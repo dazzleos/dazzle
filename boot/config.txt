@@ -1,0 +1,23 @@
+# Raspberry Pi firmware configuration for Stardust.
+# https://www.raspberrypi.com/documentation/computers/config_txt.html
+
+# Mainline kernel and device tree; the firmware's default names are for the
+# Raspberry Pi kernel fork. [pi0] also matches the Zero W, so it comes first.
+kernel=zImage
+initramfs initramfs.cpio followkernel
+
+[pi0]
+device_tree=bcm2835-rpi-zero.dtb
+
+[pi0w]
+device_tree=bcm2835-rpi-zero-w.dtb
+
+[all]
+# Serial console on GPIO 14 (TX) / 15 (RX), 115200 8N1. On the Zero W this
+# is the mini UART, which needs a fixed core clock.
+enable_uart=1
+
+# The kernel's vc4 driver owns the display. Keep the firmware from drawing
+# its rainbow splash or warning overlays on top of it.
+disable_splash=1
+avoid_warnings=2
