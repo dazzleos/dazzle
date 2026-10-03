@@ -7,27 +7,8 @@
 const std = @import("std");
 const font = @import("font");
 const vc4 = @import("vc4");
-const glsl = @import("glsl");
+const shader = @import("shader");
 const cube = @import("cube.zig");
-
-const vertex_shader =
-    \\attribute vec2 pos;
-    \\attribute vec2 uv;
-    \\varying vec2 v_uv;
-    \\void main() {
-    \\    gl_Position = vec4(pos, 0.0, 1.0);
-    \\    v_uv = uv;
-    \\}
-;
-
-const fragment_shader =
-    \\precision mediump float;
-    \\uniform sampler2D tex;
-    \\varying vec2 v_uv;
-    \\void main() {
-    \\    gl_FragColor = texture2D(tex, v_uv);
-    \\}
-;
 
 pub const title_color = 0xffffffff;
 pub const text_color = 0xffd8e0f0;
@@ -48,7 +29,7 @@ pub const Hud = struct {
     /// only changed lines are redrawn and uploaded; 0 = not drawn.
     drawn: [lines + 1]u64 = @splat(0),
     dev: vc4.Device,
-    pipeline: glsl.Pipeline,
+    pipeline: shader.Pipeline,
     /// The panel's pixels in the texture unit's tiled layout.
     texture: ?vc4.Bo = null,
     /// The quad as a triangle strip of (x, y, u, v) in clip space.
@@ -74,9 +55,10 @@ pub const Hud = struct {
     }
 
     pub fn init(gpa: std.mem.Allocator, dev: vc4.Device, f: *const font.Font, screen_width: u32, screen_height: u32, background: u32) !Hud {
-        var pipeline = try glsl.Pipeline.init(gpa, dev, vertex_shader, fragment_shader, .{
+        const program = shader.Program.decode(@embedFile("hud.shader")) catch unreachable;
+        var pipeline = try shader.Pipeline.init(gpa, dev, program, .{
             .vertex_stride = 16,
-            .attributes = &.{ .{ .name = "pos", .offset = 0 }, .{ .name = "uv", .offset = 8 } },
+            .attributes = &.{ .{ .location = 0, .offset = 0 }, .{ .location = 1, .offset = 8 } },
             .primitive = .triangle_strip,
         });
         errdefer pipeline.deinit(dev);

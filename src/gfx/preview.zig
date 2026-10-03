@@ -9,14 +9,16 @@ const vc4 = @import("vc4");
 const shaders = @import("shaders.zig");
 const canvas_mod = @import("canvas.zig");
 
+const shader = @import("shader");
+
 const sim = vc4.qpu_sim;
 
 pub const Programs = struct {
-    shape: shaders.Compiled,
-    solid: shaders.Compiled,
+    shape: shader.Program,
+    solid: shader.Program,
 
-    pub fn compile() !Programs {
-        return .{ .shape = try shaders.compileShape(), .solid = try shaders.compileSolid() };
+    pub fn load() Programs {
+        return .{ .shape = shaders.shape(), .solid = shaders.solid() };
     }
 };
 
@@ -164,7 +166,7 @@ fn expectNear(want: u32, got: u32, tolerance: i32) !void {
 }
 
 test "rounded rectangles: solid inside, clear outside, smooth corners and edges" {
-    const programs = try Programs.compile();
+    const programs = Programs.load();
     var c = Canvas.init(testing.allocator);
     defer c.deinit();
     c.begin(64, 48);
@@ -188,7 +190,7 @@ test "rounded rectangles: solid inside, clear outside, smooth corners and edges"
 }
 
 test "edges at half pixels are half covered, and blending mixes colours" {
-    const programs = try Programs.compile();
+    const programs = Programs.load();
     var c = Canvas.init(testing.allocator);
     defer c.deinit();
     c.begin(32, 32);
@@ -209,7 +211,7 @@ test "edges at half pixels are half covered, and blending mixes colours" {
 }
 
 test "strokes and polygons" {
-    const programs = try Programs.compile();
+    const programs = Programs.load();
     var c = Canvas.init(testing.allocator);
     defer c.deinit();
     c.begin(40, 40);

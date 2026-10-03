@@ -1,33 +1,9 @@
 //! The spinning cube: textured, tinted, depth-tested and back-face culled,
-//! drawn with the vc4 API and GLSL shaders.
+//! drawn with the vc4 API and its shader (shaders/cube.zig).
 
 const std = @import("std");
 const vc4 = @import("vc4");
-const glsl = @import("glsl");
-
-const vertex_shader =
-    \\attribute vec3 pos;
-    \\attribute vec2 uv;
-    \\attribute vec3 tint;
-    \\uniform mat4 mvp;
-    \\varying vec2 v_uv;
-    \\varying vec3 v_tint;
-    \\void main() {
-    \\    gl_Position = mvp * vec4(pos, 1.0);
-    \\    v_uv = uv;
-    \\    v_tint = tint;
-    \\}
-;
-
-const fragment_shader =
-    \\precision mediump float;
-    \\uniform sampler2D tex;
-    \\varying vec2 v_uv;
-    \\varying vec3 v_tint;
-    \\void main() {
-    \\    gl_FragColor = vec4(texture2D(tex, v_uv).rgb * v_tint, 1.0);
-    \\}
-;
+const shader = @import("shader");
 
 const Vertex = extern struct {
     pos: [3]f32,
@@ -71,20 +47,20 @@ pub const triangles = indices.len / 3;
 const texture_size = 128;
 
 pub const Cube = struct {
-    pipeline: glsl.Pipeline,
+    pipeline: shader.Pipeline,
     vbo: vc4.Bo,
     ibo: vc4.Bo,
     texture: vc4.Bo,
 
     pub fn init(gpa: std.mem.Allocator, dev: vc4.Device) !Cube {
-        var pipeline = try glsl.Pipeline.init(gpa, dev, vertex_shader, fragment_shader, .{
+        const program = shader.Program.decode(@embedFile("cube.shader")) catch unreachable;
+        var pipeline = try shader.Pipeline.init(gpa, dev, program, .{
             .vertex_stride = @sizeOf(Vertex),
             .attributes = &.{
-                .{ .name = "pos", .offset = @offsetOf(Vertex, "pos") },
-                .{ .name = "uv", .offset = @offsetOf(Vertex, "uv") },
-                .{ .name = "tint", .offset = @offsetOf(Vertex, "tint") },
+                .{ .location = 0, .offset = @offsetOf(Vertex, "pos") },
+                .{ .location = 1, .offset = @offsetOf(Vertex, "uv") },
+                .{ .location = 2, .offset = @offsetOf(Vertex, "tint") },
             },
-            .depth_test = true,
             .cull = .back,
         });
         errdefer pipeline.deinit(dev);
@@ -108,7 +84,8 @@ pub const Cube = struct {
 
     /// Draws the cube at `time` seconds into its rotation.
     pub fn draw(c: *Cube, frame: *vc4.render.Frame, width: u32, height: u32, time: f32) !void {
-        try c.pipeline.set("mvp", mvp(width, height, time));
+        const m = mvp(width, height, time);
+        c.pipeline.setUniforms(std.mem.asBytes(&m));
         try c.pipeline.draw(frame, .{
             .vertices = c.vbo.handle,
             .count = indices.len,
@@ -118,7 +95,7 @@ pub const Cube = struct {
     }
 };
 
-// --- Matrices (column-major, as GLSL expects) --------------------------------
+// --- Matrices (column-major, as the shader expects) --------------------------------
 
 pub const Mat4 = [16]f32;
 

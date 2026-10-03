@@ -4,7 +4,7 @@
 //! fading rings behind the cube.
 //!
 //! It is a native Stardust app: a window on stardust-shell (see the `app`
-//! module), drawn with the vc4 API and GLSL shaders.
+//! module), drawn with the vc4 API and shaders written in Zig.
 //!
 //!     stardust-demo [font.ttf]
 //!
@@ -95,7 +95,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     var f = loadFont(gpa, font_path);
     var hud: ?hud_mod.Hud = if (f) |*fnt| try hud_mod.Hud.init(gpa, dev, fnt, width, height, background) else null;
     if (hud) |*hd| hd.subtitle = "build " ++ build_info.commit;
-    var renderer = try gfx.Renderer.init(dev);
+    var renderer = try gfx.Renderer.init(gpa, dev);
     var canvas = gfx.Canvas.init(gpa);
     var rings: rings_mod.Rings = .{};
     var input: InputStatus = .{};

@@ -4,8 +4,7 @@
 //!
 //! Window contents are textures: clients' dma-bufs used in place (they
 //! render in the GPU's T-tiled layout, which the texture unit reads), or
-//! copies of shared-memory buffers. The quad shaders are written with the
-//! compiler's builder API.
+//! copies of shared-memory buffers. The quad shader is shaders/quad.zig.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -15,86 +14,16 @@ const font = @import("font");
 const server = @import("server.zig");
 const cursor = @import("cursor.zig");
 
-const compiler = vc4.compiler;
+const shader = @import("shader");
+
 const render = vc4.render;
 const texture = vc4.texture;
-const Shader = compiler.Shader;
-const Value = compiler.Value;
 
 pub const background = 0xff101830;
 const bar_background = 0xff1c2a4a;
 
-// --- Shaders ------------------------------------------------------------------
-//
-// attribute vec2 pos; attribute vec2 uv; varying vec2 v_uv;
-// gl_Position = vec4(pos, 0, 1); v_uv = uv;
-// gl_FragColor = texture2D(tex, v_uv);
-//
-// Uniforms: 0 = viewport x scale, 1 = viewport y scale (1/16 px units).
-
-fn writeScreenHeader(s: *Shader, x: Value, y: Value) void {
-    s.vpmWrite(s.packScreenXy(s.fmul(x, s.uniform(0)), s.fmul(y, s.uniform(1))));
-    s.vpmWrite(s.constantF(0.5)); // Zs
-    s.vpmWrite(s.constantF(1.0)); // 1/Wc
-}
-
-pub fn quadVertex() Shader {
-    var s = Shader.init(.vertex);
-    const x = s.vpmRead();
-    const y = s.vpmRead();
-    const u = s.vpmRead();
-    const v = s.vpmRead();
-    writeScreenHeader(&s, x, y);
-    s.vpmWrite(u);
-    s.vpmWrite(v);
-    return s;
-}
-
-pub fn quadCoordinate() Shader {
-    var s = Shader.init(.coordinate);
-    const x = s.vpmRead();
-    const y = s.vpmRead();
-    s.vpmWrite(x);
-    s.vpmWrite(y);
-    s.vpmWrite(s.constantF(0.0));
-    s.vpmWrite(s.constantF(1.0));
-    writeScreenHeader(&s, x, y);
-    return s;
-}
-
-pub fn quadFragment() Shader {
-    var s = Shader.init(.fragment);
-    const u = s.varying();
-    const v = s.varying();
-    // Textures and the render target are both stored B, G, R, A, so texels
-    // go straight to the tile buffer.
-    s.tlbColor(s.texture(u, v));
-    return s;
-}
-
-pub const Program = struct {
-    handle: u32,
-    compiled: compiler.Compiled,
-
-    pub fn init(dev: vc4.Device, shader: Shader) !Program {
-        const compiled = try compiler.compile(&shader);
-        return .{ .handle = try dev.createShaderBo(compiled.code()), .compiled = compiled };
-    }
-
-    fn binding(p: *const Program, user: []const u32) render.ShaderBinding {
-        return .{ .handle = p.handle, .layout = p.compiled.uniforms(), .user = user };
-    }
-};
-
 /// Frames are large; the shell has one.
 var static_frame: render.Frame = undefined;
-
-/// The quad program's three stages.
-pub const Programs = struct {
-    fs: Program,
-    vs: Program,
-    cs: Program,
-};
 
 pub const Window = struct {
     texture: server.Texture,
@@ -107,21 +36,20 @@ pub const Window = struct {
 /// Records a frame (after `frame.begin`): the bar and the window as quads.
 /// `vbo` holds the quads' vertices and must stay untouched until the frame
 /// has rendered.
-pub fn recordFrame(frame: *render.Frame, programs: *const Programs, vbo: vc4.Bo, bar: ?server.Texture, window: ?Window) !void {
-    const scale = frame.target.fullViewport().scaleBits();
+pub fn recordFrame(frame: *render.Frame, quads_pipeline: *shader.Pipeline, vbo: vc4.Bo, bar: ?server.Texture, window: ?Window) !void {
     var quads: usize = 0;
     if (bar) |b| {
-        try quad(frame, programs, vbo, &scale, quads, b, 0, 0, null);
+        try quad(frame, quads_pipeline, vbo, quads, b, 0, 0, null);
         quads += 1;
     }
     if (window) |w| {
-        try quad(frame, programs, vbo, &scale, quads, w.texture, w.x, w.y, .{ .x = w.clip.x, .y = w.clip.y, .width = w.clip.width, .height = w.clip.height });
+        try quad(frame, quads_pipeline, vbo, quads, w.texture, w.x, w.y, .{ .x = w.clip.x, .y = w.clip.y, .width = w.clip.width, .height = w.clip.height });
         quads += 1;
     }
 }
 
 /// Draws a texture 1:1 with its top left at (x, y).
-fn quad(frame: *render.Frame, programs: *const Programs, vbo: vc4.Bo, scale: *const [2]u32, index: usize, t: server.Texture, x: i32, y: i32, scissor: ?render.Viewport) !void {
+fn quad(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, index: usize, t: server.Texture, x: i32, y: i32, scissor: ?render.Viewport) !void {
     // Two triangles, in clip space, with texture coordinates.
     const w: f32 = @floatFromInt(frame.target.width);
     const h: f32 = @floatFromInt(frame.target.height);
@@ -135,20 +63,9 @@ fn quad(frame: *render.Frame, programs: *const Programs, vbo: vc4.Bo, scale: *co
     };
     const offset: u32 = @intCast(index * @sizeOf(@TypeOf(verts)));
     @memcpy(vbo.map[offset..][0..@sizeOf(@TypeOf(verts))], std.mem.asBytes(&verts));
-    const attrs = [_]render.Attribute{
-        .{ .handle = vbo.handle, .offset = offset, .size = 8, .stride = 16, .vs_vpm_offset = 0, .cs_vpm_offset = 0 },
-        .{ .handle = vbo.handle, .offset = offset + 8, .size = 8, .stride = 16, .vs_vpm_offset = 8, .cs_vpm_offset = 0 },
-    };
-    try frame.draw(.{
-        .fs = programs.fs.binding(&.{}),
-        .vs = programs.vs.binding(scale),
-        .cs = programs.cs.binding(scale),
-        .fs_num_varyings = 2,
-        .attributes = &attrs,
-        .vs_attribute_mask = 0b11,
-        .vs_attributes_size = 16,
-        .cs_attribute_mask = 0b01,
-        .cs_attributes_size = 8,
+    try pipeline.draw(frame, .{
+        .vertices = vbo.handle,
+        .vertex_offset = offset,
         .count = 6,
         .scissor = scissor,
         .texture = .{ .handle = t.handle, .config = .{
@@ -171,7 +88,8 @@ pub const Renderer = struct {
     display: vc4.display.Display,
     width: u32,
     height: u32,
-    programs: Programs,
+    /// Draws textures as quads.
+    quads: shader.Pipeline,
     /// Vertices for this frame's quads.
     vbo: vc4.Bo,
     /// Buffers backing the textures the renderer allocated (shm copies), by
@@ -204,11 +122,10 @@ pub const Renderer = struct {
             .display = display,
             .width = display.width,
             .height = display.height,
-            .programs = .{
-                .fs = try Program.init(dev, quadFragment()),
-                .vs = try Program.init(dev, quadVertex()),
-                .cs = try Program.init(dev, quadCoordinate()),
-            },
+            .quads = try shader.Pipeline.init(gpa, dev, shader.Program.decode(@embedFile("quad.shader")) catch unreachable, .{
+                .vertex_stride = 16,
+                .attributes = &.{ .{ .location = 0, .offset = 0 }, .{ .location = 1, .offset = 8 } },
+            }),
             .vbo = try dev.createBo(4096),
         };
     }
@@ -379,7 +296,7 @@ pub const Renderer = struct {
             r.bar_texture_stale = false;
         }
         static_frame.begin(r.display.backTarget(), .{ .clear = background });
-        try recordFrame(&static_frame, &r.programs, r.vbo, r.bar, window);
+        try recordFrame(&static_frame, &r.quads, r.vbo, r.bar, window);
         const t1 = sys.nowNs();
         const seqno = try r.dev.submit(static_frame.finish());
         try r.dev.waitSeqno(seqno, std.time.ns_per_s);

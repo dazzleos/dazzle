@@ -3,7 +3,7 @@ const std = @import("std");
 const Modules = struct {
     sys: *std.Build.Module,
     vc4: *std.Build.Module,
-    glsl: *std.Build.Module,
+    shader: *std.Build.Module,
     app: *std.Build.Module,
     gfx: *std.Build.Module,
     font: *std.Build.Module,
@@ -15,7 +15,8 @@ const Modules = struct {
 ///
 /// * `sys`: Linux system call helpers shared by everything
 /// * `vc4`: the low-level VideoCore IV graphics API
-/// * `glsl`: GLSL shaders for the vc4 API (until shaders are written in Zig)
+/// * `shader`: shaders written in Zig: SPIR-V to vc4 programs, and drawing
+///   with them
 /// * `app`: native apps' windows on stardust-shell, drawn with vc4
 /// * `gfx`: 2D graphics (rounded rectangles, polygons, strokes) on vc4
 /// * `font`: OpenType font rendering
@@ -23,38 +24,23 @@ const Modules = struct {
 /// * `build_info`: `commit`, the source's git commit (short, with "-dirty"
 ///   when there are uncommitted changes), so a running system can be
 ///   matched to its source
-fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) Modules {
-    const sys = b.createModule(.{
-        .root_source_file = b.path("src/sys/sys.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const vc4 = b.createModule(.{
-        .root_source_file = b.path("src/vc4/vc4.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{.{ .name = "sys", .module = sys }},
-    });
+fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, shaders: []const ShaderBlob) Modules {
+    const sys, const vc4, const shader = addGpuModules(b, target, optimize);
     const wayland = b.createModule(.{
         .root_source_file = b.path("src/wayland/wayland.zig"),
         .target = target,
         .optimize = optimize,
     });
-    const glsl = b.createModule(.{
-        .root_source_file = b.path("src/glsl/glsl.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "sys", .module = sys },
-            .{ .name = "vc4", .module = vc4 },
-        },
-    });
     const gfx = b.createModule(.{
         .root_source_file = b.path("src/gfx/gfx.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "vc4", .module = vc4 }},
+        .imports = &.{
+            .{ .name = "vc4", .module = vc4 },
+            .{ .name = "shader", .module = shader },
+        },
     });
+    addShaderImports(gfx, shaders, .gfx);
     const app = b.createModule(.{
         .root_source_file = b.path("src/app/app.zig"),
         .target = target,
@@ -71,7 +57,97 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     });
     const info = b.addOptions();
     info.addOption([]const u8, "commit", gitCommit(b));
-    return .{ .sys = sys, .vc4 = vc4, .glsl = glsl, .app = app, .gfx = gfx, .font = font, .wayland = wayland, .build_info = info.createModule() };
+    return .{ .sys = sys, .vc4 = vc4, .shader = shader, .app = app, .gfx = gfx, .font = font, .wayland = wayland, .build_info = info.createModule() };
+}
+
+/// `sys`, `vc4` and `shader`: what the GPU's users need, and what the
+/// shader compiler needs on the build machine.
+fn addGpuModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) struct { *std.Build.Module, *std.Build.Module, *std.Build.Module } {
+    const sys = b.createModule(.{
+        .root_source_file = b.path("src/sys/sys.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const vc4 = b.createModule(.{
+        .root_source_file = b.path("src/vc4/vc4.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "sys", .module = sys }},
+    });
+    const shader = b.createModule(.{
+        .root_source_file = b.path("src/shader/shader.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sys", .module = sys },
+            .{ .name = "vc4", .module = vc4 },
+        },
+    });
+    return .{ sys, vc4, shader };
+}
+
+/// Who embeds a shader program.
+const ShaderOwner = enum { gfx, demo, shell };
+
+/// The shader programs: Zig sources compiled to SPIR-V, then for the GPU
+/// by tools/shaderc.zig (with the render state that changes their code),
+/// and embedded in their owner as `@embedFile("<name>.shader")`.
+const shader_programs = [_]struct { source: []const u8, owner: ShaderOwner, args: []const []const u8 }{
+    .{ .source = "src/gfx/shaders/shape.zig", .owner = .gfx, .args = &.{"--blend=source-over"} },
+    .{ .source = "src/gfx/shaders/solid.zig", .owner = .gfx, .args = &.{"--blend=source-over"} },
+    .{ .source = "src/demo/shaders/cube.zig", .owner = .demo, .args = &.{"--depth-test"} },
+    .{ .source = "src/demo/shaders/hud.zig", .owner = .demo, .args = &.{} },
+    .{ .source = "src/shell/shaders/quad.zig", .owner = .shell, .args = &.{} },
+};
+
+const ShaderBlob = struct {
+    /// The source's name without ".zig".
+    name: []const u8,
+    owner: ShaderOwner,
+    spirv: std.Build.LazyPath,
+    program: std.Build.LazyPath,
+};
+
+/// Compiles the shader programs (once: they are the same for every
+/// target).
+fn addShaders(b: *std.Build) []const ShaderBlob {
+    const spirv_target = b.resolveTargetQuery(.{ .cpu_arch = .spirv64, .os_tag = .vulkan, .ofmt = .spirv });
+    const gpu = b.createModule(.{
+        .root_source_file = b.path("src/shader/gpu.zig"),
+        .target = spirv_target,
+        .optimize = .ReleaseFast,
+    });
+    const shaderc = hostTool(b, "shaderc");
+    _, _, const shader = addGpuModules(b, b.graph.host, .ReleaseSafe);
+    shaderc.root_module.addImport("shader", shader);
+
+    const blobs = b.allocator.alloc(ShaderBlob, shader_programs.len) catch @panic("OOM");
+    for (shader_programs, blobs) |p, *blob| {
+        const name = std.fs.path.stem(p.source);
+        const obj = b.addObject(.{
+            .name = name,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(p.source),
+                .target = spirv_target,
+                .optimize = .ReleaseFast,
+                .imports = &.{.{ .name = "gpu", .module = gpu }},
+            }),
+            .use_llvm = false,
+        });
+        const run = b.addRunArtifact(shaderc);
+        run.addFileArg(obj.getEmittedBin());
+        const program = run.addOutputFileArg(b.fmt("{s}.shader", .{name}));
+        run.addArgs(p.args);
+        blob.* = .{ .name = name, .owner = p.owner, .spirv = obj.getEmittedBin(), .program = program };
+    }
+    return blobs;
+}
+
+fn addShaderImports(m: *std.Build.Module, shaders: []const ShaderBlob, owner: ShaderOwner) void {
+    const b = m.owner;
+    for (shaders) |s| if (s.owner == owner) {
+        m.addAnonymousImport(b.fmt("{s}.shader", .{s.name}), .{ .root_source_file = s.program });
+    };
 }
 
 /// The short hash of the checked-out commit, "-dirty" if tracked files
@@ -87,8 +163,8 @@ fn gitCommit(b: *std.Build) []const u8 {
 
 /// A program's root module. `single_threaded` and stripping are set for the
 /// Pi builds and left at their defaults for host tests.
-fn addProgramModule(b: *std.Build, path: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, m: Modules, single_threaded: ?bool) *std.Build.Module {
-    return b.createModule(.{
+fn addProgramModule(b: *std.Build, path: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, m: Modules, shaders: []const ShaderBlob, single_threaded: ?bool) *std.Build.Module {
+    const module = b.createModule(.{
         .root_source_file = b.path(path),
         .target = target,
         .optimize = optimize,
@@ -97,7 +173,7 @@ fn addProgramModule(b: *std.Build, path: []const u8, target: std.Build.ResolvedT
         .imports = &.{
             .{ .name = "sys", .module = m.sys },
             .{ .name = "vc4", .module = m.vc4 },
-            .{ .name = "glsl", .module = m.glsl },
+            .{ .name = "shader", .module = m.shader },
             .{ .name = "app", .module = m.app },
             .{ .name = "gfx", .module = m.gfx },
             .{ .name = "font", .module = m.font },
@@ -105,6 +181,10 @@ fn addProgramModule(b: *std.Build, path: []const u8, target: std.Build.ResolvedT
             .{ .name = "build_info", .module = m.build_info },
         },
     });
+    // src/<owner>/main.zig embeds its shader programs.
+    const dir = std.fs.path.basename(std.fs.path.dirname(path).?);
+    if (std.meta.stringToEnum(ShaderOwner, dir)) |owner| addShaderImports(module, shaders, owner);
+    return module;
 }
 
 /// A host tool from tools/.
@@ -326,22 +406,23 @@ pub fn build(b: *std.Build) void {
     };
     const test_optimize = explicit_optimize orelse .Debug;
 
-    const pi = addModules(b, target, optimize);
+    const shaders = addShaders(b);
+    const pi = addModules(b, target, optimize, shaders);
     // init runs as root; the shell and the demo (its Wayland client) run as
     // the unprivileged Stardust user.
     const init_exe = b.addExecutable(.{
         .name = "stardust-init",
-        .root_module = addProgramModule(b, "src/init/main.zig", target, optimize, pi, true),
+        .root_module = addProgramModule(b, "src/init/main.zig", target, optimize, pi, shaders, true),
     });
     const install_init = b.addInstallArtifact(init_exe, .{});
     const demo_exe = b.addExecutable(.{
         .name = "stardust-demo",
-        .root_module = addProgramModule(b, "src/demo/main.zig", target, optimize, pi, true),
+        .root_module = addProgramModule(b, "src/demo/main.zig", target, optimize, pi, shaders, true),
     });
     const install_demo = b.addInstallArtifact(demo_exe, .{});
     const shell_exe = b.addExecutable(.{
         .name = "stardust-shell",
-        .root_module = addProgramModule(b, "src/shell/main.zig", target, optimize, pi, true),
+        .root_module = addProgramModule(b, "src/shell/main.zig", target, optimize, pi, shaders, true),
     });
     const install_shell = b.addInstallArtifact(shell_exe, .{});
 
@@ -381,24 +462,33 @@ pub fn build(b: *std.Build) void {
 
     // Unit tests run on the build machine; they cover the parts that do not
     // need the GPU (instruction encoding, compiler, simulator, ...).
-    const host = addModules(b, b.graph.host, test_optimize);
+    const host = addModules(b, b.graph.host, test_optimize, shaders);
+    // The shader tests check programs built here, and compile them again
+    // from SPIR-V as an app would.
+    for (shaders) |s| {
+        host.shader.addAnonymousImport(b.fmt("{s}.shader", .{s.name}), .{ .root_source_file = s.program });
+        host.shader.addAnonymousImport(b.fmt("{s}.spv", .{s.name}), .{ .root_source_file = s.spirv });
+    }
     // The font tests use the real system font.
     host.font.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const test_step = b.step("test", "Run unit tests on the host");
     for ([_]*std.Build.Module{
         host.sys,
         host.vc4,
-        host.glsl,
+        host.shader,
         host.app,
         host.gfx,
         host.font,
         host.wayland,
-        addProgramModule(b, "src/init/main.zig", b.graph.host, test_optimize, host, null),
-        addProgramModule(b, "src/demo/main.zig", b.graph.host, test_optimize, host, null),
-        addProgramModule(b, "src/shell/main.zig", b.graph.host, test_optimize, host, null),
+        addProgramModule(b, "src/init/main.zig", b.graph.host, test_optimize, host, shaders, null),
+        addProgramModule(b, "src/demo/main.zig", b.graph.host, test_optimize, host, shaders, null),
+        addProgramModule(b, "src/shell/main.zig", b.graph.host, test_optimize, host, shaders, null),
     }) |m| {
         const t = b.addTest(.{ .root_module = m });
         test_step.dependOn(&b.addRunArtifact(t).step);
     }
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hostTool(b, "mkimage").root_module })).step);
+
+    const shaders_step = b.step("shaders", "Compile the shader programs (zig-out/shaders)");
+    for (shaders) |s| shaders_step.dependOn(&b.addInstallFile(s.program, b.fmt("shaders/{s}.shader", .{s.name})).step);
 }

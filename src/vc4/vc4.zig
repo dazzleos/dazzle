@@ -2,7 +2,7 @@
 //! through the kernel's vc4 DRM driver.
 //!
 //! The shell and native apps draw with it directly (with shaders built with
-//! the compiler API, or from GLSL with the `glsl` module):
+//! the compiler API, or written in Zig with the `shader` module):
 //!
 //! * `device`: GPU buffers, shader upload and job submission
 //! * `compiler`: build shaders as SSA values and compile them to QPU code

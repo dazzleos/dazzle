@@ -6,9 +6,9 @@ Zero W (BCM2835).
 
 Stardust is its own stack. Everything draws with **`vc4`**, a low-level
 API for the VideoCore IV GPU written in Zig on the kernel's `vc4` driver:
-programs record draw calls into frames themselves, with shaders built with
-a compiler API or, for now, written in GLSL ES 1.00 (shaders will move to
-Zig). There is no OpenGL layer: the one Stardust had, for porting existing
+programs record draw calls into frames themselves, with shaders written in
+Zig, compiled by Zig to SPIR-V and from that to the GPU's code when
+Stardust is built. There is no OpenGL layer: the one Stardust had, for porting existing
 apps, is in the git history if it is needed again.
 
 On top of it is **stardust-shell**, a minimal Wayland compositor. Init (PID 1, the only process with root
@@ -29,7 +29,7 @@ The code is split into Zig modules, linked statically into each program:
 |---|---|---|
 | `sys` | `src/sys/` | Linux system call helpers (sleeping, clocks, logging, the kernel command line) |
 | `vc4` | `src/vc4/` | The low-level graphics API for the VideoCore IV, described below |
-| `glsl` | `src/glsl/` | GLSL ES 1.00 shaders for `vc4`: the compiler front end, and pipelines for drawing with them |
+| `shader` | `src/shader/` | Shaders written in Zig: SPIR-V translated to `vc4` programs, and pipelines for drawing with them |
 | `app` | `src/app/` | Native apps' windows on stardust-shell: buffers shared with the shell, frame pacing and input |
 | `gfx` | `src/gfx/` | 2D graphics for the toolkit: anti-aliased rounded rectangles, circles, polygons and polylines, filled or stroked, blended |
 | `font` | `src/font/` | OpenType font rendering, described below |
@@ -61,7 +61,8 @@ The `gfx` module draws 2D shapes, the toolkit's foundation:
 |---|---|
 | `canvas.zig` | `Canvas`: records shapes (on the CPU) into batches of vertices: rectangles with per-corner radii, circles, polygons and polylines, filled or stroked, with an origin and a clip rectangle |
 | `geometry.zig` | Polygon triangulation (ear clipping, concave polygons included) and stroke strips with mitred joins, with anti-aliasing fringes |
-| `shaders.zig` | The 2D shaders, written in Zig with the compiler's builder API |
+| `shaders/` | The 2D shaders (`shape.zig`, `solid.zig`) |
+| `shaders.zig` | The 2D shader programs, as the build compiled them, and their vertex layouts |
 | `renderer.zig` | `Renderer`: draws a canvas into a `vc4` frame |
 | `preview.zig` | Renders a canvas on the CPU through the real shaders (in the QPU simulator), for tests and preview images |
 
@@ -87,55 +88,62 @@ frame and hands it to the shell once the previous one is on the screen, so
 at most one frame is queued. It also delivers the seat's pointer and
 keyboard events.
 
-The `glsl` module (`src/glsl/`):
+The `shader` module (`src/shader/`) runs shaders written in Zig. A shader
+program is a Zig file with a vertex and a fragment entry point; it imports
+`gpu` (`gpu.zig`) for its inputs, outputs, uniforms and texture:
+
+```zig
+const gpu = @import("gpu");
+
+const Uniforms = extern struct { mvp: [4]gpu.Vec4 };
+const u = gpu.uniforms(Uniforms);
+const in_pos = gpu.vertexInput(gpu.Vec3, 0);
+const in_uv = gpu.vertexInput(gpu.Vec2, 1);
+const v_uv = gpu.vertexOutput(gpu.Vec2, 0);
+
+export fn vertex() callconv(.spirv_vertex) void {
+    const p = in_pos.*;
+    const m = u.mvp;
+    gpu.position.* = m[0] * gpu.splat4(p[0]) + m[1] * gpu.splat4(p[1]) + m[2] * gpu.splat4(p[2]) + m[3];
+    v_uv.* = in_uv.*;
+}
+
+const f_uv = gpu.fragmentInput(gpu.Vec2, 0);
+
+export fn fragment() callconv(.spirv_fragment) void {
+    gpu.color.* = gpu.texture(f_uv.*);
+}
+```
+
+The build compiles each program with Zig's SPIR-V backend, then
+`tools/shaderc.zig` translates the SPIR-V to the GPU's three shaders
+(coordinate, vertex and fragment), with the render state that changes
+their code (depth testing, blending), and the program that uses it embeds
+the result. Shaders are static, so this costs nothing when Stardust runs,
+and a shader that cannot be compiled fails the build, naming the line. The
+same code can compile SPIR-V when an app runs (`Program.compile`), and the
+tests check that it gives exactly what the build embedded.
 
 | File | Contents |
 |---|---|
-| `lexer.zig` | Tokenizer and a minimal preprocessor (`#version`, `#ifdef GL_ES`, object-like `#define`) |
-| `parser.zig` | Parser producing an AST |
-| `lower.zig` | Type checking and lowering to the vc4 compiler's SSA builder, one value per scalar component, with constant folding |
-| `program.zig` | Compiling shaders and linking programs: uniform slots, attribute locations, varying matching, and deriving the coordinate shader |
-| `pipeline.zig` | A linked program compiled for the GPU with its render state (vertex layout, depth testing, culling, primitive): uniforms set by name, draws recorded into a `vc4` frame |
-| `shader_tests.zig` | Tests: the early demos' shaders written with the builder API, checked in the simulator against the hand-written reference shaders and against GLSL |
+| `gpu.zig` | What shaders import as `gpu`: vector types, inputs and outputs by location, the uniform block, the position, the colour, texture sampling and helpers |
+| `spirv.zig` | Reading SPIR-V modules: types, constants, decorations, functions and entry points, with source lines |
+| `lower.zig` | Lowering an entry point to the vc4 compiler's builder, one value per scalar component, functions inlined; it adds the vertex's screen-space header, and the fragment's depth write and blending |
+| `program.zig` | `Program`: linking the entry points by location, deriving the coordinate shader (reading only the attributes the position needs), and the encoding programs are embedded in |
+| `pipeline.zig` | `Pipeline`: a program uploaded to the GPU with its vertex layout, culling and primitive, recording draws into a `vc4` frame |
+| `tests.zig` | Tests of the built programs in the QPU simulator, and of compiling them again from SPIR-V |
 
-Supported so far: `attribute`, `uniform`, `varying` and `const` globals of
-float, vector, matrix and `sampler2D` types; `main()` with local variables,
-assignments (including to swizzles and matrix columns), arithmetic with
-vector and matrix rules, constructors, and the built-ins `texture2D`,
-`dot`, `cross`, `length`, `distance`, `normalize`, `min`, `max`, `clamp`,
-`mix`, `abs`, `sqrt`, `inversesqrt`, `pow`, `exp`, `log`, `exp2`, `log2`,
-`radians` and `degrees`. Not yet: control flow, user functions, arrays,
-structs, comparisons and trigonometric functions; these give a compile
-error naming the problem.
+Supported so far: `f32` scalars and vectors, arithmetic (division
+included), `@min`, `@max`, `@abs`, `@sqrt`, `@exp2`, `@log2`, `@mulAdd`
+and `@reduce(.Add, ...)`, helper functions, local variables, vertex
+inputs, varyings, one uniform block of floats, vectors and arrays, and one
+texture. Shaders are straight-line code for now: comparisons, branches and
+loops need branches in the compiler; `@floor` and the trigonometric
+built-ins are not there yet.
 
-The `font` module renders text in OpenType fonts with TrueType outlines:
-
-| File | Contents |
-|---|---|
-| `opentype.zig` | Font parsing: `cmap` (formats 4 and 12), metrics, simple and composite `glyf` outlines, and pair kerning from the GPOS `kern` feature |
-| `raster.zig` | Anti-aliased rasterizer: each line adds its exact area coverage to an accumulation buffer, and a running sum gives each pixel's coverage (font-rs's method) |
-| `text.zig` | Glyph cache, layout with kerning and quarter-pixel horizontal positioning, and blending into 32-bit pixels |
-
-Glyphs are drawn unhinted with grayscale anti-aliasing. The parser is
-bounds-checked throughout, so a damaged font gives errors rather than
-crashes. Not supported: CFF outlines, variable font axes, hinting, and
-shaping beyond kerning (ligatures, combining marks, right-to-left text).
-
-The apps use **Fira Sans** Regular (`fonts/`, SIL Open Font License 1.1,
-from the Google Fonts repository). Its designers made it for Firefox OS,
-and it covers Latin, Greek and Cyrillic. The system provides no fonts:
-each app has its own copy in its directory, next to the license, and finds
-it next to its executable (`sys.appFile`).
-
-The init program (`src/init/`):
-
-| File | Contents |
-|---|---|
-| `main.zig` | Mounts `/proc`, `/sys`, `/dev`, starts the network manager, log server and device manager, gives the user the GPU, creates its runtime directory, starts the shell and reaps exited processes |
-| `devices.zig` | The device manager: gives the user the input devices (`/dev/input/event*`), at start and as uevents announce new ones |
-| `network.zig` | The network manager: follows Ethernet adapters and links, configures addresses and routes |
-| `dhcp.zig` | DHCP client messages (building requests, parsing replies) |
-| `logserver.zig` | Serves the kernel log over HTTP |
+The 2D shaders' programs draw the `gfx` showcase identically to the
+builder-API versions they replaced, and the cube's are checked in the
+simulator against the same maths done on the CPU.
 
 The shell (`src/shell/`):
 
@@ -143,7 +151,8 @@ The shell (`src/shell/`):
 |---|---|
 | `main.zig` | Opens the GPU and display, listens on `$XDG_RUNTIME_DIR/wayland-0`, starts its clients, and runs the event loop: read input, dispatch clients, then composite a frame when something changed |
 | `server.zig` | The Wayland server: clients, objects and requests, frame callbacks and buffer releases, pointer and keyboard focus |
-| `render.zig` | Compositing with the `vc4` API: textured quads (shaders written with the builder API) for the bar and the window, the bar's text, and the cursor plane |
+| `render.zig` | Compositing with the `vc4` API: textured quads for the bar and the window, the bar's text, and the cursor plane |
+| `shaders/quad.zig` | The textured quad's shader |
 | `input.zig` | USB keyboards and mice: finds `/dev/input/event*` nodes and decodes their events |
 | `cursor.zig` | The pointer's arrow, drawn into the cursor plane's buffer |
 | `server_test.zig` | Protocol tests on the host, described below |
@@ -193,9 +202,10 @@ The demo program (`src/demo/`):
 | `main.zig` | The window (from the `app` module), the frame loop, input and timing statistics |
 | `rings.zig` | The rings drawn where the pointer clicks: stroked circles on the 2D canvas, fading out |
 | `shapes.zig` | The showcase of the 2D canvas: a card, buttons, FABs, chips, text fields, selection controls, polygons, strokes and translucent circles, in Material 3's baseline colours |
-| `cube.zig` | The cube: a GLSL pipeline with depth testing and culling, vertex and index buffers, and a tiled texture |
+| `cube.zig` | The cube: a pipeline with depth testing and culling, vertex and index buffers, and a tiled texture |
 | `hud.zig` | The statistics overlay: text drawn by the font renderer into a texture, shown as a quad over the top left corner |
 | `netinfo.zig` | Looks up the IPv4 address (SIOCGIFCONF, no privileges needed) |
+| `shaders/` | The cube's and the overlay's shaders |
 
 ### Privileges
 
@@ -287,6 +297,7 @@ Other steps:
 ```sh
 scripts/zig build test              # host unit tests
 scripts/zig build programs          # just the programs and zig-out/initramfs.cpio
+scripts/zig build shaders           # just the shader programs (zig-out/shaders)
 scripts/zig build kernel            # just the kernel
 scripts/zig build qemu              # boot in QEMU (arguments after -- go to QEMU)
 ```
@@ -437,8 +448,9 @@ The firmware picks the Zero or Zero W device tree in `config.txt`. The Zero
 
 ## How a frame is drawn
 
-1. **Shaders.** The GLSL front end (`src/glsl/`) lowers each shader to
-   the compiler's builder API, as a list of SSA values. Three run per draw: a coordinate
+1. **Shaders.** Zig compiles each shader program to SPIR-V, and
+   `src/shader/` lowers its entry points to the compiler's builder API, as
+   a list of SSA values (when Stardust is built). Three run per draw: a coordinate
    shader the binner uses to find which 64×64 tiles each triangle covers, a
    vertex shader that outputs screen positions and varyings, and a fragment
    shader that writes the pixel colour (and depth) to the tile buffer.
@@ -481,8 +493,9 @@ The firmware picks the Zero or Zero W device tree in `config.txt`. The Zero
 - `vc4/texture.zig`'s tiling is cross-checked against a separate
   implementation of the reference guide's layout description in the
   simulator.
-- Shaders compiled from GLSL are run in the simulator next to the same
-  shaders written with the builder API, and must give the same results.
+- The shader programs the build compiles are run in the simulator and
+  checked against the same maths done on the CPU, and `gfx.preview` draws
+  canvases through the real 2D shaders for its pixel tests.
 - The Wayland tests run the real server, in a thread with a fake renderer,
   against real clients over a socket pair. One client speaks the protocol
   directly: registry, xdg toplevel and configure, dma-buf and shm buffers,
@@ -504,7 +517,7 @@ frame). Compiled shaders, perspective, texturing, depth testing and page
 flipping all worked, with the log readable over the network.
 
 The demo is a native app: a window on stardust-shell, drawn with the `vc4`
-API and GLSL shaders. On a Pi Zero, with the earlier OpenGL version, the
+API and shaders written in Zig. On a Pi Zero, with the earlier OpenGL version, the
 shell showed the demo's buffers directly on the display (no compositing)
 at a steady 60 frames per second, with mouse input working. The demo's
 `vc4` frames pass a userspace build of the kernel's job and shader
@@ -518,11 +531,10 @@ GPU or display).
 
 ## Next steps
 
-- GLSL: control flow (needs branches in the compiler), user functions,
-  arrays, and polynomial `sin`/`cos`.
+- Shaders: comparisons and control flow (needs branches in the compiler),
+  integers, `@floor`, and polynomial `sin`/`cos`.
 - Mipmaps, more texture formats, and depth buffers stored to memory.
 - Add `DRM_IOCTL_VC4_GET_HANG_STATE` reporting for GPU hangs.
-- Shaders written in Zig, replacing GLSL.
 - Rendering to textures, and more vertex attribute formats.
 - A Vulkan-style API on `vc4`.
 - Text: ligatures and other GSUB features, hinting or stem darkening for
