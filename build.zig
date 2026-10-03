@@ -69,6 +69,204 @@ fn addProgramModule(b: *std.Build, path: []const u8, target: std.Build.ResolvedT
     });
 }
 
+/// A host tool from tools/.
+fn hostTool(b: *std.Build, name: []const u8) *std.Build.Step.Compile {
+    return b.addExecutable(.{
+        .name = name,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(b.fmt("tools/{s}.zig", .{name})),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+}
+
+/// A step that fails, naming the packages to install, if any of the
+/// programs ("program:package") is missing.
+fn requireTools(b: *std.Build, tools: []const []const u8) *std.Build.Step.Run {
+    const run = b.addRunArtifact(hostTool(b, "check"));
+    run.addArg("tools");
+    run.addArgs(tools);
+    run.has_side_effects = true;
+    return run;
+}
+
+fn exists(b: *std.Build, path: []const u8) bool {
+    std.Io.Dir.cwd().access(b.graph.io, path, .{}) catch return false;
+    return true;
+}
+
+const linux_version = "v7.2";
+
+const Kernel = struct {
+    /// The last step of the kernel build.
+    step: *std.Build.Step,
+    /// Where make puts its output (O=).
+    out: []const u8,
+
+    fn file(k: Kernel, b: *std.Build, sub_path: []const u8) std.Build.LazyPath {
+        return .{ .cwd_relative = b.pathJoin(&.{ k.out, sub_path }) };
+    }
+};
+
+/// Linux, built with make (as the kernel must be): tinyconfig, plus the
+/// options in kernel/stardust.config, checked to have all taken effect.
+/// make does its own incremental building, so this runs every time and is
+/// quick when nothing changed.
+fn addKernel(b: *std.Build) Kernel {
+    const linux_dir = b.option([]const u8, "linux", "Linux source tree (default: build/linux, cloned at " ++ linux_version ++ " if missing)") orelse
+        b.pathFromRoot("build/linux");
+    const cross = b.option([]const u8, "cross-compile", "Build the kernel with this GCC cross compiler prefix (e.g. arm-linux-gnueabihf-) instead of LLVM");
+    const out = b.pathFromRoot("build/kernel");
+    const jobs = std.Thread.getCpuCount() catch 4;
+
+    var tools: std.ArrayList([]const u8) = .empty;
+    tools.appendSlice(b.allocator, &.{ "make:make", "flex:flex", "bison:bison", "bc:bc" }) catch @panic("OOM");
+    const clone = !exists(b, linux_dir);
+    if (clone) tools.append(b.allocator, "git:git") catch @panic("OOM");
+    if (cross) |prefix| {
+        tools.append(b.allocator, b.fmt("{s}gcc:gcc-arm-linux-gnueabihf", .{prefix})) catch @panic("OOM");
+        tools.append(b.allocator, b.fmt("{s}ld:binutils-arm-linux-gnueabihf", .{prefix})) catch @panic("OOM");
+    } else {
+        tools.appendSlice(b.allocator, &.{ "clang:clang", "ld.lld:lld", "llvm-ar:llvm", "llvm-nm:llvm", "llvm-objcopy:llvm", "llvm-objdump:llvm", "llvm-readelf:llvm", "llvm-strip:llvm" }) catch @panic("OOM");
+    }
+    var last: *std.Build.Step = &requireTools(b, tools.items).step;
+
+    const Chain = struct {
+        fn add(prev: **std.Build.Step, run: *std.Build.Step.Run) void {
+            run.has_side_effects = true;
+            run.step.dependOn(prev.*);
+            prev.* = &run.step;
+        }
+    };
+    if (clone) Chain.add(&last, b.addSystemCommand(&.{ "git", "clone", "--depth", "1", "--branch", linux_version, "https://github.com/torvalds/linux.git", linux_dir }));
+    Chain.add(&last, b.addSystemCommand(&.{ "mkdir", "-p", out }));
+
+    const toolchain: []const []const u8 = if (cross) |prefix|
+        &.{ "ARCH=arm", b.fmt("CROSS_COMPILE={s}", .{prefix}) }
+    else
+        &.{ "ARCH=arm", "LLVM=1" };
+    const make = struct {
+        fn cmd(bb: *std.Build, dir: []const u8, o: []const u8, tc: []const []const u8, targets: []const []const u8) *std.Build.Step.Run {
+            const run = bb.addSystemCommand(&.{ "make", "-s", "-C", dir, bb.fmt("O={s}", .{o}) });
+            run.addArgs(tc);
+            run.addArgs(targets);
+            return run;
+        }
+    }.cmd;
+    Chain.add(&last, make(b, linux_dir, out, toolchain, &.{"tinyconfig"}));
+    const merge = b.addSystemCommand(&.{ b.pathJoin(&.{ linux_dir, "scripts/kconfig/merge_config.sh" }), "-m", "-O", out, b.pathJoin(&.{ out, ".config" }) });
+    merge.addFileArg(b.path("kernel/stardust.config"));
+    // It lists every option it changes; show that only if it fails.
+    merge.expectExitCode(0);
+    Chain.add(&last, merge);
+    Chain.add(&last, make(b, linux_dir, out, toolchain, &.{"olddefconfig"}));
+    const check_config = b.addRunArtifact(hostTool(b, "check"));
+    check_config.addArg("config");
+    check_config.addFileArg(b.path("kernel/stardust.config"));
+    check_config.addArg(b.pathJoin(&.{ out, ".config" }));
+    Chain.add(&last, check_config);
+    Chain.add(&last, make(b, linux_dir, out, toolchain, &.{
+        b.fmt("-j{d}", .{jobs}), "zImage", "broadcom/bcm2835-rpi-zero.dtb", "broadcom/bcm2835-rpi-zero-w.dtb",
+    }));
+    return .{ .step = last, .out = out };
+}
+
+/// Raspberry Pi firmware (the GPU's boot loader), pinned by checksum.
+const firmware_tag = "1.20260915";
+const firmware = [_]struct { name: []const u8, sha256: []const u8 }{
+    .{ .name = "bootcode.bin", .sha256 = "4245ec23b58158dc3e55f3e065eb4ecc0c0705d76c8db506e9f824941feee32e" },
+    .{ .name = "start.elf", .sha256 = "32f990801e7765bae6fe5cb940ba5eeff02dd0dac8dc5474db5b3fd345281790" },
+    .{ .name = "fixup.dat", .sha256 = "7853f2b51e4489f8b3ce6f9c52fd0afdda38c7383961524e0883d34afcb4827b" },
+    .{ .name = "LICENCE.broadcom", .sha256 = "c7283ff51f863d93a275c66e3b4cb08021a5dd4d8c1e7acc47d872fbe52d3d6b" },
+};
+
+/// The SD card image (zig-out/stardust.img), and its files in zig-out/boot
+/// for copying onto a card by hand.
+fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) void {
+    const dir = b.pathFromRoot("build/firmware");
+    // Download what is missing, then check everything.
+    var fetch: ?*std.Build.Step = null;
+    for (firmware) |f| {
+        const path = b.pathJoin(&.{ dir, f.name });
+        if (exists(b, path)) continue;
+        const curl = b.addSystemCommand(&.{ "curl", "-fsSL", "--create-dirs", "-o", path, b.fmt("https://raw.githubusercontent.com/raspberrypi/firmware/{s}/boot/{s}", .{ firmware_tag, f.name }) });
+        curl.has_side_effects = true;
+        if (fetch == null) {
+            const tools = requireTools(b, &.{"curl:curl"});
+            fetch = &tools.step;
+        }
+        curl.step.dependOn(fetch.?);
+        fetch = &curl.step;
+    }
+    const verify = b.addRunArtifact(hostTool(b, "check"));
+    verify.addArg("sha256");
+    for (firmware) |f| verify.addArgs(&.{ b.pathJoin(&.{ dir, f.name }), f.sha256 });
+    verify.has_side_effects = true;
+    if (fetch) |f| verify.step.dependOn(f);
+
+    const boot_files = [_]struct { []const u8, std.Build.LazyPath }{
+        .{ "bootcode.bin", .{ .cwd_relative = b.pathJoin(&.{ dir, "bootcode.bin" }) } },
+        .{ "start.elf", .{ .cwd_relative = b.pathJoin(&.{ dir, "start.elf" }) } },
+        .{ "fixup.dat", .{ .cwd_relative = b.pathJoin(&.{ dir, "fixup.dat" }) } },
+        .{ "LICENCE.broadcom", .{ .cwd_relative = b.pathJoin(&.{ dir, "LICENCE.broadcom" }) } },
+        .{ "zImage", kernel.file(b, "arch/arm/boot/zImage") },
+        .{ "bcm2835-rpi-zero.dtb", kernel.file(b, "arch/arm/boot/dts/broadcom/bcm2835-rpi-zero.dtb") },
+        .{ "bcm2835-rpi-zero-w.dtb", kernel.file(b, "arch/arm/boot/dts/broadcom/bcm2835-rpi-zero-w.dtb") },
+        .{ "initramfs.cpio", initramfs },
+        .{ "config.txt", b.path("boot/config.txt") },
+        .{ "cmdline.txt", b.path("boot/cmdline.txt") },
+    };
+    const mkimage = b.addRunArtifact(hostTool(b, "mkimage"));
+    mkimage.step.dependOn(&verify.step);
+    mkimage.step.dependOn(kernel.step);
+    const img = mkimage.addOutputFileArg("stardust.img");
+    mkimage.addArg(b.fmt("{d}", .{b.option(u32, "image-size", "SD image size in MiB (default 64)") orelse 64}));
+    const image_step = b.step("image", "Build everything into an SD card image: zig-out/stardust.img (and its files in zig-out/boot)");
+    for (boot_files) |f| {
+        mkimage.addPrefixedFileArg(b.fmt("{s}=", .{f[0]}), f[1]);
+        const install = b.addInstallFile(f[1], b.fmt("boot/{s}", .{f[0]}));
+        install.step.dependOn(&mkimage.step);
+        image_step.dependOn(&install.step);
+    }
+    image_step.dependOn(&b.addInstallFile(img, "stardust.img").step);
+}
+
+/// Boots the kernel and initramfs in QEMU's raspi0 machine, with the log
+/// server on localhost:2323 (-Dlog-port to change).
+fn addQemu(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) void {
+    const tools = requireTools(b, &.{ "qemu-system-arm:qemu-system-arm", "fdtput:device-tree-compiler" });
+    // QEMU lacks the power management block the watchdog driver waits for.
+    const dtb = b.pathFromRoot("build/qemu-rpi-zero.dtb");
+    const copy = b.addSystemCommand(&.{"cp"});
+    copy.addFileArg(kernel.file(b, "arch/arm/boot/dts/broadcom/bcm2835-rpi-zero.dtb"));
+    copy.addArg(dtb);
+    copy.step.dependOn(kernel.step);
+    copy.step.dependOn(&tools.step);
+    copy.has_side_effects = true;
+    const patch = b.addSystemCommand(&.{ "fdtput", "-t", "s", dtb, "/soc/watchdog@7e100000", "status", "disabled" });
+    patch.step.dependOn(&copy.step);
+    patch.has_side_effects = true;
+    const port = b.option(u16, "log-port", "Host port for the log server when running in QEMU (default 2323)") orelse 2323;
+    const qemu = b.addSystemCommand(&.{ "qemu-system-arm", "-M", "raspi0", "-kernel" });
+    qemu.addFileArg(kernel.file(b, "arch/arm/boot/zImage"));
+    qemu.addArgs(&.{ "-dtb", dtb, "-initrd" });
+    qemu.addFileArg(initramfs);
+    qemu.addArgs(&.{
+        "-append",  "console=ttyAMA0 printk.devkmsg=on",
+        "-device",  "usb-net,netdev=net0",
+        "-netdev",  b.fmt("user,id=net0,hostfwd=tcp:127.0.0.1:{d}-:23", .{port}),
+        "-display", "none",
+        "-serial",  "mon:stdio",
+    });
+    if (b.args) |args| qemu.addArgs(args);
+    qemu.step.dependOn(&patch.step);
+    qemu.stdio = .inherit;
+    qemu.has_side_effects = true;
+    const step = b.step("qemu", "Boot the kernel and initramfs in QEMU (arguments after -- go to QEMU)");
+    step.dependOn(&qemu.step);
+}
+
 pub fn build(b: *std.Build) void {
     // The Raspberry Pi Zero / Zero W: BCM2835, ARM1176JZF-S with VFPv2.
     // No libc: the program talks to the kernel through raw system calls.
@@ -121,6 +319,13 @@ pub fn build(b: *std.Build) void {
     const initramfs_step = b.step("initramfs", "Build zig-out/initramfs.cpio");
     initramfs_step.dependOn(&install_initramfs.step);
 
+    const kernel = addKernel(b);
+    const kernel_step = b.step("kernel", "Build the Linux kernel and device trees (in build/kernel)");
+    kernel_step.dependOn(kernel.step);
+
+    addImage(b, kernel, initramfs);
+    addQemu(b, kernel, initramfs);
+
     // Unit tests run on the build machine; they cover the parts that do not
     // need the GPU (instruction encoding, compiler, simulator, ...).
     const host = addModules(b, b.graph.host, optimize);
@@ -140,4 +345,5 @@ pub fn build(b: *std.Build) void {
         const t = b.addTest(.{ .root_module = m });
         test_step.dependOn(&b.addRunArtifact(t).step);
     }
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hostTool(b, "mkimage").root_module })).step);
 }

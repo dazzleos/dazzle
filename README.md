@@ -185,10 +185,12 @@ passwords or logins.
 This needs `CONFIG_MULTIUSER` in the kernel (about 8 KB). Without it, every
 process has every privilege.
 
-Also: `tools/mkinitramfs.zig` (packs init, the shell, the demo and the
-font into a cpio initramfs), `kernel/stardust.config` (kernel config fragment applied on top
-of `tinyconfig`), `boot/` (firmware `config.txt` and kernel `cmdline.txt`)
-and `scripts/` (kernel build, firmware download, SD image, QEMU and Zig).
+Also: `build.zig` (the whole build, see below), `tools/` (host tools the
+build runs: `mkinitramfs.zig` packs the initramfs, `mkimage.zig` writes the
+SD card image, `check.zig` checks for build tools, the kernel
+configuration and firmware checksums), `kernel/stardust.config` (kernel
+config fragment applied on top of `tinyconfig`), `boot/` (firmware
+`config.txt` and kernel `cmdline.txt`) and `scripts/zig` (downloads Zig).
 
 The image's filesystem (an initramfs, in RAM) is kept simple:
 
@@ -210,37 +212,55 @@ There is no C library: programs make raw system calls through
   `zig` 0.16.0 is already on your PATH, so installing Zig is optional.
 - To build the kernel: `make`, `flex`, `bison`, `bc`, `git`, and either
   LLVM 17 or newer (used by default; `sudo apt install clang lld llvm`) or
-  an ARM GCC cross compiler (set `CROSS_COMPILE=arm-linux-gnueabihf-`).
-  `scripts/build-kernel.sh` checks for these and names any missing packages.
-- To build the SD image: `sfdisk` (fdisk), `mkfs.vfat` (dosfstools),
-  `mcopy` (mtools) and `curl` (`sudo apt install fdisk dosfstools mtools
-  curl`). `scripts/build-image.sh` checks for these too.
+  an ARM GCC cross compiler (`-Dcross-compile=arm-linux-gnueabihf-`).
+- To fetch the Raspberry Pi firmware: `curl`.
 - Optional, for the QEMU boot test: `qemu-system-arm` and `fdtput` (`sudo
   apt install qemu-system-arm device-tree-compiler`; on Ubuntu releases with
   a hardware enablement stack the QEMU package is `qemu-system-arm-hwe`).
-  `scripts/run-qemu.sh` checks for these.
+
+The build checks for these before it needs them and names any packages to
+install. The SD image is written by a Zig tool, so no partitioning or
+filesystem tools (or root) are needed.
 
 ## Building
 
+One command builds everything into an SD card image:
+
 ```sh
-scripts/zig build test             # host unit tests
-scripts/zig build --release=small  # zig-out/bin/stardust-{init,demo} and zig-out/initramfs.cpio
-scripts/build-kernel.sh            # clones Linux v7.2 into build/linux on first run
-scripts/build-image.sh             # build/boot/ and build/stardust.img
+scripts/zig build image --release   # zig-out/stardust.img, and its files in zig-out/boot/
 ```
 
-`scripts/build-kernel.sh path/to/linux` uses an existing kernel tree instead.
+That builds the programs and the initramfs. It clones Linux v7.2 into
+`build/linux` on first use, and builds the kernel in `build/kernel` with
+`make`. It downloads the firmware into `build/firmware`, checked against
+pinned SHA-256 digests. Then it writes the image. Each part is redone only
+when needed: a rebuild with nothing changed takes seconds, and the first
+build a few minutes.
+
+Other steps:
+
+```sh
+scripts/zig build test              # host unit tests
+scripts/zig build --release         # just the programs and zig-out/initramfs.cpio
+scripts/zig build kernel            # just the kernel
+scripts/zig build qemu --release    # boot in QEMU (arguments after -- go to QEMU)
+```
+
+Options: `-Dlinux=path/to/linux` uses an existing kernel tree,
+`-Dcross-compile=arm-linux-gnueabihf-` builds the kernel with GCC instead of
+LLVM, `-Dimage-size=<MiB>` sets the image size (default 64) and
+`-Dlog-port=<port>` the QEMU log server port (default 2323).
 
 The kernel comes from `make tinyconfig` plus `kernel/stardust.config`. The
-script fails if any requested option is dropped because a dependency is
+build fails if any requested option is dropped because a dependency is
 missing. The result is a zImage of about 1.8 MB that includes the vc4 DRM
 driver, networking and the USB Ethernet drivers.
 
 ## Running on a Pi Zero
 
-Write `build/stardust.img` to an SD card (`dd`, or Raspberry Pi Imager's
-"Use custom" option). Alternatively, copy the contents of `build/boot/` onto
-any FAT32-formatted card.
+Write `zig-out/stardust.img` to an SD card (`dd`, or Raspberry Pi Imager's
+"Use custom" option). Alternatively, copy the contents of `zig-out/boot/`
+onto any FAT32-formatted card.
 
 Connect HDMI, and a USB Ethernet adapter on the Zero's USB (OTG) port via a
 micro-USB OTG adapter, cabled to your network. The kernel has drivers for
@@ -325,7 +345,7 @@ The firmware picks the Zero or Zero W device tree in `config.txt`. The Zero
   `stardust-shell path/to/stardust-demo`. The font defaults to
   `/apps/FiraSans-Regular.ttf`. Press Ctrl+C to stop.
   Iterating on GPU code this way avoids rebuilding the SD card.
-- **QEMU:** `scripts/run-qemu.sh` boots the kernel and initramfs in QEMU's
+- **QEMU:** `scripts/zig build qemu --release` boots the kernel and initramfs in QEMU's
   `raspi0` machine with an emulated USB network card. `telnet localhost
   2323` reaches the log server. QEMU does not emulate the 3D engine or HDMI,
   so this checks the kernel, init, privileges and networking only. The log
