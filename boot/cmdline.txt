@@ -1,1 +1,1 @@
-ip=::::stardust::dhcp carrier_timeout=10 printk.devkmsg=on stardust.announce=192.168.1.83:5555 loglevel=6
+ip=::::stardust::dhcp carrier_timeout=10 printk.devkmsg=on loglevel=6

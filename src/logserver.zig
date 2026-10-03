@@ -5,12 +5,8 @@
 //! follows new messages live. Each client gets its own process reading
 //! /dev/kmsg, so a hung GPU job in init does not stop the log.
 //!
-//! Optionally, once at startup, a UDP datagram announcing the Pi's address
-//! is sent to a host given on the kernel command line, so the DHCP-assigned
-//! address does not have to be looked up:
-//!
-//!     stardust.announce=192.168.1.83:5555   (receive with `nc -ul 5555`)
-//!     stardust.logport=23                   (TCP port, default 23)
+//! The port can be changed on the kernel command line with
+//! `stardust.logport=<port>`.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -18,43 +14,16 @@ const sys = @import("sys.zig");
 
 pub const Ip4 = [4]u8;
 
-pub const Endpoint = struct {
-    addr: Ip4,
-    port: u16,
-};
-
 pub const Config = struct {
     port: u16 = 23,
-    announce: ?Endpoint = null,
 };
-
-pub fn parseIp4(s: []const u8) ?Ip4 {
-    var out: Ip4 = undefined;
-    var it = std.mem.splitScalar(u8, s, '.');
-    for (&out) |*b| {
-        b.* = std.fmt.parseInt(u8, it.next() orelse return null, 10) catch return null;
-    }
-    if (it.next() != null) return null;
-    return out;
-}
-
-pub fn parseEndpoint(s: []const u8) ?Endpoint {
-    const colon = std.mem.lastIndexOfScalar(u8, s, ':') orelse return null;
-    return .{
-        .addr = parseIp4(s[0..colon]) orelse return null,
-        .port = std.fmt.parseInt(u16, s[colon + 1 ..], 10) catch return null,
-    };
-}
 
 /// Reads `stardust.*` options from a kernel command line.
 pub fn parseCmdline(cmdline: []const u8) Config {
     var cfg: Config = .{};
     var it = std.mem.tokenizeAny(u8, cmdline, " \t\n");
     while (it.next()) |arg| {
-        if (std.mem.startsWith(u8, arg, "stardust.announce=")) {
-            cfg.announce = parseEndpoint(arg["stardust.announce=".len..]);
-            if (cfg.announce == null) sys.print("stardust: ignoring malformed {s}\n", .{arg});
-        } else if (std.mem.startsWith(u8, arg, "stardust.logport=")) {
+        if (std.mem.startsWith(u8, arg, "stardust.logport=")) {
             cfg.port = std.fmt.parseInt(u16, arg["stardust.logport=".len..], 10) catch cfg.port;
         }
     }
@@ -113,7 +82,6 @@ fn serve(cfg: Config) !void {
     _ = try sys.check(linux.bind(listener, @ptrCast(&bind_addr), @sizeOf(@TypeOf(bind_addr))));
     _ = try sys.check(linux.listen(listener, 4));
 
-    if (cfg.announce) |target| announce(target, cfg.port);
     sys.print("stardust: log server listening on TCP port {d}\n", .{cfg.port});
 
     while (true) {
@@ -131,34 +99,6 @@ fn serve(cfg: Config) !void {
         }
         sys.close(client);
     }
-}
-
-/// Sends "stardust <ip> <port>" to the target so the host learns our
-/// address. Connecting the UDP socket first makes the kernel pick the
-/// outgoing interface, whose address getsockname() then reports.
-fn announce(target: Endpoint, port: u16) void {
-    const fd: linux.fd_t = @intCast(sys.check(linux.socket(linux.AF.INET, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0)) catch return);
-    defer sys.close(fd);
-    const dest = sockaddrIn(target.addr, target.port);
-    _ = sys.check(linux.connect(fd, @ptrCast(&dest), @sizeOf(@TypeOf(dest)))) catch |err| {
-        sys.print("stardust: announce to {d}.{d}.{d}.{d}: {s} (is the network up?)\n", .{
-            target.addr[0], target.addr[1], target.addr[2], target.addr[3], @errorName(err),
-        });
-        return;
-    };
-    var local: linux.sockaddr.in = undefined;
-    var len: linux.socklen_t = @sizeOf(@TypeOf(local));
-    _ = sys.check(linux.getsockname(fd, @ptrCast(&local), &len)) catch return;
-    const ip: Ip4 = @bitCast(local.addr);
-
-    var buf: [64]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, "stardust {d}.{d}.{d}.{d} {d}\n", .{ ip[0], ip[1], ip[2], ip[3], port }) catch unreachable;
-    _ = linux.sendto(fd, msg.ptr, msg.len, 0, null, 0);
-    sys.print("stardust: address {d}.{d}.{d}.{d}, announced to {d}.{d}.{d}.{d}:{d}\n", .{
-        ip[0],          ip[1],          ip[2],          ip[3],
-        target.addr[0], target.addr[1], target.addr[2], target.addr[3],
-        target.port,
-    });
 }
 
 fn writeAll(fd: linux.fd_t, bytes: []const u8) bool {
@@ -234,17 +174,9 @@ fn streamLog(client: linux.fd_t) void {
 const testing = std.testing;
 
 test "parse command line options" {
-    const cfg = parseCmdline("console=ttyAMA0 stardust.announce=192.168.1.83:5555 stardust.logport=2323\n");
+    const cfg = parseCmdline("console=ttyAMA0 stardust.logport=2323\n");
     try testing.expectEqual(@as(u16, 2323), cfg.port);
-    try testing.expectEqualDeep(Endpoint{ .addr = .{ 192, 168, 1, 83 }, .port = 5555 }, cfg.announce.?);
-
-    const defaults = parseCmdline("ip=dhcp");
-    try testing.expectEqual(@as(u16, 23), defaults.port);
-    try testing.expectEqual(@as(?Endpoint, null), defaults.announce);
-
-    try testing.expectEqual(@as(?Endpoint, null), parseEndpoint("192.168.1:5555"));
-    try testing.expectEqual(@as(?Endpoint, null), parseEndpoint("192.168.1.300:5555"));
-    try testing.expectEqual(@as(?Endpoint, null), parseEndpoint("192.168.1.83"));
+    try testing.expectEqual(@as(u16, 23), parseCmdline("ip=dhcp").port);
 }
 
 test "format kmsg record" {

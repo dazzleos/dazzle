@@ -14,7 +14,7 @@ its own GPU shaders and draws a triangle by talking to `vc4` directly.
 | Path | Contents |
 |---|---|
 | `src/main.zig` | Init program: mounts `/proc`, `/sys`, `/dev`, finds the display, draws, keeps the image on screen |
-| `src/logserver.zig` | Serves the kernel and init log over TCP (telnet) and announces the Pi's address |
+| `src/logserver.zig` | Serves the kernel and init log over TCP (telnet) |
 | `src/qpu.zig` | QPU (shader processor) instruction encoder, hazard checker and disassembler |
 | `src/shaders.zig` | Coordinate, vertex and fragment shaders for the triangle, generated with `qpu.zig` |
 | `src/vc4/cl.zig` | Binning control list packets and shader record layout |
@@ -75,17 +75,12 @@ LAN95xx, Microchip LAN78xx and generic CDC Ethernet.
 
 The kernel gets an address by DHCP during boot (`ip=` in `boot/cmdline.txt`).
 Init then starts a log server before touching the GPU, so the log stays
-readable if a GPU job hangs. On your computer:
+readable if a GPU job hangs. The Pi asks the DHCP server for the hostname
+`stardust`, so look for that name in your router's lease list, then:
 
 ```sh
-nc -ul 5555            # wait for the Pi to announce its address
 telnet <pi-address>    # or: nc <pi-address> 23
 ```
-
-The announcement is one line, `stardust <pi-address> 23`, sent once at boot
-to the host and port in `stardust.announce=` in `cmdline.txt` (currently
-192.168.1.83:5555). The Pi also asks the DHCP server for the hostname
-`stardust`, so it may show up under that name in your router's lease list.
 
 The telnet session prints the whole log since boot (kernel and init
 messages) and then follows new messages:
@@ -160,8 +155,9 @@ References: Broadcom's *VideoCore IV 3D Architecture Reference Guide*,
 ## Status
 
 The kernel builds and boots in QEMU, and the init program runs as PID 1.
-In QEMU the network comes up by DHCP over an emulated USB network card, the
-address announcement arrives and the log server streams the log.
+In QEMU the network comes up by DHCP over an emulated USB network card and
+the log server streams the log. On a Pi Zero, networking and the log server
+work.
 The GPU path has not run on hardware yet. Its shaders and the complete
 submitted job have been checked offline against the kernel's own
 `vc4_validate_shaders.c` and `vc4_validate.c`, which accept them. Whether

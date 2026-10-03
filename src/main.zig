@@ -27,7 +27,11 @@ pub fn main() void {
     // if a GPU job hangs.
     if (is_init) logserver.start();
 
-    run(is_init) catch |err| print("stardust: error: {s}\n", .{@errorName(err)});
+    run(is_init) catch |err| {
+        print("stardust: error: {s}\n", .{@errorName(err)});
+        if (err == error.NoVc4Device)
+            print("stardust: the vc4 driver did not create a DRM device; look for vc4, hdmi or v3d errors earlier in the log\n", .{});
+    };
 
     // PID 1 must never exit; the kernel panics if it does.
     if (is_init) while (true) {

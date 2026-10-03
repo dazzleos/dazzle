@@ -12,9 +12,7 @@
 # built-in DHCP server. The log server is forwarded to the host:
 #
 #     telnet localhost 2323
-#
-# and the address announcement is sent to UDP port 5555 on the host
-# (`nc -ul 5555` to see it).
+
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -32,7 +30,7 @@ exec qemu-system-arm -M raspi0 \
 	-kernel "$BOOT/zImage" \
 	-dtb "$DTB" \
 	-initrd "$INITRAMFS" \
-	-append "console=ttyAMA0 ip=::::stardust::dhcp printk.devkmsg=on stardust.announce=10.0.2.2:5555" \
+	-append "console=ttyAMA0 ip=::::stardust::dhcp printk.devkmsg=on" \
 	-device usb-net,netdev=net0 \
 	-netdev user,id=net0,hostfwd=tcp:127.0.0.1:${LOG_PORT:-2323}-:23 \
 	-display none -serial mon:stdio "$@"
