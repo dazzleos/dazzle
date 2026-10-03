@@ -20,6 +20,7 @@ const hud_mod = @import("hud.zig");
 const netinfo = @import("netinfo.zig");
 const window_mod = @import("window.zig");
 const rings_mod = @import("rings.zig");
+const sysinfo = @import("sysinfo.zig");
 const wayland = @import("wayland");
 
 const gl = gles.gl;
@@ -116,6 +117,9 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     var hud: ?hud_mod.Hud = if (f) |*fnt| try hud_mod.Hud.init(gpa, fnt, width, height, background) else null;
     var rings = try rings_mod.Rings.init(background);
     var input: InputStatus = .{};
+    // The CPU's speed is measured against this first sample, taken cool.
+    var monitor: sysinfo.Monitor = .{};
+    var health = monitor.sample();
 
     gl.glViewport(0, 0, w, h);
     gl.glClearColor(16.0 / 255.0, 24.0 / 255.0, 48.0 / 255.0, 1.0);
@@ -160,7 +164,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         if (hud) |*hd| if (frame_start >= next_update) {
             next_update = frame_start + std.time.ns_per_s / 2;
             var bufs: [hud_mod.Hud.lines][96]u8 = undefined;
-            hd.update(statusLines(&bufs, shown, width, height, input)) catch |e| print("stardust: overlay: {s}\n", .{@errorName(e)});
+            hd.update(statusLines(&bufs, shown, width, height, input, health)) catch |e| print("stardust: overlay: {s}\n", .{@errorName(e)});
         };
 
         gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT);
@@ -184,7 +188,12 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         // Also log every 5 seconds, for the network log.
         if (now - log_window.since >= 5 * std.time.ns_per_s) {
             const s = log_window.summary(now);
-            print("stardust: {d:.1} fps, GPU {d:.2} ms, CPU {d:.2} ms per frame\n", .{ s.fps, s.gpu_ms, s.cpu_ms });
+            health = monitor.sample();
+            var temp_buf: [16]u8 = undefined;
+            print("stardust: {d:.1} fps, GPU {d:.2} ms, CPU {d:.2} ms per frame; SoC {s}, CPU speed {d:.0}%, CPU busy {d:.0}% (demo {d:.0}%, shell {d:.0}%)\n", .{
+                s.fps,        s.gpu_ms,          s.cpu_ms,         temperatureText(&temp_buf, health.temperature),
+                health.speed, health.total_busy, health.demo_busy, health.shell_busy,
+            });
             log_window = .{ .since = now };
         }
     }
@@ -253,17 +262,22 @@ fn keyName(buf: []u8, code: u32) []const u8 {
         return std.fmt.bufPrint(buf, "{c}", .{row.keys[code - row.first]}) catch "";
     };
     const named = [_]struct { u32, []const u8 }{
-        .{ 1, "Esc" },       .{ 14, "Backspace" }, .{ 15, "Tab" },   .{ 28, "Enter" },
-        .{ 29, "Ctrl" },     .{ 42, "Shift" },     .{ 54, "Shift" }, .{ 56, "Alt" },
-        .{ 57, "Space" },    .{ 97, "Ctrl" },      .{ 100, "Alt" },  .{ 103, "Up" },
-        .{ 105, "Left" },    .{ 106, "Right" },    .{ 108, "Down" },
+        .{ 1, "Esc" },    .{ 14, "Backspace" }, .{ 15, "Tab" },   .{ 28, "Enter" },
+        .{ 29, "Ctrl" },  .{ 42, "Shift" },     .{ 54, "Shift" }, .{ 56, "Alt" },
+        .{ 57, "Space" }, .{ 97, "Ctrl" },      .{ 100, "Alt" },  .{ 103, "Up" },
+        .{ 105, "Left" }, .{ 106, "Right" },    .{ 108, "Down" },
     };
     for (named) |n| if (n[0] == code) return n[1];
     return std.fmt.bufPrint(buf, "key {d}", .{code}) catch "";
 }
 
+fn temperatureText(buf: []u8, t: ?f32) []const u8 {
+    const c = t orelse return "? °C";
+    return std.fmt.bufPrint(buf, "{d:.0} °C", .{c}) catch "";
+}
+
 /// The overlay's lines of text.
-fn statusLines(bufs: *[hud_mod.Hud.lines][96]u8, s: Stats.Summary, width: u32, height: u32, input: InputStatus) [hud_mod.Hud.lines][]const u8 {
+fn statusLines(bufs: *[hud_mod.Hud.lines][96]u8, s: Stats.Summary, width: u32, height: u32, input: InputStatus, health: sysinfo.Sample) [hud_mod.Hud.lines][]const u8 {
     var out: [hud_mod.Hud.lines][]const u8 = undefined;
     out[0] = if (netinfo.primaryAddress()) |a|
         std.fmt.bufPrint(&bufs[0], "{d}.{d}.{d}.{d}  ({s})", .{ a.ip[0], a.ip[1], a.ip[2], a.ip[3], a.name() }) catch ""
@@ -278,6 +292,8 @@ fn statusLines(bufs: *[hud_mod.Hud.lines][96]u8, s: Stats.Summary, width: u32, h
         std.fmt.bufPrint(&bufs[4], "Pointer {d:.0}, {d:.0}  ·  last key {s}", .{ pos[0], pos[1], key }) catch ""
     else
         std.fmt.bufPrint(&bufs[4], "No pointer  ·  last key {s}", .{key}) catch "";
+    var temp_buf: [24]u8 = undefined;
+    out[5] = std.fmt.bufPrint(&bufs[5], "{s}  ·  CPU speed {d:.0}%  ·  busy {d:.0}%", .{ temperatureText(&temp_buf, health.temperature), health.speed, health.total_busy }) catch "";
     return out;
 }
 
@@ -287,14 +303,16 @@ test {
     _ = @import("hud.zig");
     _ = @import("netinfo.zig");
     _ = @import("rings.zig");
+    _ = @import("sysinfo.zig");
 }
 
 test "status lines" {
     var bufs: [hud_mod.Hud.lines][96]u8 = undefined;
-    const lines = statusLines(&bufs, .{ .fps = 59.94, .cpu_ms = 0.42, .gpu_ms = 6.5 }, 1920, 1080, .{ .pointer = .{ 12.25, 400 }, .key = 30 });
+    const lines = statusLines(&bufs, .{ .fps = 59.94, .cpu_ms = 0.42, .gpu_ms = 6.5 }, 1920, 1080, .{ .pointer = .{ 12.25, 400 }, .key = 30 }, .{ .temperature = 61.6, .speed = 99.6, .total_busy = 45 });
     try std.testing.expectEqualStrings("59.9 fps  ·  1920×1080  ·  12 triangles", lines[1]);
     try std.testing.expectEqualStrings("GPU 6.50 ms per frame", lines[2]);
     try std.testing.expectEqualStrings("Pointer 12, 400  ·  last key A", lines[4]);
+    try std.testing.expectEqualStrings("62 °C  ·  CPU speed 100%  ·  busy 45%", lines[5]);
     var buf: [16]u8 = undefined;
     try std.testing.expectEqualStrings("Space", keyName(&buf, 57));
     try std.testing.expectEqualStrings("0", keyName(&buf, 11));
