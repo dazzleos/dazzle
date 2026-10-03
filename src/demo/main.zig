@@ -2,15 +2,15 @@
 //! with the machine's IP address and rendering statistics in the top left
 //! corner, written in the system font.
 //!
-//! Init starts it as the unprivileged Stardust user, with stdout and stderr
-//! going to the kernel log. It can also be run by hand, on Stardust or on
-//! Raspberry Pi OS (from a text console, with no compositor holding the
-//! display, as a user who can open /dev/dri/card*):
+//! It is a Wayland client: stardust-shell starts it, and it draws into a
+//! window through EGL's Wayland platform. Without a compositor
+//! ($WAYLAND_DISPLAY unset or not answering) it draws on the screen
+//! directly instead, which is handy on Raspberry Pi OS (from a text
+//! console, as a user who can open /dev/dri/card*):
 //!
 //!     stardust-demo [font.ttf]
 //!
-//! It runs until it is stopped; the kernel restores the previous display
-//! state when it exits.
+//! It runs until it is stopped or its window is closed.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -20,6 +20,8 @@ const gles = @import("gles");
 const cube_mod = @import("cube.zig");
 const hud_mod = @import("hud.zig");
 const netinfo = @import("netinfo.zig");
+const window_mod = @import("window.zig");
+const wayland = @import("wayland");
 
 const gl = gles.gl;
 const egl = gles.egl;
@@ -35,7 +37,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     const font_path: [*:0]const u8 = args.next() orelse font.system_font_path;
     print("stardust: demo running as uid {d}\n", .{linux.getuid()});
 
-    run(font_path) catch |err| {
+    run(init, font_path) catch |err| {
         print("stardust: error: {s}\n", .{@errorName(err)});
         if (err == error.EglInitializeFailed)
             print("stardust: no GPU or display; look for vc4, hdmi or v3d errors earlier in the log\n", .{});
@@ -55,9 +57,32 @@ fn loadFont(gpa: std.mem.Allocator, path: [*:0]const u8) ?font.Font {
     };
 }
 
-fn run(font_path: [*:0]const u8) !void {
+/// Opens a window on the Wayland compositor, if there is one.
+fn openWindow(gpa: std.mem.Allocator, init: std.process.Init.Minimal) ?*window_mod.Window {
+    const Environ = std.process.Environ;
+    const display_name = Environ.getPosix(init.environ, "WAYLAND_DISPLAY") orelse {
+        print("stardust: WAYLAND_DISPLAY is not set; drawing on the screen directly\n", .{});
+        return null;
+    };
+    var path_buf: [128]u8 = undefined;
+    const path = wayland.client.socketPath(&path_buf, Environ.getPosix(init.environ, "XDG_RUNTIME_DIR"), display_name) catch {
+        print("stardust: XDG_RUNTIME_DIR is not set; drawing on the screen directly\n", .{});
+        return null;
+    };
+    return window_mod.Window.open(gpa, path, "Stardust demo") catch |err| {
+        print("stardust: cannot open a window on {s} ({s}); drawing on the screen directly\n", .{ path, @errorName(err) });
+        return null;
+    };
+}
+
+fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     const gpa = std.heap.page_allocator;
-    const dpy = egl.eglGetDisplay(egl.EGL_DEFAULT_DISPLAY);
+    const window = openWindow(gpa, init);
+    var egl_window: ?*egl.egl_wayland.Window = null;
+    const dpy = if (window) |win| blk: {
+        egl_window = egl.egl_wayland.wl_egl_window_create(&win.surface, @intCast(win.width), @intCast(win.height));
+        break :blk egl.eglGetDisplay(win.conn);
+    } else egl.eglGetDisplay(egl.EGL_DEFAULT_DISPLAY);
     if (egl.eglInitialize(dpy, null, null) == egl.EGL_FALSE) return error.EglInitializeFailed;
     const config_attribs = [_]egl.EGLint{
         egl.EGL_RED_SIZE,        8,
@@ -72,7 +97,7 @@ fn run(font_path: [*:0]const u8) !void {
     var num_configs: egl.EGLint = 0;
     if (egl.eglChooseConfig(dpy, &config_attribs, @ptrCast(&config), 1, &num_configs) == egl.EGL_FALSE or num_configs == 0)
         return error.NoEglConfig;
-    const surface = egl.eglCreateWindowSurface(dpy, config, 0, null);
+    const surface = egl.eglCreateWindowSurface(dpy, config, if (egl_window) |w| @intFromPtr(w) else 0, null);
     if (surface == egl.EGL_NO_SURFACE) return error.EglSurfaceFailed;
     const context_attribs = [_]egl.EGLint{ egl.EGL_CONTEXT_CLIENT_VERSION, 2, egl.EGL_NONE };
     const context = egl.eglCreateContext(dpy, config, egl.EGL_NO_CONTEXT, &context_attribs);
@@ -83,10 +108,11 @@ fn run(font_path: [*:0]const u8) !void {
     var h: egl.EGLint = 0;
     _ = egl.eglQuerySurface(dpy, surface, egl.EGL_WIDTH, &w);
     _ = egl.eglQuerySurface(dpy, surface, egl.EGL_HEIGHT, &h);
-    const width: u32 = @intCast(w);
-    const height: u32 = @intCast(h);
-    print("stardust: {s} on {s}, {d}x{d}\n", .{
-        std.mem.span(gl.glGetString(gl.GL_VERSION).?), std.mem.span(gl.glGetString(gl.GL_RENDERER).?), width, height,
+    var width: u32 = @intCast(w);
+    var height: u32 = @intCast(h);
+    const where = if (window != null) "window" else "screen";
+    print("stardust: {s} on {s}, {s} {d}x{d}\n", .{
+        std.mem.span(gl.glGetString(gl.GL_VERSION).?), std.mem.span(gl.glGetString(gl.GL_RENDERER).?), where, width, height,
     });
 
     const cube = try cube_mod.Cube.init();
@@ -95,15 +121,31 @@ fn run(font_path: [*:0]const u8) !void {
 
     gl.glViewport(0, 0, w, h);
     gl.glClearColor(16.0 / 255.0, 24.0 / 255.0, 48.0 / 255.0, 1.0);
-    const err = gl.glGetError();
-    if (err != gl.GL_NO_ERROR) print("stardust: GL error 0x{x} during setup\n", .{err});
+    const gl_error = gl.glGetError();
+    if (gl_error != gl.GL_NO_ERROR) print("stardust: GL error 0x{x} during setup\n", .{gl_error});
 
     const start = sys.nowNs();
-    var window: Stats = .{ .since = start };
+    var stats_window: Stats = .{ .since = start };
     var shown: Stats.Summary = .{};
     var log_window: Stats = .{ .since = start };
     var next_update: u64 = start;
     while (true) {
+        if (window) |win| {
+            win.poll() catch |err| {
+                if (err == error.ServerError) print("stardust: compositor error: {s}\n", .{win.conn.errorMessage()});
+                return err;
+            };
+            if (win.closed) return;
+            if (try win.applyConfigure()) |size| {
+                // The next buffer EGL picks has the new size.
+                egl.egl_wayland.wl_egl_window_resize(egl_window.?, @intCast(size[0]), @intCast(size[1]), 0, 0);
+                width = size[0];
+                height = size[1];
+                gl.glViewport(0, 0, @intCast(width), @intCast(height));
+                if (hud) |*hd| try hd.resize(width, height);
+                next_update = 0;
+            }
+        }
         const frame_start = sys.nowNs();
         const t: f32 = @floatCast(@as(f64, @floatFromInt(frame_start - start)) / std.time.ns_per_s);
 
@@ -124,12 +166,12 @@ fn run(font_path: [*:0]const u8) !void {
         const rendered = sys.nowNs();
         if (egl.eglSwapBuffers(dpy, surface) == egl.EGL_FALSE) return error.EglSwapBuffersFailed;
 
-        window.add(issued - frame_start, rendered - issued);
+        stats_window.add(issued - frame_start, rendered - issued);
         log_window.add(issued - frame_start, rendered - issued);
         const now = sys.nowNs();
-        if (now - window.since >= std.time.ns_per_s / 2) {
-            shown = window.summary(now);
-            window = .{ .since = now };
+        if (now - stats_window.since >= std.time.ns_per_s / 2) {
+            shown = stats_window.summary(now);
+            stats_window = .{ .since = now };
         }
         // Also log every 5 seconds, for the network log.
         if (now - log_window.since >= 5 * std.time.ns_per_s) {
@@ -187,6 +229,7 @@ fn statusLines(bufs: *[hud_mod.Hud.lines][96]u8, s: Stats.Summary, width: u32, h
 }
 
 test {
+    _ = @import("window.zig");
     _ = @import("cube.zig");
     _ = @import("hud.zig");
     _ = @import("netinfo.zig");

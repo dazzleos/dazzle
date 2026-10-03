@@ -93,12 +93,21 @@ pub const Draw = struct {
     texture: ?Texture = null,
 };
 
-/// A linear B8G8R8A8 colour buffer. Depth lives only in the tile buffer:
-/// it is cleared to `clear_z` at the start of each tile and never stored.
+/// A B8G8R8A8 colour buffer. Depth lives only in the tile buffer: it is
+/// cleared to `clear_z` at the start of each tile and never stored.
 pub const Target = struct {
     handle: u32,
     width: u16,
     height: u16,
+    /// Linear (raster order, for scanout), or the T or LT tiled layouts the
+    /// texture unit reads (see texture.zig), so the result can be sampled
+    /// as a texture of the same size.
+    tiling: cl.Tiling = .linear,
+
+    /// The tiled layout the texture unit expects for an image of this size.
+    pub fn textureTiling(width: u32, height: u32) cl.Tiling {
+        return if (texture.isLt(width, height)) .lt else .t;
+    }
 
     /// Byte stride the hardware uses for linear render targets: the width
     /// rounded up to a 4-pixel micro-tile.
@@ -288,7 +297,7 @@ pub const Frame = struct {
             .max_y_tile = @intCast(tiles[1] - 1),
             .color_write = .{
                 .hindex = 0,
-                .bits = cl.renderConfigBits(.linear, cl.render_config_format_rgba8888),
+                .bits = cl.renderConfigBits(f.target.tiling, cl.render_config_format_rgba8888),
             },
             // The clear values are always loaded so depth starts cleared;
             // keeping the colour loads it back from the target.
@@ -310,7 +319,7 @@ pub const Frame = struct {
         if (f.load == .keep) {
             f.submit.color_read = .{
                 .hindex = 0,
-                .bits = cl.loadStoreBits(.linear, .color, cl.loadstore_format_rgba8888),
+                .bits = cl.loadStoreBits(f.target.tiling, .color, cl.loadstore_format_rgba8888),
             };
         }
         return &f.submit;

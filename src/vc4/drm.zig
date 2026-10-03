@@ -338,3 +338,30 @@ pub fn waitForOutput(fd: linux.fd_t) !Output {
         };
     }
 }
+
+// --- Buffer sharing (PRIME / dma-buf) ---------------------------------------
+
+const PrimeHandle = extern struct {
+    handle: u32,
+    flags: u32,
+    fd: i32,
+};
+
+pub const IOCTL_PRIME_HANDLE_TO_FD = IOWR(0x2d, PrimeHandle);
+pub const IOCTL_PRIME_FD_TO_HANDLE = IOWR(0x2e, PrimeHandle);
+
+/// Exports a buffer as a dma-buf file descriptor another process can import.
+pub fn exportBuffer(fd: linux.fd_t, handle: u32) !linux.fd_t {
+    // DRM_CLOEXEC (O_CLOEXEC, 02000000) | DRM_RDWR (O_RDWR, 2).
+    var arg: PrimeHandle = .{ .handle = handle, .flags = 0o2000000 | 2, .fd = -1 };
+    try ioctl(fd, IOCTL_PRIME_HANDLE_TO_FD, &arg);
+    return arg.fd;
+}
+
+/// Imports a dma-buf, returning a GEM handle on this device (to be closed
+/// with gemClose). The file descriptor stays open.
+pub fn importBuffer(fd: linux.fd_t, dmabuf: linux.fd_t) !u32 {
+    var arg: PrimeHandle = .{ .handle = 0, .flags = 0, .fd = dmabuf };
+    try ioctl(fd, IOCTL_PRIME_FD_TO_HANDLE, &arg);
+    return arg.handle;
+}

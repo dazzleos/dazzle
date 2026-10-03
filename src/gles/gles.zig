@@ -1,7 +1,8 @@
 //! OpenGL ES 2.0 and EGL for Stardust, built on the low-level vc4 API.
 //!
 //! * `gl`: the OpenGL ES 2.0 entry points (C ABI) and constants
-//! * `egl`: EGL 1.4 display, surface and context management (C ABI)
+//! * `egl`: EGL 1.4 display, surface and context management (C ABI), on
+//!   Wayland (with the wayland-egl window API) or directly on the screen
 //! * `glsl`: the GLSL ES 1.00 compiler front end (shaders and programs)
 //!
 //! The entry points are exported under their standard names, so C code can

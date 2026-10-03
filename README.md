@@ -13,11 +13,13 @@ the kernel's `vc4` driver, so programs can pick the one that suits them:
   The entry points use the C ABI under their usual names, so C code can
   call them; Zig code calls the same functions.
 
-A Vulkan-style API may follow, and a simple Wayland shell later. Today init
-(PID 1, the only process with root privileges) starts a demo program as an
-unprivileged user. The demo shows a spinning, textured, depth-tested cube
-drawn with OpenGL ES. The IP address and rendering statistics appear in the
-top left, in the system font.
+On top of them is **stardust-shell**, a minimal Wayland compositor that
+draws with the `vc4` API. Init (PID 1, the only process with root
+privileges) starts the shell as an unprivileged user, and the shell starts
+the demo as its Wayland client. The demo shows a spinning, textured,
+depth-tested cube drawn with OpenGL ES. The IP address and rendering
+statistics appear in its top left, in the system font. A Vulkan-style API
+may follow.
 
 ## Layout
 
@@ -29,8 +31,10 @@ The code is split into Zig modules, linked statically into each program:
 | `vc4` | `src/vc4/` | The low-level graphics API for the VideoCore IV, described below |
 | `gles` | `src/gles/` | OpenGL ES 2.0, EGL and the GLSL ES 1.00 compiler, on top of `vc4` |
 | `font` | `src/font/` | OpenType font rendering, described below |
-| `stardust-init` | `src/init/` | The init program: mounts, log server, GPU device permissions, starting the demo |
-| `stardust-demo` | `src/demo/` | The demo program, run as the unprivileged user |
+| `wayland` | `src/wayland/` | The Wayland wire protocol (with file descriptor passing), the interfaces Stardust uses, and a small client library |
+| `stardust-init` | `src/init/` | The init program: mounts, network, log server, GPU device permissions, starting the shell |
+| `stardust-shell` | `src/shell/` | The Wayland compositor and shell, described below |
+| `stardust-demo` | `src/demo/` | The demo, a Wayland client |
 
 The `vc4` module:
 
@@ -112,16 +116,43 @@ The init program (`src/init/`):
 
 | File | Contents |
 |---|---|
-| `main.zig` | Mounts `/proc`, `/sys`, `/dev`, starts the log server, gives the user the GPU, starts the demo and reaps exited processes |
+| `main.zig` | Mounts `/proc`, `/sys`, `/dev`, starts the network manager and log server, gives the user the GPU, creates its runtime directory, starts the shell and reaps exited processes |
 | `network.zig` | The network manager: follows Ethernet adapters and links, configures addresses and routes |
 | `dhcp.zig` | DHCP client messages (building requests, parsing replies) |
 | `logserver.zig` | Serves the kernel log over TCP (telnet) |
+
+The shell (`src/shell/`):
+
+| File | Contents |
+|---|---|
+| `main.zig` | Opens the GPU and display, listens on `$XDG_RUNTIME_DIR/wayland-0`, starts its clients, and runs the event loop: dispatch clients, then composite a frame when something changed |
+| `server.zig` | The Wayland server: clients, objects and requests, frame callbacks and buffer releases |
+| `render.zig` | Compositing with the `vc4` API: textured quads (shaders written with the builder API) for the bar and the window, and the bar's text |
+| `server_test.zig` | Protocol tests on the host, described below |
+
+The server offers `wl_compositor`, `wl_shm` (ARGB8888 and XRGB8888, copied
+to a texture at commit), `zwp_linux_dmabuf_v1` and `xdg_wm_base`
+(toplevels). There are no popups, outputs or input yet.
+
+- **Windows:** each toplevel is configured to fill the screen below a bar,
+  and the newest one is shown. The bar shows the window's title and the
+  time since boot.
+- **Buffer sharing:** clients render with the GPU straight into buffers
+  they share with the shell as dma-bufs, so nothing is copied. The GPU's
+  texture unit cannot read ordinary (linear) images, so clients render in
+  its T-tiled layout, and the shell draws their buffers as textures. That
+  layout is announced with the `BROADCOM_VC4_T_TILED` modifier, as Mesa's
+  vc4 driver also does.
+- **Pacing:** a frame callback fires once the frame showing it has been
+  flipped onto the screen. Buffers are released as soon as a newer one is
+  committed, because the shell waits for each composited frame to finish.
 
 The demo program (`src/demo/`):
 
 | File | Contents |
 |---|---|
-| `main.zig` | EGL setup, the frame loop and timing statistics |
+| `main.zig` | EGL setup (Wayland, or the screen directly without a compositor), the frame loop and timing statistics |
+| `window.zig` | The Wayland window: an xdg toplevel, its configure events and pings |
 | `cube.zig` | The cube: GLSL shaders, vertex and index buffers, texture, depth testing and culling, written as a C GL program would be |
 | `hud.zig` | The statistics overlay: text drawn by the font renderer into a texture, shown as a quad over the top left corner |
 | `netinfo.zig` | Looks up the IPv4 address (SIOCGIFCONF, no privileges needed) |
@@ -133,25 +164,29 @@ fixed user and group ID 1000 (`sys.user`). There are no accounts,
 passwords or logins.
 
 - Once vc4 has probed, init makes the DRM nodes in `/dev/dri` owned by that
-  user, mode 0660. The demo is the first to open the card, so it becomes
-  DRM master and can set modes and flip pages without privileges.
-- Init forks, drops to the user (no supplementary groups, then the group,
-  then the user ID) and execs `/bin/stardust-demo`. The demo's stdout and
-  stderr are init's
-  `/dev/kmsg` descriptor, because only root can open that for writing.
+  user, mode 0660. The shell is the first to open the card, so it becomes
+  DRM master and can set modes and flip pages without privileges. Clients
+  use the render node (`/dev/dri/renderD128`), which can render but not
+  touch the display.
+- Init creates `/run/user/1000` (the user's runtime directory, mode 0700),
+  forks, drops to the user (no supplementary groups, then the group, then
+  the user ID) and execs `/bin/stardust-shell`. The shell's stdout and
+  stderr are init's `/dev/kmsg` descriptor, because only root can open that
+  for writing. The shell's clients inherit them.
 - The network manager runs as the same user but keeps three capabilities:
   configuring interfaces and routes (`CAP_NET_ADMIN`), tying its DHCP
   socket to the interface (`CAP_NET_RAW`) and binding the DHCP client port
   (`CAP_NET_BIND_SERVICE`). Init restarts it if it ever stops.
 - The log server binds port 23 as root, then drops to the same user. Reading
   `/dev/kmsg` needs no privileges.
-- Init logs how the demo exits and does not restart it.
+- Init logs how the shell exits, and the shell logs how its clients exit.
+  Neither is restarted.
 
 This needs `CONFIG_MULTIUSER` in the kernel (about 8 KB). Without it, every
 process has every privilege.
 
-Also: `tools/mkinitramfs.zig` (packs init, the demo and the font into a
-cpio initramfs), `kernel/stardust.config` (kernel config fragment applied on top
+Also: `tools/mkinitramfs.zig` (packs init, the shell, the demo and the
+font into a cpio initramfs), `kernel/stardust.config` (kernel config fragment applied on top
 of `tinyconfig`), `boot/` (firmware `config.txt` and kernel `cmdline.txt`)
 and `scripts/` (kernel build, firmware download, SD image, QEMU and Zig).
 
@@ -225,10 +260,13 @@ messages) and then follows new messages:
 [    4.740011] stardust: network: found eth0 (<mac>)
 [    4.746230] stardust: network: eth0 link up
 [    4.940117] stardust: network: eth0 is 192.168.1.42/24, gateway 192.168.1.1 (DHCP, lease 86400 s)
-[    4.740312] stardust: started /bin/stardust-demo (pid 24) as uid 1000
-[    4.740601] stardust: demo running as uid 1000
+[    4.740312] stardust: started /bin/stardust-shell (pid 24) as uid 1000
 [    4.741008] stardust: opened /dev/dri/card0 (vc4)
-[    4.802114] stardust: OpenGL ES 2.0 Stardust on VideoCore IV (Stardust), <width>x<height>
+[    4.772511] stardust-shell: display <width>x<height>
+[    4.772702] stardust-shell: listening on /run/user/1000/wayland-0
+[    4.772913] stardust-shell: started /bin/stardust-demo (pid 25)
+[    4.790100] stardust-shell: client connected
+[    4.802114] stardust: OpenGL ES 2.0 Stardust on VideoCore IV (Stardust), window <width>x<height>
 [    9.840211] stardust: 60.0 fps, GPU <t> ms, CPU <t> ms per frame
 ```
 
@@ -243,12 +281,16 @@ stardust.ip=192.168.1.50/24,192.168.1.1
 
 ### The demo
 
-The cube spins at the display's refresh rate. The top left corner shows:
+The screen shows the shell's bar along the top, and below it the demo's
+window. The cube spins at the display's refresh rate. The window's top left
+corner shows:
 
 - the IPv4 address, or "No network";
-- frames per second, the resolution and the triangle count;
+- frames per second and the triangle count;
+- the window size;
 - GPU time per frame: from submitting the frame to the GPU finishing it
-  (`glFinish`, before `eglSwapBuffers` waits for the vertical blank);
+  (`glFinish`, before `eglSwapBuffers` hands the frame to the shell). It
+  includes waiting for the shell's compositing on the shared GPU;
 - CPU time per frame: issuing the frame's GL calls.
 
 The overlay is redrawn twice a second, and the same statistics go to the
@@ -267,15 +309,18 @@ The firmware picks the Zero or Zero W device tree in `config.txt`. The Zero
 - **Raspberry Pi OS:** `zig-out/bin/stardust-demo` also runs as a normal
   program on Raspberry Pi OS (Lite, or with the desktop stopped) on any Pi
   from the Zero to the Pi 3. All of them have the same VideoCore IV and
-  `vc4` driver. Run `stardust-demo [font.ttf]` from a text console as a user in the
-  `video` group (the font defaults to `/usr/share/fonts/FiraSans-Regular.ttf`). It runs until you press Ctrl+C.
+  `vc4` driver. From a text console, as a user in the `video` group, run
+  `stardust-demo [font.ttf]` to draw on the screen directly (with no
+  `WAYLAND_DISPLAY`). Or run the shell with `XDG_RUNTIME_DIR` set:
+  `stardust-shell path/to/stardust-demo`. The font defaults to
+  `/usr/share/fonts/FiraSans-Regular.ttf`. Press Ctrl+C to stop.
   Iterating on GPU code this way avoids rebuilding the SD card.
 - **QEMU:** `scripts/run-qemu.sh` boots the kernel and initramfs in QEMU's
   `raspi0` machine with an emulated USB network card. `telnet localhost
   2323` reaches the log server. QEMU does not emulate the 3D engine or HDMI,
   so this checks the kernel, init, privileges and networking only. The log
-  ends with `stardust: error: EglInitializeFailed` and `stardust: demo
-  exited with status 1`.
+  ends with `stardust-shell: error: NoVc4Device` and `stardust: shell exited
+  with status 1`.
 
 ## How a frame is drawn
 
@@ -305,8 +350,10 @@ The firmware picks the Zero or Zero W device tree in `config.txt`. The Zero
    them.
 5. **Submission.** `DRM_IOCTL_VC4_SUBMIT_CL` submits the job. The kernel
    validates it, generates the rendering control list that clears and
-   stores each tile, and runs it on the V3D. Rendering goes straight into a
-   linear XRGB8888 buffer; depth stays in the on-chip tile buffer.
+   stores each tile, and runs it on the V3D. The shell renders straight into
+   a linear XRGB8888 scanout buffer; Wayland clients render into T-tiled
+   buffers the shell then draws as textures. Depth stays in the on-chip tile
+   buffer.
 6. **Display.** `display.zig` alternates between two such buffers, flipping
    at vertical blank so animation is tear-free and paced to the refresh
    rate.
@@ -326,6 +373,13 @@ The firmware picks the Zero or Zero W device tree in `config.txt`. The Zero
 - The GL layer runs against a stand-in GPU backend in the tests, which
   checks the jobs it records and that every GPU buffer and shader it
   creates is freed.
+- The Wayland tests run the real server, in a thread with a fake renderer,
+  against real clients over a socket pair. One client speaks the protocol
+  directly: registry, xdg toplevel and configure, dma-buf and shm buffers,
+  frame callbacks, releases and protocol errors. The other is the demo's
+  path: EGL's Wayland platform and the GL layer, swapping and resizing a
+  window. Both check that everything is freed when the client disconnects.
+  They pass on the host and as ARM code under `qemu-arm`.
 
 References: Broadcom's *VideoCore IV 3D Architecture Reference Guide*,
 `drivers/gpu/drm/vc4/` in the kernel (especially `vc4_validate.c` and
@@ -338,11 +392,12 @@ correctly at a steady 60 fps at 1920x1080 (about 6.5 ms of GPU time per
 frame). Compiled shaders, perspective, texturing, depth testing and page
 flipping all worked, with the log readable over the network.
 
-The demo now draws through OpenGL ES, with the statistics overlay, and has
-not run on hardware yet. Its frames pass a userspace build of the kernel's
-job and shader validators. Face culling's winding and the rendered output
-still need confirming on a Pi. That earlier `vc4` API version of the cube
-is in the git history.
+The demo now draws through OpenGL ES as a Wayland client of
+stardust-shell, and neither has run on hardware yet. The shell's
+compositing jobs and the demo's T-tiled frames pass a userspace build of the
+kernel's job and shader validators. Face culling's winding, sharing buffers
+between the processes, and the rendered output still need confirming on a
+Pi. The earlier `vc4` API version of the cube is in the git history.
 
 In QEMU the kernel boots and init's network manager gets an address by DHCP
 over an emulated USB network card. That holds whether the card is there at
@@ -362,4 +417,5 @@ GPU or display).
 - Text: ligatures and other GSUB features, hinting or stem darkening for
   small sizes, and text drawn by the GPU (a glyph atlas texture, once
   blending is supported).
-- Input (evdev) and a Wayland compositor.
+- The shell: input (evdev and `wl_seat`), `wl_output`, more than one
+  visible window, and blending for translucent windows.

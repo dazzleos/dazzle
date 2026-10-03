@@ -9,8 +9,10 @@
 //!    port); boot never waits for the network;
 //! 3. waits for the vc4 GPU and gives the Stardust user access to its device
 //!    nodes;
-//! 4. starts /bin/stardust-demo as the Stardust user, with its output going to
-//!    the kernel log;
+//! 4. creates the user's runtime directory (/run/user/1000, for the
+//!    Wayland socket) and starts /bin/stardust-shell, the Wayland compositor,
+//!    as the Stardust user, with its output going to the kernel log; the
+//!    shell starts the demo as its client;
 //! 5. reaps exited processes forever (PID 1 must never exit), restarting the
 //!    network manager if it ever stops.
 //!
@@ -25,11 +27,12 @@ const network = @import("network.zig");
 
 const print = sys.print;
 
-const demo_path = "/bin/stardust-demo";
+const shell_path = "/bin/stardust-shell";
+const runtime_dir = "/run/user/1000";
 
 pub fn main() void {
     if (linux.getpid() != 1) {
-        print("stardust-init must run as PID 1; run {s} to show a demo\n", .{demo_path});
+        print("stardust-init must run as PID 1\n", .{});
         linux.exit(1);
     }
     mountPseudoFilesystems();
@@ -39,8 +42,9 @@ pub fn main() void {
     const network_pid = network.start();
     logserver.start();
     grantGpuAccess();
-    const demo_pid = startDemo();
-    reapForever(demo_pid, network_pid);
+    makeRuntimeDir();
+    const shell_pid = startShell();
+    reapForever(shell_pid, network_pid);
 }
 
 fn mountPseudoFilesystems() void {
@@ -92,20 +96,27 @@ fn grantGpuAccess() void {
     }
 }
 
-/// Starts the demo program as the Stardust user. Returns its PID, or null if
-/// it could not be started.
-fn startDemo() ?linux.pid_t {
+/// The directory for the user's sockets, readable only by the user.
+fn makeRuntimeDir() void {
+    for ([_][*:0]const u8{ "/run", "/run/user", runtime_dir }) |dir| _ = linux.mkdir(dir, 0o755);
+    _ = linux.chown(runtime_dir, sys.user.uid, sys.user.gid);
+    _ = linux.fchmodat(linux.AT.FDCWD, runtime_dir, 0o700);
+}
+
+/// Starts the shell as the Stardust user. Returns its PID, or null if it
+/// could not be started.
+fn startShell() ?linux.pid_t {
     const rc = linux.fork();
     switch (linux.errno(rc)) {
         .SUCCESS => {},
         else => |e| {
-            print("stardust: cannot start the demo: fork failed ({s})\n", .{@tagName(e)});
+            print("stardust: cannot start the shell: fork failed ({s})\n", .{@tagName(e)});
             return null;
         },
     }
     if (rc != 0) {
         const pid: linux.pid_t = @intCast(rc);
-        print("stardust: started {s} (pid {d}) as uid {d}\n", .{ demo_path, pid, sys.user.uid });
+        print("stardust: started {s} (pid {d}) as uid {d}\n", .{ shell_path, pid, sys.user.uid });
         return pid;
     }
 
@@ -116,19 +127,19 @@ fn startDemo() ?linux.pid_t {
         _ = linux.dup2(kmsg, 2);
     }
     sys.dropPrivileges() catch |err| {
-        print("stardust: cannot drop privileges ({s}); not starting the demo\n", .{@errorName(err)});
+        print("stardust: cannot drop privileges ({s}); not starting the shell\n", .{@errorName(err)});
         linux.exit(126);
     };
-    const argv = [_:null]?[*:0]const u8{demo_path};
-    const envp = [_:null]?[*:0]const u8{ "HOME=/", "PATH=/bin", "USER=" ++ sys.user.name };
-    const err = linux.errno(linux.execve(demo_path, &argv, &envp));
-    print("stardust: cannot run {s} ({s})\n", .{ demo_path, @tagName(err) });
+    const argv = [_:null]?[*:0]const u8{shell_path};
+    const envp = [_:null]?[*:0]const u8{ "HOME=/", "PATH=/bin", "USER=" ++ sys.user.name, "XDG_RUNTIME_DIR=" ++ runtime_dir };
+    const err = linux.errno(linux.execve(shell_path, &argv, &envp));
+    print("stardust: cannot run {s} ({s})\n", .{ shell_path, @tagName(err) });
     linux.exit(127);
 }
 
-/// Waits for child processes, logging how the demo ends. Processes whose
+/// Waits for child processes, logging how the shell ends. Processes whose
 /// parent exits are re-parented to init, so this also collects those.
-fn reapForever(demo_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t) noreturn {
+fn reapForever(shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t) noreturn {
     var network_pid = first_network_pid;
     while (true) {
         var status: u32 = 0;
@@ -149,11 +160,11 @@ fn reapForever(demo_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t) noreturn
             network_pid = network.start();
             continue;
         }
-        if (pid != demo_pid) continue;
+        if (pid != shell_pid) continue;
         if (linux.W.IFEXITED(status)) {
-            print("stardust: demo exited with status {d}\n", .{linux.W.EXITSTATUS(status)});
+            print("stardust: shell exited with status {d}\n", .{linux.W.EXITSTATUS(status)});
         } else if (linux.W.IFSIGNALED(status)) {
-            print("stardust: demo killed by signal {d}\n", .{linux.W.TERMSIG(status)});
+            print("stardust: shell killed by signal {d}\n", .{linux.W.TERMSIG(status)});
         }
     }
 }

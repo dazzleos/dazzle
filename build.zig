@@ -5,6 +5,7 @@ const Modules = struct {
     vc4: *std.Build.Module,
     gles: *std.Build.Module,
     font: *std.Build.Module,
+    wayland: *std.Build.Module,
 };
 
 /// The library modules, built for one target:
@@ -13,6 +14,7 @@ const Modules = struct {
 /// * `vc4`: the low-level VideoCore IV graphics API
 /// * `gles`: OpenGL ES 2.0 and GLSL, built on vc4
 /// * `font`: OpenType font rendering
+/// * `wayland`: the Wayland wire protocol and a client library
 fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) Modules {
     const sys = b.createModule(.{
         .root_source_file = b.path("src/sys/sys.zig"),
@@ -25,6 +27,11 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         .optimize = optimize,
         .imports = &.{.{ .name = "sys", .module = sys }},
     });
+    const wayland = b.createModule(.{
+        .root_source_file = b.path("src/wayland/wayland.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const gles = b.createModule(.{
         .root_source_file = b.path("src/gles/gles.zig"),
         .target = target,
@@ -32,6 +39,7 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         .imports = &.{
             .{ .name = "sys", .module = sys },
             .{ .name = "vc4", .module = vc4 },
+            .{ .name = "wayland", .module = wayland },
         },
     });
     const font = b.createModule(.{
@@ -39,7 +47,7 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         .target = target,
         .optimize = optimize,
     });
-    return .{ .sys = sys, .vc4 = vc4, .gles = gles, .font = font };
+    return .{ .sys = sys, .vc4 = vc4, .gles = gles, .font = font, .wayland = wayland };
 }
 
 /// A program's root module. `single_threaded` and stripping are set for the
@@ -56,6 +64,7 @@ fn addProgramModule(b: *std.Build, path: []const u8, target: std.Build.ResolvedT
             .{ .name = "vc4", .module = m.vc4 },
             .{ .name = "gles", .module = m.gles },
             .{ .name = "font", .module = m.font },
+            .{ .name = "wayland", .module = m.wayland },
         },
     });
 }
@@ -72,7 +81,8 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseSmall });
 
     const pi = addModules(b, target, optimize);
-    // init runs as root; the demo runs as the unprivileged Stardust user.
+    // init runs as root; the shell and the demo (its Wayland client) run as
+    // the unprivileged Stardust user.
     const init_exe = b.addExecutable(.{
         .name = "stardust-init",
         .root_module = addProgramModule(b, "src/init/main.zig", target, optimize, pi, true),
@@ -83,6 +93,11 @@ pub fn build(b: *std.Build) void {
         .root_module = addProgramModule(b, "src/demo/main.zig", target, optimize, pi, true),
     });
     b.installArtifact(demo_exe);
+    const shell_exe = b.addExecutable(.{
+        .name = "stardust-shell",
+        .root_module = addProgramModule(b, "src/shell/main.zig", target, optimize, pi, true),
+    });
+    b.installArtifact(shell_exe);
 
     // Host tool that packs the init binary into a cpio initramfs.
     const mkinitramfs = b.addExecutable(.{
@@ -96,6 +111,7 @@ pub fn build(b: *std.Build) void {
     const run_mkinitramfs = b.addRunArtifact(mkinitramfs);
     const initramfs = run_mkinitramfs.addOutputFileArg("initramfs.cpio");
     run_mkinitramfs.addArtifactArg(init_exe);
+    run_mkinitramfs.addArtifactArg(shell_exe);
     run_mkinitramfs.addArtifactArg(demo_exe);
     run_mkinitramfs.addFileArg(b.path("fonts/FiraSans-Regular.ttf"));
     run_mkinitramfs.addFileArg(b.path("fonts/OFL.txt"));
@@ -116,8 +132,10 @@ pub fn build(b: *std.Build) void {
         host.vc4,
         host.gles,
         host.font,
+        host.wayland,
         addProgramModule(b, "src/init/main.zig", b.graph.host, optimize, host, null),
         addProgramModule(b, "src/demo/main.zig", b.graph.host, optimize, host, null),
+        addProgramModule(b, "src/shell/main.zig", b.graph.host, optimize, host, null),
     }) |m| {
         const t = b.addTest(.{ .root_module = m });
         test_step.dependOn(&b.addRunArtifact(t).step);

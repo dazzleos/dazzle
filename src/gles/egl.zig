@@ -1,27 +1,34 @@
-//! EGL 1.4 for Stardust: one display (the vc4 GPU and the first connected
-//! output), one configuration (8-bit RGBA with a 24-bit depth buffer)
-//! and full-screen window surfaces, double-buffered with page flips.
+//! EGL 1.4 for Stardust, with one configuration (8-bit RGBA with a 24-bit
+//! depth buffer) and two platforms:
+//!
+//! * Wayland: eglGetDisplay(wl_display), where the native display is a
+//!   `*wayland.client.Display`, and window surfaces made from a
+//!   `wl_egl_window` (see egl_wayland.zig). Rendering goes into buffers
+//!   shared with the compositor; this is how apps run under stardust-shell.
+//! * The screen itself: eglGetDisplay(EGL_DEFAULT_DISPLAY) opens the GPU
+//!   and the first connected output, and a window surface is the whole
+//!   screen, double-buffered with page flips. The app must be the only one
+//!   using the display (no compositor).
 //!
 //! Entry points are exported with the C ABI under their standard names. A
 //! typical program:
 //!
-//!     const dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+//!     const dpy = eglGetDisplay(wl_display);
 //!     _ = eglInitialize(dpy, null, null);
 //!     var config: EGLConfig = null;
 //!     var n: EGLint = 0;
 //!     _ = eglChooseConfig(dpy, &attribs, &config, 1, &n);
-//!     const surface = eglCreateWindowSurface(dpy, config, 0, null);
+//!     const window = wl_egl_window_create(&wl_surface, width, height);
+//!     const surface = eglCreateWindowSurface(dpy, config, @intFromPtr(window), null);
 //!     const ctx = eglCreateContext(dpy, config, EGL_NO_CONTEXT, &.{ EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE });
 //!     _ = eglMakeCurrent(dpy, surface, surface, ctx);
 //!     // ... GL calls, then eglSwapBuffers(dpy, surface) once per frame
-//!
-//! There is no window system yet, so the native display and window
-//! arguments are ignored and a window surface covers the whole screen.
 
 const std = @import("std");
 const sys = @import("sys");
 const vc4 = @import("vc4");
 const context = @import("context.zig");
+pub const egl_wayland = @import("egl_wayland.zig");
 const gl = @import("gl.zig");
 
 const drm = vc4.drm;
@@ -145,11 +152,38 @@ pub const EGL_READ: EGLint = 0x305A;
 const Display = struct {
     initialized: bool = false,
     dev: vc4.Device = undefined,
+    platform: enum { kms, wayland },
+    /// The screen, for the KMS platform.
     output: drm.Output = undefined,
+    /// The compositor connection, for the Wayland platform.
+    wl: egl_wayland.Platform = undefined,
 };
 
-const Surface = struct {
-    display: vc4.display.Display,
+/// A window surface: the whole screen (KMS), or a Wayland window.
+const Surface = union(enum) {
+    kms: vc4.display.Display,
+    wayland: *egl_wayland.Surface,
+
+    fn width(s: *const Surface) u32 {
+        return switch (s.*) {
+            .kms => |d| d.width,
+            .wayland => |w| w.width(),
+        };
+    }
+
+    fn height(s: *const Surface) u32 {
+        return switch (s.*) {
+            .kms => |d| d.height,
+            .wayland => |w| w.height(),
+        };
+    }
+
+    fn backTarget(s: *Surface) !vc4.render.Target {
+        return switch (s.*) {
+            .kms => |*d| d.backTarget(),
+            .wayland => |w| w.backTarget(),
+        };
+    }
 };
 
 const Context = struct {
@@ -158,7 +192,11 @@ const Context = struct {
     bound: bool = false,
 };
 
-var the_display: Display = .{};
+/// The two platforms' displays: the screen directly (EGL_DEFAULT_DISPLAY),
+/// or a Wayland compositor (a native display of a wayland client Display).
+var kms_display: Display = .{ .platform = .kms };
+var wayland_display: Display = .{ .platform = .wayland };
+var current_display: ?*Display = null;
 var last_error: EGLint = EGL_SUCCESS;
 var current_context: ?*Context = null;
 var current_surface: ?*Surface = null;
@@ -177,17 +215,21 @@ fn ok() EGLBoolean {
     return EGL_TRUE;
 }
 
+fn displayHandle(dpy: EGLDisplay) ?*Display {
+    if (dpy == @as(EGLDisplay, @ptrCast(&kms_display))) return &kms_display;
+    if (dpy == @as(EGLDisplay, @ptrCast(&wayland_display))) return &wayland_display;
+    last_error = EGL_BAD_DISPLAY;
+    return null;
+}
+
 /// The display behind a handle, if it is ours and initialized.
 fn display(dpy: EGLDisplay) ?*Display {
-    if (dpy != @as(EGLDisplay, @ptrCast(&the_display))) {
-        last_error = EGL_BAD_DISPLAY;
-        return null;
-    }
-    if (!the_display.initialized) {
+    const d = displayHandle(dpy) orelse return null;
+    if (!d.initialized) {
         last_error = EGL_NOT_INITIALIZED;
         return null;
     }
-    return &the_display;
+    return d;
 }
 
 // --- The GPU backend for GL contexts ----------------------------------------
@@ -228,40 +270,63 @@ const backend_vtable: context.Backend.VTable = .{
 
 // --- Displays ---------------------------------------------------------------
 
+/// EGL_DEFAULT_DISPLAY gives the screen itself (the app must be the DRM
+/// master, so no compositor may be running); a wayland client Display
+/// (`*wayland.client.Display`) gives windows on that compositor.
 pub export fn eglGetDisplay(native: EGLNativeDisplayType) callconv(.c) EGLDisplay {
-    if (native != EGL_DEFAULT_DISPLAY) return EGL_NO_DISPLAY;
-    return @ptrCast(&the_display);
+    const n = native orelse return @ptrCast(&kms_display);
+    if (!wayland_display.initialized) wayland_display.wl.conn = @ptrCast(@alignCast(n));
+    return @ptrCast(&wayland_display);
 }
 
 pub export fn eglInitialize(dpy: EGLDisplay, major: ?*EGLint, minor: ?*EGLint) callconv(.c) EGLBoolean {
-    if (dpy != @as(EGLDisplay, @ptrCast(&the_display))) return fail(EGL_BAD_DISPLAY);
-    if (!the_display.initialized) {
-        const dev = vc4.device.open() catch |e| {
-            sys.print("stardust egl: no vc4 GPU: {s}\n", .{@errorName(e)});
-            return fail(EGL_NOT_INITIALIZED);
-        };
-        const output = drm.waitForOutput(dev.fd) catch |e| {
-            sys.print("stardust egl: no display output: {s}\n", .{@errorName(e)});
-            sys.close(dev.fd);
-            return fail(EGL_NOT_INITIALIZED);
-        };
-        the_display = .{ .initialized = true, .dev = dev, .output = output };
-    }
+    const d = displayHandle(dpy) orelse return EGL_FALSE;
+    if (!d.initialized) switch (d.platform) {
+        .kms => {
+            const dev = vc4.device.open() catch |e| {
+                sys.print("stardust egl: no vc4 GPU: {s}\n", .{@errorName(e)});
+                return fail(EGL_NOT_INITIALIZED);
+            };
+            const output = drm.waitForOutput(dev.fd) catch |e| {
+                sys.print("stardust egl: no display output: {s}\n", .{@errorName(e)});
+                sys.close(dev.fd);
+                return fail(EGL_NOT_INITIALIZED);
+            };
+            d.dev = dev;
+            d.output = output;
+            d.initialized = true;
+        },
+        .wayland => {
+            const dev = vc4.device.openRender() catch |e| {
+                sys.print("stardust egl: no vc4 render node: {s}\n", .{@errorName(e)});
+                return fail(EGL_NOT_INITIALIZED);
+            };
+            d.dev = dev;
+            d.wl = .{ .conn = d.wl.conn, .gpu = .device(&d.dev) };
+            d.wl.init() catch |e| {
+                sys.print("stardust egl: the compositor cannot take GPU buffers: {s}\n", .{@errorName(e)});
+                sys.close(dev.fd);
+                return fail(EGL_NOT_INITIALIZED);
+            };
+            d.initialized = true;
+        },
+    };
     if (major) |m| m.* = 1;
     if (minor) |m| m.* = 4;
     return ok();
 }
 
 pub export fn eglTerminate(dpy: EGLDisplay) callconv(.c) EGLBoolean {
-    if (dpy != @as(EGLDisplay, @ptrCast(&the_display))) return fail(EGL_BAD_DISPLAY);
-    if (the_display.initialized) {
+    const d = displayHandle(dpy) orelse return EGL_FALSE;
+    if (d.initialized) {
         // Contexts and surfaces should have been destroyed; closing the
         // device frees whatever is left.
         context.current = null;
         current_context = null;
         current_surface = null;
-        sys.close(the_display.dev.fd);
-        the_display.initialized = false;
+        current_display = null;
+        sys.close(d.dev.fd);
+        d.initialized = false;
     }
     return ok();
 }
@@ -388,8 +453,9 @@ pub export fn eglGetConfigAttrib(dpy: EGLDisplay, config: EGLConfig, attribute: 
 
 // --- Surfaces ---------------------------------------------------------------
 
+/// On the KMS platform the window is ignored and the surface is the whole
+/// screen; on Wayland it is a `wl_egl_window`.
 pub export fn eglCreateWindowSurface(dpy: EGLDisplay, config: EGLConfig, window: EGLNativeWindowType, attrib_list: ?[*]const EGLint) callconv(.c) EGLSurface {
-    _ = window;
     _ = attrib_list;
     const d = display(dpy) orelse return EGL_NO_SURFACE;
     if (config != the_config) {
@@ -400,11 +466,25 @@ pub export fn eglCreateWindowSurface(dpy: EGLDisplay, config: EGLConfig, window:
         last_error = EGL_BAD_ALLOC;
         return EGL_NO_SURFACE;
     };
-    s.* = .{ .display = vc4.display.Display.init(d.dev, d.output) catch {
-        gpa.destroy(s);
-        last_error = EGL_BAD_ALLOC;
-        return EGL_NO_SURFACE;
-    } };
+    switch (d.platform) {
+        .kms => s.* = .{ .kms = vc4.display.Display.init(d.dev, d.output) catch {
+            gpa.destroy(s);
+            last_error = EGL_BAD_ALLOC;
+            return EGL_NO_SURFACE;
+        } },
+        .wayland => {
+            if (window == 0) {
+                gpa.destroy(s);
+                last_error = EGL_BAD_NATIVE_WINDOW;
+                return EGL_NO_SURFACE;
+            }
+            s.* = .{ .wayland = egl_wayland.Surface.create(&d.wl, @ptrFromInt(window)) catch {
+                gpa.destroy(s);
+                last_error = EGL_BAD_ALLOC;
+                return EGL_NO_SURFACE;
+            } };
+        },
+    }
     last_error = EGL_SUCCESS;
     return s;
 }
@@ -435,7 +515,10 @@ pub export fn eglDestroySurface(dpy: EGLDisplay, surface: EGLSurface) callconv(.
     if (surface == EGL_NO_SURFACE) return fail(EGL_BAD_SURFACE);
     const s = surfaceOf(surface);
     if (current_surface == s) return fail(EGL_BAD_ACCESS);
-    for (s.display.buffers) |b| d.dev.destroyBo(b.bo);
+    switch (s.*) {
+        .kms => |k| for (k.buffers) |b| d.dev.destroyBo(b.bo),
+        .wayland => |w| w.destroy(),
+    }
     gpa.destroy(s);
     return ok();
 }
@@ -445,8 +528,8 @@ pub export fn eglQuerySurface(dpy: EGLDisplay, surface: EGLSurface, attribute: E
     if (surface == EGL_NO_SURFACE) return fail(EGL_BAD_SURFACE);
     const s = surfaceOf(surface);
     value.* = switch (attribute) {
-        EGL_WIDTH => s.display.width,
-        EGL_HEIGHT => s.display.height,
+        EGL_WIDTH => @intCast(s.width()),
+        EGL_HEIGHT => @intCast(s.height()),
         EGL_CONFIG_ID => 1,
         EGL_RENDER_BUFFER => EGL_BACK_BUFFER,
         EGL_SWAP_BEHAVIOR => EGL_BUFFER_DESTROYED,
@@ -471,21 +554,31 @@ pub export fn eglSwapInterval(dpy: EGLDisplay, interval: EGLint) callconv(.c) EG
     return ok();
 }
 
-/// Renders the frame and shows it at the next vertical blank, waiting for
-/// the flip. The new back buffer's contents are undefined (in practice, the
-/// frame before last), so frames should start with glClear.
+/// Renders the frame and shows it. On the screen (KMS) this waits for the
+/// page flip at the next vertical blank; on Wayland it waits for the
+/// compositor to show the previous frame, then commits this one. The new
+/// back buffer's contents are undefined, so frames should start with
+/// glClear.
 pub export fn eglSwapBuffers(dpy: EGLDisplay, surface: EGLSurface) callconv(.c) EGLBoolean {
     _ = display(dpy) orelse return EGL_FALSE;
     if (surface == EGL_NO_SURFACE) return fail(EGL_BAD_SURFACE);
     const s = surfaceOf(surface);
     if (current_surface != s) return fail(EGL_BAD_SURFACE);
     const c = current_context.?;
-    c.gl.submit();
-    s.display.present() catch |e| {
-        sys.print("stardust egl: page flip failed: {s}\n", .{@errorName(e)});
-        return fail(EGL_BAD_NATIVE_WINDOW);
-    };
-    c.gl.setTarget(s.display.backTarget());
+    switch (s.*) {
+        .kms => |*k| {
+            c.gl.submit();
+            k.present() catch |e| {
+                sys.print("stardust egl: page flip failed: {s}\n", .{@errorName(e)});
+                return fail(EGL_BAD_NATIVE_WINDOW);
+            };
+            c.gl.setTarget(k.backTarget());
+        },
+        .wayland => |w| w.swap(c.gl) catch |e| {
+            sys.print("stardust egl: presenting to the compositor failed: {s}\n", .{@errorName(e)});
+            return fail(EGL_BAD_NATIVE_WINDOW);
+        },
+    }
     return ok();
 }
 
@@ -552,7 +645,7 @@ pub export fn eglDestroyContext(dpy: EGLDisplay, ctx: EGLContext) callconv(.c) E
 }
 
 pub export fn eglMakeCurrent(dpy: EGLDisplay, draw: EGLSurface, read: EGLSurface, ctx: EGLContext) callconv(.c) EGLBoolean {
-    _ = display(dpy) orelse return EGL_FALSE;
+    const d = display(dpy) orelse return EGL_FALSE;
     if (draw != read) return fail(EGL_BAD_MATCH);
     // Finish the previous binding's rendering.
     if (current_context) |old| {
@@ -563,22 +656,24 @@ pub export fn eglMakeCurrent(dpy: EGLDisplay, draw: EGLSurface, read: EGLSurface
         if (draw != EGL_NO_SURFACE) return fail(EGL_BAD_MATCH);
         current_context = null;
         current_surface = null;
+        current_display = null;
         context.current = null;
         return ok();
     }
     if (draw == EGL_NO_SURFACE) return fail(EGL_BAD_MATCH);
     const c = contextOf(ctx);
     const s = surfaceOf(draw);
-    c.gl.setTarget(s.display.backTarget());
+    c.gl.setTarget(s.backTarget() catch return fail(EGL_BAD_ALLOC));
     if (!c.bound) {
         // The viewport and scissor box start out covering the surface.
-        const size: [4]c_int = .{ 0, 0, s.display.width, s.display.height };
+        const size: [4]c_int = .{ 0, 0, @intCast(s.width()), @intCast(s.height()) };
         c.gl.viewport = size;
         c.gl.scissor = size;
         c.bound = true;
     }
     current_context = c;
     current_surface = s;
+    current_display = d;
     context.current = c.gl;
     return ok();
 }
@@ -593,7 +688,7 @@ pub export fn eglGetCurrentSurface(readdraw: EGLint) callconv(.c) EGLSurface {
 }
 
 pub export fn eglGetCurrentDisplay() callconv(.c) EGLDisplay {
-    return if (current_context != null) @ptrCast(&the_display) else EGL_NO_DISPLAY;
+    return current_display;
 }
 
 pub export fn eglQueryContext(dpy: EGLDisplay, ctx: EGLContext, attribute: EGLint, value: *EGLint) callconv(.c) EGLBoolean {

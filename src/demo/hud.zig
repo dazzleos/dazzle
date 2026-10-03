@@ -68,43 +68,56 @@ pub const Hud = struct {
     }
 
     pub fn init(gpa: std.mem.Allocator, f: *const font.Font, screen_width: u32, screen_height: u32, background: u32) !Hud {
-        const scale = scaleFor(screen_width, screen_height);
-        const r = rect(screen_width, screen_height);
-        const width = r[2];
-        const height = r[3];
-        const margin: f32 = @floatFromInt(r[0]);
         const program = try cube.buildProgram(vertex_shader, fragment_shader, &.{ "pos", "uv" });
         gl.glUseProgram(program);
         gl.glUniform1i(gl.glGetUniformLocation(program, "tex"), 0);
         var texture: gl.GLuint = 0;
         gl.glGenTextures(1, @ptrCast(&texture));
-
-        // Pixel rectangle to clip space; texture row 0 is the panel's top.
-        const sw: f32 = @floatFromInt(screen_width);
-        const sh: f32 = @floatFromInt(screen_height);
-        const x0 = margin / sw * 2 - 1;
-        const x1 = (margin + @as(f32, @floatFromInt(width))) / sw * 2 - 1;
-        const y0 = 1 - margin / sh * 2;
-        const y1 = 1 - (margin + @as(f32, @floatFromInt(height))) / sh * 2;
-        return .{
+        var h: Hud = .{
             .gpa = gpa,
             .font = f,
             .cache = font.GlyphCache.init(gpa),
             .background = background,
-            .screen = .{ screen_width, screen_height },
-            .width = width,
-            .height = height,
-            .scale = scale,
-            .pixels = try gpa.alloc(u32, @as(usize, width) * height),
-            .rgba = try gpa.alloc(u8, @as(usize, width) * height * 4),
+            .screen = .{ 0, 0 },
+            .width = 0,
+            .height = 0,
+            .scale = 1,
+            .pixels = &.{},
+            .rgba = &.{},
             .program = program,
             .texture = texture,
-            .quad = .{
-                x0, y0, 0, 0,
-                x0, y1, 0, 1,
-                x1, y0, 1, 0,
-                x1, y1, 1, 1,
-            },
+            .quad = undefined,
+        };
+        try h.resize(screen_width, screen_height);
+        return h;
+    }
+
+    /// Lays the panel out for a new screen (or window) size.
+    pub fn resize(h: *Hud, screen_width: u32, screen_height: u32) !void {
+        if (h.screen[0] == screen_width and h.screen[1] == screen_height) return;
+        const r = rect(screen_width, screen_height);
+        h.gpa.free(h.pixels);
+        h.gpa.free(h.rgba);
+        h.pixels = try h.gpa.alloc(u32, @as(usize, r[2]) * r[3]);
+        h.rgba = try h.gpa.alloc(u8, @as(usize, r[2]) * r[3] * 4);
+        h.screen = .{ screen_width, screen_height };
+        h.width = r[2];
+        h.height = r[3];
+        h.scale = scaleFor(screen_width, screen_height);
+
+        // Pixel rectangle to clip space; texture row 0 is the panel's top.
+        const margin: f32 = @floatFromInt(r[0]);
+        const sw: f32 = @floatFromInt(screen_width);
+        const sh: f32 = @floatFromInt(screen_height);
+        const x0 = margin / sw * 2 - 1;
+        const x1 = (margin + @as(f32, @floatFromInt(h.width))) / sw * 2 - 1;
+        const y0 = 1 - margin / sh * 2;
+        const y1 = 1 - (margin + @as(f32, @floatFromInt(h.height))) / sh * 2;
+        h.quad = .{
+            x0, y0, 0, 0,
+            x0, y1, 0, 1,
+            x1, y0, 1, 0,
+            x1, y1, 1, 1,
         };
     }
 
@@ -147,7 +160,8 @@ pub const Hud = struct {
 };
 
 test "the cube never reaches the panel" {
-    for ([_][2]u32{ .{ 1920, 1080 }, .{ 1280, 720 }, .{ 1024, 768 }, .{ 640, 480 } }) |size| {
+    // Full screens, and windows below the shell's bar.
+    for ([_][2]u32{ .{ 1920, 1080 }, .{ 1280, 720 }, .{ 1024, 768 }, .{ 640, 480 }, .{ 1920, 1036 }, .{ 1280, 691 } }) |size| {
         const w: f32 = @floatFromInt(size[0]);
         const h: f32 = @floatFromInt(size[1]);
         const r = Hud.rect(size[0], size[1]);

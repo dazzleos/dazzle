@@ -149,6 +149,21 @@ pub fn open() !Device {
     return error.NoVc4Device;
 }
 
+/// Opens the vc4 render node: GPU rendering without display control, for
+/// clients of a compositor.
+pub fn openRender() !Device {
+    var path_buf: [32]u8 = undefined;
+    for (128..132) |n| {
+        const path = std.fmt.bufPrintZ(&path_buf, "/dev/dri/renderD{d}", .{n}) catch continue;
+        const fd = sys.open(path.ptr, .{ .ACCMODE = .RDWR, .CLOEXEC = true }) catch continue;
+        var name_buf: [32]u8 = undefined;
+        const name = drm.driverName(fd, &name_buf) catch "";
+        if (std.mem.eql(u8, name, "vc4")) return .{ .fd = fd };
+        sys.close(fd);
+    }
+    return error.NoVc4Device;
+}
+
 pub const Device = struct {
     fd: linux.fd_t,
 
