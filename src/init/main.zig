@@ -113,7 +113,7 @@ fn run(is_init: bool) !void {
     print("stardust: shaders compiled and uploaded\n", .{});
 
     const start = sys.nowNs();
-    try demo.draw(dev, display.back().bo.handle, display.width, display.height, 0);
+    try demo.draw(dev, display.backTarget(), 0);
     try display.present();
     print("stardust: displaying {s}\n", .{@tagName(kind)});
 
@@ -135,7 +135,7 @@ fn run(is_init: bool) !void {
         const now = sys.nowNs();
         if (run_ns) |ns| if (now - start >= ns) return;
         const t: f32 = @floatCast(@as(f64, @floatFromInt(now - start)) / std.time.ns_per_s);
-        try demo.draw(dev, display.back().bo.handle, display.width, display.height, t);
+        try demo.draw(dev, display.backTarget(), t);
         gpu_ns += sys.nowNs() - now;
         try display.present();
         frames += 1;

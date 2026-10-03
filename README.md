@@ -27,7 +27,7 @@ The `vc4` module:
 | `device.zig` | GPU buffers, shader upload and job submission (`vc4` ioctls) |
 | `compiler.zig` | Shader compiler: SSA builder, register allocation and QPU code generation |
 | `qpu_schedule.zig` | Instruction scheduler: latency-aware reordering and add/mul pairing |
-| `render.zig` | Builds a job (control list, shader record, uniform streams) for one draw call |
+| `render.zig` | Records a frame: any number of draw calls into one render target, as one job |
 | `texture.zig` | Texture tiling (T and LT layouts) and texture unit configuration |
 | `display.zig` | Double-buffered scanout with page flips at vertical blank |
 | `drm.zig` | DRM core and KMS (mode setting, page flip) ioctls |
@@ -187,7 +187,7 @@ The firmware picks the Zero or Zero W device tree in `config.txt`. The Zero
    restrictions.
 3. **Upload.** `DRM_IOCTL_VC4_CREATE_SHADER_BO` uploads each program. The
    kernel validates it, because the V3D has no MMU.
-4. **Job.** `render.zig` writes the binning control list (tile binning
+4. **Job.** `render.zig` records a frame: the binning control list (tile binning
    configuration, viewport, clipper and depth state, shader state, a draw
    call), one shader record and the uniform streams. Textures are
    referenced by buffer index so the kernel can relocate and bounds-check

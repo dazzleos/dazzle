@@ -47,6 +47,11 @@ pub const Display = struct {
         return &d.buffers[d.front +% 1];
     }
 
+    /// The back buffer as a render target.
+    pub fn backTarget(d: *const Display) render.Target {
+        return .{ .handle = d.back().bo.handle, .width = d.width, .height = d.height };
+    }
+
     /// Shows the back buffer. The first call sets the mode; later calls
     /// queue a page flip and wait for it, which paces rendering to the
     /// display's refresh rate.

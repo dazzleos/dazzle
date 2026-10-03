@@ -1,5 +1,5 @@
-//! The demo scenes. Each one owns its GPU buffers and draws one frame into
-//! a target buffer given the elapsed time.
+//! The demo scenes, drawn with the low-level vc4 API. Each one owns its GPU
+//! buffers and records its draws into a frame given the elapsed time.
 //!
 //! * triangle: the original hand-written shaders, drawn once.
 //! * spin: compiled shaders, a triangle rotating at 60 frames per second.
@@ -19,17 +19,10 @@ const texture = vc4.texture;
 
 pub const Kind = enum { triangle, spin, cube };
 
-/// Indices into each job's bo_handles array.
-const bo_index = struct {
-    const target = 0;
-    const fs = 1;
-    const vs = 2;
-    const cs = 3;
-    const vertices = 4;
-    const texture = 5;
-};
-
 const clear_color = 0xff101830;
+
+/// Frames are large, so the one the demos record into is static.
+var static_frame: render.Frame = undefined;
 
 fn uploadShader(dev: vc4.Device, stage: []const u8, code: []const u64) !u32 {
     return dev.createShaderBo(code) catch |err| {
@@ -48,21 +41,13 @@ pub const Program = struct {
         return .{ .handle = try uploadShader(dev, name, compiled.code()), .compiled = compiled };
     }
 
-    fn binding(p: *const Program, index: u32, user: []const u32) render.ShaderBinding {
-        return .{ .bo_index = index, .layout = p.compiled.uniforms(), .user = user };
+    fn binding(p: *const Program, user: []const u32) render.ShaderBinding {
+        return .{ .handle = p.handle, .layout = p.compiled.uniforms(), .user = user };
     }
 };
 
-fn submit(dev: vc4.Device, job: *render.Job) !void {
-    const seqno = try dev.submit(&job.submit);
-    try dev.waitSeqno(seqno, std.time.ns_per_s);
-}
-
-fn viewportScale(width: u16, height: u16) [2]u32 {
-    return .{
-        @bitCast(@as(f32, @floatFromInt(width)) / 2.0 * 16.0),
-        @bitCast(-@as(f32, @floatFromInt(height)) / 2.0 * 16.0),
-    };
+fn aspectRatio(target: render.Target) f32 {
+    return @as(f32, @floatFromInt(target.width)) / @as(f32, @floatFromInt(target.height));
 }
 
 // --- Triangles -------------------------------------------------------------------
@@ -75,23 +60,22 @@ const triangle_vertices = [_]ColorVertex{
     .{ .x = 0.8, .y = -0.8, .r = 0.0, .g = 0.0, .b = 1.0 },
 };
 
-const color_attributes = [_]cl.Attribute{
-    .{ .bo_index = bo_index.vertices, .offset = 0, .size = 8, .stride = @sizeOf(ColorVertex), .vs_vpm_offset = 0, .cs_vpm_offset = 0 },
-    .{ .bo_index = bo_index.vertices, .offset = 8, .size = 12, .stride = @sizeOf(ColorVertex), .vs_vpm_offset = 8, .cs_vpm_offset = 0 },
-};
-
-fn colorDraw(fs: render.ShaderBinding, vs: render.ShaderBinding, cs: render.ShaderBinding) render.Draw {
+fn colorDraw(vbo: u32, fs: render.ShaderBinding, vs: render.ShaderBinding, cs: render.ShaderBinding, attributes: *[2]render.Attribute) render.Draw {
+    attributes.* = .{
+        .{ .handle = vbo, .offset = 0, .size = 8, .stride = @sizeOf(ColorVertex), .vs_vpm_offset = 0, .cs_vpm_offset = 0 },
+        .{ .handle = vbo, .offset = 8, .size = 12, .stride = @sizeOf(ColorVertex), .vs_vpm_offset = 8, .cs_vpm_offset = 0 },
+    };
     return .{
         .fs = fs,
         .vs = vs,
         .cs = cs,
         .fs_num_varyings = 3,
-        .attributes = &color_attributes,
+        .attributes = attributes,
         .vs_attribute_mask = 0b11,
         .vs_attributes_size = 20,
         .cs_attribute_mask = 0b01,
         .cs_attributes_size = 8,
-        .vertex_count = triangle_vertices.len,
+        .count = triangle_vertices.len,
     };
 }
 
@@ -124,23 +108,15 @@ pub const Triangle = struct {
         };
     }
 
-    pub fn draw(t: *const Triangle, dev: vc4.Device, target: u32, width: u16, height: u16, time: f32) !void {
-        var job: render.Job = undefined;
-        t.buildJob(&job, target, width, height, time);
-        try submit(dev, &job);
-    }
-
-    pub fn buildJob(t: *const Triangle, job: *render.Job, target: u32, width: u16, height: u16, _: f32) void {
-        const scale = viewportScale(width, height);
-        job.build(&.{ target, t.fs, t.vs, t.cs, t.vbo.handle }, .{
-            .bo_index = bo_index.target,
-            .width = width,
-            .height = height,
-            .clear_color = clear_color,
-        }, colorDraw(
-            .{ .bo_index = bo_index.fs, .layout = &.{} },
-            .{ .bo_index = bo_index.vs, .layout = &vertex_layout, .user = &scale },
-            .{ .bo_index = bo_index.cs, .layout = &vertex_layout, .user = &scale },
+    pub fn record(t: *const Triangle, frame: *render.Frame, _: f32) !void {
+        const scale = frame.target.fullViewport().scaleBits();
+        var attrs: [2]render.Attribute = undefined;
+        try frame.draw(colorDraw(
+            t.vbo.handle,
+            .{ .handle = t.fs, .layout = &.{} },
+            .{ .handle = t.vs, .layout = &vertex_layout, .user = &scale },
+            .{ .handle = t.cs, .layout = &vertex_layout, .user = &scale },
+            &attrs,
         ));
     }
 };
@@ -161,32 +137,18 @@ pub const Spin = struct {
         };
     }
 
-    pub fn draw(s: *const Spin, dev: vc4.Device, target: u32, width: u16, height: u16, time: f32) !void {
-        var job: render.Job = undefined;
-        s.buildJob(&job, target, width, height, time);
-        try submit(dev, &job);
-    }
-
-    pub fn buildJob(s: *const Spin, job: *render.Job, target: u32, width: u16, height: u16, time: f32) void {
+    pub fn record(s: *const Spin, frame: *render.Frame, time: f32) !void {
         const angle = time;
         // Scale x by the aspect ratio so the triangle keeps its shape.
-        const aspect = @as(f32, @floatFromInt(height)) / @as(f32, @floatFromInt(width));
+        const aspect = 1.0 / aspectRatio(frame.target);
         const c = @cos(angle);
         const sn = @sin(angle);
-        const scale = viewportScale(width, height);
+        const scale = frame.target.fullViewport().scaleBits();
         const user = [programs.spin.num_uniforms]u32{
             @bitCast(c * aspect), @bitCast(sn), @bitCast(-sn * aspect), @bitCast(c), scale[0], scale[1],
         };
-        job.build(&.{ target, s.fs.handle, s.vs.handle, s.cs.handle, s.vbo.handle }, .{
-            .bo_index = bo_index.target,
-            .width = width,
-            .height = height,
-            .clear_color = clear_color,
-        }, colorDraw(
-            s.fs.binding(bo_index.fs, &.{}),
-            s.vs.binding(bo_index.vs, &user),
-            s.cs.binding(bo_index.cs, &user),
-        ));
+        var attrs: [2]render.Attribute = undefined;
+        try frame.draw(colorDraw(s.vbo.handle, s.fs.binding(&.{}), s.vs.binding(&user), s.cs.binding(&user), &attrs));
     }
 };
 
@@ -240,12 +202,6 @@ const cube_vertices = blk: {
         }
     }
     break :blk out;
-};
-
-const cube_attributes = [_]cl.Attribute{
-    .{ .bo_index = bo_index.vertices, .offset = 0, .size = 12, .stride = @sizeOf(CubeVertex), .vs_vpm_offset = 0, .cs_vpm_offset = 0 },
-    .{ .bo_index = bo_index.vertices, .offset = 12, .size = 8, .stride = @sizeOf(CubeVertex), .vs_vpm_offset = 12, .cs_vpm_offset = 0 },
-    .{ .bo_index = bo_index.vertices, .offset = 20, .size = 12, .stride = @sizeOf(CubeVertex), .vs_vpm_offset = 20, .cs_vpm_offset = 0 },
 };
 
 pub const texture_size = 128;
@@ -333,37 +289,32 @@ pub const Cube = struct {
         return mul(perspective(std.math.degreesToRadians(50.0), aspect, 1.0, 20.0), mul(view, model));
     }
 
-    pub fn draw(c: *const Cube, dev: vc4.Device, target: u32, width: u16, height: u16, time: f32) !void {
-        var job: render.Job = undefined;
-        c.buildJob(&job, target, width, height, time);
-        try submit(dev, &job);
-    }
-
-    pub fn buildJob(c: *const Cube, job: *render.Job, target: u32, width: u16, height: u16, time: f32) void {
-        const m = mvp(width, height, time);
-        const scale = viewportScale(width, height);
+    pub fn record(c: *const Cube, frame: *render.Frame, time: f32) !void {
+        const m = mvp(frame.target.width, frame.target.height, time);
+        const scale = frame.target.fullViewport().scaleBits();
         var user: [programs.cube.num_uniforms]u32 = undefined;
         for (m, 0..) |e, i| user[i] = @bitCast(e);
         user[16] = scale[0];
         user[17] = scale[1];
-        job.build(&.{ target, c.fs.handle, c.vs.handle, c.cs.handle, c.vbo.handle, c.tex.handle }, .{
-            .bo_index = bo_index.target,
-            .width = width,
-            .height = height,
-            .clear_color = clear_color,
-        }, .{
-            .fs = c.fs.binding(bo_index.fs, &.{}),
-            .vs = c.vs.binding(bo_index.vs, &user),
-            .cs = c.cs.binding(bo_index.cs, &user),
+        const vbo = c.vbo.handle;
+        const attrs = [_]render.Attribute{
+            .{ .handle = vbo, .offset = 0, .size = 12, .stride = @sizeOf(CubeVertex), .vs_vpm_offset = 0, .cs_vpm_offset = 0 },
+            .{ .handle = vbo, .offset = 12, .size = 8, .stride = @sizeOf(CubeVertex), .vs_vpm_offset = 12, .cs_vpm_offset = 0 },
+            .{ .handle = vbo, .offset = 20, .size = 12, .stride = @sizeOf(CubeVertex), .vs_vpm_offset = 20, .cs_vpm_offset = 0 },
+        };
+        try frame.draw(.{
+            .fs = c.fs.binding(&.{}),
+            .vs = c.vs.binding(&user),
+            .cs = c.cs.binding(&user),
             .fs_num_varyings = programs.cube.num_varyings,
-            .attributes = &cube_attributes,
+            .attributes = &attrs,
             .vs_attribute_mask = 0b111,
             .vs_attributes_size = @sizeOf(CubeVertex),
             .cs_attribute_mask = 0b001,
             .cs_attributes_size = 12,
-            .vertex_count = cube_vertices.len,
+            .count = cube_vertices.len,
             .config = .{ .depth_func = .less, .z_updates = true },
-            .texture = .{ .bo_index = bo_index.texture, .config = tex_config },
+            .texture = .{ .handle = c.tex.handle, .config = tex_config },
         });
     }
 };
@@ -386,10 +337,19 @@ pub const Demo = union(Kind) {
         return d.* != .triangle;
     }
 
-    pub fn draw(d: *const Demo, dev: vc4.Device, target: u32, width: u16, height: u16, time: f32) !void {
+    /// Records the scene into `frame` (already begun).
+    pub fn record(d: *const Demo, frame: *render.Frame, time: f32) !void {
         switch (d.*) {
-            inline else => |*s| try s.draw(dev, target, width, height, time),
+            inline else => |*s| try s.record(frame, time),
         }
+    }
+
+    /// Renders one frame into `target` and waits for the GPU.
+    pub fn draw(d: *const Demo, dev: vc4.Device, target: render.Target, time: f32) !void {
+        static_frame.begin(target, .{ .clear = clear_color });
+        try d.record(&static_frame, time);
+        const seqno = try dev.submit(static_frame.finish());
+        try dev.waitSeqno(seqno, std.time.ns_per_s);
     }
 };
 

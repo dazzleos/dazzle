@@ -30,6 +30,9 @@ pub const Packet = enum(u8) {
     clipper_xy_scaling = 105,
     clipper_z_scaling = 106,
     tile_binning_mode_config = 112,
+    /// Not a hardware packet: tells the kernel which bo_handles entries the
+    /// following indexed primitive's index buffer uses.
+    gem_handles = 254,
 };
 
 pub const PrimitiveMode = enum(u8) {
@@ -175,6 +178,24 @@ pub const Bcl = struct {
         b.w.u32_(num_attributes & 7);
     }
 
+    /// Sets the buffers the next indexed primitive reads indices from, by
+    /// bo_handles index (the second is unused by the kernel today).
+    pub fn gemHandles(b: *Bcl, index0: u32, index1: u32) void {
+        b.w.packet(.gem_handles);
+        b.w.u32_(index0);
+        b.w.u32_(index1);
+    }
+
+    /// Draws using 8- or 16-bit indices from the buffer set by
+    /// `gemHandles`, starting at byte `offset`.
+    pub fn glIndexedPrimitive(b: *Bcl, mode: PrimitiveMode, u16_indices: bool, count: u32, offset: u32, max_index: u32) void {
+        b.w.packet(.gl_indexed_primitive);
+        b.w.u8_(@intFromEnum(mode) | @as(u8, @intFromBool(u16_indices)) << 4);
+        b.w.u32_(count);
+        b.w.u32_(offset);
+        b.w.u32_(max_index);
+    }
+
     pub fn glArrayPrimitive(b: *Bcl, mode: PrimitiveMode, count: u32, first: u32) void {
         b.w.packet(.gl_array_primitive);
         b.w.u8_(@intFromEnum(mode));
@@ -262,6 +283,17 @@ pub const render_config_format_bgr565_dithered = 0;
 pub const render_config_format_rgba8888 = 1;
 pub const render_config_format_bgr565 = 2;
 
+pub const LoadStoreBuffer = enum(u3) { none = 0, color = 1, zs = 2, z = 3, vg_mask = 4, full = 5 };
+pub const loadstore_format_rgba8888 = 0;
+pub const loadstore_format_bgr565_dither = 1;
+pub const loadstore_format_bgr565 = 2;
+
+/// Bits for `color_read` and the Z/S surfaces, which use the general tile
+/// buffer load/store packet layout.
+pub fn loadStoreBits(tiling: Tiling, buffer: LoadStoreBuffer, format: u2) u16 {
+    return @as(u16, format) << 8 | @as(u16, @intFromEnum(tiling)) << 4 | @intFromEnum(buffer);
+}
+
 /// Bits for `color_write`, which uses the render config packet layout.
 pub fn renderConfigBits(tiling: Tiling, format: u2) u16 {
     return @as(u16, @intFromEnum(tiling)) << 6 | @as(u16, format) << 2;
@@ -282,6 +314,8 @@ test "packet sizes match the kernel's table" {
         Case{ .p = .gl_shader_state, .size = 5 },
         Case{ .p = .gl_array_primitive, .size = 10 },
         Case{ .p = .primitive_list_format, .size = 2 },
+        Case{ .p = .gl_indexed_primitive, .size = 14 },
+        Case{ .p = .gem_handles, .size = 9 },
     }) |c| {
         var b: Bcl = .init(&buf);
         switch (c.p) {
@@ -294,6 +328,8 @@ test "packet sizes match the kernel's table" {
             .gl_shader_state => b.glShaderState(1),
             .gl_array_primitive => b.glArrayPrimitive(.triangles, 3, 0),
             .primitive_list_format => b.primitiveListFormat(),
+            .gl_indexed_primitive => b.glIndexedPrimitive(.triangles, true, 3, 0, 2),
+            .gem_handles => b.gemHandles(1, 0),
             else => unreachable,
         }
         try testing.expectEqual(c.size, b.bytes().len);
