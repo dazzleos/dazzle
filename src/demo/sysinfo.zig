@@ -33,10 +33,10 @@ pub const Monitor = struct {
     pub fn sample(m: *Monitor) Sample {
         var s: Sample = .{ .temperature = temperature() };
 
-        // The fastest of a few runs, to step around interruptions.
+        // The fastest of a few runs: one that was not interrupted.
         var best: u64 = std.math.maxInt(u64);
-        for (0..3) |_| best = @min(best, spinNs());
-        if (m.baseline_ns == 0) m.baseline_ns = best;
+        for (0..5) |_| best = @min(best, spinNs());
+        if (m.baseline_ns == 0) m.baseline_ns = @max(best, 1);
         s.speed = 100 * @as(f32, @floatFromInt(m.baseline_ns)) / @as(f32, @floatFromInt(@max(best, 1)));
 
         var buf: [512]u8 = undefined;
@@ -69,22 +69,19 @@ fn temperature() ?f32 {
     return @as(f32, @floatFromInt(milli)) / 1000;
 }
 
-/// CPU time (not wall time, so other processes do not count) for a fixed
-/// amount of work: about half a millisecond on a Pi Zero at full speed.
+/// The time a fixed amount of work takes: a few hundred microseconds on a
+/// Pi Zero at full speed. It is wall time (the per-thread CPU clock gave a
+/// speed of 0% on the Pi, too coarse or not advancing over so short a
+/// time); `sample` keeps the fastest of several runs so that time spent in
+/// other processes does not count.
 fn spinNs() u64 {
-    const t0 = threadCpuNs();
+    const t0 = sys.nowNs();
     var x: u32 = 1;
     for (0..50_000) |i| {
         x = x *% 1664525 +% @as(u32, @truncate(i));
         std.mem.doNotOptimizeAway(x);
     }
-    return threadCpuNs() - t0;
-}
-
-fn threadCpuNs() u64 {
-    var ts: linux.timespec = undefined;
-    _ = linux.clock_gettime(.THREAD_CPUTIME_ID, &ts);
-    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+    return sys.nowNs() - t0;
 }
 
 /// The total and idle (idle + iowait) ticks from /proc/stat's first line.
@@ -127,4 +124,15 @@ test "proc parsing" {
     const self = "25 (stardust demo) R 24 25 0 0 -1 4194304 120 0 0 0 731 42 0 0 20 0 1 0 512 9000000 400";
     try std.testing.expectEqual(@as(u64, 773), processTicks(self).?);
     try std.testing.expect(spinNs() > 0);
+}
+
+test "speed is relative to the first sample" {
+    var m: Monitor = .{};
+    const first = m.sample();
+    try std.testing.expect(first.speed > 99 and first.speed < 101);
+    try std.testing.expect(m.baseline_ns > 0);
+    // Half as fast.
+    m.baseline_ns /= 2;
+    const s = m.sample();
+    try std.testing.expect(s.speed > 30 and s.speed < 70);
 }
