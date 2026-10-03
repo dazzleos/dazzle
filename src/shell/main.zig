@@ -110,6 +110,10 @@ fn run(init: std.process.Init.Minimal) !void {
     var next_tick: u64 = start;
     var last_title: [64]u8 = undefined;
     var last_title_len: usize = 0;
+    // The bar changed, and is waiting to be shown.
+    var bar_damaged = false;
+    // When a client last had a frame for the screen.
+    var client_frame_ns: u64 = 0;
     while (true) {
         reapChildren();
 
@@ -123,9 +127,14 @@ fn run(init: std.process.Init.Minimal) !void {
         for (server.clients.items[0..n_clients], 2..) |c, i| fds[i] = .{ .fd = c.conn.fd, .events = linux.POLL.IN, .revents = 0 };
         const n_inputs = devices.pollFds(fds[2 + n_clients ..]);
         const now = sys.nowNs();
-        const frame_due = server.damaged and !renderer.flipPending();
-        const timeout: i32 = if (frame_due) 0 else if (next_tick > now) @intCast((next_tick - now) / std.time.ns_per_ms + 1) else 0;
+        var wake = next_tick;
+        if (!renderer.flipPending()) {
+            if (server.damaged) wake = now;
+            if (bar_damaged) wake = @min(wake, client_frame_ns + bar_grace_ns);
+        }
+        const timeout: i32 = if (wake > now) @intCast((wake - now) / std.time.ns_per_ms + 1) else 0;
         _ = linux.poll(&fds, 2 + n_clients + n_inputs, timeout);
+        const work_start = sys.nowNs();
 
         // The last frame reached the screen: its frame callbacks fire, and
         // the next one can be drawn.
@@ -158,6 +167,7 @@ fn run(init: std.process.Init.Minimal) !void {
             }
         }
         // Clients may disconnect (and leave the list) while being handled.
+        const clients_start = sys.nowNs();
         var i: usize = 0;
         while (i < server.clients.items.len) {
             const c = server.clients.items[i];
@@ -170,6 +180,9 @@ fn run(init: std.process.Init.Minimal) !void {
             }
             i += 1;
         }
+
+        if (server.damaged) client_frame_ns = sys.nowNs();
+        stats.clients_ns += sys.nowNs() - clients_start;
 
         // The window under the pointer, and the one with the keyboard, may
         // have changed.
@@ -184,8 +197,9 @@ fn run(init: std.process.Init.Minimal) !void {
             last_title_len = @min(title.len, last_title.len);
             @memcpy(last_title[0..last_title_len], title[0..last_title_len]);
             b.draw(title, (t_now - start) / std.time.ns_per_s) catch {};
-            try renderer.setBar(b.pixels, b.width, b.height);
-            server.damaged = true;
+            renderer.setBar(b.pixels, b.width, b.height);
+            bar_damaged = true;
+            stats.bar_ns += sys.nowNs() - t_now;
         };
         if (t_now >= next_tick) {
             next_tick = start + ((t_now - start) / std.time.ns_per_s + 1) * std.time.ns_per_s;
@@ -194,8 +208,16 @@ fn run(init: std.process.Init.Minimal) !void {
         }
 
         // Draw while the previous frame is on the screen; it is shown at
-        // the next vertical blank, without waiting here.
-        if (server.damaged and !renderer.flipPending()) {
+        // the next vertical blank, without waiting here. A change to the
+        // bar alone waits for a while if a client is animating, and goes
+        // out with its next frame: otherwise it would take the next
+        // vertical blank, and the client's frame would be shown a refresh
+        // late.
+        const bar_due = bar_damaged and sys.nowNs() >= client_frame_ns + bar_grace_ns;
+        if ((server.damaged or bar_due) and !renderer.flipPending()) {
+            const draw_start = sys.nowNs();
+            defer stats.display_ns += sys.nowNs() - draw_start;
+            bar_damaged = false;
             server.frameDrawn();
             // A full-size window goes straight onto the display, with the
             // bar on a plane above it. Otherwise (or if the display cannot
@@ -245,9 +267,15 @@ fn run(init: std.process.Init.Minimal) !void {
             }
         }
         server.flushClients();
-        stats.maybeLog(sys.nowNs());
+        const work_end = sys.nowNs();
+        stats.work_ns += work_end - work_start;
+        stats.maybeLog(work_end);
     }
 }
+
+/// How long a change to the bar alone waits for a client's frame to go out
+/// with (a few refreshes).
+const bar_grace_ns = 50 * std.time.ns_per_ms;
 
 /// The client buffers on the display, shown directly.
 const Scanout = struct {
@@ -272,6 +300,12 @@ const FrameStats = struct {
     /// Frames composited by the GPU, and shown directly.
     frames: u32 = 0,
     direct: u32 = 0,
+    /// The shell's own work (not waiting): in all, handling clients'
+    /// requests, redrawing the bar, and drawing or showing frames.
+    work_ns: u64 = 0,
+    clients_ns: u64 = 0,
+    bar_ns: u64 = 0,
+    display_ns: u64 = 0,
     cpu_ns: u64 = 0,
     gpu_ns: u64 = 0,
     /// Vertical blanks without a new frame between two flips. While a
@@ -310,6 +344,17 @@ const FrameStats = struct {
             });
         } else if (s.direct > 0) {
             print("stardust-shell: {d:.1} frames/s, all shown directly, {d} refreshes skipped\n", .{ @as(f64, @floatFromInt(s.direct)) / seconds, s.skipped });
+        }
+        const shown = s.frames + s.direct;
+        if (shown > 0) {
+            const n: f64 = @floatFromInt(shown);
+            print("stardust-shell: work {d:.2} ms per frame (clients {d:.2}, bar {d:.2}, display {d:.2}), {d:.1}% of the time\n", .{
+                @as(f64, @floatFromInt(s.work_ns)) / n / ms,
+                @as(f64, @floatFromInt(s.clients_ns)) / n / ms,
+                @as(f64, @floatFromInt(s.bar_ns)) / n / ms,
+                @as(f64, @floatFromInt(s.display_ns)) / n / ms,
+                100 * @as(f64, @floatFromInt(s.work_ns)) / @as(f64, @floatFromInt(elapsed)),
+            });
         }
         s.* = .{ .since = now, .period_us = s.period_us, .last_flip_us = s.last_flip_us };
     }

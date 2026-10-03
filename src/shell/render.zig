@@ -183,6 +183,8 @@ pub const Renderer = struct {
     bar_pixels: []const u32 = &.{},
     bar_size: [2]u32 = .{ 0, 0 },
     bar_dirty: bool = false,
+    /// `bar` does not have the latest picture yet.
+    bar_texture_stale: bool = false,
     /// Two linear buffers for the bar's overlay, so one can be written
     /// while the other is on the screen.
     bar_planes: [2]?Scanout = .{ null, null },
@@ -254,11 +256,14 @@ pub const Renderer = struct {
     }
 
     /// Replaces the bar's picture.
-    pub fn setBar(r: *Renderer, pixels: []const u32, width: u32, height: u32) !void {
-        r.bar = try uploadPixels(r, r.bar, std.mem.sliceAsBytes(pixels), width, height, width * 4);
+    /// Replaces the bar's picture. It is copied where it is needed when a
+    /// frame is drawn: into the overlay plane's buffer, or (when the frame
+    /// is composited) a texture.
+    pub fn setBar(r: *Renderer, pixels: []const u32, width: u32, height: u32) void {
         r.bar_pixels = pixels;
         r.bar_size = .{ width, height };
         r.bar_dirty = true;
+        r.bar_texture_stale = true;
     }
 
     /// Shows a client's buffer directly on the display's primary plane at
@@ -369,6 +374,10 @@ pub const Renderer = struct {
     /// while no flip is pending (`flipPending`).
     pub fn composite(r: *Renderer, window: ?Window) !Timing {
         const t0 = sys.nowNs();
+        if (r.bar_texture_stale) {
+            r.bar = try uploadPixels(r, r.bar, std.mem.sliceAsBytes(r.bar_pixels), r.bar_size[0], r.bar_size[1], r.bar_size[0] * 4);
+            r.bar_texture_stale = false;
+        }
         static_frame.begin(r.display.backTarget(), .{ .clear = background });
         try recordFrame(&static_frame, &r.programs, r.vbo, r.bar, window);
         const t1 = sys.nowNs();

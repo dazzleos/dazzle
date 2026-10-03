@@ -75,6 +75,13 @@ pub fn decode(ev_type: u16, code: u16, value: i32) ?Event {
 
 pub const max_devices = 32;
 
+/// N for a device node named "eventN" (N below `max_devices`).
+fn eventNumber(name: []const u8) ?usize {
+    if (!std.mem.startsWith(u8, name, "event")) return null;
+    const n = std.fmt.parseInt(usize, name["event".len..], 10) catch return null;
+    return if (n < max_devices) n else null;
+}
+
 pub const Devices = struct {
     /// Open event nodes, by number.
     fds: [max_devices]?linux.fd_t = @splat(null),
@@ -83,18 +90,35 @@ pub const Devices = struct {
 
     /// Opens event nodes that are not open yet.
     pub fn scan(d: *Devices) void {
-        var path_buf: [32]u8 = undefined;
-        for (&d.fds, 0..) |*slot, n| {
-            if (slot.* != null) continue;
-            const path = std.fmt.bufPrintZ(&path_buf, "/dev/input/event{d}", .{n}) catch continue;
-            // Missing, or not handed to the user yet: try again next time.
-            const fd = sys.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }) catch continue;
-            slot.* = fd;
-            d.active[n] = false;
-            var name: [64]u8 = @splat(0);
-            _ = linux.ioctl(fd, linux.IOCTL.IOR('E', 0x06, [64]u8), @intFromPtr(&name));
-            print("stardust-shell: input: {s}: {s}\n", .{ path, std.mem.sliceTo(&name, 0) });
+        const dir = sys.open("/dev/input", .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }) catch return;
+        defer sys.close(dir);
+        var buf: [2048]u8 align(8) = undefined;
+        while (true) {
+            const n = sys.check(linux.getdents64(dir, &buf, buf.len)) catch return;
+            if (n == 0) return;
+            var at: usize = 0;
+            while (at < n) {
+                const reclen = std.mem.readInt(u16, buf[at + 16 ..][0..2], .little);
+                const name = std.mem.sliceTo(buf[at + 19 .. at + reclen], 0);
+                at += reclen;
+                if (eventNumber(name)) |number| d.open(number);
+            }
         }
+    }
+
+    /// Opens /dev/input/event`n` unless it is open.
+    fn open(d: *Devices, n: usize) void {
+        const slot = &d.fds[n];
+        if (slot.* != null) return;
+        var path_buf: [32]u8 = undefined;
+        const path = std.fmt.bufPrintZ(&path_buf, "/dev/input/event{d}", .{n}) catch return;
+        // Not handed to the user yet: tried again at the next scan.
+        const fd = sys.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }) catch return;
+        slot.* = fd;
+        d.active[n] = false;
+        var name: [64]u8 = @splat(0);
+        _ = linux.ioctl(fd, linux.IOCTL.IOR('E', 0x06, [64]u8), @intFromPtr(&name));
+        print("stardust-shell: input: {s}: {s}\n", .{ path, std.mem.sliceTo(&name, 0) });
     }
 
     /// Adds the open devices to `fds`; returns how many.
@@ -141,6 +165,13 @@ pub const Devices = struct {
         return out[0..n];
     }
 };
+
+test "event node names" {
+    try std.testing.expectEqual(@as(?usize, 3), eventNumber("event3"));
+    try std.testing.expectEqual(@as(?usize, null), eventNumber("mouse0"));
+    try std.testing.expectEqual(@as(?usize, null), eventNumber("event99"));
+    try std.testing.expectEqual(@as(?usize, null), eventNumber("by-id"));
+}
 
 test "decode" {
     try std.testing.expectEqual(Event{ .motion = .{ -3, 0 } }, decode(ev_rel, rel_x, -3).?);
