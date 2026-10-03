@@ -51,7 +51,7 @@ exec qemu-system-arm -M raspi0 \
 	-kernel "$BOOT/zImage" \
 	-dtb "$DTB" \
 	-initrd "$INITRAMFS" \
-	-append "console=ttyAMA0 ip=::::stardust::dhcp printk.devkmsg=on" \
+	-append "console=ttyAMA0 printk.devkmsg=on" \
 	-device usb-net,netdev=net0 \
 	-netdev user,id=net0,hostfwd=tcp:127.0.0.1:${LOG_PORT:-2323}-:23 \
 	-display none -serial mon:stdio "$@"

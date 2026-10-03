@@ -92,6 +92,8 @@ The init program (`src/init/`):
 | File | Contents |
 |---|---|
 | `main.zig` | Mounts `/proc`, `/sys`, `/dev`, starts the log server, gives the user the GPU, starts the demo and reaps exited processes |
+| `network.zig` | The network manager: follows Ethernet adapters and links, configures addresses and routes |
+| `dhcp.zig` | DHCP client messages (building requests, parsing replies) |
 | `logserver.zig` | Serves the kernel log over TCP (telnet) |
 
 The demo program (`src/demo/`):
@@ -116,6 +118,10 @@ passwords or logins.
   then the user ID) and execs `/bin/stardust-demo` with the
   `stardust.demo=` name. The demo's stdout and stderr are init's
   `/dev/kmsg` descriptor, because only root can open that for writing.
+- The network manager runs as the same user but keeps three capabilities:
+  configuring interfaces and routes (`CAP_NET_ADMIN`), tying its DHCP
+  socket to the interface (`CAP_NET_RAW`) and binding the DHCP client port
+  (`CAP_NET_BIND_SERVICE`). Init restarts it if it ever stops.
 - The log server binds port 23 as root, then drops to the same user. Reading
   `/dev/kmsg` needs no privileges.
 - Init logs how the demo exits and does not restart it.
@@ -177,10 +183,13 @@ LAN95xx, Microchip LAN78xx and generic CDC Ethernet.
 
 ### Reading the log over the network
 
-The kernel gets an address by DHCP during boot (`ip=` in `boot/cmdline.txt`).
-Init then starts a log server before touching the GPU, so the log stays
-readable if a GPU job hangs. The Pi asks the DHCP server for the hostname
-`stardust`, so look for that name in your router's lease list, then:
+The network never holds up boot. Init starts a network manager alongside
+everything else. It waits for an Ethernet adapter and a link, gets an
+address by DHCP and keeps renewing the lease. The adapter can be plugged in
+or out, and the cable connected, at any time. A log server also starts
+before the GPU is touched, so the log stays readable if a GPU job hangs.
+The Pi asks the DHCP server for the hostname `stardust`, so look for that
+name in your router's lease list, then:
 
 ```sh
 telnet <pi-address>    # or: nc <pi-address> 23
@@ -192,6 +201,9 @@ messages) and then follows new messages:
 ```
 [    4.731220] stardust: starting as init
 [    4.739512] stardust: log server listening on TCP port 23 as uid 1000
+[    4.740011] stardust: network: found eth0 (<mac>)
+[    4.746230] stardust: network: eth0 link up
+[    4.940117] stardust: network: eth0 is 192.168.1.42/24, gateway 192.168.1.1 (DHCP, lease 86400 s)
 [    4.740312] stardust: started /bin/stardust-demo (pid 24) as uid 1000
 [    4.740601] stardust: demo cube running as uid 1000
 [    4.741008] stardust: opened /dev/dri/card0 (vc4)
@@ -202,16 +214,14 @@ messages) and then follows new messages:
 [    9.840211] stardust: 300 frames in 5.0s (60.0 fps), render <t> ms/frame
 ```
 
-Timestamps above are illustrative. To use a static address instead of DHCP,
-replace `ip=::::stardust::dhcp` in `cmdline.txt` with, for example:
+Timestamps above are illustrative, and the order varies because the network
+comes up in parallel with the demo. To use a static address instead of DHCP,
+add `stardust.ip=<address>/<prefix>[,<gateway>]` to `cmdline.txt`, for
+example:
 
 ```
-ip=192.168.1.50::192.168.1.1:255.255.255.0:stardust::off
+stardust.ip=192.168.1.50/24,192.168.1.1
 ```
-
-If no adapter is plugged in, boot waits about 12 seconds for one before
-continuing without a network. With an adapter but no cable, it waits 10
-seconds for a link (`carrier_timeout=10`).
 
 ### Choosing a demo
 
@@ -317,8 +327,10 @@ The OpenGL ES path (`glcube`) has not run on hardware yet. Its jobs pass
 a userspace build of the kernel's job and shader validators, but face
 culling's winding and the rendered output still need confirming on a Pi.
 
-In QEMU the kernel boots, the network comes up by DHCP over an emulated USB
-network card and the log server streams the log (QEMU cannot emulate the
+In QEMU the kernel boots and init's network manager gets an address by DHCP
+over an emulated USB network card. That holds whether the card is there at
+boot or added later. The lease renews, a static `stardust.ip=` works, and
+the log server streams the log (QEMU cannot emulate the
 GPU or display).
 
 ## Next steps

@@ -3,14 +3,17 @@
 //! Init is the only process that keeps root privileges. It:
 //!
 //! 1. mounts /proc, /sys and /dev, and sends its messages to the kernel log;
-//! 2. starts the network log server (which drops to the Stardust user once
-//!    it has bound its port);
+//! 2. starts the network manager (see network.zig), which brings the network
+//!    up in the background whenever an adapter and link are there, and the
+//!    log server (which drops to the Stardust user once it has bound its
+//!    port); boot never waits for the network;
 //! 3. waits for the vc4 GPU and gives the Stardust user access to its device
 //!    nodes;
 //! 4. starts /bin/stardust-demo as the Stardust user, with the demo named by
 //!    `stardust.demo=` on the kernel command line and its output going to
 //!    the kernel log;
-//! 5. reaps exited processes forever (PID 1 must never exit).
+//! 5. reaps exited processes forever (PID 1 must never exit), restarting the
+//!    network manager if it ever stops.
 //!
 //! The Stardust user is just a user ID (see `sys.user`): there are no
 //! accounts, passwords or logins.
@@ -19,6 +22,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
 const logserver = @import("logserver.zig");
+const network = @import("network.zig");
 
 const print = sys.print;
 
@@ -32,13 +36,15 @@ pub fn main() void {
     mountPseudoFilesystems();
     sys.logToKmsg();
     print("stardust: starting as init\n", .{});
+    _ = linux.syscall2(.sethostname, @intFromPtr(network.hostname), network.hostname.len);
+    const network_pid = network.start();
     logserver.start();
     grantGpuAccess();
 
     var cmdline_buf: [1024]u8 = undefined;
     const demo = sys.cmdlineValue(sys.readCmdline(&cmdline_buf), "stardust.demo");
     const demo_pid = startDemo(demo);
-    reapForever(demo_pid);
+    reapForever(demo_pid, network_pid);
 }
 
 fn mountPseudoFilesystems() void {
@@ -132,7 +138,8 @@ fn startDemo(demo: ?[]const u8) ?linux.pid_t {
 
 /// Waits for child processes, logging how the demo ends. Processes whose
 /// parent exits are re-parented to init, so this also collects those.
-fn reapForever(demo_pid: ?linux.pid_t) noreturn {
+fn reapForever(demo_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t) noreturn {
+    var network_pid = first_network_pid;
     while (true) {
         var status: u32 = 0;
         const rc = linux.wait4(-1, &status, 0, null);
@@ -146,6 +153,12 @@ fn reapForever(demo_pid: ?linux.pid_t) noreturn {
             else => continue,
         }
         const pid: linux.pid_t = @intCast(rc);
+        if (pid == network_pid) {
+            print("stardust: network manager stopped (status 0x{x}); restarting it in 5 s\n", .{status});
+            sys.sleepMs(5000);
+            network_pid = network.start();
+            continue;
+        }
         if (pid != demo_pid) continue;
         if (linux.W.IFEXITED(status)) {
             print("stardust: demo exited with status {d}\n", .{linux.W.EXITSTATUS(status)});
@@ -157,4 +170,6 @@ fn reapForever(demo_pid: ?linux.pid_t) noreturn {
 
 test {
     _ = @import("logserver.zig");
+    _ = @import("network.zig");
+    _ = @import("dhcp.zig");
 }

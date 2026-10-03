@@ -1,1 +1,1 @@
-ip=::::stardust::dhcp carrier_timeout=10 printk.devkmsg=on loglevel=6 stardust.demo=glcube
+printk.devkmsg=on loglevel=6 stardust.demo=glcube

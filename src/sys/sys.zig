@@ -165,6 +165,21 @@ pub const user = struct {
 /// Switches a root process to the user: no supplementary groups, then the
 /// group, then the user ID (after which the others cannot be changed).
 pub fn dropPrivileges() Error!void {
+    return dropPrivilegesKeeping(&.{});
+}
+
+/// Capabilities (see capability.h) a process can keep when it drops to the
+/// user.
+pub const Capability = enum(u5) {
+    net_bind_service = 10,
+    net_admin = 12,
+    net_raw = 13,
+};
+
+/// Like `dropPrivileges`, but keeps the given capabilities and no others.
+pub fn dropPrivilegesKeeping(caps: []const Capability) Error!void {
+    const pr_set_keepcaps = 8;
+    if (caps.len > 0) _ = try check(linux.prctl(pr_set_keepcaps, 1, 0, 0, 0));
     const no_groups = [_]linux.gid_t{};
     _ = try check(linux.setgroups(0, &no_groups));
     _ = try check(linux.setgid(user.gid));
@@ -172,4 +187,24 @@ pub fn dropPrivileges() Error!void {
     // Without CONFIG_MULTIUSER the calls above are not even available;
     // make sure the switch really happened.
     if (linux.getuid() != user.uid or linux.geteuid() != user.uid) return error.Unexpected;
+    if (caps.len == 0) return;
+
+    // Keep only the wanted capabilities, and make them effective (changing
+    // user clears the effective set).
+    var mask: u32 = 0;
+    for (caps) |c| mask |= @as(u32, 1) << @intFromEnum(c);
+    const Header = extern struct { version: u32, pid: i32 };
+    const Data = extern struct { effective: u32, permitted: u32, inheritable: u32 };
+    var header: Header = .{ .version = 0x20080522, .pid = 0 }; // _LINUX_CAPABILITY_VERSION_3
+    const data = [2]Data{ .{ .effective = mask, .permitted = mask, .inheritable = 0 }, .{ .effective = 0, .permitted = 0, .inheritable = 0 } };
+    _ = try check(linux.syscall2(.capset, @intFromPtr(&header), @intFromPtr(&data)));
+}
+
+/// Reads a small file (such as a sysfs attribute) into `buf`. Returns null
+/// if it cannot be read.
+pub fn readFile(path: [*:0]const u8, buf: []u8) ?[]const u8 {
+    const fd = open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }) catch return null;
+    defer close(fd);
+    const n = check(linux.read(fd, buf.ptr, buf.len)) catch return null;
+    return buf[0..n];
 }
