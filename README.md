@@ -246,23 +246,25 @@ filesystem tools (or root) are needed.
 One command builds everything into an SD card image:
 
 ```sh
-scripts/zig build image --release   # zig-out/stardust.img, and its files in zig-out/boot/
+scripts/zig build    # zig-out/stardust.img, and its files in zig-out/boot/
 ```
 
 That builds the programs and the initramfs. It clones Linux v7.2 into
 `build/linux` on first use, and builds the kernel in `build/kernel` with
 `make`. It downloads the firmware into `build/firmware`, checked against
 pinned SHA-256 digests. Then it writes the image. Each part is redone only
-when needed: a rebuild with nothing changed takes seconds, and the first
-build a few minutes.
+when needed: a rebuild with nothing changed takes about 20 seconds (most of
+it `make` checking the kernel), and the first build a few minutes. The Pi
+programs are optimized for size (ReleaseSmall) unless `--release=fast`,
+`--release=safe` or `-Doptimize=` says otherwise.
 
 Other steps:
 
 ```sh
 scripts/zig build test              # host unit tests
-scripts/zig build --release         # just the programs and zig-out/initramfs.cpio
+scripts/zig build programs          # just the programs and zig-out/initramfs.cpio
 scripts/zig build kernel            # just the kernel
-scripts/zig build qemu --release    # boot in QEMU (arguments after -- go to QEMU)
+scripts/zig build qemu              # boot in QEMU (arguments after -- go to QEMU)
 ```
 
 Options: `-Dlinux=path/to/linux` uses an existing kernel tree,
@@ -381,7 +383,7 @@ The firmware picks the Zero or Zero W device tree in `config.txt`. The Zero
   `fonts/FiraSans-Regular.ttf` there (`stardust-demo` also takes a font
   path as its argument). Press Ctrl+C to stop.
   Iterating on GPU code this way avoids rebuilding the SD card.
-- **QEMU:** `scripts/zig build qemu --release` boots the kernel and initramfs in QEMU's
+- **QEMU:** `scripts/zig build qemu` boots the kernel and initramfs in QEMU's
   `raspi0` machine with an emulated USB network card. `http://localhost:8080/`
   reaches the log server. QEMU does not emulate the 3D engine or HDMI,
   so this checks the kernel, init, privileges and networking only. The log

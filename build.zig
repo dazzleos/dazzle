@@ -201,7 +201,7 @@ const firmware = [_]struct { name: []const u8, sha256: []const u8 }{
 
 /// The SD card image (zig-out/stardust.img), and its files in zig-out/boot
 /// for copying onto a card by hand.
-fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) void {
+fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.Build.Step {
     const dir = b.pathFromRoot("build/firmware");
     // Download what is missing, then check everything.
     var fetch: ?*std.Build.Step = null;
@@ -248,6 +248,7 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) void {
         image_step.dependOn(&install.step);
     }
     image_step.dependOn(&b.addInstallFile(img, "stardust.img").step);
+    return image_step;
 }
 
 /// Boots the kernel and initramfs in QEMU's raspi0 machine, with the log
@@ -294,7 +295,16 @@ pub fn build(b: *std.Build) void {
         .os_tag = .linux,
         .abi = .eabihf,
     });
-    const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseSmall });
+    // The Pi programs are optimized for size unless told otherwise (a
+    // Debug build is far too slow on a Pi Zero); host tests default to
+    // Debug, for their safety checks.
+    const explicit_optimize = b.option(std.builtin.OptimizeMode, "optimize", "Optimization mode (default: ReleaseSmall for the Pi, Debug for host tests)");
+    const optimize: std.builtin.OptimizeMode = explicit_optimize orelse switch (b.release_mode) {
+        .off, .any, .small => .ReleaseSmall,
+        .fast => .ReleaseFast,
+        .safe => .ReleaseSafe,
+    };
+    const test_optimize = explicit_optimize orelse .Debug;
 
     const pi = addModules(b, target, optimize);
     // init runs as root; the shell and the demo (its Wayland client) run as
@@ -303,17 +313,17 @@ pub fn build(b: *std.Build) void {
         .name = "stardust-init",
         .root_module = addProgramModule(b, "src/init/main.zig", target, optimize, pi, true),
     });
-    b.installArtifact(init_exe);
+    const install_init = b.addInstallArtifact(init_exe, .{});
     const demo_exe = b.addExecutable(.{
         .name = "stardust-demo",
         .root_module = addProgramModule(b, "src/demo/main.zig", target, optimize, pi, true),
     });
-    b.installArtifact(demo_exe);
+    const install_demo = b.addInstallArtifact(demo_exe, .{});
     const shell_exe = b.addExecutable(.{
         .name = "stardust-shell",
         .root_module = addProgramModule(b, "src/shell/main.zig", target, optimize, pi, true),
     });
-    b.installArtifact(shell_exe);
+    const install_shell = b.addInstallArtifact(shell_exe, .{});
 
     // Host tool that packs the init binary into a cpio initramfs.
     const mkinitramfs = b.addExecutable(.{
@@ -332,7 +342,11 @@ pub fn build(b: *std.Build) void {
     run_mkinitramfs.addFileArg(b.path("fonts/FiraSans-Regular.ttf"));
     run_mkinitramfs.addFileArg(b.path("fonts/OFL.txt"));
     const install_initramfs = b.addInstallFile(initramfs, "initramfs.cpio");
-    b.getInstallStep().dependOn(&install_initramfs.step);
+    const programs_step = b.step("programs", "Build just the programs (zig-out/bin) and zig-out/initramfs.cpio");
+    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_shell.step, &install_initramfs.step }) |st| {
+        programs_step.dependOn(st);
+        b.getInstallStep().dependOn(st);
+    }
 
     const initramfs_step = b.step("initramfs", "Build zig-out/initramfs.cpio");
     initramfs_step.dependOn(&install_initramfs.step);
@@ -341,12 +355,13 @@ pub fn build(b: *std.Build) void {
     const kernel_step = b.step("kernel", "Build the Linux kernel and device trees (in build/kernel)");
     kernel_step.dependOn(kernel.step);
 
-    addImage(b, kernel, initramfs);
+    // `zig build` builds everything, including the SD card image.
+    b.getInstallStep().dependOn(addImage(b, kernel, initramfs));
     addQemu(b, kernel, initramfs);
 
     // Unit tests run on the build machine; they cover the parts that do not
     // need the GPU (instruction encoding, compiler, simulator, ...).
-    const host = addModules(b, b.graph.host, optimize);
+    const host = addModules(b, b.graph.host, test_optimize);
     // The font tests use the real system font.
     host.font.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const test_step = b.step("test", "Run unit tests on the host");
@@ -356,9 +371,9 @@ pub fn build(b: *std.Build) void {
         host.gles,
         host.font,
         host.wayland,
-        addProgramModule(b, "src/init/main.zig", b.graph.host, optimize, host, null),
-        addProgramModule(b, "src/demo/main.zig", b.graph.host, optimize, host, null),
-        addProgramModule(b, "src/shell/main.zig", b.graph.host, optimize, host, null),
+        addProgramModule(b, "src/init/main.zig", b.graph.host, test_optimize, host, null),
+        addProgramModule(b, "src/demo/main.zig", b.graph.host, test_optimize, host, null),
+        addProgramModule(b, "src/shell/main.zig", b.graph.host, test_optimize, host, null),
     }) |m| {
         const t = b.addTest(.{ .root_module = m });
         test_step.dependOn(&b.addRunArtifact(t).step);
