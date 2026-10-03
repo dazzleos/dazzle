@@ -208,15 +208,16 @@ comptime {
 }
 
 const cube_vertices = blk: {
-    // Each face: an outward axis, two in-plane axes and a tint.
+    // Each face: an outward axis, two in-plane axes and a tint. The tints
+    // are pure primaries and secondaries.
     const Face = struct { n: [3]f32, u: [3]f32, v: [3]f32, tint: [3]f32 };
     const faces = [6]Face{
-        .{ .n = .{ 0, 0, 1 }, .u = .{ 1, 0, 0 }, .v = .{ 0, 1, 0 }, .tint = .{ 1.0, 0.45, 0.45 } },
-        .{ .n = .{ 0, 0, -1 }, .u = .{ -1, 0, 0 }, .v = .{ 0, 1, 0 }, .tint = .{ 0.45, 1.0, 0.45 } },
-        .{ .n = .{ 1, 0, 0 }, .u = .{ 0, 0, -1 }, .v = .{ 0, 1, 0 }, .tint = .{ 0.45, 0.6, 1.0 } },
-        .{ .n = .{ -1, 0, 0 }, .u = .{ 0, 0, 1 }, .v = .{ 0, 1, 0 }, .tint = .{ 1.0, 1.0, 0.45 } },
-        .{ .n = .{ 0, 1, 0 }, .u = .{ 1, 0, 0 }, .v = .{ 0, 0, -1 }, .tint = .{ 1.0, 0.45, 1.0 } },
-        .{ .n = .{ 0, -1, 0 }, .u = .{ 1, 0, 0 }, .v = .{ 0, 0, 1 }, .tint = .{ 0.45, 1.0, 1.0 } },
+        .{ .n = .{ 0, 0, 1 }, .u = .{ 1, 0, 0 }, .v = .{ 0, 1, 0 }, .tint = .{ 1, 0, 0 } },
+        .{ .n = .{ 0, 0, -1 }, .u = .{ -1, 0, 0 }, .v = .{ 0, 1, 0 }, .tint = .{ 0, 1, 0 } },
+        .{ .n = .{ 1, 0, 0 }, .u = .{ 0, 0, -1 }, .v = .{ 0, 1, 0 }, .tint = .{ 0, 0, 1 } },
+        .{ .n = .{ -1, 0, 0 }, .u = .{ 0, 0, 1 }, .v = .{ 0, 1, 0 }, .tint = .{ 1, 1, 0 } },
+        .{ .n = .{ 0, 1, 0 }, .u = .{ 1, 0, 0 }, .v = .{ 0, 0, -1 }, .tint = .{ 1, 0, 1 } },
+        .{ .n = .{ 0, -1, 0 }, .u = .{ 1, 0, 0 }, .v = .{ 0, 0, 1 }, .tint = .{ 0, 1, 1 } },
     };
     // Corners as (u, v) in {-1, 1}, two triangles per face. Texture
     // coordinates run 0..2 so the checkerboard repeats twice per face.
@@ -249,14 +250,13 @@ const cube_attributes = [_]cl.Attribute{
 
 pub const texture_size = 128;
 
-/// A checkerboard with a colour gradient, as B8G8R8A8 pixels.
+/// A white and dark grey checkerboard, as B8G8R8A8 pixels. Combined with
+/// the pure face tints, white squares show the tint at full strength, which
+/// makes colour channel or range errors easy to see.
 pub fn checkerboard(pixels: []u32, size: u32) void {
     for (0..size) |y| for (0..size) |x| {
         const check = ((x / 16) + (y / 16)) % 2 == 0;
-        const base: u32 = if (check) 255 else 90;
-        const r = base * @as(u32, @intCast(x)) / size / 2 + base / 2;
-        const g = base * @as(u32, @intCast(y)) / size / 2 + base / 2;
-        pixels[y * size + x] = 0xff000000 | r << 16 | g << 8 | base;
+        pixels[y * size + x] = if (check) 0xffffffff else 0xff404040;
     };
 }
 
