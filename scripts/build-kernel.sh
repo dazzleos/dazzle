@@ -18,6 +18,46 @@ LINUX_DIR=${1:-${LINUX_DIR:-$ROOT/build/linux}}
 OUT=$ROOT/build/kernel
 JOBS=${JOBS:-$(nproc)}
 
+# Check for the build tools up front, so a missing one is reported clearly
+# instead of as an error partway through the kernel build. The Ubuntu/Debian
+# package providing each tool is listed after the colon.
+tools="make:make flex:flex bison:bison bc:bc"
+[ -d "$LINUX_DIR" ] || tools="$tools git:git"
+if [ -n "${CROSS_COMPILE:-}" ]; then
+	tools="$tools ${CROSS_COMPILE}gcc:gcc-arm-linux-gnueabihf ${CROSS_COMPILE}ld:binutils-arm-linux-gnueabihf"
+else
+	tools="$tools clang:clang ld.lld:lld llvm-ar:llvm llvm-nm:llvm llvm-objcopy:llvm llvm-objdump:llvm llvm-readelf:llvm llvm-strip:llvm"
+fi
+missing_tools=
+missing_pkgs=
+missing_llvm=
+for entry in $tools; do
+	tool=${entry%%:*}
+	pkg=${entry#*:}
+	if ! command -v "$tool" >/dev/null 2>&1; then
+		missing_tools="$missing_tools $tool"
+		case $pkg in clang | lld | llvm) missing_llvm=1 ;; esac
+		case " $missing_pkgs " in *" $pkg "*) ;; *) missing_pkgs="$missing_pkgs $pkg" ;; esac
+	fi
+done
+if [ -n "$missing_tools" ]; then
+	echo "error: missing build tools:$missing_tools" >&2
+	echo "On Ubuntu/Debian: sudo apt install$missing_pkgs" >&2
+	[ -z "$missing_llvm" ] || echo "Or set CROSS_COMPILE to build with a GCC cross compiler instead of LLVM." >&2
+	exit 1
+fi
+
+# Linux v7.2 needs LLVM 17.0.1 or newer (scripts/min-tool-version.sh).
+if [ -z "${CROSS_COMPILE:-}" ]; then
+	clang_major=$(clang -dumpversion | cut -d. -f1)
+	if [ "$clang_major" -lt 17 ]; then
+		echo "error: clang $(clang -dumpversion) is too old; the kernel needs LLVM 17 or newer." >&2
+		echo "Install a newer clang, lld and llvm (e.g. apt install clang-18 lld-18 llvm-18 and add" >&2
+		echo "/usr/lib/llvm-18/bin to PATH), or set CROSS_COMPILE to use GCC." >&2
+		exit 1
+	fi
+fi
+
 if [ ! -d "$LINUX_DIR" ]; then
 	echo "Cloning Linux $LINUX_VERSION into $LINUX_DIR"
 	git clone --depth 1 --branch "$LINUX_VERSION" \

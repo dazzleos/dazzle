@@ -32,9 +32,10 @@ system calls through `std.os.linux`.
 ## Requirements
 
 - Zig 0.16.0
-- To build the kernel: `make`, `flex`, `bison`, `bc` and either LLVM/Clang
-  (18 or newer, used by default) or an ARM GCC cross compiler (set
-  `CROSS_COMPILE=arm-linux-gnueabihf-`)
+- To build the kernel: `make`, `flex`, `bison`, `bc`, `git`, and either
+  LLVM 17 or newer (used by default; `sudo apt install clang lld llvm`) or
+  an ARM GCC cross compiler (set `CROSS_COMPILE=arm-linux-gnueabihf-`).
+  `scripts/build-kernel.sh` checks for these and names any missing packages.
 - To build the SD image: `sfdisk` (util-linux), `mkfs.vfat` (dosfstools),
   `mcopy` (mtools), `curl`
 - Optional: `qemu-system-arm` and `fdtput` (device-tree-compiler) for the
