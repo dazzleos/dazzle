@@ -111,7 +111,9 @@ fn writeAll(fd: linux.fd_t, bytes: []const u8) bool {
 }
 
 /// Formats one /dev/kmsg record ("prio,seq,usec,flags;text\n" followed by
-/// optional " KEY=value" lines) as "[seconds.micros] text\n".
+/// optional " KEY=value" lines) as "[seconds.micros] text\n". The kernel
+/// escapes bytes outside printable ASCII (and backslashes) as "\xNN";
+/// they are decoded, so UTF-8 text such as "°C" reads as it was written.
 pub fn formatRecord(out: []u8, record: []const u8) ?[]const u8 {
     const semi = std.mem.indexOfScalar(u8, record, ';') orelse return null;
     var fields = std.mem.splitScalar(u8, record[0..semi], ',');
@@ -120,9 +122,25 @@ pub fn formatRecord(out: []u8, record: []const u8) ?[]const u8 {
     const usec = std.fmt.parseInt(u64, fields.next() orelse return null, 10) catch return null;
     const body = record[semi + 1 ..];
     const text = body[0 .. std.mem.indexOfScalar(u8, body, '\n') orelse body.len];
-    return std.fmt.bufPrint(out, "[{d:>5}.{d:0>6}] {s}\n", .{
-        usec / std.time.us_per_s, usec % std.time.us_per_s, text,
-    }) catch null;
+    const prefix = std.fmt.bufPrint(out, "[{d:>5}.{d:0>6}] ", .{ usec / std.time.us_per_s, usec % std.time.us_per_s }) catch return null;
+    var n = prefix.len;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (n + 1 >= out.len) return null;
+        if (text[i] == '\\' and i + 4 <= text.len and text[i + 1] == 'x') {
+            if (std.fmt.parseInt(u8, text[i + 2 .. i + 4], 16)) |byte| {
+                out[n] = byte;
+                n += 1;
+                i += 4;
+                continue;
+            } else |_| {}
+        }
+        out[n] = text[i];
+        n += 1;
+        i += 1;
+    }
+    out[n] = '\n';
+    return out[0 .. n + 1];
 }
 
 pub const Request = struct {
@@ -250,6 +268,11 @@ test "format kmsg record" {
         formatRecord(&buf, "5,512,3000042,-;stardust: starting as init\n SUBSYSTEM=foo\n").?,
     );
     try testing.expectEqual(@as(?[]const u8, null), formatRecord(&buf, "garbage"));
+    // Escaped UTF-8 and backslashes are decoded.
+    try testing.expectEqualStrings(
+        "[    6.845023] stardust: SoC 36 °C, C:\\dir\n",
+        formatRecord(&buf, "6,900,6845023,-;stardust: SoC 36 \\xc2\\xb0C, C:\\x5cdir\n").?,
+    );
 }
 
 test "parse requests" {
