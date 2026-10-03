@@ -361,12 +361,15 @@ directly, and how many refreshes went by without a new frame:
 
 ```
 stardust-shell: 60.0 frames/s, all shown directly, 0 refreshes skipped
-stardust-shell: work 0.40 ms per frame (clients 0.10, bar 0.05, display 0.20), 2.4% of the time
+stardust-shell: work 2.40 ms per frame (clients 0.18, bar 0.04, display 1.27 of which commits 1.10, flips 0.30, other 0.60), 3.0 wakeups per frame, 14.4% of the time
 ```
 
 The second line is the shell's own work, by part: handling clients'
-requests, redrawing the bar (once a second), and drawing or showing
-frames. A change to the bar alone does not take a refresh while a client
+requests, redrawing the bar (once a second), drawing or showing frames
+(with the time the kernel takes for the display commits), handling page
+flips (frame callbacks and buffer releases), and the rest of the loop.
+Display commits only change what differs from the last one: usually just
+the primary plane's buffer, with the bar's overlay plane left alone. A change to the bar alone does not take a refresh while a client
 is animating; it goes out with the client's next frame.
 
 Moving a USB mouse moves the cursor. Over the window, each click starts a

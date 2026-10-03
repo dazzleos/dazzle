@@ -114,8 +114,10 @@ fn run(init: std.process.Init.Minimal) !void {
     var bar_damaged = false;
     // When a client last had a frame for the screen.
     var client_frame_ns: u64 = 0;
+    watchChildren();
     while (true) {
-        reapChildren();
+        if (child_exited.swap(false, .monotonic)) reapChildren();
+        stats.wakeups += 1;
 
         // Wait for clients, input, the display (a page flip completing), or
         // the next clock tick; or not at all if a frame is due and can be
@@ -139,6 +141,8 @@ fn run(init: std.process.Init.Minimal) !void {
         // The last frame reached the screen: its frame callbacks fire, and
         // the next one can be drawn.
         if (fds[1].revents != 0) {
+            const flip_start = sys.nowNs();
+            defer stats.flips_ns += sys.nowNs() - flip_start;
             if (renderer.handleEvents() catch |err| blk: {
                 print("stardust-shell: display events: {s}\n", .{@errorName(err)});
                 break :blk null;
@@ -269,6 +273,10 @@ fn run(init: std.process.Init.Minimal) !void {
         server.flushClients();
         const work_end = sys.nowNs();
         stats.work_ns += work_end - work_start;
+        if (renderer.display.kms) |*k| {
+            stats.commit_ns += k.commit_ns;
+            k.commit_ns = 0;
+        }
         stats.maybeLog(work_end);
     }
 }
@@ -306,6 +314,12 @@ const FrameStats = struct {
     clients_ns: u64 = 0,
     bar_ns: u64 = 0,
     display_ns: u64 = 0,
+    /// Handling page flips: frame callbacks and buffer releases.
+    flips_ns: u64 = 0,
+    /// Times round the main loop.
+    wakeups: u32 = 0,
+    /// Of `display_ns`, the display commit system calls (kernel time).
+    commit_ns: u64 = 0,
     cpu_ns: u64 = 0,
     gpu_ns: u64 = 0,
     /// Vertical blanks without a new frame between two flips. While a
@@ -348,11 +362,16 @@ const FrameStats = struct {
         const shown = s.frames + s.direct;
         if (shown > 0) {
             const n: f64 = @floatFromInt(shown);
-            print("stardust-shell: work {d:.2} ms per frame (clients {d:.2}, bar {d:.2}, display {d:.2}), {d:.1}% of the time\n", .{
+            const other = s.work_ns -| (s.clients_ns + s.bar_ns + s.display_ns + s.flips_ns);
+            print("stardust-shell: work {d:.2} ms per frame (clients {d:.2}, bar {d:.2}, display {d:.2} of which commits {d:.2}, flips {d:.2}, other {d:.2}), {d:.1} wakeups per frame, {d:.1}% of the time\n", .{
                 @as(f64, @floatFromInt(s.work_ns)) / n / ms,
                 @as(f64, @floatFromInt(s.clients_ns)) / n / ms,
                 @as(f64, @floatFromInt(s.bar_ns)) / n / ms,
                 @as(f64, @floatFromInt(s.display_ns)) / n / ms,
+                @as(f64, @floatFromInt(s.commit_ns)) / n / ms,
+                @as(f64, @floatFromInt(s.flips_ns)) / n / ms,
+                @as(f64, @floatFromInt(other)) / n / ms,
+                @as(f64, @floatFromInt(s.wakeups)) / n,
                 100 * @as(f64, @floatFromInt(s.work_ns)) / @as(f64, @floatFromInt(elapsed)),
             });
         }
@@ -442,6 +461,24 @@ fn spawn(program: [*:0]const u8, runtime_dir: [:0]const u8) ?linux.pid_t {
     const err = linux.errno(linux.execve(program, &argv, &envp));
     print("stardust-shell: cannot run {s} ({s})\n", .{ program, @tagName(err) });
     linux.exit(127);
+}
+
+/// Set when a client process exits (SIGCHLD), so it is reaped.
+var child_exited: std.atomic.Value(bool) = .init(true);
+
+fn onChildExit(_: linux.SIG) callconv(.c) void {
+    child_exited.store(true, .monotonic);
+}
+
+fn watchChildren() void {
+    const act: linux.Sigaction = .{
+        .handler = .{ .handler = onChildExit },
+        .mask = linux.sigemptyset(),
+        // System calls (poll) are not restarted: they return EINTR, and the
+        // loop goes round.
+        .flags = 0,
+    };
+    _ = linux.sigaction(.CHLD, &act, null);
 }
 
 fn reapChildren() void {

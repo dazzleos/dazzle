@@ -234,6 +234,12 @@ pub const Kms = struct {
     /// A plane above the primary one, if the CRTC has one to spare.
     overlay: ?Plane,
     mode_set: bool = false,
+    /// What the last commit put on each plane: later commits only change
+    /// what differs, so the kernel re-checks as little as it can.
+    shown_primary: ?Layer = null,
+    shown_overlay: ?Layer = null,
+    /// Time spent in commit system calls, for statistics.
+    commit_ns: u64 = 0,
 
     /// Switches the DRM file to atomic mode setting and finds the CRTC's
     /// planes. Fails (and the caller should use the legacy API) if the
@@ -282,9 +288,13 @@ pub const Kms = struct {
     }
 
     /// The request for showing `primary` (and `overlay`, or nothing above
-    /// it), setting the mode if it has not been set yet.
-    pub fn request(k: *const Kms, primary: Layer, overlay: ?Layer) Request {
+    /// it), setting the mode if it has not been set yet. Unless `full`, it
+    /// only changes what differs from the last commit: a plane whose layer
+    /// is the same is left out, and one that only shows a new buffer gets
+    /// just that.
+    pub fn request(k: *const Kms, primary: Layer, overlay: ?Layer, full: bool) Request {
         var r: Request = .{};
+        const all = full or !k.mode_set;
         if (!k.mode_set) {
             r.object(k.output.connector_id);
             r.set(k.connector_crtc_id, k.output.crtc_id);
@@ -292,15 +302,28 @@ pub const Kms = struct {
             r.set(k.crtc_mode_id, k.mode_blob);
             r.set(k.crtc_active, 1);
         }
-        r.plane(k.primary, k.output.crtc_id, primary);
-        if (k.overlay) |o| r.plane(o, k.output.crtc_id, overlay);
+        const overlay_changed = all or !std.meta.eql(k.shown_overlay, overlay);
+        const shown = k.shown_primary;
+        if (all or shown == null or !std.meta.eql(shown.?, primary)) {
+            var moved = shown orelse primary;
+            moved.fb_id = primary.fb_id;
+            if (!all and shown != null and std.meta.eql(moved, primary)) {
+                r.object(k.primary.id);
+                r.set(k.primary.props.fb_id, primary.fb_id);
+            } else r.plane(k.primary, k.output.crtc_id, primary);
+        } else if (!overlay_changed or k.overlay == null) {
+            // Nothing changed; a commit needs an object for its event.
+            r.object(k.primary.id);
+            r.set(k.primary.props.fb_id, primary.fb_id);
+        }
+        if (k.overlay) |o| if (overlay_changed) r.plane(o, k.output.crtc_id, overlay);
         return r;
     }
 
     /// Whether the display can show these layers (without showing them).
     pub fn check(k: *const Kms, primary: Layer, overlay: ?Layer) bool {
         if (overlay != null and k.overlay == null) return false;
-        var r = k.request(primary, overlay);
+        var r = k.request(primary, overlay, true);
         const flags: u32 = atomic_test_only | @as(u32, if (k.mode_set) 0 else atomic_allow_modeset);
         k.submit(&r, flags) catch return false;
         return true;
@@ -311,19 +334,25 @@ pub const Kms = struct {
     /// sets the mode and waits for it instead, and returns true (no event
     /// follows).
     pub fn commit(k: *Kms, primary: Layer, overlay: ?Layer) !bool {
-        var r = k.request(primary, overlay);
-        if (!k.mode_set) {
+        var r = k.request(primary, overlay, false);
+        const t0 = sys.nowNs();
+        defer k.commit_ns += sys.nowNs() - t0;
+        const at_once = !k.mode_set;
+        if (at_once) {
             try k.submit(&r, atomic_allow_modeset);
             k.mode_set = true;
-            return true;
+        } else {
+            k.submit(&r, atomic_nonblock | drm.page_flip_event) catch |err| switch (err) {
+                // Another update (such as the cursor) is still in progress:
+                // wait for it.
+                error.Busy => try k.submit(&r, drm.page_flip_event),
+                else => return err,
+            };
         }
-        k.submit(&r, atomic_nonblock | drm.page_flip_event) catch |err| switch (err) {
-            // Another update (such as the cursor) is still in progress:
-            // wait for it.
-            error.Busy => try k.submit(&r, drm.page_flip_event),
-            else => return err,
-        };
-        return false;
+        k.shown_primary = primary;
+        // Without an overlay plane, nothing is shown above the primary.
+        k.shown_overlay = if (k.overlay != null) overlay else null;
+        return at_once;
     }
 
     fn submit(k: *const Kms, r: *Request, flags: u32) !void {
@@ -356,7 +385,7 @@ test "atomic requests group properties by object" {
         .overlay = .{ .id = 60, .props = props },
     };
     const window: Layer = .{ .fb_id = 77, .src_width = 1920, .src_height = 1036, .x = 0, .y = 44, .width = 1920, .height = 1036 };
-    var r = k.request(window, null);
+    var r = k.request(window, null, false);
     // The mode set: connector, CRTC, then both planes.
     try std.testing.expectEqualSlices(u32, &.{ 30, 40, 50, 60 }, r.objs[0..r.n_objs]);
     try std.testing.expectEqualSlices(u32, &.{ 1, 2, 10, 2 }, r.counts[0..r.n_objs]);
@@ -366,7 +395,29 @@ test "atomic requests group properties by object" {
     try std.testing.expectEqualSlices(u64, &.{ 0, 0 }, r.values[r.n_props - 2 .. r.n_props]);
 
     k.mode_set = true;
-    r = k.request(window, window);
+    r = k.request(window, window, false);
     try std.testing.expectEqualSlices(u32, &.{ 50, 60 }, r.objs[0..r.n_objs]);
+    try std.testing.expectEqual(@as(usize, 20), r.n_props);
+
+    // After that is shown, a new buffer in the same place changes only the
+    // primary plane's framebuffer.
+    k.shown_primary = window;
+    k.shown_overlay = window;
+    var next = window;
+    next.fb_id = 78;
+    r = k.request(next, window, false);
+    try std.testing.expectEqualSlices(u32, &.{50}, r.objs[0..r.n_objs]);
+    try std.testing.expectEqualSlices(u32, &.{1}, r.props[0..r.n_props]);
+    try std.testing.expectEqual(@as(u64, 78), r.values[0]);
+    // A new bar changes only the overlay plane.
+    var bar = window;
+    bar.fb_id = 90;
+    r = k.request(window, bar, false);
+    try std.testing.expectEqualSlices(u32, &.{60}, r.objs[0..r.n_objs]);
+    // Nothing new still names the primary plane, for the flip event.
+    r = k.request(window, window, false);
+    try std.testing.expectEqualSlices(u32, &.{50}, r.objs[0..r.n_objs]);
+    // A full request sets everything.
+    r = k.request(window, window, true);
     try std.testing.expectEqual(@as(usize, 20), r.n_props);
 }
