@@ -20,6 +20,8 @@ const cube_mod = @import("cube.zig");
 const hud_mod = @import("hud.zig");
 const netinfo = @import("netinfo.zig");
 const rings_mod = @import("rings.zig");
+const shapes = @import("shapes.zig");
+const gfx = @import("gfx");
 const sysinfo = @import("sysinfo.zig");
 const build_info = @import("build_info");
 const wayland = @import("wayland");
@@ -93,7 +95,9 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     var f = loadFont(gpa, font_path);
     var hud: ?hud_mod.Hud = if (f) |*fnt| try hud_mod.Hud.init(gpa, dev, fnt, width, height, background) else null;
     if (hud) |*hd| hd.subtitle = "build " ++ build_info.commit;
-    var rings = try rings_mod.Rings.init(gpa, dev, background);
+    var renderer = try gfx.Renderer.init(dev);
+    var canvas = gfx.Canvas.init(gpa);
+    var rings: rings_mod.Rings = .{};
     var input: InputStatus = .{};
     // The CPU's speed is measured against this first sample, taken cool.
     var monitor: sysinfo.Monitor = .{};
@@ -120,7 +124,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         const frame_start = sys.nowNs();
         for (win.takeInput()) |e| switch (e) {
             .motion => |pos| input.pointer = pos,
-            .button => |b| if (b.pressed) rings.add(frame_start, b.pos[0], b.pos[1], buttonColor(b.code)),
+            .button => |b| if (b.pressed) rings.add(frame_start, b.pos[0], b.pos[1], .argb(buttonColor(b.code))),
             .key => |k| if (k.pressed) {
                 input.key = k.code;
                 next_update = 0;
@@ -136,7 +140,12 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         };
 
         frame.begin(try win.beginFrame(), .{ .clear = background });
-        try rings.draw(&frame, frame_start, width, height);
+        // 2D shapes first: the rings, and the showcase below the overlay
+        // (if the window has room for it beside the cube).
+        canvas.begin(width, height);
+        rings.draw(&canvas, frame_start, @as(f32, @floatFromInt(@min(width, height))) / 1080);
+        if (showcaseOrigin(width, height)) |origin| shapes.draw(&canvas, origin);
+        try renderer.draw(&canvas, &frame);
         try cube.draw(&frame, width, height, t);
         if (hud) |*hd| try hd.draw(&frame);
         const issued = sys.nowNs();
@@ -209,6 +218,19 @@ fn buttonColor(code: u32) u32 {
     };
 }
 
+/// Where the shape showcase goes: below the overlay, left of the cube.
+fn showcaseOrigin(width: u32, height: u32) ?gfx.Point {
+    const panel = hud_mod.Hud.rect(width, height);
+    const x: f32 = @floatFromInt(panel[0]);
+    const y: f32 = @floatFromInt(panel[1] + panel[3] + panel[0]);
+    if (y + shapes.size[1] + x > @as(f32, @floatFromInt(height))) return null;
+    // The cube reaches 0.303 of the window's height either side of the
+    // centre (see the test below).
+    const cube_left = @as(f32, @floatFromInt(width)) / 2 - 0.31 * @as(f32, @floatFromInt(height));
+    if (x + shapes.size[0] > cube_left) return null;
+    return .{ x, y };
+}
+
 /// What the overlay shows about input.
 const InputStatus = struct {
     pointer: ?[2]f32 = null,
@@ -268,6 +290,7 @@ test {
     _ = @import("hud.zig");
     _ = @import("netinfo.zig");
     _ = @import("rings.zig");
+    _ = @import("shapes.zig");
     _ = @import("sysinfo.zig");
 }
 
@@ -282,4 +305,24 @@ test "status lines" {
     try std.testing.expectEqualStrings("Space", keyName(&buf, 57));
     try std.testing.expectEqualStrings("0", keyName(&buf, 11));
     try std.testing.expectEqualStrings("key 200", keyName(&buf, 200));
+}
+
+test "the showcase fits beside the cube in the shell's window" {
+    for ([_][2]u32{ .{ 1920, 1036 }, .{ 1920, 1080 } }) |size| {
+        const origin = showcaseOrigin(size[0], size[1]) orelse return error.NoRoom;
+        const right = origin[0] + shapes.size[0];
+        const w: f32 = @floatFromInt(size[0]);
+        var t: f32 = 0;
+        while (t < 20) : (t += 0.01) {
+            const m = cube_mod.mvp(size[0], size[1], t);
+            for (0..8) |i| {
+                const p = [3]f32{ if (i & 1 != 0) 1 else -1, if (i & 2 != 0) 1 else -1, if (i & 4 != 0) 1 else -1 };
+                const cw = p[0] * m[3] + p[1] * m[7] + p[2] * m[11] + m[15];
+                const x = ((p[0] * m[0] + p[1] * m[4] + p[2] * m[8] + m[12]) / cw + 1) / 2 * w;
+                try std.testing.expect(x > right);
+            }
+        }
+    }
+    // Small windows leave it out.
+    try std.testing.expect(showcaseOrigin(1280, 720) == null);
 }

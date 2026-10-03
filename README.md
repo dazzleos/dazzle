@@ -15,8 +15,9 @@ On top of it is **stardust-shell**, a minimal Wayland compositor. Init (PID 1, t
 privileges) starts the shell as an unprivileged user, and the shell starts
 the demo as its Wayland client. USB mice and keyboards work: the shell
 shows a cursor and passes input to the window. The demo, a native app, shows a
-spinning, textured, depth-tested cube. Rings spread out and
-fade where the pointer clicks. The IP address, rendering
+spinning, textured, depth-tested cube, and a showcase of the 2D graphics
+library in Material 3's shapes and colours. Rings spread out and fade
+where the pointer clicks. The IP address, rendering
 statistics and the last key pressed appear in its top left, in Fira Sans.
 A Vulkan-style API may follow.
 
@@ -30,6 +31,7 @@ The code is split into Zig modules, linked statically into each program:
 | `vc4` | `src/vc4/` | The low-level graphics API for the VideoCore IV, described below |
 | `glsl` | `src/glsl/` | GLSL ES 1.00 shaders for `vc4`: the compiler front end, and pipelines for drawing with them |
 | `app` | `src/app/` | Native apps' windows on stardust-shell: buffers shared with the shell, frame pacing and input |
+| `gfx` | `src/gfx/` | 2D graphics for the toolkit: anti-aliased rounded rectangles, circles, polygons and polylines, filled or stroked, blended |
 | `font` | `src/font/` | OpenType font rendering, described below |
 | `wayland` | `src/wayland/` | The Wayland wire protocol (with file descriptor passing), the interfaces Stardust uses, and a small client library |
 | `stardust-init` | `src/init/` | The init program: mounts, network, log server, device permissions, starting the shell |
@@ -52,6 +54,28 @@ The `vc4` module:
 | `qpu.zig` | QPU instruction encoder, hazard checker, instruction pairing and disassembler |
 | `qpu_sim.zig` | QPU simulator used by the tests to run shaders on the build machine |
 | `reference_shaders.zig` | The original hand-written triangle shaders, known to work on hardware |
+
+The `gfx` module draws 2D shapes, the toolkit's foundation:
+
+| File | Contents |
+|---|---|
+| `canvas.zig` | `Canvas`: records shapes (on the CPU) into batches of vertices: rectangles with per-corner radii, circles, polygons and polylines, filled or stroked, with an origin and a clip rectangle |
+| `geometry.zig` | Polygon triangulation (ear clipping, concave polygons included) and stroke strips with mitred joins, with anti-aliasing fringes |
+| `shaders.zig` | The 2D shaders, written in Zig with the compiler's builder API |
+| `renderer.zig` | `Renderer`: draws a canvas into a `vc4` frame |
+| `preview.zig` | Renders a canvas on the CPU through the real shaders (in the QPU simulator), for tests and preview images |
+
+Everything is anti-aliased and blends over what is below it: the fragment
+shaders read the tile buffer's colour and mix (source-over, straight
+alpha), which the hardware supports without a blend unit. Rounded
+rectangles are cut into a 3x3 grid: the four corner cells compute the
+exact distance to the rounded outline per pixel (with exact coverage at
+square corners), while the edges and centre are plain triangles whose
+straight edges fade over a one-pixel fringe. So the costlier shader only
+runs over the corners, and a stroked rectangle skips its inside entirely.
+Polygons and polylines are triangulated on the CPU with the same fringes.
+Shapes of one kind are drawn together when nothing drawn in between
+overlaps them, so a screen of separate cards is a couple of draws.
 
 The `app` module gives a native app a window: a Wayland toplevel on the
 shell, with up to three buffers the GPU renders into in its T-tiled layout,
@@ -167,7 +191,8 @@ The demo program (`src/demo/`):
 | File | Contents |
 |---|---|
 | `main.zig` | The window (from the `app` module), the frame loop, input and timing statistics |
-| `rings.zig` | The rings drawn where the pointer clicks: one triangle strip, coloured on the CPU |
+| `rings.zig` | The rings drawn where the pointer clicks: stroked circles on the 2D canvas, fading out |
+| `shapes.zig` | The showcase of the 2D canvas: a card, buttons, FABs, chips, text fields, selection controls, polygons, strokes and translucent circles, in Material 3's baseline colours |
 | `cube.zig` | The cube: a GLSL pipeline with depth testing and culling, vertex and index buffers, and a tiled texture |
 | `hud.zig` | The statistics overlay: text drawn by the font renderer into a texture, shown as a quad over the top left corner |
 | `netinfo.zig` | Looks up the IPv4 address (SIOCGIFCONF, no privileges needed) |
@@ -374,9 +399,11 @@ is animating; it goes out with the client's next frame.
 
 Moving a USB mouse moves the cursor. Over the window, each click starts a
 small ring: blue for the left button, orange for the right and green for
-the middle. The rings grow and fade
-into the background. (There is no blending yet, so the colour moves
-towards the background colour instead.)
+the middle. The rings grow and fade out.
+
+Below the overlay, the shape showcase draws a set of Material 3
+components with the 2D canvas (when the window has room for it beside the
+cube).
 
 The overlay is redrawn twice a second, and the same statistics go to the
 log every 5 seconds. If the cube shows its inside faces rather than its
@@ -496,12 +523,10 @@ GPU or display).
 - Mipmaps, more texture formats, and depth buffers stored to memory.
 - Add `DRM_IOCTL_VC4_GET_HANG_STATE` reporting for GPU hangs.
 - Shaders written in Zig, replacing GLSL.
-- Blending (in the fragment shader, reading the tile buffer), rendering to
-  textures, and more vertex attribute formats.
+- Rendering to textures, and more vertex attribute formats.
 - A Vulkan-style API on `vc4`.
 - Text: ligatures and other GSUB features, hinting or stem darkening for
-  small sizes, and text drawn by the GPU (a glyph atlas texture, once
-  blending is supported).
+  small sizes, and text drawn by the GPU (a glyph atlas texture, blended).
 - The shell: `wl_output`, more than one visible window, blending for
   translucent windows, pointer acceleration, keymaps (XKB) and key repeat,
   and touch screens.
