@@ -14,6 +14,7 @@ its own GPU shaders and draws a triangle by talking to `vc4` directly.
 | Path | Contents |
 |---|---|
 | `src/main.zig` | Init program: mounts `/proc`, `/sys`, `/dev`, finds the display, draws, keeps the image on screen |
+| `src/logserver.zig` | Serves the kernel and init log over TCP (telnet) and announces the Pi's address |
 | `src/qpu.zig` | QPU (shader processor) instruction encoder, hazard checker and disassembler |
 | `src/shaders.zig` | Coordinate, vertex and fragment shaders for the triangle, generated with `qpu.zig` |
 | `src/vc4/cl.zig` | Binning control list packets and shader record layout |
@@ -52,8 +53,8 @@ scripts/build-image.sh         # build/boot/ and build/stardust.img
 
 The kernel comes from `make tinyconfig` plus `kernel/stardust.config`. The
 script fails if any requested option is dropped because a dependency is
-missing. The result is a zImage of about 1.2 MB that includes the vc4 DRM
-driver.
+missing. The result is a zImage of about 1.8 MB that includes the vc4 DRM
+driver, networking and the USB Ethernet drivers.
 
 ## Running on a Pi Zero
 
@@ -61,18 +62,53 @@ Write `build/stardust.img` to an SD card (`dd`, or Raspberry Pi Imager's
 "Use custom" option). Alternatively, copy the contents of `build/boot/` onto
 any FAT32-formatted card.
 
-Connect HDMI and, ideally, a 3.3V USB serial adapter to GPIO 14 (TX) and 15
-(RX) at 115200 baud. The serial console shows the kernel log and the init
-program's progress:
+Connect HDMI, and a USB Ethernet adapter on the Zero's USB (OTG) port via a
+micro-USB OTG adapter, cabled to your network. The kernel has drivers for
+common adapter chipsets: Realtek RTL8152/8153, ASIX AX88772/AX88179, SMSC
+LAN95xx, Microchip LAN78xx and generic CDC Ethernet.
+
+### Reading the log over the network
+
+The kernel gets an address by DHCP during boot (`ip=` in `boot/cmdline.txt`).
+Init then starts a log server before touching the GPU, so the log stays
+readable if a GPU job hangs. On your computer:
+
+```sh
+nc -ul 5555            # wait for the Pi to announce its address
+telnet <pi-address>    # or: nc <pi-address> 23
+```
+
+The announcement is one line, `stardust <pi-address> 23`, sent once at boot
+to the host and port in `stardust.announce=` in `cmdline.txt` (currently
+192.168.1.83:5555). The Pi also asks the DHCP server for the hostname
+`stardust`, so it may show up under that name in your router's lease list.
+
+The telnet session prints the whole log since boot (kernel and init
+messages) and then follows new messages:
 
 ```
-stardust: starting as init
-stardust: opened /dev/dri/card0 (vc4)
-stardust: V3D revision <rev>, <n> slices of <n> QPUs
-stardust: output connector <id> on crtc <id>: <mode> <width>x<height>@<hz>
-stardust: rendered frame
-stardust: displaying triangle
+[    4.731220] stardust: starting as init
+[    4.739512] stardust: log server listening on TCP port 23
+[    4.741008] stardust: opened /dev/dri/card0 (vc4)
+[    4.741903] stardust: V3D revision <rev>, <n> slices of <n> QPUs
+[    4.802114] stardust: output connector <id> on crtc <id>: <mode> <width>x<height>@<hz>
+[    4.811875] stardust: rendered frame
+[    4.833540] stardust: displaying triangle
 ```
+
+Timestamps above are illustrative. To use a static address instead of DHCP,
+replace `ip=::::stardust::dhcp` in `cmdline.txt` with, for example:
+
+```
+ip=192.168.1.50::192.168.1.1:255.255.255.0:stardust::off
+```
+
+If no adapter is plugged in, boot waits about 12 seconds for one before
+continuing without a network. With an adapter but no cable, it waits 10
+seconds for a link (`carrier_timeout=10`).
+
+The serial console on GPIO 14 (TX) and 15 (RX), 115200 baud, still works and
+shows the same messages. It is the fallback if the network does not come up.
 
 The firmware picks the Zero or Zero W device tree in `config.txt`. The Zero
 2 W has a different SoC (BCM2710, ARMv8) and is not supported yet.
@@ -86,8 +122,9 @@ The firmware picks the Zero or Zero W device tree in `config.txt`. The Zero
   10 seconds and exits. Iterating on GPU code this way avoids rebuilding the
   SD card.
 - **QEMU:** `scripts/run-qemu.sh` boots the kernel and initramfs in QEMU's
-  `raspi0` machine. QEMU does not emulate the 3D engine or HDMI, so this only
-  checks that the kernel boots and init runs. It ends with
+  `raspi0` machine with an emulated USB network card. `telnet localhost
+  2323` reaches the log server. QEMU does not emulate the 3D engine or HDMI,
+  so this checks the kernel, init and networking only. The log ends with
   `stardust: error: NoVc4Device`.
 
 ## How the triangle is drawn
@@ -119,6 +156,8 @@ References: Broadcom's *VideoCore IV 3D Architecture Reference Guide*,
 ## Status
 
 The kernel builds and boots in QEMU, and the init program runs as PID 1.
+In QEMU the network comes up by DHCP over an emulated USB network card, the
+address announcement arrives and the log server streams the log.
 The GPU path has not run on hardware yet. Its shaders and the complete
 submitted job have been checked offline against the kernel's own
 `vc4_validate_shaders.c` and `vc4_validate.c`, which accept them. Whether

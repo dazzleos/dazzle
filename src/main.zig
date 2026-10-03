@@ -1,13 +1,15 @@
 //! Stardust init: the only program in the system image.
 //!
 //! When started by the kernel as PID 1 it mounts the pseudo filesystems,
-//! then brings up the display and renders a triangle with the V3D. It can
+//! starts the network log server, then brings up the display and renders a
+//! triangle with the V3D. It can
 //! also be run as an ordinary program on Raspberry Pi OS (from a text
 //! console, with no compositor holding the display) for development.
 
 const std = @import("std");
 const linux = std.os.linux;
 const drm = @import("drm.zig");
+const logserver = @import("logserver.zig");
 const sys = @import("sys.zig");
 const triangle = @import("triangle.zig");
 const vc4 = @import("vc4.zig");
@@ -16,8 +18,14 @@ const print = sys.print;
 
 pub fn main() void {
     const is_init = linux.getpid() == 1;
+    if (is_init) {
+        mountPseudoFilesystems();
+        sys.logToKmsg();
+    }
     print("stardust: starting{s}\n", .{if (is_init) " as init" else ""});
-    if (is_init) mountPseudoFilesystems();
+    // Start serving the log before touching the GPU, so it stays readable
+    // if a GPU job hangs.
+    if (is_init) logserver.start();
 
     run(is_init) catch |err| print("stardust: error: {s}\n", .{@errorName(err)});
 
@@ -120,4 +128,5 @@ test {
     _ = @import("drm.zig");
     _ = @import("vc4.zig");
     _ = @import("triangle.zig");
+    _ = @import("logserver.zig");
 }

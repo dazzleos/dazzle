@@ -47,20 +47,53 @@ pub fn close(fd: linux.fd_t) void {
     _ = linux.close(fd);
 }
 
+/// Sleeps on the monotonic clock.
+///
+/// On 32-bit ARM this uses clock_nanosleep_time64: the Stardust kernel is
+/// built without CONFIG_COMPAT_32BIT_TIME, so the older 32-bit time
+/// syscalls (nanosleep, clock_nanosleep) that std.os.linux uses there fail
+/// with ENOSYS.
 pub fn sleepMs(ms: u32) void {
-    const ts: linux.timespec = .{ .sec = @intCast(ms / 1000), .nsec = @intCast(@as(u64, ms % 1000) * std.time.ns_per_ms) };
-    _ = linux.nanosleep(&ts, null);
+    var ts: linux.kernel_timespec = .{
+        .sec = ms / 1000,
+        .nsec = @as(i64, ms % 1000) * std.time.ns_per_ms,
+    };
+    const sys_nr = if (@hasField(linux.SYS, "clock_nanosleep_time64"))
+        linux.SYS.clock_nanosleep_time64
+    else
+        linux.SYS.clock_nanosleep;
+    while (true) {
+        const rc = linux.syscall4(sys_nr, @intFromEnum(linux.CLOCK.MONOTONIC), 0, @intFromPtr(&ts), @intFromPtr(&ts));
+        if (linux.errno(rc) != .INTR) return;
+    }
 }
 
-/// Writes formatted text to stderr (the serial console when running as
-/// PID 1).
+var kmsg_fd: ?linux.fd_t = null;
+
+/// Sends `print` output to the kernel log (/dev/kmsg) instead of stderr.
+/// The kernel still echoes it to the console, and the log server can then
+/// serve init's messages together with the kernel's.
+pub fn logToKmsg() void {
+    kmsg_fd = open("/dev/kmsg", .{ .ACCMODE = .WRONLY, .CLOEXEC = true }) catch null;
+}
+
+/// Writes formatted text to the kernel log if `logToKmsg` was called,
+/// otherwise to stderr.
 pub fn print(comptime fmt: []const u8, args: anytype) void {
     var buf: [512]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, fmt, args) catch blk: {
+    // "<5>" is the notice log level; it is ignored when writing to stderr.
+    const prefix = "<5>";
+    @memcpy(buf[0..prefix.len], prefix);
+    const msg = std.fmt.bufPrint(buf[prefix.len..], fmt, args) catch blk: {
         const trunc = "...(truncated)\n";
         @memcpy(buf[buf.len - trunc.len ..], trunc);
-        break :blk &buf;
+        break :blk buf[prefix.len..];
     };
+    if (kmsg_fd) |fd| {
+        // Each write to /dev/kmsg is one log record.
+        _ = linux.write(fd, &buf, prefix.len + msg.len);
+        return;
+    }
     var rest: []const u8 = msg;
     while (rest.len > 0) {
         const rc = linux.write(2, rest.ptr, rest.len);
