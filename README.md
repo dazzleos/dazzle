@@ -154,19 +154,14 @@ References: Broadcom's *VideoCore IV 3D Architecture Reference Guide*,
 
 ## Status
 
-The kernel builds and boots in QEMU, and the init program runs as PID 1.
-In QEMU the network comes up by DHCP over an emulated USB network card and
-the log server streams the log. On a Pi Zero, networking and the log server
-work.
-The GPU path has not run on hardware yet. Its shaders and the complete
-submitted job have been checked offline against the kernel's own
-`vc4_validate_shaders.c` and `vc4_validate.c`, which accept them. Whether
-the hardware draws the expected image still needs a real Pi Zero.
+The triangle renders on a Raspberry Pi Zero over HDMI, with the log
+readable over the network. In QEMU the kernel boots, the network comes up
+by DHCP over an emulated USB network card and the log server streams the
+log (QEMU cannot emulate the GPU or display).
 
 ## Next steps
 
-- Confirm the triangle on hardware; add `DRM_IOCTL_VC4_GET_HANG_STATE`
-  reporting for GPU hangs.
+- Add `DRM_IOCTL_VC4_GET_HANG_STATE` reporting for GPU hangs.
 - Replace the hand-written shaders with a compiler: an SSA IR, register
   allocation and instruction scheduling for the QPU, then a GLSL ES 1.00
   front end.
