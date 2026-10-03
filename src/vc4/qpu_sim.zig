@@ -35,6 +35,9 @@ pub const Env = struct {
     frag_z: Vec = splat(0),
     /// Memory the texture unit samples from; P0's offset indexes into it.
     texture_memory: []const u8 = &.{},
+    /// Fragment shaders: the packed colours the tile buffer holds, which a
+    /// colour load reads.
+    tlb_color_in: Vec = splat(0),
 };
 
 pub const max_vpm_out = 32;
@@ -211,8 +214,9 @@ pub fn run(code: []const qpu.Inst, env: Env) Error!Result {
 
         var add_result: Vec = undefined;
         var mul_result: Vec = undefined;
-        const add_op = qpu.getAddOp(inst);
-        const mul_op = qpu.getMulOp(inst);
+        // Immediate loads use the ALU fields for their value.
+        const add_op: qpu.AddOp = if (sig == .load_imm) .nop else qpu.getAddOp(inst);
+        const mul_op: qpu.MulOp = if (sig == .load_imm) .nop else qpu.getMulOp(inst);
 
         if (sig == .load_imm) {
             if (pack != 0 or pm) return error.Unsupported;
@@ -279,6 +283,7 @@ pub fn run(code: []const qpu.Inst, env: Env) Error!Result {
                 std.mem.copyForwards(Vec, s.tmu_fifo[0 .. s.tmu_fifo_len - 1], s.tmu_fifo[1..s.tmu_fifo_len]);
                 s.tmu_fifo_len -= 1;
             },
+            .color_load => s.acc[4] = env.tlb_color_in,
             .prog_end => end_at = ip + 2,
             .none, .small_imm, .load_imm, .scoreboard_unlock, .wait_scoreboard, .thread_switch, .last_thread_switch => {},
             else => return error.Unsupported,
@@ -537,4 +542,46 @@ test "hand-written fragment shader" {
     const r = try run(fs.code(), .{ .varyings = &varyings, .frag_w = splatF(2.0) });
     try testing.expectEqual(@as(usize, 3), r.varyings_read);
     for (0..lanes) |i| try testing.expectEqual(packColor(rs(i), gs(i), bs(i), 1.0), r.tlb_color.?[i]);
+}
+
+test "a compiled shader blends with the tile buffer" {
+    const compiler = @import("compiler.zig");
+    // out = src * a + dst * (1 - a), per channel, with src from uniforms:
+    // blue-ish at 25% over whatever the tile holds.
+    var s = compiler.Shader.init(.fragment);
+    const dst = s.tlbColorLoad();
+    const alpha = s.uniform(3);
+    const inv = s.fsub(s.constantF(1.0), alpha);
+    var out: [4]compiler.Value = undefined;
+    for (0..4) |c| {
+        const d = s.unpackUnorm8(dst, @intCast(c));
+        const src = if (c == 3) s.constantF(1.0) else s.uniform(@intCast(c));
+        out[c] = s.fadd(s.fmul(src, alpha), s.fmul(d, inv));
+    }
+    s.tlbColor(s.packUnorm8888(out[0], out[1], out[2], out[3]));
+    const compiled = try compiler.compile(&s);
+    try qpu.validate(compiled.code(), .fragment, null);
+
+    // The uniform stream in the order the code reads it.
+    const values = [4]f32{ 1.0, 0.5, 0.0, 0.25 }; // B, G, R, alpha
+    var uniforms: [compiler.max_uniforms]u32 = undefined;
+    for (compiled.uniforms(), 0..) |k, i| uniforms[i] = @bitCast(values[k.user]);
+    // Lane i's tile holds grey level 16 * i.
+    var tile: Vec = undefined;
+    for (&tile, 0..) |*t, i| {
+        const g: u32 = @intCast(16 * i);
+        t.* = 0xff000000 | g << 16 | g << 8 | g;
+    }
+    const r = try run(compiled.code(), .{ .uniforms = uniforms[0..compiled.uniforms().len], .tlb_color_in = tile });
+    for (0..lanes) |i| {
+        const g: f32 = @as(f32, @floatFromInt(16 * i)) / 255;
+        const want = packColor(g * 0.75, 0.5 * 0.25 + g * 0.75, 0.25 + g * 0.75, 1.0);
+        const got = r.tlb_color.?[i];
+        // Within one step per channel (rounding).
+        for (0..4) |c| {
+            const shift: u5 = @intCast(c * 8);
+            const diff = @as(i32, @intCast((got >> shift) & 0xff)) - @as(i32, @intCast((want >> shift) & 0xff));
+            try testing.expect(diff >= -1 and diff <= 1);
+        }
+    }
 }

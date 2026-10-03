@@ -87,6 +87,9 @@ pub const Op = enum {
     pack_screen_xy,
     /// Samples texture unit 0 at (s, t); the result is a packed 8888 texel.
     tex,
+    /// The colour already in the tile buffer at this fragment (fragment
+    /// shaders), as a packed 8888 value: what blending mixes with.
+    tlb_color_load,
 
     // Outputs
     vpm_write,
@@ -228,6 +231,12 @@ pub const Shader = struct {
     }
     pub fn texture(s: *Shader, tex_s: Value, tex_t: Value) Value {
         return s.pushSrcs(.tex, &.{ tex_s, tex_t }, 0);
+    }
+    /// The colour the tile buffer holds at this fragment, packed like
+    /// `tlbColor`'s input (fragment shaders). Read it to blend.
+    pub fn tlbColorLoad(s: *Shader) Value {
+        std.debug.assert(s.stage == .fragment);
+        return s.push(.{ .op = .tlb_color_load });
     }
     pub fn vpmWrite(s: *Shader, v: Value) void {
         _ = s.pushSrcs(.vpm_write, &.{v}, 0);
@@ -425,7 +434,7 @@ pub fn compileWithOptions(shader: *const Shader, options: Options) Error!Compile
         if (!live[j]) continue;
         const inst = shader.insts[j];
         switch (inst.op) {
-            .pack_screen_xy, .tex => class[j] = .a_only,
+            .pack_screen_xy, .tex, .tlb_color_load => class[j] = .a_only,
             .unpack_unorm8 => class[@intFromEnum(inst.srcs[0])] = .a_only,
             else => {},
         }
@@ -673,6 +682,16 @@ pub fn compileWithOptions(shader: *const Shader, options: Options) Error!Compile
                 try g.emit(try qpu.mov(dst.dst(), qpu.r(4)));
                 g.out.num_texture_samples += 1;
             },
+            .tlb_color_load => {
+                // Reading the tile buffer needs the scoreboard (writes wait
+                // for it implicitly; reads do not).
+                if (!g.scoreboard_waited) {
+                    try g.emit(qpu.nop(.wait_scoreboard));
+                    g.scoreboard_waited = true;
+                }
+                try g.emit(qpu.nop(.color_load));
+                try g.emit(try qpu.mov(dst.dst(), qpu.r(4)));
+            },
             .vpm_write, .tlb_z, .tlb_color => {
                 const periph: u6 = switch (inst.op) {
                     .vpm_write => qpu.W.vpm,
@@ -713,6 +732,8 @@ const Gen = struct {
     /// Index of the last SFU write, whose result appears in r4 two
     /// instructions later.
     sfu_ip: ?usize = null,
+    /// A fragment shader has waited for the tile buffer scoreboard.
+    scoreboard_waited: bool = false,
 
     fn addUniform(g: *Gen, k: UniformKind) Error!void {
         if (g.out.uniform_len == max_uniforms) return error.TooManyUniforms;
@@ -762,7 +783,7 @@ const Gen = struct {
             // r4 must not be read, and nothing else may write it, in the
             // two instructions after an SFU write.
             const touches_r4 = qpu.readsAccumulator(inst, 4) or qpu.getSig(inst) == .load_tmu0 or
-                qpu.getSig(inst) == .load_tmu1 or sfuWrite(inst);
+                qpu.getSig(inst) == .load_tmu1 or qpu.getSig(inst) == .color_load or sfuWrite(inst);
             if (touches_r4) {
                 while (o.code_len < sfu + 3) try g.push(qpu.nop(.none));
                 g.sfu_ip = null;
@@ -791,6 +812,8 @@ fn sfuWrite(inst: qpu.Inst) bool {
 }
 
 fn isTlb(inst: qpu.Inst) bool {
+    const sig = qpu.getSig(inst);
+    if (sig == .wait_scoreboard or sig == .color_load) return true;
     return qpu.writesAddr(inst, qpu.W.tlb_z) or qpu.writesAddr(inst, qpu.W.tlb_color_all) or
         qpu.writesAddr(inst, qpu.W.tlb_color_ms) or qpu.writesAddr(inst, qpu.W.tlb_stencil_setup);
 }

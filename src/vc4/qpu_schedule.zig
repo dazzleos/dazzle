@@ -143,6 +143,12 @@ fn accesses(i: qpu.Inst) Access {
             a.write(Res.tmu, 1);
             a.write(Res.r4, 1);
         },
+        // Tile buffer accesses stay in order, after the scoreboard wait.
+        .wait_scoreboard => a.write(Res.tlb, 1),
+        .color_load => {
+            a.write(Res.tlb, 1);
+            a.write(Res.r4, 1);
+        },
         else => {},
     }
     const cond_add: qpu.Cond = @enumFromInt(@as(u3, @truncate(i >> 49)));
@@ -289,7 +295,7 @@ pub fn schedule(code: []const qpu.Inst, stage: qpu.Stage) Error!Result {
     if (stage == .fragment) {
         var shift: usize = 0;
         for (out.code[0..@min(2, out.len)], 0..) |inst, ip| {
-            if (touchesTlb(inst)) shift = 2 - ip;
+            if (touchesTlb(inst)) shift = @max(shift, 2 - ip);
         }
         if (shift > 0) {
             if (out.len + shift > max_insts) return error.TooManyInstructions;
@@ -302,6 +308,8 @@ pub fn schedule(code: []const qpu.Inst, stage: qpu.Stage) Error!Result {
 }
 
 fn touchesTlb(i: qpu.Inst) bool {
+    const sig = qpu.getSig(i);
+    if (sig == .wait_scoreboard or sig == .color_load) return true;
     inline for (.{ qpu.W.tlb_z, qpu.W.tlb_color_all, qpu.W.tlb_color_ms, qpu.W.tlb_stencil_setup, qpu.W.tlb_alpha_mask }) |w|
         if (qpu.writesAddr(i, w)) return true;
     return false;

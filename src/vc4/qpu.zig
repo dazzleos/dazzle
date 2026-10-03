@@ -588,6 +588,11 @@ const pm_pack_unpack_mask: u64 = 0xf << 52 | 1 << 56 | 7 << 57;
 /// uses the mul ALU, if one instruction can encode both. Both must be
 /// plain ALU instructions (no signal other than a small immediate).
 pub fn merge(x: Inst, y: Inst) ?Inst {
+    // Immediate loads and branches use the ALU fields for other things.
+    for ([_]Inst{ x, y }) |i| switch (getSig(i)) {
+        .load_imm, .branch => return null,
+        else => {},
+    };
     const x_add = getAddOp(x) != .nop;
     const x_mul = getMulOp(x) != .nop;
     const y_add = getAddOp(y) != .nop;
