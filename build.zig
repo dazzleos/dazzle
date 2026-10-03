@@ -5,6 +5,7 @@ const Modules = struct {
     vc4: *std.Build.Module,
     glsl: *std.Build.Module,
     app: *std.Build.Module,
+    gfx: *std.Build.Module,
     font: *std.Build.Module,
     wayland: *std.Build.Module,
     build_info: *std.Build.Module,
@@ -16,6 +17,7 @@ const Modules = struct {
 /// * `vc4`: the low-level VideoCore IV graphics API
 /// * `glsl`: GLSL shaders for the vc4 API (until shaders are written in Zig)
 /// * `app`: native apps' windows on stardust-shell, drawn with vc4
+/// * `gfx`: 2D graphics (rounded rectangles, polygons, strokes) on vc4
 /// * `font`: OpenType font rendering
 /// * `wayland`: the Wayland wire protocol and a client library
 /// * `build_info`: `commit`, the source's git commit (short, with "-dirty"
@@ -47,6 +49,12 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
             .{ .name = "vc4", .module = vc4 },
         },
     });
+    const gfx = b.createModule(.{
+        .root_source_file = b.path("src/gfx/gfx.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "vc4", .module = vc4 }},
+    });
     const app = b.createModule(.{
         .root_source_file = b.path("src/app/app.zig"),
         .target = target,
@@ -63,7 +71,7 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     });
     const info = b.addOptions();
     info.addOption([]const u8, "commit", gitCommit(b));
-    return .{ .sys = sys, .vc4 = vc4, .glsl = glsl, .app = app, .font = font, .wayland = wayland, .build_info = info.createModule() };
+    return .{ .sys = sys, .vc4 = vc4, .glsl = glsl, .app = app, .gfx = gfx, .font = font, .wayland = wayland, .build_info = info.createModule() };
 }
 
 /// The short hash of the checked-out commit, "-dirty" if tracked files
@@ -91,6 +99,7 @@ fn addProgramModule(b: *std.Build, path: []const u8, target: std.Build.ResolvedT
             .{ .name = "vc4", .module = m.vc4 },
             .{ .name = "glsl", .module = m.glsl },
             .{ .name = "app", .module = m.app },
+            .{ .name = "gfx", .module = m.gfx },
             .{ .name = "font", .module = m.font },
             .{ .name = "wayland", .module = m.wayland },
             .{ .name = "build_info", .module = m.build_info },
@@ -381,6 +390,7 @@ pub fn build(b: *std.Build) void {
         host.vc4,
         host.glsl,
         host.app,
+        host.gfx,
         host.font,
         host.wayland,
         addProgramModule(b, "src/init/main.zig", b.graph.host, test_optimize, host, null),
