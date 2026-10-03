@@ -15,8 +15,9 @@ the kernel's `vc4` driver, so programs can pick the one that suits them:
 
 A Vulkan-style API may follow, and a simple Wayland shell later. Today init
 (PID 1, the only process with root privileges) starts a demo program as an
-unprivileged user. It shows a spinning, textured, depth-tested cube by
-default, drawn with either API.
+unprivileged user. The demo shows a spinning, textured, depth-tested cube
+drawn with OpenGL ES. The IP address and rendering statistics appear in the
+top left, in the system font.
 
 ## Layout
 
@@ -77,6 +78,7 @@ The GLSL front end (`src/gles/glsl/`):
 | `parser.zig` | Parser producing an AST |
 | `lower.zig` | Type checking and lowering to the vc4 compiler's SSA builder, one value per scalar component, with constant folding |
 | `program.zig` | Compiling shaders and linking programs: uniform slots, attribute locations, varying matching, and deriving the coordinate shader |
+| `shader_tests.zig` | Tests: the early demos' shaders written with the builder API, checked in the simulator against the hand-written reference shaders and against GLSL |
 
 Supported so far: `attribute`, `uniform`, `varying` and `const` globals of
 float, vector, matrix and `sampler2D` types; `main()` with local variables,
@@ -119,11 +121,10 @@ The demo program (`src/demo/`):
 
 | File | Contents |
 |---|---|
-| `main.zig` | Picks the demo from its argument, opens the GPU and display, and runs the frame loop |
-| `demos.zig` | The `vc4` API demo scenes: `triangle`, `spin` and `cube` |
-| `programs.zig` | Those demos' shaders, written with the compiler's builder API |
-| `glcube.zig` | The cube through EGL and OpenGL ES 2.0, written as a C program would be |
-| `textdemo.zig` | A specimen page of the system font with a live status line, drawn on the CPU |
+| `main.zig` | EGL setup, the frame loop and timing statistics |
+| `cube.zig` | The cube: GLSL shaders, vertex and index buffers, texture, depth testing and culling, written as a C GL program would be |
+| `hud.zig` | The statistics overlay: text drawn by the font renderer into a texture, shown as a quad over the top left corner |
+| `netinfo.zig` | Looks up the IPv4 address (SIOCGIFCONF, no privileges needed) |
 
 ### Privileges
 
@@ -135,8 +136,8 @@ passwords or logins.
   user, mode 0660. The demo is the first to open the card, so it becomes
   DRM master and can set modes and flip pages without privileges.
 - Init forks, drops to the user (no supplementary groups, then the group,
-  then the user ID) and execs `/bin/stardust-demo` with the
-  `stardust.demo=` name. The demo's stdout and stderr are init's
+  then the user ID) and execs `/bin/stardust-demo`. The demo's stdout and
+  stderr are init's
   `/dev/kmsg` descriptor, because only root can open that for writing.
 - The network manager runs as the same user but keeps three capabilities:
   configuring interfaces and routes (`CAP_NET_ADMIN`), tying its DHCP
@@ -225,13 +226,10 @@ messages) and then follows new messages:
 [    4.746230] stardust: network: eth0 link up
 [    4.940117] stardust: network: eth0 is 192.168.1.42/24, gateway 192.168.1.1 (DHCP, lease 86400 s)
 [    4.740312] stardust: started /bin/stardust-demo (pid 24) as uid 1000
-[    4.740601] stardust: demo cube running as uid 1000
+[    4.740601] stardust: demo running as uid 1000
 [    4.741008] stardust: opened /dev/dri/card0 (vc4)
-[    4.741903] stardust: V3D revision <rev>, <n> slices of <n> QPUs
-[    4.802114] stardust: output connector <id> on crtc <id>: <mode> <width>x<height>@<hz>
-[    4.811875] stardust: shaders compiled and uploaded
-[    4.833540] stardust: displaying cube
-[    9.840211] stardust: 300 frames in 5.0s (60.0 fps), render <t> ms/frame
+[    4.802114] stardust: OpenGL ES 2.0 Stardust on VideoCore IV (Stardust), <width>x<height>
+[    9.840211] stardust: 60.0 fps, GPU <t> ms, CPU <t> ms per frame
 ```
 
 Timestamps above are illustrative, and the order varies because the network
@@ -243,25 +241,20 @@ example:
 stardust.ip=192.168.1.50/24,192.168.1.1
 ```
 
-### Choosing a demo
+### The demo
 
-`stardust.demo=` in `cmdline.txt` selects what is drawn:
+The cube spins at the display's refresh rate. The top left corner shows:
 
-| Demo | What it shows |
-|---|---|
-| `triangle` | The original hand-written shaders, drawn once |
-| `spin` | A triangle rotating at the display's refresh rate, drawn with compiled shaders and double buffering |
-| `cube` (default) | A spinning cube with perspective, a checkerboard texture tinted per face, and depth testing |
-| `glcube` | The same cube through EGL and OpenGL ES 2.0, from GLSL source, with indexed drawing and back-face culling |
-| `text` | A specimen page of the system font at several sizes, in Latin, Greek and Cyrillic, with a status line (frame count, frame rate, uptime) redrawn every frame |
+- the IPv4 address, or "No network";
+- frames per second, the resolution and the triangle count;
+- GPU time per frame: from submitting the frame to the GPU finishing it
+  (`glFinish`, before `eglSwapBuffers` waits for the vertical blank);
+- CPU time per frame: issuing the frame's GL calls.
 
-The first three use the `vc4` API, each building on the previous one, so if
-one fails on the hardware the simpler ones narrow down where. `boot/cmdline.txt` currently selects `glcube`, to
-try the GL path on hardware; without the option `cube` is shown. `glcube`
-should look the same as `cube`: if only the inside faces show, face culling
-is reversed. The animated demos log their frame rate every 5 seconds (the
-`vc4` ones also log render time). `text` draws on the CPU, not the GPU. It
-draws the page once, then only redraws and copies the status line.
+The overlay is redrawn twice a second, and the same statistics go to the
+log every 5 seconds. If the cube shows its inside faces rather than its
+outside, face culling's winding is reversed. If the font cannot be loaded,
+the cube is drawn without the overlay and the log says why.
 
 The serial console on GPIO 14 (TX) and 15 (RX), 115200 baud, still works and
 shows the same messages. It is the fallback if the network does not come up.
@@ -274,20 +267,20 @@ The firmware picks the Zero or Zero W device tree in `config.txt`. The Zero
 - **Raspberry Pi OS:** `zig-out/bin/stardust-demo` also runs as a normal
   program on Raspberry Pi OS (Lite, or with the desktop stopped) on any Pi
   from the Zero to the Pi 3. All of them have the same VideoCore IV and
-  `vc4` driver. Run `stardust-demo [triangle|spin|cube|glcube|text [font.ttf]]` from a text
-  console as a user in the `video` group. It runs until you press Ctrl+C.
+  `vc4` driver. Run `stardust-demo [font.ttf]` from a text console as a user in the
+  `video` group (the font defaults to `/usr/share/fonts/FiraSans-Regular.ttf`). It runs until you press Ctrl+C.
   Iterating on GPU code this way avoids rebuilding the SD card.
 - **QEMU:** `scripts/run-qemu.sh` boots the kernel and initramfs in QEMU's
   `raspi0` machine with an emulated USB network card. `telnet localhost
   2323` reaches the log server. QEMU does not emulate the 3D engine or HDMI,
   so this checks the kernel, init, privileges and networking only. The log
-  ends with `stardust: error: NoVc4Device` (or `EglInitializeFailed` for
-  `glcube`) and `stardust: demo exited with status 1`.
+  ends with `stardust: error: EglInitializeFailed` and `stardust: demo
+  exited with status 1`.
 
 ## How a frame is drawn
 
-1. **Shaders.** `src/demo/programs.zig` describes each shader with the compiler's
-   builder API, as a list of SSA values. Three run per draw: a coordinate
+1. **Shaders.** The GLSL front end (`src/gles/glsl/`) lowers each shader to
+   the compiler's builder API, as a list of SSA values. Three run per draw: a coordinate
    shader the binner uses to find which 64×64 tiles each triangle covers, a
    vertex shader that outputs screen positions and varyings, and a fragment
    shader that writes the pixel colour (and depth) to the tile buffer.
@@ -340,14 +333,16 @@ References: Broadcom's *VideoCore IV 3D Architecture Reference Guide*,
 
 ## Status
 
-On a Raspberry Pi Zero the cube demo renders correctly at a steady 60 fps
-at 1920x1080 (about 6.5 ms of GPU time per frame): compiled shaders,
-perspective, texturing, depth testing and page flipping all work, with the
-log readable over the network.
+On a Raspberry Pi Zero the cube, drawn with the `vc4` API, rendered
+correctly at a steady 60 fps at 1920x1080 (about 6.5 ms of GPU time per
+frame). Compiled shaders, perspective, texturing, depth testing and page
+flipping all worked, with the log readable over the network.
 
-The OpenGL ES path (`glcube`) has not run on hardware yet. Its jobs pass
-a userspace build of the kernel's job and shader validators, but face
-culling's winding and the rendered output still need confirming on a Pi.
+The demo now draws through OpenGL ES, with the statistics overlay, and has
+not run on hardware yet. Its frames pass a userspace build of the kernel's
+job and shader validators. Face culling's winding and the rendered output
+still need confirming on a Pi. That earlier `vc4` API version of the cube
+is in the git history.
 
 In QEMU the kernel boots and init's network manager gets an address by DHCP
 over an emulated USB network card. That holds whether the card is there at

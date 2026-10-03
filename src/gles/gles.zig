@@ -33,4 +33,5 @@ test {
     _ = glsl.parser;
     _ = glsl.lower;
     _ = glsl.program;
+    _ = @import("glsl/shader_tests.zig");
 }

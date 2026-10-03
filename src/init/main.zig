@@ -9,8 +9,7 @@
 //!    port); boot never waits for the network;
 //! 3. waits for the vc4 GPU and gives the Stardust user access to its device
 //!    nodes;
-//! 4. starts /bin/stardust-demo as the Stardust user, with the demo named by
-//!    `stardust.demo=` on the kernel command line and its output going to
+//! 4. starts /bin/stardust-demo as the Stardust user, with its output going to
 //!    the kernel log;
 //! 5. reaps exited processes forever (PID 1 must never exit), restarting the
 //!    network manager if it ever stops.
@@ -40,10 +39,7 @@ pub fn main() void {
     const network_pid = network.start();
     logserver.start();
     grantGpuAccess();
-
-    var cmdline_buf: [1024]u8 = undefined;
-    const demo = sys.cmdlineValue(sys.readCmdline(&cmdline_buf), "stardust.demo");
-    const demo_pid = startDemo(demo);
+    const demo_pid = startDemo();
     reapForever(demo_pid, network_pid);
 }
 
@@ -98,13 +94,7 @@ fn grantGpuAccess() void {
 
 /// Starts the demo program as the Stardust user. Returns its PID, or null if
 /// it could not be started.
-fn startDemo(demo: ?[]const u8) ?linux.pid_t {
-    var name_buf: [32]u8 = undefined;
-    const name: ?[*:0]const u8 = if (demo) |d|
-        if (std.fmt.bufPrintZ(&name_buf, "{s}", .{d})) |z| z.ptr else |_| null
-    else
-        null;
-
+fn startDemo() ?linux.pid_t {
     const rc = linux.fork();
     switch (linux.errno(rc)) {
         .SUCCESS => {},
@@ -129,7 +119,7 @@ fn startDemo(demo: ?[]const u8) ?linux.pid_t {
         print("stardust: cannot drop privileges ({s}); not starting the demo\n", .{@errorName(err)});
         linux.exit(126);
     };
-    const argv = [_:null]?[*:0]const u8{ demo_path, name };
+    const argv = [_:null]?[*:0]const u8{demo_path};
     const envp = [_:null]?[*:0]const u8{ "HOME=/", "PATH=/bin", "USER=" ++ sys.user.name };
     const err = linux.errno(linux.execve(demo_path, &argv, &envp));
     print("stardust: cannot run {s} ({s})\n", .{ demo_path, @tagName(err) });

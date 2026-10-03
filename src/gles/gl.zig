@@ -404,11 +404,16 @@ pub export fn glPixelStorei(pname: GLenum, param: GLint) callconv(.c) void {
     }
 }
 
-/// Rendering is submitted to the GPU at `eglSwapBuffers`; until then there
-/// is nothing to flush.
+/// Rendering is submitted to the GPU at `eglSwapBuffers` (or `glFinish`);
+/// until then there is nothing to flush.
 pub export fn glFlush() callconv(.c) void {}
 
-pub export fn glFinish() callconv(.c) void {}
+/// Renders everything drawn so far and waits for the GPU to finish. The
+/// frame's colour is kept, so drawing can continue, but its depth values
+/// are not: depth lives only in the GPU's tile buffer.
+pub export fn glFinish() callconv(.c) void {
+    if (ctx()) |c| c.submit();
+}
 
 pub export fn glGetString(name: GLenum) callconv(.c) ?[*:0]const GLubyte {
     const c = ctx() orelse return null;

@@ -1,4 +1,7 @@
-//! Shaders for the demos, written against the compiler's builder API.
+//! Compiler tests: the shaders of Stardust's early demos, written against
+//! the vc4 compiler's builder API, checked in the QPU simulator against the
+//! hand-written reference shaders and against the same programs compiled
+//! from GLSL.
 //!
 //! Each vertex/coordinate shader pair reads the same attribute layout. The
 //! comments give the GLSL each program corresponds to.
@@ -435,7 +438,7 @@ pub const glsl_sources = struct {
     ;
 };
 
-const glsl = @import("gles").glsl;
+const glsl = @import("program.zig");
 
 const GlslStages = struct {
     vs: compiler.Compiled,
