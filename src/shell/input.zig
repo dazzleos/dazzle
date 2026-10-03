@@ -78,6 +78,8 @@ pub const max_devices = 32;
 pub const Devices = struct {
     /// Open event nodes, by number.
     fds: [max_devices]?linux.fd_t = @splat(null),
+    /// Whether each has sent events yet (logged once, for diagnosis).
+    active: [max_devices]bool = @splat(false),
 
     /// Opens event nodes that are not open yet.
     pub fn scan(d: *Devices) void {
@@ -88,6 +90,7 @@ pub const Devices = struct {
             // Missing, or not handed to the user yet: try again next time.
             const fd = sys.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }) catch continue;
             slot.* = fd;
+            d.active[n] = false;
             var name: [64]u8 = @splat(0);
             _ = linux.ioctl(fd, linux.IOCTL.IOR('E', 0x06, [64]u8), @intFromPtr(&name));
             print("stardust-shell: input: {s}: {s}\n", .{ path, std.mem.sliceTo(&name, 0) });
@@ -115,14 +118,19 @@ pub const Devices = struct {
             .SUCCESS => {},
             .AGAIN, .INTR => return out[0..0],
             else => |e| {
-                for (&d.fds) |*slot| if (slot.* == fd) {
+                for (&d.fds, 0..) |*slot, i| if (slot.* == fd) {
                     slot.* = null;
+                    print("stardust-shell: input: /dev/input/event{d} removed\n", .{i});
                 };
                 sys.close(fd);
                 if (e != .NODEV) print("stardust-shell: input: read failed ({s})\n", .{@tagName(e)});
                 return out[0..0];
             },
         }
+        for (&d.fds, 0..) |slot, i| if (slot == fd and !d.active[i]) {
+            d.active[i] = true;
+            print("stardust-shell: input: first events from /dev/input/event{d}\n", .{i});
+        };
         for (raw[0 .. rc / @sizeOf(RawEvent)]) |r| {
             if (n == out.len) break;
             if (decode(r.type, r.code, r.value)) |e| {

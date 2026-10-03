@@ -123,7 +123,7 @@ The init program (`src/init/`):
 | `devices.zig` | The device manager: gives the user the input devices (`/dev/input/event*`), at start and as uevents announce new ones |
 | `network.zig` | The network manager: follows Ethernet adapters and links, configures addresses and routes |
 | `dhcp.zig` | DHCP client messages (building requests, parsing replies) |
-| `logserver.zig` | Serves the kernel log over TCP (telnet) |
+| `logserver.zig` | Serves the kernel log over HTTP |
 
 The shell (`src/shell/`):
 
@@ -197,7 +197,7 @@ passwords or logins.
   device nodes are created owned by root, so it gives each one to the user
   (at start, then on each uevent that adds one), and the shell can read
   them. Init restarts it if it ever stops.
-- The log server binds port 23 as root, then drops to the same user. Reading
+- The log server binds port 80 as root, then drops to the same user. Reading
   `/dev/kmsg` needs no privileges.
 - Init logs how the shell exits, and the shell logs how its clients exit.
   Neither is restarted.
@@ -268,7 +268,7 @@ scripts/zig build qemu --release    # boot in QEMU (arguments after -- go to QEM
 Options: `-Dlinux=path/to/linux` uses an existing kernel tree,
 `-Dcross-compile=arm-linux-gnueabihf-` builds the kernel with GCC instead of
 LLVM, `-Dimage-size=<MiB>` sets the image size (default 64) and
-`-Dlog-port=<port>` the QEMU log server port (default 2323).
+`-Dhttp-port=<port>` the host port for QEMU's log server (default 8080).
 
 The kernel comes from `make tinyconfig` plus `kernel/stardust.config`. The
 build fails if any requested option is dropped because a dependency is
@@ -294,27 +294,28 @@ address by DHCP and keeps renewing the lease. The adapter can be plugged in
 or out, and the cable connected, at any time. A log server also starts
 before the GPU is touched, so the log stays readable if a GPU job hangs.
 The Pi asks the DHCP server for the hostname `stardust`, so look for that
-name in your router's lease list, then:
-
-```sh
-telnet <pi-address>    # or: nc <pi-address> 23
-```
-
-The telnet session prints the whole log since boot (kernel and init
-messages) and then follows new messages:
+name in your router's lease list, then open `http://<pi-address>/` in a
+browser (or `curl http://<pi-address>/`). It shows the whole log since
+boot: kernel, init and program messages. `http://<pi-address>/follow`
+shows the same, then new messages as they arrive (`curl -N` follows it in a
+terminal). The port can be changed with `stardust.httpport=<port>` in
+`cmdline.txt`.
 
 ```
-[    4.731220] stardust: starting as init
-[    4.739512] stardust: log server listening on TCP port 23 as uid 1000
+Stardust 6ec3896 system log. /follow shows new messages as they arrive.
+
+[    4.731220] stardust: starting as init (build 6ec3896)
+[    4.739512] stardust: log server listening on HTTP port 80 as uid 1000
 [    4.740011] stardust: network: found eth0 (<mac>)
 [    4.746230] stardust: network: eth0 link up
 [    4.940117] stardust: network: eth0 is 192.168.1.42/24, gateway 192.168.1.1 (DHCP, lease 86400 s)
 [    4.740312] stardust: started /apps/stardust-shell/stardust-shell (pid 24) as uid 1000
 [    4.741008] stardust: opened /dev/dri/card0 (vc4)
-[    4.772511] stardust-shell: display <width>x<height>
+[    4.772511] stardust-shell: build 6ec3896, display <width>x<height>
 [    4.772702] stardust-shell: listening on /run/user/1000/wayland-0
 [    4.772913] stardust-shell: started /apps/stardust-demo/stardust-demo (pid 25)
 [    4.773120] stardust-shell: input: /dev/input/event0: Logitech USB Optical Mouse
+[    4.791240] stardust-shell: cursor shown
 [    4.790100] stardust-shell: client connected
 [    4.802114] stardust: OpenGL ES 2.0 Stardust on VideoCore IV (Stardust), window <width>x<height>
 [    9.840211] stardust: 60.0 fps, GPU <t> ms, CPU <t> ms per frame
@@ -333,7 +334,8 @@ stardust.ip=192.168.1.50/24,192.168.1.1
 
 The screen shows the shell's bar along the top, and below it the demo's
 window. The cube spins at the display's refresh rate. The window's top left
-corner shows:
+corner shows, after the title, the git commit it was built from (short,
+with `-dirty` if there were uncommitted changes), then:
 
 - the IPv4 address, or "No network";
 - frames per second and the triangle count;
@@ -380,8 +382,8 @@ The firmware picks the Zero or Zero W device tree in `config.txt`. The Zero
   path as its argument). Press Ctrl+C to stop.
   Iterating on GPU code this way avoids rebuilding the SD card.
 - **QEMU:** `scripts/zig build qemu --release` boots the kernel and initramfs in QEMU's
-  `raspi0` machine with an emulated USB network card. `telnet localhost
-  2323` reaches the log server. QEMU does not emulate the 3D engine or HDMI,
+  `raspi0` machine with an emulated USB network card. `http://localhost:8080/`
+  reaches the log server. QEMU does not emulate the 3D engine or HDMI,
   so this checks the kernel, init, privileges and networking only. The log
   ends with `stardust-shell: error: NoVc4Device` and `stardust: shell exited
   with status 1`.

@@ -53,6 +53,9 @@ pub const Hud = struct {
     /// The quad as a triangle strip of (x, y, u, v) in clip space.
     quad: [16]f32,
 
+    /// Small text after the title.
+    subtitle: []const u8 = "",
+
     /// Lines of text the panel holds, below the title.
     pub const lines = 6;
 
@@ -138,7 +141,7 @@ pub const Hud = struct {
         var dirty: ?[2]u32 = null;
         for (0..lines + 1) |i| {
             const str = if (i == 0) "Stardust" else text[i - 1];
-            const hash = std.hash.Wyhash.hash(0, str) | 1;
+            const hash = std.hash.Wyhash.hash(if (i == 0) std.hash.Wyhash.hash(0, h.subtitle) else 0, str) | 1;
             if (hash == h.drawn[i]) continue;
             h.drawn[i] = hash;
             const rows = h.band(i);
@@ -157,6 +160,10 @@ pub const Hud = struct {
             else
                 .{ .font = h.font, .size = 28 * s, .color = if (i == 1) text_color else dim_color };
             _ = try font.draw(canvas, &h.cache, style, 0, baseline, str);
+            if (i == 0 and h.subtitle.len > 0) {
+                const x = font.measure(style, str) + 16 * s;
+                _ = try font.draw(canvas, &h.cache, .{ .font = h.font, .size = 28 * s, .color = dim_color }, x, baseline, h.subtitle);
+            }
             dirty = if (dirty) |d| .{ @min(d[0], rows[0]), @max(d[1], rows[1]) } else rows;
         }
         const d = dirty orelse return;

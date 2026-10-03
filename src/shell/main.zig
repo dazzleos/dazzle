@@ -21,6 +21,7 @@ const font = @import("font");
 const server_mod = @import("server.zig");
 const render = @import("render.zig");
 const input = @import("input.zig");
+const build_info = @import("build_info");
 
 const print = sys.print;
 
@@ -52,7 +53,7 @@ fn run(init: std.process.Init.Minimal) !void {
     const dev = try vc4.device.open();
     const output = try vc4.drm.waitForOutput(dev.fd);
     var renderer = try render.Renderer.init(gpa, dev, output);
-    print("stardust-shell: display {d}x{d}\n", .{ renderer.width, renderer.height });
+    print("stardust-shell: build {s}, display {d}x{d}\n", .{ build_info.commit, renderer.width, renderer.height });
 
     var bar: ?render.Bar = null;
     var font_buf: [512]u8 = undefined;
@@ -182,6 +183,7 @@ fn run(init: std.process.Init.Minimal) !void {
                 cursor_shown = true;
                 if (renderer.showCursor()) {
                     renderer.moveCursor(@intFromFloat(pointer.x), @intFromFloat(pointer.y));
+                    print("stardust-shell: cursor shown\n", .{});
                 } else |err| print("stardust-shell: no cursor: {s}\n", .{@errorName(err)});
             }
             server.framePresented(@truncate((sys.nowNs() - start) / std.time.ns_per_ms));

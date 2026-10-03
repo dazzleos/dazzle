@@ -28,6 +28,7 @@ const sys = @import("sys");
 const logserver = @import("logserver.zig");
 const network = @import("network.zig");
 const devices = @import("devices.zig");
+const build_info = @import("build_info");
 
 const print = sys.print;
 
@@ -41,7 +42,7 @@ pub fn main() void {
     }
     mountPseudoFilesystems();
     sys.logToKmsg();
-    print("stardust: starting as init\n", .{});
+    print("stardust: starting as init (build {s})\n", .{build_info.commit});
     _ = linux.syscall2(.sethostname, @intFromPtr(network.hostname), network.hostname.len);
     const network_pid = network.start();
     logserver.start();

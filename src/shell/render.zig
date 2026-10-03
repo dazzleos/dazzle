@@ -177,6 +177,7 @@ pub const Renderer = struct {
     bar: ?server.Texture = null,
     /// The cursor's picture, once it is shown.
     cursor_bo: ?vc4.Bo = null,
+    cursor_move_failed: bool = false,
 
     pub fn init(gpa: std.mem.Allocator, dev: vc4.Device, output: vc4.drm.Output) !Renderer {
         const display = try vc4.display.Display.init(dev, output);
@@ -255,7 +256,10 @@ pub const Renderer = struct {
     /// Moves the arrow's tip to (`x`, `y`) on the screen.
     pub fn moveCursor(r: *Renderer, x: i32, y: i32) void {
         if (r.cursor_bo == null) return;
-        vc4.drm.moveCursor(r.dev.fd, r.display.output.crtc_id, x - cursor.hotspot[0], y - cursor.hotspot[1]) catch {};
+        vc4.drm.moveCursor(r.dev.fd, r.display.output.crtc_id, x - cursor.hotspot[0], y - cursor.hotspot[1]) catch |err| {
+            if (!r.cursor_move_failed) sys.print("stardust-shell: cannot move the cursor: {s}\n", .{@errorName(err)});
+            r.cursor_move_failed = true;
+        };
     }
 
     /// Draws a frame and shows it at the next vertical blank (waiting for it).

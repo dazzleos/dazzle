@@ -99,9 +99,9 @@ pub fn cmdlineValue(cmdline: []const u8, key: []const u8) ?[]const u8 {
 }
 
 test "cmdline values" {
-    const c = "console=ttyAMA0 stardust.demo=spin stardust.logport=2323\n";
+    const c = "console=ttyAMA0 stardust.demo=spin stardust.httpport=8080\n";
     try std.testing.expectEqualStrings("spin", cmdlineValue(c, "stardust.demo").?);
-    try std.testing.expectEqualStrings("2323", cmdlineValue(c, "stardust.logport").?);
+    try std.testing.expectEqualStrings("8080", cmdlineValue(c, "stardust.httpport").?);
     try std.testing.expectEqual(@as(?[]const u8, null), cmdlineValue(c, "stardust"));
 }
 

@@ -21,6 +21,7 @@ const netinfo = @import("netinfo.zig");
 const window_mod = @import("window.zig");
 const rings_mod = @import("rings.zig");
 const sysinfo = @import("sysinfo.zig");
+const build_info = @import("build_info");
 const wayland = @import("wayland");
 
 const gl = gles.gl;
@@ -36,7 +37,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     _ = args.skip();
     var font_buf: [512]u8 = undefined;
     const font_path: [*:0]const u8 = args.next() orelse (sys.appFile(&font_buf, font.default_font_file) catch font.default_font_file);
-    print("stardust: demo running as uid {d}\n", .{linux.getuid()});
+    print("stardust: demo (build {s}) running as uid {d}\n", .{ build_info.commit, linux.getuid() });
 
     run(init, font_path) catch |err| {
         print("stardust: error: {s}\n", .{@errorName(err)});
@@ -115,6 +116,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     const cube = try cube_mod.Cube.init();
     var f = loadFont(gpa, font_path);
     var hud: ?hud_mod.Hud = if (f) |*fnt| try hud_mod.Hud.init(gpa, fnt, width, height, background) else null;
+    if (hud) |*hd| hd.subtitle = "build " ++ build_info.commit;
     var rings = try rings_mod.Rings.init(background);
     var input: InputStatus = .{};
     // The CPU's speed is measured against this first sample, taken cool.

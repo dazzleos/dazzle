@@ -1,32 +1,35 @@
-//! Serves the system log over TCP so it can be read without a serial cable.
+//! Serves the system log over HTTP so it can be read without a serial
+//! cable, in a browser or with curl:
 //!
-//! `telnet <pi> 23` (or `nc <pi> 23`) prints the kernel log buffer from
-//! boot, which also holds init's own messages (see `sys.print`), then
-//! follows new messages live. Each client gets its own process reading
-//! /dev/kmsg, so a hung GPU job in the demo does not stop the log. The
-//! server runs as the Stardust user once it has bound its port.
+//!     http://<pi>/         the log since boot (kernel and init messages,
+//!                          which include every program's; see `sys.print`)
+//!     http://<pi>/follow   the same, then new messages as they arrive
+//!
+//! Each request gets its own process reading /dev/kmsg, so a hung GPU job
+//! in the demo does not stop the log. The server runs as the Stardust user
+//! once it has bound its port.
 //!
 //! The port can be changed on the kernel command line with
-//! `stardust.logport=<port>`.
+//! `stardust.httpport=<port>`.
 
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
+const build_info = @import("build_info");
 
 pub const Ip4 = [4]u8;
 
 pub const Config = struct {
-    port: u16 = 23,
+    port: u16 = 80,
 };
 
 /// Reads `stardust.*` options from a kernel command line.
 pub fn parseCmdline(cmdline: []const u8) Config {
     var cfg: Config = .{};
-    if (sys.cmdlineValue(cmdline, "stardust.logport")) |v|
+    if (sys.cmdlineValue(cmdline, "stardust.httpport")) |v|
         cfg.port = std.fmt.parseInt(u16, v, 10) catch cfg.port;
     return cfg;
 }
-
 fn sockaddrIn(addr: Ip4, port: u16) linux.sockaddr.in {
     return .{
         .port = std.mem.nativeToBig(u16, port),
@@ -75,7 +78,7 @@ fn serve(cfg: Config) !void {
     // Only binding to the port needed root. Reading /dev/kmsg does not.
     try sys.dropPrivileges();
 
-    sys.print("stardust: log server listening on TCP port {d} as uid {d}\n", .{ cfg.port, linux.getuid() });
+    sys.print("stardust: log server listening on HTTP port {d} as uid {d}\n", .{ cfg.port, linux.getuid() });
 
     while (true) {
         const rc = linux.accept4(listener, null, null, linux.SOCK.CLOEXEC);
@@ -87,7 +90,7 @@ fn serve(cfg: Config) !void {
         const pid = linux.fork();
         if (pid == 0) {
             sys.close(listener);
-            streamLog(client);
+            handle(client);
             linux.exit(0);
         }
         sys.close(client);
@@ -108,7 +111,7 @@ fn writeAll(fd: linux.fd_t, bytes: []const u8) bool {
 }
 
 /// Formats one /dev/kmsg record ("prio,seq,usec,flags;text\n" followed by
-/// optional " KEY=value" lines) as "[seconds.micros] text\r\n".
+/// optional " KEY=value" lines) as "[seconds.micros] text\n".
 pub fn formatRecord(out: []u8, record: []const u8) ?[]const u8 {
     const semi = std.mem.indexOfScalar(u8, record, ';') orelse return null;
     var fields = std.mem.splitScalar(u8, record[0..semi], ',');
@@ -117,49 +120,117 @@ pub fn formatRecord(out: []u8, record: []const u8) ?[]const u8 {
     const usec = std.fmt.parseInt(u64, fields.next() orelse return null, 10) catch return null;
     const body = record[semi + 1 ..];
     const text = body[0 .. std.mem.indexOfScalar(u8, body, '\n') orelse body.len];
-    return std.fmt.bufPrint(out, "[{d:>5}.{d:0>6}] {s}\r\n", .{
+    return std.fmt.bufPrint(out, "[{d:>5}.{d:0>6}] {s}\n", .{
         usec / std.time.us_per_s, usec % std.time.us_per_s, text,
     }) catch null;
 }
 
-fn streamLog(client: linux.fd_t) void {
-    defer sys.close(client);
-    if (!writeAll(client, "Stardust system log. Following new messages; disconnect to stop.\r\n")) return;
+pub const Request = struct {
+    head: bool,
+    page: Page,
+};
 
-    const kmsg = sys.open("/dev/kmsg", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }) catch {
-        _ = writeAll(client, "cannot open /dev/kmsg\r\n");
+pub const Page = enum { log, follow, not_found };
+
+/// Parses an HTTP request line ("GET /follow HTTP/1.1"). Null if it is not
+/// a GET or HEAD request.
+pub fn parseRequest(line: []const u8) ?Request {
+    var parts = std.mem.tokenizeScalar(u8, line, ' ');
+    const method = parts.next() orelse return null;
+    const head = std.mem.eql(u8, method, "HEAD");
+    if (!head and !std.mem.eql(u8, method, "GET")) return null;
+    const target = parts.next() orelse return null;
+    const path = target[0 .. std.mem.indexOfAny(u8, target, "?#") orelse target.len];
+    const page: Page = if (std.mem.eql(u8, path, "/") or std.mem.eql(u8, path, "/log"))
+        .log
+    else if (std.mem.eql(u8, path, "/follow"))
+        .follow
+    else
+        .not_found;
+    return .{ .head = head, .page = page };
+}
+
+/// Reads the request's first line, waiting up to 5 seconds.
+fn readRequestLine(client: linux.fd_t, buf: []u8) ?[]const u8 {
+    var len: usize = 0;
+    while (len < buf.len) {
+        var fds = [_]linux.pollfd{.{ .fd = client, .events = linux.POLL.IN, .revents = 0 }};
+        if (linux.poll(&fds, 1, 5000) == 0) return null;
+        const rc = linux.read(client, buf[len..].ptr, buf.len - len);
+        if (linux.errno(rc) != .SUCCESS or rc == 0) return null;
+        len += rc;
+        if (std.mem.indexOfScalar(u8, buf[0..len], '\n')) |end| return std.mem.trimEnd(u8, buf[0..end], "\r");
+    }
+    return null;
+}
+
+const text_headers = "Content-Type: text/plain; charset=utf-8\r\n" ++
+    // Show text as it arrives rather than waiting to sniff its type.
+    "X-Content-Type-Options: nosniff\r\n" ++
+    "Cache-Control: no-store\r\n" ++
+    "Connection: close\r\n\r\n";
+
+fn handle(client: linux.fd_t) void {
+    defer sys.close(client);
+    var buf: [2048]u8 = undefined;
+    const line = readRequestLine(client, &buf) orelse return;
+    const req = parseRequest(line) orelse {
+        _ = writeAll(client, "HTTP/1.1 405 Method Not Allowed\r\nAllow: GET, HEAD\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        return;
+    };
+    if (req.page == .not_found) {
+        const body = "Not found. The log is at / (and /follow for live messages).\n";
+        var head_buf: [128]u8 = undefined;
+        const head = std.fmt.bufPrint(&head_buf, "HTTP/1.1 404 Not Found\r\nContent-Length: {d}\r\n", .{body.len}) catch return;
+        if (writeAll(client, head) and writeAll(client, text_headers) and !req.head) _ = writeAll(client, body);
+        return;
+    }
+    if (!writeAll(client, "HTTP/1.1 200 OK\r\n" ++ text_headers) or req.head) return;
+    const follow = req.page == .follow;
+    const intro = if (follow)
+        "Stardust " ++ build_info.commit ++ " system log, following new messages.\n\n"
+    else
+        "Stardust " ++ build_info.commit ++ " system log. /follow shows new messages as they arrive.\n\n";
+    if (!writeAll(client, intro)) return;
+    streamLog(client, follow);
+}
+
+/// Sends the log since boot, then (when following) new messages until the
+/// client goes away.
+fn streamLog(client: linux.fd_t, follow: bool) void {
+    const kmsg = sys.open("/dev/kmsg", .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NONBLOCK = true }) catch {
+        _ = writeAll(client, "cannot open /dev/kmsg\n");
         return;
     };
     defer sys.close(kmsg);
 
     var record: [8192]u8 = undefined;
     var line: [8192 + 32]u8 = undefined;
-    var fds = [_]linux.pollfd{
-        .{ .fd = kmsg, .events = linux.POLL.IN, .revents = 0 },
-        .{ .fd = client, .events = linux.POLL.IN, .revents = 0 },
-    };
     while (true) {
+        const rc = linux.read(kmsg, &record, record.len);
+        switch (linux.errno(rc)) {
+            .SUCCESS => {
+                const text = formatRecord(&line, record[0..rc]) orelse continue;
+                if (!writeAll(client, text)) return;
+                continue;
+            },
+            // The ring buffer overwrote records we had not read yet; the
+            // next read continues from the oldest remaining one.
+            .PIPE, .INTR => continue,
+            // Everything so far has been sent.
+            .AGAIN => if (!follow) return,
+            else => return,
+        }
+        // Wait for a new message, or for the client to hang up.
+        var fds = [_]linux.pollfd{
+            .{ .fd = kmsg, .events = linux.POLL.IN, .revents = 0 },
+            .{ .fd = client, .events = linux.POLL.IN, .revents = 0 },
+        };
         if (linux.errno(linux.poll(&fds, fds.len, -1)) != .SUCCESS) continue;
-
-        // Input from the client is only telnet option negotiation, which is
-        // discarded. End of input means the client went away.
         if (fds[1].revents != 0) {
             var discard: [256]u8 = undefined;
-            const rc = linux.read(client, &discard, discard.len);
-            if (linux.errno(rc) != .SUCCESS or rc == 0) return;
-        }
-
-        if (fds[0].revents != 0) {
-            const rc = linux.read(kmsg, &record, record.len);
-            switch (linux.errno(rc)) {
-                .SUCCESS => {},
-                // The ring buffer overwrote records we had not read yet;
-                // the next read continues from the oldest remaining one.
-                .PIPE, .INTR, .AGAIN => continue,
-                else => return,
-            }
-            const text = formatRecord(&line, record[0..rc]) orelse continue;
-            if (!writeAll(client, text)) return;
+            const n = linux.read(client, &discard, discard.len);
+            if (linux.errno(n) != .SUCCESS or n == 0) return;
         }
     }
 }
@@ -167,18 +238,26 @@ fn streamLog(client: linux.fd_t) void {
 const testing = std.testing;
 
 test "parse command line options" {
-    const cfg = parseCmdline("console=ttyAMA0 stardust.logport=2323\n");
-    try testing.expectEqual(@as(u16, 2323), cfg.port);
-    try testing.expectEqual(@as(u16, 23), parseCmdline("ip=dhcp").port);
+    const cfg = parseCmdline("console=ttyAMA0 stardust.httpport=8080\n");
+    try testing.expectEqual(@as(u16, 8080), cfg.port);
+    try testing.expectEqual(@as(u16, 80), parseCmdline("ip=dhcp").port);
 }
 
 test "format kmsg record" {
     var buf: [128]u8 = undefined;
     try testing.expectEqualStrings(
-        "[    3.000042] stardust: starting as init\r\n",
+        "[    3.000042] stardust: starting as init\n",
         formatRecord(&buf, "5,512,3000042,-;stardust: starting as init\n SUBSYSTEM=foo\n").?,
     );
     try testing.expectEqual(@as(?[]const u8, null), formatRecord(&buf, "garbage"));
+}
+
+test "parse requests" {
+    try testing.expectEqual(Request{ .head = false, .page = .log }, parseRequest("GET / HTTP/1.1").?);
+    try testing.expectEqual(Request{ .head = true, .page = .follow }, parseRequest("HEAD /follow?x=1 HTTP/1.1").?);
+    try testing.expectEqual(Page.not_found, parseRequest("GET /favicon.ico HTTP/1.1").?.page);
+    try testing.expectEqual(@as(?Request, null), parseRequest("POST / HTTP/1.1"));
+    try testing.expectEqual(@as(?Request, null), parseRequest(""));
 }
 
 test "sockaddr is in network byte order" {

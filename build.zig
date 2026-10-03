@@ -6,6 +6,7 @@ const Modules = struct {
     gles: *std.Build.Module,
     font: *std.Build.Module,
     wayland: *std.Build.Module,
+    build_info: *std.Build.Module,
 };
 
 /// The library modules, built for one target:
@@ -15,6 +16,9 @@ const Modules = struct {
 /// * `gles`: OpenGL ES 2.0 and GLSL, built on vc4
 /// * `font`: OpenType font rendering
 /// * `wayland`: the Wayland wire protocol and a client library
+/// * `build_info`: `commit`, the source's git commit (short, with "-dirty"
+///   when there are uncommitted changes), so a running system can be
+///   matched to its source
 fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) Modules {
     const sys = b.createModule(.{
         .root_source_file = b.path("src/sys/sys.zig"),
@@ -47,7 +51,20 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         .target = target,
         .optimize = optimize,
     });
-    return .{ .sys = sys, .vc4 = vc4, .gles = gles, .font = font, .wayland = wayland };
+    const info = b.addOptions();
+    info.addOption([]const u8, "commit", gitCommit(b));
+    return .{ .sys = sys, .vc4 = vc4, .gles = gles, .font = font, .wayland = wayland, .build_info = info.createModule() };
+}
+
+/// The short hash of the checked-out commit, "-dirty" if tracked files
+/// have changed, or "unknown" outside a git checkout.
+fn gitCommit(b: *std.Build) []const u8 {
+    const root = b.build_root.path orelse ".";
+    var code: u8 = 0;
+    const out = b.runAllowFail(&.{ "git", "-C", root, "rev-parse", "--short", "HEAD" }, &code, .ignore) catch return "unknown";
+    const hash = std.mem.trim(u8, out, " \n");
+    const status = b.runAllowFail(&.{ "git", "-C", root, "status", "--porcelain", "--untracked-files=no" }, &code, .ignore) catch "";
+    return if (std.mem.trim(u8, status, " \n").len > 0) b.fmt("{s}-dirty", .{hash}) else hash;
 }
 
 /// A program's root module. `single_threaded` and stripping are set for the
@@ -65,6 +82,7 @@ fn addProgramModule(b: *std.Build, path: []const u8, target: std.Build.ResolvedT
             .{ .name = "gles", .module = m.gles },
             .{ .name = "font", .module = m.font },
             .{ .name = "wayland", .module = m.wayland },
+            .{ .name = "build_info", .module = m.build_info },
         },
     });
 }
@@ -233,7 +251,7 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) void {
 }
 
 /// Boots the kernel and initramfs in QEMU's raspi0 machine, with the log
-/// server on localhost:2323 (-Dlog-port to change).
+/// server on http://localhost:8080 (-Dhttp-port to change).
 fn addQemu(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) void {
     const tools = requireTools(b, &.{ "qemu-system-arm:qemu-system-arm", "fdtput:device-tree-compiler" });
     // QEMU lacks the power management block the watchdog driver waits for.
@@ -247,7 +265,7 @@ fn addQemu(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) void {
     const patch = b.addSystemCommand(&.{ "fdtput", "-t", "s", dtb, "/soc/watchdog@7e100000", "status", "disabled" });
     patch.step.dependOn(&copy.step);
     patch.has_side_effects = true;
-    const port = b.option(u16, "log-port", "Host port for the log server when running in QEMU (default 2323)") orelse 2323;
+    const port = b.option(u16, "http-port", "Host port for the HTTP log server when running in QEMU (default 8080)") orelse 8080;
     const qemu = b.addSystemCommand(&.{ "qemu-system-arm", "-M", "raspi0", "-kernel" });
     qemu.addFileArg(kernel.file(b, "arch/arm/boot/zImage"));
     qemu.addArgs(&.{ "-dtb", dtb, "-initrd" });
@@ -255,7 +273,7 @@ fn addQemu(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) void {
     qemu.addArgs(&.{
         "-append",  "console=ttyAMA0 printk.devkmsg=on",
         "-device",  "usb-net,netdev=net0",
-        "-netdev",  b.fmt("user,id=net0,hostfwd=tcp:127.0.0.1:{d}-:23", .{port}),
+        "-netdev",  b.fmt("user,id=net0,hostfwd=tcp:127.0.0.1:{d}-:80", .{port}),
         "-display", "none",
         "-serial",  "mon:stdio",
     });
