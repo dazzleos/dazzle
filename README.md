@@ -342,7 +342,13 @@ corner shows:
   (`glFinish`, before `eglSwapBuffers` hands the frame to the shell). It
   includes waiting for the shell's compositing on the shared GPU;
 - CPU time per frame: issuing the frame's GL calls;
-- the pointer's position in the window and the last key pressed.
+- the pointer's position in the window and the last key pressed;
+- the SoC's temperature, the CPU's speed compared with when the demo
+  started, and how busy the CPU is. The firmware slows the CPU and GPU when
+  the SoC gets hot or the supply voltage sags, so a speed below 100% means
+  the Pi, not the software, slowed down. The log line every 5 seconds also
+  splits the CPU use between the demo and the shell, and the kernel logs
+  `Undervoltage detected!` when the supply sags.
 
 Moving a USB mouse moves the cursor. Over the window it leaves a trail of
 small rings, and each click starts a large one: blue for the left button,
