@@ -17,6 +17,15 @@ device_tree=bcm2835-rpi-zero-w.dtb
 # is the mini UART, which needs a fixed core clock.
 enable_uart=1
 
+# Run the CPU and GPU at full speed all the time. Without this the firmware
+# runs at full speed only briefly after boot, then drops to its minimum
+# clocks (CPU 700 MHz, GPU core 250 MHz on a Zero) until a kernel cpufreq
+# driver asks for more, and Stardust has none: the demo fell from 60 to
+# 30 fps after about a minute. The firmware still slows down if the SoC
+# overheats or the supply voltage sags. (Without over_voltage this does not
+# affect the warranty.)
+force_turbo=1
+
 # The kernel's vc4 driver owns the display. Keep the firmware from drawing
 # its rainbow splash or warning overlays on top of it.
 disable_splash=1

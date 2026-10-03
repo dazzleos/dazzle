@@ -350,7 +350,9 @@ with `-dirty` if there were uncommitted changes), then:
 - the SoC's temperature, the CPU's speed compared with when the demo
   started, and how busy the CPU is. The firmware slows the CPU and GPU when
   the SoC gets hot or the supply voltage sags, so a speed below 100% means
-  the Pi, not the software, slowed down. The log line every 5 seconds also
+  the Pi, not the software, slowed down. (`config.txt` sets `force_turbo=1`:
+  otherwise the firmware drops to its minimum clocks about a minute after
+  boot, because Stardust has no cpufreq driver to ask for more.) The log line every 5 seconds also
   splits the CPU use between the demo and the shell, and the kernel logs
   `Undervoltage detected!` when the supply sags.
 
