@@ -124,7 +124,8 @@ pub const Buffer = struct {
     dmabuf: ?Texture = null,
     /// Set for shm buffers.
     shm: ?struct { pool: *ShmPool, offset: u32, stride: u32 } = null,
-    /// Surfaces showing it (dmabuf buffers only).
+    /// Surfaces showing it, and the display while it scans it out (dmabuf
+    /// buffers only). It is released to the client when this drops to 0.
     uses: u32 = 0,
     destroyed: bool = false,
 };
@@ -315,7 +316,11 @@ pub const Server = struct {
         };
         it = c.objects.iterator();
         while (it.next()) |e| switch (e.value_ptr.*) {
-            .buffer => |b| s.freeBuffer(b),
+            // One the display still shows outlives its client, until
+            // `dropBuffer`.
+            .buffer => |b| if (b.uses > 0) {
+                b.destroyed = true;
+            } else s.freeBuffer(b),
             else => {},
         };
         for ([_]*std.ArrayList(FrameCallback){ &s.frame_callbacks, &s.presenting }) |list| {
@@ -394,14 +399,33 @@ pub const Server = struct {
     /// Makes `b` the dmabuf a surface shows, releasing the previous one.
     fn setBuffer(s: *Server, surf: *Surface, b: ?*Buffer) void {
         if (surf.buffer == b) return;
-        if (surf.buffer) |old| {
-            old.uses -= 1;
-            if (old.destroyed and old.uses == 0) {
-                s.freeBuffer(old);
-            } else sendRelease(old);
-        }
+        if (surf.buffer) |old| s.dropBuffer(old);
         surf.buffer = b;
         if (b) |nb| nb.uses += 1;
+    }
+
+    /// Keeps a buffer from being released or freed while the display shows
+    /// it.
+    pub fn holdBuffer(s: *Server, b: *Buffer) void {
+        _ = s;
+        b.uses += 1;
+    }
+
+    /// Ends a use of a buffer: when nothing uses it any more, it goes back
+    /// to its client (or is freed, if the client destroyed it).
+    pub fn dropBuffer(s: *Server, b: *Buffer) void {
+        b.uses -= 1;
+        if (b.uses > 0) return;
+        if (b.destroyed) s.freeBuffer(b) else sendRelease(b);
+    }
+
+    /// The dma-buf buffer a window shows, if it can go on the display as it
+    /// is: the size of the work area (where windows are shown).
+    pub fn scanoutBuffer(s: *const Server, t: *const Toplevel) ?*Buffer {
+        const surf = t.xdg.surface orelse return null;
+        const b = surf.buffer orelse return null;
+        if (b.dmabuf == null or b.width != s.work_area.width or b.height != s.work_area.height) return null;
+        return b;
     }
 
     fn sendRelease(b: *Buffer) void {

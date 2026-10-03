@@ -10,6 +10,7 @@
 //! * `texture`: texture memory layout and sampler configuration
 //! * `display`: double-buffered scanout with page flips
 //! * `drm`: mode setting and other DRM core ioctls
+//! * `kms`: atomic mode setting, showing buffers on the display's planes
 //!
 //! Lower-level pieces (`qpu` instruction encoding, `qpu_schedule`, the
 //! `qpu_sim` simulator and `cl` control list packets) are exported for
@@ -21,6 +22,7 @@ pub const render = @import("render.zig");
 pub const texture = @import("texture.zig");
 pub const display = @import("display.zig");
 pub const drm = @import("drm.zig");
+pub const kms = @import("kms.zig");
 pub const cl = @import("cl.zig");
 pub const qpu = @import("qpu.zig");
 pub const qpu_schedule = @import("qpu_schedule.zig");
@@ -40,6 +42,7 @@ test {
     _ = texture;
     _ = display;
     _ = drm;
+    _ = kms;
     _ = cl;
     _ = qpu;
     _ = qpu_schedule;

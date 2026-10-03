@@ -257,6 +257,9 @@ test "flip events" {
 pub const Output = struct {
     connector_id: u32,
     crtc_id: u32,
+    /// The CRTC's position in the card's list, which planes' possible CRTC
+    /// masks refer to.
+    crtc_index: u32,
     mode: ModeInfo,
 };
 
@@ -312,11 +315,13 @@ pub fn findOutput(fd: linux.fd_t) !Output {
         for (conn_encoders[0..@min(conn.count_encoders, max_objects)]) |encoder_id| {
             var enc: ModeGetEncoder = .{ .encoder_id = encoder_id };
             ioctl(fd, IOCTL_MODE_GETENCODER, &enc) catch continue;
-            if (encoder_id == conn.encoder_id and enc.crtc_id != 0)
-                return .{ .connector_id = connector_id, .crtc_id = enc.crtc_id, .mode = mode };
+            if (encoder_id == conn.encoder_id and enc.crtc_id != 0) {
+                if (std.mem.indexOfScalar(u32, crtcs[0..res.count_crtcs], enc.crtc_id)) |index|
+                    return .{ .connector_id = connector_id, .crtc_id = enc.crtc_id, .crtc_index = @intCast(index), .mode = mode };
+            }
             for (crtcs[0..res.count_crtcs], 0..) |crtc_id, index| {
                 if (enc.possible_crtcs & (@as(u32, 1) << @intCast(index)) != 0)
-                    return .{ .connector_id = connector_id, .crtc_id = crtc_id, .mode = mode };
+                    return .{ .connector_id = connector_id, .crtc_id = crtc_id, .crtc_index = @intCast(index), .mode = mode };
             }
         }
     }
@@ -362,6 +367,29 @@ pub fn setCursor(fd: linux.fd_t, crtc_id: u32, handle: u32, width: u32, height: 
 pub fn moveCursor(fd: linux.fd_t, crtc_id: u32, x: i32, y: i32) !void {
     var arg: ModeCursor = .{ .flags = cursor_move, .crtc_id = crtc_id, .x = x, .y = y };
     try ioctl(fd, IOCTL_MODE_CURSOR, &arg);
+}
+
+pub const fb_modifiers = 0x02;
+
+/// Like `addFramebuffer`, for a buffer in a layout other than linear, such
+/// as the GPU's T tiling.
+pub fn addFramebufferWithModifier(fd: linux.fd_t, handle: u32, width: u32, height: u32, pitch: u32, format: u32, modifier: u64) !u32 {
+    var cmd: ModeFbCmd2 = .{
+        .width = width,
+        .height = height,
+        .pixel_format = format,
+        .flags = fb_modifiers,
+        .handles = .{ handle, 0, 0, 0 },
+        .pitches = .{ pitch, 0, 0, 0 },
+        .modifier = .{ modifier, 0, 0, 0 },
+    };
+    try ioctl(fd, IOCTL_MODE_ADDFB2, &cmd);
+    return cmd.fb_id;
+}
+
+pub fn removeFramebuffer(fd: linux.fd_t, fb_id: u32) void {
+    var id = fb_id;
+    ioctl(fd, IOCTL_MODE_RMFB, &id) catch {};
 }
 
 /// Scans out `fb_id` on `output` using a legacy (non-atomic) mode set.

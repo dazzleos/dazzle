@@ -47,8 +47,9 @@ The `vc4` module:
 | `qpu_schedule.zig` | Instruction scheduler: latency-aware reordering and add/mul pairing |
 | `render.zig` | Records a frame: any number of draw calls into one render target, as one job |
 | `texture.zig` | Texture tiling (T and LT layouts) and texture unit configuration |
-| `display.zig` | Double-buffered scanout with page flips at vertical blank |
+| `display.zig` | Double-buffered scanout with page flips at vertical blank, and showing other buffers on the display's planes |
 | `drm.zig` | DRM core and KMS (mode setting, page flip, cursor) ioctls |
+| `kms.zig` | Atomic mode setting: the primary and an overlay plane, set in one commit per frame |
 | `cl.zig` | Binning control list packets and shader record layout |
 | `qpu.zig` | QPU instruction encoder, hazard checker, instruction pairing and disassembler |
 | `qpu_sim.zig` | QPU simulator used by the tests to run shaders on the build machine |
@@ -150,9 +151,21 @@ yet.
   its T-tiled layout, and the shell draws their buffers as textures. That
   layout is announced with the `BROADCOM_VC4_T_TILED` modifier, as Mesa's
   vc4 driver also does.
-- **Pacing:** a frame callback fires once the frame showing it has been
-  flipped onto the screen. Buffers are released as soon as a newer one is
-  committed, because the shell waits for each composited frame to finish.
+- **Direct scanout:** the display hardware can scan out T-tiled buffers
+  and stack several planes. When the shown window's buffer is exactly the
+  work area's size (as a maximized window's is), the shell puts it on the
+  display's primary plane as it is, and the bar on an overlay plane above
+  it, with one atomic commit. Nothing is composited, which saves the GPU a
+  full-screen copy and a third of the memory traffic per frame. Otherwise
+  (other sizes, shm buffers, or a driver without atomic mode setting) the
+  shell composites the frame with the GPU as before.
+- **Pacing:** the shell never waits for vertical blank: it queues each
+  frame and carries on serving clients and input until the page flip
+  event, then draws the next frame if anything changed. A frame callback
+  fires once the frame showing it is on the screen. A buffer shown directly
+  is released once a later frame replaces it on the screen; a composited
+  one as soon as a newer one is committed, because the shell waits for each
+  composite to finish.
 - **Input:** the shell reads evdev devices itself (no libinput). Mouse
   motion moves the pointer, without acceleration, and the shell moves the
   display's hardware cursor plane, so moving it costs no new frame. The
@@ -355,6 +368,14 @@ with `-dirty` if there were uncommitted changes), then:
   boot, because Stardust has no cpufreq driver to ask for more.) The log line every 5 seconds also
   splits the CPU use between the demo and the shell, and the kernel logs
   `Undervoltage detected!` when the supply sags.
+
+The shell also logs, every 5 seconds while it draws, how many frames per
+second it composited (with the CPU and GPU time each took) and showed
+directly, and how many refreshes went by without a new frame:
+
+```
+stardust-shell: 60.0 frames/s, all shown directly, 0 refreshes skipped
+```
 
 Moving a USB mouse moves the cursor. Over the window, each click starts a
 small ring: blue for the left button, orange for the right and green for

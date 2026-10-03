@@ -57,6 +57,11 @@ const ServerThread = struct {
     last_width: std.atomic.Value(u32) = .init(0),
     /// Set by the test to have the server thread feed it input events.
     send_input: std.atomic.Value(bool) = .init(false),
+    /// Set by the test to have the server thread hold the top window's
+    /// buffer as the display would when showing it directly, or drop it.
+    hold_top: std.atomic.Value(bool) = .init(false),
+    drop_held: std.atomic.Value(bool) = .init(false),
+    held: ?*server_mod.Buffer = null,
 
     fn run(st: *ServerThread) void {
         const c = st.server.addClient(st.fd) catch return;
@@ -65,6 +70,15 @@ const ServerThread = struct {
             _ = linux.poll(&fds, 1, 10);
             if (!st.server.dispatch(c)) break;
             st.server.updateFocus();
+            if (st.hold_top.swap(false, .monotonic)) {
+                st.held = st.server.scanoutBuffer(st.server.topWindow().?).?;
+                st.server.holdBuffer(st.held.?);
+            }
+            if (st.drop_held.swap(false, .monotonic)) {
+                st.server.dropBuffer(st.held.?);
+                st.held = null;
+                st.server.flushClients();
+            }
             if (st.send_input.swap(false, .monotonic)) {
                 const srv = &st.server;
                 // Over the bar, then over the window (at y = 40).
@@ -516,4 +530,63 @@ test "the shown window gets the pointer and keyboard" {
     thread.join();
     try testing.expect(st.server.pointer_focus == null);
     try testing.expect(st.server.keyboard_focus == null);
+}
+
+test "a buffer on the display is released only once it leaves the screen" {
+    var pair: [2]linux.fd_t = undefined;
+    try testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &pair));
+    var renderer: FakeRenderer = .{};
+    const st = try testing.allocator.create(ServerThread);
+    defer testing.allocator.destroy(st);
+    // The work area is the dma-bufs' size, so they can be shown directly.
+    st.* = .{ .server = .init(testing.allocator, renderer.backend(), .{ .x = 0, .y = 40, .width = 64, .height = 48 }), .fd = pair[0] };
+    defer st.server.deinit();
+    const thread = try std.Thread.spawn(.{}, ServerThread.run, .{st});
+
+    const d = try client.Display.fromFd(testing.allocator, pair[1]);
+    var state: State = .{};
+    var globals: client.Globals = .{};
+    const registry = try globals.fetch(d);
+    const compositor = (try globals.bind(registry, p.wl_compositor.name, 4, null)).?;
+    const wm_base = (try globals.bind(registry, p.xdg_wm_base.name, 1, null)).?;
+    const dmabuf = (try globals.bind(registry, p.zwp_linux_dmabuf_v1.name, 3, null)).?;
+    const surface = try d.newObject(null);
+    var m = try compositor.request(p.wl_compositor.request.create_surface);
+    m.uint(surface.id).end();
+    const xdg_surface = try d.newObject(.{ .ptr = &state, .handler = State.xdgSurfaceEvent });
+    m = try wm_base.request(p.xdg_wm_base.request.get_xdg_surface);
+    m.uint(xdg_surface.id).uint(surface.id).end();
+    const toplevel = try d.newObject(.{ .ptr = &state, .handler = State.toplevelEvent });
+    m = try xdg_surface.request(p.xdg_surface.request.get_toplevel);
+    m.uint(toplevel.id).end();
+    m = try surface.request(p.wl_surface.request.commit);
+    m.end();
+    try d.roundtrip();
+    m = try xdg_surface.request(p.xdg_surface.request.ack_configure);
+    m.uint(state.configure_serial).end();
+
+    const b0 = try createDmabuf(d, dmabuf, &state, 0, p.modifier.broadcom_vc4_t_tiled);
+    const b1 = try createDmabuf(d, dmabuf, &state, 1, p.modifier.broadcom_vc4_t_tiled);
+    try commitBuffer(surface, b0, &state);
+    while (state.frames_done < 1) try d.dispatch();
+
+    // The display shows b0: a newer buffer does not release it...
+    st.hold_top.store(true, .monotonic);
+    while (st.hold_top.load(.monotonic)) try d.roundtrip();
+    try commitBuffer(surface, b1, &state);
+    while (state.frames_done < 2) try d.dispatch();
+    try d.roundtrip();
+    try testing.expect(!state.released[0]);
+    // ...until the display moves on.
+    st.drop_held.store(true, .monotonic);
+    while (!state.released[0]) try d.dispatch();
+
+    // A buffer still on the display outlives its client.
+    st.hold_top.store(true, .monotonic);
+    while (st.hold_top.load(.monotonic)) try d.roundtrip();
+    d.disconnect();
+    thread.join();
+    try testing.expectEqual(@as(i32, 1), renderer.live.load(.monotonic));
+    st.server.dropBuffer(st.held.?);
+    try testing.expectEqual(@as(i32, 0), renderer.live.load(.monotonic));
 }

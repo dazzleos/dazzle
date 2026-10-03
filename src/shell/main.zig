@@ -53,7 +53,10 @@ fn run(init: std.process.Init.Minimal) !void {
     const dev = try vc4.device.open();
     const output = try vc4.drm.waitForOutput(dev.fd);
     var renderer = try render.Renderer.init(gpa, dev, output);
-    print("stardust-shell: build {s}, display {d}x{d}\n", .{ build_info.commit, renderer.width, renderer.height });
+    print("stardust-shell: build {s}, display {d}x{d}, {s}\n", .{
+        build_info.commit, renderer.width, renderer.height,
+        if (renderer.display.kms) |k| (if (k.overlay != null) "atomic mode setting with an overlay plane" else "atomic mode setting, no overlay plane") else "legacy mode setting (no direct scanout)",
+    });
 
     var bar: ?render.Bar = null;
     var font_buf: [512]u8 = undefined;
@@ -101,6 +104,9 @@ fn run(init: std.process.Init.Minimal) !void {
 
     const start = sys.nowNs();
     var stats: FrameStats = .{ .since = start, .period_us = renderer.display.refreshPeriodUs() };
+    // A client buffer the display shows directly is held until a later
+    // frame replaces it on the screen.
+    var scanout: Scanout = .{};
     var next_tick: u64 = start;
     var last_title: [64]u8 = undefined;
     var last_title_len: usize = 0;
@@ -129,6 +135,7 @@ fn run(init: std.process.Init.Minimal) !void {
                 break :blk null;
             }) |vblank_us| {
                 stats.flipped(vblank_us);
+                scanout.presented(&server);
                 server.framePresented(@truncate(vblank_us / std.time.us_per_ms));
             }
         }
@@ -189,22 +196,43 @@ fn run(init: std.process.Init.Minimal) !void {
         // Draw while the previous frame is on the screen; it is shown at
         // the next vertical blank, without waiting here.
         if (server.damaged and !renderer.flipPending()) {
-            const window: ?render.Window = if (top) |t| .{
-                .texture = t.xdg.surface.?.texture().?,
-                .x = server.work_area.x,
-                .y = server.work_area.y,
-                .clip = server.work_area,
-            } else null;
             server.frameDrawn();
-            if (renderer.composite(window)) |timing| {
-                stats.composited(timing);
-                const on_screen = renderer.show() catch |err| blk: {
-                    print("stardust-shell: cannot show the frame: {s}\n", .{@errorName(err)});
-                    break :blk true;
-                };
-                if (on_screen) server.framePresented(@truncate(sys.nowNs() / std.time.ns_per_ms));
-            } else |err| {
-                print("stardust-shell: frame failed: {s}\n", .{@errorName(err)});
+            // A full-size window goes straight onto the display, with the
+            // bar on a plane above it. Otherwise (or if the display cannot
+            // show it) the frame is composited.
+            var on_screen: ?bool = null;
+            if (top) |t| if (server.scanoutBuffer(t)) |b| {
+                if (renderer.showDirect(b.dmabuf.?, server.work_area.x, server.work_area.y)) |at_once| {
+                    server.holdBuffer(b);
+                    scanout.queued = b;
+                    stats.direct += 1;
+                    on_screen = at_once;
+                }
+            };
+            if (on_screen == null) {
+                const window: ?render.Window = if (top) |t| .{
+                    .texture = t.xdg.surface.?.texture().?,
+                    .x = server.work_area.x,
+                    .y = server.work_area.y,
+                    .clip = server.work_area,
+                } else null;
+                if (renderer.composite(window)) |timing| {
+                    stats.composited(timing);
+                    on_screen = renderer.show() catch |err| blk: {
+                        print("stardust-shell: cannot show the frame: {s}\n", .{@errorName(err)});
+                        server.framePresented(@truncate(sys.nowNs() / std.time.ns_per_ms));
+                        break :blk false;
+                    };
+                } else |err| {
+                    // Nothing new reaches the screen, but the clients should
+                    // not wait for it.
+                    print("stardust-shell: frame failed: {s}\n", .{@errorName(err)});
+                    server.framePresented(@truncate(sys.nowNs() / std.time.ns_per_ms));
+                    on_screen = false;
+                }
+            }
+            if (on_screen.?) {
+                scanout.presented(&server);
                 server.framePresented(@truncate(sys.nowNs() / std.time.ns_per_ms));
             }
             // The cursor plane needs the mode the first frame set.
@@ -221,11 +249,29 @@ fn run(init: std.process.Init.Minimal) !void {
     }
 }
 
-/// Compositing statistics, logged every 5 seconds while frames are drawn.
+/// The client buffers on the display, shown directly.
+const Scanout = struct {
+    /// On the screen now.
+    shown: ?*server_mod.Buffer = null,
+    /// In the frame queued for the next vertical blank.
+    queued: ?*server_mod.Buffer = null,
+
+    /// The queued frame reached the screen: the buffer it replaced goes
+    /// back to its client.
+    fn presented(s: *Scanout, server: *server_mod.Server) void {
+        if (s.shown) |b| server.dropBuffer(b);
+        s.shown = s.queued;
+        s.queued = null;
+    }
+};
+
+/// Frame statistics, logged every 5 seconds while frames are drawn.
 const FrameStats = struct {
     since: u64,
     period_us: u64,
+    /// Frames composited by the GPU, and shown directly.
     frames: u32 = 0,
+    direct: u32 = 0,
     cpu_ns: u64 = 0,
     gpu_ns: u64 = 0,
     /// Vertical blanks without a new frame between two flips. While a
@@ -251,15 +297,19 @@ const FrameStats = struct {
     fn maybeLog(s: *FrameStats, now: u64) void {
         const elapsed = now - s.since;
         if (elapsed < 5 * std.time.ns_per_s) return;
+        const seconds = @as(f64, @floatFromInt(elapsed)) / std.time.ns_per_s;
+        const ms: f64 = std.time.ns_per_ms;
         if (s.frames > 0) {
             const n: f64 = @floatFromInt(s.frames);
-            const ms: f64 = std.time.ns_per_ms;
-            print("stardust-shell: {d:.1} frames/s, composite CPU {d:.2} ms, GPU {d:.2} ms per frame, {d} refreshes skipped\n", .{
-                n / (@as(f64, @floatFromInt(elapsed)) / std.time.ns_per_s),
+            print("stardust-shell: {d:.1} frames/s composited (CPU {d:.2} ms, GPU {d:.2} ms per frame), {d:.1} frames/s direct, {d} refreshes skipped\n", .{
+                n / seconds,
                 @as(f64, @floatFromInt(s.cpu_ns)) / n / ms,
                 @as(f64, @floatFromInt(s.gpu_ns)) / n / ms,
+                @as(f64, @floatFromInt(s.direct)) / seconds,
                 s.skipped,
             });
+        } else if (s.direct > 0) {
+            print("stardust-shell: {d:.1} frames/s, all shown directly, {d} refreshes skipped\n", .{ @as(f64, @floatFromInt(s.direct)) / seconds, s.skipped });
         }
         s.* = .{ .since = now, .period_us = s.period_us, .last_flip_us = s.last_flip_us };
     }

@@ -162,6 +162,9 @@ fn quad(frame: *render.Frame, programs: *const Programs, vbo: vc4.Bo, scale: *co
     });
 }
 
+/// A buffer the display can show.
+const Scanout = struct { bo: vc4.Bo, fb_id: u32 };
+
 pub const Renderer = struct {
     gpa: std.mem.Allocator,
     dev: vc4.Device,
@@ -175,6 +178,18 @@ pub const Renderer = struct {
     /// GEM handle. Imported dma-bufs have only a handle.
     owned: std.AutoHashMapUnmanaged(u32, vc4.Bo) = .empty,
     bar: ?server.Texture = null,
+    /// The bar's pixels, for showing it on an overlay plane above a
+    /// window's buffer; copied into `bar_planes` when needed.
+    bar_pixels: []const u32 = &.{},
+    bar_size: [2]u32 = .{ 0, 0 },
+    bar_dirty: bool = false,
+    /// Two linear buffers for the bar's overlay, so one can be written
+    /// while the other is on the screen.
+    bar_planes: [2]?Scanout = .{ null, null },
+    bar_shown: u1 = 0,
+    /// Framebuffers for clients' buffers shown directly, by GEM handle
+    /// (null if the display cannot show that buffer).
+    client_fbs: std.AutoHashMapUnmanaged(u32, ?u32) = .empty,
     /// The cursor's picture, once it is shown.
     cursor_bo: ?vc4.Bo = null,
     cursor_move_failed: bool = false,
@@ -230,6 +245,7 @@ pub const Renderer = struct {
 
     fn destroyTexture(ptr: *anyopaque, t: server.Texture) void {
         const r: *Renderer = @ptrCast(@alignCast(ptr));
+        if (r.client_fbs.fetchRemove(t.handle)) |kv| if (kv.value) |fb| vc4.drm.removeFramebuffer(r.dev.fd, fb);
         if (r.owned.fetchRemove(t.handle)) |kv| {
             r.dev.destroyBo(kv.value);
         } else {
@@ -240,6 +256,85 @@ pub const Renderer = struct {
     /// Replaces the bar's picture.
     pub fn setBar(r: *Renderer, pixels: []const u32, width: u32, height: u32) !void {
         r.bar = try uploadPixels(r, r.bar, std.mem.sliceAsBytes(pixels), width, height, width * 4);
+        r.bar_pixels = pixels;
+        r.bar_size = .{ width, height };
+        r.bar_dirty = true;
+    }
+
+    /// Shows a client's buffer directly on the display's primary plane at
+    /// (`x`, `y`), with the bar on an overlay plane above it, so nothing
+    /// is composited. Returns null if the display cannot (the buffer is not
+    /// T-tiled, or the planes are not available), and the frame must be
+    /// composited instead; otherwise whether it is already on the screen,
+    /// as `show` does. Only while no flip is pending.
+    pub fn showDirect(r: *Renderer, t: server.Texture, x: i32, y: i32) ?bool {
+        if (r.display.kms == null) return null;
+        if (vc4.render.Target.textureTiling(t.width, t.height) != .t) return null;
+        const bar = r.barLayer();
+        const fb = r.clientFramebuffer(t, x, y, bar) orelse return null;
+        return r.display.queueLayers(windowLayer(fb, t, x, y), bar) catch |err| {
+            sys.print("stardust-shell: cannot show the window directly: {s}\n", .{@errorName(err)});
+            return null;
+        };
+    }
+
+    fn windowLayer(fb: u32, t: server.Texture, x: i32, y: i32) vc4.kms.Layer {
+        return .{ .fb_id = fb, .src_width = t.width, .src_height = t.height, .x = x, .y = y, .width = t.width, .height = t.height };
+    }
+
+    /// A framebuffer for a client's buffer, made (and checked with the
+    /// display, with the window at `x`, `y` under `bar`) the first time it
+    /// is shown.
+    fn clientFramebuffer(r: *Renderer, t: server.Texture, x: i32, y: i32, bar: ?vc4.kms.Layer) ?u32 {
+        if (r.client_fbs.get(t.handle)) |fb| return fb;
+        // T-tiled images are padded to 32-pixel-wide columns of tiles.
+        const pitch = std.mem.alignForward(u32, t.width, 32) * 4;
+        var fb: ?u32 = vc4.drm.addFramebufferWithModifier(r.dev.fd, t.handle, t.width, t.height, pitch, vc4.drm.format_xrgb8888, vc4.kms.modifier_t_tiled) catch |err| blk: {
+            sys.print("stardust-shell: no framebuffer for a {d}x{d} window: {s}\n", .{ t.width, t.height, @errorName(err) });
+            break :blk null;
+        };
+        if (fb) |id| if (!r.display.canShow(windowLayer(id, t, x, y), bar)) {
+            sys.print("stardust-shell: the display cannot show a {d}x{d} window directly\n", .{ t.width, t.height });
+            vc4.drm.removeFramebuffer(r.dev.fd, id);
+            fb = null;
+        };
+        r.client_fbs.put(r.gpa, t.handle, fb) catch {
+            if (fb) |id| vc4.drm.removeFramebuffer(r.dev.fd, id);
+            return null;
+        };
+        return fb;
+    }
+
+    /// The bar as an overlay layer, writing its latest pixels into the
+    /// overlay buffer that is not on the screen.
+    fn barLayer(r: *Renderer) ?vc4.kms.Layer {
+        const w = r.bar_size[0];
+        const h = r.bar_size[1];
+        if (w == 0 or h == 0) return null;
+        if (r.bar_dirty) {
+            const next = r.bar_shown +% 1;
+            const plane = r.barPlane(next) orelse return null;
+            @memcpy(std.mem.bytesAsSlice(u32, plane.bo.map[0 .. w * h * 4]), r.bar_pixels[0 .. w * h]);
+            r.bar_shown = next;
+            r.bar_dirty = false;
+        }
+        const plane = r.barPlane(r.bar_shown) orelse return null;
+        return .{ .fb_id = plane.fb_id, .src_width = w, .src_height = h, .x = 0, .y = 0, .width = w, .height = h };
+    }
+
+    fn barPlane(r: *Renderer, i: u1) ?Scanout {
+        if (r.bar_planes[i]) |p| return p;
+        const w = r.bar_size[0];
+        const h = r.bar_size[1];
+        const bo = r.dev.createBo(w * h * 4) catch return null;
+        const fb = vc4.drm.addFramebuffer(r.dev.fd, bo.handle, w, h, w * 4, vc4.drm.format_xrgb8888) catch {
+            r.dev.destroyBo(bo);
+            return null;
+        };
+        // The first one shown starts with the current bar.
+        @memcpy(std.mem.bytesAsSlice(u32, bo.map[0 .. w * h * 4]), r.bar_pixels[0 .. w * h]);
+        r.bar_planes[i] = .{ .bo = bo, .fb_id = fb };
+        return r.bar_planes[i];
     }
 
     /// Shows the pointer's arrow on the display's cursor plane, once the

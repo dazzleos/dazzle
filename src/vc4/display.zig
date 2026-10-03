@@ -1,10 +1,13 @@
 //! Double-buffered output: two scanout buffers, flipped at vertical blank.
+//! With atomic mode setting it can also show other buffers on the
+//! display's planes (`queueLayers`), such as a client's window.
 
 const std = @import("std");
 const linux = std.os.linux;
 const drm = @import("drm.zig");
 const render = @import("render.zig");
 const vc4 = @import("device.zig");
+const kms_mod = @import("kms.zig");
 
 pub const Buffer = struct {
     bo: vc4.Bo,
@@ -17,12 +20,17 @@ pub const Display = struct {
     width: u16,
     height: u16,
     buffers: [2]Buffer,
-    /// The buffer currently being scanned out.
-    front: u1 = 0,
-    shown: bool = false,
-    /// A page flip to the back buffer is queued and has not happened yet;
-    /// the back buffer must not be drawn into until it has.
+    /// Atomic mode setting, when the driver supports it: needed to show
+    /// other buffers (`queueLayers`). Otherwise the legacy calls are used.
+    kms: ?kms_mod.Kms,
+    /// Which of `buffers` is on the screen; null before the first frame
+    /// and while `queueLayers` buffers are shown.
+    on_screen: ?u1 = null,
+    /// A frame is queued and has not reached the screen yet; the buffers
+    /// must not change until it has.
     flip_pending: bool = false,
+    /// What the queued frame shows: one of `buffers`, or null for layers.
+    pending_buffer: ?u1 = null,
 
     pub fn init(dev: vc4.Device, output: drm.Output) !Display {
         const width = output.mode.hdisplay;
@@ -34,20 +42,24 @@ pub const Display = struct {
             .width = width,
             .height = height,
             .buffers = undefined,
+            .kms = kms_mod.Kms.init(dev.fd, output) catch null,
         };
-        for (&d.buffers, 0..) |*b, i| {
+        for (&d.buffers) |*b| {
             const bo = try dev.createBo(pitch * height);
             errdefer dev.destroyBo(bo);
             const fb_id = try drm.addFramebuffer(dev.fd, bo.handle, width, height, pitch, drm.format_xrgb8888);
             b.* = .{ .bo = bo, .fb_id = fb_id };
-            _ = i;
         }
         return d;
     }
 
+    fn backIndex(d: *const Display) u1 {
+        return if (d.on_screen) |i| i +% 1 else 0;
+    }
+
     /// The buffer to render the next frame into.
     pub fn back(d: *const Display) *const Buffer {
-        return &d.buffers[d.front +% 1];
+        return &d.buffers[d.backIndex()];
     }
 
     /// The back buffer as a render target.
@@ -61,31 +73,64 @@ pub const Display = struct {
         if (!try d.queue()) while (try d.handleEvents() == null) {};
     }
 
+    /// The whole screen, showing one of `buffers`.
+    fn fullScreen(d: *const Display, i: u1) kms_mod.Layer {
+        return .{ .fb_id = d.buffers[i].fb_id, .src_width = d.width, .src_height = d.height, .x = 0, .y = 0, .width = d.width, .height = d.height };
+    }
+
     /// Shows the back buffer at the next vertical blank, without waiting:
-    /// `handleEvents` reports when it is on the screen. The first call sets
-    /// the mode, which shows the buffer at once; it returns true then.
+    /// `handleEvents` reports when it is on the screen. The first frame
+    /// sets the mode, which shows it at once; this returns true then.
     pub fn queue(d: *Display) !bool {
         std.debug.assert(!d.flip_pending);
-        const b = d.back();
-        if (!d.shown) {
-            try drm.setCrtc(d.fd, d.output, b.fb_id);
-            d.shown = true;
-            d.front +%= 1;
-            return true;
+        const i = d.backIndex();
+        const at_once = if (d.kms) |*k|
+            try k.commit(d.fullScreen(i), null)
+        else if (d.on_screen == null) blk: {
+            try drm.setCrtc(d.fd, d.output, d.buffers[i].fb_id);
+            break :blk true;
+        } else blk: {
+            try drm.pageFlip(d.fd, d.output.crtc_id, d.buffers[i].fb_id);
+            break :blk false;
+        };
+        if (at_once) {
+            d.on_screen = i;
+        } else {
+            d.flip_pending = true;
+            d.pending_buffer = i;
         }
-        try drm.pageFlip(d.fd, d.output.crtc_id, b.fb_id);
-        d.flip_pending = true;
-        return false;
+        return at_once;
+    }
+
+    /// Whether `queueLayers` can show these layers.
+    pub fn canShow(d: *const Display, primary: kms_mod.Layer, overlay: ?kms_mod.Layer) bool {
+        const k = &(d.kms orelse return false);
+        return k.check(primary, overlay);
+    }
+
+    /// Like `queue`, but shows other buffers (framebuffers made with
+    /// `drm.addFramebuffer`) on the display's planes instead.
+    pub fn queueLayers(d: *Display, primary: kms_mod.Layer, overlay: ?kms_mod.Layer) !bool {
+        std.debug.assert(!d.flip_pending);
+        const k = &(d.kms orelse return error.Unsupported);
+        const at_once = try k.commit(primary, overlay);
+        if (at_once) {
+            d.on_screen = null;
+        } else {
+            d.flip_pending = true;
+            d.pending_buffer = null;
+        }
+        return at_once;
     }
 
     /// Reads the DRM file's events; call it when the file is readable.
     /// Returns the vertical blank's time (microseconds, CLOCK_MONOTONIC)
-    /// if the queued flip has happened.
+    /// if the queued frame has reached the screen.
     pub fn handleEvents(d: *Display) !?u64 {
         const t = try drm.readFlipEvents(d.fd) orelse return null;
         if (!d.flip_pending) return null;
         d.flip_pending = false;
-        d.front +%= 1;
+        d.on_screen = d.pending_buffer;
         return t;
     }
 
