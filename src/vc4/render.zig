@@ -87,6 +87,8 @@ pub const Draw = struct {
     config: cl.Bcl.Config = .{},
     /// Defaults to the whole target.
     viewport: ?Viewport = null,
+    /// Further limits rendering to this rectangle (y = 0 at the top).
+    scissor: ?Viewport = null,
     /// Texture for unit 0 of the fragment shader.
     texture: ?Texture = null,
 };
@@ -181,6 +183,16 @@ pub const Frame = struct {
         f.uniforms_len += 1;
     }
 
+    /// Whether one more draw with up to `uniform_words` words in its three
+    /// uniform streams (texture indices included) and up to 12 new buffers
+    /// is sure to fit.
+    pub fn hasRoom(f: *const Frame, uniform_words: usize) bool {
+        return f.bin.w.len + 128 <= f.bcl_buf.len and
+            f.rec.len + 128 <= f.rec_buf.len and
+            f.uniforms_len + uniform_words <= f.uniforms.len and
+            f.bo_count + 12 <= max_bos;
+    }
+
     pub fn draw(f: *Frame, d: Draw) Error!void {
         std.debug.assert(d.attributes.len >= 1 and d.attributes.len <= 8);
         // Worst case control list and shader record space for one draw.
@@ -190,10 +202,16 @@ pub const Frame = struct {
         const scale = vp.scale();
         // Clip to the viewport (the hardware does guard-band clipping, so
         // primitives would otherwise rasterise outside it) and the target.
-        const x0: i32 = @max(vp.x, 0);
-        const y0: i32 = @max(vp.y, 0);
-        const x1: i32 = @min(vp.x + @as(i32, @intCast(vp.width)), f.target.width);
-        const y1: i32 = @min(vp.y + @as(i32, @intCast(vp.height)), f.target.height);
+        var x0: i32 = @max(vp.x, 0);
+        var y0: i32 = @max(vp.y, 0);
+        var x1: i32 = @min(vp.x + @as(i32, @intCast(vp.width)), f.target.width);
+        var y1: i32 = @min(vp.y + @as(i32, @intCast(vp.height)), f.target.height);
+        if (d.scissor) |sc| {
+            x0 = @max(x0, sc.x);
+            y0 = @max(y0, sc.y);
+            x1 = @min(x1, sc.x + @as(i32, @intCast(sc.width)));
+            y1 = @min(y1, sc.y + @as(i32, @intCast(sc.height)));
+        }
         if (x1 <= x0 or y1 <= y0) return;
 
         f.bin.clipWindow(@intCast(x0), @intCast(y0), @intCast(x1 - x0), @intCast(y1 - y0));
@@ -281,6 +299,14 @@ pub const Frame = struct {
             .clear_z = f.clear_z,
             .flags = device.SubmitCl.flag_use_clear_color,
         };
+        // Without draws only the rendering pass is needed (a clear, or a
+        // load and store); the kernel skips binning for an empty list.
+        if (f.draws == 0) {
+            f.submit.bin_cl_size = 0;
+            f.submit.shader_rec_size = 0;
+            f.submit.shader_rec_count = 0;
+            f.submit.uniforms_size = 0;
+        }
         if (f.load == .keep) {
             f.submit.color_read = .{
                 .hindex = 0,

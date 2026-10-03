@@ -459,11 +459,11 @@ fn compileGlsl(vs_src: []const u8, fs_src: []const u8, depth: bool) !GlslStages 
     const p = try glsl.link(testing.allocator, &vs, &fs, &.{}, &log);
     const shader = try testing.allocator.create(compiler.Shader);
     defer testing.allocator.destroy(shader);
-    try p.build(.vertex, false, shader);
+    try p.build(.vertex, .{}, shader);
     const vsc = try compiler.compile(shader);
-    try p.build(.coordinate, false, shader);
+    try p.build(.coordinate, .{}, shader);
     const csc = try compiler.compile(shader);
-    try p.build(.fragment, depth, shader);
+    try p.build(.fragment, .{ .depth_write = depth }, shader);
     const fsc = try compiler.compile(shader);
     return .{ .vs = vsc, .cs = csc, .fs = fsc, .program = p };
 }

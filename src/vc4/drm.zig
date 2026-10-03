@@ -325,3 +325,16 @@ comptime {
     std.debug.assert(@sizeOf(ModeFbCmd2) == 104);
     std.debug.assert(@sizeOf(ModeCrtcPageFlip) == 24);
 }
+
+/// Like `findOutput`, but waits a few seconds for a display to appear:
+/// HDMI hotplug detection can lag behind the driver binding.
+pub fn waitForOutput(fd: linux.fd_t) !Output {
+    var attempt: u32 = 0;
+    while (true) : (attempt += 1) {
+        return findOutput(fd) catch |err| {
+            if (err != error.NoConnectedOutput or attempt == 50) return err;
+            sys.sleepMs(100);
+            continue;
+        };
+    }
+}

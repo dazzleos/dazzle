@@ -13,6 +13,7 @@ const drm = vc4.drm;
 const logserver = @import("logserver.zig");
 const sys = @import("sys");
 const demos = @import("demos.zig");
+const glcube = @import("glcube.zig");
 const display_mod = vc4.display;
 
 const print = sys.print;
@@ -53,43 +54,26 @@ fn mountPseudoFilesystems() void {
     }
 }
 
-/// Opens the vc4 DRM device. Drivers may still be probing when init
-/// starts, so poll for a few seconds.
-fn openVc4() !linux.fd_t {
-    const paths = [_][*:0]const u8{ "/dev/dri/card0", "/dev/dri/card1", "/dev/dri/card2" };
-    var attempt: u32 = 0;
-    while (attempt < 100) : (attempt += 1) {
-        for (paths) |path| {
-            const fd = sys.open(path, .{ .ACCMODE = .RDWR, .CLOEXEC = true }) catch continue;
-            var name_buf: [32]u8 = undefined;
-            const name = drm.driverName(fd, &name_buf) catch "";
-            if (std.mem.eql(u8, name, "vc4")) {
-                print("stardust: opened {s} ({s})\n", .{ path, name });
-                return fd;
-            }
-            sys.close(fd);
-        }
-        sys.sleepMs(100);
-    }
-    return error.NoVc4Device;
-}
-
-/// HDMI hotplug detection can lag behind the driver binding.
-fn waitForOutput(fd: linux.fd_t) !drm.Output {
-    var attempt: u32 = 0;
-    while (true) : (attempt += 1) {
-        return drm.findOutput(fd) catch |err| {
-            if (err != error.NoConnectedOutput or attempt == 50) return err;
-            sys.sleepMs(100);
-            continue;
-        };
-    }
-}
+/// The demos: the vc4 API ones, and the same cube through OpenGL ES.
+const DemoName = enum { triangle, spin, cube, glcube };
 
 fn run(is_init: bool) !void {
-    const fd = try openVc4();
-    defer sys.close(fd);
-    const dev: vc4.Device = .{ .fd = fd };
+    var cmdline_buf: [1024]u8 = undefined;
+    const name = demoFromCmdline(sys.readCmdline(&cmdline_buf));
+    print("stardust: demo {s} (choose with stardust.demo=triangle|spin|cube|glcube)\n", .{@tagName(name)});
+
+    // When not running as init, stop after a while; the kernel restores the
+    // previous display state once we exit.
+    const run_ns: ?u64 = if (is_init) null else 10 * std.time.ns_per_s;
+
+    const kind: demos.Kind = switch (name) {
+        .glcube => return glcube.run(run_ns),
+        inline else => |n| @field(demos.Kind, @tagName(n)),
+    };
+
+    const dev = try vc4.device.open();
+    defer sys.close(dev.fd);
+    const fd = dev.fd;
 
     const ident1 = try dev.getParam(.v3d_ident1);
     print("stardust: V3D revision {d}, {d} slices of {d} QPUs\n", .{
@@ -98,15 +82,11 @@ fn run(is_init: bool) !void {
         (ident1 >> 8) & 0xf,
     });
 
-    const output = try waitForOutput(fd);
+    const output = try drm.waitForOutput(fd);
     const mode = output.mode;
     print("stardust: output connector {d} on crtc {d}: {s} {d}x{d}@{d}\n", .{
         output.connector_id, output.crtc_id, mode.nameSlice(), mode.hdisplay, mode.vdisplay, mode.vrefresh,
     });
-
-    var cmdline_buf: [1024]u8 = undefined;
-    const kind = demoFromCmdline(sys.readCmdline(&cmdline_buf));
-    print("stardust: demo {s} (choose with stardust.demo=triangle|spin|cube)\n", .{@tagName(kind)});
 
     var display = try display_mod.Display.init(dev, output);
     const demo = try demos.Demo.init(kind, dev);
@@ -117,10 +97,6 @@ fn run(is_init: bool) !void {
     try display.present();
     print("stardust: displaying {s}\n", .{@tagName(kind)});
 
-    // When not running as init, stop after a while; the kernel restores the
-    // previous display state once we exit.
-    const run_ns: ?u64 = if (is_init) null else 10 * std.time.ns_per_s;
-
     if (!demo.animated()) {
         if (run_ns) |ns| sys.sleepMs(@intCast(ns / std.time.ns_per_ms));
         while (is_init) _ = linux.pause();
@@ -128,37 +104,21 @@ fn run(is_init: bool) !void {
     }
 
     // Frame loop: render into the back buffer, then flip at vertical blank.
-    var frames: u32 = 0;
-    var gpu_ns: u64 = 0;
-    var report_start = sys.nowNs();
+    var stats: demos.FrameStats = .init(sys.nowNs());
     while (true) {
         const now = sys.nowNs();
         if (run_ns) |ns| if (now - start >= ns) return;
         const t: f32 = @floatCast(@as(f64, @floatFromInt(now - start)) / std.time.ns_per_s);
         try demo.draw(dev, display.backTarget(), t);
-        gpu_ns += sys.nowNs() - now;
+        const render_ns = sys.nowNs() - now;
         try display.present();
-        frames += 1;
-
-        const elapsed = sys.nowNs() - report_start;
-        if (elapsed >= 5 * std.time.ns_per_s) {
-            const secs = @as(f64, @floatFromInt(elapsed)) / std.time.ns_per_s;
-            print("stardust: {d} frames in {d:.1}s ({d:.1} fps), render {d:.2} ms/frame\n", .{
-                frames,
-                secs,
-                @as(f64, @floatFromInt(frames)) / secs,
-                @as(f64, @floatFromInt(gpu_ns)) / @as(f64, @floatFromInt(frames)) / std.time.ns_per_ms,
-            });
-            frames = 0;
-            gpu_ns = 0;
-            report_start = sys.nowNs();
-        }
+        stats.frame(render_ns);
     }
 }
 
-fn demoFromCmdline(cmdline: []const u8) demos.Kind {
+fn demoFromCmdline(cmdline: []const u8) DemoName {
     const name = sys.cmdlineValue(cmdline, "stardust.demo") orelse return .cube;
-    return std.meta.stringToEnum(demos.Kind, name) orelse blk: {
+    return std.meta.stringToEnum(DemoName, name) orelse blk: {
         print("stardust: unknown demo '{s}', using cube\n", .{name});
         break :blk .cube;
     };
@@ -166,6 +126,7 @@ fn demoFromCmdline(cmdline: []const u8) demos.Kind {
 
 test {
     _ = @import("demos.zig");
+    _ = @import("glcube.zig");
     _ = @import("logserver.zig");
     _ = @import("programs.zig");
 }

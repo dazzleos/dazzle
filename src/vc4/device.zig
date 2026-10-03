@@ -128,6 +128,27 @@ pub const Bo = struct {
     map: []align(std.heap.page_size_min) u8,
 };
 
+/// Opens the vc4 DRM device. Drivers may still be probing when init
+/// starts, so this polls for a few seconds.
+pub fn open() !Device {
+    const paths = [_][*:0]const u8{ "/dev/dri/card0", "/dev/dri/card1", "/dev/dri/card2" };
+    var attempt: u32 = 0;
+    while (attempt < 100) : (attempt += 1) {
+        for (paths) |path| {
+            const fd = sys.open(path, .{ .ACCMODE = .RDWR, .CLOEXEC = true }) catch continue;
+            var name_buf: [32]u8 = undefined;
+            const name = drm.driverName(fd, &name_buf) catch "";
+            if (std.mem.eql(u8, name, "vc4")) {
+                sys.print("stardust: opened {s} ({s})\n", .{ path, name });
+                return .{ .fd = fd };
+            }
+            sys.close(fd);
+        }
+        sys.sleepMs(100);
+    }
+    return error.NoVc4Device;
+}
+
 pub const Device = struct {
     fd: linux.fd_t,
 

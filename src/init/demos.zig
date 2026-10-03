@@ -365,3 +365,32 @@ test "cube faces have outward normals and stay in front of the camera" {
         }
     }
 }
+
+/// Logs the frame rate every 5 seconds.
+pub const FrameStats = struct {
+    frames: u32 = 0,
+    render_ns: u64 = 0,
+    since: u64,
+
+    pub fn init(now: u64) FrameStats {
+        return .{ .since = now };
+    }
+
+    /// Counts a frame that took `render_ns` to render (0 if unknown).
+    pub fn frame(s: *FrameStats, render_ns: u64) void {
+        s.frames += 1;
+        s.render_ns += render_ns;
+        const now = sys.nowNs();
+        const elapsed = now - s.since;
+        if (elapsed < 5 * std.time.ns_per_s) return;
+        const secs = @as(f64, @floatFromInt(elapsed)) / std.time.ns_per_s;
+        const fps = @as(f64, @floatFromInt(s.frames)) / secs;
+        if (s.render_ns > 0) {
+            const ms = @as(f64, @floatFromInt(s.render_ns)) / @as(f64, @floatFromInt(s.frames)) / std.time.ns_per_ms;
+            sys.print("stardust: {d} frames in {d:.1}s ({d:.1} fps), render {d:.2} ms/frame\n", .{ s.frames, secs, fps, ms });
+        } else {
+            sys.print("stardust: {d} frames in {d:.1}s ({d:.1} fps)\n", .{ s.frames, secs, fps });
+        }
+        s.* = .init(now);
+    }
+};

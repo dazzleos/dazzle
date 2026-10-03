@@ -225,12 +225,12 @@ pub const Program = struct {
         return null;
     }
 
-    fn interface(p: *const Program, stage: compiler.Stage, depth_write: bool, slots: *[max_attributes]lower.Slot, uniforms: *[max_uniform_vars]lower.UniformSlot) lower.Interface {
+    fn interface(p: *const Program, stage: compiler.Stage, opts: BuildOptions, slots: *[max_attributes]lower.Slot, uniforms: *[max_uniform_vars]lower.UniformSlot) lower.Interface {
         for (p.uniformList(), 0..) |u, i| uniforms[i] = .{ .name = u.name, .type = u.type, .base = u.base };
         var n: usize = 0;
-        for (p.attributeList()) |a| {
+        for (p.attributeList(), 0..) |a, i| {
             if (stage == .coordinate and !a.in_coordinate_shader) continue;
-            slots[n] = .{ .name = a.name, .type = a.type };
+            slots[n] = .{ .name = a.name, .type = a.type, .supplied = if (opts.supplied) |s| s[i] else null };
             n += 1;
         }
         return .{
@@ -238,15 +238,23 @@ pub const Program = struct {
             .attributes = slots[0..n],
             .varyings = p.varyingList(),
             .viewport_uniform = p.viewportUniform(),
-            .depth_write = depth_write,
+            .depth_write = opts.depth_write,
         };
     }
 
+    pub const BuildOptions = struct {
+        /// Fragment shaders: write the fragment's depth for depth testing.
+        depth_write: bool = false,
+        /// Vertex shaders: components the vertex data supplies for each
+        /// attribute in `attributeList` order (all when null).
+        supplied: ?[]const u8 = null,
+    };
+
     /// Lowers one hardware stage of the program into `out`.
-    pub fn build(p: *const Program, stage: compiler.Stage, depth_write: bool, out: *compiler.Shader) error{LinkFailed}!void {
+    pub fn build(p: *const Program, stage: compiler.Stage, opts: BuildOptions, out: *compiler.Shader) error{LinkFailed}!void {
         var slots: [max_attributes]lower.Slot = undefined;
         var uniforms: [max_uniform_vars]lower.UniformSlot = undefined;
-        const iface = p.interface(stage, depth_write, &slots, &uniforms);
+        const iface = p.interface(stage, opts, &slots, &uniforms);
         var diag: Diagnostic = .{};
         // Both shaders were checked when they were compiled and linked.
         lower.lower(if (stage == .fragment) &p.fs.ast else &p.vs.ast, stage, &iface, out, &diag) catch return error.LinkFailed;
@@ -362,7 +370,7 @@ pub fn link(gpa: std.mem.Allocator, vs: *const Shader, fs: *const Shader, bindin
     for (p.attributes[0..p.num_attributes]) |*a| a.in_coordinate_shader = true;
     const cs = try gpa.create(compiler.Shader);
     defer gpa.destroy(cs);
-    p.build(.coordinate, false, cs) catch {
+    p.build(.coordinate, .{}, cs) catch {
         log.add("ERROR: internal error lowering the coordinate shader", .{});
         return error.LinkFailed;
     };
@@ -453,4 +461,26 @@ test "link errors" {
         \\void main() { gl_FragColor = vec4(missing, 0.0, 1.0); }
     , &log));
     try testing.expect(std.mem.indexOf(u8, log.text(), "missing") != null);
+}
+
+test "attributes can supply fewer components than declared" {
+    var log: Log = .{};
+    const p = try linkSources(
+        \\attribute vec4 pos;
+        \\void main() { gl_Position = pos; }
+    ,
+        \\void main() { gl_FragColor = vec4(1.0); }
+    , &log);
+    defer {
+        p.deinit();
+        testing.allocator.destroy(p);
+    }
+    const shader = try testing.allocator.create(compiler.Shader);
+    defer testing.allocator.destroy(shader);
+    for ([_]u8{ 1, 2, 3, 4 }) |n| {
+        try p.build(.vertex, .{ .supplied = &.{n} }, shader);
+        var reads: u8 = 0;
+        for (shader.insts[0..shader.len]) |inst| reads += @intFromBool(inst.op == .vpm_read);
+        try testing.expectEqual(n, reads);
+    }
 }

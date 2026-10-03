@@ -4,11 +4,18 @@ A lightweight operating system for the Raspberry Pi, written in Zig on top of
 a minimal mainline Linux kernel. The first target is the Raspberry Pi Zero /
 Zero W (BCM2835).
 
-The long-term plan is an OpenGL ES 2.0 library that drives the VideoCore IV
-GPU through the kernel's `vc4` driver, and a simple Wayland shell on top of
-it. Today it is a single program, run as PID 1, that compiles its own GPU
-shaders and draws with the GPU by talking to `vc4` directly: a spinning,
-textured, depth-tested cube by default.
+It has two rendering APIs for the VideoCore IV GPU, both written in Zig on
+the kernel's `vc4` driver, so programs can pick the one that suits them:
+
+- **`vc4`**: a low-level API specific to this GPU. Programs build shaders
+  with a compiler API and record draw calls into frames themselves.
+- **OpenGL ES 2.0 and EGL**: the standard APIs, with GLSL ES 1.00 shaders.
+  The entry points use the C ABI under their usual names, so C code can
+  call them; Zig code calls the same functions.
+
+A Vulkan-style API may follow, and a simple Wayland shell later. Today the
+system runs a single program as PID 1 that shows a demo: a spinning,
+textured, depth-tested cube by default, drawn with either API.
 
 ## Layout
 
@@ -18,7 +25,7 @@ The code is split into Zig modules, linked statically into each program:
 |---|---|---|
 | `sys` | `src/sys/` | Linux system call helpers (sleeping, clocks, logging, the kernel command line) |
 | `vc4` | `src/vc4/` | The low-level graphics API for the VideoCore IV, described below |
-| `gles` | `src/gles/` | OpenGL ES 2.0 on top of `vc4`; so far the GLSL ES 1.00 compiler front end |
+| `gles` | `src/gles/` | OpenGL ES 2.0, EGL and the GLSL ES 1.00 compiler, on top of `vc4` |
 | `stardust-init` | `src/init/` | The init program: mounts, log server and the demos |
 
 The `vc4` module:
@@ -37,7 +44,29 @@ The `vc4` module:
 | `qpu_sim.zig` | QPU simulator used by the tests to run shaders on the build machine |
 | `reference_shaders.zig` | The original hand-written triangle shaders, known to work on hardware |
 
-The `gles` module's GLSL front end (`src/gles/glsl/`):
+The `gles` module:
+
+| File | Contents |
+|---|---|
+| `gl.zig` | The OpenGL ES 2.0 entry points (exported with the C ABI), types and constants |
+| `egl.zig` | EGL 1.4: the display, one configuration, full-screen window surfaces, contexts and `eglSwapBuffers` |
+| `context.zig` | GL state and objects, and how draws become `vc4` frames |
+| `glsl/` | The GLSL compiler front end, below |
+
+GL covers shaders and programs, buffer objects, float vertex attributes
+(from buffers or client memory, and constant values), 2D textures (8-bit
+RGBA, RGB, luminance and alpha formats), depth testing, face culling,
+viewport, scissor, `glClear`, and `glDrawArrays`/`glDrawElements` with 8-
+and 16-bit indices. Rendering is recorded into one `vc4` frame and
+submitted by `eglSwapBuffers`. When the app changes a buffer or texture that
+frame still uses, it is copied rather than overwritten. Each program is
+compiled to QPU code when it is first drawn, once per combination of the
+state its hardware shaders depend on (depth testing, and how many
+components each attribute supplies). Not yet: blending, stencil,
+framebuffer objects, mipmaps, points, `glReadPixels`, and sharing objects
+between contexts. Using these records a GL error or logs a warning once.
+
+The GLSL front end (`src/gles/glsl/`):
 
 | File | Contents |
 |---|---|
@@ -62,8 +91,9 @@ The init program (`src/init/`):
 |---|---|
 | `main.zig` | Mounts `/proc`, `/sys`, `/dev`, starts the log server, sets up the display and runs a demo |
 | `logserver.zig` | Serves the kernel and init log over TCP (telnet) |
-| `demos.zig` | The demo scenes: `triangle`, `spin` and `cube` |
-| `programs.zig` | The demos' shaders, written with the compiler's builder API |
+| `demos.zig` | The `vc4` API demo scenes: `triangle`, `spin` and `cube` |
+| `programs.zig` | Those demos' shaders, written with the compiler's builder API |
+| `glcube.zig` | The cube through EGL and OpenGL ES 2.0, written as a C program would be |
 
 Also: `tools/mkinitramfs.zig` (packs the init binary into a cpio
 initramfs), `kernel/stardust.config` (kernel config fragment applied on top
@@ -135,7 +165,7 @@ messages) and then follows new messages:
 [    4.741008] stardust: opened /dev/dri/card0 (vc4)
 [    4.741903] stardust: V3D revision <rev>, <n> slices of <n> QPUs
 [    4.802114] stardust: output connector <id> on crtc <id>: <mode> <width>x<height>@<hz>
-[    4.802600] stardust: demo cube (choose with stardust.demo=triangle|spin|cube)
+[    4.802600] stardust: demo cube (choose with stardust.demo=triangle|spin|cube|glcube)
 [    4.811875] stardust: shaders compiled and uploaded
 [    4.833540] stardust: displaying cube
 [    9.840211] stardust: 300 frames in 5.0s (60.0 fps), render <t> ms/frame
@@ -161,10 +191,14 @@ seconds for a link (`carrier_timeout=10`).
 | `triangle` | The original hand-written shaders, drawn once |
 | `spin` | A triangle rotating at the display's refresh rate, drawn with compiled shaders and double buffering |
 | `cube` (default) | A spinning cube with perspective, a checkerboard texture tinted per face, and depth testing |
+| `glcube` | The same cube through EGL and OpenGL ES 2.0, from GLSL source, with indexed drawing and back-face culling |
 
-Each builds on the previous one, so if one fails on the hardware the
-simpler ones narrow down where. The animated demos log their frame rate and
-render time every 5 seconds.
+The first three use the `vc4` API, each building on the previous one, so if
+one fails on the hardware the simpler ones narrow down where. `boot/cmdline.txt` currently selects `glcube`, to
+try the GL path on hardware; without the option `cube` is shown. `glcube`
+should look the same as `cube`: if only the inside faces show, face culling
+is reversed. The animated demos log their frame rate every 5 seconds (the
+`vc4` ones also log render time).
 
 The serial console on GPIO 14 (TX) and 15 (RX), 115200 baud, still works and
 shows the same messages. It is the fallback if the network does not come up.
@@ -184,7 +218,7 @@ The firmware picks the Zero or Zero W device tree in `config.txt`. The Zero
   `raspi0` machine with an emulated USB network card. `telnet localhost
   2323` reaches the log server. QEMU does not emulate the 3D engine or HDMI,
   so this checks the kernel, init and networking only. The log ends with
-  `stardust: error: NoVc4Device`.
+  `stardust: error: NoVc4Device` (or `EglInitializeFailed` for `glcube`).
 
 ## How a frame is drawn
 
@@ -230,6 +264,11 @@ The firmware picks the Zero or Zero W device tree in `config.txt`. The Zero
 - `vc4/texture.zig`'s tiling is cross-checked against a separate
   implementation of the reference guide's layout description in the
   simulator.
+- Shaders compiled from GLSL are run in the simulator next to the same
+  shaders written with the builder API, and must give the same results.
+- The GL layer runs against a stand-in GPU backend in the tests, which
+  checks the jobs it records and that every GPU buffer and shader it
+  creates is freed.
 
 References: Broadcom's *VideoCore IV 3D Architecture Reference Guide*,
 `drivers/gpu/drm/vc4/` in the kernel (especially `vc4_validate.c` and
@@ -242,6 +281,10 @@ at 1920x1080 (about 6.5 ms of GPU time per frame): compiled shaders,
 perspective, texturing, depth testing and page flipping all work, with the
 log readable over the network.
 
+The OpenGL ES path (`glcube`) has not run on hardware yet. Its jobs pass
+a userspace build of the kernel's job and shader validators, but face
+culling's winding and the rendered output still need confirming on a Pi.
+
 In QEMU the kernel boots, the network comes up by DHCP over an emulated USB
 network card and the log server streams the log (QEMU cannot emulate the
 GPU or display).
@@ -252,6 +295,7 @@ GPU or display).
   arrays, and polynomial `sin`/`cos`.
 - Mipmaps, more texture formats, and depth buffers stored to memory.
 - Add `DRM_IOCTL_VC4_GET_HANG_STATE` reporting for GPU hangs.
-- Split the GL work into a library with a GLES 2.0 / EGL API and a separate
-  test program.
+- GL: blending (in the fragment shader, reading the tile buffer),
+  framebuffer objects, and more vertex attribute formats.
+- A Vulkan-style API on `vc4`.
 - Input (evdev) and a Wayland compositor.

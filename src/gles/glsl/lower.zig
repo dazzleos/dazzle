@@ -35,6 +35,9 @@ pub const UniformSlot = struct {
 pub const Slot = struct {
     name: []const u8,
     type: Type,
+    /// Attributes: how many components the vertex data supplies (all when
+    /// null). Missing components read as in GL: 0 for y and z, 1 for w.
+    supplied: ?u8 = null,
 };
 
 pub const Interface = struct {
@@ -721,7 +724,8 @@ const Lowerer = struct {
         if (is_vertex) {
             for (l.iface.attributes) |a| {
                 var v: Val = .{ .ty = a.type };
-                for (0..a.type.components()) |i| v.c[i] = s.vpmRead();
+                const supplied = @min(a.supplied orelse 4, a.type.components());
+                for (0..a.type.components()) |i| v.c[i] = if (i < supplied) s.vpmRead() else l.k(if (i == 3) 1 else 0);
                 l.vars[l.nvars] = .{ .name = a.name, .ty = a.type, .kind = .attribute, .val = v, .written = true };
                 l.nvars += 1;
             }
