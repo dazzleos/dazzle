@@ -208,3 +208,21 @@ pub fn readFile(path: [*:0]const u8, buf: []u8) ?[]const u8 {
     const n = check(linux.read(fd, buf.ptr, buf.len)) catch return null;
     return buf[0..n];
 }
+
+/// Reads a whole file into memory from `gpa`.
+pub fn readFileAlloc(gpa: std.mem.Allocator, path: [*:0]const u8, max_size: usize) ![]u8 {
+    const fd = try open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true });
+    defer close(fd);
+    var stx: linux.Statx = undefined;
+    _ = try check(linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .SIZE = true }, &stx));
+    if (stx.size > max_size) return error.OutOfMemory;
+    const buf = try gpa.alloc(u8, @intCast(stx.size));
+    errdefer gpa.free(buf);
+    var at: usize = 0;
+    while (at < buf.len) {
+        const n = try check(linux.read(fd, buf[at..].ptr, buf.len - at));
+        if (n == 0) return error.Unexpected;
+        at += n;
+    }
+    return buf;
+}

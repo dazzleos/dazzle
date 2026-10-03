@@ -18,6 +18,8 @@ const drm = vc4.drm;
 const sys = @import("sys");
 const demos = @import("demos.zig");
 const glcube = @import("glcube.zig");
+const textdemo = @import("textdemo.zig");
+const font = @import("font");
 const display_mod = vc4.display;
 
 const print = sys.print;
@@ -27,12 +29,13 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     var args = init.args.iterate();
     _ = args.skip();
     const name = if (args.next()) |arg| std.meta.stringToEnum(DemoName, arg) orelse {
-        print("usage: stardust-demo [triangle|spin|cube|glcube]\n", .{});
+        print("usage: stardust-demo [triangle|spin|cube|glcube|text [font.ttf]]\n", .{});
         return 2;
     } else .cube;
+    const font_path: [*:0]const u8 = args.next() orelse font.system_font_path;
     print("stardust: demo {s} running as uid {d}\n", .{ @tagName(name), linux.getuid() });
 
-    run(name) catch |err| {
+    run(name, font_path) catch |err| {
         print("stardust: error: {s}\n", .{@errorName(err)});
         if (err == error.NoVc4Device)
             print("stardust: the vc4 driver did not create a DRM device; look for vc4, hdmi or v3d errors earlier in the log\n", .{});
@@ -43,12 +46,13 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     return 0;
 }
 
-/// The demos: the vc4 API ones, and the same cube through OpenGL ES.
-pub const DemoName = enum { triangle, spin, cube, glcube };
+/// The demos: the vc4 API ones, the same cube through OpenGL ES, and text.
+pub const DemoName = enum { triangle, spin, cube, glcube, text };
 
-fn run(name: DemoName) !void {
+fn run(name: DemoName, font_path: [*:0]const u8) !void {
     const kind: demos.Kind = switch (name) {
         .glcube => return glcube.run(),
+        .text => return textdemo.run(font_path),
         inline else => |n| @field(demos.Kind, @tagName(n)),
     };
 
@@ -98,5 +102,6 @@ fn run(name: DemoName) !void {
 test {
     _ = @import("demos.zig");
     _ = @import("glcube.zig");
+    _ = @import("textdemo.zig");
     _ = @import("programs.zig");
 }

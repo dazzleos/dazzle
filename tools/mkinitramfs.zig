@@ -1,9 +1,10 @@
 //! Builds the initramfs: a "newc" cpio archive containing the directories
 //! the init program mounts over, a /dev/console node (the kernel opens it
-//! for PID 1's stdio before devtmpfs is mounted), the init binary and the
-//! demo program in /bin. Everything is owned by root.
+//! for PID 1's stdio before devtmpfs is mounted), the init binary, the
+//! demo program in /bin and the system font (with its license) in
+//! /usr/share/fonts. Everything is owned by root.
 //!
-//! Usage: mkinitramfs <output.cpio> <init-binary> <demo-binary>
+//! Usage: mkinitramfs <output.cpio> <init-binary> <demo-binary> <font> <font-license>
 
 const std = @import("std");
 
@@ -52,8 +53,8 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 4) {
-        std.debug.print("usage: {s} <output.cpio> <init-binary> <demo-binary>\n", .{args[0]});
+    if (args.len != 6) {
+        std.debug.print("usage: {s} <output.cpio> <init-binary> <demo-binary> <font> <font-license>\n", .{args[0]});
         std.process.exit(2);
     }
 
@@ -62,6 +63,10 @@ pub fn main(init: std.process.Init) !void {
     defer gpa.free(init_bin);
     const demo_bin = try cwd.readFileAlloc(io, args[3], gpa, .limited(64 * 1024 * 1024));
     defer gpa.free(demo_bin);
+    const font = try cwd.readFileAlloc(io, args[4], gpa, .limited(16 * 1024 * 1024));
+    defer gpa.free(font);
+    const font_license = try cwd.readFileAlloc(io, args[5], gpa, .limited(1024 * 1024));
+    defer gpa.free(font_license);
 
     const entries = [_]Entry{
         .{ .name = "dev", .mode = S_IFDIR | 0o755 },
@@ -71,6 +76,11 @@ pub fn main(init: std.process.Init) !void {
         .{ .name = "init", .mode = S_IFREG | 0o755, .data = init_bin },
         .{ .name = "bin", .mode = S_IFDIR | 0o755 },
         .{ .name = "bin/stardust-demo", .mode = S_IFREG | 0o755, .data = demo_bin },
+        .{ .name = "usr", .mode = S_IFDIR | 0o755 },
+        .{ .name = "usr/share", .mode = S_IFDIR | 0o755 },
+        .{ .name = "usr/share/fonts", .mode = S_IFDIR | 0o755 },
+        .{ .name = "usr/share/fonts/FiraSans-Regular.ttf", .mode = S_IFREG | 0o644, .data = font },
+        .{ .name = "usr/share/fonts/FiraSans-OFL.txt", .mode = S_IFREG | 0o644, .data = font_license },
         .{ .name = "TRAILER!!!", .mode = 0 },
     };
 

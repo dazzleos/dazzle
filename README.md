@@ -27,6 +27,7 @@ The code is split into Zig modules, linked statically into each program:
 | `sys` | `src/sys/` | Linux system call helpers (sleeping, clocks, logging, the kernel command line) |
 | `vc4` | `src/vc4/` | The low-level graphics API for the VideoCore IV, described below |
 | `gles` | `src/gles/` | OpenGL ES 2.0, EGL and the GLSL ES 1.00 compiler, on top of `vc4` |
+| `font` | `src/font/` | OpenType font rendering, described below |
 | `stardust-init` | `src/init/` | The init program: mounts, log server, GPU device permissions, starting the demo |
 | `stardust-demo` | `src/demo/` | The demo program, run as the unprivileged user |
 
@@ -87,6 +88,24 @@ vector and matrix rules, constructors, and the built-ins `texture2D`,
 structs, comparisons and trigonometric functions; these give a compile
 error naming the problem.
 
+The `font` module renders text in OpenType fonts with TrueType outlines:
+
+| File | Contents |
+|---|---|
+| `opentype.zig` | Font parsing: `cmap` (formats 4 and 12), metrics, simple and composite `glyf` outlines, and pair kerning from the GPOS `kern` feature |
+| `raster.zig` | Anti-aliased rasterizer: each line adds its exact area coverage to an accumulation buffer, and a running sum gives each pixel's coverage (font-rs's method) |
+| `text.zig` | Glyph cache, layout with kerning and quarter-pixel horizontal positioning, and blending into 32-bit pixels |
+
+Glyphs are drawn unhinted with grayscale anti-aliasing. The parser is
+bounds-checked throughout, so a damaged font gives errors rather than
+crashes. Not supported: CFF outlines, variable font axes, hinting, and
+shaping beyond kerning (ligatures, combining marks, right-to-left text).
+
+The system font is **Fira Sans** Regular (`fonts/`, SIL Open Font License
+1.1, from the Google Fonts repository). Its designers made it for Firefox
+OS, and it covers Latin, Greek and Cyrillic. It is installed in the image
+as `/usr/share/fonts/FiraSans-Regular.ttf`, next to its license.
+
 The init program (`src/init/`):
 
 | File | Contents |
@@ -104,6 +123,7 @@ The demo program (`src/demo/`):
 | `demos.zig` | The `vc4` API demo scenes: `triangle`, `spin` and `cube` |
 | `programs.zig` | Those demos' shaders, written with the compiler's builder API |
 | `glcube.zig` | The cube through EGL and OpenGL ES 2.0, written as a C program would be |
+| `textdemo.zig` | A specimen page of the system font with a live status line, drawn on the CPU |
 
 ### Privileges
 
@@ -129,8 +149,8 @@ passwords or logins.
 This needs `CONFIG_MULTIUSER` in the kernel (about 8 KB). Without it, every
 process has every privilege.
 
-Also: `tools/mkinitramfs.zig` (packs init and the demo into a cpio
-initramfs), `kernel/stardust.config` (kernel config fragment applied on top
+Also: `tools/mkinitramfs.zig` (packs init, the demo and the font into a
+cpio initramfs), `kernel/stardust.config` (kernel config fragment applied on top
 of `tinyconfig`), `boot/` (firmware `config.txt` and kernel `cmdline.txt`)
 and `scripts/` (kernel build, firmware download, SD image, QEMU and Zig).
 
@@ -233,13 +253,15 @@ stardust.ip=192.168.1.50/24,192.168.1.1
 | `spin` | A triangle rotating at the display's refresh rate, drawn with compiled shaders and double buffering |
 | `cube` (default) | A spinning cube with perspective, a checkerboard texture tinted per face, and depth testing |
 | `glcube` | The same cube through EGL and OpenGL ES 2.0, from GLSL source, with indexed drawing and back-face culling |
+| `text` | A specimen page of the system font at several sizes, in Latin, Greek and Cyrillic, with a status line (frame count, frame rate, uptime) redrawn every frame |
 
 The first three use the `vc4` API, each building on the previous one, so if
 one fails on the hardware the simpler ones narrow down where. `boot/cmdline.txt` currently selects `glcube`, to
 try the GL path on hardware; without the option `cube` is shown. `glcube`
 should look the same as `cube`: if only the inside faces show, face culling
 is reversed. The animated demos log their frame rate every 5 seconds (the
-`vc4` ones also log render time).
+`vc4` ones also log render time). `text` draws on the CPU, not the GPU. It
+draws the page once, then only redraws and copies the status line.
 
 The serial console on GPIO 14 (TX) and 15 (RX), 115200 baud, still works and
 shows the same messages. It is the fallback if the network does not come up.
@@ -252,7 +274,7 @@ The firmware picks the Zero or Zero W device tree in `config.txt`. The Zero
 - **Raspberry Pi OS:** `zig-out/bin/stardust-demo` also runs as a normal
   program on Raspberry Pi OS (Lite, or with the desktop stopped) on any Pi
   from the Zero to the Pi 3. All of them have the same VideoCore IV and
-  `vc4` driver. Run `stardust-demo [triangle|spin|cube|glcube]` from a text
+  `vc4` driver. Run `stardust-demo [triangle|spin|cube|glcube|text [font.ttf]]` from a text
   console as a user in the `video` group. It runs until you press Ctrl+C.
   Iterating on GPU code this way avoids rebuilding the SD card.
 - **QEMU:** `scripts/run-qemu.sh` boots the kernel and initramfs in QEMU's
@@ -342,4 +364,7 @@ GPU or display).
 - GL: blending (in the fragment shader, reading the tile buffer),
   framebuffer objects, and more vertex attribute formats.
 - A Vulkan-style API on `vc4`.
+- Text: ligatures and other GSUB features, hinting or stem darkening for
+  small sizes, and text drawn by the GPU (a glyph atlas texture, once
+  blending is supported).
 - Input (evdev) and a Wayland compositor.

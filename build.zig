@@ -4,6 +4,7 @@ const Modules = struct {
     sys: *std.Build.Module,
     vc4: *std.Build.Module,
     gles: *std.Build.Module,
+    font: *std.Build.Module,
 };
 
 /// The library modules, built for one target:
@@ -11,6 +12,7 @@ const Modules = struct {
 /// * `sys`: Linux system call helpers shared by everything
 /// * `vc4`: the low-level VideoCore IV graphics API
 /// * `gles`: OpenGL ES 2.0 and GLSL, built on vc4
+/// * `font`: OpenType font rendering
 fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) Modules {
     const sys = b.createModule(.{
         .root_source_file = b.path("src/sys/sys.zig"),
@@ -32,7 +34,12 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
             .{ .name = "vc4", .module = vc4 },
         },
     });
-    return .{ .sys = sys, .vc4 = vc4, .gles = gles };
+    const font = b.createModule(.{
+        .root_source_file = b.path("src/font/font.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    return .{ .sys = sys, .vc4 = vc4, .gles = gles, .font = font };
 }
 
 /// A program's root module. `single_threaded` and stripping are set for the
@@ -48,6 +55,7 @@ fn addProgramModule(b: *std.Build, path: []const u8, target: std.Build.ResolvedT
             .{ .name = "sys", .module = m.sys },
             .{ .name = "vc4", .module = m.vc4 },
             .{ .name = "gles", .module = m.gles },
+            .{ .name = "font", .module = m.font },
         },
     });
 }
@@ -89,6 +97,8 @@ pub fn build(b: *std.Build) void {
     const initramfs = run_mkinitramfs.addOutputFileArg("initramfs.cpio");
     run_mkinitramfs.addArtifactArg(init_exe);
     run_mkinitramfs.addArtifactArg(demo_exe);
+    run_mkinitramfs.addFileArg(b.path("fonts/FiraSans-Regular.ttf"));
+    run_mkinitramfs.addFileArg(b.path("fonts/OFL.txt"));
     const install_initramfs = b.addInstallFile(initramfs, "initramfs.cpio");
     b.getInstallStep().dependOn(&install_initramfs.step);
 
@@ -98,11 +108,14 @@ pub fn build(b: *std.Build) void {
     // Unit tests run on the build machine; they cover the parts that do not
     // need the GPU (instruction encoding, compiler, simulator, ...).
     const host = addModules(b, b.graph.host, optimize);
+    // The font tests use the real system font.
+    host.font.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const test_step = b.step("test", "Run unit tests on the host");
     for ([_]*std.Build.Module{
         host.sys,
         host.vc4,
         host.gles,
+        host.font,
         addProgramModule(b, "src/init/main.zig", b.graph.host, optimize, host, null),
         addProgramModule(b, "src/demo/main.zig", b.graph.host, optimize, host, null),
     }) |m| {

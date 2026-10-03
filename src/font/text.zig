@@ -1,0 +1,303 @@
+//! Drawing text: a glyph cache of rasterized coverage masks, horizontal
+//! layout with kerning, and blending into 32-bit pixels.
+//!
+//! Glyphs are positioned to a quarter of a pixel horizontally (each glyph
+//! is cached at four subpixel offsets as needed), so spacing stays even at
+//! small sizes without hinting. Baselines snap to whole pixels.
+
+const std = @import("std");
+const opentype = @import("opentype.zig");
+const Rasterizer = @import("raster.zig").Rasterizer;
+
+pub const Font = opentype.Font;
+
+/// 0xAARRGGBB pixels, as the display and the GPU render target use.
+pub const Canvas = struct {
+    pixels: []u32,
+    width: u32,
+    height: u32,
+    /// Distance between rows, in pixels.
+    stride: u32,
+
+    pub fn fill(c: Canvas, x: i32, y: i32, w: u32, h: u32, color: u32) void {
+        const x0: u32 = @intCast(std.math.clamp(x, 0, @as(i32, @intCast(c.width))));
+        const y0: u32 = @intCast(std.math.clamp(y, 0, @as(i32, @intCast(c.height))));
+        const x1: u32 = @intCast(std.math.clamp(x + @as(i32, @intCast(w)), 0, @as(i32, @intCast(c.width))));
+        const y1: u32 = @intCast(std.math.clamp(y + @as(i32, @intCast(h)), 0, @as(i32, @intCast(c.height))));
+        for (y0..y1) |row| @memset(c.pixels[row * c.stride + x0 ..][0 .. x1 - x0], color);
+    }
+
+    /// Blends `color` into the canvas through a coverage mask whose top left
+    /// is at (x, y).
+    pub fn blendMask(c: Canvas, x: i32, y: i32, mask: []const u8, mask_w: u32, mask_h: u32, color: u32) void {
+        const color_alpha: u32 = color >> 24;
+        for (0..mask_h) |my| {
+            const cy = y + @as(i32, @intCast(my));
+            if (cy < 0 or cy >= c.height) continue;
+            const row = c.pixels[@as(usize, @intCast(cy)) * c.stride ..];
+            for (0..mask_w) |mx| {
+                const cx = x + @as(i32, @intCast(mx));
+                if (cx < 0 or cx >= c.width) continue;
+                const cov: u32 = mask[my * mask_w + mx];
+                if (cov == 0) continue;
+                const a = cov * color_alpha / 255;
+                const p = &row[@intCast(cx)];
+                p.* = blend(p.*, color, a);
+            }
+        }
+    }
+};
+
+/// `src` over `dst` with alpha `a` (0-255), per colour channel. The result
+/// is opaque.
+pub fn blend(dst: u32, src: u32, a: u32) u32 {
+    if (a >= 255) return src | 0xff000000;
+    var out: u32 = 0xff000000;
+    inline for (.{ 0, 8, 16 }) |shift| {
+        const d = (dst >> shift) & 0xff;
+        const s = (src >> shift) & 0xff;
+        out |= ((s * a + d * (255 - a) + 127) / 255) << shift;
+    }
+    return out;
+}
+
+const Key = struct {
+    glyph: u16,
+    /// Pixels per em, in 1/64ths.
+    size: u32,
+    /// Horizontal offset in quarter pixels (0-3).
+    subpixel: u2,
+};
+
+/// A rasterized glyph.
+pub const Bitmap = struct {
+    /// Offset of the mask's top left from the pen position on the baseline.
+    left: i32,
+    top: i32,
+    width: u32,
+    height: u32,
+    mask: []u8,
+};
+
+pub const GlyphCache = struct {
+    gpa: std.mem.Allocator,
+    map: std.AutoHashMapUnmanaged(Key, Bitmap) = .empty,
+
+    pub fn init(gpa: std.mem.Allocator) GlyphCache {
+        return .{ .gpa = gpa };
+    }
+
+    pub fn deinit(cache: *GlyphCache) void {
+        var it = cache.map.valueIterator();
+        while (it.next()) |b| cache.gpa.free(b.mask);
+        cache.map.deinit(cache.gpa);
+    }
+
+    /// The glyph rasterized at `size` pixels per em, shifted right by
+    /// `subpixel` quarter pixels.
+    pub fn get(cache: *GlyphCache, font: *const Font, glyph: u16, size: f32, subpixel: u2) !Bitmap {
+        const key: Key = .{ .glyph = glyph, .size = @intFromFloat(size * 64), .subpixel = subpixel };
+        if (cache.map.get(key)) |b| return b;
+        const b = try rasterizeGlyph(cache.gpa, font, glyph, size, @as(f32, @floatFromInt(subpixel)) / 4);
+        errdefer cache.gpa.free(b.mask);
+        try cache.map.put(cache.gpa, key, b);
+        return b;
+    }
+};
+
+/// Rasterizes one glyph, shifted right by `dx` pixels (0 <= dx < 1).
+pub fn rasterizeGlyph(gpa: std.mem.Allocator, font: *const Font, glyph: u16, size: f32, dx: f32) !Bitmap {
+    const box = font.boundingBox(glyph) orelse return .{ .left = 0, .top = 0, .width = 0, .height = 0, .mask = &.{} };
+    const scale = size / @as(f32, @floatFromInt(font.units_per_em));
+    const x0 = @floor(@as(f32, @floatFromInt(box.x_min)) * scale + dx);
+    const x1 = @ceil(@as(f32, @floatFromInt(box.x_max)) * scale + dx);
+    const y0 = @floor(-@as(f32, @floatFromInt(box.y_max)) * scale);
+    const y1 = @ceil(-@as(f32, @floatFromInt(box.y_min)) * scale);
+    // One pixel of margin: curves may bulge slightly past rounded bounds.
+    const w: u32 = @intFromFloat(x1 - x0 + 2);
+    const h: u32 = @intFromFloat(y1 - y0 + 2);
+    var r = try Rasterizer.init(gpa, w, h);
+    defer r.deinit(gpa);
+    const sink = struct {
+        r: *Rasterizer,
+        started: bool = false,
+        pub fn moveTo(s: *@This(), x: f32, y: f32) void {
+            if (s.started) s.r.close();
+            s.started = true;
+            s.r.moveTo(x, y);
+        }
+        pub fn lineTo(s: *@This(), x: f32, y: f32) void {
+            s.r.lineTo(x, y);
+        }
+        pub fn quadTo(s: *@This(), cx: f32, cy: f32, x: f32, y: f32) void {
+            s.r.quadTo(cx, cy, x, y);
+        }
+    };
+    var s: sink = .{ .r = &r };
+    // Font units (y up) to mask pixels (y down), with the margin.
+    const t: opentype.Transform = .{ .a = scale, .d = -scale, .e = dx - x0 + 1, .f = -y0 + 1 };
+    try font.outline(glyph, t, &s);
+    if (s.started) r.close();
+    const mask = try gpa.alloc(u8, @as(usize, w) * h);
+    r.coverage(mask);
+    return .{
+        .left = @as(i32, @intFromFloat(x0)) - 1,
+        .top = @as(i32, @intFromFloat(y0)) - 1,
+        .width = w,
+        .height = h,
+        .mask = mask,
+    };
+}
+
+/// Text in one font at one size.
+pub const Style = struct {
+    font: *const Font,
+    /// Pixels per em.
+    size: f32,
+    color: u32 = 0xffffffff,
+
+    fn scale(s: Style) f32 {
+        return s.size / @as(f32, @floatFromInt(s.font.units_per_em));
+    }
+
+    /// Distance from the baseline up to the top of the tallest glyphs.
+    pub fn ascent(s: Style) f32 {
+        return @as(f32, @floatFromInt(s.font.ascender)) * s.scale();
+    }
+
+    /// Distance between baselines.
+    pub fn lineHeight(s: Style) f32 {
+        const f = s.font;
+        return @as(f32, @floatFromInt(@as(i32, f.ascender) - f.descender + f.line_gap)) * s.scale();
+    }
+};
+
+/// Steps through UTF-8 text glyph by glyph, giving each glyph's pen
+/// position (kerning applied). Invalid UTF-8 shows as U+FFFD.
+const Layout = struct {
+    style: Style,
+    text: []const u8,
+    at: usize = 0,
+    x: f32,
+    prev: ?u16 = null,
+
+    const Item = struct { glyph: u16, x: f32 };
+
+    fn next(l: *Layout) ?Item {
+        if (l.at >= l.text.len) return null;
+        const len = std.unicode.utf8ByteSequenceLength(l.text[l.at]) catch 1;
+        const cp: u21 = if (l.at + len <= l.text.len)
+            std.unicode.utf8Decode(l.text[l.at..][0..len]) catch 0xfffd
+        else
+            0xfffd;
+        l.at += @min(len, l.text.len - l.at);
+        const f = l.style.font;
+        const glyph = f.glyphIndex(cp);
+        if (l.prev) |p| l.x += @as(f32, @floatFromInt(f.kerning(p, glyph))) * l.style.scale();
+        const item: Item = .{ .glyph = glyph, .x = l.x };
+        l.x += @as(f32, @floatFromInt(f.advance(glyph))) * l.style.scale();
+        l.prev = glyph;
+        return item;
+    }
+};
+
+/// The width of `text` in pixels.
+pub fn measure(style: Style, text: []const u8) f32 {
+    var l: Layout = .{ .style = style, .text = text, .x = 0 };
+    while (l.next()) |_| {}
+    return l.x;
+}
+
+/// Draws `text` with its baseline at `baseline` (rounded to a pixel),
+/// starting at `x`. Returns the pen position after the text.
+pub fn draw(canvas: Canvas, cache: *GlyphCache, style: Style, x: f32, baseline: f32, text: []const u8) !f32 {
+    const base: i32 = @intFromFloat(@round(baseline));
+    var l: Layout = .{ .style = style, .text = text, .x = x };
+    while (l.next()) |item| {
+        const quarter: i32 = @intFromFloat(@round(item.x * 4));
+        const b = try cache.get(style.font, item.glyph, style.size, @intCast(@mod(quarter, 4)));
+        if (b.width == 0) continue;
+        canvas.blendMask(@divFloor(quarter, 4) + b.left, base + b.top, b.mask, b.width, b.height, style.color);
+    }
+    return l.x;
+}
+
+// --- Tests ------------------------------------------------------------------
+
+const testing = std.testing;
+const fira = @embedFile("FiraSans-Regular.ttf");
+
+test "blend" {
+    try testing.expectEqual(@as(u32, 0xff102030), blend(0xff102030, 0xffffffff, 0));
+    try testing.expectEqual(@as(u32, 0xffffffff), blend(0xff102030, 0xffffffff, 255));
+    try testing.expectEqual(@as(u32, 0xff808080), blend(0xff000000, 0xffffffff, 128));
+}
+
+test "glyph masks have ink where the glyph is" {
+    const f = try Font.init(fira);
+    const b = try rasterizeGlyph(testing.allocator, &f, f.glyphIndex('l'), 40, 0);
+    defer testing.allocator.free(b.mask);
+    // An 'l' at 40 px: a stem about 3 px wide and as tall as an ascender.
+    var full: u32 = 0;
+    var ink: f32 = 0;
+    for (b.mask) |v| {
+        if (v == 255) full += 1;
+        ink += @as(f32, @floatFromInt(v)) / 255;
+    }
+    try testing.expect(full > 50);
+    try testing.expect(b.top < -25 and b.top > -35);
+    // Ink is roughly the stem's area.
+    try testing.expect(ink > 80 and ink < 200);
+}
+
+test "subpixel offsets move ink right" {
+    const f = try Font.init(fira);
+    const g = f.glyphIndex('I');
+    const centroid = struct {
+        fn x(b: Bitmap) f32 {
+            var sum: f32 = 0;
+            var total: f32 = 0;
+            for (0..b.height) |y| for (0..b.width) |xi| {
+                const v: f32 = @floatFromInt(b.mask[y * b.width + xi]);
+                sum += v * (@as(f32, @floatFromInt(xi)) + 0.5 + @as(f32, @floatFromInt(b.left)));
+                total += v;
+            };
+            return sum / total;
+        }
+    }.x;
+    const b0 = try rasterizeGlyph(testing.allocator, &f, g, 20, 0);
+    defer testing.allocator.free(b0.mask);
+    const b2 = try rasterizeGlyph(testing.allocator, &f, g, 20, 0.5);
+    defer testing.allocator.free(b2.mask);
+    try testing.expectApproxEqAbs(centroid(b0) + 0.5, centroid(b2), 0.05);
+}
+
+test "drawing text into a canvas" {
+    const f = try Font.init(fira);
+    var cache = GlyphCache.init(testing.allocator);
+    defer cache.deinit();
+    var pixels: [200 * 40]u32 = @splat(0xff000000);
+    const canvas: Canvas = .{ .pixels = &pixels, .width = 200, .height = 40, .stride = 200 };
+    const style: Style = .{ .font = &f, .size = 24 };
+    const end = try draw(canvas, &cache, style, 2, 28, "Stardust AV");
+    try testing.expectApproxEqAbs(measure(style, "Stardust AV") + 2, end, 0.001);
+    // Kerning pulls "To" together (by 55/1000 em).
+    try testing.expectApproxEqAbs(measure(style, "T") + measure(style, "o") - 24 * 0.055, measure(style, "To"), 0.001);
+    var lit: u32 = 0;
+    for (pixels) |p| lit += @intFromBool(p != 0xff000000);
+    try testing.expect(lit > 300);
+    // Nothing is drawn above the tallest glyph or past the end of the text.
+    for (0..200) |x| try testing.expectEqual(@as(u32, 0xff000000), pixels[x]);
+    const end_px: usize = @intFromFloat(@ceil(end) + 2);
+    for (0..40) |y| for (end_px..200) |x| try testing.expectEqual(@as(u32, 0xff000000), pixels[y * 200 + x]);
+    // Drawing again reuses the cached glyphs.
+    const cached = cache.map.count();
+    _ = try draw(canvas, &cache, style, 2, 28, "Stardust AV");
+    try testing.expectEqual(cached, cache.map.count());
+}
+
+test "invalid UTF-8 draws the replacement character" {
+    const f = try Font.init(fira);
+    const style: Style = .{ .font = &f, .size = 16 };
+    try testing.expect(measure(style, "a\xffb") > measure(style, "ab"));
+}
