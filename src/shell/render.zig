@@ -217,14 +217,10 @@ pub const Renderer = struct {
             t = .{ .handle = bo.handle, .width = width, .height = height };
         }
         const bo = r.owned.get(t.handle).?;
-        // Rows may be padded; texture.upload wants them packed.
-        const packed_pixels = try r.gpa.alloc(u32, @as(usize, width) * height);
-        defer r.gpa.free(packed_pixels);
-        for (0..height) |y| {
-            const row = pixels[y * stride ..][0 .. width * 4];
-            for (packed_pixels[y * width ..][0..width], 0..) |*px, x| px.* = std.mem.readInt(u32, row[x * 4 ..][0..4], .little);
-        }
-        texture.upload(bo.map, packed_pixels, width, height);
+        // 32-bit pixels are already in the texture unit's byte order, and
+        // rows are a whole number of pixels apart.
+        const words = std.mem.bytesAsSlice(u32, pixels[0 .. pixels.len / 4 * 4]);
+        texture.uploadRect(bo.map, width, height, .{ .x = 0, .y = 0, .width = width, .height = height }, @alignCast(words), stride / 4);
         return t;
     }
 

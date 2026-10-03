@@ -10,7 +10,7 @@
 //! 3. waits for the vc4 GPU and gives the Stardust user access to its device
 //!    nodes;
 //! 4. creates the user's runtime directory (/run/user/1000, for the
-//!    Wayland socket) and starts /bin/stardust-shell, the Wayland compositor,
+//!    Wayland socket) and starts /stardust-shell, the Wayland compositor,
 //!    as the Stardust user, with its output going to the kernel log; the
 //!    shell starts the demo as its client;
 //! 5. reaps exited processes forever (PID 1 must never exit), restarting the
@@ -27,7 +27,7 @@ const network = @import("network.zig");
 
 const print = sys.print;
 
-const shell_path = "/bin/stardust-shell";
+const shell_path = "/stardust-shell";
 const runtime_dir = "/run/user/1000";
 
 pub fn main() void {
@@ -131,7 +131,7 @@ fn startShell() ?linux.pid_t {
         linux.exit(126);
     };
     const argv = [_:null]?[*:0]const u8{shell_path};
-    const envp = [_:null]?[*:0]const u8{ "HOME=/", "PATH=/bin", "USER=" ++ sys.user.name, "XDG_RUNTIME_DIR=" ++ runtime_dir };
+    const envp = [_:null]?[*:0]const u8{ "HOME=/", "PATH=/apps", "USER=" ++ sys.user.name, "XDG_RUNTIME_DIR=" ++ runtime_dir };
     const err = linux.errno(linux.execve(shell_path, &argv, &envp));
     print("stardust: cannot run {s} ({s})\n", .{ shell_path, @tagName(err) });
     linux.exit(127);

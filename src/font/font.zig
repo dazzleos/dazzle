@@ -7,7 +7,7 @@
 //! * `text`: the glyph cache, layout, and drawing into 32-bit pixels
 //!
 //! The system font is Fira Sans (SIL Open Font License), installed in the
-//! image as /usr/share/fonts/FiraSans-Regular.ttf.
+//! image as /apps/FiraSans-Regular.ttf.
 //!
 //!     const f = try font.Font.init(data);
 //!     var cache = font.GlyphCache.init(gpa);
@@ -25,7 +25,7 @@ pub const draw = text.draw;
 pub const measure = text.measure;
 
 /// Where the system font is installed.
-pub const system_font_path = "/usr/share/fonts/FiraSans-Regular.ttf";
+pub const system_font_path = "/apps/FiraSans-Regular.ttf";
 
 test {
     _ = opentype;

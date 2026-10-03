@@ -110,7 +110,7 @@ shaping beyond kerning (ligatures, combining marks, right-to-left text).
 The system font is **Fira Sans** Regular (`fonts/`, SIL Open Font License
 1.1, from the Google Fonts repository). Its designers made it for Firefox
 OS, and it covers Latin, Greek and Cyrillic. It is installed in the image
-as `/usr/share/fonts/FiraSans-Regular.ttf`, next to its license.
+as `/apps/FiraSans-Regular.ttf`, next to its license.
 
 The init program (`src/init/`):
 
@@ -170,7 +170,7 @@ passwords or logins.
   touch the display.
 - Init creates `/run/user/1000` (the user's runtime directory, mode 0700),
   forks, drops to the user (no supplementary groups, then the group, then
-  the user ID) and execs `/bin/stardust-shell`. The shell's stdout and
+  the user ID) and execs `/stardust-shell`. The shell's stdout and
   stderr are init's `/dev/kmsg` descriptor, because only root can open that
   for writing. The shell's clients inherit them.
 - The network manager runs as the same user but keeps three capabilities:
@@ -189,6 +189,16 @@ Also: `tools/mkinitramfs.zig` (packs init, the shell, the demo and the
 font into a cpio initramfs), `kernel/stardust.config` (kernel config fragment applied on top
 of `tinyconfig`), `boot/` (firmware `config.txt` and kernel `cmdline.txt`)
 and `scripts/` (kernel build, firmware download, SD image, QEMU and Zig).
+
+The image's filesystem (an initramfs, in RAM) is kept simple:
+
+```
+/init                       stardust-init
+/stardust-shell
+/apps/stardust-demo
+/apps/FiraSans-Regular.ttf  the system font, with its license next to it
+/dev /proc /sys /run        mounted or created by init
+```
 
 There is no C library: programs make raw system calls through
 `std.os.linux`.
@@ -260,11 +270,11 @@ messages) and then follows new messages:
 [    4.740011] stardust: network: found eth0 (<mac>)
 [    4.746230] stardust: network: eth0 link up
 [    4.940117] stardust: network: eth0 is 192.168.1.42/24, gateway 192.168.1.1 (DHCP, lease 86400 s)
-[    4.740312] stardust: started /bin/stardust-shell (pid 24) as uid 1000
+[    4.740312] stardust: started /stardust-shell (pid 24) as uid 1000
 [    4.741008] stardust: opened /dev/dri/card0 (vc4)
 [    4.772511] stardust-shell: display <width>x<height>
 [    4.772702] stardust-shell: listening on /run/user/1000/wayland-0
-[    4.772913] stardust-shell: started /bin/stardust-demo (pid 25)
+[    4.772913] stardust-shell: started /apps/stardust-demo (pid 25)
 [    4.790100] stardust-shell: client connected
 [    4.802114] stardust: OpenGL ES 2.0 Stardust on VideoCore IV (Stardust), window <width>x<height>
 [    9.840211] stardust: 60.0 fps, GPU <t> ms, CPU <t> ms per frame
@@ -313,7 +323,7 @@ The firmware picks the Zero or Zero W device tree in `config.txt`. The Zero
   `stardust-demo [font.ttf]` to draw on the screen directly (with no
   `WAYLAND_DISPLAY`). Or run the shell with `XDG_RUNTIME_DIR` set:
   `stardust-shell path/to/stardust-demo`. The font defaults to
-  `/usr/share/fonts/FiraSans-Regular.ttf`. Press Ctrl+C to stop.
+  `/apps/FiraSans-Regular.ttf`. Press Ctrl+C to stop.
   Iterating on GPU code this way avoids rebuilding the SD card.
 - **QEMU:** `scripts/run-qemu.sh` boots the kernel and initramfs in QEMU's
   `raspi0` machine with an emulated USB network card. `telnet localhost

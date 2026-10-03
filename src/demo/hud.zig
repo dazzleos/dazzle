@@ -45,7 +45,9 @@ pub const Hud = struct {
     height: u32,
     scale: f32,
     pixels: []u32,
-    rgba: []u8,
+    /// Hashes of the text in each band (the title, then each line), so
+    /// only changed lines are redrawn and uploaded; 0 = not drawn.
+    drawn: [lines + 1]u64 = @splat(0),
     program: gl.GLuint,
     texture: gl.GLuint,
     /// The quad as a triangle strip of (x, y, u, v) in clip space.
@@ -83,7 +85,6 @@ pub const Hud = struct {
             .height = 0,
             .scale = 1,
             .pixels = &.{},
-            .rgba = &.{},
             .program = program,
             .texture = texture,
             .quad = undefined,
@@ -97,9 +98,8 @@ pub const Hud = struct {
         if (h.screen[0] == screen_width and h.screen[1] == screen_height) return;
         const r = rect(screen_width, screen_height);
         h.gpa.free(h.pixels);
-        h.gpa.free(h.rgba);
         h.pixels = try h.gpa.alloc(u32, @as(usize, r[2]) * r[3]);
-        h.rgba = try h.gpa.alloc(u8, @as(usize, r[2]) * r[3] * 4);
+        h.drawn = @splat(0);
         h.screen = .{ screen_width, screen_height };
         h.width = r[2];
         h.height = r[3];
@@ -121,25 +121,59 @@ pub const Hud = struct {
         };
     }
 
-    /// Redraws the panel with new text and uploads it.
-    pub fn update(h: *Hud, text: [lines][]const u8) !void {
-        const canvas: font.Canvas = .{ .pixels = h.pixels, .width = h.width, .height = h.height, .stride = h.width };
-        canvas.fill(0, 0, h.width, h.height, h.background);
+    /// The rows of band `i` (0 = the title, then each line): from 30 above
+    /// a line's baseline to 10 below, which holds its ascenders and
+    /// descenders.
+    fn band(h: *const Hud, i: usize) [2]u32 {
         const s = h.scale;
-        _ = try font.draw(canvas, &h.cache, .{ .font = h.font, .size = 52 * s, .color = title_color }, 0, 52 * s, "Stardust");
-        for (text, 0..) |line, i| {
-            const color: u32 = if (i == 0) text_color else dim_color;
-            _ = try font.draw(canvas, &h.cache, .{ .font = h.font, .size = 28 * s, .color = color }, 0, (100 + @as(f32, @floatFromInt(i)) * 40) * s, line);
+        const top: f32 = if (i == 0) 0 else (70 + @as(f32, @floatFromInt(i - 1)) * 40) * s;
+        const bottom: f32 = if (i == lines) @floatFromInt(h.height) else (70 + @as(f32, @floatFromInt(i)) * 40) * s;
+        return .{ @intFromFloat(@floor(top)), @min(@as(u32, @intFromFloat(@floor(bottom))), h.height) };
+    }
+
+    /// Redraws and uploads the lines whose text changed.
+    pub fn update(h: *Hud, text: [lines][]const u8) !void {
+        const s = h.scale;
+        const first_upload = h.drawn[0] == 0;
+        var dirty: ?[2]u32 = null;
+        for (0..lines + 1) |i| {
+            const str = if (i == 0) "Stardust" else text[i - 1];
+            const hash = std.hash.Wyhash.hash(0, str) | 1;
+            if (hash == h.drawn[i]) continue;
+            h.drawn[i] = hash;
+            const rows = h.band(i);
+            if (rows[1] <= rows[0]) continue;
+            // Draw into the band alone, so glyphs cannot reach other lines.
+            const canvas: font.Canvas = .{
+                .pixels = h.pixels[rows[0] * h.width .. rows[1] * h.width],
+                .width = h.width,
+                .height = rows[1] - rows[0],
+                .stride = h.width,
+            };
+            canvas.fill(0, 0, h.width, rows[1] - rows[0], h.background);
+            const baseline = (if (i == 0) 52 else 100 + @as(f32, @floatFromInt(i - 1)) * 40) * s - @as(f32, @floatFromInt(rows[0]));
+            const style: font.Style = if (i == 0)
+                .{ .font = h.font, .size = 52 * s, .color = title_color }
+            else
+                .{ .font = h.font, .size = 28 * s, .color = if (i == 1) text_color else dim_color };
+            _ = try font.draw(canvas, &h.cache, style, 0, baseline, str);
+            dirty = if (dirty) |d| .{ @min(d[0], rows[0]), @max(d[1], rows[1]) } else rows;
         }
-        for (h.pixels, 0..) |p, i| h.rgba[i * 4 ..][0..4].* = .{ @truncate(p >> 16), @truncate(p >> 8), @truncate(p), @truncate(p >> 24) };
+        const d = dirty orelse return;
+        // The canvas's 0xAARRGGBB words are BGRA bytes, so GL copies them
+        // without conversion, and only the changed rows go up.
         gl.glActiveTexture(gl.GL_TEXTURE0);
         gl.glBindTexture(gl.GL_TEXTURE_2D, h.texture);
-        gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA, @intCast(h.width), @intCast(h.height), 0, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, h.rgba.ptr);
-        // One texel per pixel.
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_NEAREST);
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_NEAREST);
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE);
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE);
+        if (first_upload) {
+            gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_BGRA_EXT, @intCast(h.width), @intCast(h.height), 0, gl.GL_BGRA_EXT, gl.GL_UNSIGNED_BYTE, h.pixels.ptr);
+            // One texel per pixel.
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_NEAREST);
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_NEAREST);
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE);
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE);
+        } else {
+            gl.glTexSubImage2D(gl.GL_TEXTURE_2D, 0, 0, @intCast(d[0]), @intCast(h.width), @intCast(d[1] - d[0]), gl.GL_BGRA_EXT, gl.GL_UNSIGNED_BYTE, h.pixels[d[0] * h.width ..].ptr);
+        }
     }
 
     /// Draws the panel over whatever is on screen.

@@ -226,6 +226,8 @@ pub const Context = struct {
     stream_used: u32 = 0,
     /// A 1x1 opaque black texture for samplers with no usable texture.
     black: ?vc4.Bo = null,
+    /// Converted pixels on their way into a texture.
+    scratch: []u32 = &.{},
 
     err: gl.GLenum = gl.GL_NO_ERROR,
     warned: std.EnumSet(Warning) = .initEmpty(),
@@ -295,6 +297,7 @@ pub const Context = struct {
         if (c.black) |bo| c.backend.destroyBo(bo);
         c.collectGarbage();
         c.garbage.deinit(c.gpa);
+        c.gpa.free(c.scratch);
         if (current == c) current = null;
         c.gpa.destroy(c);
     }
@@ -314,7 +317,7 @@ pub const Context = struct {
             .line_width => "only 1 pixel wide lines are supported",
             .points => "points are not supported yet",
             .attrib_type => "only GL_FLOAT vertex attributes are supported",
-            .texture_format => "only GL_UNSIGNED_BYTE RGBA, RGB, LUMINANCE, LUMINANCE_ALPHA and ALPHA textures are supported",
+            .texture_format => "only GL_UNSIGNED_BYTE RGBA, BGRA, RGB, LUMINANCE, LUMINANCE_ALPHA and ALPHA textures are supported",
             .mipmaps => "mipmaps are not supported yet; textures use the base level",
             .multiple_samplers => "only one texture per draw is supported yet",
             .partial_clear => "clears are not limited by the scissor box yet",
@@ -698,7 +701,7 @@ pub const Context = struct {
 
     fn bytesPerPixel(c: *Context, format: gl.GLenum, ty: gl.GLenum) ?u32 {
         const bpp: u32 = switch (format) {
-            gl.GL_RGBA => 4,
+            gl.GL_RGBA, gl.GL_BGRA_EXT => 4,
             gl.GL_RGB => 3,
             gl.GL_LUMINANCE_ALPHA => 2,
             gl.GL_LUMINANCE, gl.GL_ALPHA => 1,
@@ -720,23 +723,24 @@ pub const Context = struct {
         const bpp = c.bytesPerPixel(format, ty) orelse return;
         if (width > max_texture_size or height > max_texture_size) return c.setError(gl.GL_INVALID_VALUE);
         if (level > 0) return c.warnOnce(.mipmaps);
-        if (t.bo) |bo| {
+        // Keep the buffer when the size is unchanged and the open frame does
+        // not use it: allocating GPU memory is slow, and apps often
+        // re-specify a texture every frame.
+        const in_use = c.frame_open and t.serial == c.serial;
+        if (t.bo) |bo| if (in_use or t.width != width or t.height != height) {
             c.retireBo(bo, t.serial);
             t.bo = null;
-        }
+        };
         t.width = width;
         t.height = height;
         if (width == 0 or height == 0) return;
-        const bo = c.backend.createBo(texture.imageSize(width, height)) catch return c.setError(gl.GL_OUT_OF_MEMORY);
-        t.bo = bo;
-        const tmp = c.gpa.alloc(u32, width * height) catch return c.setError(gl.GL_OUT_OF_MEMORY);
-        defer c.gpa.free(tmp);
+        if (t.bo == null) t.bo = c.backend.createBo(texture.imageSize(width, height)) catch return c.setError(gl.GL_OUT_OF_MEMORY);
+        const rect: texture.Rect = .{ .x = 0, .y = 0, .width = width, .height = height };
         if (pixels) |p| {
-            convertPixels(tmp, p, width, height, format, bpp, c.unpack_alignment);
+            c.uploadPixels(t, rect, p, format, bpp);
         } else {
-            @memset(tmp, 0);
+            @memset(t.bo.?.map, 0);
         }
-        texture.upload(bo.map, tmp, width, height);
     }
 
     pub fn texSubImage2D(c: *Context, target: gl.GLenum, level: u32, x: u32, y: u32, width: u32, height: u32, format: gl.GLenum, ty: gl.GLenum, pixels: [*]const u8) void {
@@ -752,13 +756,30 @@ pub const Context = struct {
             c.retireBo(old, t.serial);
             t.bo = bo;
         }
-        const row_stride = std.mem.alignForward(u32, width * bpp, c.unpack_alignment);
-        const map = t.bo.?.map;
-        for (0..height) |row| for (0..width) |col| {
-            const px = pixel(pixels + row * row_stride + col * bpp, format);
-            const off = texture.texelOffset(t.width, t.height, x + @as(u32, @intCast(col)), y + @as(u32, @intCast(row)));
-            std.mem.writeInt(u32, map[off..][0..4], px, .little);
-        };
+        c.uploadPixels(t, .{ .x = x, .y = y, .width = width, .height = height }, pixels, format, bpp);
+    }
+
+    /// Writes GL pixels into a rectangle of a texture.
+    fn uploadPixels(c: *Context, t: *Texture, rect: texture.Rect, pixels: [*]const u8, format: gl.GLenum, bpp: u32) void {
+        const row_stride = std.mem.alignForward(u32, rect.width * bpp, c.unpack_alignment);
+        if (format == gl.GL_BGRA_EXT) {
+            // Already the texture unit's byte order (4-byte pixels, so rows
+            // are never padded).
+            const words: [*]align(1) const u32 = @ptrCast(pixels);
+            texture.uploadRect(t.bo.?.map, t.width, t.height, rect, words[0 .. rect.width * rect.height], rect.width);
+            return;
+        }
+        // Convert into a scratch buffer kept between uploads.
+        const n = @as(usize, rect.width) * rect.height;
+        if (c.scratch.len < n) {
+            c.gpa.free(c.scratch);
+            c.scratch = c.gpa.alloc(u32, n) catch {
+                c.scratch = &.{};
+                return c.setError(gl.GL_OUT_OF_MEMORY);
+            };
+        }
+        convertPixels(c.scratch[0..n], pixels, rect.width, rect.height, format, bpp, row_stride);
+        texture.uploadRect(t.bo.?.map, t.width, t.height, rect, c.scratch[0..n], rect.width);
     }
 
     // --- Shaders and programs ------------------------------------------------
@@ -1467,8 +1488,22 @@ pub fn packColor(rgba: [4]f32) u32 {
     return out;
 }
 
+fn convertPixels(dst: []u32, src: [*]const u8, width: u32, height: u32, format: gl.GLenum, bpp: u32, row_stride: u32) void {
+    // One loop per format, so the format is not decided per pixel.
+    switch (format) {
+        inline gl.GL_RGBA, gl.GL_RGB, gl.GL_LUMINANCE_ALPHA, gl.GL_LUMINANCE, gl.GL_ALPHA => |f| {
+            for (0..height) |y| {
+                const row = src + y * row_stride;
+                const out = dst[y * width ..][0..width];
+                for (out, 0..) |*o, x| o.* = pixel(row + x * bpp, f);
+            }
+        },
+        else => unreachable,
+    }
+}
+
 /// One GL pixel as the 0xAARRGGBB word the texture unit reads.
-fn pixel(p: [*]const u8, format: gl.GLenum) u32 {
+inline fn pixel(p: [*]const u8, comptime format: gl.GLenum) u32 {
     const rgba: [4]u8 = switch (format) {
         gl.GL_RGBA => .{ p[0], p[1], p[2], p[3] },
         gl.GL_RGB => .{ p[0], p[1], p[2], 255 },
@@ -1478,13 +1513,6 @@ fn pixel(p: [*]const u8, format: gl.GLenum) u32 {
         else => unreachable,
     };
     return @as(u32, rgba[3]) << 24 | @as(u32, rgba[0]) << 16 | @as(u32, rgba[1]) << 8 | rgba[2];
-}
-
-fn convertPixels(dst: []u32, src: [*]const u8, width: u32, height: u32, format: gl.GLenum, bpp: u32, alignment: u32) void {
-    const row_stride = std.mem.alignForward(u32, width * bpp, alignment);
-    for (0..height) |y| for (0..width) |x| {
-        dst[y * width + x] = pixel(src + y * row_stride + x * bpp, format);
-    };
 }
 
 // --- Tests ------------------------------------------------------------------
@@ -1761,4 +1789,34 @@ test "compile errors are reported in the info log" {
 
 test "packColor" {
     try testing.expectEqual(@as(u32, 0xff336699), packColor(.{ 0.2, 0.4, 0.6, 1 }));
+}
+
+test "re-specifying a texture keeps its buffer, and BGRA uploads as is" {
+    const t = try TestContext.init();
+    defer t.deinit();
+    var tex: u32 = 0;
+    gl.glGenTextures(1, @ptrCast(&tex));
+    gl.glBindTexture(gl.GL_TEXTURE_2D, tex);
+    var px: [40 * 20]u32 = undefined;
+    for (&px, 0..) |*p, i| p.* = 0xff000000 | @as(u32, @intCast(i));
+    gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_BGRA_EXT, 40, 20, 0, gl.GL_BGRA_EXT, gl.GL_UNSIGNED_BYTE, &px);
+    try testing.expectEqual(gl.GL_NO_ERROR, gl.glGetError());
+    const first = t.c.lookupTexture(tex).?.bo.?.handle;
+    const allocated = t.gpu.next_handle;
+    px[41] = 0xffabcdef;
+    gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_BGRA_EXT, 40, 20, 0, gl.GL_BGRA_EXT, gl.GL_UNSIGNED_BYTE, &px);
+    try testing.expectEqual(first, t.c.lookupTexture(tex).?.bo.?.handle);
+    try testing.expectEqual(allocated, t.gpu.next_handle);
+    const map = t.c.lookupTexture(tex).?.bo.?.map;
+    try testing.expectEqual(@as(u32, 0xffabcdef), std.mem.readInt(u32, map[texture.texelOffset(40, 20, 1, 1)..][0..4], .little));
+    try testing.expectEqual(px[19 * 40 + 39], std.mem.readInt(u32, map[texture.texelOffset(40, 20, 39, 19)..][0..4], .little));
+    // A sub-image in another format lands in the right place.
+    const rgba = [_]u8{ 0x11, 0x22, 0x33, 0x44 } ** 6;
+    gl.glTexSubImage2D(gl.GL_TEXTURE_2D, 0, 5, 3, 3, 2, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, &rgba);
+    try testing.expectEqual(@as(u32, 0x44112233), std.mem.readInt(u32, map[texture.texelOffset(40, 20, 7, 4)..][0..4], .little));
+    try testing.expectEqual(px[4 * 40 + 8], std.mem.readInt(u32, map[texture.texelOffset(40, 20, 8, 4)..][0..4], .little));
+    // A new size gets a new buffer.
+    gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_BGRA_EXT, 20, 20, 0, gl.GL_BGRA_EXT, gl.GL_UNSIGNED_BYTE, &px);
+    try testing.expect(t.c.lookupTexture(tex).?.bo.?.handle != first);
+    gl.glDeleteTextures(1, @ptrCast(&tex));
 }

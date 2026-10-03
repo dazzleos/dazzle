@@ -502,7 +502,7 @@ pub const Server = struct {
                     const format = try r.uint();
                     if (format != p.wl_shm.format.argb8888 and format != p.wl_shm.format.xrgb8888)
                         return c.postError(m.object, p.wl_shm.err.invalid_format, "unsupported format {d}", .{format});
-                    if (offset < 0 or width <= 0 or height <= 0 or width > 2048 or height > 2048 or stride < width * 4 or
+                    if (offset < 0 or width <= 0 or height <= 0 or width > 2048 or height > 2048 or stride < width * 4 or @mod(stride, 4) != 0 or
                         @as(u64, @intCast(offset)) + @as(u64, @intCast(stride)) * @as(u64, @intCast(height)) > pool.map.len)
                         return c.postError(m.object, p.wl_shm.err.invalid_stride, "buffer outside the pool", .{});
                     const b = try s.gpa.create(Buffer);

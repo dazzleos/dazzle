@@ -1,8 +1,15 @@
 //! Builds the initramfs: a "newc" cpio archive containing the directories
 //! the init program mounts over, a /dev/console node (the kernel opens it
 //! for PID 1's stdio before devtmpfs is mounted), the init binary, the
-//! shell and demo programs in /bin and the system font (with its license)
-//! in /usr/share/fonts. Everything is owned by root.
+//! shell next to it, and the apps directory: the demo, and the system font
+//! with its license. Everything is owned by root:
+//!
+//!     /init                       stardust-init
+//!     /stardust-shell
+//!     /apps/stardust-demo
+//!     /apps/FiraSans-Regular.ttf
+//!     /apps/FiraSans-OFL.txt
+//!     /dev, /proc, /sys           mount points
 //!
 //! Usage: mkinitramfs <output.cpio> <init-binary> <shell-binary> <demo-binary> <font> <font-license>
 
@@ -76,14 +83,11 @@ pub fn main(init: std.process.Init) !void {
         .{ .name = "proc", .mode = S_IFDIR | 0o755 },
         .{ .name = "sys", .mode = S_IFDIR | 0o755 },
         .{ .name = "init", .mode = S_IFREG | 0o755, .data = init_bin },
-        .{ .name = "bin", .mode = S_IFDIR | 0o755 },
-        .{ .name = "bin/stardust-shell", .mode = S_IFREG | 0o755, .data = shell_bin },
-        .{ .name = "bin/stardust-demo", .mode = S_IFREG | 0o755, .data = demo_bin },
-        .{ .name = "usr", .mode = S_IFDIR | 0o755 },
-        .{ .name = "usr/share", .mode = S_IFDIR | 0o755 },
-        .{ .name = "usr/share/fonts", .mode = S_IFDIR | 0o755 },
-        .{ .name = "usr/share/fonts/FiraSans-Regular.ttf", .mode = S_IFREG | 0o644, .data = font },
-        .{ .name = "usr/share/fonts/FiraSans-OFL.txt", .mode = S_IFREG | 0o644, .data = font_license },
+        .{ .name = "stardust-shell", .mode = S_IFREG | 0o755, .data = shell_bin },
+        .{ .name = "apps", .mode = S_IFDIR | 0o755 },
+        .{ .name = "apps/stardust-demo", .mode = S_IFREG | 0o755, .data = demo_bin },
+        .{ .name = "apps/FiraSans-Regular.ttf", .mode = S_IFREG | 0o644, .data = font },
+        .{ .name = "apps/FiraSans-OFL.txt", .mode = S_IFREG | 0o644, .data = font_license },
         .{ .name = "TRAILER!!!", .mode = 0 },
     };
 

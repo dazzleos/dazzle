@@ -155,6 +155,10 @@ pub const GL_RGB: GLenum = 0x1907;
 pub const GL_RGBA: GLenum = 0x1908;
 pub const GL_LUMINANCE: GLenum = 0x1909;
 pub const GL_LUMINANCE_ALPHA: GLenum = 0x190A;
+/// GL_EXT_texture_format_BGRA8888: bytes B, G, R, A, which is the GPU's
+/// own order (and 0xAARRGGBB words on little-endian machines), so these
+/// textures upload without conversion.
+pub const GL_BGRA_EXT: GLenum = 0x80E1;
 
 // Buffers.
 pub const GL_ARRAY_BUFFER: GLenum = 0x8892;
@@ -422,7 +426,7 @@ pub export fn glGetString(name: GLenum) callconv(.c) ?[*:0]const GLubyte {
         GL_RENDERER => "VideoCore IV (Stardust)",
         GL_VERSION => "OpenGL ES 2.0 Stardust",
         GL_SHADING_LANGUAGE_VERSION => "OpenGL ES GLSL ES 1.00",
-        GL_EXTENSIONS => "",
+        GL_EXTENSIONS => "GL_EXT_texture_format_BGRA8888",
         else => {
             c.setError(GL_INVALID_ENUM);
             return null;

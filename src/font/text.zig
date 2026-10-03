@@ -31,18 +31,24 @@ pub const Canvas = struct {
     /// is at (x, y).
     pub fn blendMask(c: Canvas, x: i32, y: i32, mask: []const u8, mask_w: u32, mask_h: u32, color: u32) void {
         const color_alpha: u32 = color >> 24;
-        for (0..mask_h) |my| {
-            const cy = y + @as(i32, @intCast(my));
-            if (cy < 0 or cy >= c.height) continue;
-            const row = c.pixels[@as(usize, @intCast(cy)) * c.stride ..];
-            for (0..mask_w) |mx| {
-                const cx = x + @as(i32, @intCast(mx));
-                if (cx < 0 or cx >= c.width) continue;
-                const cov: u32 = mask[my * mask_w + mx];
-                if (cov == 0) continue;
-                const a = cov * color_alpha / 255;
-                const p = &row[@intCast(cx)];
-                p.* = blend(p.*, color, a);
+        // Clip the mask to the canvas once, not per pixel.
+        const mx0: u32 = @intCast(std.math.clamp(-x, 0, @as(i32, @intCast(mask_w))));
+        const mx1: u32 = @intCast(std.math.clamp(@as(i32, @intCast(c.width)) - x, 0, @as(i32, @intCast(mask_w))));
+        const my0: u32 = @intCast(std.math.clamp(-y, 0, @as(i32, @intCast(mask_h))));
+        const my1: u32 = @intCast(std.math.clamp(@as(i32, @intCast(c.height)) - y, 0, @as(i32, @intCast(mask_h))));
+        if (mx0 >= mx1) return;
+        for (my0..my1) |my| {
+            const cy: usize = @intCast(y + @as(i32, @intCast(my)));
+            const row = c.pixels[cy * c.stride + @as(usize, @intCast(x + @as(i32, @intCast(mx0)))) ..][0 .. mx1 - mx0];
+            const covs = mask[my * mask_w + mx0 ..][0 .. mx1 - mx0];
+            if (color_alpha == 255) {
+                for (row, covs) |*p, cov| if (cov != 0) {
+                    p.* = blend(p.*, color, cov);
+                };
+            } else {
+                for (row, covs) |*p, cov| if (cov != 0) {
+                    p.* = blend(p.*, color, div255(@as(u32, cov) * color_alpha));
+                };
             }
         }
     }
@@ -52,13 +58,21 @@ pub const Canvas = struct {
 /// is opaque.
 pub fn blend(dst: u32, src: u32, a: u32) u32 {
     if (a >= 255) return src | 0xff000000;
-    var out: u32 = 0xff000000;
-    inline for (.{ 0, 8, 16 }) |shift| {
-        const d = (dst >> shift) & 0xff;
-        const s = (src >> shift) & 0xff;
-        out |= ((s * a + d * (255 - a) + 127) / 255) << shift;
-    }
-    return out;
+    const ia = 255 - a;
+    // Red and blue together (16 bits each, so they cannot overflow into
+    // each other), then green; each channel is divided by 255 with
+    // rounding, as div255 does.
+    const rb = (src & 0xff00ff) * a + (dst & 0xff00ff) * ia + 0x800080;
+    const g = (src & 0x00ff00) * a + (dst & 0x00ff00) * ia + 0x008000;
+    const rb_out = ((rb + ((rb >> 8) & 0xff00ff)) >> 8) & 0xff00ff;
+    const g_out = ((g + ((g >> 8) & 0x00ff00)) >> 8) & 0x00ff00;
+    return 0xff000000 | rb_out | g_out;
+}
+
+/// Rounds x / 255 to the nearest integer, for 0 <= x <= 255 * 255.
+fn div255(x: u32) u32 {
+    const y = x + 128;
+    return (y + (y >> 8)) >> 8;
 }
 
 const Key = struct {
@@ -226,6 +240,23 @@ pub fn draw(canvas: Canvas, cache: *GlyphCache, style: Style, x: f32, baseline: 
 
 const testing = std.testing;
 const fira = @embedFile("FiraSans-Regular.ttf");
+
+test "blend matches per-channel arithmetic exactly" {
+    var prng = std.Random.DefaultPrng.init(1);
+    const rand = prng.random();
+    for (0..256) |a| for (0..64) |_| {
+        const dst = rand.int(u32);
+        const src = rand.int(u32);
+        var want: u32 = 0xff000000;
+        inline for (.{ 0, 8, 16 }) |shift| {
+            const d = (dst >> shift) & 0xff;
+            const s = (src >> shift) & 0xff;
+            want |= ((s * @as(u32, @intCast(a)) + d * (255 - @as(u32, @intCast(a))) + 127) / 255) << shift;
+        }
+        try testing.expectEqual(want, blend(dst, src, @intCast(a)));
+    };
+    for (0..255 * 255 + 1) |x| try testing.expectEqual((@as(u32, @intCast(x)) + 127) / 255, div255(@intCast(x)));
+}
 
 test "blend" {
     try testing.expectEqual(@as(u32, 0xff102030), blend(0xff102030, 0xffffffff, 0));

@@ -151,11 +151,41 @@ pub fn texelOffset(width: u32, height: u32, x: u32, y: u32) u32 {
 /// Copies a raster-order 32-bit image (rows of `width` pixels) into `dst`
 /// in the layout the texture unit expects.
 pub fn upload(dst: []u8, pixels: []const u32, width: u32, height: u32) void {
+    uploadRect(dst, width, height, .{ .x = 0, .y = 0, .width = width, .height = height }, pixels, width);
+}
+
+pub const Rect = struct { x: u32, y: u32, width: u32, height: u32 };
+
+/// Writes pixels into a rectangle of a tiled image. `pixels` holds the
+/// rectangle's rows, `stride` pixels apart.
+///
+/// Images are written a micro-tile at a time: its 4 rows of 4 pixels are 64
+/// contiguous bytes, so each row is one 16-byte copy and the tiled address
+/// is worked out once per micro-tile. That keeps uploads fast, and writes
+/// to GPU buffers (mapped write-combined) whole cache lines at a time.
+pub fn uploadRect(dst: []u8, width: u32, height: u32, rect: Rect, pixels: []align(1) const u32, stride: u32) void {
     std.debug.assert(dst.len >= imageSize(width, height));
-    for (0..height) |y| {
-        for (0..width) |x| {
-            const off = texelOffset(width, height, @intCast(x), @intCast(y));
-            std.mem.writeInt(u32, dst[off..][0..4], pixels[y * width + x], .little);
+    std.debug.assert(rect.x + rect.width <= width and rect.y + rect.height <= height);
+    if (rect.width == 0 or rect.height == 0) return;
+    const src = std.mem.sliceAsBytes(pixels);
+    const x_end = rect.x + rect.width;
+    const y_end = rect.y + rect.height;
+    var uy = rect.y / utile_h;
+    while (uy * utile_h < y_end) : (uy += 1) {
+        var ux = rect.x / utile_w;
+        while (ux * utile_w < x_end) : (ux += 1) {
+            const base = texelOffset(width, height, ux * utile_w, uy * utile_h);
+            // The part of this micro-tile inside the rectangle.
+            const x0 = @max(ux * utile_w, rect.x);
+            const x1 = @min(ux * utile_w + utile_w, x_end);
+            const y0 = @max(uy * utile_h, rect.y);
+            const y1 = @min(uy * utile_h + utile_h, y_end);
+            const n = (x1 - x0) * cpp;
+            for (y0..y1) |y| {
+                const d = base + ((@as(u32, @intCast(y)) % utile_h) * utile_w + x0 % utile_w) * cpp;
+                const sidx = ((@as(u32, @intCast(y)) - rect.y) * stride + (x0 - rect.x)) * cpp;
+                @memcpy(dst[d..][0..n], src[sidx..][0..n]);
+            }
         }
     }
 }
@@ -199,4 +229,35 @@ test "every texel lands in a distinct slot inside the image" {
         try testing.expect(!seen[off / 4]);
         seen[off / 4] = true;
     };
+}
+
+test "uploadRect matches per-texel addressing, for whole images and parts" {
+    const gpa = std.testing.allocator;
+    for ([_][2]u32{ .{ 13, 7 }, .{ 64, 64 }, .{ 100, 37 }, .{ 37, 100 } }) |size| {
+        const w = size[0];
+        const h = size[1];
+        const pixels = try gpa.alloc(u32, w * h);
+        defer gpa.free(pixels);
+        for (pixels, 0..) |*px, i| px.* = @intCast(i * 2654435761 % 0xffffffff);
+        const a = try gpa.alloc(u8, imageSize(w, h));
+        defer gpa.free(a);
+        @memset(a, 0);
+        upload(a, pixels, w, h);
+        for (0..h) |y| for (0..w) |x| {
+            const off = texelOffset(w, h, @intCast(x), @intCast(y));
+            try std.testing.expectEqual(pixels[y * w + x], std.mem.readInt(u32, a[off..][0..4], .little));
+        };
+        // A rectangle at odd coordinates leaves the rest alone.
+        const r: Rect = .{ .x = 3, .y = 2, .width = w - 5, .height = h - 3 };
+        const sub = try gpa.alloc(u32, r.width * r.height);
+        defer gpa.free(sub);
+        @memset(sub, 0xdeadbeef);
+        uploadRect(a, w, h, r, sub, r.width);
+        for (0..h) |y| for (0..w) |x| {
+            const off = texelOffset(w, h, @intCast(x), @intCast(y));
+            const inside = x >= r.x and x < r.x + r.width and y >= r.y and y < r.y + r.height;
+            const want = if (inside) 0xdeadbeef else pixels[y * w + x];
+            try std.testing.expectEqual(want, std.mem.readInt(u32, a[off..][0..4], .little));
+        };
+    }
 }

@@ -4,7 +4,7 @@
 //! API: a bar across the top (the window title and the time since boot)
 //! and the most recent window, maximized below it. Clients connect on
 //! $XDG_RUNTIME_DIR/wayland-0; the shell starts the programs named on its
-//! command line as clients (by default /bin/stardust-demo).
+//! command line as clients (by default /apps/stardust-demo).
 //!
 //! Init starts it as the unprivileged Stardust user, with stdout and stderr
 //! going to the kernel log.
@@ -28,7 +28,7 @@ fn logFn(comptime level: std.log.Level, comptime scope: @TypeOf(.enum_literal), 
     print("stardust-shell: " ++ (if (scope == .default) "" else @tagName(scope) ++ ": ") ++ fmt ++ "\n", args);
 }
 
-const default_client = "/bin/stardust-demo";
+const default_client = "/apps/stardust-demo";
 
 pub fn main(init: std.process.Init.Minimal) u8 {
     sys.logToKmsgIfStderr();
@@ -173,7 +173,7 @@ fn spawn(program: [*:0]const u8, runtime_dir: [:0]const u8) ?linux.pid_t {
         return @intCast(rc);
     }
     const argv = [_:null]?[*:0]const u8{program};
-    const envp = [_:null]?[*:0]const u8{ "HOME=/", "PATH=/bin", "WAYLAND_DISPLAY=wayland-0", runtime_env.ptr };
+    const envp = [_:null]?[*:0]const u8{ "HOME=/", "PATH=/apps", "WAYLAND_DISPLAY=wayland-0", runtime_env.ptr };
     const err = linux.errno(linux.execve(program, &argv, &envp));
     print("stardust-shell: cannot run {s} ({s})\n", .{ program, @tagName(err) });
     linux.exit(127);
