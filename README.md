@@ -115,8 +115,10 @@ There is no C library: programs make raw system calls through
 - To build the SD image: `sfdisk` (fdisk), `mkfs.vfat` (dosfstools),
   `mcopy` (mtools) and `curl` (`sudo apt install fdisk dosfstools mtools
   curl`). `scripts/build-image.sh` checks for these too.
-- Optional: `qemu-system-arm` and `fdtput` (device-tree-compiler) for the
-  QEMU boot test
+- Optional, for the QEMU boot test: `qemu-system-arm` and `fdtput` (`sudo
+  apt install qemu-system-arm device-tree-compiler`; on Ubuntu releases with
+  a hardware enablement stack the QEMU package is `qemu-system-arm-hwe`).
+  `scripts/run-qemu.sh` checks for these.
 
 ## Building
 

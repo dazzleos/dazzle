@@ -20,6 +20,27 @@ BOOT=$ROOT/build/kernel/arch/arm/boot
 INITRAMFS=$ROOT/zig-out/initramfs.cpio
 DTB=$ROOT/build/qemu-rpi-zero.dtb
 
+# Check for the tools up front. The Ubuntu/Debian package providing each
+# one follows the colon.
+missing_tools=
+missing_pkgs=
+for entry in qemu-system-arm:qemu-system-arm fdtput:device-tree-compiler; do
+	tool=${entry%%:*}
+	pkg=${entry#*:}
+	if ! command -v "$tool" >/dev/null 2>&1; then
+		missing_tools="$missing_tools $tool"
+		missing_pkgs="$missing_pkgs $pkg"
+	fi
+done
+if [ -n "$missing_tools" ]; then
+	echo "error: missing tools:$missing_tools" >&2
+	echo "On Ubuntu/Debian: sudo apt install$missing_pkgs" >&2
+	case "$missing_pkgs" in *qemu-system-arm*)
+		echo "(On Ubuntu releases with a hardware enablement stack the QEMU package is qemu-system-arm-hwe.)" >&2 ;;
+	esac
+	exit 1
+fi
+
 [ -f "$BOOT/zImage" ] || { echo "Build the kernel first: scripts/build-kernel.sh" >&2; exit 1; }
 [ -f "$INITRAMFS" ] || { echo "Build the initramfs first: scripts/zig build" >&2; exit 1; }
 
