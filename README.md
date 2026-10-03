@@ -4,21 +4,18 @@ A lightweight operating system for the Raspberry Pi, written in Zig on top of
 a minimal mainline Linux kernel. The first target is the Raspberry Pi Zero /
 Zero W (BCM2835).
 
-It has two rendering APIs for the VideoCore IV GPU, both written in Zig on
-the kernel's `vc4` driver, so programs can pick the one that suits them:
+Stardust is its own stack. Everything draws with **`vc4`**, a low-level
+API for the VideoCore IV GPU written in Zig on the kernel's `vc4` driver:
+programs record draw calls into frames themselves, with shaders built with
+a compiler API or, for now, written in GLSL ES 1.00 (shaders will move to
+Zig). There is no OpenGL layer: the one Stardust had, for porting existing
+apps, is in the git history if it is needed again.
 
-- **`vc4`**: a low-level API specific to this GPU. Programs build shaders
-  with a compiler API and record draw calls into frames themselves.
-- **OpenGL ES 2.0 and EGL**: the standard APIs, with GLSL ES 1.00 shaders.
-  The entry points use the C ABI under their usual names, so C code can
-  call them; Zig code calls the same functions.
-
-On top of them is **stardust-shell**, a minimal Wayland compositor that
-draws with the `vc4` API. Init (PID 1, the only process with root
+On top of it is **stardust-shell**, a minimal Wayland compositor. Init (PID 1, the only process with root
 privileges) starts the shell as an unprivileged user, and the shell starts
 the demo as its Wayland client. USB mice and keyboards work: the shell
-shows a cursor and passes input to the window. The demo shows a spinning,
-textured, depth-tested cube drawn with OpenGL ES. Rings spread out and
+shows a cursor and passes input to the window. The demo, a native app, shows a
+spinning, textured, depth-tested cube. Rings spread out and
 fade where the pointer clicks. The IP address, rendering
 statistics and the last key pressed appear in its top left, in Fira Sans.
 A Vulkan-style API may follow.
@@ -31,12 +28,13 @@ The code is split into Zig modules, linked statically into each program:
 |---|---|---|
 | `sys` | `src/sys/` | Linux system call helpers (sleeping, clocks, logging, the kernel command line) |
 | `vc4` | `src/vc4/` | The low-level graphics API for the VideoCore IV, described below |
-| `gles` | `src/gles/` | OpenGL ES 2.0, EGL and the GLSL ES 1.00 compiler, on top of `vc4` |
+| `glsl` | `src/glsl/` | GLSL ES 1.00 shaders for `vc4`: the compiler front end, and pipelines for drawing with them |
+| `app` | `src/app/` | Native apps' windows on stardust-shell: buffers shared with the shell, frame pacing and input |
 | `font` | `src/font/` | OpenType font rendering, described below |
 | `wayland` | `src/wayland/` | The Wayland wire protocol (with file descriptor passing), the interfaces Stardust uses, and a small client library |
 | `stardust-init` | `src/init/` | The init program: mounts, network, log server, device permissions, starting the shell |
 | `stardust-shell` | `src/shell/` | The Wayland compositor and shell, described below |
-| `stardust-demo` | `src/demo/` | The demo, a Wayland client |
+| `stardust-demo` | `src/demo/` | The demo, a native app |
 
 The `vc4` module:
 
@@ -55,29 +53,17 @@ The `vc4` module:
 | `qpu_sim.zig` | QPU simulator used by the tests to run shaders on the build machine |
 | `reference_shaders.zig` | The original hand-written triangle shaders, known to work on hardware |
 
-The `gles` module:
+The `app` module gives a native app a window: a Wayland toplevel on the
+shell, with up to three buffers the GPU renders into in its T-tiled layout,
+shared with the shell as dma-bufs (announced with the
+`BROADCOM_VC4_T_TILED` modifier, as Mesa's vc4 driver also does), so the
+shell can show them without copying. `beginFrame` gives the render target
+for the next frame (a buffer the shell has released); `present` renders the
+frame and hands it to the shell once the previous one is on the screen, so
+at most one frame is queued. It also delivers the seat's pointer and
+keyboard events.
 
-| File | Contents |
-|---|---|
-| `gl.zig` | The OpenGL ES 2.0 entry points (exported with the C ABI), types and constants |
-| `egl.zig` | EGL 1.4: the display, one configuration, full-screen window surfaces, contexts and `eglSwapBuffers` |
-| `context.zig` | GL state and objects, and how draws become `vc4` frames |
-| `glsl/` | The GLSL compiler front end, below |
-
-GL covers shaders and programs, buffer objects, float vertex attributes
-(from buffers or client memory, and constant values), 2D textures (8-bit
-RGBA, RGB, luminance and alpha formats), depth testing, face culling,
-viewport, scissor, `glClear`, and `glDrawArrays`/`glDrawElements` with 8-
-and 16-bit indices. Rendering is recorded into one `vc4` frame and
-submitted by `eglSwapBuffers`. When the app changes a buffer or texture that
-frame still uses, it is copied rather than overwritten. Each program is
-compiled to QPU code when it is first drawn, once per combination of the
-state its hardware shaders depend on (depth testing, and how many
-components each attribute supplies). Not yet: blending, stencil,
-framebuffer objects, mipmaps, points, `glReadPixels`, and sharing objects
-between contexts. Using these records a GL error or logs a warning once.
-
-The GLSL front end (`src/gles/glsl/`):
+The `glsl` module (`src/glsl/`):
 
 | File | Contents |
 |---|---|
@@ -85,6 +71,7 @@ The GLSL front end (`src/gles/glsl/`):
 | `parser.zig` | Parser producing an AST |
 | `lower.zig` | Type checking and lowering to the vc4 compiler's SSA builder, one value per scalar component, with constant folding |
 | `program.zig` | Compiling shaders and linking programs: uniform slots, attribute locations, varying matching, and deriving the coordinate shader |
+| `pipeline.zig` | A linked program compiled for the GPU with its render state (vertex layout, depth testing, culling, primitive): uniforms set by name, draws recorded into a `vc4` frame |
 | `shader_tests.zig` | Tests: the early demos' shaders written with the builder API, checked in the simulator against the hand-written reference shaders and against GLSL |
 
 Supported so far: `attribute`, `uniform`, `varying` and `const` globals of
@@ -179,10 +166,9 @@ The demo program (`src/demo/`):
 
 | File | Contents |
 |---|---|
-| `main.zig` | EGL setup on the Wayland platform, the frame loop, input and timing statistics |
-| `window.zig` | The Wayland window: an xdg toplevel, its configure events and pings, and the seat's pointer and keyboard |
+| `main.zig` | The window (from the `app` module), the frame loop, input and timing statistics |
 | `rings.zig` | The rings drawn where the pointer clicks: one triangle strip, coloured on the CPU |
-| `cube.zig` | The cube: GLSL shaders, vertex and index buffers, texture, depth testing and culling, written as a C GL program would be |
+| `cube.zig` | The cube: a GLSL pipeline with depth testing and culling, vertex and index buffers, and a tiled texture |
 | `hud.zig` | The statistics overlay: text drawn by the font renderer into a texture, shown as a quad over the top left corner |
 | `netinfo.zig` | Looks up the IPv4 address (SIOCGIFCONF, no privileges needed) |
 
@@ -332,7 +318,7 @@ Stardust 6ec3896 system log. /follow shows new messages as they arrive.
 [    4.773120] stardust-shell: input: /dev/input/event0: Logitech USB Optical Mouse
 [    4.791240] stardust-shell: cursor shown
 [    4.790100] stardust-shell: client connected
-[    4.802114] stardust: OpenGL ES 2.0 Stardust on VideoCore IV (Stardust), window <width>x<height>
+[    4.802114] stardust: drawing with the vc4 API, window <width>x<height>
 [    9.840211] stardust: 60.0 fps, GPU <t> ms, CPU <t> ms per frame
 ```
 
@@ -358,7 +344,7 @@ with `-dirty` if there were uncommitted changes), then:
 - GPU time per frame: from submitting the frame to the GPU finishing it
   (`glFinish`, before `eglSwapBuffers` hands the frame to the shell). It
   includes waiting for the shell's compositing on the shared GPU;
-- CPU time per frame: issuing the frame's GL calls;
+- CPU time per frame: recording the frame's draws;
 - the pointer's position in the window and the last key pressed;
 - the SoC's temperature, the CPU's speed compared with when the demo
   started, and how busy the CPU is. The firmware slows the CPU and GPU when
@@ -415,7 +401,7 @@ The firmware picks the Zero or Zero W device tree in `config.txt`. The Zero
 
 ## How a frame is drawn
 
-1. **Shaders.** The GLSL front end (`src/gles/glsl/`) lowers each shader to
+1. **Shaders.** The GLSL front end (`src/glsl/`) lowers each shader to
    the compiler's builder API, as a list of SSA values. Three run per draw: a coordinate
    shader the binner uses to find which 64×64 tiles each triangle covers, a
    vertex shader that outputs screen positions and varyings, and a fragment
@@ -461,16 +447,13 @@ The firmware picks the Zero or Zero W device tree in `config.txt`. The Zero
   simulator.
 - Shaders compiled from GLSL are run in the simulator next to the same
   shaders written with the builder API, and must give the same results.
-- The GL layer runs against a stand-in GPU backend in the tests, which
-  checks the jobs it records and that every GPU buffer and shader it
-  creates is freed.
 - The Wayland tests run the real server, in a thread with a fake renderer,
   against real clients over a socket pair. One client speaks the protocol
   directly: registry, xdg toplevel and configure, dma-buf and shm buffers,
   frame callbacks, releases, protocol errors, and pointer and keyboard
-  focus and events. The other is the demo's
-  path: EGL's Wayland platform and the GL layer, swapping and resizing a
-  window. Both check that everything is freed when the client disconnects.
+  focus and events. The other is the demo's path: an `app` window with a
+  stand-in GPU, presenting frames and resizing. Both check that everything
+  is freed when the client disconnects.
   They pass on the host and as ARM code under `qemu-arm`.
 
 References: Broadcom's *VideoCore IV 3D Architecture Reference Guide*,
@@ -484,12 +467,12 @@ correctly at a steady 60 fps at 1920x1080 (about 6.5 ms of GPU time per
 frame). Compiled shaders, perspective, texturing, depth testing and page
 flipping all worked, with the log readable over the network.
 
-The demo now draws through OpenGL ES as a Wayland client of
-stardust-shell, and neither has run on hardware yet. The shell's
-compositing jobs and the demo's T-tiled frames pass a userspace build of the
-kernel's job and shader validators. Face culling's winding, sharing buffers
-between the processes, and the rendered output still need confirming on a
-Pi. The earlier `vc4` API version of the cube is in the git history.
+The demo is a native app: a window on stardust-shell, drawn with the `vc4`
+API and GLSL shaders. On a Pi Zero, with the earlier OpenGL version, the
+shell showed the demo's buffers directly on the display (no compositing)
+at a steady 60 frames per second, with mouse input working. The demo's
+`vc4` frames pass a userspace build of the kernel's job and shader
+validators; the native version still needs confirming on a Pi.
 
 In QEMU the kernel boots and init's network manager gets an address by DHCP
 over an emulated USB network card. That holds whether the card is there at
@@ -503,8 +486,9 @@ GPU or display).
   arrays, and polynomial `sin`/`cos`.
 - Mipmaps, more texture formats, and depth buffers stored to memory.
 - Add `DRM_IOCTL_VC4_GET_HANG_STATE` reporting for GPU hangs.
-- GL: blending (in the fragment shader, reading the tile buffer),
-  framebuffer objects, and more vertex attribute formats.
+- Shaders written in Zig, replacing GLSL.
+- Blending (in the fragment shader, reading the tile buffer), rendering to
+  textures, and more vertex attribute formats.
 - A Vulkan-style API on `vc4`.
 - Text: ligatures and other GSUB features, hinting or stem darkening for
   small sizes, and text drawn by the GPU (a glyph atlas texture, once

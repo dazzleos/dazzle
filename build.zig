@@ -3,7 +3,8 @@ const std = @import("std");
 const Modules = struct {
     sys: *std.Build.Module,
     vc4: *std.Build.Module,
-    gles: *std.Build.Module,
+    glsl: *std.Build.Module,
+    app: *std.Build.Module,
     font: *std.Build.Module,
     wayland: *std.Build.Module,
     build_info: *std.Build.Module,
@@ -13,7 +14,8 @@ const Modules = struct {
 ///
 /// * `sys`: Linux system call helpers shared by everything
 /// * `vc4`: the low-level VideoCore IV graphics API
-/// * `gles`: OpenGL ES 2.0 and GLSL, built on vc4
+/// * `glsl`: GLSL shaders for the vc4 API (until shaders are written in Zig)
+/// * `app`: native apps' windows on stardust-shell, drawn with vc4
 /// * `font`: OpenType font rendering
 /// * `wayland`: the Wayland wire protocol and a client library
 /// * `build_info`: `commit`, the source's git commit (short, with "-dirty"
@@ -36,12 +38,20 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         .target = target,
         .optimize = optimize,
     });
-    const gles = b.createModule(.{
-        .root_source_file = b.path("src/gles/gles.zig"),
+    const glsl = b.createModule(.{
+        .root_source_file = b.path("src/glsl/glsl.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "sys", .module = sys },
+            .{ .name = "vc4", .module = vc4 },
+        },
+    });
+    const app = b.createModule(.{
+        .root_source_file = b.path("src/app/app.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
             .{ .name = "vc4", .module = vc4 },
             .{ .name = "wayland", .module = wayland },
         },
@@ -53,7 +63,7 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     });
     const info = b.addOptions();
     info.addOption([]const u8, "commit", gitCommit(b));
-    return .{ .sys = sys, .vc4 = vc4, .gles = gles, .font = font, .wayland = wayland, .build_info = info.createModule() };
+    return .{ .sys = sys, .vc4 = vc4, .glsl = glsl, .app = app, .font = font, .wayland = wayland, .build_info = info.createModule() };
 }
 
 /// The short hash of the checked-out commit, "-dirty" if tracked files
@@ -79,7 +89,8 @@ fn addProgramModule(b: *std.Build, path: []const u8, target: std.Build.ResolvedT
         .imports = &.{
             .{ .name = "sys", .module = m.sys },
             .{ .name = "vc4", .module = m.vc4 },
-            .{ .name = "gles", .module = m.gles },
+            .{ .name = "glsl", .module = m.glsl },
+            .{ .name = "app", .module = m.app },
             .{ .name = "font", .module = m.font },
             .{ .name = "wayland", .module = m.wayland },
             .{ .name = "build_info", .module = m.build_info },
@@ -368,7 +379,8 @@ pub fn build(b: *std.Build) void {
     for ([_]*std.Build.Module{
         host.sys,
         host.vc4,
-        host.gles,
+        host.glsl,
+        host.app,
         host.font,
         host.wayland,
         addProgramModule(b, "src/init/main.zig", b.graph.host, test_optimize, host, null),

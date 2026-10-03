@@ -1,15 +1,14 @@
 //! The statistics overlay in the top left corner: text drawn by the CPU
 //! with the font renderer into a texture, shown as an opaque quad on top of
 //! the scene. The panel's background is the scene's clear colour, so the
-//! text appears to sit directly on the background (the GL layer has no
-//! blending yet, so the quad cannot be translucent).
+//! text appears to sit directly on the background (the quad is drawn
+//! without blending, so it cannot be translucent).
 
 const std = @import("std");
 const font = @import("font");
-const gles = @import("gles");
+const vc4 = @import("vc4");
+const glsl = @import("glsl");
 const cube = @import("cube.zig");
-
-const gl = gles.gl;
 
 const vertex_shader =
     \\attribute vec2 pos;
@@ -48,10 +47,12 @@ pub const Hud = struct {
     /// Hashes of the text in each band (the title, then each line), so
     /// only changed lines are redrawn and uploaded; 0 = not drawn.
     drawn: [lines + 1]u64 = @splat(0),
-    program: gl.GLuint,
-    texture: gl.GLuint,
+    dev: vc4.Device,
+    pipeline: glsl.Pipeline,
+    /// The panel's pixels in the texture unit's tiled layout.
+    texture: ?vc4.Bo = null,
     /// The quad as a triangle strip of (x, y, u, v) in clip space.
-    quad: [16]f32,
+    quad: vc4.Bo,
 
     /// Small text after the title.
     subtitle: []const u8 = "",
@@ -72,12 +73,14 @@ pub const Hud = struct {
         return .{ margin, margin, @intFromFloat(@ceil(560 * scale)), @intFromFloat(@ceil((96 + lines * 40) * scale)) };
     }
 
-    pub fn init(gpa: std.mem.Allocator, f: *const font.Font, screen_width: u32, screen_height: u32, background: u32) !Hud {
-        const program = try cube.buildProgram(vertex_shader, fragment_shader, &.{ "pos", "uv" });
-        gl.glUseProgram(program);
-        gl.glUniform1i(gl.glGetUniformLocation(program, "tex"), 0);
-        var texture: gl.GLuint = 0;
-        gl.glGenTextures(1, @ptrCast(&texture));
+    pub fn init(gpa: std.mem.Allocator, dev: vc4.Device, f: *const font.Font, screen_width: u32, screen_height: u32, background: u32) !Hud {
+        var pipeline = try glsl.Pipeline.init(gpa, dev, vertex_shader, fragment_shader, .{
+            .vertex_stride = 16,
+            .attributes = &.{ .{ .name = "pos", .offset = 0 }, .{ .name = "uv", .offset = 8 } },
+            .primitive = .triangle_strip,
+        });
+        errdefer pipeline.deinit(dev);
+        const quad = try dev.createBo(4096);
         var h: Hud = .{
             .gpa = gpa,
             .font = f,
@@ -88,9 +91,9 @@ pub const Hud = struct {
             .height = 0,
             .scale = 1,
             .pixels = &.{},
-            .program = program,
-            .texture = texture,
-            .quad = undefined,
+            .dev = dev,
+            .pipeline = pipeline,
+            .quad = quad,
         };
         try h.resize(screen_width, screen_height);
         return h;
@@ -102,6 +105,8 @@ pub const Hud = struct {
         const r = rect(screen_width, screen_height);
         h.gpa.free(h.pixels);
         h.pixels = try h.gpa.alloc(u32, @as(usize, r[2]) * r[3]);
+        if (h.texture) |t| h.dev.destroyBo(t);
+        h.texture = try h.dev.createBo(vc4.texture.imageSize(r[2], r[3]));
         h.drawn = @splat(0);
         h.screen = .{ screen_width, screen_height };
         h.width = r[2];
@@ -116,12 +121,13 @@ pub const Hud = struct {
         const x1 = (margin + @as(f32, @floatFromInt(h.width))) / sw * 2 - 1;
         const y0 = 1 - margin / sh * 2;
         const y1 = 1 - (margin + @as(f32, @floatFromInt(h.height))) / sh * 2;
-        h.quad = .{
+        const quad = [16]f32{
             x0, y0, 0, 0,
             x0, y1, 0, 1,
             x1, y0, 1, 0,
             x1, y1, 1, 1,
         };
+        @memcpy(h.quad.map[0..@sizeOf(@TypeOf(quad))], std.mem.asBytes(&quad));
     }
 
     /// The rows of band `i` (0 = the title, then each line): from 30 above
@@ -137,7 +143,6 @@ pub const Hud = struct {
     /// Redraws and uploads the lines whose text changed.
     pub fn update(h: *Hud, text: [lines][]const u8) !void {
         const s = h.scale;
-        const first_upload = h.drawn[0] == 0;
         var dirty: ?[2]u32 = null;
         for (0..lines + 1) |i| {
             const str = if (i == 0) "Stardust" else text[i - 1];
@@ -167,36 +172,27 @@ pub const Hud = struct {
             dirty = if (dirty) |d| .{ @min(d[0], rows[0]), @max(d[1], rows[1]) } else rows;
         }
         const d = dirty orelse return;
-        // The canvas's 0xAARRGGBB words are BGRA bytes, so GL copies them
-        // without conversion, and only the changed rows go up.
-        gl.glActiveTexture(gl.GL_TEXTURE0);
-        gl.glBindTexture(gl.GL_TEXTURE_2D, h.texture);
-        if (first_upload) {
-            gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_BGRA_EXT, @intCast(h.width), @intCast(h.height), 0, gl.GL_BGRA_EXT, gl.GL_UNSIGNED_BYTE, h.pixels.ptr);
-            // One texel per pixel.
-            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_NEAREST);
-            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_NEAREST);
-            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE);
-            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE);
-        } else {
-            gl.glTexSubImage2D(gl.GL_TEXTURE_2D, 0, 0, @intCast(d[0]), @intCast(h.width), @intCast(d[1] - d[0]), gl.GL_BGRA_EXT, gl.GL_UNSIGNED_BYTE, h.pixels[d[0] * h.width ..].ptr);
-        }
+        // The canvas's 0xAARRGGBB words are the texture's B, G, R, A bytes,
+        // so only the changed rows are tiled into it. The previous frame has
+        // finished rendering, so the GPU is not reading it.
+        vc4.texture.uploadRect(h.texture.?.map, h.width, h.height, .{ .x = 0, .y = d[0], .width = h.width, .height = d[1] - d[0] }, h.pixels[d[0] * h.width .. d[1] * h.width], h.width);
     }
 
-    /// Draws the panel over whatever is on screen.
-    pub fn draw(h: *const Hud) void {
-        gl.glUseProgram(h.program);
-        gl.glDisable(gl.GL_DEPTH_TEST);
-        gl.glDisable(gl.GL_CULL_FACE);
-        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, 0);
-        gl.glVertexAttribPointer(0, 2, gl.GL_FLOAT, gl.GL_FALSE, 16, &h.quad);
-        gl.glVertexAttribPointer(1, 2, gl.GL_FLOAT, gl.GL_FALSE, 16, &h.quad[2]);
-        gl.glEnableVertexAttribArray(0);
-        gl.glEnableVertexAttribArray(1);
-        gl.glDisableVertexAttribArray(2);
-        gl.glActiveTexture(gl.GL_TEXTURE0);
-        gl.glBindTexture(gl.GL_TEXTURE_2D, h.texture);
-        gl.glDrawArrays(gl.GL_TRIANGLE_STRIP, 0, 4);
+    /// Draws the panel over whatever is in the frame.
+    pub fn draw(h: *Hud, frame: *vc4.render.Frame) !void {
+        try h.pipeline.draw(frame, .{
+            .vertices = h.quad.handle,
+            .count = 4,
+            // One texel per pixel.
+            .texture = .{ .handle = h.texture.?.handle, .config = .{
+                .width = h.width,
+                .height = h.height,
+                .mag_filter = .nearest,
+                .min_filter = .nearest,
+                .wrap_s = .clamp,
+                .wrap_t = .clamp,
+            } },
+        });
     }
 };
 

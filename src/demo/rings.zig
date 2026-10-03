@@ -1,12 +1,10 @@
-//! Expanding, fading rings where the pointer clicks, drawn behind
-//! the cube. Without blending in the GL layer, "fading" means moving the
+//! Expanding, fading rings where the pointer clicks, drawn behind the
+//! cube. They are drawn without blending, so "fading" means moving the
 //! colour towards the background.
 
 const std = @import("std");
-const gles = @import("gles");
-const cube = @import("cube.zig");
-
-const gl = gles.gl;
+const vc4 = @import("vc4");
+const glsl = @import("glsl");
 
 const vertex_shader =
     \\attribute vec2 pos;
@@ -43,18 +41,25 @@ const Ring = struct {
 };
 
 pub const Rings = struct {
-    program: gl.GLuint,
-    scale_loc: gl.GLint,
+    /// Null in tests, which check the vertices only.
+    pipeline: ?glsl.Pipeline,
+    /// The vertices, for the GPU.
+    vbo: ?vc4.Bo,
     background: [3]f32,
     rings: [max_rings]Ring = undefined,
     len: usize = 0,
     vertices: [max_rings * vertices_per_ring * floats_per_vertex]f32 = undefined,
 
-    pub fn init(background: u32) !Rings {
-        const program = try cube.buildProgram(vertex_shader, fragment_shader, &.{ "pos", "color" });
+    pub fn init(gpa: std.mem.Allocator, dev: vc4.Device, background: u32) !Rings {
+        var pipeline = try glsl.Pipeline.init(gpa, dev, vertex_shader, fragment_shader, .{
+            .vertex_stride = floats_per_vertex * @sizeOf(f32),
+            .attributes = &.{ .{ .name = "pos", .offset = 0 }, .{ .name = "color", .offset = 8 } },
+            .primitive = .triangle_strip,
+        });
+        errdefer pipeline.deinit(dev);
         return .{
-            .program = program,
-            .scale_loc = gl.glGetUniformLocation(program, "scale"),
+            .pipeline = pipeline,
+            .vbo = try dev.createBo(@sizeOf(@FieldType(Rings, "vertices"))),
             .background = rgb(background),
         };
     }
@@ -70,7 +75,9 @@ pub const Rings = struct {
         r.len += 1;
     }
 
-    pub fn draw(r: *Rings, now: u64, width: u32, height: u32) void {
+    /// Draws the rings into `frame` (whose previous use of the vertex
+    /// buffer has finished rendering).
+    pub fn draw(r: *Rings, frame: *vc4.render.Frame, now: u64, width: u32, height: u32) !void {
         // Drop finished rings.
         var kept: usize = 0;
         for (r.rings[0..r.len]) |ring| if (now -| ring.born < lifetime) {
@@ -84,17 +91,12 @@ pub const Rings = struct {
         var n: usize = 0;
         for (r.rings[0..r.len]) |ring| n = r.addRing(n, ring, now, unit);
 
-        gl.glUseProgram(r.program);
-        gl.glDisable(gl.GL_DEPTH_TEST);
-        gl.glDisable(gl.GL_CULL_FACE);
-        gl.glUniform2f(r.scale_loc, 2 / @as(f32, @floatFromInt(width)), -2 / @as(f32, @floatFromInt(height)));
-        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, 0);
-        gl.glEnableVertexAttribArray(0);
-        gl.glEnableVertexAttribArray(1);
-        const stride = floats_per_vertex * @sizeOf(f32);
-        gl.glVertexAttribPointer(0, 2, gl.GL_FLOAT, gl.GL_FALSE, stride, &r.vertices);
-        gl.glVertexAttribPointer(1, 3, gl.GL_FLOAT, gl.GL_FALSE, stride, &r.vertices[2]);
-        gl.glDrawArrays(gl.GL_TRIANGLE_STRIP, 0, @intCast(n));
+        const vbo = r.vbo.?;
+        const bytes = std.mem.sliceAsBytes(r.vertices[0 .. n * floats_per_vertex]);
+        @memcpy(vbo.map[0..bytes.len], bytes);
+        const p = &r.pipeline.?;
+        try p.set("scale", [2]f32{ 2 / @as(f32, @floatFromInt(width)), -2 / @as(f32, @floatFromInt(height)) });
+        try p.draw(frame, .{ .vertices = vbo.handle, .count = @intCast(n) });
     }
 
     /// Writes a ring's vertices from vertex `n`; returns the new count.
@@ -142,7 +144,7 @@ fn rgb(argb: u32) [3]f32 {
 }
 
 test "rings fit their vertex buffer and expire" {
-    var r: Rings = .{ .program = 0, .scale_loc = 0, .background = .{ 0, 0, 0 } };
+    var r: Rings = .{ .pipeline = null, .vbo = null, .background = .{ 0, 0, 0 } };
     for (0..max_rings + 5) |i| r.add(@as(u64, i) * std.time.ns_per_ms, 10, 10, 0xffffffff);
     try std.testing.expectEqual(@as(usize, max_rings), r.len);
     var n: usize = 0;

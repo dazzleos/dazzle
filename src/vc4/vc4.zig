@@ -1,8 +1,8 @@
 //! Stardust's low-level graphics API for the VideoCore IV (BCM2835 V3D),
 //! through the kernel's vc4 DRM driver.
 //!
-//! This is the layer the OpenGL ES implementation is built on, and apps can
-//! use it directly for explicit control:
+//! The shell and native apps draw with it directly (with shaders built with
+//! the compiler API, or from GLSL with the `glsl` module):
 //!
 //! * `device`: GPU buffers, shader upload and job submission
 //! * `compiler`: build shaders as SSA values and compile them to QPU code

@@ -1,12 +1,9 @@
-//! The spinning cube: a textured, tinted cube drawn with OpenGL ES 2.0, as
-//! a C program would draw it: GLSL shaders, vertex and index buffers, a
-//! texture, depth testing and back-face culling.
+//! The spinning cube: textured, tinted, depth-tested and back-face culled,
+//! drawn with the vc4 API and GLSL shaders.
 
 const std = @import("std");
-const sys = @import("sys");
-const gles = @import("gles");
-
-const gl = gles.gl;
+const vc4 = @import("vc4");
+const glsl = @import("glsl");
 
 const vertex_shader =
     \\attribute vec3 pos;
@@ -72,110 +69,56 @@ const indices = blk: {
 pub const triangles = indices.len / 3;
 
 const texture_size = 128;
-var texture_pixels: [texture_size * texture_size * 4]u8 = undefined;
-
-pub fn compileShader(kind: gl.GLenum, source: [*:0]const u8) !gl.GLuint {
-    const shader = gl.glCreateShader(kind);
-    gl.glShaderSource(shader, 1, &[_][*]const u8{source}, null);
-    gl.glCompileShader(shader);
-    var status: gl.GLint = 0;
-    gl.glGetShaderiv(shader, gl.GL_COMPILE_STATUS, @ptrCast(&status));
-    if (status == 0) {
-        var log: [1024]u8 = undefined;
-        var len: gl.GLsizei = 0;
-        gl.glGetShaderInfoLog(shader, log.len, &len, &log);
-        sys.print("stardust: shader compile failed:\n{s}\n", .{log[0..@intCast(len)]});
-        return error.ShaderCompileFailed;
-    }
-    return shader;
-}
-
-/// Compiles and links a program, binding `attributes` to locations 0, 1, ...
-pub fn buildProgram(vs_source: [*:0]const u8, fs_source: [*:0]const u8, attributes: []const [*:0]const u8) !gl.GLuint {
-    const vs = try compileShader(gl.GL_VERTEX_SHADER, vs_source);
-    defer gl.glDeleteShader(vs);
-    const fs = try compileShader(gl.GL_FRAGMENT_SHADER, fs_source);
-    defer gl.glDeleteShader(fs);
-    const program = gl.glCreateProgram();
-    gl.glAttachShader(program, vs);
-    gl.glAttachShader(program, fs);
-    for (attributes, 0..) |name, i| gl.glBindAttribLocation(program, @intCast(i), name);
-    gl.glLinkProgram(program);
-    var status: gl.GLint = 0;
-    gl.glGetProgramiv(program, gl.GL_LINK_STATUS, @ptrCast(&status));
-    if (status == 0) {
-        var log: [1024]u8 = undefined;
-        var len: gl.GLsizei = 0;
-        gl.glGetProgramInfoLog(program, log.len, &len, &log);
-        sys.print("stardust: program link failed:\n{s}\n", .{log[0..@intCast(len)]});
-        return error.ProgramLinkFailed;
-    }
-    return program;
-}
 
 pub const Cube = struct {
-    program: gl.GLuint,
-    mvp_location: gl.GLint,
-    vbo: gl.GLuint,
-    ibo: gl.GLuint,
-    texture: gl.GLuint,
+    pipeline: glsl.Pipeline,
+    vbo: vc4.Bo,
+    ibo: vc4.Bo,
+    texture: vc4.Bo,
 
-    pub fn init() !Cube {
-        const program = try buildProgram(vertex_shader, fragment_shader, &.{ "pos", "uv", "tint" });
-        gl.glUseProgram(program);
-        gl.glUniform1i(gl.glGetUniformLocation(program, "tex"), 0);
-
-        var buffers: [2]gl.GLuint = undefined;
-        gl.glGenBuffers(2, &buffers);
-        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, buffers[0]);
-        gl.glBufferData(gl.GL_ARRAY_BUFFER, @sizeOf(@TypeOf(vertices)), &vertices, gl.GL_STATIC_DRAW);
-        gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, buffers[1]);
-        gl.glBufferData(gl.GL_ELEMENT_ARRAY_BUFFER, @sizeOf(@TypeOf(indices)), &indices, gl.GL_STATIC_DRAW);
+    pub fn init(gpa: std.mem.Allocator, dev: vc4.Device) !Cube {
+        var pipeline = try glsl.Pipeline.init(gpa, dev, vertex_shader, fragment_shader, .{
+            .vertex_stride = @sizeOf(Vertex),
+            .attributes = &.{
+                .{ .name = "pos", .offset = @offsetOf(Vertex, "pos") },
+                .{ .name = "uv", .offset = @offsetOf(Vertex, "uv") },
+                .{ .name = "tint", .offset = @offsetOf(Vertex, "tint") },
+            },
+            .depth_test = true,
+            .cull = .back,
+        });
+        errdefer pipeline.deinit(dev);
+        const vbo = try dev.createBo(@sizeOf(@TypeOf(vertices)));
+        errdefer dev.destroyBo(vbo);
+        @memcpy(vbo.map[0..@sizeOf(@TypeOf(vertices))], std.mem.asBytes(&vertices));
+        const ibo = try dev.createBo(@sizeOf(@TypeOf(indices)));
+        errdefer dev.destroyBo(ibo);
+        @memcpy(ibo.map[0..@sizeOf(@TypeOf(indices))], std.mem.asBytes(&indices));
 
         // A white and dark grey checkerboard: with the pure face tints,
         // white squares show each tint at full strength.
+        var pixels: [texture_size * texture_size]u32 = undefined;
         for (0..texture_size) |y| for (0..texture_size) |x| {
-            const v: u8 = if (((x / 16) + (y / 16)) % 2 == 0) 0xff else 0x40;
-            texture_pixels[(y * texture_size + x) * 4 ..][0..4].* = .{ v, v, v, 0xff };
+            pixels[y * texture_size + x] = if (((x / 16) + (y / 16)) % 2 == 0) 0xffffffff else 0xff404040;
         };
-        var texture: gl.GLuint = 0;
-        gl.glGenTextures(1, @ptrCast(&texture));
-        gl.glBindTexture(gl.GL_TEXTURE_2D, texture);
-        gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA, texture_size, texture_size, 0, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, &texture_pixels);
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR);
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR);
-
-        return .{
-            .program = program,
-            .mvp_location = gl.glGetUniformLocation(program, "mvp"),
-            .vbo = buffers[0],
-            .ibo = buffers[1],
-            .texture = texture,
-        };
+        const texture = try dev.createBo(vc4.texture.imageSize(texture_size, texture_size));
+        vc4.texture.upload(texture.map, &pixels, texture_size, texture_size);
+        return .{ .pipeline = pipeline, .vbo = vbo, .ibo = ibo, .texture = texture };
     }
 
     /// Draws the cube at `time` seconds into its rotation.
-    pub fn draw(c: *const Cube, width: u32, height: u32, time: f32) void {
-        gl.glUseProgram(c.program);
-        gl.glEnable(gl.GL_DEPTH_TEST);
-        gl.glEnable(gl.GL_CULL_FACE);
-        gl.glCullFace(gl.GL_BACK);
-        gl.glFrontFace(gl.GL_CCW);
-        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, c.vbo);
-        gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, c.ibo);
-        gl.glVertexAttribPointer(0, 3, gl.GL_FLOAT, gl.GL_FALSE, @sizeOf(Vertex), @ptrFromInt(@offsetOf(Vertex, "pos")));
-        gl.glVertexAttribPointer(1, 2, gl.GL_FLOAT, gl.GL_FALSE, @sizeOf(Vertex), @ptrFromInt(@offsetOf(Vertex, "uv")));
-        gl.glVertexAttribPointer(2, 3, gl.GL_FLOAT, gl.GL_FALSE, @sizeOf(Vertex), @ptrFromInt(@offsetOf(Vertex, "tint")));
-        for (0..3) |i| gl.glEnableVertexAttribArray(@intCast(i));
-        gl.glActiveTexture(gl.GL_TEXTURE0);
-        gl.glBindTexture(gl.GL_TEXTURE_2D, c.texture);
-        const m = mvp(width, height, time);
-        gl.glUniformMatrix4fv(c.mvp_location, 1, gl.GL_FALSE, &m);
-        gl.glDrawElements(gl.GL_TRIANGLES, indices.len, gl.GL_UNSIGNED_SHORT, null);
+    pub fn draw(c: *Cube, frame: *vc4.render.Frame, width: u32, height: u32, time: f32) !void {
+        try c.pipeline.set("mvp", mvp(width, height, time));
+        try c.pipeline.draw(frame, .{
+            .vertices = c.vbo.handle,
+            .count = indices.len,
+            .indices = .{ .handle = c.ibo.handle, .offset = 0, .max_index = vertices.len - 1 },
+            .texture = .{ .handle = c.texture.handle, .config = .{ .width = texture_size, .height = texture_size } },
+        });
     }
 };
 
-// --- Matrices (column-major, as GL expects) ----------------------------------
+// --- Matrices (column-major, as GLSL expects) --------------------------------
 
 pub const Mat4 = [16]f32;
 

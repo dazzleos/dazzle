@@ -1,10 +1,10 @@
-//! The Stardust demo: a spinning, textured cube drawn with OpenGL ES 2.0,
-//! with the machine's IP address and rendering statistics in the top left
-//! corner, written in Fira Sans (its own copy, next to the executable).
-//! Clicks draw expanding, fading rings behind the cube.
+//! The Stardust demo: a spinning, textured cube, with the machine's IP
+//! address and rendering statistics in the top left corner, written in
+//! Fira Sans (its own copy, next to the executable). Clicks draw expanding,
+//! fading rings behind the cube.
 //!
-//! It is a Wayland client: stardust-shell starts it, and it draws into a
-//! window through EGL's Wayland platform.
+//! It is a native Stardust app: a window on stardust-shell (see the `app`
+//! module), drawn with the vc4 API and GLSL shaders.
 //!
 //!     stardust-demo [font.ttf]
 //!
@@ -14,18 +14,16 @@ const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
 const font = @import("font");
-const gles = @import("gles");
+const vc4 = @import("vc4");
+const app = @import("app");
 const cube_mod = @import("cube.zig");
 const hud_mod = @import("hud.zig");
 const netinfo = @import("netinfo.zig");
-const window_mod = @import("window.zig");
 const rings_mod = @import("rings.zig");
 const sysinfo = @import("sysinfo.zig");
 const build_info = @import("build_info");
 const wayland = @import("wayland");
 
-const gl = gles.gl;
-const egl = gles.egl;
 const print = sys.print;
 
 /// The clear colour (also the overlay's background).
@@ -41,8 +39,6 @@ pub fn main(init: std.process.Init.Minimal) u8 {
 
     run(init, font_path) catch |err| {
         print("stardust: error: {s}\n", .{@errorName(err)});
-        if (err == error.EglInitializeFailed)
-            print("stardust: no GPU or display; look for vc4, hdmi or v3d errors earlier in the log\n", .{});
         return 1;
     };
     return 0;
@@ -60,7 +56,7 @@ fn loadFont(gpa: std.mem.Allocator, path: [*:0]const u8) ?font.Font {
 }
 
 /// Opens a window on the Wayland compositor.
-fn openWindow(gpa: std.mem.Allocator, init: std.process.Init.Minimal) !*window_mod.Window {
+fn openWindow(gpa: std.mem.Allocator, init: std.process.Init.Minimal, dev: *vc4.Device) !*app.Window {
     const Environ = std.process.Environ;
     const display_name = Environ.getPosix(init.environ, "WAYLAND_DISPLAY") orelse {
         print("stardust: WAYLAND_DISPLAY is not set; run me under stardust-shell\n", .{});
@@ -71,62 +67,37 @@ fn openWindow(gpa: std.mem.Allocator, init: std.process.Init.Minimal) !*window_m
         print("stardust: XDG_RUNTIME_DIR is not set\n", .{});
         return error.NoCompositor;
     };
-    return window_mod.Window.open(gpa, path, "Stardust demo") catch |err| {
+    const win = app.Window.open(gpa, .device(dev), path, "Stardust demo") catch |err| {
         print("stardust: cannot open a window on {s} ({s})\n", .{ path, @errorName(err) });
         return err;
     };
+    try win.setAppId("stardust-demo");
+    return win;
 }
+
+/// Frames are large; the demo records one at a time.
+var frame: vc4.render.Frame = undefined;
 
 fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     const gpa = std.heap.page_allocator;
-    const win = try openWindow(gpa, init);
-    const egl_window = egl.egl_wayland.wl_egl_window_create(&win.surface, @intCast(win.width), @intCast(win.height)) orelse return error.OutOfMemory;
-    const dpy = egl.eglGetDisplay(win.conn);
-    if (egl.eglInitialize(dpy, null, null) == egl.EGL_FALSE) return error.EglInitializeFailed;
-    const config_attribs = [_]egl.EGLint{
-        egl.EGL_RED_SIZE,        8,
-        egl.EGL_GREEN_SIZE,      8,
-        egl.EGL_BLUE_SIZE,       8,
-        egl.EGL_DEPTH_SIZE,      24,
-        egl.EGL_SURFACE_TYPE,    egl.EGL_WINDOW_BIT,
-        egl.EGL_RENDERABLE_TYPE, egl.EGL_OPENGL_ES2_BIT,
-        egl.EGL_NONE,
+    var dev = vc4.device.openRender() catch |err| {
+        print("stardust: no GPU ({s}); look for vc4 or v3d errors earlier in the log\n", .{@errorName(err)});
+        return err;
     };
-    var config: egl.EGLConfig = null;
-    var num_configs: egl.EGLint = 0;
-    if (egl.eglChooseConfig(dpy, &config_attribs, @ptrCast(&config), 1, &num_configs) == egl.EGL_FALSE or num_configs == 0)
-        return error.NoEglConfig;
-    const surface = egl.eglCreateWindowSurface(dpy, config, @intFromPtr(egl_window), null);
-    if (surface == egl.EGL_NO_SURFACE) return error.EglSurfaceFailed;
-    const context_attribs = [_]egl.EGLint{ egl.EGL_CONTEXT_CLIENT_VERSION, 2, egl.EGL_NONE };
-    const context = egl.eglCreateContext(dpy, config, egl.EGL_NO_CONTEXT, &context_attribs);
-    if (context == egl.EGL_NO_CONTEXT) return error.EglContextFailed;
-    if (egl.eglMakeCurrent(dpy, surface, surface, context) == egl.EGL_FALSE) return error.EglMakeCurrentFailed;
+    const win = try openWindow(gpa, init, &dev);
+    var width = win.width;
+    var height = win.height;
+    print("stardust: drawing with the vc4 API, window {d}x{d}\n", .{ width, height });
 
-    var w: egl.EGLint = 0;
-    var h: egl.EGLint = 0;
-    _ = egl.eglQuerySurface(dpy, surface, egl.EGL_WIDTH, &w);
-    _ = egl.eglQuerySurface(dpy, surface, egl.EGL_HEIGHT, &h);
-    var width: u32 = @intCast(w);
-    var height: u32 = @intCast(h);
-    print("stardust: {s} on {s}, window {d}x{d}\n", .{
-        std.mem.span(gl.glGetString(gl.GL_VERSION).?), std.mem.span(gl.glGetString(gl.GL_RENDERER).?), width, height,
-    });
-
-    const cube = try cube_mod.Cube.init();
+    var cube = try cube_mod.Cube.init(gpa, dev);
     var f = loadFont(gpa, font_path);
-    var hud: ?hud_mod.Hud = if (f) |*fnt| try hud_mod.Hud.init(gpa, fnt, width, height, background) else null;
+    var hud: ?hud_mod.Hud = if (f) |*fnt| try hud_mod.Hud.init(gpa, dev, fnt, width, height, background) else null;
     if (hud) |*hd| hd.subtitle = "build " ++ build_info.commit;
-    var rings = try rings_mod.Rings.init(background);
+    var rings = try rings_mod.Rings.init(gpa, dev, background);
     var input: InputStatus = .{};
     // The CPU's speed is measured against this first sample, taken cool.
     var monitor: sysinfo.Monitor = .{};
     var health = monitor.sample();
-
-    gl.glViewport(0, 0, w, h);
-    gl.glClearColor(16.0 / 255.0, 24.0 / 255.0, 48.0 / 255.0, 1.0);
-    const gl_error = gl.glGetError();
-    if (gl_error != gl.GL_NO_ERROR) print("stardust: GL error 0x{x} during setup\n", .{gl_error});
 
     const start = sys.nowNs();
     var stats_window: Stats = .{ .since = start };
@@ -140,11 +111,9 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         };
         if (win.closed) return;
         if (try win.applyConfigure()) |size| {
-            // The next buffer EGL picks has the new size.
-            egl.egl_wayland.wl_egl_window_resize(egl_window, @intCast(size[0]), @intCast(size[1]), 0, 0);
+            // The next frame is rendered at the new size.
             width = size[0];
             height = size[1];
-            gl.glViewport(0, 0, @intCast(width), @intCast(height));
             if (hud) |*hd| try hd.resize(width, height);
             next_update = 0;
         }
@@ -166,16 +135,16 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             hd.update(statusLines(&bufs, shown, width, height, input, health)) catch |e| print("stardust: overlay: {s}\n", .{@errorName(e)});
         };
 
-        gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT);
-        rings.draw(frame_start, width, height);
-        cube.draw(width, height, t);
-        if (hud) |*hd| hd.draw();
+        frame.begin(try win.beginFrame(), .{ .clear = background });
+        try rings.draw(&frame, frame_start, width, height);
+        try cube.draw(&frame, width, height, t);
+        if (hud) |*hd| try hd.draw(&frame);
         const issued = sys.nowNs();
-        // Render now, so the GPU's time can be told apart from waiting for
-        // the display's vertical blank in eglSwapBuffers.
-        gl.glFinish();
+        // Render, then hand the frame to the shell (which may wait for the
+        // previous one to be shown), so the GPU's time is measured alone.
+        try win.render(&frame);
         const rendered = sys.nowNs();
-        if (egl.eglSwapBuffers(dpy, surface) == egl.EGL_FALSE) return error.EglSwapBuffersFailed;
+        try win.show();
 
         stats_window.add(issued - frame_start, rendered - issued);
         log_window.add(issued - frame_start, rendered - issued);
@@ -207,7 +176,7 @@ const Stats = struct {
 
     const Summary = struct {
         fps: f32 = 0,
-        /// Issuing the frame's GL calls.
+        /// Recording the frame's draws.
         cpu_ms: f32 = 0,
         /// From submitting the frame to the GPU finishing it.
         gpu_ms: f32 = 0,
@@ -295,7 +264,6 @@ fn statusLines(bufs: *[hud_mod.Hud.lines][96]u8, s: Stats.Summary, width: u32, h
 }
 
 test {
-    _ = @import("window.zig");
     _ = @import("cube.zig");
     _ = @import("hud.zig");
     _ = @import("netinfo.zig");

@@ -277,24 +277,34 @@ test "a client maps a window, gets frame callbacks and buffer releases" {
     try testing.expect(st.server.topWindow() == null);
 }
 
-// --- EGL and GL on Wayland ------------------------------------------------------
+// --- Native app windows ----------------------------------------------------------
 
-const gles = @import("gles");
 const vc4 = @import("vc4");
-const gl = gles.gl;
-const egl_wayland = gles.egl.egl_wayland;
+const app = @import("app");
 
-/// The GL context's fake GPU, also exporting "dma-bufs" (pipes).
-const FakeExport = struct {
-    gpu: gles.context.FakeGpu,
+/// A GPU for app windows that keeps buffers in memory, exports them as
+/// pipes, and records the frames it is asked to render.
+const FakeGpu = struct {
+    live_bos: u32 = 0,
+    next_handle: u32 = 1,
+    frames: u32 = 0,
+    last_target: ?vc4.render.Target = null,
+
+    fn gpu(f: *FakeGpu) app.Gpu {
+        return .{ .ptr = f, .vtable = &.{ .createBo = createBo, .destroyBo = destroyBo, .exportBo = exportBo, .run = run } };
+    }
 
     fn createBo(ptr: *anyopaque, size: u32) anyerror!vc4.Bo {
-        const f: *FakeExport = @ptrCast(@alignCast(ptr));
-        return f.gpu.backend().vtable.createBo(&f.gpu, size);
+        const f: *FakeGpu = @ptrCast(@alignCast(ptr));
+        const map = try testing.allocator.alignedAlloc(u8, .fromByteUnits(std.heap.page_size_min), size);
+        f.live_bos += 1;
+        f.next_handle += 1;
+        return .{ .handle = f.next_handle, .map = map };
     }
     fn destroyBo(ptr: *anyopaque, bo: vc4.Bo) void {
-        const f: *FakeExport = @ptrCast(@alignCast(ptr));
-        f.gpu.backend().vtable.destroyBo(&f.gpu, bo);
+        const f: *FakeGpu = @ptrCast(@alignCast(ptr));
+        testing.allocator.free(bo.map);
+        f.live_bos -= 1;
     }
     fn exportBo(_: *anyopaque, _: u32) anyerror!linux.fd_t {
         var pipe: [2]linux.fd_t = undefined;
@@ -302,9 +312,17 @@ const FakeExport = struct {
         _ = linux.close(pipe[1]);
         return pipe[0];
     }
+    fn run(ptr: *anyopaque, frame: *vc4.render.Frame) anyerror!void {
+        const f: *FakeGpu = @ptrCast(@alignCast(ptr));
+        _ = frame.finish();
+        f.frames += 1;
+        f.last_target = frame.target;
+    }
 };
 
-test "EGL window surfaces render, swap through the compositor and resize" {
+var test_frame: vc4.render.Frame = undefined;
+
+test "app windows render, present through the compositor and resize" {
     var pair: [2]linux.fd_t = undefined;
     try testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &pair));
     var renderer: FakeRenderer = .{};
@@ -314,71 +332,42 @@ test "EGL window surfaces render, swap through the compositor and resize" {
     defer st.server.deinit();
     const thread = try std.Thread.spawn(.{}, ServerThread.run, .{st});
 
+    var fake: FakeGpu = .{};
     const d = try client.Display.fromFd(testing.allocator, pair[1]);
-    var state: State = .{};
-    var globals: client.Globals = .{};
-    const registry = try globals.fetch(d);
-    const compositor = (try globals.bind(registry, p.wl_compositor.name, 4, null)).?;
-    const wm_base = (try globals.bind(registry, p.xdg_wm_base.name, 1, null)).?;
-    const surface = try d.newObject(null);
-    var m = try compositor.request(p.wl_compositor.request.create_surface);
-    m.uint(surface.id).end();
-    const xdg_surface = try d.newObject(.{ .ptr = &state, .handler = State.xdgSurfaceEvent });
-    m = try wm_base.request(p.xdg_wm_base.request.get_xdg_surface);
-    m.uint(xdg_surface.id).uint(surface.id).end();
-    const toplevel = try d.newObject(.{ .ptr = &state, .handler = State.toplevelEvent });
-    m = try xdg_surface.request(p.xdg_surface.request.get_toplevel);
-    m.uint(toplevel.id).end();
-    m = try surface.request(p.wl_surface.request.commit);
-    m.end();
-    try d.roundtrip();
-    m = try xdg_surface.request(p.xdg_surface.request.ack_configure);
-    m.uint(state.configure_serial).end();
+    const win = try app.Window.openOn(testing.allocator, fake.gpu(), d, "Test window");
+    // Maximized into the work area.
+    try testing.expectEqual(@as(u32, 320), win.width);
+    try testing.expectEqual(@as(u32, 200), win.height);
 
-    // EGL's side: the platform, a window and its surface, and a GL context.
-    var fake: FakeExport = .{ .gpu = .{ .gpa = testing.allocator } };
-    var pl: egl_wayland.Platform = .{ .conn = d, .gpu = .{ .ptr = &fake, .createBo = FakeExport.createBo, .destroyBo = FakeExport.destroyBo, .exportBo = FakeExport.exportBo } };
-    try pl.init();
-    const win = egl_wayland.wl_egl_window_create(&surface, state.configure_width, state.configure_height).?;
-    defer egl_wayland.wl_egl_window_destroy(win);
-    const es = try egl_wayland.Surface.create(&pl, win);
-    const ctx = try gles.context.Context.create(testing.allocator, fake.gpu.backend());
-    gles.context.current = ctx;
-    ctx.setTarget(try es.backTarget());
-
-    for (0..6) |i| {
-        gl.glClearColor(@floatFromInt(i % 2), 0, 0, 1);
-        gl.glClear(gl.GL_COLOR_BUFFER_BIT);
-        try es.swap(ctx);
+    for (0..6) |_| {
+        test_frame.begin(try win.beginFrame(), .{ .clear = 0xff000000 });
+        try win.present(&test_frame);
     }
     // Frames render into T-tiled buffers the compositor can sample.
-    try testing.expectEqual(@as(u32, 6), fake.gpu.frames);
-    try testing.expectEqual(vc4.cl.renderConfigBits(.t, vc4.cl.render_config_format_rgba8888), fake.gpu.last_submit.color_write.bits);
+    try testing.expectEqual(@as(u32, 6), fake.frames);
+    try testing.expectEqual(vc4.cl.Tiling.t, fake.last_target.?.tiling);
+    while (win.frame_pending) try d.dispatch();
     try testing.expectEqual(@as(u32, 320), st.last_width.load(.monotonic));
+    try testing.expect(st.titles_seen.load(.monotonic) > 0);
 
-    // A resize takes effect with the next buffer.
-    egl_wayland.wl_egl_window_resize(win, 160, 100, 0, 0);
+    // A new size (as a configure would set) takes effect with the next
+    // buffer.
+    win.width = 160;
+    win.height = 100;
     for (0..4) |_| {
-        gl.glClear(gl.GL_COLOR_BUFFER_BIT);
-        try es.swap(ctx);
+        test_frame.begin(try win.beginFrame(), .{ .clear = 0xff000000 });
+        try win.present(&test_frame);
     }
-    // Let the last frame be shown.
-    while (es.frame_pending) try d.dispatch();
+    while (win.frame_pending) try d.dispatch();
     try testing.expectEqual(@as(u32, 160), st.last_width.load(.monotonic));
-    var w: c_int = 0;
-    var h: c_int = 0;
-    egl_wayland.wl_egl_window_get_attached_size(win, &w, &h);
-    try testing.expectEqual(@as(c_int, 100), h);
-    // The client never holds more than three buffers.
-    try testing.expect(fake.gpu.live_bos <= 3 + 2);
+    try testing.expectEqual(@as(u16, 100), fake.last_target.?.height);
+    // The window never holds more than three buffers.
+    try testing.expect(fake.live_bos <= 3);
 
-    ctx.target = null;
-    es.destroy();
-    ctx.destroy();
-    d.disconnect();
+    win.close();
     thread.join();
+    try testing.expectEqual(@as(u32, 0), fake.live_bos);
     try testing.expectEqual(@as(i32, 0), renderer.live.load(.monotonic));
-    try testing.expectEqual(@as(u32, 0), fake.gpu.live_bos);
 }
 
 const InputState = struct {
