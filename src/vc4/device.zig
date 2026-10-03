@@ -8,7 +8,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const drm = @import("drm.zig");
 const qpu = @import("qpu.zig");
-const sys = @import("sys.zig");
+const sys = @import("sys");
 
 pub const SubmitRclSurface = extern struct {
     /// Index into `bo_handles`, or `no_surface`.

@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const linux = std.os.linux;
-const sys = @import("sys.zig");
+const sys = @import("sys");
 
 pub const ioctl_base = 'd';
 pub const command_base = 0x40;

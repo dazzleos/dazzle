@@ -7,15 +7,15 @@
 //!   testing.
 
 const std = @import("std");
-const cl = @import("vc4/cl.zig");
-const compiler = @import("compiler.zig");
-const drm = @import("drm.zig");
+const vc4 = @import("vc4");
+const cl = vc4.cl;
+const compiler = vc4.compiler;
+const drm = vc4.drm;
 const programs = @import("programs.zig");
-const render = @import("render.zig");
-const shaders = @import("shaders.zig");
-const sys = @import("sys.zig");
-const texture = @import("vc4/texture.zig");
-const vc4 = @import("vc4.zig");
+const render = vc4.render;
+const shaders = vc4.reference_shaders;
+const sys = @import("sys");
+const texture = vc4.texture;
 
 pub const Kind = enum { triangle, spin, cube };
 

@@ -3,7 +3,7 @@
 //! Each vertex/coordinate shader pair reads the same attribute layout. The
 //! comments give the GLSL each program corresponds to.
 
-const compiler = @import("compiler.zig");
+const compiler = vc4.compiler;
 
 const Shader = compiler.Shader;
 const Value = compiler.Value;
@@ -187,10 +187,11 @@ pub const cube = struct {
 // --- Tests ---------------------------------------------------------------------
 
 const std = @import("std");
-const qpu = @import("qpu.zig");
-const sim = @import("qpu_sim.zig");
-const shaders = @import("shaders.zig");
-const texture = @import("vc4/texture.zig");
+const vc4 = @import("vc4");
+const qpu = vc4.qpu;
+const sim = vc4.qpu_sim;
+const shaders = vc4.reference_shaders;
+const texture = vc4.texture;
 const testing = std.testing;
 
 /// Builds a shader's uniform stream from its layout.

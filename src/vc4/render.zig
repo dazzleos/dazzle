@@ -4,10 +4,10 @@
 //! handles (`bo_handles`), which is how the kernel relocates addresses.
 
 const std = @import("std");
-const cl = @import("vc4/cl.zig");
+const cl = @import("cl.zig");
 const compiler = @import("compiler.zig");
-const texture = @import("vc4/texture.zig");
-const vc4 = @import("vc4.zig");
+const texture = @import("texture.zig");
+const vc4 = @import("device.zig");
 
 pub const ShaderBinding = struct {
     /// Index of the shader BO in `bo_handles`.

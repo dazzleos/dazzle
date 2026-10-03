@@ -176,7 +176,7 @@ test "config round trip" {
 }
 
 test "layout matches the reference description" {
-    const sim = @import("../qpu_sim.zig");
+    const sim = @import("qpu_sim.zig");
     const sizes = [_][2]u32{ .{ 16, 16 }, .{ 8, 64 }, .{ 64, 64 }, .{ 128, 96 }, .{ 96, 128 }, .{ 256, 256 } };
     for (sizes) |sz| {
         var y: u32 = 0;

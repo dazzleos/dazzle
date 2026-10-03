@@ -4,7 +4,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const drm = @import("drm.zig");
 const render = @import("render.zig");
-const vc4 = @import("vc4.zig");
+const vc4 = @import("device.zig");
 
 pub const Buffer = struct {
     bo: vc4.Bo,

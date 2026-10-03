@@ -7,13 +7,13 @@
 //! console, with no compositor holding the display) for development.
 
 const std = @import("std");
+const vc4 = @import("vc4");
 const linux = std.os.linux;
-const drm = @import("drm.zig");
+const drm = vc4.drm;
 const logserver = @import("logserver.zig");
-const sys = @import("sys.zig");
+const sys = @import("sys");
 const demos = @import("demos.zig");
-const display_mod = @import("display.zig");
-const vc4 = @import("vc4.zig");
+const display_mod = vc4.display;
 
 const print = sys.print;
 
@@ -165,19 +165,7 @@ fn demoFromCmdline(cmdline: []const u8) demos.Kind {
 }
 
 test {
-    _ = @import("qpu.zig");
-    _ = @import("shaders.zig");
-    _ = @import("vc4/cl.zig");
-    _ = @import("drm.zig");
-    _ = @import("vc4.zig");
     _ = @import("demos.zig");
-    _ = @import("render.zig");
-    _ = @import("display.zig");
-    _ = @import("sys.zig");
     _ = @import("logserver.zig");
-    _ = @import("qpu_sim.zig");
-    _ = @import("vc4/texture.zig");
-    _ = @import("compiler.zig");
     _ = @import("programs.zig");
-    _ = @import("qpu_schedule.zig");
 }

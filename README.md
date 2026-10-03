@@ -12,30 +12,46 @@ textured, depth-tested cube by default.
 
 ## Layout
 
-| Path | Contents |
-|---|---|
-| `src/main.zig` | Init program: mounts `/proc`, `/sys`, `/dev`, starts the log server, sets up the display and runs a demo |
-| `src/logserver.zig` | Serves the kernel and init log over TCP (telnet) |
-| `src/demos.zig` | The demo scenes: `triangle`, `spin` and `cube` |
-| `src/compiler.zig` | Shader compiler: SSA builder, register allocation and QPU code generation |
-| `src/programs.zig` | The demos' shaders, written with the compiler's builder API |
-| `src/qpu.zig` | QPU (shader processor) instruction encoder, hazard checker and disassembler |
-| `src/qpu_schedule.zig` | Instruction scheduler: latency-aware reordering and add/mul pairing |
-| `src/qpu_sim.zig` | QPU simulator used by the tests to run shaders on the build machine |
-| `src/shaders.zig` | The original hand-written triangle shaders |
-| `src/render.zig` | Builds a `vc4` job (control list, shader record, uniform streams) for one draw call |
-| `src/display.zig` | Double-buffered scanout with page flips at vertical blank |
-| `src/vc4/cl.zig` | Binning control list packets and shader record layout |
-| `src/vc4/texture.zig` | Texture tiling (T and LT layouts) and texture unit configuration |
-| `src/vc4.zig` | `vc4` ioctls: buffers, shader upload, job submission |
-| `src/drm.zig` | DRM core and KMS (mode setting, page flip) ioctls |
-| `tools/mkinitramfs.zig` | Host tool that packs the init binary into a cpio initramfs |
-| `kernel/stardust.config` | Kernel config fragment applied on top of `tinyconfig` |
-| `boot/` | Firmware `config.txt` and kernel `cmdline.txt` |
-| `scripts/` | Kernel build, firmware download, SD image and QEMU scripts |
+The code is split into Zig modules, linked statically into each program:
 
-There is no C library and no other userspace: the init program makes raw
-system calls through `std.os.linux`.
+| Module | Path | Contents |
+|---|---|---|
+| `sys` | `src/sys/` | Linux system call helpers (sleeping, clocks, logging, the kernel command line) |
+| `vc4` | `src/vc4/` | The low-level graphics API for the VideoCore IV, described below |
+| `stardust-init` | `src/init/` | The init program: mounts, log server and the demos |
+
+The `vc4` module:
+
+| File | Contents |
+|---|---|
+| `device.zig` | GPU buffers, shader upload and job submission (`vc4` ioctls) |
+| `compiler.zig` | Shader compiler: SSA builder, register allocation and QPU code generation |
+| `qpu_schedule.zig` | Instruction scheduler: latency-aware reordering and add/mul pairing |
+| `render.zig` | Builds a job (control list, shader record, uniform streams) for one draw call |
+| `texture.zig` | Texture tiling (T and LT layouts) and texture unit configuration |
+| `display.zig` | Double-buffered scanout with page flips at vertical blank |
+| `drm.zig` | DRM core and KMS (mode setting, page flip) ioctls |
+| `cl.zig` | Binning control list packets and shader record layout |
+| `qpu.zig` | QPU instruction encoder, hazard checker, instruction pairing and disassembler |
+| `qpu_sim.zig` | QPU simulator used by the tests to run shaders on the build machine |
+| `reference_shaders.zig` | The original hand-written triangle shaders, known to work on hardware |
+
+The init program (`src/init/`):
+
+| File | Contents |
+|---|---|
+| `main.zig` | Mounts `/proc`, `/sys`, `/dev`, starts the log server, sets up the display and runs a demo |
+| `logserver.zig` | Serves the kernel and init log over TCP (telnet) |
+| `demos.zig` | The demo scenes: `triangle`, `spin` and `cube` |
+| `programs.zig` | The demos' shaders, written with the compiler's builder API |
+
+Also: `tools/mkinitramfs.zig` (packs the init binary into a cpio
+initramfs), `kernel/stardust.config` (kernel config fragment applied on top
+of `tinyconfig`), `boot/` (firmware `config.txt` and kernel `cmdline.txt`)
+and `scripts/` (kernel build, firmware download, SD image, QEMU and Zig).
+
+There is no C library: programs make raw system calls through
+`std.os.linux`.
 
 ## Requirements
 
@@ -152,7 +168,7 @@ The firmware picks the Zero or Zero W device tree in `config.txt`. The Zero
 
 ## How a frame is drawn
 
-1. **Shaders.** `programs.zig` describes each shader with the compiler's
+1. **Shaders.** `src/init/programs.zig` describes each shader with the compiler's
    builder API, as a list of SSA values. Three run per draw: a coordinate
    shader the binner uses to find which 64×64 tiles each triangle covers, a
    vertex shader that outputs screen positions and varyings, and a fragment

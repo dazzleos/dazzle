@@ -10,7 +10,7 @@
 
 const std = @import("std");
 const qpu = @import("qpu.zig");
-const texture = @import("vc4/texture.zig");
+const texture = @import("texture.zig");
 
 pub const lanes = 16;
 pub const Vec = [lanes]u32;
@@ -465,7 +465,7 @@ pub fn referenceTexelOffset(width: u32, height: u32, x: u32, y: u32) u32 {
 // Zero, so running them here checks the simulator itself.
 
 const testing = std.testing;
-const shaders = @import("shaders.zig");
+const shaders = @import("reference_shaders.zig");
 
 fn lanesF(comptime gen: fn (usize) f32) Vec {
     var v: Vec = undefined;
