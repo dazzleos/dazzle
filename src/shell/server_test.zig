@@ -55,13 +55,32 @@ const ServerThread = struct {
     titles_seen: std.atomic.Value(u32) = .init(0),
     frames: std.atomic.Value(u32) = .init(0),
     last_width: std.atomic.Value(u32) = .init(0),
+    /// Set by the test to have the server thread feed it input events.
+    send_input: std.atomic.Value(bool) = .init(false),
 
     fn run(st: *ServerThread) void {
         const c = st.server.addClient(st.fd) catch return;
         while (true) {
             var fds = [_]linux.pollfd{.{ .fd = c.conn.fd, .events = linux.POLL.IN, .revents = 0 }};
-            _ = linux.poll(&fds, 1, 50);
+            _ = linux.poll(&fds, 1, 10);
             if (!st.server.dispatch(c)) break;
+            st.server.updateFocus();
+            if (st.send_input.swap(false, .monotonic)) {
+                const srv = &st.server;
+                // Over the bar, then over the window (at y = 40).
+                srv.pointerMotion(1, 10, 10);
+                srv.pointerFrame();
+                srv.pointerMotion(2, 30, 50);
+                srv.pointerFrame();
+                srv.pointerMotion(3, 31.5, 52);
+                srv.pointerButton(3, p.input.btn_left, true);
+                srv.pointerFrame();
+                srv.pointerAxis(4, p.wl_pointer.axis.vertical_scroll, 15);
+                srv.pointerFrame();
+                srv.keyboardKey(5, 30, true); // KEY_A
+                srv.keyboardKey(6, 30, false);
+                srv.flushClients();
+            }
             if (st.server.damaged) {
                 if (st.server.topWindow()) |t| {
                     if (std.mem.eql(u8, t.title(), "Test window")) _ = st.titles_seen.fetchAdd(1, .monotonic);
@@ -168,7 +187,7 @@ test "a client maps a window, gets frame callbacks and buffer releases" {
     var state: State = .{};
     var globals: client.Globals = .{};
     const registry = try globals.fetch(d);
-    try testing.expectEqual(@as(usize, 4), globals.len);
+    try testing.expectEqual(@as(usize, 5), globals.len);
     const compositor = (try globals.bind(registry, p.wl_compositor.name, 4, null)).?;
     const wm_base = (try globals.bind(registry, p.xdg_wm_base.name, 1, null)).?;
     const dmabuf = (try globals.bind(registry, p.zwp_linux_dmabuf_v1.name, 3, .{ .ptr = &state, .handler = State.dmabufEvent })).?;
@@ -345,4 +364,155 @@ test "EGL window surfaces render, swap through the compositor and resize" {
     thread.join();
     try testing.expectEqual(@as(i32, 0), renderer.live.load(.monotonic));
     try testing.expectEqual(@as(u32, 0), fake.gpu.live_bos);
+}
+
+const InputState = struct {
+    capabilities: u32 = 0,
+    keymap_format: ?u32 = null,
+    keyboard_entered: bool = false,
+    pointer_entered: bool = false,
+    enter_x: f64 = 0,
+    enter_y: f64 = 0,
+    motion_x: f64 = 0,
+    motion_y: f64 = 0,
+    buttons: u32 = 0,
+    scrolled: f64 = 0,
+    pointer_frames: u32 = 0,
+    keys: [4]u32 = @splat(0),
+    n_keys: usize = 0,
+
+    fn seatEvent(ptr: ?*anyopaque, _: *client.Display, _: u32, opcode: u16, r: *wire.Reader) void {
+        const s: *InputState = @ptrCast(@alignCast(ptr.?));
+        if (opcode == p.wl_seat.event.capabilities) s.capabilities = r.uint() catch 0;
+    }
+
+    fn pointerEvent(ptr: ?*anyopaque, _: *client.Display, _: u32, opcode: u16, r: *wire.Reader) void {
+        const s: *InputState = @ptrCast(@alignCast(ptr.?));
+        switch (opcode) {
+            p.wl_pointer.event.enter => {
+                _ = r.uint() catch 0;
+                _ = r.uint() catch 0;
+                s.pointer_entered = true;
+                s.enter_x = r.fixed() catch 0;
+                s.enter_y = r.fixed() catch 0;
+            },
+            p.wl_pointer.event.motion => {
+                _ = r.uint() catch 0;
+                s.motion_x = r.fixed() catch 0;
+                s.motion_y = r.fixed() catch 0;
+            },
+            p.wl_pointer.event.button => {
+                _ = r.uint() catch 0;
+                _ = r.uint() catch 0;
+                if ((r.uint() catch 0) == p.input.btn_left and (r.uint() catch 0) == p.wl_pointer.button_state.pressed) s.buttons += 1;
+            },
+            p.wl_pointer.event.axis => {
+                _ = r.uint() catch 0;
+                _ = r.uint() catch 0;
+                s.scrolled += r.fixed() catch 0;
+            },
+            p.wl_pointer.event.frame => s.pointer_frames += 1,
+            else => {},
+        }
+    }
+
+    fn keyboardEvent(ptr: ?*anyopaque, _: *client.Display, _: u32, opcode: u16, r: *wire.Reader) void {
+        const s: *InputState = @ptrCast(@alignCast(ptr.?));
+        switch (opcode) {
+            p.wl_keyboard.event.keymap => {
+                s.keymap_format = r.uint() catch null;
+                if (r.fd()) |fd| _ = linux.close(fd) else |_| {}
+            },
+            p.wl_keyboard.event.enter => s.keyboard_entered = true,
+            p.wl_keyboard.event.key => {
+                _ = r.uint() catch 0;
+                _ = r.uint() catch 0;
+                const key = r.uint() catch 0;
+                const state = r.uint() catch 0;
+                if (s.n_keys < s.keys.len) {
+                    s.keys[s.n_keys] = key << 1 | state;
+                    s.n_keys += 1;
+                }
+            },
+            else => {},
+        }
+    }
+};
+
+test "the shown window gets the pointer and keyboard" {
+    var pair: [2]linux.fd_t = undefined;
+    try testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &pair));
+    var renderer: FakeRenderer = .{};
+    const st = try testing.allocator.create(ServerThread);
+    defer testing.allocator.destroy(st);
+    st.* = .{ .server = .init(testing.allocator, renderer.backend(), .{ .x = 0, .y = 40, .width = 800, .height = 560 }), .fd = pair[0] };
+    defer st.server.deinit();
+    const thread = try std.Thread.spawn(.{}, ServerThread.run, .{st});
+
+    const d = try client.Display.fromFd(testing.allocator, pair[1]);
+    var state: State = .{};
+    var input: InputState = .{};
+    var globals: client.Globals = .{};
+    const registry = try globals.fetch(d);
+    const compositor = (try globals.bind(registry, p.wl_compositor.name, 4, null)).?;
+    const wm_base = (try globals.bind(registry, p.xdg_wm_base.name, 1, null)).?;
+    const shm = (try globals.bind(registry, p.wl_shm.name, 1, null)).?;
+    const seat = (try globals.bind(registry, p.wl_seat.name, 5, .{ .ptr = &input, .handler = InputState.seatEvent })).?;
+    const pointer = try d.newObject(.{ .ptr = &input, .handler = InputState.pointerEvent });
+    var m = try seat.request(p.wl_seat.request.get_pointer);
+    m.uint(pointer.id).end();
+    const keyboard = try d.newObject(.{ .ptr = &input, .handler = InputState.keyboardEvent });
+    m = try seat.request(p.wl_seat.request.get_keyboard);
+    m.uint(keyboard.id).end();
+    try d.roundtrip();
+    try testing.expectEqual(@as(u32, p.wl_seat.capability.pointer | p.wl_seat.capability.keyboard), input.capabilities);
+    try testing.expectEqual(@as(?u32, p.wl_keyboard.keymap_format.no_keymap), input.keymap_format);
+
+    // A mapped window (an shm buffer) gets the keyboard focus.
+    const surface = try d.newObject(null);
+    m = try compositor.request(p.wl_compositor.request.create_surface);
+    m.uint(surface.id).end();
+    const xdg_surface = try d.newObject(.{ .ptr = &state, .handler = State.xdgSurfaceEvent });
+    m = try wm_base.request(p.xdg_wm_base.request.get_xdg_surface);
+    m.uint(xdg_surface.id).uint(surface.id).end();
+    const toplevel = try d.newObject(.{ .ptr = &state, .handler = State.toplevelEvent });
+    m = try xdg_surface.request(p.xdg_surface.request.get_toplevel);
+    m.uint(toplevel.id).end();
+    m = try surface.request(p.wl_surface.request.commit);
+    m.end();
+    try d.roundtrip();
+    m = try xdg_surface.request(p.xdg_surface.request.ack_configure);
+    m.uint(state.configure_serial).end();
+    const memfd: linux.fd_t = @intCast(linux.memfd_create("test", 0));
+    try testing.expectEqual(@as(usize, 0), linux.ftruncate(memfd, 64 * 64 * 4));
+    const pool = try d.newObject(null);
+    m = try shm.request(p.wl_shm.request.create_pool);
+    m.uint(pool.id).fd(memfd).int(64 * 64 * 4).end();
+    const sb = try d.newObject(.{ .ptr = &state, .handler = State.bufferEvent });
+    m = try pool.request(p.wl_shm_pool.request.create_buffer);
+    m.uint(sb.id).int(0).int(64).int(64).int(256).uint(p.wl_shm.format.xrgb8888).end();
+    try commitBuffer(surface, sb, &state);
+    while (state.frames_done < 1) try d.dispatch();
+    try d.roundtrip();
+    try testing.expect(input.keyboard_entered);
+    try testing.expect(!input.pointer_entered);
+
+    // The pointer enters the window (64x64 at 0,40), in surface coordinates.
+    st.send_input.store(true, .monotonic);
+    while (input.n_keys < 2) try d.dispatch();
+    try testing.expect(input.pointer_entered);
+    try testing.expectEqual(@as(f64, 30), input.enter_x);
+    try testing.expectEqual(@as(f64, 10), input.enter_y);
+    try testing.expectEqual(@as(f64, 31.5), input.motion_x);
+    try testing.expectEqual(@as(f64, 12), input.motion_y);
+    try testing.expectEqual(@as(u32, 1), input.buttons);
+    try testing.expectEqual(@as(f64, 15), input.scrolled);
+    try testing.expectEqual(@as(u32, 3), input.pointer_frames);
+    try testing.expectEqual(@as(u32, 30 << 1 | 1), input.keys[0]);
+    try testing.expectEqual(@as(u32, 30 << 1 | 0), input.keys[1]);
+
+    d.disconnect();
+    thread.join();
+    try testing.expect(st.server.pointer_focus == null);
+    try testing.expect(st.server.keyboard_focus == null);
 }

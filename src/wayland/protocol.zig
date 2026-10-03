@@ -241,3 +241,81 @@ pub const modifier = struct {
     /// and its tile buffer can write.
     pub const broadcom_vc4_t_tiled: u64 = 0x07 << 56 | 1;
 };
+
+pub const wl_seat = struct {
+    pub const name = "wl_seat";
+    pub const version = 5;
+    pub const request = struct {
+        pub const get_pointer = 0;
+        pub const get_keyboard = 1;
+        pub const get_touch = 2;
+        pub const release = 3;
+    };
+    pub const event = struct {
+        pub const capabilities = 0;
+        pub const name = 1;
+    };
+    pub const capability = struct {
+        pub const pointer = 1;
+        pub const keyboard = 2;
+        pub const touch = 4;
+    };
+};
+
+pub const wl_pointer = struct {
+    pub const name = "wl_pointer";
+    pub const request = struct {
+        pub const set_cursor = 0;
+        pub const release = 1;
+    };
+    pub const event = struct {
+        pub const enter = 0;
+        pub const leave = 1;
+        pub const motion = 2;
+        pub const button = 3;
+        pub const axis = 4;
+        pub const frame = 5;
+        pub const axis_source = 6;
+        pub const axis_stop = 7;
+        pub const axis_discrete = 8;
+    };
+    pub const button_state = struct {
+        pub const released = 0;
+        pub const pressed = 1;
+    };
+    pub const axis = struct {
+        pub const vertical_scroll = 0;
+        pub const horizontal_scroll = 1;
+    };
+};
+
+pub const wl_keyboard = struct {
+    pub const name = "wl_keyboard";
+    pub const request = struct {
+        pub const release = 0;
+    };
+    pub const event = struct {
+        pub const keymap = 0;
+        pub const enter = 1;
+        pub const leave = 2;
+        pub const key = 3;
+        pub const modifiers = 4;
+        pub const repeat_info = 5;
+    };
+    pub const keymap_format = struct {
+        /// Raw Linux evdev key codes, without an XKB keymap.
+        pub const no_keymap = 0;
+        pub const xkb_v1 = 1;
+    };
+    pub const key_state = struct {
+        pub const released = 0;
+        pub const pressed = 1;
+    };
+};
+
+/// Linux input event codes (linux/input-event-codes.h) used by Stardust.
+pub const input = struct {
+    pub const btn_left = 0x110;
+    pub const btn_right = 0x111;
+    pub const btn_middle = 0x112;
+};

@@ -3,8 +3,9 @@
 //! Supported globals: wl_compositor (surfaces; regions are accepted and
 //! ignored), wl_shm (ARGB8888 and XRGB8888, copied to the GPU at commit),
 //! zwp_linux_dmabuf_v1 (buffers in the VideoCore IV's T-tiled layout, used
-//! by the GPU directly) and xdg_wm_base (toplevel windows; popups are not
-//! supported).
+//! by the GPU directly), xdg_wm_base (toplevel windows; popups are not
+//! supported) and wl_seat (a pointer and a keyboard; key codes are Linux
+//! evdev codes, without an XKB keymap).
 //!
 //! Windows are maximized into the work area below the shell's bar, and the
 //! most recently mapped one is shown. The server does not draw: it keeps the
@@ -15,6 +16,10 @@
 //! next frame that shows it has been presented. Because the renderer waits
 //! for each composited frame to finish, a client buffer is released as soon
 //! as a newer one is committed.
+//!
+//! Input: the shell reports pointer and key events (`pointerMotion`,
+//! `keyboardKey`, ...); the keyboard goes to the shown window, the pointer
+//! to it while the pointer is over it.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -52,6 +57,7 @@ const globals = [_]struct { name: []const u8, version: u32 }{
     .{ .name = p.wl_shm.name, .version = p.wl_shm.version },
     .{ .name = p.xdg_wm_base.name, .version = p.xdg_wm_base.version },
     .{ .name = p.zwp_linux_dmabuf_v1.name, .version = p.zwp_linux_dmabuf_v1.version },
+    .{ .name = p.wl_seat.name, .version = p.wl_seat.version },
 };
 
 const Object = union(enum) {
@@ -70,6 +76,10 @@ const Object = union(enum) {
     toplevel: *Toplevel,
     dmabuf,
     params: *Params,
+    /// The seat, pointer and keyboard, with the version the client bound.
+    seat: u32,
+    pointer: u32,
+    keyboard: u32,
 };
 
 pub const Surface = struct {
@@ -202,6 +212,12 @@ pub const Server = struct {
     damaged: bool = true,
     /// Frame callbacks to fire after the next presented frame.
     frame_callbacks: std.ArrayList(struct { client: *Client, id: u32 }) = .empty,
+    /// Where the pointer is on the screen.
+    pointer_x: f64 = 0,
+    pointer_y: f64 = 0,
+    /// The surfaces with pointer and keyboard focus.
+    pointer_focus: ?*Surface = null,
+    keyboard_focus: ?*Surface = null,
 
     pub fn init(gpa: std.mem.Allocator, backend: Backend, work_area: Rect) Server {
         return .{ .gpa = gpa, .backend = backend, .work_area = work_area };
@@ -331,6 +347,9 @@ pub const Server = struct {
     }
 
     fn destroySurface(s: *Server, surf: *Surface) void {
+        // The client knows it destroyed the surface; no leave events.
+        if (s.pointer_focus == surf) s.pointer_focus = null;
+        if (s.keyboard_focus == surf) s.keyboard_focus = null;
         s.setBuffer(surf, null);
         if (surf.copy) |t| s.backend.vtable.destroyTexture(s.backend.ptr, t);
         // Frame callbacks of a destroyed surface never fire.
@@ -454,7 +473,7 @@ pub const Server = struct {
                 if (name == 0 or name > globals.len) return error.InvalidGlobal;
                 const g = globals[name - 1];
                 if (!std.mem.eql(u8, interface, g.name) or version == 0 or version > g.version) return error.InvalidGlobal;
-                try s.bind(c, name, id);
+                try s.bind(c, name, id, version);
             },
             .callback => return error.InvalidOpcode,
             .compositor => switch (m.opcode) {
@@ -612,10 +631,14 @@ pub const Server = struct {
                 else => return error.InvalidOpcode,
             },
             .params => |pr| try s.paramsRequest(c, pr, m, r),
+            .seat => |version| try s.seatRequest(c, version, m, r),
+            // The cursor is the shell's own.
+            .pointer => if (m.opcode == p.wl_pointer.request.release) c.deleteId(m.object),
+            .keyboard => if (m.opcode == p.wl_keyboard.request.release) c.deleteId(m.object),
         }
     }
 
-    fn bind(s: *Server, c: *Client, name: u32, id: u32) !void {
+    fn bind(s: *Server, c: *Client, name: u32, id: u32, version: u32) !void {
         switch (name) {
             1 => try c.addObject(id, .compositor),
             2 => {
@@ -640,9 +663,177 @@ pub const Server = struct {
                     }
                 }
             },
+            5 => {
+                try c.addObject(id, .{ .seat = version });
+                if (c.send(id, p.wl_seat.event.capabilities)) |m0| {
+                    var e = m0;
+                    e.uint(p.wl_seat.capability.pointer | p.wl_seat.capability.keyboard).end();
+                }
+                if (version >= 2) if (c.send(id, p.wl_seat.event.name)) |m0| {
+                    var e = m0;
+                    e.string("seat0").end();
+                };
+            },
             else => unreachable,
         }
         _ = s;
+    }
+
+    fn seatRequest(s: *Server, c: *Client, version: u32, m: wire.Message, r: *wire.Reader) !void {
+        switch (m.opcode) {
+            p.wl_seat.request.get_pointer => {
+                const id = try r.uint();
+                try c.addObject(id, .{ .pointer = version });
+                // Already over one of the client's surfaces.
+                if (s.pointer_focus) |surf| if (surf.client == c) {
+                    const local = s.surfaceLocal();
+                    sendTo(c, id, p.wl_pointer.event.enter, .{ s.nextSerial(), surf.id, local[0], local[1] });
+                    if (version >= 5) sendTo(c, id, p.wl_pointer.event.frame, .{});
+                };
+            },
+            p.wl_seat.request.get_keyboard => {
+                const id = try r.uint();
+                try c.addObject(id, .{ .keyboard = version });
+                // No XKB keymap: keys are evdev codes. The protocol still
+                // wants a file descriptor.
+                const null_fd = linux.open("/dev/null", .{ .CLOEXEC = true }, 0);
+                if (linux.errno(null_fd) == .SUCCESS) {
+                    if (c.send(id, p.wl_keyboard.event.keymap)) |m0| {
+                        var e = m0;
+                        e.uint(p.wl_keyboard.keymap_format.no_keymap).fd(@intCast(null_fd)).uint(0).end();
+                    } else _ = linux.close(@intCast(null_fd));
+                }
+                // Key repeat is the client's business; a rate of 0 turns it off.
+                if (version >= 4) sendTo(c, id, p.wl_keyboard.event.repeat_info, .{ @as(i32, 0), @as(i32, 0) });
+                if (s.keyboard_focus) |surf| if (surf.client == c) s.sendKeyboardEnter(c, id, surf);
+            },
+            p.wl_seat.request.get_touch => return c.postError(m.object, p.wl_display.err.invalid_method, "no touch screen", .{}),
+            p.wl_seat.request.release => c.deleteId(m.object),
+            else => return error.InvalidOpcode,
+        }
+    }
+
+    // --- Input ----------------------------------------------------------------
+
+    /// Moves the pointer to (`x`, `y`) on the screen. Finish a batch of
+    /// pointer events with `pointerFrame`.
+    pub fn pointerMotion(s: *Server, time_ms: u32, x: f64, y: f64) void {
+        s.pointer_x = x;
+        s.pointer_y = y;
+        // Entering a surface carries the position.
+        if (s.updatePointerFocus()) return;
+        const surf = s.pointer_focus orelse return;
+        const local = s.surfaceLocal();
+        broadcast(surf.client, .pointer, p.wl_pointer.event.motion, 1, .{ time_ms, local[0], local[1] });
+    }
+
+    /// `button` is a Linux button code (BTN_LEFT, ...).
+    pub fn pointerButton(s: *Server, time_ms: u32, button: u32, pressed: bool) void {
+        const surf = s.pointer_focus orelse return;
+        const state: u32 = if (pressed) p.wl_pointer.button_state.pressed else p.wl_pointer.button_state.released;
+        broadcast(surf.client, .pointer, p.wl_pointer.event.button, 1, .{ s.nextSerial(), time_ms, button, state });
+    }
+
+    /// Scrolls by `value` (in surface pixels) along `axis`.
+    pub fn pointerAxis(s: *Server, time_ms: u32, axis: u32, value: f64) void {
+        const surf = s.pointer_focus orelse return;
+        broadcast(surf.client, .pointer, p.wl_pointer.event.axis, 1, .{ time_ms, axis, value });
+    }
+
+    /// Ends a batch of pointer events that belong together.
+    pub fn pointerFrame(s: *Server) void {
+        const surf = s.pointer_focus orelse return;
+        broadcast(surf.client, .pointer, p.wl_pointer.event.frame, 5, .{});
+    }
+
+    /// `key` is a Linux key code (KEY_A, ...).
+    pub fn keyboardKey(s: *Server, time_ms: u32, key: u32, pressed: bool) void {
+        const surf = s.keyboard_focus orelse return;
+        const state: u32 = if (pressed) p.wl_keyboard.key_state.pressed else p.wl_keyboard.key_state.released;
+        broadcast(surf.client, .keyboard, p.wl_keyboard.event.key, 1, .{ s.nextSerial(), time_ms, key, state });
+    }
+
+    /// Moves the focus after the windows change: the keyboard to the shown
+    /// window, and the pointer to it if the pointer is over it.
+    pub fn updateFocus(s: *Server) void {
+        if (s.updatePointerFocus()) s.pointerFrame();
+        const top: ?*Surface = if (s.topWindow()) |t| t.xdg.surface else null;
+        if (top == s.keyboard_focus) return;
+        if (s.keyboard_focus) |old| broadcast(old.client, .keyboard, p.wl_keyboard.event.leave, 1, .{ s.nextSerial(), old.id });
+        s.keyboard_focus = top;
+        if (top) |surf| {
+            var it = surf.client.objects.iterator();
+            while (it.next()) |e| if (e.value_ptr.* == .keyboard) s.sendKeyboardEnter(surf.client, e.key_ptr.*, surf);
+        }
+    }
+
+    /// The surface under the pointer, if any.
+    fn surfaceUnderPointer(s: *Server) ?*Surface {
+        const t = s.topWindow() orelse return null;
+        const surf = t.xdg.surface.?;
+        const tex = surf.texture().?;
+        const wa = s.work_area;
+        const right = @as(f64, @floatFromInt(wa.x)) + @as(f64, @floatFromInt(@min(tex.width, wa.width)));
+        const bottom = @as(f64, @floatFromInt(wa.y)) + @as(f64, @floatFromInt(@min(tex.height, wa.height)));
+        if (s.pointer_x < @as(f64, @floatFromInt(wa.x)) or s.pointer_x >= right or
+            s.pointer_y < @as(f64, @floatFromInt(wa.y)) or s.pointer_y >= bottom) return null;
+        return surf;
+    }
+
+    /// The pointer's position relative to the window (which is at the work
+    /// area's corner).
+    fn surfaceLocal(s: *const Server) [2]f64 {
+        return .{ s.pointer_x - @as(f64, @floatFromInt(s.work_area.x)), s.pointer_y - @as(f64, @floatFromInt(s.work_area.y)) };
+    }
+
+    /// Sends leave and enter events if the pointer is over a different
+    /// surface. Returns whether it is.
+    fn updatePointerFocus(s: *Server) bool {
+        const under = s.surfaceUnderPointer();
+        if (under == s.pointer_focus) return false;
+        if (s.pointer_focus) |old| {
+            broadcast(old.client, .pointer, p.wl_pointer.event.leave, 1, .{ s.nextSerial(), old.id });
+            broadcast(old.client, .pointer, p.wl_pointer.event.frame, 5, .{});
+        }
+        s.pointer_focus = under;
+        if (under) |surf| {
+            const local = s.surfaceLocal();
+            broadcast(surf.client, .pointer, p.wl_pointer.event.enter, 1, .{ s.nextSerial(), surf.id, local[0], local[1] });
+        }
+        return true;
+    }
+
+    fn sendKeyboardEnter(s: *Server, c: *Client, id: u32, surf: *Surface) void {
+        const no_keys: []const u8 = &.{};
+        sendTo(c, id, p.wl_keyboard.event.enter, .{ s.nextSerial(), surf.id, no_keys });
+        sendTo(c, id, p.wl_keyboard.event.modifiers, .{ s.serial, @as(u32, 0), @as(u32, 0), @as(u32, 0), @as(u32, 0) });
+    }
+
+    /// Sends an event to each of a client's pointers or keyboards (bound at
+    /// `min_version` or later).
+    fn broadcast(c: *Client, comptime kind: std.meta.Tag(Object), opcode: u16, min_version: u32, args: anytype) void {
+        var it = c.objects.iterator();
+        while (it.next()) |e| {
+            const version = switch (e.value_ptr.*) {
+                kind => |v| v,
+                else => continue,
+            };
+            if (version >= min_version) sendTo(c, e.key_ptr.*, opcode, args);
+        }
+    }
+
+    /// Sends an event; u32 and i32 arguments are integers, f64 fixed point
+    /// numbers and byte slices arrays.
+    fn sendTo(c: *Client, id: u32, opcode: u16, args: anytype) void {
+        var m = c.send(id, opcode) orelse return;
+        inline for (args) |a| switch (@TypeOf(a)) {
+            u32 => _ = m.uint(a),
+            i32 => _ = m.int(a),
+            f64 => _ = m.fixed(a),
+            []const u8 => _ = m.array(a),
+            else => @compileError("unsupported argument type " ++ @typeName(@TypeOf(a))),
+        };
+        m.end();
     }
 
     fn surfaceRequest(s: *Server, c: *Client, surf: *Surface, m: wire.Message, r: *wire.Reader) !void {

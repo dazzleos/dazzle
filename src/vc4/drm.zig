@@ -301,6 +301,34 @@ pub fn addFramebuffer(fd: linux.fd_t, handle: u32, width: u32, height: u32, pitc
     return cmd.fb_id;
 }
 
+pub const ModeCursor = extern struct {
+    flags: u32,
+    crtc_id: u32,
+    x: i32 = 0,
+    y: i32 = 0,
+    width: u32 = 0,
+    height: u32 = 0,
+    handle: u32 = 0,
+};
+
+pub const IOCTL_MODE_CURSOR = IOWR(0xa3, ModeCursor);
+pub const cursor_bo = 0x01;
+pub const cursor_move = 0x02;
+
+/// Shows a linear, premultiplied ARGB8888 buffer (`width` * 4 bytes per row)
+/// as the CRTC's cursor; handle 0 hides it. The CRTC must be on.
+pub fn setCursor(fd: linux.fd_t, crtc_id: u32, handle: u32, width: u32, height: u32) !void {
+    var arg: ModeCursor = .{ .flags = cursor_bo, .crtc_id = crtc_id, .handle = handle, .width = width, .height = height };
+    try ioctl(fd, IOCTL_MODE_CURSOR, &arg);
+}
+
+/// Moves the cursor's top left corner to (`x`, `y`). It is a plane of its
+/// own, so this needs no new frame.
+pub fn moveCursor(fd: linux.fd_t, crtc_id: u32, x: i32, y: i32) !void {
+    var arg: ModeCursor = .{ .flags = cursor_move, .crtc_id = crtc_id, .x = x, .y = y };
+    try ioctl(fd, IOCTL_MODE_CURSOR, &arg);
+}
+
 /// Scans out `fb_id` on `output` using a legacy (non-atomic) mode set.
 pub fn setCrtc(fd: linux.fd_t, output: Output, fb_id: u32) !void {
     var connector_id = output.connector_id;
@@ -318,6 +346,7 @@ pub fn setCrtc(fd: linux.fd_t, output: Output, fb_id: u32) !void {
 comptime {
     // Sizes from the uapi headers, identical on 32- and 64-bit targets.
     std.debug.assert(@sizeOf(ModeCardRes) == 64);
+    std.debug.assert(@sizeOf(ModeCursor) == 28);
     std.debug.assert(@sizeOf(ModeInfo) == 68);
     std.debug.assert(@sizeOf(ModeGetConnector) == 80);
     std.debug.assert(@sizeOf(ModeGetEncoder) == 20);

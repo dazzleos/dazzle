@@ -16,10 +16,12 @@ the kernel's `vc4` driver, so programs can pick the one that suits them:
 On top of them is **stardust-shell**, a minimal Wayland compositor that
 draws with the `vc4` API. Init (PID 1, the only process with root
 privileges) starts the shell as an unprivileged user, and the shell starts
-the demo as its Wayland client. The demo shows a spinning, textured,
-depth-tested cube drawn with OpenGL ES. The IP address and rendering
-statistics appear in its top left, in the system font. A Vulkan-style API
-may follow.
+the demo as its Wayland client. USB mice and keyboards work: the shell
+shows a cursor and passes input to the window. The demo shows a spinning,
+textured, depth-tested cube drawn with OpenGL ES. Rings spread out and
+fade where the pointer moves and clicks. The IP address, rendering
+statistics and the last key pressed appear in its top left, in Fira Sans.
+A Vulkan-style API may follow.
 
 ## Layout
 
@@ -32,7 +34,7 @@ The code is split into Zig modules, linked statically into each program:
 | `gles` | `src/gles/` | OpenGL ES 2.0, EGL and the GLSL ES 1.00 compiler, on top of `vc4` |
 | `font` | `src/font/` | OpenType font rendering, described below |
 | `wayland` | `src/wayland/` | The Wayland wire protocol (with file descriptor passing), the interfaces Stardust uses, and a small client library |
-| `stardust-init` | `src/init/` | The init program: mounts, network, log server, GPU device permissions, starting the shell |
+| `stardust-init` | `src/init/` | The init program: mounts, network, log server, device permissions, starting the shell |
 | `stardust-shell` | `src/shell/` | The Wayland compositor and shell, described below |
 | `stardust-demo` | `src/demo/` | The demo, a Wayland client |
 
@@ -46,7 +48,7 @@ The `vc4` module:
 | `render.zig` | Records a frame: any number of draw calls into one render target, as one job |
 | `texture.zig` | Texture tiling (T and LT layouts) and texture unit configuration |
 | `display.zig` | Double-buffered scanout with page flips at vertical blank |
-| `drm.zig` | DRM core and KMS (mode setting, page flip) ioctls |
+| `drm.zig` | DRM core and KMS (mode setting, page flip, cursor) ioctls |
 | `cl.zig` | Binning control list packets and shader record layout |
 | `qpu.zig` | QPU instruction encoder, hazard checker, instruction pairing and disassembler |
 | `qpu_sim.zig` | QPU simulator used by the tests to run shaders on the build machine |
@@ -107,16 +109,18 @@ bounds-checked throughout, so a damaged font gives errors rather than
 crashes. Not supported: CFF outlines, variable font axes, hinting, and
 shaping beyond kerning (ligatures, combining marks, right-to-left text).
 
-The system font is **Fira Sans** Regular (`fonts/`, SIL Open Font License
-1.1, from the Google Fonts repository). Its designers made it for Firefox
-OS, and it covers Latin, Greek and Cyrillic. It is installed in the image
-as `/apps/FiraSans-Regular.ttf`, next to its license.
+The apps use **Fira Sans** Regular (`fonts/`, SIL Open Font License 1.1,
+from the Google Fonts repository). Its designers made it for Firefox OS,
+and it covers Latin, Greek and Cyrillic. The system provides no fonts:
+each app has its own copy in its directory, next to the license, and finds
+it next to its executable (`sys.appFile`).
 
 The init program (`src/init/`):
 
 | File | Contents |
 |---|---|
-| `main.zig` | Mounts `/proc`, `/sys`, `/dev`, starts the network manager and log server, gives the user the GPU, creates its runtime directory, starts the shell and reaps exited processes |
+| `main.zig` | Mounts `/proc`, `/sys`, `/dev`, starts the network manager, log server and device manager, gives the user the GPU, creates its runtime directory, starts the shell and reaps exited processes |
+| `devices.zig` | The device manager: gives the user the input devices (`/dev/input/event*`), at start and as uevents announce new ones |
 | `network.zig` | The network manager: follows Ethernet adapters and links, configures addresses and routes |
 | `dhcp.zig` | DHCP client messages (building requests, parsing replies) |
 | `logserver.zig` | Serves the kernel log over TCP (telnet) |
@@ -125,14 +129,17 @@ The shell (`src/shell/`):
 
 | File | Contents |
 |---|---|
-| `main.zig` | Opens the GPU and display, listens on `$XDG_RUNTIME_DIR/wayland-0`, starts its clients, and runs the event loop: dispatch clients, then composite a frame when something changed |
-| `server.zig` | The Wayland server: clients, objects and requests, frame callbacks and buffer releases |
-| `render.zig` | Compositing with the `vc4` API: textured quads (shaders written with the builder API) for the bar and the window, and the bar's text |
+| `main.zig` | Opens the GPU and display, listens on `$XDG_RUNTIME_DIR/wayland-0`, starts its clients, and runs the event loop: read input, dispatch clients, then composite a frame when something changed |
+| `server.zig` | The Wayland server: clients, objects and requests, frame callbacks and buffer releases, pointer and keyboard focus |
+| `render.zig` | Compositing with the `vc4` API: textured quads (shaders written with the builder API) for the bar and the window, the bar's text, and the cursor plane |
+| `input.zig` | USB keyboards and mice: finds `/dev/input/event*` nodes and decodes their events |
+| `cursor.zig` | The pointer's arrow, drawn into the cursor plane's buffer |
 | `server_test.zig` | Protocol tests on the host, described below |
 
 The server offers `wl_compositor`, `wl_shm` (ARGB8888 and XRGB8888, copied
-to a texture at commit), `zwp_linux_dmabuf_v1` and `xdg_wm_base`
-(toplevels). There are no popups, outputs or input yet.
+to a texture at commit), `zwp_linux_dmabuf_v1`, `xdg_wm_base` (toplevels)
+and `wl_seat` (a pointer and a keyboard). There are no popups or outputs
+yet.
 
 - **Windows:** each toplevel is configured to fill the screen below a bar,
   and the newest one is shown. The bar shows the window's title and the
@@ -146,13 +153,22 @@ to a texture at commit), `zwp_linux_dmabuf_v1` and `xdg_wm_base`
 - **Pacing:** a frame callback fires once the frame showing it has been
   flipped onto the screen. Buffers are released as soon as a newer one is
   committed, because the shell waits for each composited frame to finish.
+- **Input:** the shell reads evdev devices itself (no libinput). Mouse
+  motion moves the pointer, without acceleration, and the shell moves the
+  display's hardware cursor plane, so moving it costs no new frame. The
+  shown window gets the keyboard, and it gets the pointer while the pointer
+  is over it, in window coordinates. There is no XKB keymap: the keymap
+  format is `no_keymap`, so key events carry Linux key codes, and key
+  repeat is off. Clients' own cursor images (`set_cursor`) are ignored.
+  Devices plugged in later are found within a second.
 
 The demo program (`src/demo/`):
 
 | File | Contents |
 |---|---|
-| `main.zig` | EGL setup (Wayland, or the screen directly without a compositor), the frame loop and timing statistics |
-| `window.zig` | The Wayland window: an xdg toplevel, its configure events and pings |
+| `main.zig` | EGL setup on the Wayland platform, the frame loop, input and timing statistics |
+| `window.zig` | The Wayland window: an xdg toplevel, its configure events and pings, and the seat's pointer and keyboard |
+| `rings.zig` | The rings drawn where the pointer moves and clicks: one triangle strip, coloured on the CPU |
 | `cube.zig` | The cube: GLSL shaders, vertex and index buffers, texture, depth testing and culling, written as a C GL program would be |
 | `hud.zig` | The statistics overlay: text drawn by the font renderer into a texture, shown as a quad over the top left corner |
 | `netinfo.zig` | Looks up the IPv4 address (SIOCGIFCONF, no privileges needed) |
@@ -170,13 +186,17 @@ passwords or logins.
   touch the display.
 - Init creates `/run/user/1000` (the user's runtime directory, mode 0700),
   forks, drops to the user (no supplementary groups, then the group, then
-  the user ID) and execs `/stardust-shell`. The shell's stdout and
+  the user ID) and execs `/apps/stardust-shell/stardust-shell`. The shell's stdout and
   stderr are init's `/dev/kmsg` descriptor, because only root can open that
   for writing. The shell's clients inherit them.
 - The network manager runs as the same user but keeps three capabilities:
   configuring interfaces and routes (`CAP_NET_ADMIN`), tying its DHCP
   socket to the interface (`CAP_NET_RAW`) and binding the DHCP client port
   (`CAP_NET_BIND_SERVICE`). Init restarts it if it ever stops.
+- The device manager runs as the user, keeping only `CAP_CHOWN`. Input
+  device nodes are created owned by root, so it gives each one to the user
+  (at start, then on each uevent that adds one), and the shell can read
+  them. Init restarts it if it ever stops.
 - The log server binds port 23 as root, then drops to the same user. Reading
   `/dev/kmsg` needs no privileges.
 - Init logs how the shell exits, and the shell logs how its clients exit.
@@ -196,9 +216,8 @@ The image's filesystem (an initramfs, in RAM) is kept simple:
 
 ```
 /init                       stardust-init
-/stardust-shell
-/apps/stardust-demo
-/apps/FiraSans-Regular.ttf  the system font, with its license next to it
+/apps/stardust-shell/       stardust-shell, FiraSans-Regular.ttf and its license
+/apps/stardust-demo/        stardust-demo, FiraSans-Regular.ttf and its license
 /dev /proc /sys /run        mounted or created by init
 ```
 
@@ -290,11 +309,12 @@ messages) and then follows new messages:
 [    4.740011] stardust: network: found eth0 (<mac>)
 [    4.746230] stardust: network: eth0 link up
 [    4.940117] stardust: network: eth0 is 192.168.1.42/24, gateway 192.168.1.1 (DHCP, lease 86400 s)
-[    4.740312] stardust: started /stardust-shell (pid 24) as uid 1000
+[    4.740312] stardust: started /apps/stardust-shell/stardust-shell (pid 24) as uid 1000
 [    4.741008] stardust: opened /dev/dri/card0 (vc4)
 [    4.772511] stardust-shell: display <width>x<height>
 [    4.772702] stardust-shell: listening on /run/user/1000/wayland-0
-[    4.772913] stardust-shell: started /apps/stardust-demo (pid 25)
+[    4.772913] stardust-shell: started /apps/stardust-demo/stardust-demo (pid 25)
+[    4.773120] stardust-shell: input: /dev/input/event0: Logitech USB Optical Mouse
 [    4.790100] stardust-shell: client connected
 [    4.802114] stardust: OpenGL ES 2.0 Stardust on VideoCore IV (Stardust), window <width>x<height>
 [    9.840211] stardust: 60.0 fps, GPU <t> ms, CPU <t> ms per frame
@@ -321,7 +341,14 @@ corner shows:
 - GPU time per frame: from submitting the frame to the GPU finishing it
   (`glFinish`, before `eglSwapBuffers` hands the frame to the shell). It
   includes waiting for the shell's compositing on the shared GPU;
-- CPU time per frame: issuing the frame's GL calls.
+- CPU time per frame: issuing the frame's GL calls;
+- the pointer's position in the window and the last key pressed.
+
+Moving a USB mouse moves the cursor. Over the window it leaves a trail of
+small rings, and each click starts a large one: blue for the left button,
+orange for the right and green for the middle. The rings grow and fade
+into the background. (There is no blending yet, so the colour moves
+towards the background colour instead.)
 
 The overlay is redrawn twice a second, and the same statistics go to the
 log every 5 seconds. If the cube shows its inside faces rather than its
@@ -336,14 +363,15 @@ The firmware picks the Zero or Zero W device tree in `config.txt`. The Zero
 
 ## Faster development loops
 
-- **Raspberry Pi OS:** `zig-out/bin/stardust-demo` also runs as a normal
-  program on Raspberry Pi OS (Lite, or with the desktop stopped) on any Pi
+- **Raspberry Pi OS:** `zig-out/bin/stardust-shell` and `stardust-demo`
+  also run as normal programs on Raspberry Pi OS (Lite, or with the desktop stopped) on any Pi
   from the Zero to the Pi 3. All of them have the same VideoCore IV and
-  `vc4` driver. From a text console, as a user in the `video` group, run
-  `stardust-demo [font.ttf]` to draw on the screen directly (with no
-  `WAYLAND_DISPLAY`). Or run the shell with `XDG_RUNTIME_DIR` set:
-  `stardust-shell path/to/stardust-demo`. The font defaults to
-  `/apps/FiraSans-Regular.ttf`. Press Ctrl+C to stop.
+  `vc4` driver. From a text console, as a user in the `video` and `input`
+  groups, run the shell with `XDG_RUNTIME_DIR` set:
+  `stardust-shell path/to/stardust-demo`. Each program looks for
+  `FiraSans-Regular.ttf` next to its executable, so copy
+  `fonts/FiraSans-Regular.ttf` there (`stardust-demo` also takes a font
+  path as its argument). Press Ctrl+C to stop.
   Iterating on GPU code this way avoids rebuilding the SD card.
 - **QEMU:** `scripts/zig build qemu --release` boots the kernel and initramfs in QEMU's
   `raspi0` machine with an emulated USB network card. `telnet localhost
@@ -406,7 +434,8 @@ The firmware picks the Zero or Zero W device tree in `config.txt`. The Zero
 - The Wayland tests run the real server, in a thread with a fake renderer,
   against real clients over a socket pair. One client speaks the protocol
   directly: registry, xdg toplevel and configure, dma-buf and shm buffers,
-  frame callbacks, releases and protocol errors. The other is the demo's
+  frame callbacks, releases, protocol errors, and pointer and keyboard
+  focus and events. The other is the demo's
   path: EGL's Wayland platform and the GL layer, swapping and resizing a
   window. Both check that everything is freed when the client disconnects.
   They pass on the host and as ARM code under `qemu-arm`.
@@ -447,5 +476,6 @@ GPU or display).
 - Text: ligatures and other GSUB features, hinting or stem darkening for
   small sizes, and text drawn by the GPU (a glyph atlas texture, once
   blending is supported).
-- The shell: input (evdev and `wl_seat`), `wl_output`, more than one
-  visible window, and blending for translucent windows.
+- The shell: `wl_output`, more than one visible window, blending for
+  translucent windows, pointer acceleration, keymaps (XKB) and key repeat,
+  and touch screens.

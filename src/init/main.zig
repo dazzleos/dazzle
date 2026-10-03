@@ -7,14 +7,17 @@
 //!    up in the background whenever an adapter and link are there, and the
 //!    log server (which drops to the Stardust user once it has bound its
 //!    port); boot never waits for the network;
-//! 3. waits for the vc4 GPU and gives the Stardust user access to its device
+//! 3. starts the device manager (see devices.zig), which gives the Stardust
+//!    user the input devices (USB keyboards and mice), now and when they
+//!    are plugged in; waits for the vc4 GPU and gives the Stardust user access to its device
 //!    nodes;
 //! 4. creates the user's runtime directory (/run/user/1000, for the
-//!    Wayland socket) and starts /stardust-shell, the Wayland compositor,
+//!    Wayland socket) and starts /apps/stardust-shell/stardust-shell, the
+//!    Wayland compositor,
 //!    as the Stardust user, with its output going to the kernel log; the
 //!    shell starts the demo as its client;
 //! 5. reaps exited processes forever (PID 1 must never exit), restarting the
-//!    network manager if it ever stops.
+//!    network and device managers if they ever stop.
 //!
 //! The Stardust user is just a user ID (see `sys.user`): there are no
 //! accounts, passwords or logins.
@@ -24,10 +27,11 @@ const linux = std.os.linux;
 const sys = @import("sys");
 const logserver = @import("logserver.zig");
 const network = @import("network.zig");
+const devices = @import("devices.zig");
 
 const print = sys.print;
 
-const shell_path = "/stardust-shell";
+const shell_path = "/apps/stardust-shell/stardust-shell";
 const runtime_dir = "/run/user/1000";
 
 pub fn main() void {
@@ -41,10 +45,11 @@ pub fn main() void {
     _ = linux.syscall2(.sethostname, @intFromPtr(network.hostname), network.hostname.len);
     const network_pid = network.start();
     logserver.start();
+    const devices_pid = devices.start();
     grantGpuAccess();
     makeRuntimeDir();
     const shell_pid = startShell();
-    reapForever(shell_pid, network_pid);
+    reapForever(shell_pid, network_pid, devices_pid);
 }
 
 fn mountPseudoFilesystems() void {
@@ -131,7 +136,7 @@ fn startShell() ?linux.pid_t {
         linux.exit(126);
     };
     const argv = [_:null]?[*:0]const u8{shell_path};
-    const envp = [_:null]?[*:0]const u8{ "HOME=/", "PATH=/apps", "USER=" ++ sys.user.name, "XDG_RUNTIME_DIR=" ++ runtime_dir };
+    const envp = [_:null]?[*:0]const u8{ "HOME=/", "USER=" ++ sys.user.name, "XDG_RUNTIME_DIR=" ++ runtime_dir };
     const err = linux.errno(linux.execve(shell_path, &argv, &envp));
     print("stardust: cannot run {s} ({s})\n", .{ shell_path, @tagName(err) });
     linux.exit(127);
@@ -139,8 +144,9 @@ fn startShell() ?linux.pid_t {
 
 /// Waits for child processes, logging how the shell ends. Processes whose
 /// parent exits are re-parented to init, so this also collects those.
-fn reapForever(shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t) noreturn {
+fn reapForever(shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, first_devices_pid: ?linux.pid_t) noreturn {
     var network_pid = first_network_pid;
+    var devices_pid = first_devices_pid;
     while (true) {
         var status: u32 = 0;
         const rc = linux.wait4(-1, &status, 0, null);
@@ -160,6 +166,12 @@ fn reapForever(shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t) noretur
             network_pid = network.start();
             continue;
         }
+        if (pid == devices_pid) {
+            print("stardust: device manager stopped (status 0x{x}); restarting it in 5 s\n", .{status});
+            sys.sleepMs(5000);
+            devices_pid = devices.start();
+            continue;
+        }
         if (pid != shell_pid) continue;
         if (linux.W.IFEXITED(status)) {
             print("stardust: shell exited with status {d}\n", .{linux.W.EXITSTATUS(status)});
@@ -173,4 +185,5 @@ test {
     _ = @import("logserver.zig");
     _ = @import("network.zig");
     _ = @import("dhcp.zig");
+    _ = @import("devices.zig");
 }

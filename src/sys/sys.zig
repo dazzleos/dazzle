@@ -171,6 +171,7 @@ pub fn dropPrivileges() Error!void {
 /// Capabilities (see capability.h) a process can keep when it drops to the
 /// user.
 pub const Capability = enum(u5) {
+    chown = 0,
     net_bind_service = 10,
     net_admin = 12,
     net_raw = 13,
@@ -225,4 +226,14 @@ pub fn readFileAlloc(gpa: std.mem.Allocator, path: [*:0]const u8, max_size: usiz
         at += n;
     }
     return buf;
+}
+
+/// The path of a file in the running program's own directory. Each app
+/// lives in a directory of its own with everything it needs (the system
+/// provides no shared files).
+pub fn appFile(buf: []u8, name: []const u8) ![:0]const u8 {
+    var exe: [512]u8 = undefined;
+    const n = try check(linux.readlink("/proc/self/exe", &exe, exe.len));
+    const dir = std.fs.path.dirname(exe[0..n]) orelse "/";
+    return std.fmt.bufPrintZ(buf, "{s}/{s}", .{ dir, name }) catch error.OutOfMemory;
 }

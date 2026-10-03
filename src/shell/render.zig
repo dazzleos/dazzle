@@ -13,6 +13,7 @@ const sys = @import("sys");
 const vc4 = @import("vc4");
 const font = @import("font");
 const server = @import("server.zig");
+const cursor = @import("cursor.zig");
 
 const compiler = vc4.compiler;
 const render = vc4.render;
@@ -174,6 +175,8 @@ pub const Renderer = struct {
     /// GEM handle. Imported dma-bufs have only a handle.
     owned: std.AutoHashMapUnmanaged(u32, vc4.Bo) = .empty,
     bar: ?server.Texture = null,
+    /// The cursor's picture, once it is shown.
+    cursor_bo: ?vc4.Bo = null,
 
     pub fn init(gpa: std.mem.Allocator, dev: vc4.Device, output: vc4.drm.Output) !Renderer {
         const display = try vc4.display.Display.init(dev, output);
@@ -236,6 +239,23 @@ pub const Renderer = struct {
     /// Replaces the bar's picture.
     pub fn setBar(r: *Renderer, pixels: []const u32, width: u32, height: u32) !void {
         r.bar = try uploadPixels(r, r.bar, std.mem.sliceAsBytes(pixels), width, height, width * 4);
+    }
+
+    /// Shows the pointer's arrow on the display's cursor plane, once the
+    /// first frame has set the mode.
+    pub fn showCursor(r: *Renderer) !void {
+        const bytes = cursor.size * cursor.size * 4;
+        const bo = try r.dev.createBo(bytes);
+        errdefer r.dev.destroyBo(bo);
+        cursor.draw(std.mem.bytesAsValue([cursor.size * cursor.size]u32, bo.map[0..bytes]));
+        try vc4.drm.setCursor(r.dev.fd, r.display.output.crtc_id, bo.handle, cursor.size, cursor.size);
+        r.cursor_bo = bo;
+    }
+
+    /// Moves the arrow's tip to (`x`, `y`) on the screen.
+    pub fn moveCursor(r: *Renderer, x: i32, y: i32) void {
+        if (r.cursor_bo == null) return;
+        vc4.drm.moveCursor(r.dev.fd, r.display.output.crtc_id, x - cursor.hotspot[0], y - cursor.hotspot[1]) catch {};
     }
 
     /// Draws a frame and shows it at the next vertical blank (waiting for it).

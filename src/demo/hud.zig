@@ -54,7 +54,7 @@ pub const Hud = struct {
     quad: [16]f32,
 
     /// Lines of text the panel holds, below the title.
-    pub const lines = 4;
+    pub const lines = 5;
 
     /// Sizes are designed for 1920x1080 and scale with the display (by its
     /// narrower dimension, so the panel stays clear of the cube on 4:3).

@@ -6,8 +6,8 @@
 //! * `raster`: rasterizing outlines into coverage masks
 //! * `text`: the glyph cache, layout, and drawing into 32-bit pixels
 //!
-//! The system font is Fira Sans (SIL Open Font License), installed in the
-//! image as /apps/FiraSans-Regular.ttf.
+//! Stardust's apps use Fira Sans (SIL Open Font License); each app carries
+//! its own copy, next to its executable.
 //!
 //!     const f = try font.Font.init(data);
 //!     var cache = font.GlyphCache.init(gpa);
@@ -24,8 +24,8 @@ pub const Style = text.Style;
 pub const draw = text.draw;
 pub const measure = text.measure;
 
-/// Where the system font is installed.
-pub const system_font_path = "/apps/FiraSans-Regular.ttf";
+/// The file name apps ship Fira Sans under.
+pub const default_font_file = "FiraSans-Regular.ttf";
 
 test {
     _ = opentype;

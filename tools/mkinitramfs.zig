@@ -1,15 +1,17 @@
 //! Builds the initramfs: a "newc" cpio archive containing the directories
 //! the init program mounts over, a /dev/console node (the kernel opens it
 //! for PID 1's stdio before devtmpfs is mounted), the init binary, the
-//! shell next to it, and the apps directory: the demo, and the system font
-//! with its license. Everything is owned by root:
+//! apps, each in a directory of its own with everything it needs (the
+//! system provides nothing else). Everything is owned by root:
 //!
-//!     /init                       stardust-init
-//!     /stardust-shell
-//!     /apps/stardust-demo
-//!     /apps/FiraSans-Regular.ttf
-//!     /apps/FiraSans-OFL.txt
-//!     /dev, /proc, /sys           mount points
+//!     /init                                     stardust-init
+//!     /apps/stardust-shell/stardust-shell
+//!     /apps/stardust-shell/FiraSans-Regular.ttf
+//!     /apps/stardust-shell/FiraSans-OFL.txt
+//!     /apps/stardust-demo/stardust-demo
+//!     /apps/stardust-demo/FiraSans-Regular.ttf
+//!     /apps/stardust-demo/FiraSans-OFL.txt
+//!     /dev, /proc, /sys                         mount points
 //!
 //! Usage: mkinitramfs <output.cpio> <init-binary> <shell-binary> <demo-binary> <font> <font-license>
 
@@ -83,11 +85,15 @@ pub fn main(init: std.process.Init) !void {
         .{ .name = "proc", .mode = S_IFDIR | 0o755 },
         .{ .name = "sys", .mode = S_IFDIR | 0o755 },
         .{ .name = "init", .mode = S_IFREG | 0o755, .data = init_bin },
-        .{ .name = "stardust-shell", .mode = S_IFREG | 0o755, .data = shell_bin },
         .{ .name = "apps", .mode = S_IFDIR | 0o755 },
-        .{ .name = "apps/stardust-demo", .mode = S_IFREG | 0o755, .data = demo_bin },
-        .{ .name = "apps/FiraSans-Regular.ttf", .mode = S_IFREG | 0o644, .data = font },
-        .{ .name = "apps/FiraSans-OFL.txt", .mode = S_IFREG | 0o644, .data = font_license },
+        .{ .name = "apps/stardust-shell", .mode = S_IFDIR | 0o755 },
+        .{ .name = "apps/stardust-shell/stardust-shell", .mode = S_IFREG | 0o755, .data = shell_bin },
+        .{ .name = "apps/stardust-shell/FiraSans-Regular.ttf", .mode = S_IFREG | 0o644, .data = font },
+        .{ .name = "apps/stardust-shell/FiraSans-OFL.txt", .mode = S_IFREG | 0o644, .data = font_license },
+        .{ .name = "apps/stardust-demo", .mode = S_IFDIR | 0o755 },
+        .{ .name = "apps/stardust-demo/stardust-demo", .mode = S_IFREG | 0o755, .data = demo_bin },
+        .{ .name = "apps/stardust-demo/FiraSans-Regular.ttf", .mode = S_IFREG | 0o644, .data = font },
+        .{ .name = "apps/stardust-demo/FiraSans-OFL.txt", .mode = S_IFREG | 0o644, .data = font_license },
         .{ .name = "TRAILER!!!", .mode = 0 },
     };
 

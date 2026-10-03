@@ -1,12 +1,10 @@
 //! The Stardust demo: a spinning, textured cube drawn with OpenGL ES 2.0,
 //! with the machine's IP address and rendering statistics in the top left
-//! corner, written in the system font.
+//! corner, written in Fira Sans (its own copy, next to the executable).
+//! Pointer events draw expanding, fading rings behind the cube.
 //!
 //! It is a Wayland client: stardust-shell starts it, and it draws into a
-//! window through EGL's Wayland platform. Without a compositor
-//! ($WAYLAND_DISPLAY unset or not answering) it draws on the screen
-//! directly instead, which is handy on Raspberry Pi OS (from a text
-//! console, as a user who can open /dev/dri/card*):
+//! window through EGL's Wayland platform.
 //!
 //!     stardust-demo [font.ttf]
 //!
@@ -21,6 +19,7 @@ const cube_mod = @import("cube.zig");
 const hud_mod = @import("hud.zig");
 const netinfo = @import("netinfo.zig");
 const window_mod = @import("window.zig");
+const rings_mod = @import("rings.zig");
 const wayland = @import("wayland");
 
 const gl = gles.gl;
@@ -34,7 +33,8 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     sys.logToKmsgIfStderr();
     var args = init.args.iterate();
     _ = args.skip();
-    const font_path: [*:0]const u8 = args.next() orelse font.system_font_path;
+    var font_buf: [512]u8 = undefined;
+    const font_path: [*:0]const u8 = args.next() orelse (sys.appFile(&font_buf, font.default_font_file) catch font.default_font_file);
     print("stardust: demo running as uid {d}\n", .{linux.getuid()});
 
     run(init, font_path) catch |err| {
@@ -57,32 +57,29 @@ fn loadFont(gpa: std.mem.Allocator, path: [*:0]const u8) ?font.Font {
     };
 }
 
-/// Opens a window on the Wayland compositor, if there is one.
-fn openWindow(gpa: std.mem.Allocator, init: std.process.Init.Minimal) ?*window_mod.Window {
+/// Opens a window on the Wayland compositor.
+fn openWindow(gpa: std.mem.Allocator, init: std.process.Init.Minimal) !*window_mod.Window {
     const Environ = std.process.Environ;
     const display_name = Environ.getPosix(init.environ, "WAYLAND_DISPLAY") orelse {
-        print("stardust: WAYLAND_DISPLAY is not set; drawing on the screen directly\n", .{});
-        return null;
+        print("stardust: WAYLAND_DISPLAY is not set; run me under stardust-shell\n", .{});
+        return error.NoCompositor;
     };
     var path_buf: [128]u8 = undefined;
     const path = wayland.client.socketPath(&path_buf, Environ.getPosix(init.environ, "XDG_RUNTIME_DIR"), display_name) catch {
-        print("stardust: XDG_RUNTIME_DIR is not set; drawing on the screen directly\n", .{});
-        return null;
+        print("stardust: XDG_RUNTIME_DIR is not set\n", .{});
+        return error.NoCompositor;
     };
     return window_mod.Window.open(gpa, path, "Stardust demo") catch |err| {
-        print("stardust: cannot open a window on {s} ({s}); drawing on the screen directly\n", .{ path, @errorName(err) });
-        return null;
+        print("stardust: cannot open a window on {s} ({s})\n", .{ path, @errorName(err) });
+        return err;
     };
 }
 
 fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     const gpa = std.heap.page_allocator;
-    const window = openWindow(gpa, init);
-    var egl_window: ?*egl.egl_wayland.Window = null;
-    const dpy = if (window) |win| blk: {
-        egl_window = egl.egl_wayland.wl_egl_window_create(&win.surface, @intCast(win.width), @intCast(win.height));
-        break :blk egl.eglGetDisplay(win.conn);
-    } else egl.eglGetDisplay(egl.EGL_DEFAULT_DISPLAY);
+    const win = try openWindow(gpa, init);
+    const egl_window = egl.egl_wayland.wl_egl_window_create(&win.surface, @intCast(win.width), @intCast(win.height)) orelse return error.OutOfMemory;
+    const dpy = egl.eglGetDisplay(win.conn);
     if (egl.eglInitialize(dpy, null, null) == egl.EGL_FALSE) return error.EglInitializeFailed;
     const config_attribs = [_]egl.EGLint{
         egl.EGL_RED_SIZE,        8,
@@ -97,7 +94,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     var num_configs: egl.EGLint = 0;
     if (egl.eglChooseConfig(dpy, &config_attribs, @ptrCast(&config), 1, &num_configs) == egl.EGL_FALSE or num_configs == 0)
         return error.NoEglConfig;
-    const surface = egl.eglCreateWindowSurface(dpy, config, if (egl_window) |w| @intFromPtr(w) else 0, null);
+    const surface = egl.eglCreateWindowSurface(dpy, config, @intFromPtr(egl_window), null);
     if (surface == egl.EGL_NO_SURFACE) return error.EglSurfaceFailed;
     const context_attribs = [_]egl.EGLint{ egl.EGL_CONTEXT_CLIENT_VERSION, 2, egl.EGL_NONE };
     const context = egl.eglCreateContext(dpy, config, egl.EGL_NO_CONTEXT, &context_attribs);
@@ -110,14 +107,15 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     _ = egl.eglQuerySurface(dpy, surface, egl.EGL_HEIGHT, &h);
     var width: u32 = @intCast(w);
     var height: u32 = @intCast(h);
-    const where = if (window != null) "window" else "screen";
-    print("stardust: {s} on {s}, {s} {d}x{d}\n", .{
-        std.mem.span(gl.glGetString(gl.GL_VERSION).?), std.mem.span(gl.glGetString(gl.GL_RENDERER).?), where, width, height,
+    print("stardust: {s} on {s}, window {d}x{d}\n", .{
+        std.mem.span(gl.glGetString(gl.GL_VERSION).?), std.mem.span(gl.glGetString(gl.GL_RENDERER).?), width, height,
     });
 
     const cube = try cube_mod.Cube.init();
     var f = loadFont(gpa, font_path);
     var hud: ?hud_mod.Hud = if (f) |*fnt| try hud_mod.Hud.init(gpa, fnt, width, height, background) else null;
+    var rings = try rings_mod.Rings.init(background);
+    var input: InputStatus = .{};
 
     gl.glViewport(0, 0, w, h);
     gl.glClearColor(16.0 / 255.0, 24.0 / 255.0, 48.0 / 255.0, 1.0);
@@ -130,33 +128,43 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     var log_window: Stats = .{ .since = start };
     var next_update: u64 = start;
     while (true) {
-        if (window) |win| {
-            win.poll() catch |err| {
-                if (err == error.ServerError) print("stardust: compositor error: {s}\n", .{win.conn.errorMessage()});
-                return err;
-            };
-            if (win.closed) return;
-            if (try win.applyConfigure()) |size| {
-                // The next buffer EGL picks has the new size.
-                egl.egl_wayland.wl_egl_window_resize(egl_window.?, @intCast(size[0]), @intCast(size[1]), 0, 0);
-                width = size[0];
-                height = size[1];
-                gl.glViewport(0, 0, @intCast(width), @intCast(height));
-                if (hud) |*hd| try hd.resize(width, height);
-                next_update = 0;
-            }
+        win.poll() catch |err| {
+            if (err == error.ServerError) print("stardust: compositor error: {s}\n", .{win.conn.errorMessage()});
+            return err;
+        };
+        if (win.closed) return;
+        if (try win.applyConfigure()) |size| {
+            // The next buffer EGL picks has the new size.
+            egl.egl_wayland.wl_egl_window_resize(egl_window, @intCast(size[0]), @intCast(size[1]), 0, 0);
+            width = size[0];
+            height = size[1];
+            gl.glViewport(0, 0, @intCast(width), @intCast(height));
+            if (hud) |*hd| try hd.resize(width, height);
+            next_update = 0;
         }
         const frame_start = sys.nowNs();
+        for (win.takeInput()) |e| switch (e) {
+            .motion => |pos| {
+                rings.add(frame_start, pos[0], pos[1], .trail, trail_color);
+                input.pointer = pos;
+            },
+            .button => |b| if (b.pressed) rings.add(frame_start, b.pos[0], b.pos[1], .click, buttonColor(b.code)),
+            .key => |k| if (k.pressed) {
+                input.key = k.code;
+                next_update = 0;
+            },
+        };
         const t: f32 = @floatCast(@as(f64, @floatFromInt(frame_start - start)) / std.time.ns_per_s);
 
         // The overlay changes twice a second.
         if (hud) |*hd| if (frame_start >= next_update) {
             next_update = frame_start + std.time.ns_per_s / 2;
             var bufs: [hud_mod.Hud.lines][96]u8 = undefined;
-            hd.update(statusLines(&bufs, shown, width, height)) catch |e| print("stardust: overlay: {s}\n", .{@errorName(e)});
+            hd.update(statusLines(&bufs, shown, width, height, input)) catch |e| print("stardust: overlay: {s}\n", .{@errorName(e)});
         };
 
         gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT);
+        rings.draw(frame_start, width, height);
         cube.draw(width, height, t);
         if (hud) |*hd| hd.draw();
         const issued = sys.nowNs();
@@ -215,8 +223,47 @@ const Stats = struct {
     }
 };
 
+const trail_color = 0xff5070c0;
+
+fn buttonColor(code: u32) u32 {
+    return switch (code) {
+        wayland.protocol.input.btn_left => 0xff60d0ff,
+        wayland.protocol.input.btn_right => 0xffffa040,
+        wayland.protocol.input.btn_middle => 0xff80ff80,
+        else => 0xffffffff,
+    };
+}
+
+/// What the overlay shows about input.
+const InputStatus = struct {
+    pointer: ?[2]f32 = null,
+    /// The last key pressed (a Linux key code).
+    key: ?u32 = null,
+};
+
+/// A name for a Linux key code (US layout).
+fn keyName(buf: []u8, code: u32) []const u8 {
+    const rows = [_]struct { first: u32, keys: []const u8 }{
+        .{ .first = 2, .keys = "1234567890" },
+        .{ .first = 16, .keys = "QWERTYUIOP" },
+        .{ .first = 30, .keys = "ASDFGHJKL" },
+        .{ .first = 44, .keys = "ZXCVBNM" },
+    };
+    for (rows) |row| if (code >= row.first and code < row.first + row.keys.len) {
+        return std.fmt.bufPrint(buf, "{c}", .{row.keys[code - row.first]}) catch "";
+    };
+    const named = [_]struct { u32, []const u8 }{
+        .{ 1, "Esc" },       .{ 14, "Backspace" }, .{ 15, "Tab" },   .{ 28, "Enter" },
+        .{ 29, "Ctrl" },     .{ 42, "Shift" },     .{ 54, "Shift" }, .{ 56, "Alt" },
+        .{ 57, "Space" },    .{ 97, "Ctrl" },      .{ 100, "Alt" },  .{ 103, "Up" },
+        .{ 105, "Left" },    .{ 106, "Right" },    .{ 108, "Down" },
+    };
+    for (named) |n| if (n[0] == code) return n[1];
+    return std.fmt.bufPrint(buf, "key {d}", .{code}) catch "";
+}
+
 /// The overlay's lines of text.
-fn statusLines(bufs: *[hud_mod.Hud.lines][96]u8, s: Stats.Summary, width: u32, height: u32) [hud_mod.Hud.lines][]const u8 {
+fn statusLines(bufs: *[hud_mod.Hud.lines][96]u8, s: Stats.Summary, width: u32, height: u32, input: InputStatus) [hud_mod.Hud.lines][]const u8 {
     var out: [hud_mod.Hud.lines][]const u8 = undefined;
     out[0] = if (netinfo.primaryAddress()) |a|
         std.fmt.bufPrint(&bufs[0], "{d}.{d}.{d}.{d}  ({s})", .{ a.ip[0], a.ip[1], a.ip[2], a.ip[3], a.name() }) catch ""
@@ -225,6 +272,12 @@ fn statusLines(bufs: *[hud_mod.Hud.lines][96]u8, s: Stats.Summary, width: u32, h
     out[1] = std.fmt.bufPrint(&bufs[1], "{d:.1} fps  ·  {d}×{d}  ·  {d} triangles", .{ s.fps, width, height, cube_mod.triangles }) catch "";
     out[2] = std.fmt.bufPrint(&bufs[2], "GPU {d:.2} ms per frame", .{s.gpu_ms}) catch "";
     out[3] = std.fmt.bufPrint(&bufs[3], "CPU {d:.2} ms per frame", .{s.cpu_ms}) catch "";
+    var key_buf: [16]u8 = undefined;
+    const key = if (input.key) |k| keyName(&key_buf, k) else "none";
+    out[4] = if (input.pointer) |pos|
+        std.fmt.bufPrint(&bufs[4], "Pointer {d:.0}, {d:.0}  ·  last key {s}", .{ pos[0], pos[1], key }) catch ""
+    else
+        std.fmt.bufPrint(&bufs[4], "No pointer  ·  last key {s}", .{key}) catch "";
     return out;
 }
 
@@ -233,11 +286,17 @@ test {
     _ = @import("cube.zig");
     _ = @import("hud.zig");
     _ = @import("netinfo.zig");
+    _ = @import("rings.zig");
 }
 
 test "status lines" {
     var bufs: [hud_mod.Hud.lines][96]u8 = undefined;
-    const lines = statusLines(&bufs, .{ .fps = 59.94, .cpu_ms = 0.42, .gpu_ms = 6.5 }, 1920, 1080);
+    const lines = statusLines(&bufs, .{ .fps = 59.94, .cpu_ms = 0.42, .gpu_ms = 6.5 }, 1920, 1080, .{ .pointer = .{ 12.25, 400 }, .key = 30 });
     try std.testing.expectEqualStrings("59.9 fps  ·  1920×1080  ·  12 triangles", lines[1]);
     try std.testing.expectEqualStrings("GPU 6.50 ms per frame", lines[2]);
+    try std.testing.expectEqualStrings("Pointer 12, 400  ·  last key A", lines[4]);
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("Space", keyName(&buf, 57));
+    try std.testing.expectEqualStrings("0", keyName(&buf, 11));
+    try std.testing.expectEqualStrings("key 200", keyName(&buf, 200));
 }
