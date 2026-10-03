@@ -100,25 +100,41 @@ fn run(init: std.process.Init.Minimal) !void {
     var cursor_shown = false;
 
     const start = sys.nowNs();
+    var stats: FrameStats = .{ .since = start, .period_us = renderer.display.refreshPeriodUs() };
     var next_tick: u64 = start;
     var last_title: [64]u8 = undefined;
     var last_title_len: usize = 0;
     while (true) {
         reapChildren();
 
-        // Wait for clients, input, or the next clock tick, or nothing if a
-        // frame is due.
-        var fds: [1 + max_clients + input.max_devices]linux.pollfd = undefined;
+        // Wait for clients, input, the display (a page flip completing), or
+        // the next clock tick; or not at all if a frame is due and can be
+        // drawn.
+        var fds: [2 + max_clients + input.max_devices]linux.pollfd = undefined;
         fds[0] = .{ .fd = listener, .events = linux.POLL.IN, .revents = 0 };
+        fds[1] = .{ .fd = renderer.dev.fd, .events = linux.POLL.IN, .revents = 0 };
         const n_clients = @min(server.clients.items.len, max_clients);
-        for (server.clients.items[0..n_clients], 1..) |c, i| fds[i] = .{ .fd = c.conn.fd, .events = linux.POLL.IN, .revents = 0 };
-        const n_inputs = devices.pollFds(fds[1 + n_clients ..]);
+        for (server.clients.items[0..n_clients], 2..) |c, i| fds[i] = .{ .fd = c.conn.fd, .events = linux.POLL.IN, .revents = 0 };
+        const n_inputs = devices.pollFds(fds[2 + n_clients ..]);
         const now = sys.nowNs();
-        const timeout: i32 = if (server.damaged) 0 else if (next_tick > now) @intCast((next_tick - now) / std.time.ns_per_ms + 1) else 0;
-        _ = linux.poll(&fds, 1 + n_clients + n_inputs, timeout);
+        const frame_due = server.damaged and !renderer.flipPending();
+        const timeout: i32 = if (frame_due) 0 else if (next_tick > now) @intCast((next_tick - now) / std.time.ns_per_ms + 1) else 0;
+        _ = linux.poll(&fds, 2 + n_clients + n_inputs, timeout);
+
+        // The last frame reached the screen: its frame callbacks fire, and
+        // the next one can be drawn.
+        if (fds[1].revents != 0) {
+            if (renderer.handleEvents() catch |err| blk: {
+                print("stardust-shell: display events: {s}\n", .{@errorName(err)});
+                break :blk null;
+            }) |vblank_us| {
+                stats.flipped(vblank_us);
+                server.framePresented(@truncate(vblank_us / std.time.us_per_ms));
+            }
+        }
 
         const time_ms: u32 = @truncate((sys.nowNs() - start) / std.time.ns_per_ms);
-        for (fds[1 + n_clients ..][0..n_inputs]) |f| if (f.revents != 0) {
+        for (fds[2 + n_clients ..][0..n_inputs]) |f| if (f.revents != 0) {
             var events: [64]input.Event = undefined;
             for (devices.read(f.fd, &events)) |e| pointer.handle(&server, time_ms, e);
             if (pointer.moved) {
@@ -138,7 +154,7 @@ fn run(init: std.process.Init.Minimal) !void {
         var i: usize = 0;
         while (i < server.clients.items.len) {
             const c = server.clients.items[i];
-            const ready = for (fds[1 .. n_clients + 1]) |f| {
+            const ready = for (fds[2 .. n_clients + 2]) |f| {
                 if (f.fd == c.conn.fd) break f.revents != 0;
             } else false;
             if (ready and !server.dispatch(c)) {
@@ -170,14 +186,27 @@ fn run(init: std.process.Init.Minimal) !void {
             devices.scan();
         }
 
-        if (server.damaged) {
+        // Draw while the previous frame is on the screen; it is shown at
+        // the next vertical blank, without waiting here.
+        if (server.damaged and !renderer.flipPending()) {
             const window: ?render.Window = if (top) |t| .{
                 .texture = t.xdg.surface.?.texture().?,
                 .x = server.work_area.x,
                 .y = server.work_area.y,
                 .clip = server.work_area,
             } else null;
-            renderer.drawFrame(window) catch |err| print("stardust-shell: frame failed: {s}\n", .{@errorName(err)});
+            server.frameDrawn();
+            if (renderer.composite(window)) |timing| {
+                stats.composited(timing);
+                const on_screen = renderer.show() catch |err| blk: {
+                    print("stardust-shell: cannot show the frame: {s}\n", .{@errorName(err)});
+                    break :blk true;
+                };
+                if (on_screen) server.framePresented(@truncate(sys.nowNs() / std.time.ns_per_ms));
+            } else |err| {
+                print("stardust-shell: frame failed: {s}\n", .{@errorName(err)});
+                server.framePresented(@truncate(sys.nowNs() / std.time.ns_per_ms));
+            }
             // The cursor plane needs the mode the first frame set.
             if (!cursor_shown) {
                 cursor_shown = true;
@@ -186,10 +215,55 @@ fn run(init: std.process.Init.Minimal) !void {
                     print("stardust-shell: cursor shown\n", .{});
                 } else |err| print("stardust-shell: no cursor: {s}\n", .{@errorName(err)});
             }
-            server.framePresented(@truncate((sys.nowNs() - start) / std.time.ns_per_ms));
-        } else server.flushClients();
+        }
+        server.flushClients();
+        stats.maybeLog(sys.nowNs());
     }
 }
+
+/// Compositing statistics, logged every 5 seconds while frames are drawn.
+const FrameStats = struct {
+    since: u64,
+    period_us: u64,
+    frames: u32 = 0,
+    cpu_ns: u64 = 0,
+    gpu_ns: u64 = 0,
+    /// Vertical blanks without a new frame between two flips. While a
+    /// client animates, these are frames it (or the shell) missed.
+    skipped: u64 = 0,
+    last_flip_us: u64 = 0,
+
+    fn composited(s: *FrameStats, t: render.Renderer.Timing) void {
+        s.frames += 1;
+        s.cpu_ns += t.cpu_ns;
+        s.gpu_ns += t.gpu_ns;
+    }
+
+    fn flipped(s: *FrameStats, vblank_us: u64) void {
+        if (s.last_flip_us != 0 and vblank_us > s.last_flip_us) {
+            // Rounded to whole refreshes.
+            const refreshes = (vblank_us - s.last_flip_us + s.period_us / 2) / s.period_us;
+            if (refreshes > 1) s.skipped += refreshes - 1;
+        }
+        s.last_flip_us = vblank_us;
+    }
+
+    fn maybeLog(s: *FrameStats, now: u64) void {
+        const elapsed = now - s.since;
+        if (elapsed < 5 * std.time.ns_per_s) return;
+        if (s.frames > 0) {
+            const n: f64 = @floatFromInt(s.frames);
+            const ms: f64 = std.time.ns_per_ms;
+            print("stardust-shell: {d:.1} frames/s, composite CPU {d:.2} ms, GPU {d:.2} ms per frame, {d} refreshes skipped\n", .{
+                n / (@as(f64, @floatFromInt(elapsed)) / std.time.ns_per_s),
+                @as(f64, @floatFromInt(s.cpu_ns)) / n / ms,
+                @as(f64, @floatFromInt(s.gpu_ns)) / n / ms,
+                s.skipped,
+            });
+        }
+        s.* = .{ .since = now, .period_us = s.period_us, .last_flip_us = s.last_flip_us };
+    }
+};
 
 const max_clients = 32;
 

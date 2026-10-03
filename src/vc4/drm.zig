@@ -191,6 +191,16 @@ pub const Event = extern struct {
     length: u32,
 };
 
+/// struct drm_event_vblank: a vertical blank or completed page flip.
+pub const EventVblank = extern struct {
+    base: Event,
+    user_data: u64,
+    tv_sec: u32,
+    tv_usec: u32,
+    sequence: u32,
+    crtc_id: u32,
+};
+
 /// Queues a flip to `fb_id` at the next vertical blank. Completion is
 /// reported as an event on the DRM file; see `waitFlip`.
 pub fn pageFlip(fd: linux.fd_t, crtc_id: u32, fb_id: u32) !void {
@@ -200,22 +210,47 @@ pub fn pageFlip(fd: linux.fd_t, crtc_id: u32, fb_id: u32) !void {
 
 /// Blocks until a page flip completes.
 pub fn waitFlip(fd: linux.fd_t) !void {
+    while (try readFlipEvents(fd) == null) {}
+}
+
+/// Reads the DRM file's pending events (blocking if there are none).
+/// Returns the time of the vertical blank at which a page flip completed,
+/// in microseconds on CLOCK_MONOTONIC, if one did.
+pub fn readFlipEvents(fd: linux.fd_t) !?u64 {
     var buf: [256]u8 align(8) = undefined;
-    while (true) {
-        const rc = linux.read(fd, &buf, buf.len);
-        switch (linux.errno(rc)) {
-            .SUCCESS => {},
-            .INTR, .AGAIN => continue,
-            else => |e| return sys.errorFromErrno(e),
-        }
-        var off: usize = 0;
-        while (off + @sizeOf(Event) <= rc) {
-            const ev = std.mem.bytesToValue(Event, buf[off..][0..@sizeOf(Event)]);
-            if (ev.type == event_flip_complete) return;
-            if (ev.length == 0) break;
-            off += ev.length;
-        }
+    const rc = linux.read(fd, &buf, buf.len);
+    switch (linux.errno(rc)) {
+        .SUCCESS => {},
+        .INTR, .AGAIN => return null,
+        else => |e| return sys.errorFromErrno(e),
     }
+    return parseFlipEvents(buf[0..rc]);
+}
+
+fn parseFlipEvents(events: []const u8) ?u64 {
+    var flipped: ?u64 = null;
+    var off: usize = 0;
+    while (off + @sizeOf(Event) <= events.len) {
+        const ev = std.mem.bytesToValue(Event, events[off..][0..@sizeOf(Event)]);
+        if (ev.length < @sizeOf(Event) or off + ev.length > events.len) break;
+        if (ev.type == event_flip_complete and ev.length >= @sizeOf(EventVblank)) {
+            const v = std.mem.bytesToValue(EventVblank, events[off..][0..@sizeOf(EventVblank)]);
+            flipped = @as(u64, v.tv_sec) * std.time.us_per_s + v.tv_usec;
+        }
+        off += ev.length;
+    }
+    return flipped;
+}
+
+test "flip events" {
+    var buf: [64]u8 align(8) = @splat(0);
+    const ev: EventVblank = .{ .base = .{ .type = event_flip_complete, .length = 32 }, .user_data = 0, .tv_sec = 12, .tv_usec = 345, .sequence = 1, .crtc_id = 70 };
+    @memcpy(buf[32..64], std.mem.asBytes(&ev));
+    // Something else first (a vblank event), then the flip.
+    std.mem.writeInt(u32, buf[0..4], 0x01, .little);
+    std.mem.writeInt(u32, buf[4..8], 32, .little);
+    try std.testing.expectEqual(@as(?u64, 12_000_345), parseFlipEvents(&buf));
+    try std.testing.expectEqual(@as(?u64, null), parseFlipEvents(buf[0..32]));
 }
 
 /// A connected output and the mode and CRTC chosen to drive it.
@@ -347,6 +382,7 @@ comptime {
     // Sizes from the uapi headers, identical on 32- and 64-bit targets.
     std.debug.assert(@sizeOf(ModeCardRes) == 64);
     std.debug.assert(@sizeOf(ModeCursor) == 28);
+    std.debug.assert(@sizeOf(EventVblank) == 32);
     std.debug.assert(@sizeOf(ModeInfo) == 68);
     std.debug.assert(@sizeOf(ModeGetConnector) == 80);
     std.debug.assert(@sizeOf(ModeGetEncoder) == 20);

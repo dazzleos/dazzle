@@ -199,6 +199,8 @@ pub const Client = struct {
     }
 };
 
+const FrameCallback = struct { client: *Client, id: u32 };
+
 pub const Server = struct {
     gpa: std.mem.Allocator,
     backend: Backend,
@@ -210,8 +212,10 @@ pub const Server = struct {
     serial: u32 = 0,
     /// Something visible changed since the last frame.
     damaged: bool = true,
-    /// Frame callbacks to fire after the next presented frame.
-    frame_callbacks: std.ArrayList(struct { client: *Client, id: u32 }) = .empty,
+    /// Frame callbacks for the next frame drawn.
+    frame_callbacks: std.ArrayList(FrameCallback) = .empty,
+    /// Frame callbacks for the frame drawn and waiting to reach the screen.
+    presenting: std.ArrayList(FrameCallback) = .empty,
     /// Where the pointer is on the screen.
     pointer_x: f64 = 0,
     pointer_y: f64 = 0,
@@ -228,6 +232,7 @@ pub const Server = struct {
         s.clients.deinit(s.gpa);
         s.toplevels.deinit(s.gpa);
         s.frame_callbacks.deinit(s.gpa);
+        s.presenting.deinit(s.gpa);
     }
 
     /// Adds a client connected on `fd`.
@@ -313,9 +318,11 @@ pub const Server = struct {
             .buffer => |b| s.freeBuffer(b),
             else => {},
         };
-        var i: usize = 0;
-        while (i < s.frame_callbacks.items.len) {
-            if (s.frame_callbacks.items[i].client == c) _ = s.frame_callbacks.swapRemove(i) else i += 1;
+        for ([_]*std.ArrayList(FrameCallback){ &s.frame_callbacks, &s.presenting }) |list| {
+            var i: usize = 0;
+            while (i < list.items.len) {
+                if (list.items[i].client == c) _ = list.swapRemove(i) else i += 1;
+            }
         }
         c.objects.deinit(s.gpa);
         c.conn.deinit();
@@ -416,17 +423,29 @@ pub const Server = struct {
         return null;
     }
 
-    /// Fires frame callbacks once a frame has reached the screen.
+    /// Call when a frame has been drawn from the current state: the frame
+    /// callbacks committed so far belong to it, and later changes to the
+    /// next one.
+    pub fn frameDrawn(s: *Server) void {
+        s.presenting.appendSlice(s.gpa, s.frame_callbacks.items) catch {
+            // Without memory to hold them, fire them now.
+            s.framePresented(0);
+            s.presenting.appendSlice(s.gpa, s.frame_callbacks.items) catch {};
+        };
+        s.frame_callbacks.clearRetainingCapacity();
+        s.damaged = false;
+    }
+
+    /// Fires the drawn frame's callbacks once it has reached the screen.
     pub fn framePresented(s: *Server, time_ms: u32) void {
-        for (s.frame_callbacks.items) |fc| {
+        for (s.presenting.items) |fc| {
             if (fc.client.send(fc.id, p.wl_callback.event.done)) |m0| {
                 var m = m0;
                 m.uint(time_ms).end();
             }
             fc.client.deleteId(fc.id);
         }
-        s.frame_callbacks.clearRetainingCapacity();
-        s.damaged = false;
+        s.presenting.clearRetainingCapacity();
         s.flushClients();
     }
 

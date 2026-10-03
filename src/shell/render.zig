@@ -262,13 +262,41 @@ pub const Renderer = struct {
         };
     }
 
-    /// Draws a frame and shows it at the next vertical blank (waiting for it).
-    pub fn drawFrame(r: *Renderer, window: ?Window) !void {
+    /// How long composing a frame took.
+    pub const Timing = struct {
+        /// Recording the GPU job.
+        cpu_ns: u64,
+        /// From submitting the job to the GPU finishing it.
+        gpu_ns: u64,
+    };
+
+    /// Composites a frame into the back buffer, waiting for the GPU. Only
+    /// while no flip is pending (`flipPending`).
+    pub fn composite(r: *Renderer, window: ?Window) !Timing {
+        const t0 = sys.nowNs();
         static_frame.begin(r.display.backTarget(), .{ .clear = background });
         try recordFrame(&static_frame, &r.programs, r.vbo, r.bar, window);
+        const t1 = sys.nowNs();
         const seqno = try r.dev.submit(static_frame.finish());
         try r.dev.waitSeqno(seqno, std.time.ns_per_s);
-        try r.display.present();
+        return .{ .cpu_ns = t1 - t0, .gpu_ns = sys.nowNs() - t1 };
+    }
+
+    /// Shows the composited frame at the next vertical blank, without
+    /// waiting. Returns true if it is already on the screen (the first
+    /// frame, which sets the mode); otherwise `handleEvents` reports it.
+    pub fn show(r: *Renderer) !bool {
+        return r.display.queue();
+    }
+
+    pub fn flipPending(r: *const Renderer) bool {
+        return r.display.flip_pending;
+    }
+
+    /// Handles the display's events; call when its file is readable.
+    /// Returns the vertical blank time (microseconds) of a completed flip.
+    pub fn handleEvents(r: *Renderer) !?u64 {
+        return r.display.handleEvents();
     }
 };
 

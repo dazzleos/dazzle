@@ -87,6 +87,7 @@ const ServerThread = struct {
                     st.last_width.store(t.xdg.surface.?.texture().?.width, .monotonic);
                     _ = st.frames.fetchAdd(1, .monotonic);
                 }
+                st.server.frameDrawn();
                 st.server.framePresented(16);
             }
         }
