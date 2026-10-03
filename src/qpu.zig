@@ -540,6 +540,170 @@ fn isTlbAccess(i: Inst) bool {
     return false;
 }
 
+// --- Instruction pairing -------------------------------------------------------
+
+fn activeMuxes(i: Inst, buf: *[4]Mux) []const Mux {
+    var n: usize = 0;
+    if (getAddOp(i) != .nop) {
+        buf[n] = getMux(i, 9);
+        buf[n + 1] = getMux(i, 6);
+        n += 2;
+    }
+    if (getMulOp(i) != .nop) {
+        buf[n] = getMux(i, 3);
+        buf[n + 1] = getMux(i, 0);
+        n += 2;
+    }
+    return buf[0..n];
+}
+
+fn usesMux(i: Inst, m: Mux) bool {
+    var buf: [4]Mux = undefined;
+    return std.mem.indexOfScalar(Mux, activeMuxes(i, &buf), m) != null;
+}
+
+/// Write addresses whose meaning depends on the register file.
+fn fileSpecific(waddr: u6) bool {
+    return waddr < 32 or waddr == W.quad_xy or waddr == W.ms_flags or
+        waddr == W.vpmvcd_setup or waddr == W.vpm_addr;
+}
+
+/// Accesses to the units of which an instruction may only use one: TMU,
+/// TLB, SFU, VPM, varyings, setup registers and the like.
+fn usesPeripheral(i: Inst) bool {
+    for ([_]u6{ getWaddrAdd(i), getWaddrMul(i) }) |w| {
+        if (w >= 36 and w != W.acc5 and w != W.nop) return true;
+    }
+    const sig = getSig(i);
+    const addr_a = getRaddrA(i);
+    const addr_b = getRaddrB(i);
+    if (usesMux(i, .a) and (addr_a == R.vary or addr_a == R.vpm)) return true;
+    if (sig != .small_imm and usesMux(i, .b) and (addr_b == R.vary or addr_b == R.vpm)) return true;
+    return false;
+}
+
+const pm_pack_unpack_mask: u64 = 0xf << 52 | 1 << 56 | 7 << 57;
+
+/// Combines an instruction that only uses the add ALU with one that only
+/// uses the mul ALU, if one instruction can encode both. Both must be
+/// plain ALU instructions (no signal other than a small immediate).
+pub fn merge(x: Inst, y: Inst) ?Inst {
+    const x_add = getAddOp(x) != .nop;
+    const x_mul = getMulOp(x) != .nop;
+    const y_add = getAddOp(y) != .nop;
+    const y_mul = getMulOp(y) != .nop;
+    const a, const m = if (x_add and !x_mul and y_mul and !y_add)
+        .{ x, y }
+    else if (y_add and !y_mul and x_mul and !x_add)
+        .{ y, x }
+    else
+        return null;
+
+    const sig_a = getSig(a);
+    const sig_m = getSig(m);
+    if ((sig_a != .none and sig_a != .small_imm) or (sig_m != .none and sig_m != .small_imm)) return null;
+    if (usesPeripheral(a) and usesPeripheral(m)) return null;
+    // Flags come from the add result when the add ALU is in use.
+    if (m & (1 << 45) != 0) return null;
+
+    // Shared read ports.
+    var raddr_a: u64 = R.nop;
+    var raddr_b: u64 = R.nop;
+    var small_imm = false;
+    for ([_]Inst{ a, m }) |i| {
+        if (usesMux(i, .a)) {
+            if (raddr_a != R.nop and raddr_a != getRaddrA(i)) return null;
+            raddr_a = getRaddrA(i);
+        }
+        if (usesMux(i, .b)) {
+            const imm = getSig(i) == .small_imm;
+            if (raddr_b != R.nop and (raddr_b != getRaddrB(i) or small_imm != imm)) return null;
+            raddr_b = getRaddrB(i);
+            small_imm = imm;
+        }
+    }
+
+    // Pack and unpack share the PM bit and fields: at most one instruction
+    // may use them, and an unpack must not affect the other's inputs.
+    const pa = a & pm_pack_unpack_mask;
+    const pmm = m & pm_pack_unpack_mask;
+    if (pa != 0 and pmm != 0) return null;
+    const packer = if (pa != 0) a else m;
+    const other = if (pa != 0) m else a;
+    if (pa | pmm != 0) {
+        const unpack = (packer >> 57) & 7;
+        const pm = (packer >> 56) & 1 != 0;
+        if (unpack != 0) {
+            if (!pm and usesMux(other, .a)) return null;
+            if (pm and usesMux(other, .r4)) return null;
+        }
+    }
+
+    // One write swap bit for both destinations.
+    const a_needs: ?bool = if (fileSpecific(getWaddrAdd(a))) getWs(a) else null; // true: add writes B
+    const m_needs: ?bool = if (fileSpecific(getWaddrMul(m))) getWs(m) else null; // true: mul writes A
+    var ws = false;
+    if (a_needs) |v| ws = v;
+    if (m_needs) |v| {
+        if (a_needs != null and a_needs.? != v) return null;
+        ws = v;
+    }
+    // A regfile A pack applies to whichever result goes to regfile A.
+    if (pa | pmm != 0 and (packer >> 56) & 1 == 0 and (packer >> 52) & 0xf != 0) {
+        const packs_add = packer == a;
+        if (packs_add == ws) return null; // the packed result would go to B
+    }
+
+    const add_fields: u64 = 0b111 << 49 | 0b111111 << 38 | 0b11111 << 24 | 0b111 << 9 | 0b111 << 6 | 1 << 45;
+    const mul_fields: u64 = 0b111 << 46 | 0b111111 << 32 | 0b111 << 29 | 0b111 << 3 | 0b111;
+    const sig: Sig = if (small_imm) .small_imm else .none;
+    return field(@intFromEnum(sig), 60) |
+        (pa | pmm) |
+        field(@intFromBool(ws), 44) |
+        (a & add_fields) |
+        (m & mul_fields) |
+        field(raddr_a, 18) |
+        field(raddr_b, 12);
+}
+
+test "merge pairs an add and a mul" {
+    const add = try alu(.{ .add = .{ .op = .fadd, .dst = wr(0), .a = r(1), .b = ra(5) } });
+    const mul = try alu(.{ .mul = .{ .op = .fmul, .dst = wr(2), .a = r(1), .b = rb(7) } });
+    const both = try alu(.{
+        .add = .{ .op = .fadd, .dst = wr(0), .a = r(1), .b = ra(5) },
+        .mul = .{ .op = .fmul, .dst = wr(2), .a = r(1), .b = rb(7) },
+    });
+    try testing.expectEqual(both, merge(add, mul).?);
+    try testing.expectEqual(both, merge(mul, add).?);
+}
+
+test "merge rejects conflicts" {
+    const add_a5 = try alu(.{ .add = .{ .op = .fadd, .dst = wr(0), .a = r(1), .b = ra(5) } });
+    const mul_a6 = try alu(.{ .mul = .{ .op = .fmul, .dst = wr(2), .a = r(1), .b = ra(6) } });
+    try testing.expectEqual(@as(?Inst, null), merge(add_a5, mul_a6)); // read port
+    const add_wa = try mov(wa(1), r(0));
+    const mul_wa = try alu(.{ .mul = .{ .op = .fmul, .dst = wa(2), .a = r(1), .b = r(1) } });
+    try testing.expectEqual(@as(?Inst, null), merge(add_wa, mul_wa)); // both write regfile A
+    const add_imm = try alu(.{ .add = .{ .op = .fadd, .dst = wr(0), .a = r(1), .b = smallImmFloat(1.0) } });
+    const mul_imm = try alu(.{ .mul = .{ .op = .fmul, .dst = wr(2), .a = r(1), .b = smallImmFloat(2.0) } });
+    try testing.expectEqual(@as(?Inst, null), merge(add_imm, mul_imm)); // different immediates
+    const vpm = try mov(vpm_write, r(0));
+    const sfu = try alu(.{ .mul = .{ .op = .fmul, .dst = .{ .periph = W.sfu_recip }, .a = r(1), .b = r(1) } });
+    try testing.expectEqual(@as(?Inst, null), merge(vpm, sfu)); // two peripherals
+    const unpack = try alu(.{ .add = .{ .op = .fmax, .dst = wr(0), .a = ra(3), .b = ra(3) }, .unpack = .{ .regfile_a = .@"8a" } });
+    const reads_a = try alu(.{ .mul = .{ .op = .fmul, .dst = wr(1), .a = ra(3), .b = r(2) } });
+    try testing.expectEqual(@as(?Inst, null), merge(unpack, reads_a)); // unpack would apply to both
+}
+
+test "merge picks the write swap bit" {
+    const add_wb = try mov(wb(4), r(0));
+    const mul_wa = try alu(.{ .mul = .{ .op = .fmul, .dst = wa(2), .a = r(1), .b = r(1) } });
+    const merged = merge(add_wb, mul_wa).?;
+    try testing.expect(getWs(merged));
+    const mul_acc = try alu(.{ .mul = .{ .op = .fmul, .dst = wr(1), .a = r(1), .b = r(1) } });
+    try testing.expect(getWs(merge(add_wb, mul_acc).?));
+}
+
 // --- Programs -------------------------------------------------------------------
 
 pub const Stage = enum { vertex, coordinate, fragment };

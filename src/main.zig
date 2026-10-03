@@ -179,4 +179,5 @@ test {
     _ = @import("vc4/texture.zig");
     _ = @import("compiler.zig");
     _ = @import("programs.zig");
+    _ = @import("qpu_schedule.zig");
 }

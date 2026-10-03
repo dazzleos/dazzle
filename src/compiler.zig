@@ -26,6 +26,7 @@
 
 const std = @import("std");
 const qpu = @import("qpu.zig");
+const qpu_schedule = @import("qpu_schedule.zig");
 
 pub const Stage = qpu.Stage;
 
@@ -270,7 +271,7 @@ pub const Compiled = struct {
     }
 };
 
-pub const Error = qpu.EncodeError || qpu.ValidationError || error{
+pub const Error = qpu.EncodeError || qpu.ValidationError || qpu_schedule.Error || error{
     OutOfRegisters,
     ProgramTooLong,
     TooManyUniforms,
@@ -367,7 +368,17 @@ const Allocator = struct {
 
 const Class = enum { any, a_only };
 
+pub const Options = struct {
+    /// Reorder and pair instructions (see qpu_schedule.zig). Without it,
+    /// code runs one operation per instruction with NOPs for hazards.
+    schedule: bool = true,
+};
+
 pub fn compile(shader: *const Shader) Error!Compiled {
+    return compileWithOptions(shader, .{});
+}
+
+pub fn compileWithOptions(shader: *const Shader, options: Options) Error!Compiled {
     const n = shader.len;
     var live: [max_insts]bool = @splat(false);
     var uses: [max_insts]u16 = @splat(0);
@@ -443,6 +454,29 @@ pub fn compile(shader: *const Shader) Error!Compiled {
         }
     }
 
+    // Register file preferences: a value read together with a uniform
+    // (regfile A port) is better in regfile B, and one read together with a
+    // small immediate (regfile B port) is better in regfile A, saving a
+    // move to resolve the read port conflict.
+    const FilePref = enum { none, a, b };
+    var pref: [max_insts]FilePref = @splat(.none);
+    for (0..n) |j| {
+        if (!live[j]) continue;
+        const inst = shader.insts[j];
+        if (inst.op == .pack_unorm8888) {
+            for (shader.operands(j)) |v| pref[@intFromEnum(v)] = .a;
+            continue;
+        }
+        if (!inst.op.isAlu() or inst.nsrc != 2) continue;
+        for (0..2) |k| {
+            const other = @intFromEnum(inst.srcs[1 - k]);
+            const me = @intFromEnum(inst.srcs[k]);
+            if (other == me) continue;
+            if (folded[other]) pref[me] = .b;
+            if (shader.insts[other].op == .constant and reg_uses[other] == 0) pref[me] = .a;
+        }
+    }
+
     // 3. Register allocation, in program order. A value's register is freed
     // after the instruction holding its last use, so a destination never
     // shares a register with one of its own sources.
@@ -487,7 +521,11 @@ pub fn compile(shader: *const Shader) Error!Compiled {
             if (al.take("acc_free")) |a| r = .{ .acc = @intCast(a) };
         }
         if (r == null) {
-            const prefer_a = class[j] == .a_only or next_file_a;
+            const prefer_a = class[j] == .a_only or switch (pref[j]) {
+                .a => true,
+                .b => false,
+                .none => next_file_a,
+            };
             if (prefer_a) {
                 if (al.take("a_free")) |a| r = .{ .a = a };
             }
@@ -628,6 +666,13 @@ pub fn compile(shader: *const Shader) Error!Compiled {
                 if (a == .unif) try g.addUniform(.{ .user = shader.insts[@intFromEnum(inst.srcs[0])].imm });
             },
         }
+    }
+
+    if (options.schedule) {
+        const sched = try qpu_schedule.schedule(g.out.code(), shader.stage);
+        if (sched.len + 3 > max_code) return error.ProgramTooLong;
+        @memcpy(g.out.code_buf[0..sched.len], sched.slice());
+        g.out.code_len = sched.len;
     }
 
     // Thread end and its two delay slots; fragment shaders release the tile

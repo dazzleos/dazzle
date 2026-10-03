@@ -250,6 +250,25 @@ test "compiled triangle shaders match the hand-written ones" {
     );
 }
 
+test "compiled triangle shaders are no longer than the hand-written ones" {
+    try testing.expect((try compiler.compile(&triangle.vertex())).code().len <= (try shaders.vertex()).len);
+    try testing.expect((try compiler.compile(&triangle.coordinate())).code().len <= (try shaders.coordinate()).len);
+    try testing.expect((try compiler.compile(&triangle.fragment())).code().len <= (try shaders.fragment()).len);
+}
+
+test "shaders consume exactly the uniforms in their layout" {
+    var user: [cube.num_uniforms]u32 = undefined;
+    for (&user, 0..) |*e, i| e.* = f2u(@floatFromInt(i + 1));
+    var buf: [64]u32 = undefined;
+    const attrs = [_]sim.Vec{lane(0.1, 0.01)} ** 8;
+    inline for (.{ cube.vertex, cube.coordinate, spin.vertex, spin.coordinate }) |f| {
+        const c = try compiler.compile(&f());
+        const stream = uniformStream(&buf, &c, &user, .{ 0, 0 });
+        const r = try sim.run(c.code(), .{ .uniforms = stream, .vpm_in = attrs[0..c.num_vpm_reads] });
+        try testing.expectEqual(stream.len, r.uniforms_read);
+    }
+}
+
 test "spinning triangle vertex shader" {
     const angle: f32 = 0.7;
     const m = [4]f32{ @cos(angle), @sin(angle), -@sin(angle), @cos(angle) };

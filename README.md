@@ -20,6 +20,7 @@ textured, depth-tested cube by default.
 | `src/compiler.zig` | Shader compiler: SSA builder, register allocation and QPU code generation |
 | `src/programs.zig` | The demos' shaders, written with the compiler's builder API |
 | `src/qpu.zig` | QPU (shader processor) instruction encoder, hazard checker and disassembler |
+| `src/qpu_schedule.zig` | Instruction scheduler: latency-aware reordering and add/mul pairing |
 | `src/qpu_sim.zig` | QPU simulator used by the tests to run shaders on the build machine |
 | `src/shaders.zig` | The original hand-written triangle shaders |
 | `src/render.zig` | Builds a `vc4` job (control list, shader record, uniform streams) for one draw call |
@@ -158,11 +159,16 @@ The firmware picks the Zero or Zero W device tree in `config.txt`. The Zero
    shader that writes the pixel colour (and depth) to the tile buffer.
 2. **Compilation.** `compiler.zig` removes dead code, folds small constants
    and single-use uniforms into the instructions that read them, allocates
-   registers (accumulators and the two register files), and generates QPU
-   code, inserting NOPs where the hardware would read a stale value. It
-   also records the uniform stream layout, including the texture config
-   words the texture unit reads implicitly. `qpu.validate` checks the
-   result against the hardware's instruction restrictions.
+   registers (accumulators and the two register files, preferring the file
+   that avoids read port conflicts) and generates QPU code. `qpu_schedule.zig`
+   then reorders it with a list scheduler: it respects each result's
+   latency, keeps the order of the hardware's FIFO-like ports (uniforms,
+   varyings, VPM, texture unit, tile buffer), fills gaps with independent
+   work instead of NOPs and pairs add- and mul-ALU operations into one
+   instruction. The compiler also records the uniform stream layout,
+   including the texture config words the texture unit reads implicitly.
+   `qpu.validate` checks the result against the hardware's instruction
+   restrictions.
 3. **Upload.** `DRM_IOCTL_VC4_CREATE_SHADER_BO` uploads each program. The
    kernel validates it, because the V3D has no MMU.
 4. **Job.** `render.zig` writes the binning control list (tile binning
@@ -206,9 +212,7 @@ GPU or display).
 
 ## Next steps
 
-- Compiler: pair add and mul operations into one instruction, schedule to
-  hide latencies instead of inserting NOPs, then control flow and a GLSL
-  ES 1.00 front end.
+- Compiler: a GLSL ES 1.00 front end, then control flow.
 - Mipmaps, more texture formats, and depth buffers stored to memory.
 - Add `DRM_IOCTL_VC4_GET_HANG_STATE` reporting for GPU hangs.
 - Split the GL work into a library with a GLES 2.0 / EGL API and a separate
