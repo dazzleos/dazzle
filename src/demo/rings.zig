@@ -1,4 +1,4 @@
-//! Expanding, fading rings where the pointer moves and clicks, drawn behind
+//! Expanding, fading rings where the pointer clicks, drawn behind
 //! the cube. Without blending in the GL layer, "fading" means moving the
 //! colour towards the background.
 
@@ -35,18 +35,10 @@ const vertices_per_ring = 2 * (segments + 1) + 2;
 /// x, y, r, g, b.
 const floats_per_vertex = 5;
 
-pub const Kind = enum {
-    /// A button press: big and slow.
-    click,
-    /// Pointer motion: small and quick.
-    trail,
-};
-
 const Ring = struct {
     x: f32,
     y: f32,
     born: u64,
-    kind: Kind,
     color: [3]f32,
 };
 
@@ -57,8 +49,6 @@ pub const Rings = struct {
     rings: [max_rings]Ring = undefined,
     len: usize = 0,
     vertices: [max_rings * vertices_per_ring * floats_per_vertex]f32 = undefined,
-    /// When the last trail ring started, to space them out.
-    last_trail: u64 = 0,
 
     pub fn init(background: u32) !Rings {
         const program = try cube.buildProgram(vertex_shader, fragment_shader, &.{ "pos", "color" });
@@ -70,24 +60,20 @@ pub const Rings = struct {
     }
 
     /// Starts a ring at (`x`, `y`) in window pixels.
-    pub fn add(r: *Rings, now: u64, x: f32, y: f32, kind: Kind, color: u32) void {
-        if (kind == .trail) {
-            if (now -| r.last_trail < trail_interval) return;
-            r.last_trail = now;
-        }
+    pub fn add(r: *Rings, now: u64, x: f32, y: f32, color: u32) void {
         // Full: the oldest goes.
         if (r.len == max_rings) {
             std.mem.copyForwards(Ring, r.rings[0 .. max_rings - 1], r.rings[1..max_rings]);
             r.len -= 1;
         }
-        r.rings[r.len] = .{ .x = x, .y = y, .born = now, .kind = kind, .color = rgb(color) };
+        r.rings[r.len] = .{ .x = x, .y = y, .born = now, .color = rgb(color) };
         r.len += 1;
     }
 
     pub fn draw(r: *Rings, now: u64, width: u32, height: u32) void {
         // Drop finished rings.
         var kept: usize = 0;
-        for (r.rings[0..r.len]) |ring| if (now -| ring.born < lifetime(ring.kind)) {
+        for (r.rings[0..r.len]) |ring| if (now -| ring.born < lifetime) {
             r.rings[kept] = ring;
             kept += 1;
         };
@@ -113,13 +99,11 @@ pub const Rings = struct {
 
     /// Writes a ring's vertices from vertex `n`; returns the new count.
     fn addRing(r: *Rings, n: usize, ring: Ring, now: u64, unit: f32) usize {
-        const t = @as(f32, @floatFromInt(now -| ring.born)) / @as(f32, @floatFromInt(lifetime(ring.kind)));
-        // Fast at first, slowing down.
+        const t = @as(f32, @floatFromInt(now -| ring.born)) / @as(f32, @floatFromInt(lifetime));
+        // Fast at first, slowing down; thinning as it goes.
         const grow = 1 - (1 - t) * (1 - t);
-        const radius: f32, const thickness: f32 = switch (ring.kind) {
-            .click => .{ 12 + 150 * grow, 8 * (1 - t) + 2 },
-            .trail => .{ 4 + 36 * grow, 3 * (1 - t) + 1 },
-        };
+        const radius = 4 + 36 * grow;
+        const thickness = 3 * (1 - t) + 1;
         var color: [3]f32 = undefined;
         for (&color, ring.color, r.background) |*c, from, to| c.* = from + (to - from) * t;
 
@@ -146,15 +130,8 @@ pub const Rings = struct {
     }
 };
 
-/// How often pointer motion leaves a ring.
-const trail_interval = 40 * std.time.ns_per_ms;
-
-fn lifetime(kind: Kind) u64 {
-    return switch (kind) {
-        .click => 900 * std.time.ns_per_ms,
-        .trail => 500 * std.time.ns_per_ms,
-    };
-}
+/// How long a ring takes to grow and fade away.
+const lifetime = 500 * std.time.ns_per_ms;
 
 fn rgb(argb: u32) [3]f32 {
     return .{
@@ -166,7 +143,7 @@ fn rgb(argb: u32) [3]f32 {
 
 test "rings fit their vertex buffer and expire" {
     var r: Rings = .{ .program = 0, .scale_loc = 0, .background = .{ 0, 0, 0 } };
-    for (0..max_rings + 5) |i| r.add(@as(u64, i) * trail_interval, 10, 10, if (i % 2 == 0) .click else .trail, 0xffffffff);
+    for (0..max_rings + 5) |i| r.add(@as(u64, i) * std.time.ns_per_ms, 10, 10, 0xffffffff);
     try std.testing.expectEqual(@as(usize, max_rings), r.len);
     var n: usize = 0;
     for (r.rings[0..r.len]) |ring| n = r.addRing(n, ring, ring.born, 1);
@@ -174,6 +151,6 @@ test "rings fit their vertex buffer and expire" {
     try std.testing.expectEqual(max_rings * vertices_per_ring - 1, n);
     // A ring starts in its own colour and ends in the background's.
     try std.testing.expectEqual(@as(f32, 1), r.vertices[2]);
-    _ = r.addRing(0, r.rings[0], r.rings[0].born + lifetime(r.rings[0].kind), 1);
+    _ = r.addRing(0, r.rings[0], r.rings[0].born + lifetime, 1);
     try std.testing.expectEqual(@as(f32, 0), r.vertices[2]);
 }

@@ -19,7 +19,7 @@ privileges) starts the shell as an unprivileged user, and the shell starts
 the demo as its Wayland client. USB mice and keyboards work: the shell
 shows a cursor and passes input to the window. The demo shows a spinning,
 textured, depth-tested cube drawn with OpenGL ES. Rings spread out and
-fade where the pointer moves and clicks. The IP address, rendering
+fade where the pointer clicks. The IP address, rendering
 statistics and the last key pressed appear in its top left, in Fira Sans.
 A Vulkan-style API may follow.
 
@@ -168,7 +168,7 @@ The demo program (`src/demo/`):
 |---|---|
 | `main.zig` | EGL setup on the Wayland platform, the frame loop, input and timing statistics |
 | `window.zig` | The Wayland window: an xdg toplevel, its configure events and pings, and the seat's pointer and keyboard |
-| `rings.zig` | The rings drawn where the pointer moves and clicks: one triangle strip, coloured on the CPU |
+| `rings.zig` | The rings drawn where the pointer clicks: one triangle strip, coloured on the CPU |
 | `cube.zig` | The cube: GLSL shaders, vertex and index buffers, texture, depth testing and culling, written as a C GL program would be |
 | `hud.zig` | The statistics overlay: text drawn by the font renderer into a texture, shown as a quad over the top left corner |
 | `netinfo.zig` | Looks up the IPv4 address (SIOCGIFCONF, no privileges needed) |
@@ -354,9 +354,9 @@ with `-dirty` if there were uncommitted changes), then:
   splits the CPU use between the demo and the shell, and the kernel logs
   `Undervoltage detected!` when the supply sags.
 
-Moving a USB mouse moves the cursor. Over the window it leaves a trail of
-small rings, and each click starts a large one: blue for the left button,
-orange for the right and green for the middle. The rings grow and fade
+Moving a USB mouse moves the cursor. Over the window, each click starts a
+small ring: blue for the left button, orange for the right and green for
+the middle. The rings grow and fade
 into the background. (There is no blending yet, so the colour moves
 towards the background colour instead.)
 

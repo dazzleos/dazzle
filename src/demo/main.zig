@@ -1,7 +1,7 @@
 //! The Stardust demo: a spinning, textured cube drawn with OpenGL ES 2.0,
 //! with the machine's IP address and rendering statistics in the top left
 //! corner, written in Fira Sans (its own copy, next to the executable).
-//! Pointer events draw expanding, fading rings behind the cube.
+//! Clicks draw expanding, fading rings behind the cube.
 //!
 //! It is a Wayland client: stardust-shell starts it, and it draws into a
 //! window through EGL's Wayland platform.
@@ -150,11 +150,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         }
         const frame_start = sys.nowNs();
         for (win.takeInput()) |e| switch (e) {
-            .motion => |pos| {
-                rings.add(frame_start, pos[0], pos[1], .trail, trail_color);
-                input.pointer = pos;
-            },
-            .button => |b| if (b.pressed) rings.add(frame_start, b.pos[0], b.pos[1], .click, buttonColor(b.code)),
+            .motion => |pos| input.pointer = pos,
+            .button => |b| if (b.pressed) rings.add(frame_start, b.pos[0], b.pos[1], buttonColor(b.code)),
             .key => |k| if (k.pressed) {
                 input.key = k.code;
                 next_update = 0;
@@ -233,8 +230,6 @@ const Stats = struct {
         };
     }
 };
-
-const trail_color = 0xff5070c0;
 
 fn buttonColor(code: u32) u32 {
     return switch (code) {
