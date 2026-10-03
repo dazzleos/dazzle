@@ -3,7 +3,8 @@
 //! `telnet <pi> 23` (or `nc <pi> 23`) prints the kernel log buffer from
 //! boot, which also holds init's own messages (see `sys.print`), then
 //! follows new messages live. Each client gets its own process reading
-//! /dev/kmsg, so a hung GPU job in init does not stop the log.
+//! /dev/kmsg, so a hung GPU job in the demo does not stop the log. The
+//! server runs as the Stardust user once it has bound its port.
 //!
 //! The port can be changed on the kernel command line with
 //! `stardust.logport=<port>`.
@@ -71,7 +72,10 @@ fn serve(cfg: Config) !void {
     _ = try sys.check(linux.bind(listener, @ptrCast(&bind_addr), @sizeOf(@TypeOf(bind_addr))));
     _ = try sys.check(linux.listen(listener, 4));
 
-    sys.print("stardust: log server listening on TCP port {d}\n", .{cfg.port});
+    // Only binding to the port needed root. Reading /dev/kmsg does not.
+    try sys.dropPrivileges();
+
+    sys.print("stardust: log server listening on TCP port {d} as uid {d}\n", .{ cfg.port, linux.getuid() });
 
     while (true) {
         const rc = linux.accept4(listener, null, null, linux.SOCK.CLOEXEC);

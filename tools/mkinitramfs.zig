@@ -1,8 +1,9 @@
 //! Builds the initramfs: a "newc" cpio archive containing the directories
 //! the init program mounts over, a /dev/console node (the kernel opens it
-//! for PID 1's stdio before devtmpfs is mounted) and the init binary.
+//! for PID 1's stdio before devtmpfs is mounted), the init binary and the
+//! demo program in /bin. Everything is owned by root.
 //!
-//! Usage: mkinitramfs <output.cpio> <init-binary>
+//! Usage: mkinitramfs <output.cpio> <init-binary> <demo-binary>
 
 const std = @import("std");
 
@@ -51,14 +52,16 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 3) {
-        std.debug.print("usage: {s} <output.cpio> <init-binary>\n", .{args[0]});
+    if (args.len != 4) {
+        std.debug.print("usage: {s} <output.cpio> <init-binary> <demo-binary>\n", .{args[0]});
         std.process.exit(2);
     }
 
     const cwd = std.Io.Dir.cwd();
     const init_bin = try cwd.readFileAlloc(io, args[2], gpa, .limited(64 * 1024 * 1024));
     defer gpa.free(init_bin);
+    const demo_bin = try cwd.readFileAlloc(io, args[3], gpa, .limited(64 * 1024 * 1024));
+    defer gpa.free(demo_bin);
 
     const entries = [_]Entry{
         .{ .name = "dev", .mode = S_IFDIR | 0o755 },
@@ -66,6 +69,8 @@ pub fn main(init: std.process.Init) !void {
         .{ .name = "proc", .mode = S_IFDIR | 0o755 },
         .{ .name = "sys", .mode = S_IFDIR | 0o755 },
         .{ .name = "init", .mode = S_IFREG | 0o755, .data = init_bin },
+        .{ .name = "bin", .mode = S_IFDIR | 0o755 },
+        .{ .name = "bin/stardust-demo", .mode = S_IFREG | 0o755, .data = demo_bin },
         .{ .name = "TRAILER!!!", .mode = 0 },
     };
 

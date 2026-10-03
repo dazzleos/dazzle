@@ -13,9 +13,10 @@ the kernel's `vc4` driver, so programs can pick the one that suits them:
   The entry points use the C ABI under their usual names, so C code can
   call them; Zig code calls the same functions.
 
-A Vulkan-style API may follow, and a simple Wayland shell later. Today the
-system runs a single program as PID 1 that shows a demo: a spinning,
-textured, depth-tested cube by default, drawn with either API.
+A Vulkan-style API may follow, and a simple Wayland shell later. Today init
+(PID 1, the only process with root privileges) starts a demo program as an
+unprivileged user. It shows a spinning, textured, depth-tested cube by
+default, drawn with either API.
 
 ## Layout
 
@@ -26,7 +27,8 @@ The code is split into Zig modules, linked statically into each program:
 | `sys` | `src/sys/` | Linux system call helpers (sleeping, clocks, logging, the kernel command line) |
 | `vc4` | `src/vc4/` | The low-level graphics API for the VideoCore IV, described below |
 | `gles` | `src/gles/` | OpenGL ES 2.0, EGL and the GLSL ES 1.00 compiler, on top of `vc4` |
-| `stardust-init` | `src/init/` | The init program: mounts, log server and the demos |
+| `stardust-init` | `src/init/` | The init program: mounts, log server, GPU device permissions, starting the demo |
+| `stardust-demo` | `src/demo/` | The demo program, run as the unprivileged user |
 
 The `vc4` module:
 
@@ -89,13 +91,39 @@ The init program (`src/init/`):
 
 | File | Contents |
 |---|---|
-| `main.zig` | Mounts `/proc`, `/sys`, `/dev`, starts the log server, sets up the display and runs a demo |
-| `logserver.zig` | Serves the kernel and init log over TCP (telnet) |
+| `main.zig` | Mounts `/proc`, `/sys`, `/dev`, starts the log server, gives the user the GPU, starts the demo and reaps exited processes |
+| `logserver.zig` | Serves the kernel log over TCP (telnet) |
+
+The demo program (`src/demo/`):
+
+| File | Contents |
+|---|---|
+| `main.zig` | Picks the demo from its argument, opens the GPU and display, and runs the frame loop |
 | `demos.zig` | The `vc4` API demo scenes: `triangle`, `spin` and `cube` |
 | `programs.zig` | Those demos' shaders, written with the compiler's builder API |
 | `glcube.zig` | The cube through EGL and OpenGL ES 2.0, written as a C program would be |
 
-Also: `tools/mkinitramfs.zig` (packs the init binary into a cpio
+### Privileges
+
+Only init runs as root. Everything else runs as the Stardust user: the
+fixed user and group ID 1000 (`sys.user`). There are no accounts,
+passwords or logins.
+
+- Once vc4 has probed, init makes the DRM nodes in `/dev/dri` owned by that
+  user, mode 0660. The demo is the first to open the card, so it becomes
+  DRM master and can set modes and flip pages without privileges.
+- Init forks, drops to the user (no supplementary groups, then the group,
+  then the user ID) and execs `/bin/stardust-demo` with the
+  `stardust.demo=` name. The demo's stdout and stderr are init's
+  `/dev/kmsg` descriptor, because only root can open that for writing.
+- The log server binds port 23 as root, then drops to the same user. Reading
+  `/dev/kmsg` needs no privileges.
+- Init logs how the demo exits and does not restart it.
+
+This needs `CONFIG_MULTIUSER` in the kernel (about 8 KB). Without it, every
+process has every privilege.
+
+Also: `tools/mkinitramfs.zig` (packs init and the demo into a cpio
 initramfs), `kernel/stardust.config` (kernel config fragment applied on top
 of `tinyconfig`), `boot/` (firmware `config.txt` and kernel `cmdline.txt`)
 and `scripts/` (kernel build, firmware download, SD image, QEMU and Zig).
@@ -124,7 +152,7 @@ There is no C library: programs make raw system calls through
 
 ```sh
 scripts/zig build test             # host unit tests
-scripts/zig build --release=small  # zig-out/bin/stardust-init and zig-out/initramfs.cpio
+scripts/zig build --release=small  # zig-out/bin/stardust-{init,demo} and zig-out/initramfs.cpio
 scripts/build-kernel.sh            # clones Linux v7.2 into build/linux on first run
 scripts/build-image.sh             # build/boot/ and build/stardust.img
 ```
@@ -163,11 +191,12 @@ messages) and then follows new messages:
 
 ```
 [    4.731220] stardust: starting as init
-[    4.739512] stardust: log server listening on TCP port 23
+[    4.739512] stardust: log server listening on TCP port 23 as uid 1000
+[    4.740312] stardust: started /bin/stardust-demo (pid 24) as uid 1000
+[    4.740601] stardust: demo cube running as uid 1000
 [    4.741008] stardust: opened /dev/dri/card0 (vc4)
 [    4.741903] stardust: V3D revision <rev>, <n> slices of <n> QPUs
 [    4.802114] stardust: output connector <id> on crtc <id>: <mode> <width>x<height>@<hz>
-[    4.802600] stardust: demo cube (choose with stardust.demo=triangle|spin|cube|glcube)
 [    4.811875] stardust: shaders compiled and uploaded
 [    4.833540] stardust: displaying cube
 [    9.840211] stardust: 300 frames in 5.0s (60.0 fps), render <t> ms/frame
@@ -210,21 +239,22 @@ The firmware picks the Zero or Zero W device tree in `config.txt`. The Zero
 
 ## Faster development loops
 
-- **Raspberry Pi OS:** `zig-out/bin/stardust-init` also runs as a normal
+- **Raspberry Pi OS:** `zig-out/bin/stardust-demo` also runs as a normal
   program on Raspberry Pi OS (Lite, or with the desktop stopped) on any Pi
   from the Zero to the Pi 3. All of them have the same VideoCore IV and
-  `vc4` driver. Run it as root from a text console. It runs the cube demo
-  for 10 seconds and exits. Iterating on GPU code this way avoids rebuilding the
-  SD card.
+  `vc4` driver. Run `stardust-demo [triangle|spin|cube|glcube]` from a text
+  console as a user in the `video` group. It runs until you press Ctrl+C.
+  Iterating on GPU code this way avoids rebuilding the SD card.
 - **QEMU:** `scripts/run-qemu.sh` boots the kernel and initramfs in QEMU's
   `raspi0` machine with an emulated USB network card. `telnet localhost
   2323` reaches the log server. QEMU does not emulate the 3D engine or HDMI,
-  so this checks the kernel, init and networking only. The log ends with
-  `stardust: error: NoVc4Device` (or `EglInitializeFailed` for `glcube`).
+  so this checks the kernel, init, privileges and networking only. The log
+  ends with `stardust: error: NoVc4Device` (or `EglInitializeFailed` for
+  `glcube`) and `stardust: demo exited with status 1`.
 
 ## How a frame is drawn
 
-1. **Shaders.** `src/init/programs.zig` describes each shader with the compiler's
+1. **Shaders.** `src/demo/programs.zig` describes each shader with the compiler's
    builder API, as a list of SSA values. Three run per draw: a coordinate
    shader the binner uses to find which 64×64 tiles each triangle covers, a
    vertex shader that outputs screen positions and varyings, and a fragment

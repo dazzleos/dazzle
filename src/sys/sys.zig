@@ -114,6 +114,22 @@ pub fn logToKmsg() void {
     kmsg_fd = open("/dev/kmsg", .{ .ACCMODE = .WRONLY, .CLOEXEC = true }) catch null;
 }
 
+/// The kernel log descriptor `print` writes to, if any.
+pub fn kmsgFd() ?linux.fd_t {
+    return kmsg_fd;
+}
+
+/// Sends `print` output to the kernel log if stderr is /dev/kmsg, as it is
+/// for programs started by init. (Opening /dev/kmsg for writing needs root;
+/// an inherited descriptor does not.)
+pub fn logToKmsgIfStderr() void {
+    var stx: linux.Statx = undefined;
+    const rc = linux.statx(2, "", linux.AT.EMPTY_PATH, .{ .TYPE = true }, &stx);
+    if (linux.errno(rc) != .SUCCESS) return;
+    // /dev/kmsg is character device 1:11.
+    if (stx.mode & linux.S.IFMT == linux.S.IFCHR and stx.rdev_major == 1 and stx.rdev_minor == 11) kmsg_fd = 2;
+}
+
 /// Writes formatted text to the kernel log if `logToKmsg` was called,
 /// otherwise to stderr.
 pub fn print(comptime fmt: []const u8, args: anytype) void {
@@ -137,4 +153,23 @@ pub fn print(comptime fmt: []const u8, args: anytype) void {
         if (linux.errno(rc) != .SUCCESS) return;
         rest = rest[rc..];
     }
+}
+
+/// Stardust has a single user, which everything but init runs as.
+pub const user = struct {
+    pub const uid: linux.uid_t = 1000;
+    pub const gid: linux.gid_t = 1000;
+    pub const name = "stardust";
+};
+
+/// Switches a root process to the user: no supplementary groups, then the
+/// group, then the user ID (after which the others cannot be changed).
+pub fn dropPrivileges() Error!void {
+    const no_groups = [_]linux.gid_t{};
+    _ = try check(linux.setgroups(0, &no_groups));
+    _ = try check(linux.setgid(user.gid));
+    _ = try check(linux.setuid(user.uid));
+    // Without CONFIG_MULTIUSER the calls above are not even available;
+    // make sure the switch really happened.
+    if (linux.getuid() != user.uid or linux.geteuid() != user.uid) return error.Unexpected;
 }

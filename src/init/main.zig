@@ -1,44 +1,44 @@
-//! Stardust init: the only program in the system image.
+//! Stardust init: PID 1.
 //!
-//! When started by the kernel as PID 1 it mounts the pseudo filesystems,
-//! starts the network log server, then brings up the display and renders a
-//! triangle with the V3D. It can
-//! also be run as an ordinary program on Raspberry Pi OS (from a text
-//! console, with no compositor holding the display) for development.
+//! Init is the only process that keeps root privileges. It:
+//!
+//! 1. mounts /proc, /sys and /dev, and sends its messages to the kernel log;
+//! 2. starts the network log server (which drops to the Stardust user once
+//!    it has bound its port);
+//! 3. waits for the vc4 GPU and gives the Stardust user access to its device
+//!    nodes;
+//! 4. starts /bin/stardust-demo as the Stardust user, with the demo named by
+//!    `stardust.demo=` on the kernel command line and its output going to
+//!    the kernel log;
+//! 5. reaps exited processes forever (PID 1 must never exit).
+//!
+//! The Stardust user is just a user ID (see `sys.user`): there are no
+//! accounts, passwords or logins.
 
 const std = @import("std");
-const vc4 = @import("vc4");
 const linux = std.os.linux;
-const drm = vc4.drm;
-const logserver = @import("logserver.zig");
 const sys = @import("sys");
-const demos = @import("demos.zig");
-const glcube = @import("glcube.zig");
-const display_mod = vc4.display;
+const logserver = @import("logserver.zig");
 
 const print = sys.print;
 
+const demo_path = "/bin/stardust-demo";
+
 pub fn main() void {
-    const is_init = linux.getpid() == 1;
-    if (is_init) {
-        mountPseudoFilesystems();
-        sys.logToKmsg();
+    if (linux.getpid() != 1) {
+        print("stardust-init must run as PID 1; run {s} to show a demo\n", .{demo_path});
+        linux.exit(1);
     }
-    print("stardust: starting{s}\n", .{if (is_init) " as init" else ""});
-    // Start serving the log before touching the GPU, so it stays readable
-    // if a GPU job hangs.
-    if (is_init) logserver.start();
+    mountPseudoFilesystems();
+    sys.logToKmsg();
+    print("stardust: starting as init\n", .{});
+    logserver.start();
+    grantGpuAccess();
 
-    run(is_init) catch |err| {
-        print("stardust: error: {s}\n", .{@errorName(err)});
-        if (err == error.NoVc4Device)
-            print("stardust: the vc4 driver did not create a DRM device; look for vc4, hdmi or v3d errors earlier in the log\n", .{});
-    };
-
-    // PID 1 must never exit; the kernel panics if it does.
-    if (is_init) while (true) {
-        _ = linux.pause();
-    };
+    var cmdline_buf: [1024]u8 = undefined;
+    const demo = sys.cmdlineValue(sys.readCmdline(&cmdline_buf), "stardust.demo");
+    const demo_pid = startDemo(demo);
+    reapForever(demo_pid);
 }
 
 fn mountPseudoFilesystems() void {
@@ -54,79 +54,107 @@ fn mountPseudoFilesystems() void {
     }
 }
 
-/// The demos: the vc4 API ones, and the same cube through OpenGL ES.
-const DemoName = enum { triangle, spin, cube, glcube };
+const max_cards = 4;
 
-fn run(is_init: bool) !void {
-    var cmdline_buf: [1024]u8 = undefined;
-    const name = demoFromCmdline(sys.readCmdline(&cmdline_buf));
-    print("stardust: demo {s} (choose with stardust.demo=triangle|spin|cube|glcube)\n", .{@tagName(name)});
+/// Whether DRM card `n` is the vc4 display driver, from its sysfs driver
+/// link (".../drivers/vc4-drm").
+fn isVc4Card(n: usize) bool {
+    var path_buf: [64]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&path_buf, "/sys/class/drm/card{d}/device/driver", .{n}) catch return false;
+    var link: [256]u8 = undefined;
+    const len = sys.check(linux.readlink(path.ptr, &link, link.len)) catch return false;
+    return std.mem.endsWith(u8, link[0..len], "/vc4-drm");
+}
 
-    // When not running as init, stop after a while; the kernel restores the
-    // previous display state once we exit.
-    const run_ns: ?u64 = if (is_init) null else 10 * std.time.ns_per_s;
-
-    const kind: demos.Kind = switch (name) {
-        .glcube => return glcube.run(run_ns),
-        inline else => |n| @field(demos.Kind, @tagName(n)),
-    };
-
-    const dev = try vc4.device.open();
-    defer sys.close(dev.fd);
-    const fd = dev.fd;
-
-    const ident1 = try dev.getParam(.v3d_ident1);
-    print("stardust: V3D revision {d}, {d} slices of {d} QPUs\n", .{
-        ident1 & 0xf,
-        (ident1 >> 4) & 0xf,
-        (ident1 >> 8) & 0xf,
-    });
-
-    const output = try drm.waitForOutput(fd);
-    const mode = output.mode;
-    print("stardust: output connector {d} on crtc {d}: {s} {d}x{d}@{d}\n", .{
-        output.connector_id, output.crtc_id, mode.nameSlice(), mode.hdisplay, mode.vdisplay, mode.vrefresh,
-    });
-
-    var display = try display_mod.Display.init(dev, output);
-    const demo = try demos.Demo.init(kind, dev);
-    print("stardust: shaders compiled and uploaded\n", .{});
-
-    const start = sys.nowNs();
-    try demo.draw(dev, display.backTarget(), 0);
-    try display.present();
-    print("stardust: displaying {s}\n", .{@tagName(kind)});
-
-    if (!demo.animated()) {
-        if (run_ns) |ns| sys.sleepMs(@intCast(ns / std.time.ns_per_ms));
-        while (is_init) _ = linux.pause();
-        return;
+/// DRM device nodes are created root-only (0600). Once the vc4 driver has
+/// probed (it may still be loading firmware or waiting for other devices
+/// when init starts), hand every DRM node to the Stardust user. The first
+/// process to open a card becomes its DRM master, which it needs for mode
+/// setting; init itself never opens them.
+fn grantGpuAccess() void {
+    var found = false;
+    var attempt: u32 = 0;
+    while (!found and attempt < 100) : (attempt += 1) {
+        for (0..max_cards) |n| found = found or isVc4Card(n);
+        if (!found) sys.sleepMs(100);
     }
+    if (!found) print("stardust: no vc4 DRM device after 10 s\n", .{});
 
-    // Frame loop: render into the back buffer, then flip at vertical blank.
-    var stats: demos.FrameStats = .init(sys.nowNs());
-    while (true) {
-        const now = sys.nowNs();
-        if (run_ns) |ns| if (now - start >= ns) return;
-        const t: f32 = @floatCast(@as(f64, @floatFromInt(now - start)) / std.time.ns_per_s);
-        try demo.draw(dev, display.backTarget(), t);
-        const render_ns = sys.nowNs() - now;
-        try display.present();
-        stats.frame(render_ns);
+    var path_buf: [32]u8 = undefined;
+    for (0..max_cards) |n| {
+        for ([_]struct { []const u8, usize }{ .{ "card", n }, .{ "renderD", 128 + n } }) |node| {
+            const path = std.fmt.bufPrintZ(&path_buf, "/dev/dri/{s}{d}", .{ node[0], node[1] }) catch continue;
+            _ = sys.check(linux.chown(path.ptr, sys.user.uid, sys.user.gid)) catch continue;
+            _ = linux.fchmodat(linux.AT.FDCWD, path.ptr, 0o660);
+        }
     }
 }
 
-fn demoFromCmdline(cmdline: []const u8) DemoName {
-    const name = sys.cmdlineValue(cmdline, "stardust.demo") orelse return .cube;
-    return std.meta.stringToEnum(DemoName, name) orelse blk: {
-        print("stardust: unknown demo '{s}', using cube\n", .{name});
-        break :blk .cube;
+/// Starts the demo program as the Stardust user. Returns its PID, or null if
+/// it could not be started.
+fn startDemo(demo: ?[]const u8) ?linux.pid_t {
+    var name_buf: [32]u8 = undefined;
+    const name: ?[*:0]const u8 = if (demo) |d|
+        if (std.fmt.bufPrintZ(&name_buf, "{s}", .{d})) |z| z.ptr else |_| null
+    else
+        null;
+
+    const rc = linux.fork();
+    switch (linux.errno(rc)) {
+        .SUCCESS => {},
+        else => |e| {
+            print("stardust: cannot start the demo: fork failed ({s})\n", .{@tagName(e)});
+            return null;
+        },
+    }
+    if (rc != 0) {
+        const pid: linux.pid_t = @intCast(rc);
+        print("stardust: started {s} (pid {d}) as uid {d}\n", .{ demo_path, pid, sys.user.uid });
+        return pid;
+    }
+
+    // The child. Its output goes to the kernel log: it inherits init's
+    // /dev/kmsg descriptor, since only root may open that for writing.
+    if (sys.kmsgFd()) |kmsg| {
+        _ = linux.dup2(kmsg, 1);
+        _ = linux.dup2(kmsg, 2);
+    }
+    sys.dropPrivileges() catch |err| {
+        print("stardust: cannot drop privileges ({s}); not starting the demo\n", .{@errorName(err)});
+        linux.exit(126);
     };
+    const argv = [_:null]?[*:0]const u8{ demo_path, name };
+    const envp = [_:null]?[*:0]const u8{ "HOME=/", "PATH=/bin", "USER=" ++ sys.user.name };
+    const err = linux.errno(linux.execve(demo_path, &argv, &envp));
+    print("stardust: cannot run {s} ({s})\n", .{ demo_path, @tagName(err) });
+    linux.exit(127);
+}
+
+/// Waits for child processes, logging how the demo ends. Processes whose
+/// parent exits are re-parented to init, so this also collects those.
+fn reapForever(demo_pid: ?linux.pid_t) noreturn {
+    while (true) {
+        var status: u32 = 0;
+        const rc = linux.wait4(-1, &status, 0, null);
+        switch (linux.errno(rc)) {
+            .SUCCESS => {},
+            // No children left: wait for signals forever.
+            .CHILD => {
+                _ = linux.pause();
+                continue;
+            },
+            else => continue,
+        }
+        const pid: linux.pid_t = @intCast(rc);
+        if (pid != demo_pid) continue;
+        if (linux.W.IFEXITED(status)) {
+            print("stardust: demo exited with status {d}\n", .{linux.W.EXITSTATUS(status)});
+        } else if (linux.W.IFSIGNALED(status)) {
+            print("stardust: demo killed by signal {d}\n", .{linux.W.TERMSIG(status)});
+        }
+    }
 }
 
 test {
-    _ = @import("demos.zig");
-    _ = @import("glcube.zig");
     _ = @import("logserver.zig");
-    _ = @import("programs.zig");
 }

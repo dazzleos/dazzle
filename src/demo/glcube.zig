@@ -115,8 +115,8 @@ fn buildProgram() !gl.GLuint {
     return program;
 }
 
-/// Runs the demo, forever or for `duration_ns`.
-pub fn run(duration_ns: ?u64) !void {
+/// Runs the demo until the process is stopped.
+pub fn run() !void {
     const dpy = egl.eglGetDisplay(egl.EGL_DEFAULT_DISPLAY);
     if (egl.eglInitialize(dpy, null, null) == egl.EGL_FALSE) return error.EglInitializeFailed;
     defer _ = egl.eglTerminate(dpy);
@@ -202,7 +202,6 @@ pub fn run(duration_ns: ?u64) !void {
     var stats: demos.FrameStats = .init(start);
     while (true) {
         const now = sys.nowNs();
-        if (duration_ns) |d| if (now - start >= d) return;
         const t: f32 = @floatCast(@as(f64, @floatFromInt(now - start)) / std.time.ns_per_s);
 
         gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT);

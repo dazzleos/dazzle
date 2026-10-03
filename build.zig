@@ -35,9 +35,11 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     return .{ .sys = sys, .vc4 = vc4, .gles = gles };
 }
 
-fn addInitModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, m: Modules, single_threaded: ?bool) *std.Build.Module {
+/// A program's root module. `single_threaded` and stripping are set for the
+/// Pi builds and left at their defaults for host tests.
+fn addProgramModule(b: *std.Build, path: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, m: Modules, single_threaded: ?bool) *std.Build.Module {
     return b.createModule(.{
-        .root_source_file = b.path("src/init/main.zig"),
+        .root_source_file = b.path(path),
         .target = target,
         .optimize = optimize,
         .single_threaded = single_threaded,
@@ -62,11 +64,17 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseSmall });
 
     const pi = addModules(b, target, optimize);
+    // init runs as root; the demo runs as the unprivileged Stardust user.
     const init_exe = b.addExecutable(.{
         .name = "stardust-init",
-        .root_module = addInitModule(b, target, optimize, pi, true),
+        .root_module = addProgramModule(b, "src/init/main.zig", target, optimize, pi, true),
     });
     b.installArtifact(init_exe);
+    const demo_exe = b.addExecutable(.{
+        .name = "stardust-demo",
+        .root_module = addProgramModule(b, "src/demo/main.zig", target, optimize, pi, true),
+    });
+    b.installArtifact(demo_exe);
 
     // Host tool that packs the init binary into a cpio initramfs.
     const mkinitramfs = b.addExecutable(.{
@@ -80,6 +88,7 @@ pub fn build(b: *std.Build) void {
     const run_mkinitramfs = b.addRunArtifact(mkinitramfs);
     const initramfs = run_mkinitramfs.addOutputFileArg("initramfs.cpio");
     run_mkinitramfs.addArtifactArg(init_exe);
+    run_mkinitramfs.addArtifactArg(demo_exe);
     const install_initramfs = b.addInstallFile(initramfs, "initramfs.cpio");
     b.getInstallStep().dependOn(&install_initramfs.step);
 
@@ -90,7 +99,13 @@ pub fn build(b: *std.Build) void {
     // need the GPU (instruction encoding, compiler, simulator, ...).
     const host = addModules(b, b.graph.host, optimize);
     const test_step = b.step("test", "Run unit tests on the host");
-    for ([_]*std.Build.Module{ host.sys, host.vc4, host.gles, addInitModule(b, b.graph.host, optimize, host, null) }) |m| {
+    for ([_]*std.Build.Module{
+        host.sys,
+        host.vc4,
+        host.gles,
+        addProgramModule(b, "src/init/main.zig", b.graph.host, optimize, host, null),
+        addProgramModule(b, "src/demo/main.zig", b.graph.host, optimize, host, null),
+    }) |m| {
         const t = b.addTest(.{ .root_module = m });
         test_step.dependOn(&b.addRunArtifact(t).step);
     }
