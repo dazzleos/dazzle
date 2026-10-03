@@ -11,7 +11,8 @@ const linux = std.os.linux;
 const drm = @import("drm.zig");
 const logserver = @import("logserver.zig");
 const sys = @import("sys.zig");
-const triangle = @import("triangle.zig");
+const demos = @import("demos.zig");
+const display_mod = @import("display.zig");
 const vc4 = @import("vc4.zig");
 
 const print = sys.print;
@@ -103,26 +104,64 @@ fn run(is_init: bool) !void {
         output.connector_id, output.crtc_id, mode.nameSlice(), mode.hdisplay, mode.vdisplay, mode.vrefresh,
     });
 
-    const pitch = triangle.Target.pitch(mode.hdisplay);
-    const bo = try dev.createBo(pitch * mode.vdisplay);
-    defer dev.destroyBo(bo);
-    const target: triangle.Target = .{ .bo = bo, .width = mode.hdisplay, .height = mode.vdisplay };
+    var cmdline_buf: [1024]u8 = undefined;
+    const kind = demoFromCmdline(sys.readCmdline(&cmdline_buf));
+    print("stardust: demo {s} (choose with stardust.demo=triangle|spin|cube)\n", .{@tagName(kind)});
 
-    const tri = try triangle.Triangle.init(dev);
-    defer tri.deinit(dev);
-    try tri.draw(dev, target, 0xff101830);
-    print("stardust: rendered frame\n", .{});
+    var display = try display_mod.Display.init(dev, output);
+    const demo = try demos.Demo.init(kind, dev);
+    print("stardust: shaders compiled and uploaded\n", .{});
 
-    const fb_id = try drm.addFramebuffer(fd, bo.handle, mode.hdisplay, mode.vdisplay, pitch, drm.format_xrgb8888);
-    try drm.setCrtc(fd, output, fb_id);
-    print("stardust: displaying triangle\n", .{});
+    const start = sys.nowNs();
+    try demo.draw(dev, display.back().bo.handle, display.width, display.height, 0);
+    try display.present();
+    print("stardust: displaying {s}\n", .{@tagName(kind)});
 
-    // Keep the framebuffer alive while it is on screen. When not running as
-    // init, the kernel restores the previous display state once we exit.
-    if (is_init) while (true) {
-        _ = linux.pause();
+    // When not running as init, stop after a while; the kernel restores the
+    // previous display state once we exit.
+    const run_ns: ?u64 = if (is_init) null else 10 * std.time.ns_per_s;
+
+    if (!demo.animated()) {
+        if (run_ns) |ns| sys.sleepMs(@intCast(ns / std.time.ns_per_ms));
+        while (is_init) _ = linux.pause();
+        return;
+    }
+
+    // Frame loop: render into the back buffer, then flip at vertical blank.
+    var frames: u32 = 0;
+    var gpu_ns: u64 = 0;
+    var report_start = sys.nowNs();
+    while (true) {
+        const now = sys.nowNs();
+        if (run_ns) |ns| if (now - start >= ns) return;
+        const t: f32 = @floatCast(@as(f64, @floatFromInt(now - start)) / std.time.ns_per_s);
+        try demo.draw(dev, display.back().bo.handle, display.width, display.height, t);
+        gpu_ns += sys.nowNs() - now;
+        try display.present();
+        frames += 1;
+
+        const elapsed = sys.nowNs() - report_start;
+        if (elapsed >= 5 * std.time.ns_per_s) {
+            const secs = @as(f64, @floatFromInt(elapsed)) / std.time.ns_per_s;
+            print("stardust: {d} frames in {d:.1}s ({d:.1} fps), render {d:.2} ms/frame\n", .{
+                frames,
+                secs,
+                @as(f64, @floatFromInt(frames)) / secs,
+                @as(f64, @floatFromInt(gpu_ns)) / @as(f64, @floatFromInt(frames)) / std.time.ns_per_ms,
+            });
+            frames = 0;
+            gpu_ns = 0;
+            report_start = sys.nowNs();
+        }
+    }
+}
+
+fn demoFromCmdline(cmdline: []const u8) demos.Kind {
+    const name = sys.cmdlineValue(cmdline, "stardust.demo") orelse return .cube;
+    return std.meta.stringToEnum(demos.Kind, name) orelse blk: {
+        print("stardust: unknown demo '{s}', using cube\n", .{name});
+        break :blk .cube;
     };
-    sys.sleepMs(10_000);
 }
 
 test {
@@ -131,6 +170,13 @@ test {
     _ = @import("vc4/cl.zig");
     _ = @import("drm.zig");
     _ = @import("vc4.zig");
-    _ = @import("triangle.zig");
+    _ = @import("demos.zig");
+    _ = @import("render.zig");
+    _ = @import("display.zig");
+    _ = @import("sys.zig");
     _ = @import("logserver.zig");
+    _ = @import("qpu_sim.zig");
+    _ = @import("vc4/texture.zig");
+    _ = @import("compiler.zig");
+    _ = @import("programs.zig");
 }

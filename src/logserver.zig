@@ -21,20 +21,9 @@ pub const Config = struct {
 /// Reads `stardust.*` options from a kernel command line.
 pub fn parseCmdline(cmdline: []const u8) Config {
     var cfg: Config = .{};
-    var it = std.mem.tokenizeAny(u8, cmdline, " \t\n");
-    while (it.next()) |arg| {
-        if (std.mem.startsWith(u8, arg, "stardust.logport=")) {
-            cfg.port = std.fmt.parseInt(u16, arg["stardust.logport=".len..], 10) catch cfg.port;
-        }
-    }
+    if (sys.cmdlineValue(cmdline, "stardust.logport")) |v|
+        cfg.port = std.fmt.parseInt(u16, v, 10) catch cfg.port;
     return cfg;
-}
-
-fn readCmdline(buf: []u8) []const u8 {
-    const fd = sys.open("/proc/cmdline", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }) catch return "";
-    defer sys.close(fd);
-    const n = sys.check(linux.read(fd, buf.ptr, buf.len)) catch return "";
-    return buf[0..n];
 }
 
 fn sockaddrIn(addr: Ip4, port: u16) linux.sockaddr.in {
@@ -56,7 +45,7 @@ fn ignoreSignal(sig: linux.SIG) void {
 /// Forks the log server. Returns in the parent; the child never returns.
 pub fn start() void {
     var cmdline_buf: [1024]u8 = undefined;
-    const cfg = parseCmdline(readCmdline(&cmdline_buf));
+    const cfg = parseCmdline(sys.readCmdline(&cmdline_buf));
     const rc = linux.fork();
     switch (linux.errno(rc)) {
         .SUCCESS => if (rc != 0) return,

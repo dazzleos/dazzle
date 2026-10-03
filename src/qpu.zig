@@ -174,6 +174,26 @@ pub const Pack = union(enum) {
     mul: PackMul,
 };
 
+/// Unpack modes for values read from regfile A (PM = 0) or r4 (PM = 1).
+/// The 8-bit modes produce a [0, 1] float for float operations and a
+/// zero-extended integer otherwise.
+pub const UnpackMode = enum(u3) {
+    none = 0,
+    @"16a" = 1,
+    @"16b" = 2,
+    @"8d_rep" = 3,
+    @"8a" = 4,
+    @"8b" = 5,
+    @"8c" = 6,
+    @"8d" = 7,
+};
+
+pub const Unpack = union(enum) {
+    none,
+    regfile_a: UnpackMode,
+    r4: UnpackMode,
+};
+
 /// An ALU source operand.
 pub const Src = union(enum) {
     /// Accumulator r0-r5.
@@ -289,6 +309,7 @@ pub const Alu = struct {
     /// Set flags from the add result (or the mul result if add is a nop).
     sf: bool = false,
     pack: Pack = .none,
+    unpack: Unpack = .none,
 };
 
 pub const EncodeError = error{
@@ -301,6 +322,8 @@ pub const EncodeError = error{
     /// A small immediate was used without the small immediate signal, or
     /// together with a signal that reuses the field.
     BadSmallImmediate,
+    /// The pack and unpack modes need different values of the PM bit.
+    PackUnpackConflict,
 };
 
 const Ports = struct {
@@ -372,10 +395,25 @@ pub fn alu(i: Alu) EncodeError!Inst {
         },
     }
 
+    var unpack: u3 = 0;
+    switch (i.unpack) {
+        .none => {},
+        .regfile_a => |m| {
+            if (pm) return error.PackUnpackConflict;
+            unpack = @intFromEnum(m);
+        },
+        .r4 => |m| {
+            if (i.pack == .regfile_a) return error.PackUnpackConflict;
+            pm = true;
+            unpack = @intFromEnum(m);
+        },
+    }
+
     const cond_add: Cond = if (i.add.op == .nop) .never else i.add.cond;
     const cond_mul: Cond = if (i.mul.op == .nop) .never else i.mul.cond;
 
     return field(@intFromEnum(sig), 60) |
+        field(unpack, 57) |
         field(@intFromBool(pm), 56) |
         field(pack, 52) |
         field(@intFromEnum(cond_add), 49) |
@@ -460,7 +498,7 @@ fn getMux(i: Inst, comptime shift: u6) Mux {
 
 /// Whether the instruction reads the given regfile A / B address through
 /// one of its ALU inputs.
-fn readsFile(i: Inst, file: Mux, addr: u6) bool {
+pub fn readsFile(i: Inst, file: Mux, addr: u6) bool {
     const sig = getSig(i);
     if (sig == .load_imm or sig == .branch) return false;
     if (file == .b and sig == .small_imm) return false;
@@ -473,11 +511,22 @@ fn readsFile(i: Inst, file: Mux, addr: u6) bool {
     return false;
 }
 
+/// Whether the instruction reads accumulator `n` through one of its ALU
+/// inputs.
+pub fn readsAccumulator(i: Inst, n: u3) bool {
+    const sig = getSig(i);
+    if (sig == .load_imm or sig == .branch) return false;
+    const mux: Mux = @enumFromInt(n);
+    if (getAddOp(i) != .nop and (getMux(i, 9) == mux or getMux(i, 6) == mux)) return true;
+    if (getMulOp(i) != .nop and (getMux(i, 3) == mux or getMux(i, 0) == mux)) return true;
+    return false;
+}
+
 fn readsAnyFile(i: Inst, addr: u6) bool {
     return readsFile(i, .a, addr) or readsFile(i, .b, addr);
 }
 
-fn writesAddr(i: Inst, addr: u6) bool {
+pub fn writesAddr(i: Inst, addr: u6) bool {
     if (getSig(i) == .branch) return false;
     return getWaddrAdd(i) == addr or getWaddrMul(i) == addr;
 }
@@ -638,7 +687,11 @@ fn dstName(buf: []u8, addr: u6, file: u8) []const u8 {
         W.sfu_exp => "sfu_exp",
         W.sfu_log => "sfu_log",
         W.tmu0_s => "tmu0_s",
+        W.tmu0_t => "tmu0_t",
+        W.tmu0_r => "tmu0_r",
+        W.tmu0_b => "tmu0_b",
         W.tmu1_s => "tmu1_s",
+        W.tmu1_t => "tmu1_t",
         else => std.fmt.bufPrint(buf, "w{c}?{d}", .{ file, addr }) catch "?",
     };
 }
@@ -674,7 +727,9 @@ pub fn disassemble(buf: []u8, i: Inst) []const u8 {
         .none, .small_imm => "",
         else => @tagName(sig),
     };
-    return std.fmt.bufPrint(buf, "{s} {s}{s}, {s}, {s} ; {s} {s}, {s}, {s} {s}{s}", .{
+    const unpack: UnpackMode = @enumFromInt(@as(u3, @truncate(i >> 57)));
+    const unpack_s: []const u8 = if (unpack == .none) "" else if (pm) " unpack.r4" else " unpack.a";
+    return std.fmt.bufPrint(buf, "{s} {s}{s}, {s}, {s} ; {s} {s}, {s}, {s} {s}{s}{s}{s}", .{
         @tagName(getAddOp(i)),
         dstName(&b0, getWaddrAdd(i), add_file),
         if (!ws and !pm) pack_s else "",
@@ -686,6 +741,8 @@ pub fn disassemble(buf: []u8, i: Inst) []const u8 {
         srcName(&b5, i, getMux(i, 0)),
         if (pm or ws) pack_s else "",
         sig_s,
+        unpack_s,
+        if (unpack == .none) "" else @tagName(unpack),
     }) catch buf;
 }
 

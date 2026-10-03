@@ -68,6 +68,43 @@ pub fn sleepMs(ms: u32) void {
     }
 }
 
+/// Nanoseconds on the monotonic clock. Like sleepMs, uses the 64-bit time
+/// syscall on 32-bit targets.
+pub fn nowNs() u64 {
+    var ts: linux.kernel_timespec = undefined;
+    const sys_nr = if (@hasField(linux.SYS, "clock_gettime64"))
+        linux.SYS.clock_gettime64
+    else
+        linux.SYS.clock_gettime;
+    _ = linux.syscall2(sys_nr, @intFromEnum(linux.CLOCK.MONOTONIC), @intFromPtr(&ts));
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
+
+/// Reads the kernel command line into `buf`.
+pub fn readCmdline(buf: []u8) []const u8 {
+    const fd = open("/proc/cmdline", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }) catch return "";
+    defer close(fd);
+    const n = check(linux.read(fd, buf.ptr, buf.len)) catch return "";
+    return buf[0..n];
+}
+
+/// The value of `key=value` on a kernel command line, if present.
+pub fn cmdlineValue(cmdline: []const u8, key: []const u8) ?[]const u8 {
+    var it = std.mem.tokenizeAny(u8, cmdline, " \t\n");
+    while (it.next()) |arg| {
+        if (arg.len > key.len and std.mem.startsWith(u8, arg, key) and arg[key.len] == '=')
+            return arg[key.len + 1 ..];
+    }
+    return null;
+}
+
+test "cmdline values" {
+    const c = "console=ttyAMA0 stardust.demo=spin stardust.logport=2323\n";
+    try std.testing.expectEqualStrings("spin", cmdlineValue(c, "stardust.demo").?);
+    try std.testing.expectEqualStrings("2323", cmdlineValue(c, "stardust.logport").?);
+    try std.testing.expectEqual(@as(?[]const u8, null), cmdlineValue(c, "stardust"));
+}
+
 var kmsg_fd: ?linux.fd_t = null;
 
 /// Sends `print` output to the kernel log (/dev/kmsg) instead of stderr.

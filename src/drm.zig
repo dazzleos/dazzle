@@ -173,6 +173,50 @@ pub const IOCTL_MODE_GETENCODER = IOWR(0xa6, ModeGetEncoder);
 pub const IOCTL_MODE_GETCONNECTOR = IOWR(0xa7, ModeGetConnector);
 pub const IOCTL_MODE_RMFB = IOWR(0xaf, c_uint);
 pub const IOCTL_MODE_ADDFB2 = IOWR(0xb8, ModeFbCmd2);
+pub const IOCTL_MODE_PAGE_FLIP = IOWR(0xb0, ModeCrtcPageFlip);
+
+pub const ModeCrtcPageFlip = extern struct {
+    crtc_id: u32,
+    fb_id: u32,
+    flags: u32,
+    reserved: u32 = 0,
+    user_data: u64 = 0,
+};
+
+pub const page_flip_event = 0x01;
+pub const event_flip_complete = 0x02;
+
+pub const Event = extern struct {
+    type: u32,
+    length: u32,
+};
+
+/// Queues a flip to `fb_id` at the next vertical blank. Completion is
+/// reported as an event on the DRM file; see `waitFlip`.
+pub fn pageFlip(fd: linux.fd_t, crtc_id: u32, fb_id: u32) !void {
+    var arg: ModeCrtcPageFlip = .{ .crtc_id = crtc_id, .fb_id = fb_id, .flags = page_flip_event };
+    try ioctl(fd, IOCTL_MODE_PAGE_FLIP, &arg);
+}
+
+/// Blocks until a page flip completes.
+pub fn waitFlip(fd: linux.fd_t) !void {
+    var buf: [256]u8 align(8) = undefined;
+    while (true) {
+        const rc = linux.read(fd, &buf, buf.len);
+        switch (linux.errno(rc)) {
+            .SUCCESS => {},
+            .INTR, .AGAIN => continue,
+            else => |e| return sys.errorFromErrno(e),
+        }
+        var off: usize = 0;
+        while (off + @sizeOf(Event) <= rc) {
+            const ev = std.mem.bytesToValue(Event, buf[off..][0..@sizeOf(Event)]);
+            if (ev.type == event_flip_complete) return;
+            if (ev.length == 0) break;
+            off += ev.length;
+        }
+    }
+}
 
 /// A connected output and the mode and CRTC chosen to drive it.
 pub const Output = struct {
@@ -279,4 +323,5 @@ comptime {
     std.debug.assert(@sizeOf(ModeGetEncoder) == 20);
     std.debug.assert(@sizeOf(ModeCrtc) == 104);
     std.debug.assert(@sizeOf(ModeFbCmd2) == 104);
+    std.debug.assert(@sizeOf(ModeCrtcPageFlip) == 24);
 }
