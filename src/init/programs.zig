@@ -378,3 +378,158 @@ test "cube fragment shader samples and tints the texture" {
         try testing.expectEqual(sim.packColor(ch(t, 16) * 1.0, ch(t, 8) * 0.5, ch(t, 0) * 0.25, 1.0), r.tlb_color.?[i]);
     }
 }
+
+// --- The same shaders in GLSL ---------------------------------------------------
+//
+// Used by the OpenGL ES demo, and by the tests below to check the GLSL
+// front end against the builder-API versions above.
+
+pub const glsl_sources = struct {
+    pub const triangle_vs =
+        \\attribute vec2 pos;
+        \\attribute vec3 color;
+        \\varying vec3 v_color;
+        \\void main() {
+        \\    gl_Position = vec4(pos, 0.0, 1.0);
+        \\    v_color = color;
+        \\}
+    ;
+    pub const triangle_fs =
+        \\precision mediump float;
+        \\varying vec3 v_color;
+        \\void main() {
+        \\    gl_FragColor = vec4(v_color, 1.0);
+        \\}
+    ;
+    pub const spin_vs =
+        \\attribute vec2 pos;
+        \\attribute vec3 color;
+        \\uniform mat2 m;
+        \\varying vec3 v_color;
+        \\void main() {
+        \\    gl_Position = vec4(m * pos, 0.0, 1.0);
+        \\    v_color = color;
+        \\}
+    ;
+    pub const cube_vs =
+        \\attribute vec3 pos;
+        \\attribute vec2 uv;
+        \\attribute vec3 tint;
+        \\uniform mat4 mvp;
+        \\varying vec2 v_uv;
+        \\varying vec3 v_tint;
+        \\void main() {
+        \\    gl_Position = mvp * vec4(pos, 1.0);
+        \\    v_uv = uv;
+        \\    v_tint = tint;
+        \\}
+    ;
+    pub const cube_fs =
+        \\precision mediump float;
+        \\uniform sampler2D tex;
+        \\varying vec2 v_uv;
+        \\varying vec3 v_tint;
+        \\void main() {
+        \\    gl_FragColor = vec4(texture2D(tex, v_uv).rgb * v_tint, 1.0);
+        \\}
+    ;
+};
+
+const glsl = @import("gles").glsl;
+
+const GlslStages = struct {
+    vs: compiler.Compiled,
+    cs: compiler.Compiled,
+    fs: compiler.Compiled,
+    program: *glsl.Program,
+
+    fn deinit(g: *GlslStages) void {
+        g.program.deinit();
+        testing.allocator.destroy(g.program);
+    }
+};
+
+fn compileGlsl(vs_src: []const u8, fs_src: []const u8, depth: bool) !GlslStages {
+    var log: glsl.Log = .{};
+    errdefer std.debug.print("{s}", .{log.text()});
+    var vs = try glsl.compileShader(testing.allocator, .vertex, vs_src, &log);
+    defer vs.deinit();
+    var fs = try glsl.compileShader(testing.allocator, .fragment, fs_src, &log);
+    defer fs.deinit();
+    const p = try glsl.link(testing.allocator, &vs, &fs, &.{}, &log);
+    const shader = try testing.allocator.create(compiler.Shader);
+    defer testing.allocator.destroy(shader);
+    try p.build(.vertex, false, shader);
+    const vsc = try compiler.compile(shader);
+    try p.build(.coordinate, false, shader);
+    const csc = try compiler.compile(shader);
+    try p.build(.fragment, depth, shader);
+    const fsc = try compiler.compile(shader);
+    return .{ .vs = vsc, .cs = csc, .fs = fsc, .program = p };
+}
+
+fn expectSameStage(a: *const compiler.Compiled, b: *const compiler.Compiled, user: []const u32, env: sim.Env) !void {
+    var buf_a: [64]u32 = undefined;
+    var buf_b: [64]u32 = undefined;
+    var ea = env;
+    var eb = env;
+    ea.uniforms = uniformStream(&buf_a, a, user, .{ texture.p0(test_tex), texture.p1(test_tex) });
+    eb.uniforms = uniformStream(&buf_b, b, user, .{ texture.p0(test_tex), texture.p1(test_tex) });
+    const ra = try sim.run(a.code(), ea);
+    const rb = try sim.run(b.code(), eb);
+    try expectSameRun(ra, rb);
+    try testing.expectEqual(ra.tlb_z, rb.tlb_z);
+}
+
+const test_tex: texture.Config = .{ .width = 64, .height = 64, .mag_filter = .nearest, .min_filter = .nearest };
+
+test "GLSL triangle and spin shaders match the builder versions" {
+    const attrs = [_]sim.Vec{ lane(-1, 0.125), lane(0.9, -0.1), lane(0, 0.06), lane(1, -0.06), lane(0.5, 0) };
+    var g = try compileGlsl(glsl_sources.triangle_vs, glsl_sources.triangle_fs, false);
+    defer g.deinit();
+    try testing.expectEqual(@as(u32, 0), g.program.uniform_words);
+    const vp = [_]u32{ f2u(960.0 * 16.0), f2u(-540.0 * 16.0) };
+    const tri_vs = try compiler.compile(&triangle.vertex());
+    const tri_cs = try compiler.compile(&triangle.coordinate());
+    const tri_fs = try compiler.compile(&triangle.fragment());
+    try expectSameStage(&tri_vs, &g.vs, &vp, .{ .vpm_in = &attrs });
+    try expectSameStage(&tri_cs, &g.cs, &vp, .{ .vpm_in = attrs[0..2] });
+    try expectSameStage(&tri_fs, &g.fs, &vp, .{ .varyings = attrs[2..5], .frag_w = sim.splatF(1.5) });
+
+    var gs = try compileGlsl(glsl_sources.spin_vs, glsl_sources.triangle_fs, false);
+    defer gs.deinit();
+    const angle: f32 = 0.7;
+    const user = [_]u32{ f2u(@cos(angle)), f2u(@sin(angle)), f2u(-@sin(angle)), f2u(@cos(angle)), vp[0], vp[1] };
+    const spin_vs = try compiler.compile(&spin.vertex());
+    const spin_cs = try compiler.compile(&spin.coordinate());
+    try expectSameStage(&spin_vs, &gs.vs, &user, .{ .vpm_in = &attrs });
+    try expectSameStage(&spin_cs, &gs.cs, &user, .{ .vpm_in = attrs[0..2] });
+}
+
+test "GLSL cube shaders match the builder versions" {
+    var g = try compileGlsl(glsl_sources.cube_vs, glsl_sources.cube_fs, true);
+    defer g.deinit();
+    try testing.expectEqual(@as(u32, 16), g.program.viewportUniform());
+    const m = testMvp();
+    var user: [cube.num_uniforms]u32 = undefined;
+    for (m, 0..) |e, i| user[i] = f2u(e);
+    user[16] = f2u(400 * 16);
+    user[17] = f2u(-300 * 16);
+    const attrs = [_]sim.Vec{
+        lane(-1, 0.13),  lane(1, -0.12),  lane(-0.5, 0.07),
+        lane(0, 0.06),   lane(1, -0.05),  lane(0.2, 0.0),
+        lane(0.4, 0.01), lane(0.6, 0.02),
+    };
+    const cvs = try compiler.compile(&cube.vertex());
+    const ccs = try compiler.compile(&cube.coordinate());
+    const cfs = try compiler.compile(&cube.fragment());
+    try expectSameStage(&cvs, &g.vs, &user, .{ .vpm_in = &attrs });
+    try expectSameStage(&ccs, &g.cs, &user, .{ .vpm_in = attrs[0..3] });
+
+    var pixels: [64 * 64]u32 = undefined;
+    for (&pixels, 0..) |*p, i| p.* = 0xff000000 | @as(u32, @intCast(i * 2654435761 % 0xffffff));
+    var memory: [texture.imageSize(64, 64)]u8 = undefined;
+    texture.upload(&memory, &pixels, 64, 64);
+    const varyings = [_]sim.Vec{ lane(0.5 / 64.0, 3.0 / 64.0), lane(10.5 / 64.0, 2.0 / 64.0), lane(1.0, 0), lane(0.5, 0), lane(0.25, 0) };
+    try expectSameStage(&cfs, &g.fs, &.{}, .{ .varyings = &varyings, .frag_w = sim.splatF(1.5), .frag_z = sim.splat(0x123456), .texture_memory = &memory });
+}

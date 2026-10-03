@@ -21,8 +21,8 @@
 const std = @import("std");
 const qpu = @import("qpu.zig");
 
-pub const max_insts = 512;
-const max_edges = 8192;
+pub const max_insts = 1024;
+const max_edges = 16384;
 const max_readers = 64;
 
 pub const Error = error{ TooManyInstructions, TooManyDependencies };

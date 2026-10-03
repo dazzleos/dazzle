@@ -131,6 +131,8 @@ fn addOp(op: qpu.AddOp, a: u32, b: u32) Error!u32 {
         .fsub => u(f(a) - f(b)),
         .fmin => u(@min(f(a), f(b))),
         .fmax => u(@max(f(a), f(b))),
+        .fminabs => u(@min(@abs(f(a)), @abs(f(b)))),
+        .fmaxabs => u(@max(@abs(f(a)), @abs(f(b)))),
         .ftoi => ftoi(f(a)),
         .itof => u(@floatFromInt(ai)),
         .add => a +% b,

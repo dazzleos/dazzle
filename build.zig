@@ -3,12 +3,14 @@ const std = @import("std");
 const Modules = struct {
     sys: *std.Build.Module,
     vc4: *std.Build.Module,
+    gles: *std.Build.Module,
 };
 
 /// The library modules, built for one target:
 ///
 /// * `sys`: Linux system call helpers shared by everything
 /// * `vc4`: the low-level VideoCore IV graphics API
+/// * `gles`: OpenGL ES 2.0 and GLSL, built on vc4
 fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) Modules {
     const sys = b.createModule(.{
         .root_source_file = b.path("src/sys/sys.zig"),
@@ -21,7 +23,16 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         .optimize = optimize,
         .imports = &.{.{ .name = "sys", .module = sys }},
     });
-    return .{ .sys = sys, .vc4 = vc4 };
+    const gles = b.createModule(.{
+        .root_source_file = b.path("src/gles/gles.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sys", .module = sys },
+            .{ .name = "vc4", .module = vc4 },
+        },
+    });
+    return .{ .sys = sys, .vc4 = vc4, .gles = gles };
 }
 
 fn addInitModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, m: Modules, single_threaded: ?bool) *std.Build.Module {
@@ -34,6 +45,7 @@ fn addInitModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         .imports = &.{
             .{ .name = "sys", .module = m.sys },
             .{ .name = "vc4", .module = m.vc4 },
+            .{ .name = "gles", .module = m.gles },
         },
     });
 }
@@ -78,7 +90,7 @@ pub fn build(b: *std.Build) void {
     // need the GPU (instruction encoding, compiler, simulator, ...).
     const host = addModules(b, b.graph.host, optimize);
     const test_step = b.step("test", "Run unit tests on the host");
-    for ([_]*std.Build.Module{ host.sys, host.vc4, addInitModule(b, b.graph.host, optimize, host, null) }) |m| {
+    for ([_]*std.Build.Module{ host.sys, host.vc4, host.gles, addInitModule(b, b.graph.host, optimize, host, null) }) |m| {
         const t = b.addTest(.{ .root_module = m });
         test_step.dependOn(&b.addRunArtifact(t).step);
     }

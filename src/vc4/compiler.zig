@@ -30,8 +30,8 @@ const qpu_schedule = @import("qpu_schedule.zig");
 
 pub const Stage = qpu.Stage;
 
-pub const max_insts = 256;
-pub const max_code = 512;
+pub const max_insts = 1024;
+pub const max_code = 1024;
 pub const max_uniforms = 64;
 
 /// An SSA value: the index of the instruction that defines it.
@@ -56,6 +56,8 @@ pub const Op = enum {
     fsub,
     fmin,
     fmax,
+    /// max(|a|, |b|); abs(x) is fmaxabs(x, x).
+    fmaxabs,
     ftoi,
     itof,
     add,
@@ -112,6 +114,7 @@ pub const Op = enum {
             .fsub => .fsub,
             .fmin => .fmin,
             .fmax => .fmax,
+            .fmaxabs => .fmaxabs,
             .ftoi => .ftoi,
             .itof => .itof,
             .add => .add,
@@ -374,6 +377,33 @@ pub const Options = struct {
     schedule: bool = true,
 };
 
+fn liveness(shader: *const Shader, live: *[max_insts]bool, uses: *[max_insts]u16, last_use: *[max_insts]u16) void {
+    var i: usize = shader.len;
+    while (i > 0) {
+        i -= 1;
+        if (shader.insts[i].op.hasSideEffects()) live[i] = true;
+        if (!live[i]) continue;
+        for (shader.operands(i)) |v| {
+            const d = @intFromEnum(v);
+            live[d] = true;
+            uses[d] += 1;
+            last_use[d] = @max(last_use[d], @as(u16, @intCast(i)));
+        }
+    }
+}
+
+/// Whether each value is read by an instruction that contributes to the
+/// shader's outputs.
+pub fn usedValues(shader: *const Shader) [max_insts]bool {
+    var live: [max_insts]bool = @splat(false);
+    var uses: [max_insts]u16 = @splat(0);
+    var last_use: [max_insts]u16 = @splat(0);
+    liveness(shader, &live, &uses, &last_use);
+    var used: [max_insts]bool = undefined;
+    for (&used, uses) |*u, n| u.* = n > 0;
+    return used;
+}
+
 pub fn compile(shader: *const Shader) Error!Compiled {
     return compileWithOptions(shader, .{});
 }
@@ -386,20 +416,8 @@ pub fn compileWithOptions(shader: *const Shader, options: Options) Error!Compile
     var class: [max_insts]Class = @splat(.any);
     var reg: [max_insts]Reg = @splat(.none);
 
-    // 1. Liveness: walk backwards keeping side effects and their inputs.
-    var i: usize = n;
-    while (i > 0) {
-        i -= 1;
-        const op = shader.insts[i].op;
-        if (op.hasSideEffects()) live[i] = true;
-        if (!live[i]) continue;
-        for (shader.operands(i)) |v| {
-            const d = @intFromEnum(v);
-            live[d] = true;
-            uses[d] += 1;
-            last_use[d] = @max(last_use[d], @as(u16, @intCast(i)));
-        }
-    }
+    // 1. Liveness: keep side effects and their inputs.
+    liveness(shader, &live, &uses, &last_use);
 
     // 2. Operand folding and register class constraints.
     var folded: [max_insts]bool = @splat(false);
@@ -591,7 +609,7 @@ pub fn compileWithOptions(shader: *const Shader, options: Options) Error!Compile
                 try g.emit(try qpu.alu(.{ .add = .{ .op = .fadd, .dst = dst.dst(), .a = qpu.r(3), .b = qpu.r(5) } }));
                 g.out.num_varyings += 1;
             },
-            .fadd, .fsub, .fmin, .fmax, .ftoi, .itof, .add, .sub, .shl, .shr, .asr, .@"and", .@"or", .xor, .min, .max, .fmul => {
+            .fadd, .fsub, .fmin, .fmax, .fmaxabs, .ftoi, .itof, .add, .sub, .shl, .shr, .asr, .@"and", .@"or", .xor, .min, .max, .fmul => {
                 const srcs = shader.operands(j);
                 var a = try g.operand(shader, reg, srcs[0]);
                 var b = if (srcs.len > 1) try g.operand(shader, reg, srcs[1]) else a;

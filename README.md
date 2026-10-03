@@ -18,6 +18,7 @@ The code is split into Zig modules, linked statically into each program:
 |---|---|---|
 | `sys` | `src/sys/` | Linux system call helpers (sleeping, clocks, logging, the kernel command line) |
 | `vc4` | `src/vc4/` | The low-level graphics API for the VideoCore IV, described below |
+| `gles` | `src/gles/` | OpenGL ES 2.0 on top of `vc4`; so far the GLSL ES 1.00 compiler front end |
 | `stardust-init` | `src/init/` | The init program: mounts, log server and the demos |
 
 The `vc4` module:
@@ -35,6 +36,25 @@ The `vc4` module:
 | `qpu.zig` | QPU instruction encoder, hazard checker, instruction pairing and disassembler |
 | `qpu_sim.zig` | QPU simulator used by the tests to run shaders on the build machine |
 | `reference_shaders.zig` | The original hand-written triangle shaders, known to work on hardware |
+
+The `gles` module's GLSL front end (`src/gles/glsl/`):
+
+| File | Contents |
+|---|---|
+| `lexer.zig` | Tokenizer and a minimal preprocessor (`#version`, `#ifdef GL_ES`, object-like `#define`) |
+| `parser.zig` | Parser producing an AST |
+| `lower.zig` | Type checking and lowering to the vc4 compiler's SSA builder, one value per scalar component, with constant folding |
+| `program.zig` | Compiling shaders and linking programs: uniform slots, attribute locations, varying matching, and deriving the coordinate shader |
+
+Supported so far: `attribute`, `uniform`, `varying` and `const` globals of
+float, vector, matrix and `sampler2D` types; `main()` with local variables,
+assignments (including to swizzles and matrix columns), arithmetic with
+vector and matrix rules, constructors, and the built-ins `texture2D`,
+`dot`, `cross`, `length`, `distance`, `normalize`, `min`, `max`, `clamp`,
+`mix`, `abs`, `sqrt`, `inversesqrt`, `pow`, `exp`, `log`, `exp2`, `log2`,
+`radians` and `degrees`. Not yet: control flow, user functions, arrays,
+structs, comparisons and trigonometric functions; these give a compile
+error naming the problem.
 
 The init program (`src/init/`):
 
@@ -228,7 +248,8 @@ GPU or display).
 
 ## Next steps
 
-- Compiler: a GLSL ES 1.00 front end, then control flow.
+- GLSL: control flow (needs branches in the compiler), user functions,
+  arrays, and polynomial `sin`/`cos`.
 - Mipmaps, more texture formats, and depth buffers stored to memory.
 - Add `DRM_IOCTL_VC4_GET_HANG_STATE` reporting for GPU hangs.
 - Split the GL work into a library with a GLES 2.0 / EGL API and a separate
