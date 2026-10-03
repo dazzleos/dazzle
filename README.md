@@ -31,23 +31,26 @@ system calls through `std.os.linux`.
 
 ## Requirements
 
-- Zig 0.16.0
+- Zig 0.16.0. `scripts/zig` downloads it into `build/zig/` on first use
+  (checked against the SHA-256 in ziglang.org's release index) unless a
+  `zig` 0.16.0 is already on your PATH, so installing Zig is optional.
 - To build the kernel: `make`, `flex`, `bison`, `bc`, `git`, and either
   LLVM 17 or newer (used by default; `sudo apt install clang lld llvm`) or
   an ARM GCC cross compiler (set `CROSS_COMPILE=arm-linux-gnueabihf-`).
   `scripts/build-kernel.sh` checks for these and names any missing packages.
-- To build the SD image: `sfdisk` (util-linux), `mkfs.vfat` (dosfstools),
-  `mcopy` (mtools), `curl`
+- To build the SD image: `sfdisk` (fdisk), `mkfs.vfat` (dosfstools),
+  `mcopy` (mtools) and `curl` (`sudo apt install fdisk dosfstools mtools
+  curl`). `scripts/build-image.sh` checks for these too.
 - Optional: `qemu-system-arm` and `fdtput` (device-tree-compiler) for the
   QEMU boot test
 
 ## Building
 
 ```sh
-zig build test                 # host unit tests
-zig build --release=small      # zig-out/bin/stardust-init and zig-out/initramfs.cpio
-scripts/build-kernel.sh        # clones Linux v7.2 into build/linux on first run
-scripts/build-image.sh         # build/boot/ and build/stardust.img
+scripts/zig build test             # host unit tests
+scripts/zig build --release=small  # zig-out/bin/stardust-init and zig-out/initramfs.cpio
+scripts/build-kernel.sh            # clones Linux v7.2 into build/linux on first run
+scripts/build-image.sh             # build/boot/ and build/stardust.img
 ```
 
 `scripts/build-kernel.sh path/to/linux` uses an existing kernel tree instead.

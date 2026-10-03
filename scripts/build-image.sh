@@ -6,7 +6,7 @@
 #   build/stardust.img a complete SD card image (write with dd or
 #                      Raspberry Pi Imager's "Use custom" option)
 #
-# Requires: the kernel (scripts/build-kernel.sh), the initramfs (zig build),
+# Requires: the kernel (scripts/build-kernel.sh), the initramfs (scripts/zig build),
 # and sfdisk, mkfs.vfat (dosfstools) and mcopy (mtools) for the image.
 set -eu
 
@@ -16,10 +16,32 @@ BOOT=$ROOT/build/boot
 IMG=$ROOT/build/stardust.img
 IMG_MB=${IMG_MB:-64}
 
+# sfdisk and mkfs.vfat live in /usr/sbin, which is not always on a normal
+# user's PATH. Neither needs root when working on an image file.
+PATH=$PATH:/usr/sbin:/sbin
+
+# Check for the image tools up front. The Ubuntu/Debian package providing
+# each tool is listed after the colon.
+missing_tools=
+missing_pkgs=
+for entry in sfdisk:fdisk mkfs.vfat:dosfstools mcopy:mtools curl:curl truncate:coreutils; do
+	tool=${entry%%:*}
+	pkg=${entry#*:}
+	if ! command -v "$tool" >/dev/null 2>&1; then
+		missing_tools="$missing_tools $tool"
+		case " $missing_pkgs " in *" $pkg "*) ;; *) missing_pkgs="$missing_pkgs $pkg" ;; esac
+	fi
+done
+if [ -n "$missing_tools" ]; then
+	echo "error: missing tools:$missing_tools" >&2
+	echo "On Ubuntu/Debian: sudo apt install$missing_pkgs" >&2
+	exit 1
+fi
+
 "$ROOT/scripts/fetch-firmware.sh"
 
 [ -f "$KBOOT/zImage" ] || { echo "Build the kernel first: scripts/build-kernel.sh" >&2; exit 1; }
-[ -f "$ROOT/zig-out/initramfs.cpio" ] || { echo "Build the initramfs first: zig build" >&2; exit 1; }
+[ -f "$ROOT/zig-out/initramfs.cpio" ] || { echo "Build the initramfs first: scripts/zig build" >&2; exit 1; }
 
 rm -rf "$BOOT"
 mkdir -p "$BOOT"
