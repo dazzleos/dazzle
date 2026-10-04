@@ -15,7 +15,7 @@
 //!     /apps/<app>/FiraSans-OFL.txt
 //!     /dev, /proc, /sys, /data                  mount points
 //!
-//!     /lib/firmware/brcm/...                    the Wi-Fi chips' firmware
+//!     /brcm/...                                 the Wi-Fi chips' firmware
 //!
 //! An app is named after its binary (dazzle-demo, dazzle-files). The
 //! shell's own apps (dazzle-settings, dazzle-setup), which cannot be

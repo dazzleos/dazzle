@@ -411,9 +411,8 @@ pub const manager = sys.network;
 /// Sends the network manager a request ("scan\n", or one from
 /// `manager.connectRequest` or `manager.ethernetRequest`, ...) and returns
 /// its report. Null if the manager cannot be reached.
-pub fn askManager(runtime_dir: []const u8, request: []const u8) ?manager.Report {
-    var path_buf: [108]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ runtime_dir, manager.socket_name }) catch return null;
+pub fn askManager(request: []const u8) ?manager.Report {
+    const path = manager.socket_path;
     const fd: linux.fd_t = @intCast(sys.check(linux.socket(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0)) catch return null);
     defer sys.close(fd);
     var addr: linux.sockaddr.un = .{ .path = @splat(0) };

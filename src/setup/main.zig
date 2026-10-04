@@ -62,9 +62,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
 
     var name_buf: [32]u8 = undefined;
     const suggestion = names.random(&name_buf);
-    const runtime_dir = std.process.Environ.getPosix(init.environ, "XDG_RUNTIME_DIR");
     // Preparing the card starts now, while the pages are filled in.
-    var report: ?proto.Report = if (runtime_dir) |dir| ask(dir, "prepare\n") else null;
+    var report: ?proto.Report = ask("prepare\n");
     var next_ask: u64 = sys.nowNs() + 500 * std.time.ns_per_ms;
     var actions: view.Actions = .{};
 
@@ -96,7 +95,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
 
         // How preparing goes: often while it does.
         if (now >= next_ask) {
-            report = if (runtime_dir) |dir| ask(dir, "status\n") else null;
+            report = ask("status\n");
             const preparing = if (report) |r| r.storage == .preparing else false;
             next_ask = now + @as(u64, if (preparing) 250 else 1000) * std.time.ns_per_ms;
             dirty = true;
@@ -113,7 +112,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             if (can) {
                 var req_buf: [96]u8 = undefined;
                 const req = std.fmt.bufPrint(&req_buf, "finish {s}\n", .{h.slice()}) catch "";
-                if (runtime_dir) |dir| _ = ask(dir, req);
+                _ = ask(req);
                 print("dazzle-setup: finished; the computer is {s}\n", .{h.slice()});
                 return;
             }
@@ -147,9 +146,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
 
 /// Sends the system manager a request and returns its report; null if it
 /// cannot be reached.
-fn ask(runtime_dir: []const u8, request: []const u8) ?proto.Report {
-    var path_buf: [108]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ runtime_dir, proto.socket_name }) catch return null;
+fn ask(request: []const u8) ?proto.Report {
+    const path = proto.socket_path;
     const fd: linux.fd_t = @intCast(sys.check(linux.socket(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0)) catch return null);
     defer sys.close(fd);
     var addr: linux.sockaddr.un = .{ .path = @splat(0) };
@@ -174,13 +172,11 @@ fn ask(runtime_dir: []const u8, request: []const u8) ?proto.Report {
 
 fn openWindow(gpa: std.mem.Allocator, init: std.process.Init.Minimal, dev: *vc4.Device) !*app.Window {
     const Environ = std.process.Environ;
-    const display_name = Environ.getPosix(init.environ, "WAYLAND_DISPLAY") orelse {
-        print("dazzle-setup: WAYLAND_DISPLAY is not set; run me under dazzle-shell\n", .{});
-        return error.NoCompositor;
-    };
+    // Dazzle's compositor listens on /wayland-0; elsewhere, where
+    // WAYLAND_DISPLAY and XDG_RUNTIME_DIR say.
     var path_buf: [128]u8 = undefined;
-    const path = wayland.client.socketPath(&path_buf, Environ.getPosix(init.environ, "XDG_RUNTIME_DIR"), display_name) catch {
-        print("dazzle-setup: XDG_RUNTIME_DIR is not set\n", .{});
+    const path = wayland.client.socketPath(&path_buf, Environ.getPosix(init.environ, "XDG_RUNTIME_DIR"), Environ.getPosix(init.environ, "WAYLAND_DISPLAY")) catch {
+        print("dazzle-setup: WAYLAND_DISPLAY needs XDG_RUNTIME_DIR\n", .{});
         return error.NoCompositor;
     };
     const win = app.Window.open(gpa, .device(dev), path, "Setup") catch |err| {

@@ -1,7 +1,7 @@
 //! The network manager: the one process that configures the network, wired
 //! and Wi-Fi, without holding up boot.
 //!
-//! Init forks it early, once the user's runtime directory exists. It runs
+//! Init forks it early. It runs
 //! as the Dazzle user and keeps only the capabilities this needs:
 //! changing interfaces, routes and Wi-Fi (CAP_NET_ADMIN), packet sockets and
 //! tying sockets to an interface (CAP_NET_RAW, for EAPOL and DHCP) and the
@@ -13,7 +13,7 @@
 //! renews the lease itself), or a static one chosen in the settings app.
 //! Wi-Fi: see wifi.zig.
 //!
-//! It listens on $XDG_RUNTIME_DIR/network (see `sys.network` for the
+//! It listens on /network (see `sys.network` for the
 //! protocol) and answers only the settings app: the program the connecting
 //! process runs must be /shell/dazzle-settings. Every
 //! app runs as the same user, so the socket's permissions alone could not
@@ -33,7 +33,7 @@ const print = sys.print;
 const look_ns = 2 * std.time.ns_per_s;
 const max_clients = 4;
 
-pub fn start(runtime_dir: []const u8) ?linux.pid_t {
+pub fn start() ?linux.pid_t {
     const rc = linux.fork();
     switch (linux.errno(rc)) {
         .SUCCESS => if (rc != 0) return @intCast(rc),
@@ -46,7 +46,7 @@ pub fn start(runtime_dir: []const u8) ?linux.pid_t {
         print("dazzle: network: cannot drop privileges ({s})\n", .{@errorName(err)});
         linux.exit(1);
     };
-    run(runtime_dir) catch |err| print("dazzle: network: {s}\n", .{@errorName(err)});
+    run() catch |err| print("dazzle: network: {s}\n", .{@errorName(err)});
     linux.exit(1);
 }
 
@@ -130,13 +130,11 @@ const Ethernet = struct {
     }
 };
 
-fn run(runtime_dir: []const u8) !void {
+fn run() !void {
     // Loopback first: some programs talk to themselves over it.
     ipv4.setStatic("lo", .{ 127, 0, 0, 1 }, 8, null) catch {};
 
-    var path_buf: [108]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ runtime_dir, proto.socket_name });
-    const listener = try listen(path);
+    const listener = try listen(proto.socket_path);
     var ethernet: Ethernet = .{};
     var w: wifi.Manager = .{};
     var clients: [max_clients]?linux.fd_t = @splat(null);

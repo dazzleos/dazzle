@@ -9,7 +9,9 @@
 //! that window. Clicking an app in the dock starts it, or brings its window
 //! to the front if it is running: apps run once each.
 //!
-//! Clients connect on $XDG_RUNTIME_DIR/wayland-0. The shell starts no app
+//! Clients connect on /wayland-0 (or, run elsewhere with XDG_RUNTIME_DIR
+//! set, $XDG_RUNTIME_DIR/wayland-0, as other compositors do; its clients
+//! are then told so). The shell starts no app
 //! itself, other than the programs named on its command line. It is not an
 //! app: it lives in /shell, with its font and its own apps (Settings, which
 //! the dock lists with the others, and Setup). On the first run (init gives
@@ -26,6 +28,7 @@ const linux = std.os.linux;
 const sys = @import("sys");
 const vc4 = @import("vc4");
 const font = @import("font");
+const wayland = @import("wayland");
 const server_mod = @import("server.zig");
 const render = @import("render.zig");
 const input = @import("input.zig");
@@ -55,10 +58,9 @@ pub fn main(init: std.process.Init.Minimal) u8 {
 
 fn run(init: std.process.Init.Minimal) !void {
     const gpa = std.heap.page_allocator;
-    const runtime_dir = std.process.Environ.getPosix(init.environ, "XDG_RUNTIME_DIR") orelse {
-        print("dazzle-shell: XDG_RUNTIME_DIR is not set\n", .{});
-        return error.NoRuntimeDir;
-    };
+    // Run elsewhere (on Raspberry Pi OS), the socket goes where other
+    // compositors' do.
+    const runtime_dir = std.process.Environ.getPosix(init.environ, "XDG_RUNTIME_DIR");
 
     const dev = try vc4.device.open();
     const output = try vc4.drm.waitForOutput(dev.fd);
@@ -109,7 +111,7 @@ fn run(init: std.process.Init.Minimal) !void {
     });
 
     var path_buf: [108]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/wayland-0", .{runtime_dir});
+    const path = if (runtime_dir) |dir| try std.fmt.bufPrintZ(&path_buf, "{s}/wayland-0", .{dir}) else wayland.client.default_socket;
     const listener = try listen(path);
     print("dazzle-shell: listening on {s}\n", .{path});
 
@@ -494,10 +496,11 @@ fn listen(path: [:0]const u8) !linux.fd_t {
     return fd;
 }
 
-/// Starts a client program, with the Wayland environment.
-fn spawn(program: [*:0]const u8, runtime_dir: [:0]const u8) ?linux.pid_t {
+/// Starts a client program. Dazzle's apps find the shell on /wayland-0;
+/// with a runtime directory (run elsewhere) they are told where it is.
+fn spawn(program: [*:0]const u8, runtime_dir: ?[:0]const u8) ?linux.pid_t {
     var env_buf: [160]u8 = undefined;
-    const runtime_env = std.fmt.bufPrintZ(&env_buf, "XDG_RUNTIME_DIR={s}", .{runtime_dir}) catch return null;
+    const runtime_env: ?[*:0]const u8 = if (runtime_dir) |dir| (std.fmt.bufPrintZ(&env_buf, "XDG_RUNTIME_DIR={s}", .{dir}) catch return null).ptr else null;
     const rc = linux.fork();
     if (linux.errno(rc) != .SUCCESS) {
         print("dazzle-shell: cannot start {s}: fork failed\n", .{program});
@@ -508,7 +511,7 @@ fn spawn(program: [*:0]const u8, runtime_dir: [:0]const u8) ?linux.pid_t {
         return @intCast(rc);
     }
     const argv = [_:null]?[*:0]const u8{program};
-    const envp = [_:null]?[*:0]const u8{ "HOME=/", "WAYLAND_DISPLAY=wayland-0", runtime_env.ptr };
+    const envp = if (runtime_env) |r| [_:null]?[*:0]const u8{ "HOME=/", "WAYLAND_DISPLAY=wayland-0", r } else [_:null]?[*:0]const u8{ "HOME=/", null, null };
     const err = linux.errno(linux.execve(program, &argv, &envp));
     print("dazzle-shell: cannot run {s} ({s})\n", .{ program, @tagName(err) });
     linux.exit(127);

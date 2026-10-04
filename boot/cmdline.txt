@@ -1,1 +1,1 @@
-printk.devkmsg=on loglevel=6 cma=128M
+printk.devkmsg=on loglevel=6 cma=128M firmware_class.path=/

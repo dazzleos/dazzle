@@ -5,7 +5,7 @@
 //! keeping only the capabilities this needs: writing the card, mounting it
 //! and setting the hostname (CAP_SYS_ADMIN), writing the card's device and
 //! the root-owned /data (CAP_DAC_OVERRIDE), and giving /data/system to root
-//! (CAP_CHOWN). It listens on $XDG_RUNTIME_DIR/system (see `sys.system` for
+//! (CAP_CHOWN). It listens on /system (see `sys.system` for
 //! the protocol) and answers only the setup app: the program the
 //! connecting process runs must be /shell/dazzle-setup.
 //!
@@ -33,7 +33,7 @@ const slice_ns = 50 * std.time.ns_per_ms;
 /// Forks the manager. `card` says whether there is an SD card, and
 /// `mounted` whether /data is already there (prepared on an earlier run
 /// that did not finish setting up).
-pub fn start(runtime_dir: []const u8, card: bool, mounted: bool) ?linux.pid_t {
+pub fn start(card: bool, mounted: bool) ?linux.pid_t {
     const rc = linux.fork();
     switch (linux.errno(rc)) {
         .SUCCESS => if (rc != 0) return @intCast(rc),
@@ -49,7 +49,7 @@ pub fn start(runtime_dir: []const u8, card: bool, mounted: bool) ?linux.pid_t {
     var m: Manager = .{ .report = .{ .storage = if (mounted) .ready else if (card) .unprepared else .none } };
     var uts: linux.utsname = undefined;
     if (linux.errno(linux.uname(&uts)) == .SUCCESS) m.report.hostname = proto.Hostname.parse(std.mem.sliceTo(&uts.nodename, 0)) orelse .{};
-    m.run(runtime_dir) catch |err| print("dazzle: system: {s}\n", .{@errorName(err)});
+    m.run() catch |err| print("dazzle: system: {s}\n", .{@errorName(err)});
     linux.exit(if (m.finished) 0 else 1);
 }
 
@@ -60,9 +60,8 @@ const Manager = struct {
     fd: ?linux.fd_t = null,
     finished: bool = false,
 
-    fn run(m: *Manager, runtime_dir: []const u8) !void {
-        var path_buf: [108]u8 = undefined;
-        const path = try std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ runtime_dir, proto.socket_name });
+    fn run(m: *Manager) !void {
+        const path = proto.socket_path;
         const listener = try listen(path);
         defer {
             sys.close(listener);

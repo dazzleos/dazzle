@@ -6,8 +6,8 @@
 //! 2. waits a moment for the SD card and mounts its space for files at
 //!    /data (if setup has prepared it), and names the computer as kept
 //!    there (or "dazzle");
-//! 3. creates the user's runtime directory (/run/user/1000, for the
-//!    Wayland socket and the managers'), starts the network manager (see
+//! 3. lets the Dazzle user's sockets go in / (the Wayland socket
+//!    /wayland-0, and the managers'), starts the network manager (see
 //!    network.zig), which brings the wired and Wi-Fi network up in the
 //!    background and answers the settings app, and the log server (which
 //!    drops to the Dazzle user once it has bound its port); boot never
@@ -40,7 +40,6 @@ const build_info = @import("build_info");
 const print = sys.print;
 
 const shell_path = "/shell/dazzle-shell";
-const runtime_dir = "/run/user/1000";
 
 pub fn main() void {
     if (linux.getpid() != 1) {
@@ -48,21 +47,21 @@ pub fn main() void {
         linux.exit(1);
     }
     mountPseudoFilesystems();
+    prepareRoot();
     sys.logToKmsg();
     print("dazzle: starting as init (build {s})\n", .{build_info.commit});
     // The card's files (and the computer's name, kept there).
     const card = storage.boot();
     const name = card.hostname.slice();
     _ = linux.syscall2(.sethostname, @intFromPtr(name.ptr), name.len);
-    makeRuntimeDir();
-    const network_pid = network.start(runtime_dir);
+    const network_pid = network.start();
     logserver.start();
     const devices_pid = devices.start();
     grantGpuAccess();
     // Until setup has finished, the shell runs the setup app (and nothing
     // else), and the system manager prepares the card and names the
     // computer for it.
-    if (!card.setup_done) _ = system.start(runtime_dir, card.card, card.mounted);
+    if (!card.setup_done) _ = system.start(card.card, card.mounted);
     const shell_pid = startShell(!card.setup_done);
     reapForever(shell_pid, network_pid, devices_pid);
 }
@@ -78,6 +77,17 @@ fn mountPseudoFilesystems() void {
         _ = sys.check(linux.mount(m.src, m.dir, m.fstype, m.flags, 0)) catch |err|
             print("dazzle: mount {s}: {s}\n", .{ m.dir, @errorName(err) });
     }
+}
+
+/// The root directory: the Dazzle user's sockets go in it (the shell's
+/// /wayland-0, the managers' /network and /system), so the user's group may
+/// add to it; it is sticky, so nothing of root's in it can be removed or
+/// replaced. The kernel unpacks a default initramfs of its own before ours,
+/// which makes an empty /root; nothing uses it.
+fn prepareRoot() void {
+    _ = linux.rmdir("/root");
+    _ = linux.chown("/", 0, sys.user.gid);
+    _ = linux.fchmodat(linux.AT.FDCWD, "/", 0o1775);
 }
 
 const max_cards = 4;
@@ -116,13 +126,6 @@ fn grantGpuAccess() void {
     }
 }
 
-/// The directory for the user's sockets, readable only by the user.
-fn makeRuntimeDir() void {
-    for ([_][*:0]const u8{ "/run", "/run/user", runtime_dir }) |dir| _ = linux.mkdir(dir, 0o755);
-    _ = linux.chown(runtime_dir, sys.user.uid, sys.user.gid);
-    _ = linux.fchmodat(linux.AT.FDCWD, runtime_dir, 0o700);
-}
-
 /// Starts the shell as the Dazzle user. Returns its PID, or null if it
 /// could not be started.
 fn startShell(setup: bool) ?linux.pid_t {
@@ -151,7 +154,7 @@ fn startShell(setup: bool) ?linux.pid_t {
         linux.exit(126);
     };
     const argv = [_:null]?[*:0]const u8{ shell_path, if (setup) "--setup" else null };
-    const envp = [_:null]?[*:0]const u8{ "HOME=/", "USER=" ++ sys.user.name, "XDG_RUNTIME_DIR=" ++ runtime_dir };
+    const envp = [_:null]?[*:0]const u8{ "HOME=/", "USER=" ++ sys.user.name };
     const err = linux.errno(linux.execve(shell_path, &argv, &envp));
     print("dazzle: cannot run {s} ({s})\n", .{ shell_path, @tagName(err) });
     linux.exit(127);
@@ -178,7 +181,7 @@ fn reapForever(shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, first_d
         if (pid == network_pid) {
             print("dazzle: network manager stopped (status 0x{x}); restarting it in 5 s\n", .{status});
             sys.sleepMs(5000);
-            network_pid = network.start(runtime_dir);
+            network_pid = network.start();
             continue;
         }
         if (pid == devices_pid) {

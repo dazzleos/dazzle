@@ -1,8 +1,8 @@
 //! The system manager's protocol. On the first run, init runs the manager
 //! (src/init/system.zig), which prepares the SD card's free space for files
-//! and sets the computer's name; it listens on a socket in the user's
-//! runtime directory and answers only the setup app, checked by the
-//! program the connecting process runs.
+//! and sets the computer's name; it listens on a socket, /system, and
+//! answers only the setup app, checked by the program the connecting
+//! process runs.
 //!
 //! A client connects, sends a request and reads the report until the
 //! manager closes the connection. The requests are:
@@ -24,8 +24,8 @@
 
 const std = @import("std");
 
-/// The socket's name in $XDG_RUNTIME_DIR.
-pub const socket_name = "system";
+/// The manager's socket.
+pub const socket_path = "/system";
 
 /// The only program the manager answers.
 pub const allowed_program = "/shell/dazzle-setup";

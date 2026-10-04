@@ -71,7 +71,6 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     var network = info.Network.read();
     // The network manager is asked less often: each request may start a
     // Wi-Fi scan.
-    const runtime_dir = std.process.Environ.getPosix(init.environ, "XDG_RUNTIME_DIR");
     var report: ?info.manager.Report = null;
     var next_ask: u64 = 0;
     // What the window asks of the network manager (Connect, Disconnect, an
@@ -123,24 +122,24 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             network = info.Network.read();
             dirty = true;
         }
-        if (actions.connect != null or actions.disconnect or actions.ethernet != null) if (runtime_dir) |dir| {
+        if (actions.connect != null or actions.disconnect or actions.ethernet != null) {
             var req_buf: [256]u8 = undefined;
-            if (actions.ethernet) |a| report = info.askManager(dir, info.manager.ethernetRequest(&req_buf, a));
+            if (actions.ethernet) |a| report = info.askManager(info.manager.ethernetRequest(&req_buf, a));
             if (actions.connect != null or actions.disconnect) {
                 const req = if (actions.connect) |*j| info.manager.connectRequest(&req_buf, j.ssid(), j.passphrase()) else "disconnect\n";
                 if (actions.connect) |*j| print("dazzle-settings: joining \"{s}\"\n", .{j.ssid()});
-                report = info.askManager(dir, req);
+                report = info.askManager(req);
             }
             actions = .{};
             next_ask = sys.nowNs() + std.time.ns_per_s;
             dirty = true;
-        };
+        }
         if (!suspended and now >= next_ask) {
             // Soon after the first answer (to show what the first scan
             // found) and while joining a network, then every few seconds.
             const busy = if (report) |r| r.scanning or r.connection.state == .connecting or r.connection.state == .authenticating or r.connection.state == .addressing else true;
             next_ask = now + @as(u64, if (busy) 1 else 5) * std.time.ns_per_s;
-            report = if (runtime_dir) |dir| info.askManager(dir, "scan\n") else null;
+            report = info.askManager("scan\n");
             dirty = true;
         }
 
@@ -181,13 +180,11 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
 /// Opens a window on the Wayland compositor.
 fn openWindow(gpa: std.mem.Allocator, init: std.process.Init.Minimal, dev: *vc4.Device) !*app.Window {
     const Environ = std.process.Environ;
-    const display_name = Environ.getPosix(init.environ, "WAYLAND_DISPLAY") orelse {
-        print("dazzle-settings: WAYLAND_DISPLAY is not set; run me under dazzle-shell\n", .{});
-        return error.NoCompositor;
-    };
+    // Dazzle's compositor listens on /wayland-0; elsewhere, where
+    // WAYLAND_DISPLAY and XDG_RUNTIME_DIR say.
     var path_buf: [128]u8 = undefined;
-    const path = wayland.client.socketPath(&path_buf, Environ.getPosix(init.environ, "XDG_RUNTIME_DIR"), display_name) catch {
-        print("dazzle-settings: XDG_RUNTIME_DIR is not set\n", .{});
+    const path = wayland.client.socketPath(&path_buf, Environ.getPosix(init.environ, "XDG_RUNTIME_DIR"), Environ.getPosix(init.environ, "WAYLAND_DISPLAY")) catch {
+        print("dazzle-settings: WAYLAND_DISPLAY needs XDG_RUNTIME_DIR\n", .{});
         return error.NoCompositor;
     };
     const win = app.Window.open(gpa, .device(dev), path, "Settings") catch |err| {

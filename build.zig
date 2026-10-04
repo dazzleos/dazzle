@@ -349,7 +349,9 @@ const firmware = [_]struct { name: []const u8, sha256: []const u8 }{
 };
 
 /// The Wi-Fi chips' firmware, which the kernel's brcmfmac driver loads from
-/// /lib/firmware/brcm, from Raspberry Pi OS's firmware-nonfree (pinned by
+/// /brcm (it asks for "brcm/<name>", and cmdline.txt's
+/// firmware_class.path=/ has the kernel look from the root directory, not
+/// /lib/firmware), from Raspberry Pi OS's firmware-nonfree (pinned by
 /// commit and checksum), named for each board's device tree so the driver
 /// finds it. The licence (firmware/LICENCE.cypress) goes with it.
 const wifi_firmware_commit = "3bab0f823f5b53150b76aab77093adef6655b920";
@@ -486,7 +488,7 @@ fn addQemu(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) void {
     qemu.addArgs(&.{ "-dtb", dtb, "-initrd" });
     qemu.addFileArg(initramfs);
     qemu.addArgs(&.{
-        "-append",  "printk.devkmsg=on",
+        "-append",  "printk.devkmsg=on firmware_class.path=/",
         "-device",  "usb-net,netdev=net0",
         "-netdev",  b.fmt("user,id=net0,hostfwd=tcp:127.0.0.1:{d}-:80", .{port}),
         "-display", "none",
@@ -577,9 +579,9 @@ pub fn build(b: *std.Build) void {
     // The Wi-Fi chips' firmware, for the kernel to load.
     run_mkinitramfs.step.dependOn(fetchWifiFirmware(b));
     for (wifi_firmware) |f| {
-        run_mkinitramfs.addArg(b.fmt("--file=lib/firmware/brcm/{s}={s}", .{ f.name, b.pathJoin(&.{ b.pathFromRoot("build/firmware/wifi"), f.name }) }));
+        run_mkinitramfs.addArg(b.fmt("--file=brcm/{s}={s}", .{ f.name, b.pathJoin(&.{ b.pathFromRoot("build/firmware/wifi"), f.name }) }));
     }
-    run_mkinitramfs.addPrefixedFileArg("--file=lib/firmware/brcm/LICENCE.cypress=", b.path("firmware/LICENCE.cypress"));
+    run_mkinitramfs.addPrefixedFileArg("--file=brcm/LICENCE.cypress=", b.path("firmware/LICENCE.cypress"));
     // The shell's own apps, beside it in /shell (they cannot be removed).
     run_mkinitramfs.addPrefixedArtifactArg("--shell=", settings_exe);
     run_mkinitramfs.addPrefixedArtifactArg("--shell=", setup_exe);
