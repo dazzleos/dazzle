@@ -6,6 +6,7 @@ const Modules = struct {
     shader: *std.Build.Module,
     app: *std.Build.Module,
     gfx: *std.Build.Module,
+    ui: *std.Build.Module,
     font: *std.Build.Module,
     wayland: *std.Build.Module,
     build_info: *std.Build.Module,
@@ -19,6 +20,7 @@ const Modules = struct {
 ///   with them
 /// * `app`: native apps' windows on stardust-shell, drawn with vc4
 /// * `gfx`: 2D graphics (rounded rectangles, polygons, strokes, text) on vc4
+/// * `ui`: the widget toolkit, on gfx
 /// * `font`: OpenType font rendering
 /// * `wayland`: the Wayland wire protocol and a client library
 /// * `build_info`: `commit`, the source's git commit (short, with "-dirty"
@@ -47,6 +49,16 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         },
     });
     addShaderImports(gfx, shaders, .gfx);
+    const ui = b.createModule(.{
+        .root_source_file = b.path("src/ui/ui.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "vc4", .module = vc4 },
+            .{ .name = "gfx", .module = gfx },
+            .{ .name = "font", .module = font },
+        },
+    });
     const app = b.createModule(.{
         .root_source_file = b.path("src/app/app.zig"),
         .target = target,
@@ -58,7 +70,7 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     });
     const info = b.addOptions();
     info.addOption([]const u8, "commit", gitCommit(b));
-    return .{ .sys = sys, .vc4 = vc4, .shader = shader, .app = app, .gfx = gfx, .font = font, .wayland = wayland, .build_info = info.createModule() };
+    return .{ .sys = sys, .vc4 = vc4, .shader = shader, .app = app, .gfx = gfx, .ui = ui, .font = font, .wayland = wayland, .build_info = info.createModule() };
 }
 
 /// `sys`, `vc4` and `shader`: what the GPU's users need, and what the
@@ -178,6 +190,7 @@ fn addProgramModule(b: *std.Build, path: []const u8, target: std.Build.ResolvedT
             .{ .name = "shader", .module = m.shader },
             .{ .name = "app", .module = m.app },
             .{ .name = "gfx", .module = m.gfx },
+            .{ .name = "ui", .module = m.ui },
             .{ .name = "font", .module = m.font },
             .{ .name = "wayland", .module = m.wayland },
             .{ .name = "build_info", .module = m.build_info },
@@ -472,7 +485,7 @@ pub fn build(b: *std.Build) void {
         host.shader.addAnonymousImport(b.fmt("{s}.spv", .{s.name}), .{ .root_source_file = s.spirv });
     }
     // The font tests use the real system font.
-    for ([_]*std.Build.Module{ host.font, host.gfx }) |m| m.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
+    for ([_]*std.Build.Module{ host.font, host.gfx, host.ui }) |m| m.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const test_step = b.step("test", "Run unit tests on the host");
     for ([_]*std.Build.Module{
         host.sys,
@@ -480,6 +493,7 @@ pub fn build(b: *std.Build) void {
         host.shader,
         host.app,
         host.gfx,
+        host.ui,
         host.font,
         host.wayland,
         addProgramModule(b, "src/init/main.zig", b.graph.host, test_optimize, host, shaders, null),

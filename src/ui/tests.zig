@@ -1,0 +1,364 @@
+//! Tests of the toolkit: layouts (sensible and not), state, input, and
+//! what is painted (drawn on the CPU with the real shaders).
+
+const std = @import("std");
+const gfx = @import("gfx");
+const font = @import("font");
+const vc4 = @import("vc4");
+const ui = @import("ui.zig");
+
+const testing = std.testing;
+const Widget = ui.Widget;
+const Context = ui.Context;
+const Node = ui.Node;
+
+const fira_data = @embedFile("FiraSans-Regular.ttf");
+
+/// The first node (depth first) whose widget is a `T`.
+fn find(n: *Node, comptime T: type) ?*Node {
+    if (n.widget.is(T)) return n;
+    for (n.children.items) |ch| if (find(ch, T)) |f| return f;
+    return null;
+}
+
+fn findAll(n: *Node, comptime T: type, out: *std.ArrayList(*Node)) !void {
+    if (n.widget.is(T)) try out.append(testing.allocator, n);
+    for (n.children.items) |ch| try findAll(ch, T, out);
+}
+
+const Image = struct {
+    pixels: []u32,
+    img: gfx.preview.Image,
+
+    fn init(u: *ui.Ui, w: u32, h: u32) !Image {
+        const pixels = try testing.allocator.alloc(u32, w * h);
+        @memset(pixels, 0xff000000);
+        const img: gfx.preview.Image = .{ .pixels = pixels, .width = w, .height = h };
+        try u.preview(img);
+        return .{ .pixels = pixels, .img = img };
+    }
+
+    fn deinit(i: Image) void {
+        testing.allocator.free(i.pixels);
+    }
+
+    fn at(i: Image, x: u32, y: u32) u32 {
+        return i.img.at(x, y);
+    }
+};
+
+fn channels(px: u32) [3]u8 {
+    return .{ @truncate(px >> 16), @truncate(px >> 8), @truncate(px) };
+}
+
+fn isYellow(px: u32) bool {
+    const c = channels(px);
+    return c[0] > 150 and c[1] > 150 and c[2] < 100;
+}
+
+const red = gfx.Color.rgb(0xff0000);
+const blue = gfx.Color.rgb(0x0000ff);
+
+/// A root made by a function, for tests.
+fn Root(comptime f: fn (*Context) Widget) type {
+    return struct {
+        pub fn build(_: *const @This(), cx: *Context) Widget {
+            return f(cx);
+        }
+    };
+}
+
+test "an overflowing row is clipped, and striped along the edge it overflows" {
+    const fira = try font.Font.init(fira_data);
+    const u = try ui.Ui.create(testing.allocator, &fira);
+    defer u.destroy();
+    const build = struct {
+        fn f(cx: *Context) Widget {
+            return cx.make(ui.Align{ .alignment = .top_left, .child = cx.make(ui.SizedBox{ .width = 100, .height = 40, .child = cx.make(ui.Row{ .children = &.{
+                cx.make(ui.SizedBox{ .width = 80, .child = cx.make(ui.Decorated{ .color = red }) }),
+                cx.make(ui.SizedBox{ .width = 80, .child = cx.make(ui.Decorated{ .color = blue }) }),
+            } }) }) });
+        }
+    }.f;
+    u.frame(200, 60, 0, Root(build){});
+    const row = find(u.root.?, ui.Row).?;
+    try testing.expectEqual(@as(f32, 60), row.overflow.right);
+    try testing.expectEqual(@as(f32, 0), row.overflow.bottom);
+    const img = try Image.init(u, 200, 60);
+    defer img.deinit();
+    try testing.expectEqual(@as(u32, 0xffff0000), img.at(40, 20));
+    try testing.expectEqual(@as(u32, 0xff0000ff), img.at(85, 20));
+    // The stripes along the right edge: some yellow there, none before.
+    var yellow: u32 = 0;
+    for (0..40) |y| for (92..100) |x| {
+        yellow += @intFromBool(isYellow(img.at(@intCast(x), @intCast(y))));
+    };
+    try testing.expect(yellow > 40);
+    // Nothing past the row.
+    for (0..60) |y| try testing.expectEqual(@as(u32, 0xff000000), img.at(120, @intCast(y)));
+    for (0..200) |x| try testing.expectEqual(@as(u32, 0xff000000), img.at(@intCast(x), 50));
+}
+
+/// A widget whose layout returns nonsense.
+const Nonsense = struct {
+    pub fn layout(_: *const Nonsense, _: *Node, _: ui.Constraints) ui.Size {
+        return .{ .w = std.math.nan(f32), .h = -std.math.inf(f32) };
+    }
+};
+
+test "layouts that make no sense still lay out" {
+    const fira = try font.Font.init(fira_data);
+    const u = try ui.Ui.create(testing.allocator, &fira);
+    defer u.destroy();
+    const build = struct {
+        fn f(cx: *Context) Widget {
+            return cx.make(ui.Column{
+                .children = &.{
+                    // A column in a column: unbounded height, where Expanded
+                    // has no space to share.
+                    cx.make(ui.Column{ .children = &.{
+                        cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = "Expanded in unbounded space" }) }),
+                        cx.make(Nonsense{}),
+                    } }),
+                    // A row in a row: unbounded width.
+                    cx.make(ui.Row{ .children = &.{cx.make(ui.Row{ .children = &.{cx.make(ui.Text{ .text = "Row in a row" })} })} }),
+                    cx.make(ui.SizedBox{ .width = -5, .height = std.math.nan(f32) }),
+                    cx.make(ui.Padding{ .padding = .all(1000), .child = cx.make(ui.Text{ .text = "Padded away" }) }),
+                    cx.make(ui.Center{ .child = cx.make(ui.Overlay{}) }),
+                },
+            });
+        }
+    }.f;
+    u.frame(300, 200, 0, Root(build){});
+    // Everything got a finite size, and the column says it overflows.
+    const Check = struct {
+        fn all(n: *Node) !void {
+            try testing.expect(std.math.isFinite(n.size.w) and n.size.w >= 0);
+            try testing.expect(std.math.isFinite(n.size.h) and n.size.h >= 0);
+            for (n.children.items) |ch| try all(ch);
+        }
+    };
+    try Check.all(u.root.?);
+    try testing.expect(u.root.?.child(0).overflow.bottom > 0);
+    const img = try Image.init(u, 300, 200);
+    img.deinit();
+}
+
+const Counter = struct {
+    pub const State = struct {
+        count: u32 = 0,
+        fn add(s: *State) void {
+            s.count += 1;
+        }
+    };
+
+    pub fn build(_: *const Counter, cx: *Context, state: *State) Widget {
+        return cx.make(ui.Column{ .children = &.{
+            cx.make(ui.Text{ .text = cx.fmt("Count {d}", .{state.count}) }),
+            cx.make(ui.OutlinedButton{ .label = "Add", .on_press = .of(state, State.add) }),
+            cx.make(ui.OutlinedButton{ .label = "Disabled" }),
+        } });
+    }
+};
+
+fn click(u: *ui.Ui, n: *Node) void {
+    const at = n.position();
+    const p: ui.Point = .{ at[0] + n.size.w / 2, at[1] + n.size.h / 2 };
+    u.pointerMotion(p);
+    u.pointerButton(p, ui.widgets.btn_left, true);
+    u.pointerButton(p, ui.widgets.btn_left, false);
+}
+
+test "buttons call back, state lasts between frames, and hovering tints" {
+    const fira = try font.Font.init(fira_data);
+    const u = try ui.Ui.create(testing.allocator, &fira);
+    defer u.destroy();
+    u.frame(300, 200, 0, Counter{});
+    var buttons: std.ArrayList(*Node) = .empty;
+    defer buttons.deinit(testing.allocator);
+    try findAll(u.root.?, ui.OutlinedButton, &buttons);
+    try testing.expectEqual(@as(usize, 2), buttons.items.len);
+    // Material's size, centred in the column.
+    try testing.expectEqual(@as(f32, 40), buttons.items[0].size.h);
+
+    click(u, buttons.items[0]);
+    click(u, buttons.items[0]);
+    try testing.expectEqual(@as(u32, 2), u.root.?.state(Counter.State).count);
+    u.frame(300, 200, 1, Counter{});
+    try testing.expectEqualStrings("Count 2", find(u.root.?, ui.Text).?.widget.as(ui.Text).?.text);
+    // Still over the button: tinted.
+    try testing.expect(find(buttons.items[0], ui.Decorated).?.widget.as(ui.Decorated).?.color != null);
+
+    // The disabled button does nothing, and is not tinted.
+    click(u, buttons.items[1]);
+    u.frame(300, 200, 2, Counter{});
+    try testing.expectEqual(@as(u32, 2), u.root.?.state(Counter.State).count);
+    try testing.expect(find(buttons.items[1], ui.Decorated).?.widget.as(ui.Decorated).?.color == null);
+
+    // Pressing, moving off and releasing is not a click.
+    const b = buttons.items[0];
+    const at = b.position();
+    u.pointerMotion(.{ at[0] + 5, at[1] + 20 });
+    u.pointerButton(.{ at[0] + 5, at[1] + 20 }, ui.widgets.btn_left, true);
+    u.pointerMotion(.{ 299, 199 });
+    u.pointerButton(.{ 299, 199 }, ui.widgets.btn_left, false);
+    try testing.expectEqual(@as(u32, 2), u.root.?.state(Counter.State).count);
+}
+
+var freed: u32 = 0;
+
+const Keeper = struct {
+    id: u32,
+    pub const State = struct {
+        id: u32,
+        pub fn deinit(_: *State) void {
+            freed += 1;
+        }
+    };
+    pub fn initState(self: *const Keeper) State {
+        return .{ .id = self.id };
+    }
+    pub fn build(_: *const Keeper, cx: *Context, _: *State) Widget {
+        return cx.make(ui.SizedBox{ .width = 10, .height = 10 });
+    }
+};
+
+const Keepers = struct {
+    ids: []const u32,
+    pub fn build(self: *const Keepers, cx: *Context) Widget {
+        var children = cx.arena.alloc(Widget, self.ids.len) catch return cx.make(ui.Empty{});
+        for (self.ids, 0..) |id, i| children[i] = cx.make(Keeper{ .id = id }).withKey(id);
+        return cx.make(ui.Column{ .children = children });
+    }
+};
+
+test "keys keep state when siblings come and go, and dropped state is freed" {
+    const u = try ui.Ui.create(testing.allocator, null);
+    freed = 0;
+    u.frame(100, 100, 0, Keepers{ .ids = &.{ 1, 2, 3 } });
+    u.frame(100, 100, 0, Keepers{ .ids = &.{ 3, 1 } });
+    var keepers: std.ArrayList(*Node) = .empty;
+    defer keepers.deinit(testing.allocator);
+    try findAll(u.root.?, Keeper, &keepers);
+    try testing.expectEqual(@as(u32, 3), keepers.items[0].state(Keeper.State).id);
+    try testing.expectEqual(@as(u32, 1), keepers.items[1].state(Keeper.State).id);
+    try testing.expectEqual(@as(u32, 1), freed);
+    u.destroy();
+    try testing.expectEqual(@as(u32, 3), freed);
+}
+
+test "text wraps to fit, and a word that cannot is marked" {
+    const fira = try font.Font.init(fira_data);
+    const u = try ui.Ui.create(testing.allocator, &fira);
+    defer u.destroy();
+    const build = struct {
+        fn f(cx: *Context) Widget {
+            return cx.make(ui.Align{ .alignment = .top_left, .child = cx.make(ui.SizedBox{
+                .width = 70,
+                .child = cx.make(ui.Text{ .text = "Some words then Supercalifragilistic", .style = .{ .size = 14 } }),
+            }) });
+        }
+    }.f;
+    u.frame(200, 200, 0, Root(build){});
+    const t = find(u.root.?, ui.Text).?;
+    const line = (font.Style{ .font = &fira, .size = 14 }).lineHeight();
+    try testing.expect(t.size.h > 2.5 * line);
+    try testing.expect(t.overflow.right > 0);
+    const img = try Image.init(u, 200, 200);
+    defer img.deinit();
+    // Text was drawn.
+    var lit: u32 = 0;
+    for (img.pixels) |px| lit += @intFromBool(channels(px)[2] > 128);
+    try testing.expect(lit > 50);
+}
+
+test "an overlay's top layer takes the pointer where it has something" {
+    const u = try ui.Ui.create(testing.allocator, null);
+    defer u.destroy();
+    const S = struct {
+        var below: u32 = 0;
+        var above: u32 = 0;
+        fn addBelow(_: *const u8) void {
+            below += 1;
+        }
+        fn addAbove(_: *const u8) void {
+            above += 1;
+        }
+        const token: u8 = 0;
+        fn f(cx: *Context) Widget {
+            return cx.make(ui.Overlay{ .children = &.{
+                cx.make(ui.Pressable{ .on_press = .of(&token, addBelow) }),
+                cx.make(ui.Align{ .alignment = .top_left, .child = cx.make(ui.SizedBox{ .width = 50, .height = 50, .child = cx.make(ui.Pressable{ .on_press = .of(&token, addAbove) }) }) }),
+            } });
+        }
+    };
+    u.frame(200, 200, 0, Root(S.f){});
+    for ([_]ui.Point{ .{ 10, 10 }, .{ 100, 100 }, .{ 20, 40 } }) |p| {
+        u.pointerMotion(p);
+        u.pointerButton(p, ui.widgets.btn_left, true);
+        u.pointerButton(p, ui.widgets.btn_left, false);
+    }
+    try testing.expectEqual(@as(u32, 2), S.above);
+    try testing.expectEqual(@as(u32, 1), S.below);
+}
+
+/// Draws straight to the GPU.
+const GpuView = struct {
+    fn draw(_: *const GpuView, _: *vc4.render.Frame, _: ui.GpuArea) anyerror!void {}
+    pub fn paint(self: *const GpuView, _: *Node, p: *ui.Painter) void {
+        p.gpu(self, draw);
+    }
+};
+
+test "GPU draws go between the 2D layers, in the tree's order" {
+    const fira = try font.Font.init(fira_data);
+    const u = try ui.Ui.create(testing.allocator, &fira);
+    defer u.destroy();
+    const build = struct {
+        fn f(cx: *Context) Widget {
+            return cx.make(ui.Overlay{ .children = &.{
+                cx.make(ui.Decorated{ .color = red }),
+                cx.make(ui.Padding{ .padding = .all(10), .child = cx.make(GpuView{}) }),
+                cx.make(ui.Center{ .child = cx.make(ui.Text{ .text = "Over" }) }),
+            } });
+        }
+    }.f;
+    u.frame(200, 100, 0, Root(build){});
+    const segs = u.segments.items;
+    try testing.expectEqual(@as(usize, 3), segs.len);
+    try testing.expect(segs[0] == .canvas and segs[1] == .gpu and segs[2] == .canvas);
+    try testing.expectEqual(vc4.render.Viewport{ .x = 10, .y = 10, .width = 180, .height = 80 }, segs[1].gpu.area.viewport);
+    try testing.expect(segs[1].gpu.area.scissor == null);
+}
+
+test "rows and columns align and space their children" {
+    const u = try ui.Ui.create(testing.allocator, null);
+    defer u.destroy();
+    const build = struct {
+        fn f(cx: *Context) Widget {
+            return cx.make(ui.Column{ .children = &.{
+                cx.make(ui.Row{ .main_axis_alignment = .center, .spacing = 10, .children = &.{
+                    cx.make(ui.SizedBox{ .width = 20, .height = 10 }),
+                    cx.make(ui.SizedBox{ .width = 30, .height = 20 }),
+                } }),
+                cx.make(ui.Row{ .main_axis_alignment = .space_between, .cross_axis_alignment = .end, .children = &.{
+                    cx.make(ui.SizedBox{ .width = 20, .height = 10 }),
+                    cx.make(ui.Expanded{ .child = cx.make(ui.SizedBox{ .height = 5 }) }),
+                    cx.make(ui.SizedBox{ .width = 30, .height = 20 }),
+                } }),
+            } });
+        }
+    }.f;
+    u.frame(200, 100, 0, Root(build){});
+    const col = u.root.?.child(0);
+    const r1 = col.child(0);
+    // 20 + 10 + 30 = 60 wide, centred in 200; the small box centred
+    // across.
+    try testing.expectEqual(ui.Point{ 70, 5 }, r1.child(0).offset);
+    try testing.expectEqual(ui.Point{ 100, 0 }, r1.child(1).offset);
+    try testing.expectEqual(@as(f32, 20), r1.size.h);
+    const r2 = col.child(1);
+    try testing.expectEqual(@as(f32, 150), r2.child(1).size.w);
+    try testing.expectEqual(ui.Point{ 170, 0 }, r2.child(2).offset);
+    try testing.expectEqual(ui.Point{ 20, 15 }, r2.child(1).offset);
+}
