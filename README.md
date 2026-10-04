@@ -234,7 +234,7 @@ tests check that it gives exactly what the build embedded.
 |---|---|
 | `gpu.zig` | What shaders import as `gpu`: vector types, inputs and outputs by location, the uniform block, the position, the colour, texture sampling and helpers |
 | `spirv.zig` | Reading SPIR-V modules: types, constants, decorations, functions and entry points, with source lines |
-| `lower.zig` | Lowering an entry point to the vc4 compiler's builder, one value per scalar component, functions inlined; it adds the vertex's screen-space header, and the fragment's depth write and blending |
+| `lower.zig` | Lowering an entry point to the vc4 compiler's builder, one value per scalar component, functions inlined, control flow predicated and loops unrolled; it adds the vertex's screen-space header, and the fragment's depth write and blending |
 | `program.zig` | `Program`: linking the entry points by location, deriving the coordinate shader (reading only the attributes the position needs), and the encoding programs are embedded in |
 | `pipeline.zig` | `Pipeline`: a program uploaded to the GPU with its vertex layout, culling and primitive, recording draws into a `vc4` frame |
 | `tests.zig` | Tests of the built programs in the QPU simulator, and of compiling them again from SPIR-V |
@@ -243,9 +243,15 @@ Supported so far: `f32` scalars and vectors, arithmetic (division
 included), `@min`, `@max`, `@abs`, `@sqrt`, `@exp2`, `@log2`, `@mulAdd`
 and `@reduce(.Add, ...)`, helper functions, local variables, vertex
 inputs, varyings, one uniform block of floats, vectors and arrays, and one
-texture. Shaders are straight-line code for now: comparisons, branches and
-loops need branches in the compiler; `@floor` and the trigonometric
-built-ins are not there yet.
+texture. Control flow works too: comparisons, `if`, `switch`, `@select`,
+early returns, and loops (`while`, `for`, `break`). The compiler has no
+branches, so it is lowered by predication: the 16 lanes of a QPU each take
+their own way, every block some lane takes runs for those lanes, and
+variables keep their old values in the others. So both sides of an `if`
+cost time when the lanes differ, and loops are unrolled: they must stop
+after a number of iterations known when the shader is compiled (a `break`
+that depends on the data is fine). Integer arithmetic beyond loop
+counters, `@floor` and the trigonometric built-ins are not there yet.
 
 The 2D shaders' programs draw the `gfx` showcase identically to the
 builder-API versions they replaced, and the demo's are checked in the
@@ -677,7 +683,8 @@ GPU or display).
 
 ## Next steps
 
-- Shaders: comparisons and control flow (needs branches in the compiler),
+- Shaders: real branches in the compiler (for loops that depend on the
+  data, and skipping blocks no lane takes), discarding fragments,
   integers, `@floor`, and polynomial `sin`/`cos`.
 - Mipmaps, more texture formats, and depth buffers stored to memory.
 - Add `DRM_IOCTL_VC4_GET_HANG_STATE` reporting for GPU hangs.

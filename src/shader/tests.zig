@@ -234,3 +234,77 @@ test "the shell's textured quads copy texels exactly" {
         for (0..sim.lanes) |i| try testing.expectEqual(tex.at(i), r.tlb_color.?[i]);
     }
 }
+
+fn lanes(values: [sim.lanes]f32) sim.Vec {
+    var v: sim.Vec = undefined;
+    for (&v, values) |*e, x| e.* = f2u(x);
+    return v;
+}
+
+/// What testdata/flow.zig's fragment shader works out, done here.
+fn flowColor(c: [4]f32) [4]f32 {
+    var r = c[0];
+    if (c[1] < 0.25) {
+        r = 1;
+    } else if (c[1] < 0.5) {
+        r *= 0.5;
+    } else if (c[1] == 0.5) {
+        r = 0.75;
+    } else {
+        r = 0;
+    }
+    const x = if (c[2] >= c[3]) c[2] else c[3];
+    const g: f32 = if (x < 0.25) 0 else if (x < 0.5) 0.25 else if (x >= 0.75) 1 else 0.5;
+    var steps: f32 = 0;
+    for (0..4) |i| {
+        if (c[0] + @as(f32, @floatFromInt(i)) * 0.25 > 1) break;
+        steps += 0.125;
+    }
+    const sum = 0.5 * c[1] + 0.25 * c[1] + 0.125 * c[1];
+    const k: u32 = @intFromFloat(c[3] * 3);
+    const pick: f32 = switch (k) {
+        0 => 0.25,
+        1 => 0.5,
+        else => 0.125,
+    };
+    const sel = [2]f32{ if (c[2] > 0.5) 0.25 else 0, if (c[3] > 0.5) 0.25 else 0 };
+    return .{ r, g, steps + sum * 0.5, pick + sel[0] + sel[1] };
+}
+
+test "control flow: each fragment takes its own way through ifs, returns, loops and switches" {
+    var diag: program_mod.Diagnostic = .{};
+    const p = Program.compile(testing.allocator, @embedFile("flow.spv"), .{}, &diag) catch |err| {
+        std.debug.print("{s}\n", .{diag.message()});
+        return err;
+    };
+    var in: [4][sim.lanes]f32 = undefined;
+    for (0..sim.lanes) |i| {
+        const f: f32 = @floatFromInt(i);
+        in[0][i] = 0.05 + f * 0.06;
+        in[1][i] = ([4]f32{ 0.1, 0.3, 0.5, 0.7 })[i % 4];
+        in[2][i] = ([4]f32{ 0.1, 0.3, 0.6, 0.9 })[(i / 4) % 4];
+        in[3][i] = ([5]f32{ 0.2, 0.45, 0.7, 0.95, 0.05 })[i % 5];
+    }
+    const varyings = [_]sim.Vec{ lanes(in[0]), lanes(in[1]), lanes(in[2]), lanes(in[3]) };
+    var buf: [8]u32 = undefined;
+    const stream = uniformStream(&buf, &p.fs, &.{}, .{ 0, 0 });
+    const r = try sim.run(p.fs.code(), .{ .uniforms = stream, .varyings = &varyings });
+    for (0..sim.lanes) |i| {
+        const want = flowColor(.{ in[0][i], in[1][i], in[2][i], in[3][i] });
+        const packed_want = sim.packColor(want[0], want[1], want[2], want[3]);
+        for ([_]u5{ 0, 8, 16, 24 }) |sh| {
+            const d = @as(i32, @intCast(packed_want >> sh & 0xff)) - @as(i32, @intCast(r.tlb_color.?[i] >> sh & 0xff));
+            if (d < -1 or d > 1) {
+                std.debug.print("lane {d}: in {any}, want {any} ({x}), got {x}\n", .{ i, .{ in[0][i], in[1][i], in[2][i], in[3][i] }, want, packed_want, r.tlb_color.?[i] });
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+}
+
+test "loops whose number of iterations is not known when compiled are reported" {
+    var diag: program_mod.Diagnostic = .{};
+    try testing.expectError(error.Unsupported, Program.compile(testing.allocator, @embedFile("endless.spv"), .{}, &diag));
+    try testing.expect(std.mem.indexOf(u8, diag.message(), "endless.zig:") != null);
+    try testing.expect(std.mem.indexOf(u8, diag.message(), "loops must stop") != null);
+}

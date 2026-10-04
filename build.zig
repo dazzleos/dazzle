@@ -117,6 +117,13 @@ const shader_programs = [_]struct { source: []const u8, name: ?[]const u8 = null
     .{ .source = "src/shell/shaders/quad.zig", .owner = .shell, .args = &.{} },
 };
 
+/// Shaders the shader tests compile from SPIR-V themselves, embedded as
+/// `@embedFile("<name>.spv")`.
+const test_shaders = [_][]const u8{
+    "src/shader/testdata/flow.zig",
+    "src/shader/testdata/endless.zig",
+};
+
 const ShaderBlob = struct {
     /// The source's name without ".zig".
     name: []const u8,
@@ -128,12 +135,6 @@ const ShaderBlob = struct {
 /// Compiles the shader programs (once: they are the same for every
 /// target).
 fn addShaders(b: *std.Build) []const ShaderBlob {
-    const spirv_target = b.resolveTargetQuery(.{ .cpu_arch = .spirv64, .os_tag = .vulkan, .ofmt = .spirv });
-    const gpu = b.createModule(.{
-        .root_source_file = b.path("src/shader/gpu.zig"),
-        .target = spirv_target,
-        .optimize = .ReleaseFast,
-    });
     const shaderc = hostTool(b, "shaderc");
     _, _, const shader = addGpuModules(b, b.graph.host, .ReleaseSafe);
     shaderc.root_module.addImport("shader", shader);
@@ -141,23 +142,35 @@ fn addShaders(b: *std.Build) []const ShaderBlob {
     const blobs = b.allocator.alloc(ShaderBlob, shader_programs.len) catch @panic("OOM");
     for (shader_programs, blobs) |p, *blob| {
         const name = p.name orelse std.fs.path.stem(p.source);
-        const obj = b.addObject(.{
-            .name = name,
-            .root_module = b.createModule(.{
-                .root_source_file = b.path(p.source),
-                .target = spirv_target,
-                .optimize = .ReleaseFast,
-                .imports = &.{.{ .name = "gpu", .module = gpu }},
-            }),
-            .use_llvm = false,
-        });
+        const spirv = addSpirv(b, name, p.source);
         const run = b.addRunArtifact(shaderc);
-        run.addFileArg(obj.getEmittedBin());
+        run.addFileArg(spirv);
         const program = run.addOutputFileArg(b.fmt("{s}.shader", .{name}));
         run.addArgs(p.args);
-        blob.* = .{ .name = name, .owner = p.owner, .spirv = obj.getEmittedBin(), .program = program };
+        blob.* = .{ .name = name, .owner = p.owner, .spirv = spirv, .program = program };
     }
     return blobs;
+}
+
+/// A shader's Zig source compiled to SPIR-V.
+fn addSpirv(b: *std.Build, name: []const u8, source: []const u8) std.Build.LazyPath {
+    const spirv_target = b.resolveTargetQuery(.{ .cpu_arch = .spirv64, .os_tag = .vulkan, .ofmt = .spirv });
+    const gpu = b.createModule(.{
+        .root_source_file = b.path("src/shader/gpu.zig"),
+        .target = spirv_target,
+        .optimize = .ReleaseFast,
+    });
+    const obj = b.addObject(.{
+        .name = name,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(source),
+            .target = spirv_target,
+            .optimize = .ReleaseFast,
+            .imports = &.{.{ .name = "gpu", .module = gpu }},
+        }),
+        .use_llvm = false,
+    });
+    return obj.getEmittedBin();
 }
 
 fn addShaderImports(m: *std.Build.Module, shaders: []const ShaderBlob, owner: ShaderOwner) void {
@@ -519,6 +532,10 @@ pub fn build(b: *std.Build) void {
     for (shaders) |s| {
         host.shader.addAnonymousImport(b.fmt("{s}.shader", .{s.name}), .{ .root_source_file = s.program });
         host.shader.addAnonymousImport(b.fmt("{s}.spv", .{s.name}), .{ .root_source_file = s.spirv });
+    }
+    for (test_shaders) |source| {
+        const name = std.fs.path.stem(source);
+        host.shader.addAnonymousImport(b.fmt("{s}.spv", .{name}), .{ .root_source_file = addSpirv(b, name, source) });
     }
     // The font tests use the real system font.
     for ([_]*std.Build.Module{ host.font, host.gfx, host.ui }) |m| m.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });

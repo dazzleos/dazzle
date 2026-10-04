@@ -18,9 +18,12 @@
 //!         gpu.color.* = color.*;
 //!     }
 //!
-//! Shaders are straight-line code for now: no branches, loops,
-//! comparisons or @select. The fragment's colour is straight RGBA;
-//! blending and depth testing are set when the program is built.
+//! Comparisons, `if`, `switch`, `@select` and loops work, by predication
+//! (each of the 16 lanes takes its own way, and both sides of an `if` run
+//! when they differ). Loops are unrolled, so they must stop after a number
+//! of iterations known when the shader is compiled; a `break` that depends
+//! on the data is fine. The fragment's colour is straight RGBA; blending
+//! and depth testing are set when the program is built.
 
 const std = @import("std");
 

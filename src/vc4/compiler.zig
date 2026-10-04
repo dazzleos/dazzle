@@ -1,9 +1,10 @@
 //! Shader compiler: builds shaders as a list of SSA values and generates
 //! QPU code for them.
 //!
-//! Shaders are straight-line programs (no control flow yet). Each value is
-//! produced by exactly one instruction; the builder methods on `Shader`
-//! append instructions and return the value they define.
+//! Shaders are straight-line programs (the shader lowering predicates
+//! control flow before it gets here). Each value is produced by exactly
+//! one instruction; the builder methods on `Shader` append instructions
+//! and return the value they define.
 //!
 //! Compilation runs these passes:
 //!
