@@ -141,7 +141,9 @@ pub const Usage = struct {
 /// the memory available.
 pub const Storage = struct {
     /// Bytes of files: the system's (init and the shell), the apps' (in
-    /// /apps) and the user's (in /home, when there is one).
+    /// /apps) and the user's (what is used of the SD card's space for
+    /// files, /data, once setup has prepared it); and what is free (there,
+    /// or else of the memory the system runs in).
     system: u64 = 0,
     apps: u64 = 0,
     user: u64 = 0,
@@ -225,12 +227,15 @@ pub const UsageMonitor = struct {
             all.add("/", 0);
             var apps: Tally = .{};
             apps.add("/apps", 1);
-            var user: Tally = .{};
-            user.add("/home", 1);
-            m.storage = .{ .system = all.bytes -| apps.bytes -| user.bytes, .apps = apps.bytes, .user = user.bytes };
+            m.storage = .{ .system = all.bytes -| apps.bytes, .apps = apps.bytes };
         }
         u.storage = m.storage;
         u.storage.free = u.mem_available;
+        // The card's space for files, once it is there (an ext4 mount).
+        if (sys.diskSpace(sys.system.data_dir)) |d| if (d.kind == 0xef53) {
+            u.storage.user = d.total -| d.free;
+            u.storage.free = d.free;
+        };
         return u;
     }
 };
@@ -259,7 +264,7 @@ pub const Tally = struct {
                 const name = std.mem.sliceTo(buf[at + 19 .. at + reclen], 0);
                 at += reclen;
                 if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
-                if (depth == 0 and (std.mem.eql(u8, name, "proc") or std.mem.eql(u8, name, "sys") or std.mem.eql(u8, name, "dev"))) continue;
+                if (depth == 0 and (std.mem.eql(u8, name, "proc") or std.mem.eql(u8, name, "sys") or std.mem.eql(u8, name, "dev") or std.mem.eql(u8, name, "data"))) continue;
                 var child_buf: [512]u8 = undefined;
                 const sep: []const u8 = if (std.mem.endsWith(u8, path, "/")) "" else "/";
                 const child = std.fmt.bufPrintZ(&child_buf, "{s}{s}{s}", .{ path, sep, name }) catch continue;

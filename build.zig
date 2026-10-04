@@ -548,6 +548,11 @@ pub fn build(b: *std.Build) void {
         .root_module = addProgramModule(b, "src/files/main.zig", target, optimize, pi, shaders, true),
     });
     const install_files = b.addInstallArtifact(files_exe, .{});
+    const setup_exe = b.addExecutable(.{
+        .name = "dazzle-setup",
+        .root_module = addProgramModule(b, "src/setup/main.zig", target, optimize, pi, shaders, true),
+    });
+    const install_setup = b.addInstallArtifact(setup_exe, .{});
     const shell_exe = b.addExecutable(.{
         .name = "dazzle-shell",
         .root_module = addProgramModule(b, "src/shell/main.zig", target, optimize, pi, shaders, true),
@@ -575,13 +580,15 @@ pub fn build(b: *std.Build) void {
         run_mkinitramfs.addArg(b.fmt("--file=lib/firmware/brcm/{s}={s}", .{ f.name, b.pathJoin(&.{ b.pathFromRoot("build/firmware/wifi"), f.name }) }));
     }
     run_mkinitramfs.addPrefixedFileArg("--file=lib/firmware/brcm/LICENCE.cypress=", b.path("firmware/LICENCE.cypress"));
+    // The shell's own apps, beside it in /shell (they cannot be removed).
+    run_mkinitramfs.addPrefixedArtifactArg("--shell=", settings_exe);
+    run_mkinitramfs.addPrefixedArtifactArg("--shell=", setup_exe);
     // The apps, each in /apps/<name>, listed in the shell's dock.
     run_mkinitramfs.addArtifactArg(demo_exe);
-    run_mkinitramfs.addArtifactArg(settings_exe);
     run_mkinitramfs.addArtifactArg(files_exe);
     const install_initramfs = b.addInstallFile(initramfs, "initramfs.cpio");
     const programs_step = b.step("programs", "Build just the programs (zig-out/bin) and zig-out/initramfs.cpio");
-    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_settings.step, &install_files.step, &install_shell.step, &install_initramfs.step }) |st| {
+    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_settings.step, &install_files.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
         programs_step.dependOn(st);
         b.getInstallStep().dependOn(st);
     }
@@ -620,6 +627,8 @@ pub fn build(b: *std.Build) void {
     host_settings.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_files = addProgramModule(b, "src/files/main.zig", b.graph.host, test_optimize, host, shaders, null);
     host_files.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
+    const host_setup = addProgramModule(b, "src/setup/main.zig", b.graph.host, test_optimize, host, shaders, null);
+    host_setup.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     for ([_]*std.Build.Module{
         host.sys,
         host.vc4,
@@ -633,6 +642,7 @@ pub fn build(b: *std.Build) void {
         host_demo,
         host_settings,
         host_files,
+        host_setup,
         addProgramModule(b, "src/shell/main.zig", b.graph.host, test_optimize, host, shaders, null),
     }) |m| {
         const t = b.addTest(.{ .root_module = m });

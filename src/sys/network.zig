@@ -42,7 +42,7 @@ const std = @import("std");
 pub const socket_name = "network";
 
 /// The only program the manager answers.
-pub const allowed_program = "/apps/dazzle-settings/dazzle-settings";
+pub const allowed_program = "/shell/dazzle-settings";
 
 pub const max_networks = 24;
 

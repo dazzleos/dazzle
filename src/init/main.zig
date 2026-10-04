@@ -3,20 +3,25 @@
 //! Init is the only process that keeps root privileges. It:
 //!
 //! 1. mounts /proc, /sys and /dev, and sends its messages to the kernel log;
-//! 2. creates the user's runtime directory (/run/user/1000, for the
-//!    Wayland socket and the network manager's), starts the network
-//!    manager (see network.zig), which brings the wired and Wi-Fi network
-//!    up in the background and answers the settings app, and the log server
-//!    (which drops to the Dazzle user once it has bound its port); boot
-//!    never waits for the network;
-//! 3. starts the device manager (see devices.zig), which gives the Dazzle
+//! 2. waits a moment for the SD card and mounts its space for files at
+//!    /data (if setup has prepared it), and names the computer as kept
+//!    there (or "dazzle");
+//! 3. creates the user's runtime directory (/run/user/1000, for the
+//!    Wayland socket and the managers'), starts the network manager (see
+//!    network.zig), which brings the wired and Wi-Fi network up in the
+//!    background and answers the settings app, and the log server (which
+//!    drops to the Dazzle user once it has bound its port); boot never
+//!    waits for the network;
+//! 4. starts the device manager (see devices.zig), which gives the Dazzle
 //!    user the input devices (USB keyboards and mice), now and when they
-//!    are plugged in; waits for the vc4 GPU and gives the Dazzle user access to its device
-//!    nodes;
-//! 4. starts /shell/dazzle-shell, the Wayland compositor, as the Dazzle
-//!    user, with its output going to the kernel log; its dock starts the
-//!    apps in /apps;
-//! 5. reaps exited processes forever (PID 1 must never exit), restarting the
+//!    are plugged in; waits for the vc4 GPU and gives the Dazzle user access
+//!    to its device nodes;
+//! 5. until setup has finished, starts the system manager (see system.zig),
+//!    which prepares the card and names the computer for the setup app;
+//! 6. starts /shell/dazzle-shell, the Wayland compositor, as the Dazzle
+//!    user (with --setup until setup has finished), with its output going
+//!    to the kernel log; its dock starts the apps;
+//! 7. reaps exited processes forever (PID 1 must never exit), restarting the
 //!    network and device managers if they ever stop.
 //!
 //! The Dazzle user is just a user ID (see `sys.user`): there are no
@@ -28,6 +33,8 @@ const sys = @import("sys");
 const logserver = @import("logserver.zig");
 const network = @import("network.zig");
 const devices = @import("devices.zig");
+const storage = @import("storage.zig");
+const system = @import("system.zig");
 const build_info = @import("build_info");
 
 const print = sys.print;
@@ -43,13 +50,20 @@ pub fn main() void {
     mountPseudoFilesystems();
     sys.logToKmsg();
     print("dazzle: starting as init (build {s})\n", .{build_info.commit});
-    _ = linux.syscall2(.sethostname, @intFromPtr(network.hostname), network.hostname.len);
+    // The card's files (and the computer's name, kept there).
+    const card = storage.boot();
+    const name = card.hostname.slice();
+    _ = linux.syscall2(.sethostname, @intFromPtr(name.ptr), name.len);
     makeRuntimeDir();
     const network_pid = network.start(runtime_dir);
     logserver.start();
     const devices_pid = devices.start();
     grantGpuAccess();
-    const shell_pid = startShell();
+    // Until setup has finished, the shell runs the setup app (and nothing
+    // else), and the system manager prepares the card and names the
+    // computer for it.
+    if (!card.setup_done) _ = system.start(runtime_dir, card.card, card.mounted);
+    const shell_pid = startShell(!card.setup_done);
     reapForever(shell_pid, network_pid, devices_pid);
 }
 
@@ -111,7 +125,7 @@ fn makeRuntimeDir() void {
 
 /// Starts the shell as the Dazzle user. Returns its PID, or null if it
 /// could not be started.
-fn startShell() ?linux.pid_t {
+fn startShell(setup: bool) ?linux.pid_t {
     const rc = linux.fork();
     switch (linux.errno(rc)) {
         .SUCCESS => {},
@@ -136,7 +150,7 @@ fn startShell() ?linux.pid_t {
         print("dazzle: cannot drop privileges ({s}); not starting the shell\n", .{@errorName(err)});
         linux.exit(126);
     };
-    const argv = [_:null]?[*:0]const u8{shell_path};
+    const argv = [_:null]?[*:0]const u8{ shell_path, if (setup) "--setup" else null };
     const envp = [_:null]?[*:0]const u8{ "HOME=/", "USER=" ++ sys.user.name, "XDG_RUNTIME_DIR=" ++ runtime_dir };
     const err = linux.errno(linux.execve(shell_path, &argv, &envp));
     print("dazzle: cannot run {s} ({s})\n", .{ shell_path, @tagName(err) });
@@ -189,4 +203,7 @@ test {
     _ = @import("devices.zig");
     _ = @import("nl80211.zig");
     _ = @import("supplicant.zig");
+    _ = @import("mkfs.zig");
+    _ = @import("storage.zig");
+    _ = @import("system.zig");
 }

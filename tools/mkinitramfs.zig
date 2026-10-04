@@ -7,19 +7,22 @@
 //!
 //!     /init                                     dazzle-init
 //!     /shell/dazzle-shell
+//!     /shell/<program>                          the shell's own apps
 //!     /shell/FiraSans-Regular.ttf
 //!     /shell/FiraSans-OFL.txt
 //!     /apps/<app>/<app>                         for each app binary
 //!     /apps/<app>/FiraSans-Regular.ttf
 //!     /apps/<app>/FiraSans-OFL.txt
-//!     /dev, /proc, /sys                         mount points
+//!     /dev, /proc, /sys, /data                  mount points
 //!
 //!     /lib/firmware/brcm/...                    the Wi-Fi chips' firmware
 //!
-//! An app is named after its binary (dazzle-demo, dazzle-settings).
-//! Other files are given as --file=<path in the archive>=<file>.
+//! An app is named after its binary (dazzle-demo, dazzle-files). The
+//! shell's own apps (dazzle-settings, dazzle-setup), which cannot be
+//! removed, go beside it: --shell=<binary>. Other files are given as
+//! --file=<path in the archive>=<file>.
 //!
-//! Usage: mkinitramfs <output.cpio> <init-binary> <shell-binary> <font> <font-license> [<app-binary> | --file=<path>=<file>]...
+//! Usage: mkinitramfs <output.cpio> <init-binary> <shell-binary> <font> <font-license> [<app-binary> | --shell=<binary> | --file=<path>=<file>]...
 
 const std = @import("std");
 
@@ -69,7 +72,7 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len < 6) {
-        std.debug.print("usage: {s} <output.cpio> <init-binary> <shell-binary> <font> <font-license> [<app-binary> | --file=<path>=<file>]...\n", .{args[0]});
+        std.debug.print("usage: {s} <output.cpio> <init-binary> <shell-binary> <font> <font-license> [<app-binary> | --shell=<binary> | --file=<path>=<file>]...\n", .{args[0]});
         std.process.exit(2);
     }
     const arena = init.arena.allocator();
@@ -90,6 +93,7 @@ pub fn main(init: std.process.Init) !void {
         .{ .name = "dev/console", .mode = S_IFCHR | 0o600, .rdev_major = 5, .rdev_minor = 1 },
         .{ .name = "proc", .mode = S_IFDIR | 0o755 },
         .{ .name = "sys", .mode = S_IFDIR | 0o755 },
+        .{ .name = "data", .mode = S_IFDIR | 0o755 },
         .{ .name = "init", .mode = S_IFREG | 0o755, .data = init_bin },
         .{ .name = "shell", .mode = S_IFDIR | 0o755 },
         .{ .name = "shell/dazzle-shell", .mode = S_IFREG | 0o755, .data = shell_bin },
@@ -113,6 +117,13 @@ pub fn main(init: std.process.Init) !void {
             }
             const data = try cwd.readFileAlloc(io, spec[eq + 1 ..], arena, .limited(16 * 1024 * 1024));
             try entries.append(arena, .{ .name = dest, .mode = S_IFREG | 0o644, .data = data });
+            continue;
+        }
+        // One of the shell's own apps, beside it (using its font).
+        if (std.mem.startsWith(u8, path, "--shell=")) {
+            const bin_path = path["--shell=".len..];
+            const bin = try cwd.readFileAlloc(io, bin_path, arena, .limited(64 * 1024 * 1024));
+            try entries.append(arena, .{ .name = try std.fmt.allocPrint(arena, "shell/{s}", .{std.fs.path.basename(bin_path)}), .mode = S_IFREG | 0o755, .data = bin });
             continue;
         }
         const name = std.fs.path.basename(path);

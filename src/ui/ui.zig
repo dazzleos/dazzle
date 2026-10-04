@@ -38,7 +38,7 @@
 //!   ConstrainedBox, Grid, Overlay, Decorated, Pressable
 //! * `scroll_view`: ScrollView
 //! * `text`: Text
-//! * `material`: the theme, OutlinedButton
+//! * `material`: the theme, OutlinedButton, Spinner
 //! * `controls`: Checkbox, Radio, Switch
 //! * `text_field`: TextField
 //! * `title_bar`: TitleBar, the bar apps draw across the top of their window
@@ -100,6 +100,7 @@ pub const TextAlign = text.TextAlign;
 
 pub const Theme = material.Theme;
 pub const OutlinedButton = material.OutlinedButton;
+pub const Spinner = material.Spinner;
 pub const Checkbox = controls.Checkbox;
 pub const Radio = controls.Radio;
 pub const Switch = controls.Switch;

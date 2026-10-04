@@ -472,6 +472,18 @@ pub const Server = struct {
         if (b.destroyed) s.freeBuffer(b) else sendRelease(b);
     }
 
+    /// Moves the work area (when the dock comes or goes): maximized windows
+    /// are told the new size, and restored ones kept in it.
+    pub fn setWorkArea(s: *Server, wa: Rect) void {
+        s.work_area = wa;
+        for (s.toplevels.items) |t| {
+            const surf = t.xdg.surface orelse continue;
+            if (!t.maximized and t.shown()) s.moveWindow(t, @floatFromInt(t.x), @floatFromInt(t.y));
+            s.configure(surf.client, t);
+        }
+        s.damaged = true;
+    }
+
     /// The dma-buf buffer a window shows, if it can go on the display as it
     /// is: maximized, and the size of the work area.
     pub fn scanoutBuffer(s: *const Server, t: *const Toplevel) ?*Buffer {

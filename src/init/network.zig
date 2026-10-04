@@ -15,7 +15,7 @@
 //!
 //! It listens on $XDG_RUNTIME_DIR/network (see `sys.network` for the
 //! protocol) and answers only the settings app: the program the connecting
-//! process runs must be /apps/dazzle-settings/dazzle-settings. Every
+//! process runs must be /shell/dazzle-settings. Every
 //! app runs as the same user, so the socket's permissions alone could not
 //! tell them apart. Nothing is remembered across a reboot: the system lives
 //! in RAM.
@@ -28,8 +28,6 @@ const wifi = @import("wifi.zig");
 
 const proto = sys.network;
 const print = sys.print;
-
-pub const hostname = ipv4.hostname;
 
 /// How often to look for a wired adapter, and whether it is still there.
 const look_ns = 2 * std.time.ns_per_s;
@@ -231,9 +229,9 @@ fn listen(path: [:0]const u8) !linux.fd_t {
 }
 
 test "only the settings app is answered" {
-    try std.testing.expect(isAllowedProgram("/apps/dazzle-settings/dazzle-settings"));
+    try std.testing.expect(isAllowedProgram("/shell/dazzle-settings"));
     try std.testing.expect(!isAllowedProgram("/apps/dazzle-demo/dazzle-demo"));
-    try std.testing.expect(!isAllowedProgram("/apps/dazzle-settings/dazzle-settings (deleted)"));
+    try std.testing.expect(!isAllowedProgram("/shell/dazzle-settings (deleted)"));
     try std.testing.expect(!isAllowedProgram("/tmp/dazzle-settings"));
 }
 

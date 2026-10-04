@@ -1,9 +1,10 @@
-//! The dock along the bottom of the screen: an icon for each app in /apps.
-//! Clicking one starts the app or, if it is running, brings its window to
-//! the front (apps run once each).
+//! The dock along the bottom of the screen: an icon for each app in /apps,
+//! and for the shell's own (Settings). Clicking one starts the app or, if it
+//! is running, brings its window to the front (apps run once each).
 //!
 //! An app is a directory /apps/<name> holding its program, also called
-//! <name>, and the files it needs (such as its font). Its icon is its
+//! <name>, and the files it needs (such as its font). The shell's own apps
+//! are programs beside it in /shell, and cannot be removed. Its icon is its
 //! initial on a coloured square, with a dot under it while it runs.
 
 const std = @import("std");
@@ -34,15 +35,36 @@ pub const App = struct {
     }
 };
 
-/// The apps in `dir`, sorted by name: its directories that hold a program
-/// of the same name.
-pub fn findApps(gpa: std.mem.Allocator, dir_path: []const u8) ![]App {
-    var path_buf: [256]u8 = undefined;
-    const dir_z = try std.fmt.bufPrintZ(&path_buf, "{s}", .{dir_path});
-    const dir = sys.open(dir_z, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }) catch return &.{};
-    defer sys.close(dir);
+/// The apps in `dir` (its directories that hold a program of the same
+/// name) and the programs `builtin` (paths, those that are there), sorted
+/// by name.
+pub fn findApps(gpa: std.mem.Allocator, dir_path: []const u8, builtin: []const []const u8) ![]App {
     var apps: std.ArrayList(App) = .empty;
     errdefer apps.deinit(gpa);
+    for (builtin) |p| {
+        const path = try gpa.dupeZ(u8, p);
+        if (linux.errno(linux.access(path, linux.X_OK)) != .SUCCESS) {
+            gpa.free(path);
+            continue;
+        }
+        const owned = try gpa.dupe(u8, std.fs.path.basename(p));
+        try apps.append(gpa, .{ .name = owned, .label = try label(gpa, owned), .path = path });
+    }
+    var path_buf: [256]u8 = undefined;
+    const dir_z = try std.fmt.bufPrintZ(&path_buf, "{s}", .{dir_path});
+    if (sys.open(dir_z, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true })) |dir| {
+        defer sys.close(dir);
+        try addDir(gpa, &apps, dir, dir_path);
+    } else |_| {}
+    std.mem.sort(App, apps.items, {}, struct {
+        fn lessThan(_: void, a: App, b: App) bool {
+            return std.mem.lessThan(u8, a.name, b.name);
+        }
+    }.lessThan);
+    return apps.toOwnedSlice(gpa);
+}
+
+fn addDir(gpa: std.mem.Allocator, apps: *std.ArrayList(App), dir: linux.fd_t, dir_path: []const u8) !void {
     var buf: [2048]u8 align(8) = undefined;
     while (true) {
         const n = try sys.check(linux.getdents64(dir, &buf, buf.len));
@@ -62,12 +84,6 @@ pub fn findApps(gpa: std.mem.Allocator, dir_path: []const u8) ![]App {
             try apps.append(gpa, .{ .name = owned, .label = try label(gpa, owned), .path = path });
         }
     }
-    std.mem.sort(App, apps.items, {}, struct {
-        fn lessThan(_: void, a: App, b: App) bool {
-            return std.mem.lessThan(u8, a.name, b.name);
-        }
-    }.lessThan);
-    return apps.toOwnedSlice(gpa);
 }
 
 /// "dazzle-demo" is shown as "Demo".
@@ -246,7 +262,10 @@ test "apps are the directories holding a program of the same name" {
         _ = linux.fchmod(fd, 0o755);
         sys.close(fd);
     }
-    const apps = try findApps(a, root);
+    // And a program of the shell's own (one that is not there is left out).
+    var own_buf: [128]u8 = undefined;
+    const own = try std.fmt.bufPrint(&own_buf, "{s}/zeta/zeta", .{root});
+    const apps = try findApps(a, root, &.{ own, "/nonexistent/beta" });
     defer {
         for (apps) |app| {
             a.free(app.name);
@@ -255,9 +274,10 @@ test "apps are the directories holding a program of the same name" {
         }
         a.free(apps);
     }
-    try testing.expectEqual(@as(usize, 2), apps.len);
+    try testing.expectEqual(@as(usize, 3), apps.len);
     try testing.expectEqualStrings("alpha", apps[0].name);
     try testing.expectEqualStrings("Zeta", apps[1].label);
+    try testing.expectEqualStrings("zeta", apps[2].name);
     try testing.expect(std.mem.endsWith(u8, apps[1].path, "/zeta/zeta"));
-    try testing.expectEqual(@as(usize, 0), (try findApps(a, "/nonexistent")).len);
+    try testing.expectEqual(@as(usize, 0), (try findApps(a, "/nonexistent", &.{})).len);
 }

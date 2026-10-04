@@ -11,7 +11,16 @@ const dhcp = @import("dhcp.zig");
 const Ip4 = dhcp.Ip4;
 const print = sys.print;
 
-pub const hostname = "dazzle";
+/// The computer's name, as DHCP is told it (it can change while a lease
+/// is kept: setup names the computer).
+fn hostname(buf: *[65]u8) []const u8 {
+    var uts: linux.utsname = undefined;
+    if (linux.errno(linux.uname(&uts)) != .SUCCESS) return "dazzle";
+    const name = std.mem.sliceTo(&uts.nodename, 0);
+    const n = @min(name.len, buf.len);
+    @memcpy(buf[0..n], name[0..n]);
+    return buf[0..n];
+}
 
 pub const Interface = struct {
     name_buf: [linux.IFNAMESIZE]u8 = @splat(0),
@@ -305,7 +314,8 @@ fn dhcpSession(ctl: linux.fd_t, ifc: *const Interface, previous: *?Ip4) Error!vo
     while (true) {
         // Selecting: discover servers and request the first offer.
         c.xid +%= 1;
-        const offer = (try c.exchange(.{ .type = .discover, .xid = c.xid, .mac = ifc.mac, .requested_ip = previous.*, .hostname = hostname }, broadcast, &.{.offer}, null)).?;
+        var name_buf: [65]u8 = undefined;
+        const offer = (try c.exchange(.{ .type = .discover, .xid = c.xid, .mac = ifc.mac, .requested_ip = previous.*, .hostname = hostname(&name_buf) }, broadcast, &.{.offer}, null)).?;
         const server = offer.server_id orelse continue;
         const ack = (try c.exchange(.{
             .type = .request,
@@ -313,7 +323,7 @@ fn dhcpSession(ctl: linux.fd_t, ifc: *const Interface, previous: *?Ip4) Error!vo
             .mac = ifc.mac,
             .requested_ip = offer.yiaddr,
             .server_id = server,
-            .hostname = hostname,
+            .hostname = hostname(&name_buf),
         }, broadcast, &.{ .ack, .nak }, sys.nowNs() + 60 * std.time.ns_per_s)) orelse continue;
         if (ack.type == .nak) continue;
 
@@ -334,7 +344,7 @@ fn dhcpSession(ctl: linux.fd_t, ifc: *const Interface, previous: *?Ip4) Error!vo
             // Renewing: ask the server that granted the lease, then any
             // server, until the lease runs out.
             c.xid +%= 1;
-            const renew: dhcp.Request = .{ .type = .request, .xid = c.xid, .mac = ifc.mac, .ciaddr = lease.address, .hostname = hostname };
+            const renew: dhcp.Request = .{ .type = .request, .xid = c.xid, .mac = ifc.mac, .ciaddr = lease.address, .hostname = hostname(&name_buf) };
             const reply = (try c.exchange(renew, lease.server, &.{ .ack, .nak }, granted + @as(u64, lease.rebind_after) * s)) orelse
                 (try c.exchange(renew, broadcast, &.{ .ack, .nak }, granted + @as(u64, lease.expires_after) * s));
             if (reply != null and reply.?.type == .ack) {

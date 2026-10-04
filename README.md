@@ -44,9 +44,10 @@ The code is split into Zig modules, linked statically into each program:
 | `ui` | `src/ui/` | The widget toolkit: declarative widgets with state, layout, painting and input, in Material 3's style |
 | `font` | `src/font/` | OpenType font rendering, described below |
 | `wayland` | `src/wayland/` | The Wayland wire protocol (with file descriptor passing), the interfaces Dazzle uses, and a small client library |
-| `dazzle-init` | `src/init/` | The init program: mounts, network, Wi-Fi scanning, log server, device permissions, starting the shell |
+| `dazzle-init` | `src/init/` | The init program: mounts, the SD card's space for files (partitioning and formatting it on the first run), network, Wi-Fi, log server, device permissions, starting the shell |
 | `dazzle-shell` | `src/shell/` | The Wayland compositor and shell, described below |
 | `dazzle-demo` | `src/demo/` | The demo, a native app |
+| `dazzle-setup` | `src/setup/` | The setup app, on the first run only: names the computer while the SD card is prepared |
 | `dazzle-settings` | `src/settings/` | The settings app: the build, the hardware, what is in use and the network |
 | `dazzle-files` | `src/files/` | The Files app: a tree of folders and a grid of what is in the open one |
 
@@ -358,7 +359,6 @@ The demo program (`src/demo/`):
 | `view.zig` | The window's widgets: the rings and the solid behind a column with the statistics, the speed buttons, the radio buttons choosing the solid, and the lighting and texture switches |
 | `rings.zig` | The rings drawn where the pointer clicks: stroked circles on the 2D canvas, fading out |
 | `solids.zig` | The five Platonic solids: meshes found from their corners (with flat normals, a tint per face and a checkerboard across each), drawn with depth testing and culling, lit and textured or not |
-| `netinfo.zig` | Looks up the IPv4 address (SIOCGIFCONF, no privileges needed) |
 | `shaders/` | The solids' shader: tint, optional lighting (diffuse from a fixed light, with ambient) and optional texture |
 
 ### Privileges
@@ -388,6 +388,12 @@ passwords or logins.
   and it checks instead which program the connecting process runs
   (`/proc/<pid>/exe`, from the socket's peer credentials). Init restarts it
   if it ever stops.
+- The system manager runs only on the first run, while the setup app
+  does, as the user keeping three capabilities: `CAP_SYS_ADMIN` (writing
+  the card's partition table, mounting and setting the hostname),
+  `CAP_DAC_OVERRIDE` (the card's device node and the root-owned `/data`)
+  and `CAP_CHOWN` (giving `/data/system` to root). Its socket,
+  `/run/user/1000/system`, answers only `/shell/dazzle-setup`.
 - The device manager runs as the user, keeping only `CAP_CHOWN`. Input
   device nodes are created owned by root, so it gives each one to the user
   (at start, then on each uevent that adds one), and the shell can read
@@ -412,11 +418,16 @@ The image's filesystem (an initramfs, in RAM) is kept simple:
 
 ```
 /init                       dazzle-init
-/shell/                     dazzle-shell, FiraSans-Regular.ttf and its license
+/shell/                     dazzle-shell, its own apps (dazzle-settings and
+                            dazzle-setup, which cannot be removed),
+                            FiraSans-Regular.ttf and its license
 /apps/dazzle-demo/          dazzle-demo, FiraSans-Regular.ttf and its license
-/apps/dazzle-settings/      dazzle-settings, FiraSans-Regular.ttf and its license
 /apps/dazzle-files/         dazzle-files, FiraSans-Regular.ttf and its license
 /dev /proc /sys /run        mounted or created by init
+/data                       the SD card's space for files, once setup has
+                            prepared it: /data/system (the computer's name,
+                            and a mark that setup has finished; root's) and
+                            /data/user (the user's)
 ```
 
 There is no C library: programs make raw system calls through
@@ -487,8 +498,27 @@ device tree (`config.txt`).
 ## Running on a Pi Zero or Pi 3 A+
 
 Write `zig-out/dazzle.img` to an SD card (`dd`, or Raspberry Pi Imager's
-"Use custom" option). Alternatively, copy the contents of `zig-out/boot/`
-onto any FAT32-formatted card. The same card works in either board.
+"Use custom" option). The same card works in either board.
+
+### The first run
+
+The first time it starts, the screen shows the setup app
+(`/shell/dazzle-setup`) and no dock. It asks for the computer's name, filled
+in with a random two words (like `awesome-elephant`), on pages with Next
+buttons (more pages, such as the language, keyboard and network, are to
+come). Meanwhile init's system manager (`src/init/system.zig`) makes the
+rest of the card a place for files: it adds a partition from the end of the
+system's (rounded up to 4 MiB) to the end of the card (`src/init/storage.zig`),
+gives it an empty filesystem (`src/init/mkfs.zig`: ext2's layout with a
+journal, which the kernel's ext4 driver mounts; written a few block groups
+at a time, so setup can say how far it has got) and mounts it at `/data`.
+After the last page, a spinner shows while that finishes, if it has not.
+Then the computer is named (and the name kept in `/data/system`, for every
+boot after), setup is marked done, and the dock appears. If the card
+cannot be prepared (it is no bigger than the image, say), setup says why;
+files are then not kept, and setup runs again at the next start. The
+journal keeps the filesystem consistent through a power cut, the usual way
+to turn a Pi off.
 
 Connect HDMI, and a USB Ethernet adapter cabled to your network: on the
 Zero's USB (OTG) port via a micro-USB OTG adapter, or in the Pi 3 A+'s USB
@@ -614,7 +644,8 @@ a program keeping one core busy shows 25%.
 
 ### The settings app
 
-Click "S" in the dock. Its window has four cards, with the figures that
+Click "S" in the dock (Settings is one of the shell's own apps, in
+`/shell`). Its window has four cards, with the figures that
 change read again every second (`src/settings/info.zig`):
 
 - **System:** the build (git commit), Linux's version, how long the system
@@ -624,10 +655,10 @@ change read again every second (`src/settings/info.zig`):
 - **Resources:** how busy the CPU is, the SoC's temperature, memory, the
   GPU's memory (the CMA pool all GPU buffers come from: the V3D has no
   MMU), and storage: a bar of what the system, the apps and the user's
-  files take, with a key that ends with the free space. Dazzle has no driver for the SD card:
-  the firmware loads the system into memory at boot and it runs from
-  there, so its storage is that filesystem in RAM and its free space the
-  memory available; the bar will say more once there is real storage. The
+  files take, with a key that ends with the free space. The system and
+  apps run from memory (the firmware loads them at boot); the user's
+  share and the free space are the SD card's space for files (`/data`),
+  once setup has prepared it, or else the memory available. The
   meters turn red above 90%.
 - **Ethernet:** each wired adapter's link (and speed), its address
   (and whether it came from DHCP or is static), traffic and MAC
@@ -720,7 +751,11 @@ read says so.
   other cores wait in a 64-bit loop the kernel cannot use, so it runs on
   one. `http://localhost:8080/`
   reaches the log server. QEMU does not emulate the 3D engine or HDMI,
-  so this checks the kernel, init, privileges and networking only. The log
+  so this checks the kernel, init, privileges and networking only. To
+  try the SD card, give QEMU a copy of the image grown to a power of two
+  (`truncate -s 512M card.img`) after `--`: `-drive
+  file=card.img,if=sd,format=raw`; init then mounts `/data` if setup has
+  prepared it. The log
   ends with `dazzle-shell: error: NoVc4Device` and `dazzle: shell exited
   with status 1`.
 
@@ -839,9 +874,10 @@ GPU or display).
   buttons), text selection and non-ASCII typing, keyboard layouts other
   than US, animations, and logical pixels (a scale for the display's
   density).
-- Wi-Fi: WPA3 (SAE), remembering networks across reboots (once there is
-  storage), and turning a passphrase into a key without holding up the
-  manager.
+- Wi-Fi: WPA3 (SAE), remembering networks across reboots (in `/data`),
+  and turning a passphrase into a key without holding up the manager.
+- Setup: more pages (language, keyboard, network); keeping the Ethernet
+  addressing chosen in Settings in `/data`; a way to shut down cleanly.
 - The shell: `wl_output`, more than one visible window, blending for
   translucent windows, pointer acceleration, keymaps (XKB) and key repeat,
   and touch screens.

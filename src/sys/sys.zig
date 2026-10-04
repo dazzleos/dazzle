@@ -5,14 +5,17 @@
 //! wrappers used throughout the program.
 //!
 //! * `network`: the network manager's protocol, shared by init and settings
+//! * `system`: the system manager's protocol, shared by init and setup
 
 const std = @import("std");
 const linux = std.os.linux;
 
 pub const network = @import("network.zig");
+pub const system = @import("system.zig");
 
 test {
     _ = network;
+    _ = system;
 }
 
 pub const Error = error{
@@ -155,9 +158,11 @@ pub fn dropPrivileges() Error!void {
 /// user.
 pub const Capability = enum(u5) {
     chown = 0,
+    dac_override = 1,
     net_bind_service = 10,
     net_admin = 12,
     net_raw = 13,
+    sys_admin = 21,
 };
 
 /// Like `dropPrivileges`, but keeps the given capabilities and no others.
@@ -182,6 +187,31 @@ pub fn dropPrivilegesKeeping(caps: []const Capability) Error!void {
     var header: Header = .{ .version = 0x20080522, .pid = 0 }; // _LINUX_CAPABILITY_VERSION_3
     const data = [2]Data{ .{ .effective = mask, .permitted = mask, .inheritable = 0 }, .{ .effective = 0, .permitted = 0, .inheritable = 0 } };
     _ = try check(linux.syscall2(.capset, @intFromPtr(&header), @intFromPtr(&data)));
+}
+
+/// The space on the filesystem holding `path`, in bytes, and its type.
+pub const DiskSpace = struct { kind: u32, total: u64, free: u64 };
+
+pub fn diskSpace(path: [*:0]const u8) ?DiskSpace {
+    if (@sizeOf(usize) == 4) {
+        // struct statfs64, as 32-bit ARM packs it (84 bytes).
+        const Statfs64 = extern struct { kind: u32, bsize: u32, blocks: u64, bfree: u64, bavail: u64, files: u64, ffree: u64, fsid: [2]i32, namelen: u32, frsize: u32, flags: u32, spare: [4]u32 };
+        var st: Statfs64 = undefined;
+        _ = check(linux.syscall3(.statfs64, @intFromPtr(path), 84, @intFromPtr(&st))) catch return null;
+        return .{ .kind = st.kind, .total = st.blocks * st.bsize, .free = st.bavail * st.bsize };
+    }
+    // struct statfs, with words for most fields.
+    const Statfs = extern struct { kind: isize, bsize: isize, blocks: u64, bfree: u64, bavail: u64, files: u64, ffree: u64, fsid: [2]i32, namelen: isize, frsize: isize, flags: isize, spare: [4]isize };
+    var st: Statfs = undefined;
+    _ = check(linux.syscall2(.statfs, @intFromPtr(path), @intFromPtr(&st))) catch return null;
+    const bsize: u64 = @intCast(st.bsize);
+    return .{ .kind = @truncate(@as(usize, @bitCast(st.kind))), .total = st.blocks * bsize, .free = st.bavail * bsize };
+}
+
+test "disk space" {
+    const root = diskSpace("/").?;
+    try std.testing.expect(root.total > 0 and root.free <= root.total);
+    try std.testing.expect(diskSpace("/nonexistent") == null);
 }
 
 /// Reads a small file (such as a sysfs attribute) into `buf`. Returns null

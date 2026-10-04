@@ -11,7 +11,10 @@
 //!
 //! Clients connect on $XDG_RUNTIME_DIR/wayland-0. The shell starts no app
 //! itself, other than the programs named on its command line. It is not an
-//! app: it lives in /shell, with its font.
+//! app: it lives in /shell, with its font and its own apps (Settings, which
+//! the dock lists with the others, and Setup). On the first run (init gives
+//! it --setup) it starts the setup app with the whole screen and no dock;
+//! the dock appears once setup has finished.
 //!
 //! Init starts it as the unprivileged Dazzle user, with stdout and stderr
 //! going to the kernel log.
@@ -74,18 +77,35 @@ fn run(init: std.process.Init.Minimal) !void {
         } else |err| print("dazzle-shell: font: {s}\n", .{@errorName(err)});
     } else |err| print("dazzle-shell: cannot read {s}: {s}\n", .{ font_path, @errorName(err) });
 
-    const apps = try dock_mod.findApps(gpa, dock_mod.apps_dir);
+    // The shell's own apps are beside it; the others are in /apps.
+    var settings_buf: [512]u8 = undefined;
+    const settings_path = try sys.appFile(&settings_buf, "dazzle-settings");
+    const apps = try dock_mod.findApps(gpa, dock_mod.apps_dir, &.{settings_path});
     for (apps) |app| print("dazzle-shell: app {s} ({s})\n", .{ app.label, app.path });
     var dock = try dock_mod.Dock.init(gpa, ui_font, apps, renderer.width, renderer.height);
     const dock_y: u32 = renderer.height - dock.height;
-    dock.draw();
-    renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+    const with_dock: server_mod.Rect = .{ .x = 0, .y = 0, .width = renderer.width, .height = dock_y };
 
-    var server = server_mod.Server.init(gpa, renderer.backend(), .{
+    // On the first run (--setup), the setup app has the whole screen, and
+    // the dock shows once it has finished.
+    var args = init.args.iterate();
+    _ = args.skip();
+    var setup_pid: ?linux.pid_t = null;
+    var setup_args = args;
+    while (setup_args.next()) |arg| if (std.mem.eql(u8, arg, "--setup")) {
+        var setup_buf: [512]u8 = undefined;
+        setup_pid = spawn(try sys.appFile(&setup_buf, "dazzle-setup"), runtime_dir);
+    };
+    var dock_shown = setup_pid == null;
+    if (dock_shown) {
+        dock.draw();
+        renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+    }
+    var server = server_mod.Server.init(gpa, renderer.backend(), if (dock_shown) with_dock else .{
         .x = 0,
         .y = 0,
         .width = renderer.width,
-        .height = dock_y,
+        .height = renderer.height,
     });
 
     var path_buf: [108]u8 = undefined;
@@ -94,9 +114,9 @@ fn run(init: std.process.Init.Minimal) !void {
     print("dazzle-shell: listening on {s}\n", .{path});
 
     // Start the clients named on the command line.
-    var args = init.args.iterate();
-    _ = args.skip();
-    while (args.next()) |client| _ = spawn(client, runtime_dir);
+    while (args.next()) |client| if (!std.mem.eql(u8, client, "--setup")) {
+        _ = spawn(client, runtime_dir);
+    };
 
     // The pointer starts in the middle of the screen.
     var devices: input.Devices = .{};
@@ -122,9 +142,18 @@ fn run(init: std.process.Init.Minimal) !void {
     var client_frame_ns: u64 = 0;
     watchChildren();
     while (true) {
-        if (child_exited.swap(false, .monotonic) and reapChildren(apps)) {
+        if (child_exited.swap(false, .monotonic) and reapChildren(apps, &setup_pid) and dock_shown) {
             dock.draw();
             renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+            panels_damaged = true;
+        }
+        // Setup has finished (or stopped): the dock comes.
+        if (!dock_shown and setup_pid == null) {
+            dock_shown = true;
+            print("dazzle-shell: setup finished\n", .{});
+            dock.draw();
+            renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+            server.setWorkArea(with_dock);
             panels_damaged = true;
         }
         stats.wakeups += 1;
@@ -168,7 +197,7 @@ fn run(init: std.process.Init.Minimal) !void {
             var events: [64]input.Event = undefined;
             for (devices.read(f.fd, &events)) |e| {
                 // Buttons over the dock are the shell's.
-                if (e == .button and pointer.y >= @as(f64, @floatFromInt(dock_y))) {
+                if (dock_shown and e == .button and pointer.y >= @as(f64, @floatFromInt(dock_y))) {
                     pointer.flushMotion(&server, time_ms);
                     if (!e.button.pressed or e.button.code != btn_left) continue;
                     const i = dock.hit(pointer.x, pointer.y - @as(f64, @floatFromInt(dock_y))) orelse continue;
@@ -188,7 +217,7 @@ fn run(init: std.process.Init.Minimal) !void {
             if (pointer.moved) {
                 pointer.moved = false;
                 renderer.moveCursor(@intFromFloat(pointer.x), @intFromFloat(pointer.y));
-                const in_dock = pointer.y >= @as(f64, @floatFromInt(dock_y));
+                const in_dock = dock_shown and pointer.y >= @as(f64, @floatFromInt(dock_y));
                 if (dock.pointerAt(if (in_dock) pointer.x else null, pointer.y - @as(f64, @floatFromInt(dock_y)))) {
                     dock.draw();
                     renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
@@ -504,8 +533,8 @@ fn watchChildren() void {
 }
 
 /// Reaps exited clients. Returns whether one was an app (which the dock
-/// then shows as not running).
-fn reapChildren(apps: []dock_mod.App) bool {
+/// then shows as not running); the setup app's ending clears `setup_pid`.
+fn reapChildren(apps: []dock_mod.App, setup_pid: *?linux.pid_t) bool {
     var app_exited = false;
     while (true) {
         var status: u32 = 0;
@@ -515,6 +544,7 @@ fn reapChildren(apps: []dock_mod.App) bool {
             app.pid = null;
             app_exited = true;
         };
+        if (setup_pid.* == @as(linux.pid_t, @intCast(rc))) setup_pid.* = null;
         if (linux.W.IFEXITED(status)) {
             print("dazzle-shell: client {d} exited with status {d}\n", .{ rc, linux.W.EXITSTATUS(status) });
         } else if (linux.W.IFSIGNALED(status)) {
