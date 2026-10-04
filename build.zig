@@ -110,7 +110,6 @@ const shader_programs = [_]struct { source: []const u8, owner: ShaderOwner, args
     .{ .source = "src/gfx/shaders/solid.zig", .owner = .gfx, .args = &.{"--blend=source-over"} },
     .{ .source = "src/gfx/shaders/text.zig", .owner = .gfx, .args = &.{"--blend=source-over"} },
     .{ .source = "src/demo/shaders/cube.zig", .owner = .demo, .args = &.{"--depth-test"} },
-    .{ .source = "src/demo/shaders/hud.zig", .owner = .demo, .args = &.{} },
     .{ .source = "src/shell/shaders/quad.zig", .owner = .shell, .args = &.{} },
 };
 
@@ -487,6 +486,9 @@ pub fn build(b: *std.Build) void {
     // The font tests use the real system font.
     for ([_]*std.Build.Module{ host.font, host.gfx, host.ui }) |m| m.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const test_step = b.step("test", "Run unit tests on the host");
+    // The demo's layout is tested with its real font.
+    const host_demo = addProgramModule(b, "src/demo/main.zig", b.graph.host, test_optimize, host, shaders, null);
+    host_demo.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     for ([_]*std.Build.Module{
         host.sys,
         host.vc4,
@@ -497,7 +499,7 @@ pub fn build(b: *std.Build) void {
         host.font,
         host.wayland,
         addProgramModule(b, "src/init/main.zig", b.graph.host, test_optimize, host, shaders, null),
-        addProgramModule(b, "src/demo/main.zig", b.graph.host, test_optimize, host, shaders, null),
+        host_demo,
         addProgramModule(b, "src/shell/main.zig", b.graph.host, test_optimize, host, shaders, null),
     }) |m| {
         const t = b.addTest(.{ .root_module = m });

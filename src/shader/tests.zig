@@ -18,7 +18,6 @@ const programs = [_]struct { name: []const u8, program: []const u8, spirv: []con
     .{ .name = "solid", .program = @embedFile("solid.shader"), .spirv = @embedFile("solid.spv") },
     .{ .name = "text", .program = @embedFile("text.shader"), .spirv = @embedFile("text.spv") },
     .{ .name = "cube", .program = @embedFile("cube.shader"), .spirv = @embedFile("cube.spv") },
-    .{ .name = "hud", .program = @embedFile("hud.shader"), .spirv = @embedFile("hud.spv") },
     .{ .name = "quad", .program = @embedFile("quad.shader"), .spirv = @embedFile("quad.spv") },
 };
 
@@ -178,10 +177,10 @@ test "cube fragment shader samples and tints the texture, and keeps the depth" {
     }
 }
 
-test "textured quads copy texels exactly" {
+test "the shell's textured quads copy texels exactly" {
     var tex: TestTexture = undefined;
     tex.init();
-    inline for (.{ "quad", "hud" }) |name| {
+    inline for (.{"quad"}) |name| {
         const p = try load(name);
         try testing.expect(!p.options.depth_test);
         var buf: [8]u32 = undefined;

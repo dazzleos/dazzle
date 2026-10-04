@@ -82,11 +82,14 @@ pub const Cube = struct {
         return .{ .pipeline = pipeline, .vbo = vbo, .ibo = ibo, .texture = texture };
     }
 
-    /// Draws the cube at `time` seconds into its rotation.
-    pub fn draw(c: *Cube, frame: *vc4.render.Frame, width: u32, height: u32, time: f32) !void {
-        const m = mvp(width, height, time);
+    /// Draws the cube at `time` seconds into its rotation, filling
+    /// `viewport` (and clipped to `scissor`).
+    pub fn draw(c: *Cube, frame: *vc4.render.Frame, viewport: vc4.render.Viewport, scissor: ?vc4.render.Viewport, time: f32) !void {
+        const m = mvp(viewport.width, viewport.height, time);
         c.pipeline.setUniforms(std.mem.asBytes(&m));
         try c.pipeline.draw(frame, .{
+            .viewport = viewport,
+            .scissor = scissor,
             .vertices = c.vbo.handle,
             .count = indices.len,
             .indices = .{ .handle = c.ibo.handle, .offset = 0, .max_index = vertices.len - 1 },
@@ -143,8 +146,8 @@ pub fn rotationY(a: f32) Mat4 {
 pub fn mvp(width: u32, height: u32, time: f32) Mat4 {
     const aspect = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
     const model = mul(rotationX(time * 0.7), rotationY(time));
-    // Far enough back that the cube clears the statistics in the corner
-    // (see hud.zig's test).
+    // Far enough back that the cube clears the panel on the left (see
+    // view.zig's test).
     const view = translation(0, 0, -6);
     return mul(perspective(std.math.degreesToRadians(50.0), aspect, 1.0, 20.0), mul(view, model));
 }

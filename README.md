@@ -14,8 +14,9 @@ apps, is in the git history if it is needed again.
 On top of it is **stardust-shell**, a minimal Wayland compositor. Init (PID 1, the only process with root
 privileges) starts the shell as an unprivileged user, and the shell starts
 the demo as its Wayland client. USB mice and keyboards work: the shell
-shows a cursor and passes input to the window. The demo, a native app, shows a
-spinning, textured, depth-tested cube, and a showcase of the 2D graphics
+shows a cursor and passes input to the window. The demo, a native app built
+with Stardust's widget toolkit, shows a spinning, textured, depth-tested
+cube, with buttons to change its speed, and a showcase of the 2D graphics
 library in Material 3's shapes and colours. Rings spread out and fade
 where the pointer clicks. The IP address, rendering
 statistics and the last key pressed appear in its top left, in Fira Sans.
@@ -31,7 +32,8 @@ The code is split into Zig modules, linked statically into each program:
 | `vc4` | `src/vc4/` | The low-level graphics API for the VideoCore IV, described below |
 | `shader` | `src/shader/` | Shaders written in Zig: SPIR-V translated to `vc4` programs, and pipelines for drawing with them |
 | `app` | `src/app/` | Native apps' windows on stardust-shell: buffers shared with the shell, frame pacing and input |
-| `gfx` | `src/gfx/` | 2D graphics for the toolkit: anti-aliased rounded rectangles, circles, polygons and polylines, filled or stroked, blended |
+| `gfx` | `src/gfx/` | 2D graphics for the toolkit: anti-aliased rounded rectangles, circles, polygons and polylines, filled or stroked, and text, blended |
+| `ui` | `src/ui/` | The widget toolkit: declarative widgets with state, layout, painting and input, in Material 3's style |
 | `font` | `src/font/` | OpenType font rendering, described below |
 | `wayland` | `src/wayland/` | The Wayland wire protocol (with file descriptor passing), the interfaces Stardust uses, and a small client library |
 | `stardust-init` | `src/init/` | The init program: mounts, network, log server, device permissions, starting the shell |
@@ -59,11 +61,12 @@ The `gfx` module draws 2D shapes, the toolkit's foundation:
 
 | File | Contents |
 |---|---|
-| `canvas.zig` | `Canvas`: records shapes (on the CPU) into batches of vertices: rectangles with per-corner radii, circles, polygons and polylines, filled or stroked, with an origin and a clip rectangle |
+| `canvas.zig` | `Canvas`: records shapes and text (on the CPU) into batches of vertices: rectangles with per-corner radii, circles, polygons and polylines, filled or stroked, and lines of text, with an origin and a clip rectangle |
+| `atlas.zig` | `Atlas`: glyphs rasterized by the font renderer, packed into one texture, and the text runs laid out recently |
 | `geometry.zig` | Polygon triangulation (ear clipping, concave polygons included) and stroke strips with mitred joins, with anti-aliasing fringes |
-| `shaders/` | The 2D shaders (`shape.zig`, `solid.zig`) |
+| `shaders/` | The 2D shaders (`shape.zig`, `solid.zig`, `text.zig`) |
 | `shaders.zig` | The 2D shader programs, as the build compiled them, and their vertex layouts |
-| `renderer.zig` | `Renderer`: draws a canvas into a `vc4` frame |
+| `renderer.zig` | `Renderer`: draws canvases into a `vc4` frame (several per frame, with other draws between them), and uploads the glyphs added to the atlas |
 | `preview.zig` | Renders a canvas on the CPU through the real shaders (in the QPU simulator), for tests and preview images |
 
 Everything is anti-aliased and blends over what is below it: the fragment
@@ -77,6 +80,70 @@ runs over the corners, and a stroked rectangle skips its inside entirely.
 Polygons and polylines are triangulated on the CPU with the same fringes.
 Shapes of one kind are drawn together when nothing drawn in between
 overlaps them, so a screen of separate cards is a couple of draws.
+
+Text is drawn by the GPU too: each glyph is a quad sampling its coverage
+from the atlas, in the text's colour, blended like the shapes. Glyphs are
+placed to a quarter of a pixel (each quarter rasterized once), and match
+the font renderer's own drawing to within one level per channel. Text
+laid out once (character map lookups and kerning, the costly part) is
+kept while it is drawn each frame.
+
+The `ui` module (`src/ui/`) is the widget toolkit. Like Flutter, it is
+declarative: an app describes its window as a tree of widgets, made again
+each frame from its state, and the toolkit keeps what lasts between frames.
+There is one kind of widget, any struct: one with `build` is made of other
+widgets, and one that declares a `State` type also keeps that state for as
+long as it stays at its place in the tree (by position and type, or by
+key). There is no separate stateless and stateful widget:
+
+```zig
+const Counter = struct {
+    label: []const u8,
+
+    pub const State = struct {
+        count: u32 = 0,
+        fn add(s: *State) void {
+            s.count += 1;
+        }
+    };
+
+    pub fn build(self: *const Counter, cx: *ui.Context, state: *State) ui.Widget {
+        return cx.make(ui.Row{ .spacing = 12, .children = &.{
+            cx.make(ui.Text{ .text = cx.fmt("{s}: {d}", .{ self.label, state.count }) }),
+            cx.make(ui.OutlinedButton{ .label = "Add", .on_press = .of(state, State.add) }),
+        } });
+    }
+};
+```
+
+Any struct with `paint` draws whatever it likes: shapes and text on the 2D
+canvas, or its own draws straight into the GPU frame, layered in the
+tree's order. The demo's cube is one: a widget whose `paint` adds a draw
+of the cube with the widget's box as the viewport. `layout` sizes a widget
+within the constraints its parent gives (Flutter's box constraints) and
+places its children, and `event` takes pointer events.
+
+Unlike Flutter, layout never fails. Unbounded space, impossible or
+nonsensical constraints and sizes (NaN, negative, infinite), and flexible
+children with no space to share all still give a layout. Children that
+reach past their parent are clipped to it, and the edges they overflow
+are striped black and yellow, so a layout that does not fit still shows,
+with the problem marked.
+
+| File | Contents |
+|---|---|
+| `widget.zig` | `Widget`, `Context` (for `build`), `Callback`, and `Node`: the tree kept between frames, matching each frame's widgets to it, layout and hit testing |
+| `geometry.zig` | Sizes, constraints (made usable whatever they are), insets, alignment |
+| `widgets.zig` | `Row`, `Column`, `Expanded`, `Padding`, `Align`, `Center`, `SizedBox`, `ConstrainedBox`, `Overlay`, `Decorated` (a filled or outlined rounded rectangle) and `Pressable` (clicks, hover and press) |
+| `text.zig` | `Text`: lines at `\n`, wrapped at spaces to fit |
+| `material.zig` | Material 3's light and dark baseline themes, and `OutlinedButton`, made of a `Pressable`, `Decorated`, `ConstrainedBox`, `Padding` and `Center` |
+| `painter.zig` | Painting: canvas layers and GPU draws in order, clipping, and the overflow stripes |
+| `runtime.zig` | `Ui`: builds, lays out and paints each frame, records it into a `vc4` frame (or draws it on the CPU, for tests), and sends pointer events to the widgets under the pointer |
+| `tests.zig` | Tests: overflow, nonsense layouts, state and keys, buttons, overlays, GPU draws' order, rows and columns |
+
+`Overlay` stacks layers, each filling it, and the topmost layer with
+something under the pointer gets the event. A button press takes the
+pointer until it is released; releasing over the button is a click.
 
 The `app` module gives a native app a window: a Wayland toplevel on the
 shell, with up to three buffers the GPU renders into in its T-tiled layout,
@@ -200,12 +267,12 @@ The demo program (`src/demo/`):
 | File | Contents |
 |---|---|
 | `main.zig` | The window (from the `app` module), the frame loop, input and timing statistics |
+| `view.zig` | The window's widgets: the rings and cube behind a column with the statistics, the speed buttons and the showcase |
 | `rings.zig` | The rings drawn where the pointer clicks: stroked circles on the 2D canvas, fading out |
 | `shapes.zig` | The showcase of the 2D canvas: a card, buttons, FABs, chips, text fields, selection controls, polygons, strokes and translucent circles, in Material 3's baseline colours |
 | `cube.zig` | The cube: a pipeline with depth testing and culling, vertex and index buffers, and a tiled texture |
-| `hud.zig` | The statistics overlay: text drawn by the font renderer into a texture, shown as a quad over the top left corner |
 | `netinfo.zig` | Looks up the IPv4 address (SIOCGIFCONF, no privileges needed) |
-| `shaders/` | The cube's and the overlay's shaders |
+| `shaders/` | The cube's shader |
 
 ### Privileges
 
@@ -412,14 +479,15 @@ Moving a USB mouse moves the cursor. Over the window, each click starts a
 small ring: blue for the left button, orange for the right and green for
 the middle. The rings grow and fade out.
 
-Below the overlay, the shape showcase draws a set of Material 3
-components with the 2D canvas (when the window has room for it beside the
-cube).
+Below the statistics, Material outlined buttons slow the cube down, pause
+it and speed it up, and the shape showcase draws a set of Material 3
+components with the 2D canvas. In a window too small for it all, the
+column overflows at the bottom and shows the stripes.
 
-The overlay is redrawn twice a second, and the same statistics go to the
+The statistics change twice a second, and the same statistics go to the
 log every 5 seconds. If the cube shows its inside faces rather than its
 outside, face culling's winding is reversed. If the font cannot be loaded,
-the cube is drawn without the overlay and the log says why.
+everything but the text is drawn and the log says why.
 
 The serial console on GPIO 14 (TX) and 15 (RX), 115200 baud, still works and
 shows the same messages. It is the fallback if the network does not come up.
@@ -537,8 +605,11 @@ GPU or display).
 - Add `DRM_IOCTL_VC4_GET_HANG_STATE` reporting for GPU hangs.
 - Rendering to textures, and more vertex attribute formats.
 - A Vulkan-style API on `vc4`.
-- Text: ligatures and other GSUB features, hinting or stem darkening for
-  small sizes, and text drawn by the GPU (a glyph atlas texture, blended).
+- Text: ligatures and other GSUB features, and hinting or stem darkening
+  for small sizes.
+- The toolkit: more widgets (scrolling, text fields, images, the other
+  Material buttons), keyboard focus, animations, and logical pixels (a
+  scale for the display's density).
 - The shell: `wl_output`, more than one visible window, blending for
   translucent windows, pointer acceleration, keymaps (XKB) and key repeat,
   and touch screens.
