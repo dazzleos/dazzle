@@ -268,7 +268,8 @@ The shell (`src/shell/`):
 |---|---|
 | `main.zig` | Opens the GPU and display, listens on `$XDG_RUNTIME_DIR/wayland-0`, and runs the event loop: read input (clicks on the dock start or raise apps), dispatch clients, then composite a frame when something changed |
 | `server.zig` | The Wayland server: clients, objects and requests, frame callbacks and buffer releases, pointer and keyboard focus |
-| `render.zig` | Compositing with the `vc4` API: textured quads for the panels (the bar and the dock) and the window, the bar's text, and the cursor plane |
+| `render.zig` | Compositing with the `vc4` API: textured quads for the panels (the bar and the dock) and the window, and the cursor plane |
+| `bar.zig` | The bar: the front window's title and its close button |
 | `dock.zig` | The dock: finds the apps in `/apps`, draws their icons, and finds the one clicked |
 | `shaders/quad.zig` | The textured quad's shader |
 | `input.zig` | USB keyboards and mice: finds `/dev/input/event*` nodes and decodes their events |
@@ -282,8 +283,9 @@ yet.
 
 - **Windows:** each toplevel is configured to fill the screen between the
   bar and the dock, and the newest one is shown, or the one whose app was
-  last clicked in the dock. The bar shows the window's title and the time
-  since boot.
+  last clicked in the dock. The bar shows the window's title ("Stardust"
+  when no app is open) and, while there is a window, a close button that
+  asks its app to close it (xdg_toplevel's close event).
 - **Covered windows:** the windows behind the front one cannot be seen, so
   they are told: they get xdg_toplevel's `suspended` state (xdg-shell
   version 6) instead of `activated`, their frame callbacks are held until
@@ -588,26 +590,26 @@ a program keeping one core busy shows 25%.
 
 ### The settings app
 
-Click "S" in the dock. Its window has four cards, with the figures that
+Click "S" in the dock. Its window has three cards, with the figures that
 change read again every second (`src/settings/info.zig`):
 
-- **System:** the build (git commit), Linux's version and how long the
-  system has been up.
-- **Hardware:** the board (from the device tree), the chip, the CPU's core
-  and how many there are, the GPU (the V3D's version, QPUs and slices,
-  from the vc4 driver), the memory, and the board's revision and serial
-  number.
-- **In use:** how busy the CPU is, the SoC's temperature, memory, the GPU's
-  memory (the CMA pool all GPU buffers come from: the V3D has no MMU), and
-  the system's files. Stardust has no driver for the SD card: the firmware
-  loads the system into memory at boot and it runs from there, so its
-  storage is that filesystem in RAM. The meters turn red above 90%.
+- **System:** the build (git commit), Linux's version, how long the system
+  has been up, the board (from the device tree, which also tells the chip,
+  CPU and GPU) and its serial number when the firmware gives it.
+- **Resources:** how busy the CPU is, the SoC's temperature, memory, the
+  GPU's memory (the CMA pool all GPU buffers come from: the V3D has no
+  MMU), and storage: a bar of what the system, the apps and the user's
+  files take, and the free space. Stardust has no driver for the SD card:
+  the firmware loads the system into memory at boot and it runs from
+  there, so its storage is that filesystem in RAM and its free space the
+  memory available; the bar will say more once there is real storage. The
+  meters turn red above 90%.
 - **Network:** the hostname, each adapter's link (and speed), its address
-  (and whether it came from DHCP or `stardust.ip=`), traffic and hardware
+  (and whether it came from DHCP or `stardust.ip=`), traffic and MAC
   address, and the default gateway.
 
-Everything comes from files any user can read (`/proc`, `/sys`) and the
-GPU's render node, so it runs unprivileged like the other apps.
+Everything comes from files any user can read (`/proc`, `/sys`), so it
+runs unprivileged like the other apps.
 
 ## Faster development loops
 

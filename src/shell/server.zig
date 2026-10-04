@@ -476,6 +476,19 @@ pub const Server = struct {
         return false;
     }
 
+    /// Asks the front window's client to close it (as its own close button
+    /// would). Returns whether there is a window.
+    pub fn closeTop(s: *Server) bool {
+        const t = s.topWindow() orelse return false;
+        const c = t.xdg.surface.?.client;
+        if (c.send(t.id, p.xdg_toplevel.event.close)) |m0| {
+            var m = m0;
+            m.end();
+        }
+        c.conn.flush() catch {};
+        return true;
+    }
+
     /// The window to show: the top mapped toplevel.
     pub fn topWindow(s: *const Server) ?*Toplevel {
         var i = s.toplevels.items.len;

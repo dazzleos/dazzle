@@ -1,8 +1,8 @@
 //! Stardust's settings app: what the system is and how it is doing. It
-//! shows the build, Linux's version and how long the system has been up;
-//! the hardware (board, chip, CPU, GPU, memory); what is in use (CPU,
-//! temperature, memory, the GPU's memory and the system's files); and the
-//! network (adapters, addresses and traffic). The figures that change are
+//! shows the build, Linux's version, how long the system has been up and
+//! the board; the resources in use (CPU, temperature, memory, the GPU's
+//! memory and storage); and the network (adapters, addresses and
+//! traffic). The figures that change are
 //! read again every second (see info.zig); the window is built with the
 //! `ui` toolkit (see view.zig), and only what changed is drawn again.
 //!
@@ -62,8 +62,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     const window_ui = try ui.Ui.create(gpa, if (f) |*fnt| fnt else null);
     try window_ui.attachGpu(dev);
 
-    const hardware = info.Hardware.read(dev);
-    print("stardust-settings: {s}, {s}, {s} x{d}\n", .{ hardware.model.slice(), hardware.soc.slice(), hardware.cpu.slice(), hardware.cores });
+    const system = info.System.read();
+    print("stardust-settings: {s}, {d} {s}\n", .{ system.model.slice(), system.cores, if (system.cores == 1) "core" else "cores" });
     var monitor: info.UsageMonitor = .{};
     var usage = monitor.read(sys.nowNs());
     var network = info.Network.read();
@@ -113,7 +113,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             dirty = false;
             window_ui.frame(width, height, now, view.Settings{
                 .commit = build_info.commit,
-                .hardware = &hardware,
+                .system = &system,
                 .usage = usage,
                 .network = &network,
                 .scale = view.scaleFor(width, height),

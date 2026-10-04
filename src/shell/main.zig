@@ -1,9 +1,10 @@
 //! stardust-shell: a minimal Wayland compositor and shell.
 //!
 //! It owns the display (as the DRM master) and draws with the low-level vc4
-//! API: a bar across the top (the window title and the time since boot), a
-//! dock along the bottom with an icon for each app in /apps (see dock.zig),
-//! and the front window, maximized between them. USB mice move a cursor
+//! API: a bar across the top (the front window's title and a button that
+//! closes it; see bar.zig), a dock along the bottom with an icon for each
+//! app in /apps (see dock.zig), and the front window, maximized between
+//! them. USB mice move a cursor
 //! (on the display's cursor plane) and, with USB keyboards, give input to
 //! that window. Clicking an app in the dock starts it, or brings its window
 //! to the front if it is running: apps run once each.
@@ -26,6 +27,7 @@ const server_mod = @import("server.zig");
 const render = @import("render.zig");
 const input = @import("input.zig");
 const dock_mod = @import("dock.zig");
+const bar_mod = @import("bar.zig");
 const build_info = @import("build_info");
 
 const print = sys.print;
@@ -60,18 +62,18 @@ fn run(init: std.process.Init.Minimal) !void {
     const output = try vc4.drm.waitForOutput(dev.fd);
     var renderer = try render.Renderer.init(gpa, dev, output);
     print("stardust-shell: build {s}, display {d}x{d}, {s}\n", .{
-        build_info.commit, renderer.width, renderer.height,
+        build_info.commit,                                                                                                                                                                                                             renderer.width, renderer.height,
         if (renderer.display.kms) |k| (if (k.overlays[vc4.kms.max_overlays - 1] != null) "atomic mode setting with overlay planes" else "atomic mode setting, too few overlay planes") else "legacy mode setting (no direct scanout)",
     });
 
-    var bar: ?render.Bar = null;
+    var bar: ?bar_mod.Bar = null;
     var ui_font: ?font.Font = null;
     var font_buf: [512]u8 = undefined;
     const font_path = try sys.appFile(&font_buf, font.default_font_file);
     if (sys.readFileAlloc(gpa, font_path, 32 * 1024 * 1024)) |data| {
         if (font.Font.init(data)) |f| {
             ui_font = f;
-            bar = try render.Bar.init(gpa, f, renderer.width, renderer.height);
+            bar = try bar_mod.Bar.init(gpa, f, renderer.width, renderer.height);
         } else |err| print("stardust-shell: font: {s}\n", .{@errorName(err)});
     } else |err| print("stardust-shell: cannot read {s}: {s}\n", .{ font_path, @errorName(err) });
     const bar_height: u32 = if (bar) |b| b.height else 0;
@@ -120,6 +122,9 @@ fn run(init: std.process.Init.Minimal) !void {
     var next_tick: u64 = start;
     var last_title: [64]u8 = undefined;
     var last_title_len: usize = 0;
+    var last_had_window = false;
+    // The bar needs drawing again.
+    var bar_stale = true;
     // The bar or the dock changed, and is waiting to be shown.
     var panels_damaged = true;
     // When a client last had a frame for the screen.
@@ -187,6 +192,15 @@ fn run(init: std.process.Init.Minimal) !void {
                     }
                     continue;
                 }
+                // And over the bar: its close button closes the front
+                // window.
+                if (e == .button and pointer.y < @as(f64, @floatFromInt(bar_height))) {
+                    pointer.flushMotion(&server, time_ms);
+                    if (e.button.pressed and e.button.code == btn_left) if (bar) |*b| if (b.hitClose(pointer.x, pointer.y)) {
+                        _ = server.closeTop();
+                    };
+                    continue;
+                }
                 pointer.handle(&server, time_ms, e);
             }
             if (pointer.moved) {
@@ -198,6 +212,10 @@ fn run(init: std.process.Init.Minimal) !void {
                     renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
                     panels_damaged = true;
                 }
+                const in_bar = pointer.y < @as(f64, @floatFromInt(bar_height));
+                if (bar) |*b| if (b.pointerAt(if (in_bar) pointer.x else null, pointer.y)) {
+                    bar_stale = true;
+                };
             }
         };
 
@@ -230,15 +248,19 @@ fn run(init: std.process.Init.Minimal) !void {
         // have changed.
         server.updateFocus();
 
-        // The bar: once a second, or when the title changes.
+        // The bar: when the front window or its title changes, or the
+        // close button's highlight.
         const top = server.topWindow();
-        const title = if (top) |t| t.title() else "";
+        const title: ?[]const u8 = if (top) |t| t.title() else null;
         const t_now = sys.nowNs();
-        const title_changed = !std.mem.eql(u8, title, last_title[0..last_title_len]);
-        if (bar) |*b| if (t_now >= next_tick or title_changed) {
-            last_title_len = @min(title.len, last_title.len);
-            @memcpy(last_title[0..last_title_len], title[0..last_title_len]);
-            b.draw(title, (t_now - start) / std.time.ns_per_s) catch {};
+        const shown_title = title orelse "";
+        if (!std.mem.eql(u8, shown_title, last_title[0..last_title_len]) or (title != null) != last_had_window) bar_stale = true;
+        if (bar) |*b| if (bar_stale) {
+            bar_stale = false;
+            last_title_len = @min(shown_title.len, last_title.len);
+            @memcpy(last_title[0..last_title_len], shown_title[0..last_title_len]);
+            last_had_window = title != null;
+            b.draw(title);
             renderer.setPanel(.bar, b.pixels, b.width, b.height, 0);
             panels_damaged = true;
             stats.bar_ns += sys.nowNs() - t_now;
@@ -545,4 +567,5 @@ test {
     _ = @import("input.zig");
     _ = @import("cursor.zig");
     _ = @import("dock.zig");
+    _ = @import("bar.zig");
 }

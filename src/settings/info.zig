@@ -1,14 +1,13 @@
 //! What the settings app shows about the machine, read from the kernel
-//! (/proc, /sys, the device tree), the GPU and the network interfaces. All
+//! (/proc, /sys, the device tree) and the network interfaces. All
 //! of it is readable by the unprivileged Stardust user.
 //!
-//! `Hardware` does not change while the system runs and is read once;
+//! `System` does not change while the system runs and is read once;
 //! `Usage` and `Network` are read again every second.
 
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
-const vc4 = @import("vc4");
 
 /// A short piece of text kept in place.
 pub fn Str(comptime n: usize) type {
@@ -39,51 +38,15 @@ pub fn Str(comptime n: usize) type {
     };
 }
 
-// --- Hardware -------------------------------------------------------------------
+// --- System ---------------------------------------------------------------------
 
-pub const Gpu = struct {
-    /// The V3D's technology version and revision (2.1 on the VideoCore IV).
-    version: u8,
-    revision: u8,
-    slices: u8,
-    qpus_per_slice: u8,
-    tmus_per_slice: u8,
-    /// Vertex pipeline memory, in KB.
-    vpm_kb: u32,
-
-    pub fn qpus(g: Gpu) u32 {
-        return @as(u32, g.slices) * g.qpus_per_slice;
-    }
-};
-
-/// The V3D's identification registers, as the vc4 driver reports them.
-pub fn decodeGpu(ident0: u64, ident1: u64) ?Gpu {
-    // IDENT0: "V3D" in the low three bytes, the technology version above.
-    if (ident0 & 0xffffff != 0x443356) return null;
-    const vpm: u32 = @truncate(ident1 >> 28 & 0xf);
-    return .{
-        .version = @truncate(ident0 >> 24),
-        .revision = @truncate(ident1 & 0xf),
-        .slices = @truncate(ident1 >> 4 & 0xf),
-        .qpus_per_slice = @truncate(ident1 >> 8 & 0xf),
-        .tmus_per_slice = @truncate(ident1 >> 12 & 0xf),
-        // In KB; 0 means 16.
-        .vpm_kb = if (vpm == 0) 16 else vpm,
-    };
-}
-
-pub const Hardware = struct {
+/// What does not change while the system runs.
+pub const System = struct {
     /// The board, from the device tree: "Raspberry Pi Zero W Rev 1.1".
     model: Str(64) = .{},
-    /// The system on a chip: "BCM2835".
-    soc: Str(16) = .{},
-    /// The CPU's core: "ARM1176JZF-S".
-    cpu: Str(48) = .{},
-    cores: u32 = 0,
-    /// The board's revision code and serial number (from /proc/cpuinfo).
-    revision: Str(16) = .{},
+    /// The board's serial number, if the firmware gives it.
     serial: Str(24) = .{},
-    gpu: ?Gpu = null,
+    cores: u32 = 0,
     /// Linux's version ("6.12.0 (armv6l)") and the machine's name on the
     /// network.
     kernel: Str(64) = .{},
@@ -91,24 +54,22 @@ pub const Hardware = struct {
     /// A static address from the kernel command line (otherwise DHCP).
     static_ip: Str(48) = .{},
 
-    pub fn read(dev: ?vc4.Device) Hardware {
-        var h: Hardware = .{};
+    pub fn read() System {
+        var h: System = .{};
         var buf: [4096]u8 = undefined;
-        if (sys.readFile("/sys/firmware/devicetree/base/model", &buf)) |m| h.model.set(std.mem.trimEnd(u8, m, "\x00\n"));
-        if (sys.readFile("/sys/firmware/devicetree/base/compatible", &buf)) |c| h.soc = socName(c);
+        const dt = "/sys/firmware/devicetree/base";
+        if (sys.readFile(dt ++ "/model", &buf)) |m| h.model.set(std.mem.trimEnd(u8, m, "\x00\n"));
         if (sys.readFile("/proc/cpuinfo", &buf)) |info| {
             const c = parseCpuinfo(info);
-            h.cpu = c.cpu;
             h.cores = c.cores;
-            h.revision = c.revision;
             h.serial = c.serial;
-            if (h.soc.len == 0) h.soc = c.hardware;
         }
-        if (dev) |d| {
-            const id0 = d.getParam(.v3d_ident0) catch 0;
-            const id1 = d.getParam(.v3d_ident1) catch 0;
-            h.gpu = decodeGpu(id0, id1);
-        }
+        // Linux on 32-bit ARM only fills in /proc/cpuinfo's serial number
+        // when booted the old way (ATAGs); the firmware puts it in the
+        // device tree too.
+        if (h.serial.len == 0) if (sys.readFile(dt ++ "/system/linux,serial", &buf)) |raw| {
+            h.serial = serialFromDeviceTree(raw);
+        };
         var uts: linux.utsname = undefined;
         if (linux.errno(linux.uname(&uts)) == .SUCCESS) {
             h.kernel.print("{s} ({s})", .{ std.mem.sliceTo(&uts.release, 0), std.mem.sliceTo(&uts.machine, 0) });
@@ -119,30 +80,25 @@ pub const Hardware = struct {
     }
 };
 
-/// The SoC from the device tree's compatible list ("brcm,bcm2837" is the
-/// last entry naming the chip).
-pub fn socName(compatible: []const u8) Str(16) {
-    var out: Str(16) = .{};
-    var it = std.mem.tokenizeScalar(u8, compatible, 0);
-    while (it.next()) |entry| if (std.mem.startsWith(u8, entry, "brcm,")) {
-        out.set(entry["brcm,".len..]);
-        for (out.buf[0..out.len]) |*ch| ch.* = std.ascii.toUpper(ch.*);
-    };
+/// A device tree's 64-bit serial number (big-endian), in hexadecimal; empty
+/// if it is 0.
+pub fn serialFromDeviceTree(raw: []const u8) Str(24) {
+    var out: Str(24) = .{};
+    if (raw.len < 8) return out;
+    const v = std.mem.readInt(u64, raw[0..8], .big);
+    if (v != 0) out.print("{x}", .{v});
     return out;
 }
 
 pub const Cpuinfo = struct {
-    cpu: Str(48) = .{},
     cores: u32 = 0,
-    hardware: Str(16) = .{},
-    revision: Str(16) = .{},
+    /// Without leading zeros: empty if it is 0 (as Linux reports it when
+    /// booted from a device tree).
     serial: Str(24) = .{},
 };
 
 pub fn parseCpuinfo(text: []const u8) Cpuinfo {
     var out: Cpuinfo = .{};
-    var model: []const u8 = "";
-    var part: ?u32 = null;
     var lines = std.mem.tokenizeScalar(u8, text, '\n');
     while (lines.next()) |line| {
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
@@ -150,26 +106,10 @@ pub fn parseCpuinfo(text: []const u8) Cpuinfo {
         const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
         if (std.mem.eql(u8, key, "processor")) {
             out.cores += 1;
-        } else if (std.mem.eql(u8, key, "model name") and model.len == 0) {
-            model = value;
-        } else if (std.mem.eql(u8, key, "CPU part") and part == null) {
-            part = std.fmt.parseInt(u32, value, 0) catch null;
-        } else if (std.mem.eql(u8, key, "Hardware")) {
-            out.hardware.set(value);
-        } else if (std.mem.eql(u8, key, "Revision")) {
-            out.revision.set(value);
         } else if (std.mem.eql(u8, key, "Serial")) {
             out.serial.set(std.mem.trimStart(u8, value, "0"));
         }
     }
-    const name: ?[]const u8 = if (part) |p| switch (p) {
-        0xb76 => "ARM1176JZF-S",
-        0xc07 => "Cortex-A7",
-        0xd03 => "Cortex-A53",
-        0xd08 => "Cortex-A72",
-        else => null,
-    } else null;
-    out.cpu.set(name orelse model);
     return out;
 }
 
@@ -194,10 +134,7 @@ pub const Usage = struct {
     /// MMU), and how much of it is free.
     gpu_total: u64 = 0,
     gpu_free: u64 = 0,
-    /// The system's files: Stardust runs from a filesystem in RAM, loaded
-    /// from the SD card at boot.
-    storage_bytes: u64 = 0,
-    storage_files: u32 = 0,
+    storage: Storage = .{},
     uptime_s: u64 = 0,
 
     pub fn memUsed(u: Usage) u64 {
@@ -206,6 +143,22 @@ pub const Usage = struct {
 
     pub fn gpuUsed(u: Usage) u64 {
         return u.gpu_total -| u.gpu_free;
+    }
+};
+
+/// Where the storage goes. Stardust runs from a filesystem in RAM, loaded
+/// from the SD card at boot, so its files take memory and the free space is
+/// the memory available.
+pub const Storage = struct {
+    /// Bytes of files: the system's (init and the shell), the apps' (in
+    /// /apps) and the user's (in /home, when there is one).
+    system: u64 = 0,
+    apps: u64 = 0,
+    user: u64 = 0,
+    free: u64 = 0,
+
+    pub fn total(s: Storage) u64 {
+        return s.system + s.apps + s.user + s.free;
     }
 };
 
@@ -248,7 +201,7 @@ pub const UsageMonitor = struct {
     last: ?[2]u64 = null,
     /// The system's files change rarely: counted again every so often.
     storage_at: u64 = 0,
-    storage: [2]u64 = .{ 0, 0 },
+    storage: Storage = .{},
 
     pub fn read(m: *UsageMonitor, now_ns: u64) Usage {
         var u: Usage = .{};
@@ -278,12 +231,16 @@ pub const UsageMonitor = struct {
         }
         if (m.storage_at == 0 or now_ns >= m.storage_at) {
             m.storage_at = now_ns + 10 * std.time.ns_per_s;
-            var t: Tally = .{};
-            t.add("/", 0);
-            m.storage = .{ t.bytes, t.files };
+            var all: Tally = .{};
+            all.add("/", 0);
+            var apps: Tally = .{};
+            apps.add("/apps", 1);
+            var user: Tally = .{};
+            user.add("/home", 1);
+            m.storage = .{ .system = all.bytes -| apps.bytes -| user.bytes, .apps = apps.bytes, .user = user.bytes };
         }
-        u.storage_bytes = m.storage[0];
-        u.storage_files = @intCast(m.storage[1]);
+        u.storage = m.storage;
+        u.storage.free = u.mem_available;
         return u;
     }
 };
@@ -473,37 +430,17 @@ pub fn formatDuration(buf: []u8, s: u64) []const u8 {
 
 const testing = std.testing;
 
-test "the GPU's identification" {
-    // A VideoCore IV: V3D 2.1, 3 slices of 4 QPUs and 2 TMUs, 12 KB VPM.
-    const g = decodeGpu(0x02443356, 0xc0102431).?;
-    try testing.expectEqual(@as(u8, 2), g.version);
-    try testing.expectEqual(@as(u8, 1), g.revision);
-    try testing.expectEqual(@as(u8, 3), g.slices);
-    try testing.expectEqual(@as(u8, 4), g.qpus_per_slice);
-    try testing.expectEqual(@as(u8, 2), g.tmus_per_slice);
-    try testing.expectEqual(@as(u32, 12), g.qpus());
-    try testing.expectEqual(@as(u32, 12), g.vpm_kb);
-    try testing.expect(decodeGpu(0, 0) == null);
-}
-
-test "the CPU and board from /proc/cpuinfo, and the SoC from the device tree" {
-    const zero = "processor\t: 0\nmodel name\t: ARMv6-compatible processor rev 7 (v6l)\nBogoMIPS\t: 697.95\nCPU part\t: 0xb76\n\nHardware\t: BCM2835\nRevision\t: 9000c1\nSerial\t\t: 00000000a1b2c3d4\n";
+test "the cores and serial number" {
+    const zero = "processor\t: 0\nmodel name\t: ARMv6-compatible processor rev 7 (v6l)\nHardware\t: BCM2835\nRevision\t: 0000\nSerial\t\t: 00000000a1b2c3d4\n";
     const c = parseCpuinfo(zero);
-    try testing.expectEqualStrings("ARM1176JZF-S", c.cpu.slice());
     try testing.expectEqual(@as(u32, 1), c.cores);
-    try testing.expectEqualStrings("9000c1", c.revision.slice());
     try testing.expectEqualStrings("a1b2c3d4", c.serial.slice());
-    try testing.expectEqualStrings("BCM2835", c.hardware.slice());
-
-    const quad = "processor : 0\nCPU part : 0xd03\nprocessor : 1\nprocessor : 2\nprocessor : 3\n";
-    const q = parseCpuinfo(quad);
-    try testing.expectEqualStrings("Cortex-A53", q.cpu.slice());
+    // Booted from a device tree, Linux reports 0.
+    const q = parseCpuinfo("processor : 0\nprocessor : 1\nprocessor : 2\nprocessor : 3\nSerial : 0000000000000000\n");
     try testing.expectEqual(@as(u32, 4), q.cores);
-    // An unknown part: the model name.
-    try testing.expectEqualStrings("Some CPU", parseCpuinfo("processor : 0\nmodel name : Some CPU\nCPU part : 0x123\n").cpu.slice());
-
-    try testing.expectEqualStrings("BCM2837", socName("raspberrypi,3-model-a-plus\x00brcm,bcm2837\x00").slice());
-    try testing.expectEqualStrings("BCM2835", socName("raspberrypi,model-zero-w\x00brcm,bcm2835\x00").slice());
+    try testing.expectEqual(@as(usize, 0), q.serial.len);
+    try testing.expectEqualStrings("a1b2c3d4", serialFromDeviceTree(&.{ 0, 0, 0, 0, 0xa1, 0xb2, 0xc3, 0xd4 }).slice());
+    try testing.expectEqual(@as(usize, 0), serialFromDeviceTree(&(.{0} ** 8)).len);
 }
 
 test "memory, CPU time, routes and the command line" {
@@ -563,13 +500,13 @@ test "files are counted, without the kernel's filesystems" {
 }
 
 test "reading this machine" {
-    const h = Hardware.read(null);
+    const h = System.read();
     try testing.expect(h.kernel.len > 0);
     var m: UsageMonitor = .{};
     _ = m.read(1);
     const u = m.read(2);
     try testing.expect(u.mem_total > 0 and u.mem_available <= u.mem_total);
-    try testing.expect(u.storage_files > 0);
+    try testing.expect(u.storage.system > 0 and u.storage.free > 0);
     const net = Network.read();
     for (net.slice()) |*i| try testing.expect(i.name.len > 0 and !std.mem.eql(u8, i.name.slice(), "lo"));
 }

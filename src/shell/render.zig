@@ -12,7 +12,6 @@ const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
 const vc4 = @import("vc4");
-const font = @import("font");
 const server = @import("server.zig");
 const cursor = @import("cursor.zig");
 
@@ -22,7 +21,6 @@ const render = vc4.render;
 const texture = vc4.texture;
 
 pub const background = 0xff101830;
-const bar_background = 0xff1c2a4a;
 
 /// Frames are large; the shell has one.
 var static_frame: render.Frame = undefined;
@@ -344,44 +342,5 @@ pub const Renderer = struct {
     /// Returns the vertical blank time (microseconds) of a completed flip.
     pub fn handleEvents(r: *Renderer) !?u64 {
         return r.display.handleEvents();
-    }
-};
-
-/// The bar across the top of the screen: "Stardust", the window title and
-/// the time since boot.
-pub const Bar = struct {
-    font: font.Font,
-    cache: font.GlyphCache,
-    pixels: []u32,
-    width: u32,
-    height: u32,
-    scale: f32,
-
-    pub fn init(gpa: std.mem.Allocator, f: font.Font, screen_width: u32, screen_height: u32) !Bar {
-        const scale = @min(@as(f32, @floatFromInt(screen_width)) / 1920, @as(f32, @floatFromInt(screen_height)) / 1080);
-        const height: u32 = @intFromFloat(@round(44 * scale));
-        return .{
-            .font = f,
-            .cache = font.GlyphCache.init(gpa),
-            .pixels = try gpa.alloc(u32, @as(usize, screen_width) * height),
-            .width = screen_width,
-            .height = height,
-            .scale = scale,
-        };
-    }
-
-    pub fn draw(b: *Bar, title: []const u8, uptime_s: u64) !void {
-        const canvas: font.Canvas = .{ .pixels = b.pixels, .width = b.width, .height = b.height, .stride = b.width };
-        canvas.fill(0, 0, b.width, b.height, bar_background);
-        const s = b.scale;
-        const baseline = 30 * s;
-        const style: font.Style = .{ .font = &b.font, .size = 24 * s, .color = 0xffffffff };
-        _ = try font.draw(canvas, &b.cache, style, 20 * s, baseline, "Stardust");
-        const dim: font.Style = .{ .font = &b.font, .size = 22 * s, .color = 0xffb8c4dc };
-        const w: f32 = @floatFromInt(b.width);
-        _ = try font.draw(canvas, &b.cache, dim, (w - font.measure(dim, title)) / 2, baseline, title);
-        var buf: [32]u8 = undefined;
-        const clock = std.fmt.bufPrint(&buf, "up {d}:{d:0>2}:{d:0>2}", .{ uptime_s / 3600, uptime_s / 60 % 60, uptime_s % 60 }) catch "";
-        _ = try font.draw(canvas, &b.cache, dim, w - font.measure(dim, clock) - 20 * s, baseline, clock);
     }
 };
