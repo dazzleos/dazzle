@@ -2,7 +2,7 @@
 //! and Wi-Fi, without holding up boot.
 //!
 //! Init forks it early, once the user's runtime directory exists. It runs
-//! as the Stardust user and keeps only the capabilities this needs:
+//! as the Dazzle user and keeps only the capabilities this needs:
 //! changing interfaces, routes and Wi-Fi (CAP_NET_ADMIN), packet sockets and
 //! tying sockets to an interface (CAP_NET_RAW, for EAPOL and DHCP) and the
 //! DHCP client port (CAP_NET_BIND_SERVICE).
@@ -15,7 +15,7 @@
 //!
 //! It listens on $XDG_RUNTIME_DIR/network (see `sys.network` for the
 //! protocol) and answers only the settings app: the program the connecting
-//! process runs must be /apps/stardust-settings/stardust-settings. Every
+//! process runs must be /apps/dazzle-settings/dazzle-settings. Every
 //! app runs as the same user, so the socket's permissions alone could not
 //! tell them apart. Nothing is remembered across a reboot: the system lives
 //! in RAM.
@@ -40,15 +40,15 @@ pub fn start(runtime_dir: []const u8) ?linux.pid_t {
     switch (linux.errno(rc)) {
         .SUCCESS => if (rc != 0) return @intCast(rc),
         else => |e| {
-            print("stardust: network: fork failed ({s})\n", .{@tagName(e)});
+            print("dazzle: network: fork failed ({s})\n", .{@tagName(e)});
             return null;
         },
     }
     sys.dropPrivilegesKeeping(&.{ .net_admin, .net_raw, .net_bind_service }) catch |err| {
-        print("stardust: network: cannot drop privileges ({s})\n", .{@errorName(err)});
+        print("dazzle: network: cannot drop privileges ({s})\n", .{@errorName(err)});
         linux.exit(1);
     };
-    run(runtime_dir) catch |err| print("stardust: network: {s}\n", .{@errorName(err)});
+    run(runtime_dir) catch |err| print("dazzle: network: {s}\n", .{@errorName(err)});
     linux.exit(1);
 }
 
@@ -66,18 +66,18 @@ const Ethernet = struct {
         e.looked_ns = now;
         if (e.ifc) |*i| {
             if (i.exists()) return;
-            print("stardust: network: {s} removed\n", .{i.name()});
+            print("dazzle: network: {s} removed\n", .{i.name()});
             e.stopDhcp();
             e.ifc = null;
             return;
         }
         const i = ipv4.findEthernet() orelse {
-            if (!e.said_waiting) print("stardust: network: waiting for an Ethernet adapter\n", .{});
+            if (!e.said_waiting) print("dazzle: network: waiting for an Ethernet adapter\n", .{});
             e.said_waiting = true;
             return;
         };
         e.said_waiting = false;
-        print("stardust: network: found {s} ({x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2})\n", .{
+        print("dazzle: network: found {s} ({x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2})\n", .{
             i.name(), i.mac[0], i.mac[1], i.mac[2], i.mac[3], i.mac[4], i.mac[5],
         });
         e.ifc = i;
@@ -102,11 +102,11 @@ const Ethernet = struct {
         _ = ipv4.bringUp(i.name());
         switch (e.addressing) {
             .static => |st| ipv4.setStatic(i.name(), st.address, st.prefix, st.gateway) catch |err| {
-                print("stardust: network: cannot set {s}'s address ({s})\n", .{ i.name(), @errorName(err) });
+                print("dazzle: network: cannot set {s}'s address ({s})\n", .{ i.name(), @errorName(err) });
             },
             .dhcp => {
                 const rc = linux.fork();
-                if (linux.errno(rc) != .SUCCESS) return print("stardust: network: cannot start DHCP on {s}\n", .{i.name()});
+                if (linux.errno(rc) != .SUCCESS) return print("dazzle: network: cannot start DHCP on {s}\n", .{i.name()});
                 if (rc == 0) ipv4.runDhcp(i.name());
                 e.dhcp_pid = @intCast(rc);
             },
@@ -208,7 +208,7 @@ fn allowed(fd: linux.fd_t) bool {
     var exe: [256]u8 = undefined;
     const n = sys.check(linux.readlink(path.ptr, &exe, exe.len)) catch return false;
     const ok = isAllowedProgram(exe[0..n]);
-    if (!ok) print("stardust: network: refused {s} (pid {d})\n", .{ exe[0..n], cred.pid });
+    if (!ok) print("dazzle: network: refused {s} (pid {d})\n", .{ exe[0..n], cred.pid });
     return ok;
 }
 
@@ -231,10 +231,10 @@ fn listen(path: [:0]const u8) !linux.fd_t {
 }
 
 test "only the settings app is answered" {
-    try std.testing.expect(isAllowedProgram("/apps/stardust-settings/stardust-settings"));
-    try std.testing.expect(!isAllowedProgram("/apps/stardust-demo/stardust-demo"));
-    try std.testing.expect(!isAllowedProgram("/apps/stardust-settings/stardust-settings (deleted)"));
-    try std.testing.expect(!isAllowedProgram("/tmp/stardust-settings"));
+    try std.testing.expect(isAllowedProgram("/apps/dazzle-settings/dazzle-settings"));
+    try std.testing.expect(!isAllowedProgram("/apps/dazzle-demo/dazzle-demo"));
+    try std.testing.expect(!isAllowedProgram("/apps/dazzle-settings/dazzle-settings (deleted)"));
+    try std.testing.expect(!isAllowedProgram("/tmp/dazzle-settings"));
 }
 
 test "a process running another program is refused" {

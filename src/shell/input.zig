@@ -1,6 +1,6 @@
 //! USB keyboards and mice, read from their evdev nodes (/dev/input/eventN).
 //!
-//! Init's device manager gives the Stardust user each node as it appears;
+//! Init's device manager gives the Dazzle user each node as it appears;
 //! the shell looks for new ones once a second, so devices can be plugged
 //! in at any time. Relative motion moves the pointer, the wheel scrolls,
 //! mouse buttons are pointer buttons and every other key is a keyboard
@@ -118,7 +118,7 @@ pub const Devices = struct {
         d.active[n] = false;
         var name: [64]u8 = @splat(0);
         _ = linux.ioctl(fd, linux.IOCTL.IOR('E', 0x06, [64]u8), @intFromPtr(&name));
-        print("stardust-shell: input: {s}: {s}\n", .{ path, std.mem.sliceTo(&name, 0) });
+        print("dazzle-shell: input: {s}: {s}\n", .{ path, std.mem.sliceTo(&name, 0) });
     }
 
     /// Adds the open devices to `fds`; returns how many.
@@ -144,16 +144,16 @@ pub const Devices = struct {
             else => |e| {
                 for (&d.fds, 0..) |*slot, i| if (slot.* == fd) {
                     slot.* = null;
-                    print("stardust-shell: input: /dev/input/event{d} removed\n", .{i});
+                    print("dazzle-shell: input: /dev/input/event{d} removed\n", .{i});
                 };
                 sys.close(fd);
-                if (e != .NODEV) print("stardust-shell: input: read failed ({s})\n", .{@tagName(e)});
+                if (e != .NODEV) print("dazzle-shell: input: read failed ({s})\n", .{@tagName(e)});
                 return out[0..0];
             },
         }
         for (&d.fds, 0..) |slot, i| if (slot == fd and !d.active[i]) {
             d.active[i] = true;
-            print("stardust-shell: input: first events from /dev/input/event{d}\n", .{i});
+            print("dazzle-shell: input: first events from /dev/input/event{d}\n", .{i});
         };
         for (raw[0 .. rc / @sizeOf(RawEvent)]) |r| {
             if (n == out.len) break;

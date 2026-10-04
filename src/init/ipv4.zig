@@ -11,7 +11,7 @@ const dhcp = @import("dhcp.zig");
 const Ip4 = dhcp.Ip4;
 const print = sys.print;
 
-pub const hostname = "stardust";
+pub const hostname = "dazzle";
 
 pub const Interface = struct {
     name_buf: [linux.IFNAMESIZE]u8 = @splat(0),
@@ -164,7 +164,7 @@ fn deconfigure(ctl: linux.fd_t, ifc: *const Interface) void {
 fn logAddress(ifc: *const Interface, address: Ip4, prefix: u6, gateway: ?Ip4, how: []const u8) void {
     var gw_buf: [32]u8 = undefined;
     const gw = if (gateway) |g| std.fmt.bufPrint(&gw_buf, ", gateway {d}.{d}.{d}.{d}", .{ g[0], g[1], g[2], g[3] }) catch "" else "";
-    print("stardust: network: {s} is {d}.{d}.{d}.{d}/{d}{s} ({s})\n", .{
+    print("dazzle: network: {s} is {d}.{d}.{d}.{d}/{d}{s} ({s})\n", .{
         ifc.name(), address[0], address[1], address[2], address[3], prefix, gw, how,
     });
 }
@@ -177,16 +177,16 @@ fn manage(ctl: linux.fd_t, ifc: *const Interface) Error!void {
         var waited = false;
         while (!ifc.carrier()) {
             if (!ifc.exists()) return error.InterfaceGone;
-            if (!waited) print("stardust: network: {s} waiting for a link\n", .{ifc.name()});
+            if (!waited) print("dazzle: network: {s} waiting for a link\n", .{ifc.name()});
             waited = true;
             sys.sleepMs(500);
         }
-        print("stardust: network: {s} link up\n", .{ifc.name()});
+        print("dazzle: network: {s} link up\n", .{ifc.name()});
 
         dhcpSession(ctl, ifc, &previous) catch |err| switch (err) {
             // Keep the address: the link may come straight back, and DHCP
             // then asks for the same one.
-            error.LinkDown => print("stardust: network: {s} link down\n", .{ifc.name()}),
+            error.LinkDown => print("dazzle: network: {s} link down\n", .{ifc.name()}),
             else => return err,
         };
     }
@@ -201,7 +201,7 @@ pub fn runDhcp(name: []const u8) noreturn {
     var attr_buf: [32]u8 = undefined;
     ifc.mac = parseMac(ifc.attr("address", &attr_buf) orelse linux.exit(1)) orelse linux.exit(1);
     const ctl: linux.fd_t = @intCast(sys.check(linux.socket(linux.AF.INET, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0)) catch linux.exit(1));
-    manage(ctl, &ifc) catch |err| print("stardust: network: {s}: {s}\n", .{ ifc.name(), @errorName(err) });
+    manage(ctl, &ifc) catch |err| print("dazzle: network: {s}: {s}\n", .{ ifc.name(), @errorName(err) });
     linux.exit(0);
 }
 
@@ -341,7 +341,7 @@ fn dhcpSession(ctl: linux.fd_t, ifc: *const Interface, previous: *?Ip4) Error!vo
                 lease = dhcp.Lease.fromAck(reply.?, lease.server);
                 continue;
             }
-            print("stardust: network: {s} lost its lease\n", .{ifc.name()});
+            print("dazzle: network: {s} lost its lease\n", .{ifc.name()});
             deconfigure(ctl, ifc);
             configured = false;
             break;
@@ -373,7 +373,7 @@ pub fn bringUp(name: []const u8) bool {
     if (req.ifru.flags.UP) return true;
     req.ifru.flags.UP = true;
     if (linux.errno(linux.ioctl(sock, linux.SIOCSIFFLAGS, @intFromPtr(&req))) != .SUCCESS) {
-        print("stardust: network: cannot bring {s} up\n", .{name});
+        print("dazzle: network: cannot bring {s} up\n", .{name});
         return false;
     }
     return true;

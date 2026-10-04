@@ -1,4 +1,4 @@
-//! The Wayland interfaces Stardust uses: names, versions and opcodes, from
+//! The Wayland interfaces Dazzle uses: names, versions and opcodes, from
 //! wayland.xml, xdg-shell.xml and linux-dmabuf-v1.xml. Requests are sent by
 //! clients, events by the server; each list starts at opcode 0.
 
@@ -333,7 +333,7 @@ pub const wl_keyboard = struct {
     };
 };
 
-/// Linux input event codes (linux/input-event-codes.h) used by Stardust.
+/// Linux input event codes (linux/input-event-codes.h) used by Dazzle.
 pub const input = struct {
     pub const btn_left = 0x110;
     pub const btn_right = 0x111;

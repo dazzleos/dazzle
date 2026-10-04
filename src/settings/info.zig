@@ -1,6 +1,6 @@
 //! What the settings app shows about the machine, read from the kernel
 //! (/proc, /sys, the device tree) and the network interfaces. All
-//! of it is readable by the unprivileged Stardust user.
+//! of it is readable by the unprivileged Dazzle user.
 //!
 //! `System` does not change while the system runs and is read once;
 //! `Usage` and `Network` are read again every second.
@@ -136,7 +136,7 @@ pub const Usage = struct {
     }
 };
 
-/// Where the storage goes. Stardust runs from a filesystem in RAM, loaded
+/// Where the storage goes. Dazzle runs from a filesystem in RAM, loaded
 /// from the SD card at boot, so its files take memory and the free space is
 /// the memory available.
 pub const Storage = struct {
@@ -500,7 +500,7 @@ test "sizes and durations read naturally" {
 
 test "files are counted, without the kernel's filesystems" {
     var root_buf: [64]u8 = undefined;
-    const root = try std.fmt.bufPrintZ(&root_buf, "/tmp/stardust-tally-{d}", .{linux.getpid()});
+    const root = try std.fmt.bufPrintZ(&root_buf, "/tmp/dazzle-tally-{d}", .{linux.getpid()});
     var b: [128]u8 = undefined;
     _ = linux.mkdir(root, 0o755);
     _ = linux.mkdir(try std.fmt.bufPrintZ(&b, "{s}/sub", .{root}), 0o755);

@@ -1,4 +1,4 @@
-//! Native Stardust apps: a window on stardust-shell that the app renders
+//! Native Dazzle apps: a window on dazzle-shell that the app renders
 //! into with the vc4 API.
 //!
 //! * `Window`: a Wayland toplevel with the seat's pointer and keyboard, and

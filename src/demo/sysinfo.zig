@@ -122,7 +122,7 @@ fn processTicks(stat: []const u8) ?u64 {
 test "proc parsing" {
     const stat = "cpu  100 5 50 800 20 3 2 0 0 0\ncpu0 100 5 50 800 20 3 2 0 0 0\n";
     try std.testing.expectEqual([2]u64{ 980, 820 }, parseStat(stat).?);
-    const self = "25 (stardust demo) R 24 25 0 0 -1 4194304 120 0 0 0 731 42 0 0 20 0 1 0 512 9000000 400";
+    const self = "25 (dazzle demo) R 24 25 0 0 -1 4194304 120 0 0 0 731 42 0 0 20 0 1 0 512 9000000 400";
     try std.testing.expectEqual(@as(u64, 773), processTicks(self).?);
     try std.testing.expect(spinNs() > 0);
 }

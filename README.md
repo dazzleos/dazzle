@@ -1,23 +1,24 @@
-# Stardust
+# Dazzle
 
 A lightweight operating system for the Raspberry Pi, written in Zig on top of
 a minimal mainline Linux kernel. It runs on the Raspberry Pi Zero / Zero W
 (BCM2835) and the Raspberry Pi 3 A+ (BCM2837), from the same SD card image.
+It is named after dazzle camouflage's zig-zags, and written in Zig.
 
-Stardust is its own stack. Everything draws with **`vc4`**, a low-level
+Dazzle is its own stack. Everything draws with **`vc4`**, a low-level
 API for the VideoCore IV GPU written in Zig on the kernel's `vc4` driver:
 programs record draw calls into frames themselves, with shaders written in
 Zig, compiled by Zig to SPIR-V and from that to the GPU's code when
-Stardust is built. There is no OpenGL layer: the one Stardust had, for porting existing
+Dazzle is built. There is no OpenGL layer: the one Dazzle had, for porting existing
 apps, is in the git history if it is needed again.
 
-On top of it is **stardust-shell**, a minimal Wayland compositor. Init (PID 1, the only process with root
+On top of it is **dazzle-shell**, a minimal Wayland compositor. Init (PID 1, the only process with root
 privileges) starts the shell as an unprivileged user. Its dock along the
 bottom of the screen has an icon for each app; clicking one starts the app
 as a Wayland client, or brings its window to the front if it is already
 running. USB mice and keyboards work: the shell shows a cursor and passes
 input to the window. The demo, a native app built
-with Stardust's widget toolkit, shows a spinning, depth-tested Platonic
+with Dazzle's widget toolkit, shows a spinning, depth-tested Platonic
 solid, with Material 3 buttons to change its speed, radio buttons to
 choose the solid and switches to turn its lighting and texture on and
 off. Rings spread out and fade
@@ -38,16 +39,16 @@ The code is split into Zig modules, linked statically into each program:
 | `sys` | `src/sys/` | Linux system call helpers (sleeping, clocks, logging, the kernel command line) |
 | `vc4` | `src/vc4/` | The low-level graphics API for the VideoCore IV, described below |
 | `shader` | `src/shader/` | Shaders written in Zig: SPIR-V translated to `vc4` programs, and pipelines for drawing with them |
-| `app` | `src/app/` | Native apps' windows on stardust-shell: buffers shared with the shell, frame pacing and input |
+| `app` | `src/app/` | Native apps' windows on dazzle-shell: buffers shared with the shell, frame pacing and input |
 | `gfx` | `src/gfx/` | 2D graphics for the toolkit: anti-aliased rounded rectangles, circles, polygons and polylines, filled or stroked, and text, blended |
 | `ui` | `src/ui/` | The widget toolkit: declarative widgets with state, layout, painting and input, in Material 3's style |
 | `font` | `src/font/` | OpenType font rendering, described below |
-| `wayland` | `src/wayland/` | The Wayland wire protocol (with file descriptor passing), the interfaces Stardust uses, and a small client library |
-| `stardust-init` | `src/init/` | The init program: mounts, network, Wi-Fi scanning, log server, device permissions, starting the shell |
-| `stardust-shell` | `src/shell/` | The Wayland compositor and shell, described below |
-| `stardust-demo` | `src/demo/` | The demo, a native app |
-| `stardust-settings` | `src/settings/` | The settings app: the build, the hardware, what is in use and the network |
-| `stardust-files` | `src/files/` | The Files app: a tree of folders and a grid of what is in the open one |
+| `wayland` | `src/wayland/` | The Wayland wire protocol (with file descriptor passing), the interfaces Dazzle uses, and a small client library |
+| `dazzle-init` | `src/init/` | The init program: mounts, network, Wi-Fi scanning, log server, device permissions, starting the shell |
+| `dazzle-shell` | `src/shell/` | The Wayland compositor and shell, described below |
+| `dazzle-demo` | `src/demo/` | The demo, a native app |
+| `dazzle-settings` | `src/settings/` | The settings app: the build, the hardware, what is in use and the network |
+| `dazzle-files` | `src/files/` | The Files app: a tree of folders and a grid of what is in the open one |
 
 The `vc4` module:
 
@@ -237,7 +238,7 @@ The build compiles each program with Zig's SPIR-V backend, then
 `tools/shaderc.zig` translates the SPIR-V to the GPU's three shaders
 (coordinate, vertex and fragment), with the render state that changes
 their code (depth testing, blending), and the program that uses it embeds
-the result. Shaders are static, so this costs nothing when Stardust runs,
+the result. Shaders are static, so this costs nothing when Dazzle runs,
 and a shader that cannot be compiled fails the build, naming the line. The
 same code can compile SPIR-V when an app runs (`Program.compile`), and the
 tests check that it gives exactly what the build embedded.
@@ -303,7 +304,7 @@ yet.
 - **Covered windows:** a window hidden behind one above it cannot be seen,
   so it is told: it gets xdg_toplevel's `suspended` state (xdg-shell
   version 6), its frame callbacks are held until it can be seen again, and
-  what it commits meanwhile does not make the shell draw a frame. Stardust's apps then stop drawing (the demo's
+  what it commits meanwhile does not make the shell draw a frame. Dazzle's apps then stop drawing (the demo's
   solid stops spinning) and free the buffers they are not using, so the
   app in front has the GPU memory; raised, they draw again.
 - **GPU memory:** every buffer the GPU touches comes from the kernel's CMA
@@ -362,7 +363,7 @@ The demo program (`src/demo/`):
 
 ### Privileges
 
-Only init runs as root. Everything else runs as the Stardust user: the
+Only init runs as root. Everything else runs as the Dazzle user: the
 fixed user and group ID 1000 (`sys.user`). There are no accounts,
 passwords or logins.
 
@@ -373,7 +374,7 @@ passwords or logins.
   touch the display.
 - Init creates `/run/user/1000` (the user's runtime directory, mode 0700),
   forks, drops to the user (no supplementary groups, then the group, then
-  the user ID) and execs `/shell/stardust-shell`. The shell's stdout and
+  the user ID) and execs `/shell/dazzle-shell`. The shell's stdout and
   stderr are init's `/dev/kmsg` descriptor, because only root can open that
   for writing. The shell's clients inherit them.
 - The network manager, the one process that configures the network (wired
@@ -402,7 +403,7 @@ process has every privilege.
 Also: `build.zig` (the whole build, see below), `tools/` (host tools the
 build runs: `mkinitramfs.zig` packs the initramfs, `mkimage.zig` writes the
 SD card image, `check.zig` checks for build tools, the kernel
-configuration and firmware checksums), `kernel/stardust.config` (kernel
+configuration and firmware checksums), `kernel/dazzle.config` (kernel
 config fragment applied on top of `tinyconfig`), `boot/` (firmware
 `config.txt`, kernel `cmdline.txt`, and the Pi 3 A+'s device tree:
 mainline's, built by the kernel's `dtc` with one change, below) and `scripts/zig` (downloads Zig).
@@ -410,11 +411,11 @@ mainline's, built by the kernel's `dtc` with one change, below) and `scripts/zig
 The image's filesystem (an initramfs, in RAM) is kept simple:
 
 ```
-/init                       stardust-init
-/shell/                     stardust-shell, FiraSans-Regular.ttf and its license
-/apps/stardust-demo/        stardust-demo, FiraSans-Regular.ttf and its license
-/apps/stardust-settings/    stardust-settings, FiraSans-Regular.ttf and its license
-/apps/stardust-files/       stardust-files, FiraSans-Regular.ttf and its license
+/init                       dazzle-init
+/shell/                     dazzle-shell, FiraSans-Regular.ttf and its license
+/apps/dazzle-demo/          dazzle-demo, FiraSans-Regular.ttf and its license
+/apps/dazzle-settings/      dazzle-settings, FiraSans-Regular.ttf and its license
+/apps/dazzle-files/         dazzle-files, FiraSans-Regular.ttf and its license
 /dev /proc /sys /run        mounted or created by init
 ```
 
@@ -444,7 +445,7 @@ filesystem tools (or root) are needed.
 One command builds everything into an SD card image:
 
 ```sh
-scripts/zig build    # zig-out/stardust.img, and its files in zig-out/boot/
+scripts/zig build    # zig-out/dazzle.img, and its files in zig-out/boot/
 ```
 
 That builds the programs and the initramfs. It clones Linux v7.2 into
@@ -471,7 +472,7 @@ Options: `-Dlinux=path/to/linux` uses an existing kernel tree,
 LLVM, `-Dimage-size=<MiB>` sets the image size (default 64) and
 `-Dhttp-port=<port>` the host port for QEMU's log server (default 8080).
 
-The kernel comes from `make tinyconfig` plus `kernel/stardust.config`. The
+The kernel comes from `make tinyconfig` plus `kernel/dazzle.config`. The
 build fails if any requested option is dropped because a dependency is
 missing. The result is a zImage of about 2 MB that includes the vc4 DRM
 driver, networking and the USB Ethernet drivers.
@@ -485,7 +486,7 @@ device tree (`config.txt`).
 
 ## Running on a Pi Zero or Pi 3 A+
 
-Write `zig-out/stardust.img` to an SD card (`dd`, or Raspberry Pi Imager's
+Write `zig-out/dazzle.img` to an SD card (`dd`, or Raspberry Pi Imager's
 "Use custom" option). Alternatively, copy the contents of `zig-out/boot/`
 onto any FAT32-formatted card. The same card works in either board.
 
@@ -506,7 +507,7 @@ Ethernet adapter, and gets an address by DHCP once there is a link
 app. The adapter can be plugged in or out, and the cable connected, at any
 time. A log server also starts
 before the GPU is touched, so the log stays readable if a GPU job hangs.
-The Pi asks the DHCP server for the hostname `stardust`, so look for that
+The Pi asks the DHCP server for the hostname `dazzle`, so look for that
 name in your router's lease list, then open `http://<pi-address>/` in a
 browser (or `curl http://<pi-address>/`). It shows the whole log since
 boot: kernel, init and program messages. `http://<pi-address>/follow`
@@ -514,24 +515,24 @@ shows the same, then new messages as they arrive (`curl -N` follows it in a
 terminal).
 
 ```
-Stardust 6ec3896 system log. /follow shows new messages as they arrive.
+Dazzle 6ec3896 system log. /follow shows new messages as they arrive.
 
-[    4.731220] stardust: starting as init (build 6ec3896)
-[    4.739512] stardust: log server listening on HTTP port 80 as uid 1000
-[    4.740011] stardust: network: found eth0 (<mac>)
-[    4.746230] stardust: network: eth0 link up
-[    4.940117] stardust: network: eth0 is 192.168.1.42/24, gateway 192.168.1.1 (DHCP, lease 86400 s)
-[    4.740312] stardust: started /shell/stardust-shell (pid 24) as uid 1000
-[    4.741008] stardust: opened /dev/dri/card0 (vc4)
-[    4.772511] stardust-shell: build 6ec3896, display <width>x<height>
-[    4.772610] stardust-shell: app Demo (/apps/stardust-demo/stardust-demo)
-[    4.772702] stardust-shell: listening on /run/user/1000/wayland-0
-[    4.773120] stardust-shell: input: /dev/input/event0: Logitech USB Optical Mouse
-[    4.791240] stardust-shell: cursor shown
-[    7.312913] stardust-shell: started /apps/stardust-demo/stardust-demo (pid 25)
-[    7.330100] stardust-shell: client connected
-[    4.802114] stardust: drawing with the vc4 API, window <width>x<height>
-[    9.840211] stardust: 60.0 fps, GPU <t> ms, CPU <t> ms per frame
+[    4.731220] dazzle: starting as init (build 6ec3896)
+[    4.739512] dazzle: log server listening on HTTP port 80 as uid 1000
+[    4.740011] dazzle: network: found eth0 (<mac>)
+[    4.746230] dazzle: network: eth0 link up
+[    4.940117] dazzle: network: eth0 is 192.168.1.42/24, gateway 192.168.1.1 (DHCP, lease 86400 s)
+[    4.740312] dazzle: started /shell/dazzle-shell (pid 24) as uid 1000
+[    4.741008] dazzle: opened /dev/dri/card0 (vc4)
+[    4.772511] dazzle-shell: build 6ec3896, display <width>x<height>
+[    4.772610] dazzle-shell: app Demo (/apps/dazzle-demo/dazzle-demo)
+[    4.772702] dazzle-shell: listening on /run/user/1000/wayland-0
+[    4.773120] dazzle-shell: input: /dev/input/event0: Logitech USB Optical Mouse
+[    4.791240] dazzle-shell: cursor shown
+[    7.312913] dazzle-shell: started /apps/dazzle-demo/dazzle-demo (pid 25)
+[    7.330100] dazzle-shell: client connected
+[    4.802114] dazzle: drawing with the vc4 API, window <width>x<height>
+[    9.840211] dazzle: 60.0 fps, GPU <t> ms, CPU <t> ms per frame
 ```
 
 Timestamps above are illustrative, and the order varies because the network
@@ -562,7 +563,7 @@ title:
   the SoC gets hot or the supply voltage sags, so a speed below 100% means
   the Pi, not the software, slowed down. (`config.txt` sets `force_turbo=1`:
   otherwise the firmware drops to its minimum clocks about a minute after
-  boot, because Stardust has no cpufreq driver to ask for more.) The log line every 5 seconds also
+  boot, because Dazzle has no cpufreq driver to ask for more.) The log line every 5 seconds also
   splits the CPU use between the demo and the shell, and the kernel logs
   `Undervoltage detected!` when the supply sags.
 
@@ -571,8 +572,8 @@ second it composited (with the CPU and GPU time each took) and showed
 directly, and how many refreshes went by without a new frame:
 
 ```
-stardust-shell: 60.0 frames/s, all shown directly, 0 refreshes skipped
-stardust-shell: work 2.40 ms per frame (clients 0.18, display 1.27 of which commits 1.10, flips 0.30, other 0.60), 3.0 wakeups per frame, 14.4% of the time
+dazzle-shell: 60.0 frames/s, all shown directly, 0 refreshes skipped
+dazzle-shell: work 2.40 ms per frame (clients 0.18, display 1.27 of which commits 1.10, flips 0.30, other 0.60), 3.0 wakeups per frame, 14.4% of the time
 ```
 
 The second line is the shell's own work, by part: handling clients'
@@ -623,7 +624,7 @@ change read again every second (`src/settings/info.zig`):
 - **Resources:** how busy the CPU is, the SoC's temperature, memory, the
   GPU's memory (the CMA pool all GPU buffers come from: the V3D has no
   MMU), and storage: a bar of what the system, the apps and the user's
-  files take, with a key that ends with the free space. Stardust has no driver for the SD card:
+  files take, with a key that ends with the free space. Dazzle has no driver for the SD card:
   the firmware loads the system into memory at boot and it runs from
   there, so its storage is that filesystem in RAM and its free space the
   memory available; the bar will say more once there is real storage. The
@@ -701,14 +702,14 @@ read says so.
 
 ## Faster development loops
 
-- **Raspberry Pi OS:** `zig-out/bin/stardust-shell` and `stardust-demo`
+- **Raspberry Pi OS:** `zig-out/bin/dazzle-shell` and `dazzle-demo`
   also run as normal programs on Raspberry Pi OS (Lite, or with the desktop stopped) on any Pi
   from the Zero to the Pi 3. All of them have the same VideoCore IV and
   `vc4` driver. From a text console, as a user in the `video` and `input`
   groups, run the shell with `XDG_RUNTIME_DIR` set:
-  `stardust-shell path/to/stardust-demo`. Each program looks for
+  `dazzle-shell path/to/dazzle-demo`. Each program looks for
   `FiraSans-Regular.ttf` next to its executable, so copy
-  `fonts/FiraSans-Regular.ttf` there (`stardust-demo` also takes a font
+  `fonts/FiraSans-Regular.ttf` there (`dazzle-demo` also takes a font
   path as its argument). Press Ctrl+C to stop.
   Iterating on GPU code this way avoids rebuilding the SD card.
 - **QEMU:** `scripts/zig build qemu` boots the kernel and initramfs in QEMU's
@@ -720,14 +721,14 @@ read says so.
   one. `http://localhost:8080/`
   reaches the log server. QEMU does not emulate the 3D engine or HDMI,
   so this checks the kernel, init, privileges and networking only. The log
-  ends with `stardust-shell: error: NoVc4Device` and `stardust: shell exited
+  ends with `dazzle-shell: error: NoVc4Device` and `dazzle: shell exited
   with status 1`.
 
 ## How a frame is drawn
 
 1. **Shaders.** Zig compiles each shader program to SPIR-V, and
    `src/shader/` lowers its entry points to the compiler's builder API, as
-   a list of SSA values (when Stardust is built). Three run per draw: a coordinate
+   a list of SSA values (when Dazzle is built). Three run per draw: a coordinate
    shader the binner uses to find which 64×64 tiles each triangle covers, a
    vertex shader that outputs screen positions and varyings, and a fragment
    shader that writes the pixel colour (and depth) to the tile buffer.
@@ -807,7 +808,7 @@ correctly at a steady 60 fps at 1920x1080 (about 6.5 ms of GPU time per
 frame). Compiled shaders, perspective, texturing, depth testing and page
 flipping all worked, with the log readable over the network.
 
-The demo is a native app: a window on stardust-shell, drawn with the `vc4`
+The demo is a native app: a window on dazzle-shell, drawn with the `vc4`
 API and shaders written in Zig. On a Pi Zero, with the earlier OpenGL version, the
 shell showed the demo's buffers directly on the display (no compositing)
 at a steady 60 frames per second, with mouse input working. The demo's

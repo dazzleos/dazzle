@@ -1,4 +1,4 @@
-//! Tests of Stardust's shader programs, as the build compiled them: run in
+//! Tests of Dazzle's shader programs, as the build compiled them: run in
 //! the QPU simulator and checked against the same maths done here, and
 //! compiled again from their SPIR-V, as an app compiling shaders when it
 //! runs would.

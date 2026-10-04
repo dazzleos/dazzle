@@ -1,14 +1,14 @@
-//! The Stardust demo: a spinning Platonic solid, with rendering statistics
+//! The Dazzle demo: a spinning Platonic solid, with rendering statistics
 //! in the top left corner, written in Fira Sans (its own copy, next to the
 //! executable), buttons that change the solid's speed, radio buttons to
 //! choose the solid and switches for its lighting and texture. Clicks draw
 //! expanding, fading rings behind the solid.
 //!
-//! It is a native Stardust app: a window on stardust-shell (see the `app`
+//! It is a native Dazzle app: a window on dazzle-shell (see the `app`
 //! module), built with the `ui` toolkit (see view.zig), drawn with the vc4
 //! API and shaders written in Zig.
 //!
-//!     stardust-demo [font.ttf]
+//!     dazzle-demo [font.ttf]
 //!
 //! It runs until it is stopped or its window is closed.
 
@@ -37,10 +37,10 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     _ = args.skip();
     var font_buf: [512]u8 = undefined;
     const font_path: [*:0]const u8 = args.next() orelse (sys.appFile(&font_buf, font.default_font_file) catch font.default_font_file);
-    print("stardust: demo (build {s}) running as uid {d}\n", .{ build_info.commit, linux.getuid() });
+    print("dazzle: demo (build {s}) running as uid {d}\n", .{ build_info.commit, linux.getuid() });
 
     run(init, font_path) catch |err| {
-        print("stardust: error: {s}\n", .{@errorName(err)});
+        print("dazzle: error: {s}\n", .{@errorName(err)});
         return 1;
     };
     return 0;
@@ -48,11 +48,11 @@ pub fn main(init: std.process.Init.Minimal) u8 {
 
 fn loadFont(gpa: std.mem.Allocator, path: [*:0]const u8) ?font.Font {
     const data = sys.readFileAlloc(gpa, path, 32 * 1024 * 1024) catch |err| {
-        print("stardust: cannot read the font {s} ({s}); no text\n", .{ path, @errorName(err) });
+        print("dazzle: cannot read the font {s} ({s}); no text\n", .{ path, @errorName(err) });
         return null;
     };
     return font.Font.init(data) catch |err| {
-        print("stardust: {s} is not a usable font ({s}); no text\n", .{ path, @errorName(err) });
+        print("dazzle: {s} is not a usable font ({s}); no text\n", .{ path, @errorName(err) });
         return null;
     };
 }
@@ -61,19 +61,19 @@ fn loadFont(gpa: std.mem.Allocator, path: [*:0]const u8) ?font.Font {
 fn openWindow(gpa: std.mem.Allocator, init: std.process.Init.Minimal, dev: *vc4.Device) !*app.Window {
     const Environ = std.process.Environ;
     const display_name = Environ.getPosix(init.environ, "WAYLAND_DISPLAY") orelse {
-        print("stardust: WAYLAND_DISPLAY is not set; run me under stardust-shell\n", .{});
+        print("dazzle: WAYLAND_DISPLAY is not set; run me under dazzle-shell\n", .{});
         return error.NoCompositor;
     };
     var path_buf: [128]u8 = undefined;
     const path = wayland.client.socketPath(&path_buf, Environ.getPosix(init.environ, "XDG_RUNTIME_DIR"), display_name) catch {
-        print("stardust: XDG_RUNTIME_DIR is not set\n", .{});
+        print("dazzle: XDG_RUNTIME_DIR is not set\n", .{});
         return error.NoCompositor;
     };
-    const win = app.Window.open(gpa, .device(dev), path, "Stardust demo") catch |err| {
-        print("stardust: cannot open a window on {s} ({s})\n", .{ path, @errorName(err) });
+    const win = app.Window.open(gpa, .device(dev), path, "Dazzle demo") catch |err| {
+        print("dazzle: cannot open a window on {s} ({s})\n", .{ path, @errorName(err) });
         return err;
     };
-    try win.setAppId("stardust-demo");
+    try win.setAppId("dazzle-demo");
     return win;
 }
 
@@ -83,13 +83,13 @@ var frame: vc4.render.Frame = undefined;
 fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     const gpa = std.heap.page_allocator;
     var dev = vc4.device.openRender() catch |err| {
-        print("stardust: no GPU ({s}); look for vc4 or v3d errors earlier in the log\n", .{@errorName(err)});
+        print("dazzle: no GPU ({s}); look for vc4 or v3d errors earlier in the log\n", .{@errorName(err)});
         return err;
     };
     const win = try openWindow(gpa, init, &dev);
     var width = win.width;
     var height = win.height;
-    print("stardust: drawing with the vc4 API, window {d}x{d}\n", .{ width, height });
+    print("dazzle: drawing with the vc4 API, window {d}x{d}\n", .{ width, height });
 
     var all_solids = try solids.Solids.init(gpa, dev);
     var f = loadFont(gpa, font_path);
@@ -127,7 +127,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             break :blk win.wait(@max(until -| sys.nowNs(), std.time.ns_per_ms));
         } else win.poll();
         waited catch |err| {
-            if (err == error.ServerError) print("stardust: compositor error: {s}\n", .{win.conn.errorMessage()});
+            if (err == error.ServerError) print("dazzle: compositor error: {s}\n", .{win.conn.errorMessage()});
             return err;
         };
         if (win.closed or controls.quit) return;
@@ -143,7 +143,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         if (win.suspended != suspended) {
             suspended = win.suspended;
             if (suspended) win.releaseSpareBuffers() else dirty = true;
-            print("stardust: {s}\n", .{if (suspended) "covered: not drawing" else "in front: drawing"});
+            print("dazzle: {s}\n", .{if (suspended) "covered: not drawing" else "in front: drawing"});
         }
         const frame_start = sys.nowNs();
         for (win.takeInput()) |e| switch (e) {
@@ -219,7 +219,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             const s = log_window.summary(now, width, height);
             health = monitor.sample();
             var temp_buf: [16]u8 = undefined;
-            print("stardust: {d:.1} fps ({d:.0}% of the window redrawn), GPU {d:.2} ms, CPU {d:.2} ms per frame; SoC {s}, CPU speed {d:.0}%, CPU busy {d:.0}% (demo {d:.0}%, shell {d:.0}%)\n", .{
+            print("dazzle: {d:.1} fps ({d:.0}% of the window redrawn), GPU {d:.2} ms, CPU {d:.2} ms per frame; SoC {s}, CPU speed {d:.0}%, CPU busy {d:.0}% (demo {d:.0}%, shell {d:.0}%)\n", .{
                 s.fps,                                          s.redrawn,    s.gpu_ms,          s.cpu_ms,
                 temperatureText(&temp_buf, health.temperature), health.speed, health.total_busy, health.demo_busy,
                 health.shell_busy,

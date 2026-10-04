@@ -18,7 +18,7 @@ const Modules = struct {
 /// * `vc4`: the low-level VideoCore IV graphics API
 /// * `shader`: shaders written in Zig: SPIR-V to vc4 programs, and drawing
 ///   with them
-/// * `app`: native apps' windows on stardust-shell, drawn with vc4
+/// * `app`: native apps' windows on dazzle-shell, drawn with vc4
 /// * `gfx`: 2D graphics (rounded rectangles, polygons, strokes, text) on vc4
 /// * `ui`: the widget toolkit, on gfx
 /// * `font`: OpenType font rendering
@@ -277,7 +277,7 @@ const Kernel = struct {
 };
 
 /// Linux, built with make (as the kernel must be): tinyconfig, plus the
-/// options in kernel/stardust.config, checked to have all taken effect.
+/// options in kernel/dazzle.config, checked to have all taken effect.
 /// make does its own incremental building, so this runs every time and is
 /// quick when nothing changed.
 fn addKernel(b: *std.Build) Kernel {
@@ -323,14 +323,14 @@ fn addKernel(b: *std.Build) Kernel {
     }.cmd;
     Chain.add(&last, make(b, linux_dir, out, toolchain, &.{"tinyconfig"}));
     const merge = b.addSystemCommand(&.{ b.pathJoin(&.{ linux_dir, "scripts/kconfig/merge_config.sh" }), "-m", "-O", out, b.pathJoin(&.{ out, ".config" }) });
-    merge.addFileArg(b.path("kernel/stardust.config"));
+    merge.addFileArg(b.path("kernel/dazzle.config"));
     // It lists every option it changes; show that only if it fails.
     merge.expectExitCode(0);
     Chain.add(&last, merge);
     Chain.add(&last, make(b, linux_dir, out, toolchain, &.{"olddefconfig"}));
     const check_config = b.addRunArtifact(hostTool(b, "check"));
     check_config.addArg("config");
-    check_config.addFileArg(b.path("kernel/stardust.config"));
+    check_config.addFileArg(b.path("kernel/dazzle.config"));
     check_config.addArg(b.pathJoin(&.{ out, ".config" }));
     Chain.add(&last, check_config);
     Chain.add(&last, make(b, linux_dir, out, toolchain, &.{
@@ -396,7 +396,7 @@ fn fetchWifiFirmware(b: *std.Build) *std.Build.Step {
     }.url);
 }
 
-/// The SD card image (zig-out/stardust.img), and its files in zig-out/boot
+/// The SD card image (zig-out/dazzle.img), and its files in zig-out/boot
 /// for copying onto a card by hand.
 fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.Build.Step {
     const dir = b.pathFromRoot("build/firmware");
@@ -424,20 +424,20 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.B
     const mkimage = b.addRunArtifact(hostTool(b, "mkimage"));
     mkimage.step.dependOn(verify_step);
     mkimage.step.dependOn(kernel.step);
-    const img = mkimage.addOutputFileArg("stardust.img");
+    const img = mkimage.addOutputFileArg("dazzle.img");
     mkimage.addArg(b.fmt("{d}", .{b.option(u32, "image-size", "SD image size in MiB (default 64)") orelse 64}));
-    const image_step = b.step("image", "Build everything into an SD card image: zig-out/stardust.img (and its files in zig-out/boot)");
+    const image_step = b.step("image", "Build everything into an SD card image: zig-out/dazzle.img (and its files in zig-out/boot)");
     for (boot_files) |f| {
         mkimage.addPrefixedFileArg(b.fmt("{s}=", .{f[0]}), f[1]);
         const install = b.addInstallFile(f[1], b.fmt("boot/{s}", .{f[0]}));
         install.step.dependOn(&mkimage.step);
         image_step.dependOn(&install.step);
     }
-    image_step.dependOn(&b.addInstallFile(img, "stardust.img").step);
+    image_step.dependOn(&b.addInstallFile(img, "dazzle.img").step);
     return image_step;
 }
 
-/// The boards Stardust runs on, as QEMU emulates them.
+/// The boards Dazzle runs on, as QEMU emulates them.
 const QemuBoard = enum {
     zero,
     @"pi3a+",
@@ -527,29 +527,29 @@ pub fn build(b: *std.Build) void {
     const shaders = addShaders(b);
     const pi = addModules(b, target, optimize, shaders);
     // init runs as root; the shell and the apps (its Wayland clients) run
-    // as the unprivileged Stardust user.
+    // as the unprivileged Dazzle user.
     const init_exe = b.addExecutable(.{
-        .name = "stardust-init",
+        .name = "dazzle-init",
         .root_module = addProgramModule(b, "src/init/main.zig", target, optimize, pi, shaders, true),
     });
     const install_init = b.addInstallArtifact(init_exe, .{});
     const demo_exe = b.addExecutable(.{
-        .name = "stardust-demo",
+        .name = "dazzle-demo",
         .root_module = addProgramModule(b, "src/demo/main.zig", target, optimize, pi, shaders, true),
     });
     const install_demo = b.addInstallArtifact(demo_exe, .{});
     const settings_exe = b.addExecutable(.{
-        .name = "stardust-settings",
+        .name = "dazzle-settings",
         .root_module = addProgramModule(b, "src/settings/main.zig", target, optimize, pi, shaders, true),
     });
     const install_settings = b.addInstallArtifact(settings_exe, .{});
     const files_exe = b.addExecutable(.{
-        .name = "stardust-files",
+        .name = "dazzle-files",
         .root_module = addProgramModule(b, "src/files/main.zig", target, optimize, pi, shaders, true),
     });
     const install_files = b.addInstallArtifact(files_exe, .{});
     const shell_exe = b.addExecutable(.{
-        .name = "stardust-shell",
+        .name = "dazzle-shell",
         .root_module = addProgramModule(b, "src/shell/main.zig", target, optimize, pi, shaders, true),
     });
     const install_shell = b.addInstallArtifact(shell_exe, .{});

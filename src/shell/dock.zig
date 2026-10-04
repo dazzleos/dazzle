@@ -22,7 +22,7 @@ const palette = [_]u32{ 0xff3f7ee8, 0xffe8743f, 0xff3fb86e, 0xffb04fd6, 0xffe8b3
 pub const App = struct {
     /// Its directory's name, and its program's.
     name: []const u8,
-    /// The name shown: without a "stardust-" prefix, capitalised.
+    /// The name shown: without a "dazzle-" prefix, capitalised.
     label: []const u8,
     /// The program: /apps/<name>/<name>.
     path: [:0]const u8,
@@ -70,9 +70,9 @@ pub fn findApps(gpa: std.mem.Allocator, dir_path: []const u8) ![]App {
     return apps.toOwnedSlice(gpa);
 }
 
-/// "stardust-demo" is shown as "Demo".
+/// "dazzle-demo" is shown as "Demo".
 pub fn label(gpa: std.mem.Allocator, name: []const u8) ![]const u8 {
-    const prefix = "stardust-";
+    const prefix = "dazzle-";
     const base = if (std.mem.startsWith(u8, name, prefix) and name.len > prefix.len) name[prefix.len..] else name;
     const out = try gpa.dupe(u8, base);
     out[0] = std.ascii.toUpper(out[0]);
@@ -180,9 +180,9 @@ fn roundedRect(c: font.Canvas, x: f32, y: f32, w: f32, h: f32, radius: f32, colo
 
 const testing = std.testing;
 
-test "app labels drop the stardust- prefix" {
+test "app labels drop the dazzle- prefix" {
     const a = testing.allocator;
-    const l = try label(a, "stardust-demo");
+    const l = try label(a, "dazzle-demo");
     defer a.free(l);
     try testing.expectEqualStrings("Demo", l);
     const m = try label(a, "notes");
@@ -227,7 +227,7 @@ test "icons are in a row in the middle, and clicks find them" {
 test "apps are the directories holding a program of the same name" {
     const a = testing.allocator;
     var tmp_buf: [64]u8 = undefined;
-    const root = try std.fmt.bufPrintZ(&tmp_buf, "/tmp/stardust-dock-test-{d}", .{linux.getpid()});
+    const root = try std.fmt.bufPrintZ(&tmp_buf, "/tmp/dazzle-dock-test-{d}", .{linux.getpid()});
     defer {
         var b: [128]u8 = undefined;
         for ([_][]const u8{ "/zeta/zeta", "/alpha/alpha", "/zeta", "/alpha", "/notes", "" }) |p| {

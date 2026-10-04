@@ -89,7 +89,7 @@ pub fn build(gpa: std.mem.Allocator, size_mib: u32, files: []const File) ![]u8 {
     // --- Directory entries (needed to size the root directory) ---
     var entries: std.ArrayList([32]u8) = .empty;
     var label: [32]u8 = @splat(0);
-    @memcpy(label[0..11], "STARDUST   ");
+    @memcpy(label[0..11], "DAZZLE     ");
     label[11] = 0x08; // volume label
     try entries.append(gpa, label);
     var shorts: std.ArrayList([11]u8) = .empty;
@@ -155,7 +155,7 @@ pub fn build(gpa: std.mem.Allocator, size_mib: u32, files: []const File) ![]u8 {
     // --- Boot sector, FSInfo, and their backups ---
     const bs = part[0..sector];
     bs[0..3].* = .{ 0xeb, 0x58, 0x90 };
-    @memcpy(bs[3..11], "STARDUST");
+    @memcpy(bs[3..11], "DAZZLE  ");
     put16(bs, 11, sector);
     bs[13] = sectors_per_cluster;
     put16(bs, 14, reserved_sectors);
@@ -172,7 +172,7 @@ pub fn build(gpa: std.mem.Allocator, size_mib: u32, files: []const File) ![]u8 {
     bs[64] = 0x80; // drive number
     bs[66] = 0x29; // extended boot signature
     put32(bs, 67, 0x53544152); // volume ID
-    @memcpy(bs[71..82], "STARDUST   ");
+    @memcpy(bs[71..82], "DAZZLE     ");
     @memcpy(bs[82..90], "FAT32   ");
     bs[510] = 0x55;
     bs[511] = 0xaa;

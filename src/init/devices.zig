@@ -1,4 +1,4 @@
-//! The device manager: hands input devices to the Stardust user.
+//! The device manager: hands input devices to the Dazzle user.
 //!
 //! The kernel creates /dev/input/eventN (one per keyboard, mouse or other
 //! input device) owned by root, so the unprivileged shell could not read
@@ -20,15 +20,15 @@ pub fn start() ?linux.pid_t {
     switch (linux.errno(rc)) {
         .SUCCESS => if (rc != 0) return @intCast(rc),
         else => |e| {
-            print("stardust: devices: fork failed ({s})\n", .{@tagName(e)});
+            print("dazzle: devices: fork failed ({s})\n", .{@tagName(e)});
             return null;
         },
     }
     sys.dropPrivilegesKeeping(&.{.chown}) catch |err| {
-        print("stardust: devices: cannot drop privileges ({s})\n", .{@errorName(err)});
+        print("dazzle: devices: cannot drop privileges ({s})\n", .{@errorName(err)});
         linux.exit(1);
     };
-    run() catch |err| print("stardust: devices: {s}\n", .{@errorName(err)});
+    run() catch |err| print("dazzle: devices: {s}\n", .{@errorName(err)});
     linux.exit(1);
 }
 
@@ -79,12 +79,12 @@ fn grant(name: []const u8, log: bool) void {
         const err = linux.errno(linux.chown(path.ptr, sys.user.uid, sys.user.gid));
         if (err == .SUCCESS) break;
         if (err != .NOENT or !log or attempt == 10) {
-            if (log or err != .NOENT) print("stardust: devices: cannot chown {s} ({s})\n", .{ path, @tagName(err) });
+            if (log or err != .NOENT) print("dazzle: devices: cannot chown {s} ({s})\n", .{ path, @tagName(err) });
             return;
         }
         sys.sleepMs(10);
     }
-    if (log) print("stardust: devices: {s} is the user's\n", .{path});
+    if (log) print("dazzle: devices: {s} is the user's\n", .{path});
 }
 
 test "input uevents" {

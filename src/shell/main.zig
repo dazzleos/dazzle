@@ -1,4 +1,4 @@
-//! stardust-shell: a minimal Wayland compositor and shell.
+//! dazzle-shell: a minimal Wayland compositor and shell.
 //!
 //! It owns the display (as the DRM master) and draws with the low-level vc4
 //! API: a dock along the bottom with an icon for each app in /apps (see
@@ -13,10 +13,10 @@
 //! itself, other than the programs named on its command line. It is not an
 //! app: it lives in /shell, with its font.
 //!
-//! Init starts it as the unprivileged Stardust user, with stdout and stderr
+//! Init starts it as the unprivileged Dazzle user, with stdout and stderr
 //! going to the kernel log.
 //!
-//!     stardust-shell [client ...]
+//!     dazzle-shell [client ...]
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -35,7 +35,7 @@ pub const std_options: std.Options = .{ .logFn = logFn };
 
 fn logFn(comptime level: std.log.Level, comptime scope: @TypeOf(.enum_literal), comptime fmt: []const u8, args: anytype) void {
     _ = level;
-    print("stardust-shell: " ++ (if (scope == .default) "" else @tagName(scope) ++ ": ") ++ fmt ++ "\n", args);
+    print("dazzle-shell: " ++ (if (scope == .default) "" else @tagName(scope) ++ ": ") ++ fmt ++ "\n", args);
 }
 
 /// The mouse's left button.
@@ -44,7 +44,7 @@ const btn_left = 0x110;
 pub fn main(init: std.process.Init.Minimal) u8 {
     sys.logToKmsgIfStderr();
     run(init) catch |err| {
-        print("stardust-shell: error: {s}\n", .{@errorName(err)});
+        print("dazzle-shell: error: {s}\n", .{@errorName(err)});
         return 1;
     };
     return 0;
@@ -53,14 +53,14 @@ pub fn main(init: std.process.Init.Minimal) u8 {
 fn run(init: std.process.Init.Minimal) !void {
     const gpa = std.heap.page_allocator;
     const runtime_dir = std.process.Environ.getPosix(init.environ, "XDG_RUNTIME_DIR") orelse {
-        print("stardust-shell: XDG_RUNTIME_DIR is not set\n", .{});
+        print("dazzle-shell: XDG_RUNTIME_DIR is not set\n", .{});
         return error.NoRuntimeDir;
     };
 
     const dev = try vc4.device.open();
     const output = try vc4.drm.waitForOutput(dev.fd);
     var renderer = try render.Renderer.init(gpa, dev, output);
-    print("stardust-shell: build {s}, display {d}x{d}, {s}\n", .{
+    print("dazzle-shell: build {s}, display {d}x{d}, {s}\n", .{
         build_info.commit,                                                                                                                                                                                                             renderer.width, renderer.height,
         if (renderer.display.kms) |k| (if (k.overlays[vc4.kms.max_overlays - 1] != null) "atomic mode setting with overlay planes" else "atomic mode setting, too few overlay planes") else "legacy mode setting (no direct scanout)",
     });
@@ -71,11 +71,11 @@ fn run(init: std.process.Init.Minimal) !void {
     if (sys.readFileAlloc(gpa, font_path, 32 * 1024 * 1024)) |data| {
         if (font.Font.init(data)) |f| {
             ui_font = f;
-        } else |err| print("stardust-shell: font: {s}\n", .{@errorName(err)});
-    } else |err| print("stardust-shell: cannot read {s}: {s}\n", .{ font_path, @errorName(err) });
+        } else |err| print("dazzle-shell: font: {s}\n", .{@errorName(err)});
+    } else |err| print("dazzle-shell: cannot read {s}: {s}\n", .{ font_path, @errorName(err) });
 
     const apps = try dock_mod.findApps(gpa, dock_mod.apps_dir);
-    for (apps) |app| print("stardust-shell: app {s} ({s})\n", .{ app.label, app.path });
+    for (apps) |app| print("dazzle-shell: app {s} ({s})\n", .{ app.label, app.path });
     var dock = try dock_mod.Dock.init(gpa, ui_font, apps, renderer.width, renderer.height);
     const dock_y: u32 = renderer.height - dock.height;
     dock.draw();
@@ -91,7 +91,7 @@ fn run(init: std.process.Init.Minimal) !void {
     var path_buf: [108]u8 = undefined;
     const path = try std.fmt.bufPrintZ(&path_buf, "{s}/wayland-0", .{runtime_dir});
     const listener = try listen(path);
-    print("stardust-shell: listening on {s}\n", .{path});
+    print("dazzle-shell: listening on {s}\n", .{path});
 
     // Start the clients named on the command line.
     var args = init.args.iterate();
@@ -154,7 +154,7 @@ fn run(init: std.process.Init.Minimal) !void {
             const flip_start = sys.nowNs();
             defer stats.flips_ns += sys.nowNs() - flip_start;
             if (renderer.handleEvents() catch |err| blk: {
-                print("stardust-shell: display events: {s}\n", .{@errorName(err)});
+                print("dazzle-shell: display events: {s}\n", .{@errorName(err)});
                 break :blk null;
             }) |vblank_us| {
                 stats.flipped(vblank_us);
@@ -174,7 +174,7 @@ fn run(init: std.process.Init.Minimal) !void {
                     const i = dock.hit(pointer.x, pointer.y - @as(f64, @floatFromInt(dock_y))) orelse continue;
                     const app = &apps[i];
                     if (app.pid) |pid| {
-                        if (!server.raise(pid)) print("stardust-shell: {s} has no window yet\n", .{app.label});
+                        if (!server.raise(pid)) print("dazzle-shell: {s} has no window yet\n", .{app.label});
                     } else {
                         app.pid = spawn(app.path, runtime_dir);
                         dock.draw();
@@ -201,7 +201,7 @@ fn run(init: std.process.Init.Minimal) !void {
             const rc = linux.accept4(listener, null, null, linux.SOCK.CLOEXEC);
             if (linux.errno(rc) == .SUCCESS) {
                 _ = try server.addClient(@intCast(rc));
-                print("stardust-shell: client connected\n", .{});
+                print("dazzle-shell: client connected\n", .{});
             }
         }
         // Clients may disconnect (and leave the list) while being handled.
@@ -213,7 +213,7 @@ fn run(init: std.process.Init.Minimal) !void {
                 if (f.fd == c.conn.fd) break f.revents != 0;
             } else false;
             if (ready and !server.dispatch(c)) {
-                print("stardust-shell: client disconnected\n", .{});
+                print("dazzle-shell: client disconnected\n", .{});
                 continue;
             }
             i += 1;
@@ -269,14 +269,14 @@ fn run(init: std.process.Init.Minimal) !void {
                 if (renderer.composite(windows[0..visible.len])) |timing| {
                     stats.composited(timing);
                     on_screen = renderer.show() catch |err| blk: {
-                        print("stardust-shell: cannot show the frame: {s}\n", .{@errorName(err)});
+                        print("dazzle-shell: cannot show the frame: {s}\n", .{@errorName(err)});
                         server.framePresented(@truncate(sys.nowNs() / std.time.ns_per_ms));
                         break :blk false;
                     };
                 } else |err| {
                     // Nothing new reaches the screen, but the clients should
                     // not wait for it.
-                    print("stardust-shell: frame failed: {s}\n", .{@errorName(err)});
+                    print("dazzle-shell: frame failed: {s}\n", .{@errorName(err)});
                     server.framePresented(@truncate(sys.nowNs() / std.time.ns_per_ms));
                     on_screen = false;
                 }
@@ -290,8 +290,8 @@ fn run(init: std.process.Init.Minimal) !void {
                 cursor_shown = true;
                 if (renderer.showCursor()) {
                     renderer.moveCursor(@intFromFloat(pointer.x), @intFromFloat(pointer.y));
-                    print("stardust-shell: cursor shown\n", .{});
-                } else |err| print("stardust-shell: no cursor: {s}\n", .{@errorName(err)});
+                    print("dazzle-shell: cursor shown\n", .{});
+                } else |err| print("dazzle-shell: no cursor: {s}\n", .{@errorName(err)});
             }
         }
         server.flushClients();
@@ -372,7 +372,7 @@ const FrameStats = struct {
         const ms: f64 = std.time.ns_per_ms;
         if (s.frames > 0) {
             const n: f64 = @floatFromInt(s.frames);
-            print("stardust-shell: {d:.1} frames/s composited (CPU {d:.2} ms, GPU {d:.2} ms per frame), {d:.1} frames/s direct, {d} refreshes skipped\n", .{
+            print("dazzle-shell: {d:.1} frames/s composited (CPU {d:.2} ms, GPU {d:.2} ms per frame), {d:.1} frames/s direct, {d} refreshes skipped\n", .{
                 n / seconds,
                 @as(f64, @floatFromInt(s.cpu_ns)) / n / ms,
                 @as(f64, @floatFromInt(s.gpu_ns)) / n / ms,
@@ -380,13 +380,13 @@ const FrameStats = struct {
                 s.skipped,
             });
         } else if (s.direct > 0) {
-            print("stardust-shell: {d:.1} frames/s, all shown directly, {d} refreshes skipped\n", .{ @as(f64, @floatFromInt(s.direct)) / seconds, s.skipped });
+            print("dazzle-shell: {d:.1} frames/s, all shown directly, {d} refreshes skipped\n", .{ @as(f64, @floatFromInt(s.direct)) / seconds, s.skipped });
         }
         const shown = s.frames + s.direct;
         if (shown > 0) {
             const n: f64 = @floatFromInt(shown);
             const other = s.work_ns -| (s.clients_ns + s.display_ns + s.flips_ns);
-            print("stardust-shell: work {d:.2} ms per frame (clients {d:.2}, display {d:.2} of which commits {d:.2}, flips {d:.2}, other {d:.2}), {d:.1} wakeups per frame, {d:.1}% of the time\n", .{
+            print("dazzle-shell: work {d:.2} ms per frame (clients {d:.2}, display {d:.2} of which commits {d:.2}, flips {d:.2}, other {d:.2}), {d:.1} wakeups per frame, {d:.1}% of the time\n", .{
                 @as(f64, @floatFromInt(s.work_ns)) / n / ms,
                 @as(f64, @floatFromInt(s.clients_ns)) / n / ms,
                 @as(f64, @floatFromInt(s.display_ns)) / n / ms,
@@ -471,17 +471,17 @@ fn spawn(program: [*:0]const u8, runtime_dir: [:0]const u8) ?linux.pid_t {
     const runtime_env = std.fmt.bufPrintZ(&env_buf, "XDG_RUNTIME_DIR={s}", .{runtime_dir}) catch return null;
     const rc = linux.fork();
     if (linux.errno(rc) != .SUCCESS) {
-        print("stardust-shell: cannot start {s}: fork failed\n", .{program});
+        print("dazzle-shell: cannot start {s}: fork failed\n", .{program});
         return null;
     }
     if (rc != 0) {
-        print("stardust-shell: started {s} (pid {d})\n", .{ program, rc });
+        print("dazzle-shell: started {s} (pid {d})\n", .{ program, rc });
         return @intCast(rc);
     }
     const argv = [_:null]?[*:0]const u8{program};
     const envp = [_:null]?[*:0]const u8{ "HOME=/", "WAYLAND_DISPLAY=wayland-0", runtime_env.ptr };
     const err = linux.errno(linux.execve(program, &argv, &envp));
-    print("stardust-shell: cannot run {s} ({s})\n", .{ program, @tagName(err) });
+    print("dazzle-shell: cannot run {s} ({s})\n", .{ program, @tagName(err) });
     linux.exit(127);
 }
 
@@ -516,9 +516,9 @@ fn reapChildren(apps: []dock_mod.App) bool {
             app_exited = true;
         };
         if (linux.W.IFEXITED(status)) {
-            print("stardust-shell: client {d} exited with status {d}\n", .{ rc, linux.W.EXITSTATUS(status) });
+            print("dazzle-shell: client {d} exited with status {d}\n", .{ rc, linux.W.EXITSTATUS(status) });
         } else if (linux.W.IFSIGNALED(status)) {
-            print("stardust-shell: client {d} killed by signal {d}\n", .{ rc, linux.W.TERMSIG(status) });
+            print("dazzle-shell: client {d} killed by signal {d}\n", .{ rc, linux.W.TERMSIG(status) });
         }
     }
 }

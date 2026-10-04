@@ -1,5 +1,5 @@
-//! Wayland for Stardust: the wire protocol, the interfaces Stardust uses,
-//! and a small client library. The server side lives in stardust-shell.
+//! Wayland for Dazzle: the wire protocol, the interfaces Dazzle uses,
+//! and a small client library. The server side lives in dazzle-shell.
 
 pub const wire = @import("wire.zig");
 pub const protocol = @import("protocol.zig");

@@ -6,7 +6,7 @@
 //!     http://<pi>/follow   the same, then new messages as they arrive
 //!
 //! Each request gets its own process reading /dev/kmsg, so a hung GPU job
-//! in the demo does not stop the log. The server runs as the Stardust user
+//! in the demo does not stop the log. The server runs as the Dazzle user
 //! once it has bound its port.
 
 const std = @import("std");
@@ -41,11 +41,11 @@ pub fn start() void {
     switch (linux.errno(rc)) {
         .SUCCESS => if (rc != 0) return,
         else => |e| {
-            sys.print("stardust: log server: fork failed ({s})\n", .{@tagName(e)});
+            sys.print("dazzle: log server: fork failed ({s})\n", .{@tagName(e)});
             return;
         },
     }
-    serve() catch |err| sys.print("stardust: log server: {s}\n", .{@errorName(err)});
+    serve() catch |err| sys.print("dazzle: log server: {s}\n", .{@errorName(err)});
     linux.exit(1);
 }
 
@@ -65,7 +65,7 @@ fn serve() !void {
     // Only binding to the port needed root. Reading /dev/kmsg does not.
     try sys.dropPrivileges();
 
-    sys.print("stardust: log server listening on HTTP port {d} as uid {d}\n", .{ http_port, linux.getuid() });
+    sys.print("dazzle: log server listening on HTTP port {d} as uid {d}\n", .{ http_port, linux.getuid() });
 
     while (true) {
         const rc = linux.accept4(listener, null, null, linux.SOCK.CLOEXEC);
@@ -193,9 +193,9 @@ fn handle(client: linux.fd_t) void {
     if (!writeAll(client, "HTTP/1.1 200 OK\r\n" ++ text_headers) or req.head) return;
     const follow = req.page == .follow;
     const intro = if (follow)
-        "Stardust " ++ build_info.commit ++ " system log, following new messages.\n\n"
+        "Dazzle " ++ build_info.commit ++ " system log, following new messages.\n\n"
     else
-        "Stardust " ++ build_info.commit ++ " system log. /follow shows new messages as they arrive.\n\n";
+        "Dazzle " ++ build_info.commit ++ " system log. /follow shows new messages as they arrive.\n\n";
     if (!writeAll(client, intro)) return;
     streamLog(client, follow);
 }
@@ -245,14 +245,14 @@ const testing = std.testing;
 test "format kmsg record" {
     var buf: [128]u8 = undefined;
     try testing.expectEqualStrings(
-        "[    3.000042] stardust: starting as init\n",
-        formatRecord(&buf, "5,512,3000042,-;stardust: starting as init\n SUBSYSTEM=foo\n").?,
+        "[    3.000042] dazzle: starting as init\n",
+        formatRecord(&buf, "5,512,3000042,-;dazzle: starting as init\n SUBSYSTEM=foo\n").?,
     );
     try testing.expectEqual(@as(?[]const u8, null), formatRecord(&buf, "garbage"));
     // Escaped UTF-8 and backslashes are decoded.
     try testing.expectEqualStrings(
-        "[    6.845023] stardust: SoC 36 °C, C:\\dir\n",
-        formatRecord(&buf, "6,900,6845023,-;stardust: SoC 36 \\xc2\\xb0C, C:\\x5cdir\n").?,
+        "[    6.845023] dazzle: SoC 36 °C, C:\\dir\n",
+        formatRecord(&buf, "6,900,6845023,-;dazzle: SoC 36 \\xc2\\xb0C, C:\\x5cdir\n").?,
     );
 }
 

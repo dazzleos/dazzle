@@ -238,12 +238,12 @@ fn testReply(buf: *[max_message_size]u8, msg_type: MessageType, options: []const
 
 test "discover message" {
     var buf: [max_message_size]u8 = undefined;
-    const msg = build(&buf, .{ .type = .discover, .xid = 0x01020304, .mac = test_mac, .hostname = "stardust" });
+    const msg = build(&buf, .{ .type = .discover, .xid = 0x01020304, .mac = test_mac, .hostname = "dazzle" });
     try testing.expectEqual(@as(usize, min_message_size), msg.len);
     try testing.expectEqualSlices(u8, &.{ 1, 1, 6, 0, 1, 2, 3, 4, 0, 0, 0x80, 0 }, msg[0..12]);
     try testing.expectEqualSlices(u8, &test_mac, msg[28..34]);
     try testing.expectEqualSlices(u8, &(magic_cookie ++ [_]u8{ 53, 1, 1, 61, 7, 1 }), msg[236..246]);
-    try testing.expect(std.mem.indexOf(u8, msg, &([_]u8{ 12, 8 } ++ "stardust".*)) != null);
+    try testing.expect(std.mem.indexOf(u8, msg, &([_]u8{ 12, 6 } ++ "dazzle".*)) != null);
 }
 
 test "renewal requests are unicast and carry ciaddr" {

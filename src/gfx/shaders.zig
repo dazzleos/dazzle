@@ -1,4 +1,4 @@
-//! The 2D shaders, written in Zig (shaders/) and compiled when Stardust is
+//! The 2D shaders, written in Zig (shaders/) and compiled when Dazzle is
 //! built. Both take vertices in clip space (computed on the CPU) and blend
 //! their colour over what the tile buffer holds (source-over, with straight
 //! alpha).

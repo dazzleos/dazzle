@@ -80,13 +80,13 @@ pub const Manager = struct {
         m.looked_ns = now;
         if (m.nl == null) {
             m.nl = nl80211.Nl80211.open() catch |err| {
-                if (!m.said_no_wifi) print("stardust: wifi: no nl80211 ({s}): this kernel has no Wi-Fi\n", .{@errorName(err)});
+                if (!m.said_no_wifi) print("dazzle: wifi: no nl80211 ({s}): this kernel has no Wi-Fi\n", .{@errorName(err)});
                 m.said_no_wifi = true;
                 return;
             };
         }
         const station = (m.nl.?.findStation() catch return) orelse return;
-        print("stardust: wifi: found {s}\n", .{station.adapter.name()});
+        print("dazzle: wifi: found {s}\n", .{station.adapter.name()});
         m.station = station;
         m.station.?.adapter.up = ipv4.bringUp(station.adapter.name());
     }
@@ -134,7 +134,7 @@ pub const Manager = struct {
             // Another scan is under way (the kernel's own).
             error.Busy => m.scan_started_ns = now,
             else => {
-                print("stardust: wifi: cannot scan ({s})\n", .{@errorName(err)});
+                print("dazzle: wifi: cannot scan ({s})\n", .{@errorName(err)});
                 // Down, perhaps: up again, and try at the next request.
                 m.station.?.adapter.up = ipv4.bringUp(st.adapter.name());
             },
@@ -142,7 +142,7 @@ pub const Manager = struct {
     }
 
     fn fail(m: *Manager, why: wifi.Failure) void {
-        print("stardust: wifi: could not join \"{s}\": {s}\n", .{ m.report.connection.ssid(), @tagName(why) });
+        print("dazzle: wifi: could not join \"{s}\": {s}\n", .{ m.report.connection.ssid(), @tagName(why) });
         m.leave(false);
         m.report.connection.state = .failed;
         m.report.connection.failure = why;
@@ -171,7 +171,7 @@ pub const Manager = struct {
         } else if (bss.network.security != .open) return m.fail(.unsupported);
         m.join = j;
         m.startJoin(now) catch |err| {
-            print("stardust: wifi: cannot connect ({s})\n", .{@errorName(err)});
+            print("dazzle: wifi: cannot connect ({s})\n", .{@errorName(err)});
             m.fail(.rejected);
         };
     }
@@ -191,7 +191,7 @@ pub const Manager = struct {
             params.wpa2 = .{ .rsn = rsn, .group_cipher = j.bss.group_cipher };
         }
         if (!m.station.?.adapter.up) m.station.?.adapter.up = ipv4.bringUp(st.adapter.name());
-        print("stardust: wifi: joining \"{s}\" ({x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}, {d} MHz)\n", .{ j.ssid(), j.bss.bssid[0], j.bss.bssid[1], j.bss.bssid[2], j.bss.bssid[3], j.bss.bssid[4], j.bss.bssid[5], j.bss.network.freq_mhz });
+        print("dazzle: wifi: joining \"{s}\" ({x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}, {d} MHz)\n", .{ j.ssid(), j.bss.bssid[0], j.bss.bssid[1], j.bss.bssid[2], j.bss.bssid[3], j.bss.bssid[4], j.bss.bssid[5], j.bss.network.freq_mhz });
         try m.nl.?.connect(st.index, params);
         m.setState(.connecting);
     }
@@ -246,7 +246,7 @@ pub const Manager = struct {
             if (nl.scanResults(st.index, &fresh)) {
                 m.report.networks = fresh.networks;
                 m.report.len = fresh.len;
-            } else |err| print("stardust: wifi: cannot read the scan ({s})\n", .{@errorName(err)});
+            } else |err| print("dazzle: wifi: cannot read the scan ({s})\n", .{@errorName(err)});
         } else if (m.scan_started_ns) |t| if (now -| t > scan_timeout_ns) {
             m.scan_started_ns = null;
         };
@@ -269,11 +269,11 @@ pub const Manager = struct {
                 // A disconnection after message 1 came (and 3 did not)
                 // means the access point did not accept message 2's MIC.
                 const wrong = state == .authenticating and j.handshake.message1_count > 0 and !j.handshake.complete;
-                print("stardust: wifi: disconnected (reason {d})\n", .{reason});
+                print("dazzle: wifi: disconnected (reason {d})\n", .{reason});
                 m.fail(if (wrong) .wrong_password else .rejected);
             },
             .addressing, .connected => {
-                print("stardust: wifi: connection to \"{s}\" lost (reason {d}); trying again\n", .{ j.ssid(), reason });
+                print("dazzle: wifi: connection to \"{s}\" lost (reason {d}); trying again\n", .{ j.ssid(), reason });
                 m.leave(false);
                 m.report.connection.state = .failed;
                 m.report.connection.failure = .lost;
@@ -300,14 +300,14 @@ pub const Manager = struct {
             const st = m.station.?;
             if (actions.reply) |reply| sendEapol(fd, st.index, j.bss.bssid, reply);
             if (actions.pairwise) |tk| m.nl.?.setPairwiseKey(st.index, j.bss.bssid, tk) catch |err| {
-                print("stardust: wifi: cannot install the pairwise key ({s})\n", .{@errorName(err)});
+                print("dazzle: wifi: cannot install the pairwise key ({s})\n", .{@errorName(err)});
                 return m.fail(.rejected);
             };
             if (actions.group) |g| m.nl.?.setGroupKey(st.index, j.bss.group_cipher, g.index, g.key[0..g.len], g.rsc) catch |err| {
-                print("stardust: wifi: cannot install the group key ({s})\n", .{@errorName(err)});
+                print("dazzle: wifi: cannot install the group key ({s})\n", .{@errorName(err)});
             };
             if (actions.complete and !m.report.connection.state.joined()) {
-                print("stardust: wifi: joined \"{s}\" (WPA2)\n", .{j.ssid()});
+                print("dazzle: wifi: joined \"{s}\" (WPA2)\n", .{j.ssid()});
                 m.nl.?.authorize(st.index, j.bss.bssid);
                 m.startDhcp();
             }
@@ -325,7 +325,7 @@ pub const Manager = struct {
             .addressing, .connected => {
                 const addr = ipv4.interfaceAddress(m.station.?.adapter.name());
                 if (addr) |a| {
-                    if (m.report.connection.state == .addressing) print("stardust: wifi: \"{s}\" gave {d}.{d}.{d}.{d}\n", .{ j.ssid(), a[0], a[1], a[2], a[3] });
+                    if (m.report.connection.state == .addressing) print("dazzle: wifi: \"{s}\" gave {d}.{d}.{d}.{d}\n", .{ j.ssid(), a[0], a[1], a[2], a[3] });
                     m.setState(.connected);
                 }
                 m.report.connection.address = addr;

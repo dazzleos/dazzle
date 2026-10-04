@@ -1,4 +1,4 @@
-//! Stardust's font renderer: OpenType fonts with TrueType outlines,
+//! Dazzle's font renderer: OpenType fonts with TrueType outlines,
 //! rasterized with exact-area anti-aliasing and laid out with kerning.
 //!
 //! * `opentype`: parsing the font (character map, metrics, outlines, GPOS
@@ -6,7 +6,7 @@
 //! * `raster`: rasterizing outlines into coverage masks
 //! * `text`: the glyph cache, layout, and drawing into 32-bit pixels
 //!
-//! Stardust's apps use Fira Sans (SIL Open Font License); each app carries
+//! Dazzle's apps use Fira Sans (SIL Open Font License); each app carries
 //! its own copy, next to its executable.
 //!
 //!     const f = try font.Font.init(data);

@@ -5,8 +5,8 @@
 //! of its own with everything it needs (the system provides nothing else).
 //! Everything is owned by root:
 //!
-//!     /init                                     stardust-init
-//!     /shell/stardust-shell
+//!     /init                                     dazzle-init
+//!     /shell/dazzle-shell
 //!     /shell/FiraSans-Regular.ttf
 //!     /shell/FiraSans-OFL.txt
 //!     /apps/<app>/<app>                         for each app binary
@@ -16,7 +16,7 @@
 //!
 //!     /lib/firmware/brcm/...                    the Wi-Fi chips' firmware
 //!
-//! An app is named after its binary (stardust-demo, stardust-settings).
+//! An app is named after its binary (dazzle-demo, dazzle-settings).
 //! Other files are given as --file=<path in the archive>=<file>.
 //!
 //! Usage: mkinitramfs <output.cpio> <init-binary> <shell-binary> <font> <font-license> [<app-binary> | --file=<path>=<file>]...
@@ -92,7 +92,7 @@ pub fn main(init: std.process.Init) !void {
         .{ .name = "sys", .mode = S_IFDIR | 0o755 },
         .{ .name = "init", .mode = S_IFREG | 0o755, .data = init_bin },
         .{ .name = "shell", .mode = S_IFDIR | 0o755 },
-        .{ .name = "shell/stardust-shell", .mode = S_IFREG | 0o755, .data = shell_bin },
+        .{ .name = "shell/dazzle-shell", .mode = S_IFREG | 0o755, .data = shell_bin },
         .{ .name = "shell/FiraSans-Regular.ttf", .mode = S_IFREG | 0o644, .data = font },
         .{ .name = "shell/FiraSans-OFL.txt", .mode = S_IFREG | 0o644, .data = font_license },
         .{ .name = "apps", .mode = S_IFDIR | 0o755 },

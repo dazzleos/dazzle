@@ -690,7 +690,7 @@ const testing = std.testing;
 const font = @import("font");
 
 fn sample() struct { sys: info.System, net: info.Network, usage: info.Usage } {
-    const sys: info.System = .{ .model = .of("Raspberry Pi Zero W Rev 1.1"), .cores = 1, .serial = .of("a1b2c3d4"), .kernel = .of("6.12.0 (armv6l)"), .hostname = .of("stardust") };
+    const sys: info.System = .{ .model = .of("Raspberry Pi Zero W Rev 1.1"), .cores = 1, .serial = .of("a1b2c3d4"), .kernel = .of("6.12.0 (armv6l)"), .hostname = .of("dazzle") };
     var net: info.Network = .{ .gateway = .{ 192, 168, 1, 1 } };
     net.interfaces[0] = .{ .name = .of("eth0"), .state = .of("up"), .carrier = true, .mac = .of("00:e0:4c:68:01:02"), .ip = .{ 192, 168, 1, 42 }, .prefix = 24, .speed = 100, .rx_bytes = 12 << 20, .tx_bytes = 3 << 20 };
     net.interfaces[1] = .{ .name = .of("eth1"), .state = .of("down") };
@@ -798,7 +798,7 @@ test "everything is shown, and fits the window at the shell's sizes" {
     }
     // The build is in the system card, not beside the title; the hardware
     // is the board alone.
-    for ([_][]const u8{ "Stardust build", "Hardware\n", "Chip", "GPU\n", "Revision", "In use" }) |gone| {
+    for ([_][]const u8{ "Dazzle build", "Hardware\n", "Chip", "GPU\n", "Revision", "In use" }) |gone| {
         try testing.expect(std.mem.indexOf(u8, all.items, gone) == null);
     }
 }

@@ -1,4 +1,4 @@
-# Raspberry Pi firmware configuration for Stardust.
+# Raspberry Pi firmware configuration for Dazzle.
 # https://www.raspberrypi.com/documentation/computers/config_txt.html
 
 # Mainline kernel and device tree; the firmware's default names are for the
@@ -13,7 +13,7 @@ device_tree=bcm2835-rpi-zero.dtb
 device_tree=bcm2835-rpi-zero-w.dtb
 
 # Pi 3 A+ (and, wrongly, the 3 B+, which is not supported). The firmware
-# boots it in 32-bit mode, as Stardust's kernel needs.
+# boots it in 32-bit mode, as Dazzle's kernel needs.
 [pi3+]
 device_tree=bcm2837-rpi-3-a-plus.dtb
 
@@ -25,7 +25,7 @@ enable_uart=1
 # Run the CPU and GPU at full speed all the time. Without this the firmware
 # runs at full speed only briefly after boot, then drops to its minimum
 # clocks (CPU 700 MHz, GPU core 250 MHz on a Zero) until a kernel cpufreq
-# driver asks for more, and Stardust has none: the demo fell from 60 to
+# driver asks for more, and Dazzle has none: the demo fell from 60 to
 # 30 fps after about a minute. The firmware still slows down if the SoC
 # overheats or the supply voltage sags. (Without over_voltage this does not
 # affect the warranty.)

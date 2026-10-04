@@ -1,4 +1,4 @@
-//! 2D graphics on the vc4 API, for Stardust's toolkit: anti-aliased
+//! 2D graphics on the vc4 API, for Dazzle's toolkit: anti-aliased
 //! rectangles with rounded corners (and circles), polygons and polylines,
 //! filled or stroked, blended over what is below them.
 //!

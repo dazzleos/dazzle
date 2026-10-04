@@ -1,4 +1,4 @@
-//! What Stardust's shaders, written in Zig and compiled to SPIR-V, import
+//! What Dazzle's shaders, written in Zig and compiled to SPIR-V, import
 //! as "gpu": vector types, inputs and outputs by location, the uniform
 //! block, the position, and texture sampling.
 //!
@@ -35,14 +35,14 @@ pub const Vec4 = @Vector(4, f32);
 pub const position = std.gpu.position_out;
 
 /// The fragment's colour, straight (not premultiplied) RGBA.
-pub const color = @extern(*addrspace(.output) Vec4, .{ .name = "stardust_color", .decoration = .{ .location = 0 } });
+pub const color = @extern(*addrspace(.output) Vec4, .{ .name = "dazzle_color", .decoration = .{ .location = 0 } });
 
 // Names for the variables at each location. (Literals: names built with
 // std.fmt.comptimePrint crash Zig 0.16's SPIR-V backend.)
 const max_locations = 8;
-const vin_names = [max_locations][]const u8{ "stardust_vin0", "stardust_vin1", "stardust_vin2", "stardust_vin3", "stardust_vin4", "stardust_vin5", "stardust_vin6", "stardust_vin7" };
-const vout_names = [max_locations][]const u8{ "stardust_vout0", "stardust_vout1", "stardust_vout2", "stardust_vout3", "stardust_vout4", "stardust_vout5", "stardust_vout6", "stardust_vout7" };
-const fin_names = [max_locations][]const u8{ "stardust_fin0", "stardust_fin1", "stardust_fin2", "stardust_fin3", "stardust_fin4", "stardust_fin5", "stardust_fin6", "stardust_fin7" };
+const vin_names = [max_locations][]const u8{ "dazzle_vin0", "dazzle_vin1", "dazzle_vin2", "dazzle_vin3", "dazzle_vin4", "dazzle_vin5", "dazzle_vin6", "dazzle_vin7" };
+const vout_names = [max_locations][]const u8{ "dazzle_vout0", "dazzle_vout1", "dazzle_vout2", "dazzle_vout3", "dazzle_vout4", "dazzle_vout5", "dazzle_vout6", "dazzle_vout7" };
+const fin_names = [max_locations][]const u8{ "dazzle_fin0", "dazzle_fin1", "dazzle_fin2", "dazzle_fin3", "dazzle_fin4", "dazzle_fin5", "dazzle_fin6", "dazzle_fin7" };
 
 /// A vertex attribute.
 pub fn vertexInput(comptime T: type, comptime location: u32) *addrspace(.input) T {
@@ -61,7 +61,7 @@ pub fn fragmentInput(comptime T: type, comptime location: u32) *addrspace(.input
 
 /// The program's uniforms: an extern struct the app sets for each draw.
 pub fn uniforms(comptime T: type) *addrspace(.uniform) T {
-    return @extern(*addrspace(.uniform) T, .{ .name = "stardust_uniforms", .decoration = .{ .descriptor = .{ .binding = 0, .set = 0 } } });
+    return @extern(*addrspace(.uniform) T, .{ .name = "dazzle_uniforms", .decoration = .{ .descriptor = .{ .binding = 0, .set = 0 } } });
 }
 
 /// Samples the draw's texture at `coord` (0 to 1 across it), as RGBA.

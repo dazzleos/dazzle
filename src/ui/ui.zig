@@ -1,4 +1,4 @@
-//! Stardust's widget toolkit: declarative, like Flutter. An app describes
+//! Dazzle's widget toolkit: declarative, like Flutter. An app describes
 //! its UI as a tree of widgets, made again each frame from its state;
 //! the toolkit keeps what persists (state, layout) between frames, lays
 //! the tree out, paints it with the `gfx` canvas and sends it pointer

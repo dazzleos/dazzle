@@ -29,7 +29,7 @@ pub const ScrollView = struct {
     /// The bar's width.
     bar_width: f32 = 12,
     /// How far a turn of the wheel scrolls, as a multiple of what the
-    /// compositor says (a notch is 15 pixels on stardust-shell).
+    /// compositor says (a notch is 15 pixels on dazzle-shell).
     wheel_factor: f32 = 3,
     /// The key of a widget in it to scroll to, when this changes.
     reveal: ?u64 = null,

@@ -1,5 +1,5 @@
 //! A functional simulator for the subset of the QPU instruction set that
-//! Stardust generates. It runs a shader on 16 SIMD lanes and records what
+//! Dazzle generates. It runs a shader on 16 SIMD lanes and records what
 //! it writes to the VPM, the tile buffer and the texture unit, so shaders
 //! can be tested on the build machine instead of on a Raspberry Pi.
 //!

@@ -7,7 +7,7 @@ const std = @import("std");
 
 pub const magic = 0x07230203;
 
-/// The opcodes Stardust reads.
+/// The opcodes Dazzle reads.
 pub const Op = struct {
     pub const undef = 1;
     pub const name = 5;

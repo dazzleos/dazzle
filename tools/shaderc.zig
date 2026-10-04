@@ -1,4 +1,4 @@
-//! Compiles a shader program for the GPU when Stardust is built:
+//! Compiles a shader program for the GPU when Dazzle is built:
 //!
 //!     shaderc <program.spv> <output> [--depth-test] [--blend=none|source-over]
 //!

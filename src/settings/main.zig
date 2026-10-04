@@ -1,4 +1,4 @@
-//! Stardust's settings app: what the system is and how it is doing. It
+//! Dazzle's settings app: what the system is and how it is doing. It
 //! shows the build, Linux's version, how long the system has been up and
 //! the board; the resources in use (CPU, temperature, memory, the GPU's
 //! memory and storage); the network (adapters, addresses and traffic);
@@ -8,7 +8,7 @@
 //! that change are read again every second (see info.zig); the window is built with the
 //! `ui` toolkit (see view.zig), and only what changed is drawn again.
 //!
-//!     stardust-settings [font.ttf]
+//!     dazzle-settings [font.ttf]
 //!
 //! It runs until it is stopped or its window is closed.
 
@@ -38,7 +38,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     var font_buf: [512]u8 = undefined;
     const font_path: [*:0]const u8 = args.next() orelse (sys.appFile(&font_buf, font.default_font_file) catch font.default_font_file);
     run(init, font_path) catch |err| {
-        print("stardust-settings: error: {s}\n", .{@errorName(err)});
+        print("dazzle-settings: error: {s}\n", .{@errorName(err)});
         return 1;
     };
     return 0;
@@ -47,7 +47,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
 fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     const gpa = std.heap.page_allocator;
     var dev = vc4.device.openRender() catch |err| {
-        print("stardust-settings: no GPU ({s})\n", .{@errorName(err)});
+        print("dazzle-settings: no GPU ({s})\n", .{@errorName(err)});
         return err;
     };
     const win = try openWindow(gpa, init, &dev);
@@ -56,7 +56,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
 
     var f: ?font.Font = blk: {
         const data = sys.readFileAlloc(gpa, font_path, 32 * 1024 * 1024) catch |err| {
-            print("stardust-settings: cannot read the font {s} ({s}); no text\n", .{ font_path, @errorName(err) });
+            print("dazzle-settings: cannot read the font {s} ({s}); no text\n", .{ font_path, @errorName(err) });
             break :blk null;
         };
         break :blk font.Font.init(data) catch null;
@@ -65,7 +65,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     try window_ui.attachGpu(dev);
 
     const system = info.System.read();
-    print("stardust-settings: {s}, {d} {s}\n", .{ system.model.slice(), system.cores, if (system.cores == 1) "core" else "cores" });
+    print("dazzle-settings: {s}, {d} {s}\n", .{ system.model.slice(), system.cores, if (system.cores == 1) "core" else "cores" });
     var monitor: info.UsageMonitor = .{};
     var usage = monitor.read(sys.nowNs());
     var network = info.Network.read();
@@ -92,7 +92,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             break :blk win.wait(@max(until -| sys.nowNs(), std.time.ns_per_ms));
         } else win.poll();
         waited catch |err| {
-            if (err == error.ServerError) print("stardust-settings: compositor error: {s}\n", .{win.conn.errorMessage()});
+            if (err == error.ServerError) print("dazzle-settings: compositor error: {s}\n", .{win.conn.errorMessage()});
             return err;
         };
         if (win.closed or controls.quit) return;
@@ -128,7 +128,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             if (actions.ethernet) |a| report = info.askManager(dir, info.manager.ethernetRequest(&req_buf, a));
             if (actions.connect != null or actions.disconnect) {
                 const req = if (actions.connect) |*j| info.manager.connectRequest(&req_buf, j.ssid(), j.passphrase()) else "disconnect\n";
-                if (actions.connect) |*j| print("stardust-settings: joining \"{s}\"\n", .{j.ssid()});
+                if (actions.connect) |*j| print("dazzle-settings: joining \"{s}\"\n", .{j.ssid()});
                 report = info.askManager(dir, req);
             }
             actions = .{};
@@ -182,19 +182,19 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
 fn openWindow(gpa: std.mem.Allocator, init: std.process.Init.Minimal, dev: *vc4.Device) !*app.Window {
     const Environ = std.process.Environ;
     const display_name = Environ.getPosix(init.environ, "WAYLAND_DISPLAY") orelse {
-        print("stardust-settings: WAYLAND_DISPLAY is not set; run me under stardust-shell\n", .{});
+        print("dazzle-settings: WAYLAND_DISPLAY is not set; run me under dazzle-shell\n", .{});
         return error.NoCompositor;
     };
     var path_buf: [128]u8 = undefined;
     const path = wayland.client.socketPath(&path_buf, Environ.getPosix(init.environ, "XDG_RUNTIME_DIR"), display_name) catch {
-        print("stardust-settings: XDG_RUNTIME_DIR is not set\n", .{});
+        print("dazzle-settings: XDG_RUNTIME_DIR is not set\n", .{});
         return error.NoCompositor;
     };
     const win = app.Window.open(gpa, .device(dev), path, "Settings") catch |err| {
-        print("stardust-settings: cannot open a window on {s} ({s})\n", .{ path, @errorName(err) });
+        print("dazzle-settings: cannot open a window on {s} ({s})\n", .{ path, @errorName(err) });
         return err;
     };
-    try win.setAppId("stardust-settings");
+    try win.setAppId("dazzle-settings");
     return win;
 }
 

@@ -1,6 +1,6 @@
 //! Thin helpers over raw Linux system calls.
 //!
-//! Stardust talks to the kernel directly through std.os.linux rather than
+//! Dazzle talks to the kernel directly through std.os.linux rather than
 //! through a C library, so this module provides error mapping and a few
 //! wrappers used throughout the program.
 //!
@@ -57,7 +57,7 @@ pub fn close(fd: linux.fd_t) void {
 
 /// Sleeps on the monotonic clock.
 ///
-/// On 32-bit ARM this uses clock_nanosleep_time64: the Stardust kernel is
+/// On 32-bit ARM this uses clock_nanosleep_time64: the Dazzle kernel is
 /// built without CONFIG_COMPAT_32BIT_TIME, so the older 32-bit time
 /// syscalls (nanosleep, clock_nanosleep) that std.os.linux uses there fail
 /// with ENOSYS.
@@ -138,11 +138,11 @@ pub fn print(comptime fmt: []const u8, args: anytype) void {
     }
 }
 
-/// Stardust has a single user, which everything but init runs as.
+/// Dazzle has a single user, which everything but init runs as.
 pub const user = struct {
     pub const uid: linux.uid_t = 1000;
     pub const gid: linux.gid_t = 1000;
-    pub const name = "stardust";
+    pub const name = "dazzle";
 };
 
 /// Switches a root process to the user: no supplementary groups, then the

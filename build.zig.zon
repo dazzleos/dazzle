@@ -1,7 +1,7 @@
 .{
-    .name = .stardust,
+    .name = .dazzle,
     .version = "0.0.0",
-    .fingerprint = 0xaa64878d3d90eb8e, // Changing this has security and trust implications.
+    .fingerprint = 0x2f81ae1020b5eecd, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0",
     .dependencies = .{},
     .paths = .{

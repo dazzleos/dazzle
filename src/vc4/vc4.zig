@@ -1,4 +1,4 @@
-//! Stardust's low-level graphics API for the VideoCore IV (BCM2835 V3D),
+//! Dazzle's low-level graphics API for the VideoCore IV (BCM2835 V3D),
 //! through the kernel's vc4 DRM driver.
 //!
 //! The shell and native apps draw with it directly (with shaders built with

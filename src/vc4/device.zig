@@ -139,7 +139,7 @@ pub fn open() !Device {
             var name_buf: [32]u8 = undefined;
             const name = drm.driverName(fd, &name_buf) catch "";
             if (std.mem.eql(u8, name, "vc4")) {
-                sys.print("stardust: opened {s} ({s})\n", .{ path, name });
+                sys.print("dazzle: opened {s} ({s})\n", .{ path, name });
                 return .{ .fd = fd };
             }
             sys.close(fd);

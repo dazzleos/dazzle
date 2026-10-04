@@ -2,7 +2,7 @@
 //! fragment entry points of one module, linked by location, lowered to the
 //! three hardware shaders (coordinate, vertex, fragment).
 //!
-//! Programs are compiled when Stardust is built (see tools/shaderc.zig) and
+//! Programs are compiled when Dazzle is built (see tools/shaderc.zig) and
 //! embedded in the programs that use them, as `encode` writes them; they can
 //! also be compiled when an app runs, from SPIR-V it loads.
 
