@@ -543,6 +543,11 @@ pub fn build(b: *std.Build) void {
         .root_module = addProgramModule(b, "src/settings/main.zig", target, optimize, pi, shaders, true),
     });
     const install_settings = b.addInstallArtifact(settings_exe, .{});
+    const files_exe = b.addExecutable(.{
+        .name = "stardust-files",
+        .root_module = addProgramModule(b, "src/files/main.zig", target, optimize, pi, shaders, true),
+    });
+    const install_files = b.addInstallArtifact(files_exe, .{});
     const shell_exe = b.addExecutable(.{
         .name = "stardust-shell",
         .root_module = addProgramModule(b, "src/shell/main.zig", target, optimize, pi, shaders, true),
@@ -573,9 +578,10 @@ pub fn build(b: *std.Build) void {
     // The apps, each in /apps/<name>, listed in the shell's dock.
     run_mkinitramfs.addArtifactArg(demo_exe);
     run_mkinitramfs.addArtifactArg(settings_exe);
+    run_mkinitramfs.addArtifactArg(files_exe);
     const install_initramfs = b.addInstallFile(initramfs, "initramfs.cpio");
     const programs_step = b.step("programs", "Build just the programs (zig-out/bin) and zig-out/initramfs.cpio");
-    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_settings.step, &install_shell.step, &install_initramfs.step }) |st| {
+    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_settings.step, &install_files.step, &install_shell.step, &install_initramfs.step }) |st| {
         programs_step.dependOn(st);
         b.getInstallStep().dependOn(st);
     }
@@ -612,6 +618,8 @@ pub fn build(b: *std.Build) void {
     host_demo.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_settings = addProgramModule(b, "src/settings/main.zig", b.graph.host, test_optimize, host, shaders, null);
     host_settings.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
+    const host_files = addProgramModule(b, "src/files/main.zig", b.graph.host, test_optimize, host, shaders, null);
+    host_files.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     for ([_]*std.Build.Module{
         host.sys,
         host.vc4,
@@ -624,6 +632,7 @@ pub fn build(b: *std.Build) void {
         addProgramModule(b, "src/init/main.zig", b.graph.host, test_optimize, host, shaders, null),
         host_demo,
         host_settings,
+        host_files,
         addProgramModule(b, "src/shell/main.zig", b.graph.host, test_optimize, host, shaders, null),
     }) |m| {
         const t = b.addTest(.{ .root_module = m });

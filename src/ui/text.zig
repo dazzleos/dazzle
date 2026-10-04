@@ -33,6 +33,8 @@ pub const Text = struct {
     text_align: TextAlign = .start,
     /// Wrap at spaces to fit the width (otherwise only `\n` breaks lines).
     wrap: bool = true,
+    /// End lines too wide for the space with "…" instead of overflowing.
+    ellipsis: bool = false,
 
     const Laid = struct { lines: []const Line, style: font.Style };
 
@@ -47,6 +49,9 @@ pub const Text = struct {
         const style = self.fontStyle(n) orelse return c.smallest();
         const arena = n.ui.arena();
         const lines = wrap(arena, &n.ui.atlas.runs, style, self.text, if (self.wrap) c.max_w else geometry.inf) catch return c.smallest();
+        if (self.ellipsis and c.boundedWidth()) for (lines) |*l| {
+            if (l.width > c.max_w) l.* = ellipsize(arena, &n.ui.atlas.runs, style, l.text, c.max_w) catch l.*;
+        };
         var widest: f32 = 0;
         for (lines) |l| widest = @max(widest, l.width);
         const height = @as(f32, @floatFromInt(lines.len)) * style.lineHeight();
@@ -73,9 +78,43 @@ pub const Text = struct {
     }
 };
 
+const ellipsis_text = "…";
+
+/// As much of `text` as fits `max_width` with "…" after it.
+pub fn ellipsize(gpa: std.mem.Allocator, runs: *font.RunCache, style: font.Style, text: []const u8, max_width: f32) !Line {
+    const dots = runs.measure(style, ellipsis_text);
+    if (dots > max_width) return .{ .text = "", .width = 0 };
+    const whole = runs.measure(style, text);
+    // Start from a guess in proportion, then step a character at a time.
+    var end = boundaryBefore(text, @intFromFloat(@as(f32, @floatFromInt(text.len)) * std.math.clamp((max_width - dots) / @max(whole, 1), 0, 1)));
+    while (end < text.len) {
+        const next = boundaryAfter(text, end);
+        if (font.measure(style, text[0..next]) + dots > max_width) break;
+        end = next;
+    }
+    while (end > 0 and font.measure(style, text[0..end]) + dots > max_width) end = boundaryBefore(text, end - 1);
+    const kept = std.mem.trimEnd(u8, text[0..end], " ");
+    const out = try std.mem.concat(gpa, u8, &.{ kept, ellipsis_text });
+    return .{ .text = out, .width = font.measure(style, out) };
+}
+
+/// The start of the UTF-8 character at or before byte `i`.
+fn boundaryBefore(text: []const u8, i_in: usize) usize {
+    var i = @min(i_in, text.len);
+    while (i > 0 and i < text.len and text[i] & 0xc0 == 0x80) i -= 1;
+    return i;
+}
+
+/// The start of the UTF-8 character after the one at byte `i`.
+fn boundaryAfter(text: []const u8, i_in: usize) usize {
+    var i = i_in + 1;
+    while (i < text.len and text[i] & 0xc0 == 0x80) i += 1;
+    return @min(i, text.len);
+}
+
 /// Breaks text into lines no wider than `max_width` where it can: at
 /// newlines, and at spaces (a word too wide gets a line of its own).
-pub fn wrap(gpa: std.mem.Allocator, runs: *font.RunCache, style: font.Style, text: []const u8, max_width: f32) ![]const Line {
+pub fn wrap(gpa: std.mem.Allocator, runs: *font.RunCache, style: font.Style, text: []const u8, max_width: f32) ![]Line {
     var lines: std.ArrayList(Line) = .empty;
     var paragraphs = std.mem.splitScalar(u8, text, '\n');
     while (paragraphs.next()) |para| {
@@ -103,6 +142,26 @@ pub fn wrap(gpa: std.mem.Allocator, runs: *font.RunCache, style: font.Style, tex
         }
     }
     return lines.items;
+}
+
+test "ellipsis" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const style: font.Style = .{ .font = &f, .size = 16 };
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    var runs = font.RunCache.init(gpa);
+    defer runs.deinit();
+    const name = "brcmfmac43455-sdio.raspberrypi,3-model-a-plus.bin";
+    const max = font.measure(style, "brcmfmac43455…");
+    const l = try ellipsize(arena.allocator(), &runs, style, name, max);
+    try std.testing.expectEqualStrings("brcmfmac43455…", l.text);
+    try std.testing.expect(l.width <= max);
+    // Characters are not split.
+    const accents = try ellipsize(arena.allocator(), &runs, style, "éééééééééé", font.measure(style, "éé…") + 1);
+    try std.testing.expectEqualStrings("éé…", accents.text);
+    // Too narrow for even the dots: nothing.
+    try std.testing.expectEqualStrings("", (try ellipsize(arena.allocator(), &runs, style, name, 2)).text);
 }
 
 test "wrapping" {

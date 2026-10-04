@@ -35,7 +35,8 @@
 //! * `widget`: `Widget`, `Context`, `Node` (the tree kept between frames)
 //! * `geometry`: sizes, constraints, insets, alignment
 //! * `widgets`: Row, Column, Expanded, Padding, Align, Center, SizedBox,
-//!   ConstrainedBox, Overlay, Decorated, Pressable
+//!   ConstrainedBox, Grid, Overlay, Decorated, Pressable
+//! * `scroll_view`: ScrollView
 //! * `text`: Text
 //! * `material`: the theme, OutlinedButton
 //! * `controls`: Checkbox, Radio, Switch
@@ -54,6 +55,7 @@ pub const material = @import("material.zig");
 pub const controls = @import("controls.zig");
 pub const text_field = @import("text_field.zig");
 pub const title_bar = @import("title_bar.zig");
+pub const scroll_view = @import("scroll_view.zig");
 pub const keymap = @import("keymap.zig");
 pub const painter = @import("painter.zig");
 pub const damage = @import("damage.zig");
@@ -82,6 +84,7 @@ pub const Center = widgets.Center;
 pub const Row = widgets.Row;
 pub const Column = widgets.Column;
 pub const Expanded = widgets.Expanded;
+pub const Grid = widgets.Grid;
 pub const Overlay = widgets.Overlay;
 pub const Decorated = widgets.Decorated;
 pub const Border = widgets.Border;
@@ -102,6 +105,7 @@ pub const Radio = controls.Radio;
 pub const Switch = controls.Switch;
 pub const TextField = text_field.TextField;
 pub const TitleBar = title_bar.TitleBar;
+pub const ScrollView = scroll_view.ScrollView;
 
 pub const Painter = painter.Painter;
 pub const GpuArea = painter.GpuArea;
@@ -116,6 +120,7 @@ test {
     _ = controls;
     _ = text_field;
     _ = title_bar;
+    _ = scroll_view;
     _ = keymap;
     _ = painter;
     _ = damage;

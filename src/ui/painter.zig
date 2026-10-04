@@ -6,7 +6,8 @@
 //! Widgets whose children (or content) reach past their edges are clipped
 //! to their bounds, and the edges that overflow get black and yellow
 //! stripes: a layout that does not fit still shows, with the problem
-//! marked.
+//! marked. Widgets that clip on purpose (scroll views) get no stripes, and
+//! what is outside the clip is not painted at all.
 
 const std = @import("std");
 const gfx = @import("gfx");
@@ -147,8 +148,15 @@ pub const Painter = struct {
         p.node = n;
         p.origin = .{ p.origin[0] + n.offset[0], p.origin[1] + n.offset[1] };
         const box = p.boxRect();
+        // Outside what may be drawn on (scrolled out of a scroll view,
+        // say), nothing of it can show: what a widget draws is within its
+        // box (or the overflow it clips to it).
+        if (p.clip) |c| {
+            const visible = intersect(c, box).?;
+            if (visible.w <= 0 or visible.h <= 0) return;
+        }
         const overflowing = n.overflow.any();
-        if (overflowing) p.clip = intersect(p.clip, box);
+        if (overflowing or n.widget.vtable.clips_children) p.clip = intersect(p.clip, box);
         // Nothing of it can show.
         if (p.clip) |c| if (c.w <= 0 or c.h <= 0) return;
 

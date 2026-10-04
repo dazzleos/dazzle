@@ -549,3 +549,129 @@ test "GPU draws are damaged every frame, unless their key stays the same" {
     u.frame(100, 100, 4, Keyed{ .key = 8 });
     try testing.expectEqual(ui.Rect{ .x = 10, .y = 10, .w = 20, .h = 20 }, u.damaged()[0]);
 }
+
+test "a grid puts as many cells in a row as fit" {
+    const u = try ui.Ui.create(testing.allocator, null);
+    defer u.destroy();
+    const build = struct {
+        fn f(cx: *Context) Widget {
+            var cells: [7]Widget = undefined;
+            for (&cells) |*c| c.* = cx.make(ui.Decorated{ .color = red });
+            return cx.make(ui.Align{ .alignment = .top_left, .child = cx.make(ui.SizedBox{ .width = 250, .child = cx.make(ui.Grid{ .cell = .{ .w = 60, .h = 40 }, .spacing = 10, .children = &cells }) }) });
+        }
+    }.f;
+    u.frame(400, 300, 0, Root(build){});
+    var cells: std.ArrayList(*Node) = .empty;
+    defer cells.deinit(testing.allocator);
+    try findAll(u.root.?, ui.Decorated, &cells);
+    // 250 wide: three 60-wide cells with 10 between (four would need 270).
+    try testing.expectEqual(@as(usize, 7), cells.items.len);
+    try testing.expectEqual(ui.Point{ 140, 0 }, cells.items[2].offset);
+    try testing.expectEqual(ui.Point{ 0, 50 }, cells.items[3].offset);
+    try testing.expectEqual(ui.Point{ 0, 100 }, cells.items[6].offset);
+    try testing.expectEqual(ui.Size{ .w = 60, .h = 40 }, cells.items[6].size);
+    const grid = find(u.root.?, ui.Grid).?;
+    try testing.expectEqual(ui.Size{ .w = 250, .h = 140 }, grid.size);
+}
+
+test "a scroll view scrolls with the wheel and its bar, and paints only what shows" {
+    const u = try ui.Ui.create(testing.allocator, null);
+    defer u.destroy();
+    const build = struct {
+        fn f(cx: *Context) Widget {
+            var rows: [20]Widget = undefined;
+            for (&rows, 0..) |*r, i| r.* = cx.make(ui.SizedBox{ .height = 50, .child = cx.make(ui.Decorated{ .color = if (i % 2 == 0) red else blue }) });
+            return cx.make(ui.Align{ .alignment = .top_left, .child = cx.make(ui.SizedBox{ .width = 200, .height = 300, .child = cx.make(ui.ScrollView{
+                .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &rows }),
+            }) }) });
+        }
+    }.f;
+    u.frame(400, 400, 0, Root(build){});
+    const view = find(u.root.?, ui.ScrollView).?;
+    const column = view.child(0);
+    const st = view.state(ui.ScrollView.State);
+    // Too tall: the bar takes its width, and nothing counts as overflow.
+    try testing.expectEqual(ui.Size{ .w = 200, .h = 300 }, view.size);
+    try testing.expectEqual(@as(f32, 188), column.size.w);
+    try testing.expectEqual(@as(f32, 1000), st.content);
+    try testing.expect(!view.overflow.any());
+    // Rows below the view are not painted.
+    try testing.expect(column.child(5).paint.valid);
+    try testing.expect(!column.child(6).paint.valid);
+
+    // The wheel: a notch (15 pixels) scrolls three times that.
+    u.pointerScroll(.{ 100, 100 }, 0, 15);
+    try testing.expect(u.needs_frame);
+    u.frame(400, 400, 1, Root(build){});
+    try testing.expectEqual(@as(f32, 45), st.offset);
+    try testing.expectEqual(ui.Point{ 0, -45 }, column.offset);
+    try testing.expect(u.changed());
+    // No further than the end, and no further back than the top.
+    u.pointerScroll(.{ 100, 100 }, 0, 10000);
+    u.frame(400, 400, 2, Root(build){});
+    try testing.expectEqual(@as(f32, 700), st.offset);
+    try testing.expect(!column.child(0).paint.valid);
+    try testing.expect(column.child(19).paint.valid);
+    u.pointerScroll(.{ 100, 100 }, 0, -10000);
+    u.frame(400, 400, 3, Root(build){});
+    try testing.expectEqual(@as(f32, 0), st.offset);
+    // At the top already, the wheel up is not taken.
+    u.needs_frame = false;
+    u.pointerScroll(.{ 100, 100 }, 0, -15);
+    try testing.expect(!u.needs_frame);
+
+    // Pressing the bar below the thumb (90 tall: 300 of 1000) jumps there,
+    // centred on the pointer; dragging moves it.
+    u.pointerMotion(.{ 194, 255 });
+    u.pointerButton(.{ 194, 255 }, ui.widgets.btn_left, true);
+    // The thumb's top at 210 of the 210 it can travel: the end.
+    try testing.expectEqual(@as(f32, 700), st.offset);
+    u.pointerMotion(.{ 194, 150 });
+    try testing.expectEqual(@as(f32, 350), st.offset);
+    u.pointerButton(.{ 194, 150 }, ui.widgets.btn_left, false);
+    try testing.expect(st.grab == null);
+    u.frame(400, 400, 4, Root(build){});
+    try testing.expectEqual(ui.Point{ 0, -350 }, column.offset);
+
+    // Content that fits needs no bar, and does not scroll.
+    const short = struct {
+        fn f(cx: *Context) Widget {
+            return cx.make(ui.Align{ .alignment = .top_left, .child = cx.make(ui.SizedBox{ .width = 200, .height = 300, .child = cx.make(ui.ScrollView{
+                .child = cx.make(ui.SizedBox{ .height = 100, .child = cx.make(ui.Decorated{ .color = red }) }),
+            }) }) });
+        }
+    }.f;
+    u.frame(400, 400, 5, Root(short){});
+    const v2 = find(u.root.?, ui.ScrollView).?;
+    try testing.expectEqual(@as(f32, 200), v2.child(0).size.w);
+    try testing.expectEqual(@as(f32, 0), v2.state(ui.ScrollView.State).offset);
+}
+
+test "a scroll view scrolls to the widget it is told to reveal, once" {
+    const u = try ui.Ui.create(testing.allocator, null);
+    defer u.destroy();
+    const Reveal = struct {
+        target: ?u64,
+        pub fn build(self: *const @This(), cx: *Context) Widget {
+            var rows: [20]Widget = undefined;
+            for (&rows, 0..) |*r, i| r.* = cx.make(ui.SizedBox{ .height = 50, .child = cx.make(ui.Decorated{ .color = red }) }).withKey(i);
+            return cx.make(ui.Align{ .alignment = .top_left, .child = cx.make(ui.SizedBox{ .width = 200, .height = 300, .child = cx.make(ui.ScrollView{
+                .reveal = self.target,
+                .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &rows }),
+            }) }) });
+        }
+    };
+    u.frame(400, 400, 0, Reveal{ .target = 12 });
+    const st = find(u.root.?, ui.ScrollView).?.state(ui.ScrollView.State);
+    // Row 12 (600 to 650) at the bottom of the view.
+    try testing.expectEqual(@as(f32, 350), st.offset);
+    // Scrolled away, it stays away until another is revealed.
+    _ = st.scrollTo(0);
+    u.frame(400, 400, 1, Reveal{ .target = 12 });
+    try testing.expectEqual(@as(f32, 0), st.offset);
+    u.frame(400, 400, 2, Reveal{ .target = 19 });
+    try testing.expectEqual(@as(f32, 700), st.offset);
+    // Above the view: at its top.
+    u.frame(400, 400, 3, Reveal{ .target = 2 });
+    try testing.expectEqual(@as(f32, 100), st.offset);
+}

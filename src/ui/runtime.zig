@@ -256,6 +256,17 @@ pub const Ui = struct {
         }
     }
 
+    /// The wheel turned (`dy` pixels down, `dx` right): the deepest widget
+    /// under the pointer that can scroll does.
+    pub fn pointerScroll(ui: *Ui, pos: Point, dx: f32, dy: f32) void {
+        ui.pointer = pos;
+        ui.updateHover(pos);
+        for (ui.hovered.items) |n| if (send(n, .{ .scroll = .{ .pos = local(n, pos), .dx = dx, .dy = dy } })) {
+            ui.needs_frame = true;
+            return;
+        };
+    }
+
     /// Gives the keyboard to a widget (null: to none).
     pub fn focus(ui: *Ui, n: ?*Node) void {
         if (ui.focused == n) return;

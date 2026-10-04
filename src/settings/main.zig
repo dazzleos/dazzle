@@ -109,6 +109,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             .motion => |pos| window_ui.pointerMotion(pos),
             .button => |b| window_ui.pointerButton(b.pos, b.code, b.pressed),
             .key => |k| window_ui.keyEvent(k.code, k.pressed),
+            .scroll => |sc| window_ui.pointerScroll(sc.pos, sc.dx, sc.dy),
+            .leave => window_ui.pointerLeave(),
         };
 
         // The figures change every second.

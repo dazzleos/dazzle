@@ -21,11 +21,12 @@ with Stardust's widget toolkit, shows a spinning, depth-tested Platonic
 solid, with Material 3 buttons to change its speed, radio buttons to
 choose the solid and switches to turn its lighting and texture on and
 off. Rings spread out and fade
-where the pointer clicks. Rendering statistics and the last key pressed
+where the pointer clicks in it. Rendering statistics and the last key pressed
 appear in its top left, in Fira Sans.
 The settings app shows the build, the hardware, how much CPU, memory, GPU
 memory and storage is in use, and the Ethernet and Wi-Fi status, and joins
-Wi-Fi networks. A Vulkan-style
+Wi-Fi networks. The Files app browses the system's files: a tree of
+folders, and the open folder's contents as a grid of icons. A Vulkan-style
 API may follow.
 
 ## Layout
@@ -46,6 +47,7 @@ The code is split into Zig modules, linked statically into each program:
 | `stardust-shell` | `src/shell/` | The Wayland compositor and shell, described below |
 | `stardust-demo` | `src/demo/` | The demo, a native app |
 | `stardust-settings` | `src/settings/` | The settings app: the build, the hardware, what is in use and the network |
+| `stardust-files` | `src/files/` | The Files app: a tree of folders and a grid of what is in the open one |
 
 The `vc4` module:
 
@@ -149,17 +151,18 @@ with the problem marked.
 |---|---|
 | `widget.zig` | `Widget`, `Context` (for `build`), `Callback`, and `Node`: the tree kept between frames, matching each frame's widgets to it, layout and hit testing |
 | `geometry.zig` | Sizes, constraints (made usable whatever they are), insets, alignment |
-| `widgets.zig` | `Row`, `Column`, `Expanded`, `Padding`, `Align`, `Center`, `SizedBox`, `ConstrainedBox`, `Overlay`, `Decorated` (a filled or outlined rounded rectangle) and `Pressable` (clicks, hover and press) |
-| `text.zig` | `Text`: lines at `\n`, wrapped at spaces to fit |
+| `widgets.zig` | `Row`, `Column`, `Expanded`, `Padding`, `Align`, `Center`, `SizedBox`, `ConstrainedBox`, `Grid` (cells in rows, as many to a row as fit), `Overlay`, `Decorated` (a filled or outlined rounded rectangle) and `Pressable` (clicks, hover and press) |
+| `text.zig` | `Text`: lines at `\n`, wrapped at spaces to fit, or cut short with "…" |
+| `scroll_view.zig` | `ScrollView`: the part of a taller child scrolled to, with the wheel or by dragging its bar, and scrolling to a widget in it (`reveal`) |
 | `material.zig` | Material 3's light and dark baseline themes, and `OutlinedButton`, made of a `Pressable`, `Decorated`, `ConstrainedBox`, `Padding` and `Center` |
 | `controls.zig` | Material 3's selection controls: `Checkbox`, `Radio` (generic over the value it selects) and `Switch` (its handle slides), each with an optional label that presses it too |
 | `text_field.zig` | `TextField`: a line of text to type (Material's outlined field), optionally shown as dots for passwords; clicking it gives it the keyboard |
 | `title_bar.zig` | `TitleBar`: the bar apps draw across the top of their window, with their name, maximize and close buttons, and dragging it to move the window (the shell draws none) |
 | `keymap.zig` | Linux key codes to characters, for a US keyboard (the shell sends key codes without a keymap) |
-| `painter.zig` | Painting: canvas layers and GPU draws in order, clipping, and the overflow stripes |
+| `painter.zig` | Painting: canvas layers and GPU draws in order, clipping (nothing outside the clip is painted), and the overflow stripes |
 | `damage.zig` | What changed between frames: each node's drawing fingerprinted and compared, kept as a few rectangles, with a history for buffers of any age |
-| `runtime.zig` | `Ui`: builds, lays out and paints each frame, records it into a `vc4` frame (or draws it on the CPU, for tests), and sends pointer events to the widgets under the pointer |
-| `tests.zig` | Tests: overflow, nonsense layouts, state and keys, buttons, overlays, GPU draws' order, rows and columns, controls, damage |
+| `runtime.zig` | `Ui`: builds, lays out and paints each frame, records it into a `vc4` frame (or draws it on the CPU, for tests), and sends pointer events (and the wheel) to the widgets under the pointer |
+| `tests.zig` | Tests: overflow, nonsense layouts, state and keys, buttons, overlays, GPU draws' order, rows and columns, controls, damage, grids and scrolling |
 
 `Overlay` stacks layers, each filling it, and the topmost layer with
 something under the pointer gets the event. A button press takes the
@@ -412,6 +415,7 @@ The image's filesystem (an initramfs, in RAM) is kept simple:
 /shell/                     stardust-shell, FiraSans-Regular.ttf and its license
 /apps/stardust-demo/        stardust-demo, FiraSans-Regular.ttf and its license
 /apps/stardust-settings/    stardust-settings, FiraSans-Regular.ttf and its license
+/apps/stardust-files/       stardust-files, FiraSans-Regular.ttf and its license
 /dev /proc /sys /run        mounted or created by init
 ```
 
@@ -679,6 +683,21 @@ neither driver, and the firmware leaves it off, so the chip never shows up.
 `boot/bcm2837-rpi-3-a-plus.dts` gives it to the Wi-Fi power sequence, as the
 Pi 3 B+'s does (there is no Bluetooth driver here to disturb).
 
+### The Files app
+
+Click "F" in the dock. It starts at the root of the filesystem: the tree
+of folders on the left, and the open folder on the right as a grid of
+icons (folders, files, programs, devices; links get an arrow in the
+corner), with its path and an Up button above (Backspace goes up too).
+Clicking a folder in the tree or the grid opens it, and its row in the
+tree comes into view; the arrow beside a folder opens or closes it in
+the tree. Clicking anything else picks it, and the line under the grid
+gives its name, kind and size. Both sides scroll, with the wheel or by
+dragging their bars. Names starting with a dot are left out, a folder
+shows at most 1000 entries, and folders are read when they are opened
+(`src/files/fs.zig`), as the app's unprivileged user: a folder it may not
+read says so.
+
 ## Faster development loops
 
 - **Raspberry Pi OS:** `zig-out/bin/stardust-shell` and `stardust-demo`
@@ -814,7 +833,7 @@ GPU or display).
 - A Vulkan-style API on `vc4`.
 - Text: ligatures and other GSUB features, and hinting or stem darkening
   for small sizes.
-- The toolkit: more widgets (scrolling, images, the other Material
+- The toolkit: more widgets (images, the other Material
   buttons), text selection and non-ASCII typing, keyboard layouts other
   than US, animations, and logical pixels (a scale for the display's
   density).

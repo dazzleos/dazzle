@@ -160,7 +160,7 @@ pub const TextField = struct {
                 if (st.key(k, self.max_len)) if (self.on_changed) |f| f.call(st.text());
                 return true;
             },
-            .motion => {},
+            .motion, .scroll => {},
         }
         return false;
     }

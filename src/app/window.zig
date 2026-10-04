@@ -76,6 +76,12 @@ pub const InputEvent = union(enum) {
     button: struct { pos: [2]f32, code: u32, pressed: bool },
     /// A Linux key code (KEY_A, ...).
     key: struct { code: u32, pressed: bool },
+    /// The wheel turned: by `dy` pixels down (and `dx` right), with the
+    /// pointer at `pos`.
+    scroll: struct { pos: [2]f32, dx: f32, dy: f32 },
+    /// The pointer left the window (or the shell took it, to move the
+    /// window).
+    leave,
 };
 
 /// Used when the compositor leaves the size to us.
@@ -476,6 +482,14 @@ pub const Window = struct {
                 if (state == p.wl_pointer.button_state.pressed) w.press_serial = serial;
                 w.pushInput(.{ .button = .{ .pos = w.pointer_pos, .code = code, .pressed = state == p.wl_pointer.button_state.pressed } });
             },
+            p.wl_pointer.event.axis => {
+                _ = r.uint() catch return; // time
+                const axis = r.uint() catch return;
+                const value: f32 = @floatCast(r.fixed() catch return);
+                const vertical = axis == p.wl_pointer.axis.vertical_scroll;
+                w.pushInput(.{ .scroll = .{ .pos = w.pointer_pos, .dx = if (vertical) 0 else value, .dy = if (vertical) value else 0 } });
+            },
+            p.wl_pointer.event.leave => w.pushInput(.leave),
             else => {},
         }
     }

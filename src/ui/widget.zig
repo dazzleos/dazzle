@@ -78,6 +78,10 @@ pub const Event = union(enum) {
     release: struct { pos: Point, button: u32, inside: bool },
     /// The pointer moved, over it or while it has the pointer.
     motion: Point,
+    /// The wheel turned over it: by `dy` pixels down (and `dx` right).
+    /// Returning true says it scrolled; otherwise it goes to the widgets
+    /// around it.
+    scroll: struct { pos: Point, dx: f32, dy: f32 },
     /// It got the keyboard (`Ui.focus`), or lost it.
     focus,
     blur,
@@ -145,6 +149,10 @@ pub const VTable = struct {
     event: ?*const fn (*const anyopaque, *Node, Event) bool,
     hit_test: ?*const fn (*const anyopaque, *Node, Point) bool,
     state: ?StateOps,
+    /// Shows only what of its children is within its bounds, without
+    /// counting the rest as overflow (`pub const clips_children = true`:
+    /// a scroll view).
+    clips_children: bool,
 };
 
 pub const StateOps = struct {
@@ -212,6 +220,7 @@ fn makeVTable(comptime T: type) VTable {
         .paint_over = if (@hasDecl(T, "paintOver")) S.paintOver else null,
         .event = if (@hasDecl(T, "event")) S.event else null,
         .hit_test = if (@hasDecl(T, "hitTest")) S.hitTest else null,
+        .clips_children = @hasDecl(T, "clips_children") and T.clips_children,
         .state = if (@hasDecl(T, "State")) .{
             .size = @sizeOf(T.State),
             .alignment = .of(T.State),
@@ -340,7 +349,7 @@ pub const Node = struct {
         }
         const want = if (n.widget.vtable.layout) |f| f(n.widget.ptr, n, c) else n.defaultLayout(c);
         n.size = c.sanitizeSize(want);
-        n.findOverflow();
+        if (n.widget.vtable.clips_children) n.overflow = .{} else n.findOverflow();
         return n.size;
     }
 

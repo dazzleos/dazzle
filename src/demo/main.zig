@@ -160,6 +160,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
                 input.key = k.code;
                 next_update = 0;
             },
+            .scroll => |sc| window_ui.pointerScroll(sc.pos, sc.dx, sc.dy),
+            .leave => window_ui.pointerLeave(),
         };
 
         // The statistics change twice a second.
