@@ -160,7 +160,8 @@ pub fn announcePartition(fd: linux.fd_t, plan: Plan) sys.Error!void {
 
 const testing = std.testing;
 
-/// A table like mkimage's: a FAT32 partition from 1 MiB to 64 MiB.
+/// A table with a boot partition from 1 MiB to 64 MiB (mkimage's are
+/// smaller: as big as their files need).
 fn imageMbr() [sector]u8 {
     var mbr: [sector]u8 = @splat(0);
     const e = mbr[446..][0..16];

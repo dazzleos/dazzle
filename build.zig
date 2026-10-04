@@ -427,7 +427,7 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.B
     mkimage.step.dependOn(verify_step);
     mkimage.step.dependOn(kernel.step);
     const img = mkimage.addOutputFileArg("dazzle.img");
-    mkimage.addArg(b.fmt("{d}", .{b.option(u32, "image-size", "SD image size in MiB (default 64)") orelse 64}));
+    mkimage.addArg(if (b.option(u32, "image-size", "SD image size in MiB (default: just big enough)")) |mib| b.fmt("{d}", .{mib}) else "auto");
     const image_step = b.step("image", "Build everything into an SD card image: zig-out/dazzle.img (and its files in zig-out/boot)");
     for (boot_files) |f| {
         mkimage.addPrefixedFileArg(b.fmt("{s}=", .{f[0]}), f[1]);

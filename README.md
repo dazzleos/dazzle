@@ -491,7 +491,9 @@ scripts/zig build qemu              # boot in QEMU as a Zero (-Dqemu-board=pi3a+
 
 Options: `-Dlinux=path/to/linux` uses an existing kernel tree,
 `-Dcross-compile=arm-linux-gnueabihf-` builds the kernel with GCC instead of
-LLVM, `-Dimage-size=<MiB>` sets the image size (default 64) and
+LLVM, `-Dimage-size=<MiB>` sets the image size (by default it is just big
+enough for its files, with a quarter to spare: about 12 MiB, a FAT16 boot
+partition after the partition table's first MiB) and
 `-Dhttp-port=<port>` the host port for QEMU's log server (default 8080).
 
 The kernel comes from `make tinyconfig` plus `kernel/dazzle.config`. The
