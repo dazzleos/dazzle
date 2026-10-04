@@ -120,6 +120,11 @@ const State = struct {
     buffer_ids: [4]u32 = @splat(0),
     activated: bool = false,
     suspended: bool = false,
+    maximized: bool = false,
+    /// From the pointer, if it has one.
+    pointer_in: bool = false,
+    press_serial: u32 = 0,
+    releases: u32 = 0,
 
     fn dmabufEvent(ptr: ?*anyopaque, _: *client.Display, _: u32, opcode: u16, r: *wire.Reader) void {
         const s: *State = @ptrCast(@alignCast(ptr.?));
@@ -144,12 +149,29 @@ const State = struct {
         const states = r.array() catch &.{};
         s.activated = false;
         s.suspended = false;
+        s.maximized = false;
         var i: usize = 0;
         while (i + 4 <= states.len) : (i += 4) switch (std.mem.readInt(u32, states[i..][0..4], .little)) {
             p.xdg_toplevel.state.activated => s.activated = true,
+            p.xdg_toplevel.state.maximized => s.maximized = true,
             p.xdg_toplevel.state.suspended => s.suspended = true,
             else => {},
         };
+    }
+
+    fn pointerEvent(ptr: ?*anyopaque, _: *client.Display, _: u32, opcode: u16, r: *wire.Reader) void {
+        const s: *State = @ptrCast(@alignCast(ptr.?));
+        switch (opcode) {
+            p.wl_pointer.event.enter => s.pointer_in = true,
+            p.wl_pointer.event.leave => s.pointer_in = false,
+            p.wl_pointer.event.button => {
+                const serial = r.uint() catch return;
+                _ = r.uint() catch return;
+                _ = r.uint() catch return;
+                if ((r.uint() catch return) == p.wl_pointer.button_state.pressed) s.press_serial = serial else s.releases += 1;
+            },
+            else => {},
+        }
     }
 
     fn xdgSurfaceEvent(ptr: ?*anyopaque, _: *client.Display, _: u32, _: u16, r: *wire.Reader) void {
@@ -612,6 +634,50 @@ const MultiServerThread = struct {
     frames: std.atomic.Value(u32) = .init(0),
     /// Set by the test: the process whose window to raise.
     raise_pid: std.atomic.Value(i32) = .init(0),
+    /// Set by the test: pointer input to feed the server (`Input`).
+    input: std.atomic.Value(u32) = .init(0),
+    /// Where the window of process 1002 is.
+    second_x: std.atomic.Value(i32) = .init(0),
+    second_y: std.atomic.Value(i32) = .init(0),
+
+    const Input = enum(u32) {
+        none,
+        /// Press in the second window (restored, at 200,180).
+        press_second,
+        /// Move by (100, 60), then release.
+        drag_release,
+        /// Click in the first window (maximized, at 0,40).
+        click_first,
+    };
+
+    fn feed(srv: *server_mod.Server, input: Input) void {
+        const left = p.input.btn_left;
+        switch (input) {
+            .none => {},
+            .press_second => {
+                srv.pointerMotion(1, 210, 190);
+                srv.pointerFrame();
+                srv.pointerButton(1, left, true);
+                srv.pointerFrame();
+            },
+            .drag_release => {
+                srv.pointerMotion(2, 260, 220);
+                srv.pointerFrame();
+                srv.pointerMotion(3, 310, 250);
+                srv.pointerFrame();
+                srv.pointerButton(4, left, false);
+                srv.pointerFrame();
+            },
+            .click_first => {
+                srv.pointerMotion(5, 10, 50);
+                srv.pointerFrame();
+                srv.pointerButton(5, left, true);
+                srv.pointerFrame();
+                srv.pointerButton(6, left, false);
+                srv.pointerFrame();
+            },
+        }
+    }
 
     fn run(st: *MultiServerThread) void {
         var clients: [4]?*server_mod.Client = @splat(null);
@@ -633,7 +699,12 @@ const MultiServerThread = struct {
             };
             const pid = st.raise_pid.swap(0, .monotonic);
             if (pid != 0) _ = st.server.raise(pid);
+            feed(&st.server, @enumFromInt(st.input.swap(0, .monotonic)));
             st.server.updateFocus();
+            for (st.server.toplevels.items) |t| if (t.xdg.surface) |surf| if (surf.client.pid == 1002) {
+                st.second_x.store(t.x, .monotonic);
+                st.second_y.store(t.y, .monotonic);
+            };
             if (st.server.damaged) {
                 _ = st.frames.fetchAdd(1, .monotonic);
                 st.server.frameDrawn();
@@ -649,12 +720,26 @@ const TestWindow = struct {
     state: State = .{},
     surface: client.Proxy = undefined,
     buffer: client.Proxy = undefined,
+    toplevel: client.Proxy = undefined,
+    seat: ?client.Proxy = null,
 
-    /// Connects on `fd` and maps a 64x64 shm window.
+    /// Connects on `fd` and maps a 64x64 shm window (with a pointer if
+    /// `pointer`).
     fn open(tw: *TestWindow) !void {
+        return tw.openWith(false);
+    }
+
+    fn openWith(tw: *TestWindow, pointer: bool) !void {
         const d = tw.d;
         var globals: client.Globals = .{};
         const registry = try globals.fetch(d);
+        if (pointer) {
+            const seat = (try globals.bind(registry, p.wl_seat.name, 5, null)).?;
+            const ptr = try d.newObject(.{ .ptr = &tw.state, .handler = State.pointerEvent });
+            var m = try seat.request(p.wl_seat.request.get_pointer);
+            m.uint(ptr.id).end();
+            tw.seat = seat;
+        }
         const compositor = (try globals.bind(registry, p.wl_compositor.name, 4, null)).?;
         const wm_base = (try globals.bind(registry, p.xdg_wm_base.name, 6, null)).?;
         const shm = (try globals.bind(registry, p.wl_shm.name, 1, null)).?;
@@ -664,9 +749,9 @@ const TestWindow = struct {
         const xdg_surface = try d.newObject(.{ .ptr = &tw.state, .handler = State.xdgSurfaceEvent });
         m = try wm_base.request(p.xdg_wm_base.request.get_xdg_surface);
         m.uint(xdg_surface.id).uint(tw.surface.id).end();
-        const toplevel = try d.newObject(.{ .ptr = &tw.state, .handler = State.toplevelEvent });
+        tw.toplevel = try d.newObject(.{ .ptr = &tw.state, .handler = State.toplevelEvent });
         m = try xdg_surface.request(p.xdg_surface.request.get_toplevel);
-        m.uint(toplevel.id).end();
+        m.uint(tw.toplevel.id).end();
         m = try tw.surface.request(p.wl_surface.request.commit);
         m.end();
         try d.roundtrip();
@@ -750,6 +835,112 @@ test "a covered window is suspended, without frame callbacks or redraws, until r
         }
     };
     try first.waitFor(&first.state, Done.two);
+    try second.waitFor(&second.state, Cond.suspended);
+
+    first.d.disconnect();
+    second.d.disconnect();
+    thread.join();
+}
+
+test "a restored window is half the size, moves by its grab, and windows are clicked to the top" {
+    var a: [2]linux.fd_t = undefined;
+    var b: [2]linux.fd_t = undefined;
+    try testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &a));
+    try testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &b));
+    var renderer: FakeRenderer = .{};
+    const fds = [_]linux.fd_t{ a[0], b[0] };
+    const st = try testing.allocator.create(MultiServerThread);
+    defer testing.allocator.destroy(st);
+    st.* = .{ .server = .init(testing.allocator, renderer.backend(), .{ .x = 0, .y = 40, .width = 800, .height = 560 }), .fds = &fds };
+    defer st.server.deinit();
+    const thread = try std.Thread.spawn(.{}, MultiServerThread.run, .{st});
+
+    var first: TestWindow = .{ .d = try client.Display.fromFd(testing.allocator, a[1]) };
+    try first.openWith(true);
+    try testing.expect(first.state.maximized);
+    try testing.expectEqual(@as(i32, 800), first.state.configure_width);
+    var second: TestWindow = .{ .d = try client.Display.fromFd(testing.allocator, b[1]) };
+    try second.openWith(true);
+    const Cond = struct {
+        fn suspended(s: *const State) bool {
+            return s.suspended;
+        }
+        fn visible(s: *const State) bool {
+            return !s.suspended;
+        }
+        fn restored(s: *const State) bool {
+            return !s.maximized;
+        }
+        fn maximized(s: *const State) bool {
+            return s.maximized;
+        }
+        fn pressed(s: *const State) bool {
+            return s.press_serial != 0;
+        }
+        fn activated(s: *const State) bool {
+            return s.activated;
+        }
+        fn deactivated(s: *const State) bool {
+            return !s.activated;
+        }
+        fn moved(t: *const MultiServerThread) bool {
+            return t.second_x.load(.monotonic) == 300 and t.second_y.load(.monotonic) == 240;
+        }
+    };
+    try first.waitFor(&first.state, Cond.suspended);
+
+    // Restored, the second window is told half the work area's size, and
+    // goes in the middle of it, which uncovers the first window (64x64 at
+    // the corner). The second keeps the keyboard.
+    var m = try second.toplevel.request(p.xdg_toplevel.request.unset_maximized);
+    m.end();
+    try second.d.flush();
+    try second.waitFor(&second.state, Cond.restored);
+    try testing.expectEqual(@as(i32, 400), second.state.configure_width);
+    try testing.expectEqual(@as(i32, 280), second.state.configure_height);
+    try testing.expect(second.state.activated);
+    try first.waitFor(&first.state, Cond.visible);
+    try testing.expect(!first.state.activated);
+    try testing.expectEqual(@as(i32, 200), st.second_x.load(.monotonic));
+    try testing.expectEqual(@as(i32, 180), st.second_y.load(.monotonic));
+
+    // Pressing on it (its title bar, say) and asking to move: the window
+    // follows the pointer, which leaves it until the button is released
+    // (which the client does not see).
+    st.input.store(@intFromEnum(MultiServerThread.Input.press_second), .monotonic);
+    try second.waitFor(&second.state, Cond.pressed);
+    try testing.expect(second.state.pointer_in);
+    m = try second.toplevel.request(p.xdg_toplevel.request.move);
+    m.uint(second.seat.?.id).uint(second.state.press_serial).end();
+    try second.d.roundtrip();
+    try testing.expect(!second.state.pointer_in);
+    st.input.store(@intFromEnum(MultiServerThread.Input.drag_release), .monotonic);
+    try second.waitFor(st, Cond.moved);
+    try second.d.roundtrip();
+    try testing.expectEqual(@as(u32, 0), second.state.releases);
+    try testing.expect(second.state.pointer_in);
+
+    // A move with a stale serial (no button down) does nothing.
+    m = try second.toplevel.request(p.xdg_toplevel.request.move);
+    m.uint(second.seat.?.id).uint(second.state.press_serial).end();
+    try second.d.roundtrip();
+    try testing.expect(st.server.grab == null);
+
+    // Clicking the first window brings it to the top, with the keyboard.
+    st.input.store(@intFromEnum(MultiServerThread.Input.click_first), .monotonic);
+    try first.waitFor(&first.state, Cond.activated);
+    try first.d.roundtrip();
+    try testing.expect(first.state.press_serial != 0);
+    try testing.expectEqual(@as(u32, 1), first.state.releases);
+    try second.waitFor(&second.state, Cond.deactivated);
+
+    // Maximized again, the second window (still below) is in the corner,
+    // under the first, so covered.
+    m = try second.toplevel.request(p.xdg_toplevel.request.set_maximized);
+    m.end();
+    try second.d.flush();
+    try second.waitFor(&second.state, Cond.maximized);
+    try testing.expectEqual(@as(i32, 800), second.state.configure_width);
     try second.waitFor(&second.state, Cond.suspended);
 
     first.d.disconnect();

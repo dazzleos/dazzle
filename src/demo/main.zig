@@ -114,8 +114,10 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     var dirty = true;
     var idle = false;
     var suspended = false;
-    // The title bar's close button.
-    var quit: Quit = .{};
+    // What the title bar's buttons do. Its size stays as it was for the
+    // whole screen when the window is restored to half of it.
+    var controls: app.Controls = .{ .win = win };
+    const bar_scale = @as(f32, @floatFromInt(width)) / 1920;
     while (true) {
         const waited = if (idle) blk: {
             // Nothing to draw: sleep until the statistics change, or
@@ -128,7 +130,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             if (err == error.ServerError) print("stardust: compositor error: {s}\n", .{win.conn.errorMessage()});
             return err;
         };
-        if (win.closed or quit.requested) return;
+        if (win.closed or controls.quit) return;
         if (try win.applyConfigure()) |size| {
             // The next frame is rendered at the new size.
             width = size[0];
@@ -176,8 +178,11 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
                 .rings = &rings,
                 .status = status,
                 .scale = scale,
-                .on_close = .of(&quit, Quit.request),
-                .bar_scale = @as(f32, @floatFromInt(width)) / 1920,
+                .on_close = .of(&controls, app.Controls.close),
+                .on_maximize = .of(&controls, app.Controls.toggleMaximized),
+                .on_drag = .of(&controls, app.Controls.drag),
+                .maximized = win.maximized,
+                .bar_scale = bar_scale,
             });
             if (window_ui.changed()) {
                 idle = false;
@@ -305,14 +310,6 @@ fn temperatureText(buf: []u8, t: ?f32) []const u8 {
     const c = t orelse return "? °C";
     return std.fmt.bufPrint(buf, "{d:.0} °C", .{c}) catch "";
 }
-
-const Quit = struct {
-    requested: bool = false,
-
-    fn request(q: *Quit) void {
-        q.requested = true;
-    }
-};
 
 /// The panel's lines of statistics.
 fn statusLines(bufs: *[view.lines][96]u8, s: Stats.Summary, width: u32, height: u32, input: InputStatus, health: sysinfo.Sample) [view.lines][]const u8 {

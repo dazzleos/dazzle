@@ -33,19 +33,24 @@ pub const Window = struct {
     clip: server.Rect,
 };
 
+/// The most windows a frame draws (the vertex buffer holds this many quads
+/// besides the panels').
+pub const max_windows = 16;
+
 /// A panel's picture, drawn across the screen at `y`.
 pub const PanelQuad = struct { texture: server.Texture, y: i32 };
 
-/// Records a frame (after `frame.begin`): the panels and the window as
-/// quads. `vbo` holds the quads' vertices and must stay untouched until the
-/// frame has rendered.
-pub fn recordFrame(frame: *render.Frame, quads_pipeline: *shader.Pipeline, vbo: vc4.Bo, panels: []const ?PanelQuad, window: ?Window) !void {
+/// Records a frame (after `frame.begin`): the panels and the windows
+/// (bottom first, at most `max_windows`) as quads. `vbo` holds the quads'
+/// vertices and must stay untouched until the frame has rendered.
+pub fn recordFrame(frame: *render.Frame, quads_pipeline: *shader.Pipeline, vbo: vc4.Bo, panels: []const ?PanelQuad, windows: []const Window) !void {
+    std.debug.assert(windows.len <= max_windows);
     var quads: usize = 0;
     for (panels) |panel| if (panel) |pq| {
         try quad(frame, quads_pipeline, vbo, quads, pq.texture, 0, pq.y, null);
         quads += 1;
     };
-    if (window) |w| {
+    for (windows) |w| {
         try quad(frame, quads_pipeline, vbo, quads, w.texture, w.x, w.y, .{ .x = w.clip.x, .y = w.clip.y, .width = w.clip.width, .height = w.clip.height });
         quads += 1;
     }
@@ -80,6 +85,13 @@ fn quad(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, index: us
             .wrap_t = .clamp,
         } },
     });
+}
+
+/// Room for the panels' and windows' quads (each two triangles of four
+/// floats per vertex).
+const vbo_size = 4096;
+comptime {
+    std.debug.assert((n_panels + max_windows) * 6 * 4 * @sizeOf(f32) <= vbo_size);
 }
 
 /// A buffer the display can show.
@@ -141,7 +153,7 @@ pub const Renderer = struct {
                 .vertex_stride = 16,
                 .attributes = &.{ .{ .location = 0, .offset = 0 }, .{ .location = 1, .offset = 8 } },
             }),
-            .vbo = try dev.createBo(4096),
+            .vbo = try dev.createBo(vbo_size),
         };
     }
 
@@ -309,7 +321,7 @@ pub const Renderer = struct {
 
     /// Composites a frame into the back buffer, waiting for the GPU. Only
     /// while no flip is pending (`flipPending`).
-    pub fn composite(r: *Renderer, window: ?Window) !Timing {
+    pub fn composite(r: *Renderer, windows: []const Window) !Timing {
         const t0 = sys.nowNs();
         var quads: [n_panels]?PanelQuad = @splat(null);
         for (&r.panels, &quads) |*p, *q| {
@@ -321,7 +333,7 @@ pub const Renderer = struct {
             q.* = .{ .texture = p.texture.?, .y = p.y };
         }
         static_frame.begin(r.display.backTarget(), .{ .clear = background });
-        try recordFrame(&static_frame, &r.quads, r.vbo, &quads, window);
+        try recordFrame(&static_frame, &r.quads, r.vbo, &quads, windows);
         const t1 = sys.nowNs();
         const seqno = try r.dev.submit(static_frame.finish());
         try r.dev.waitSeqno(seqno, std.time.ns_per_s);

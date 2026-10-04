@@ -119,6 +119,12 @@ pub const Window = struct {
     closed: bool = false,
     /// Covered by another window: there is no point drawing.
     suspended: bool = false,
+    /// Filling the screen (the shell's configure says so); otherwise half
+    /// the screen, and movable.
+    maximized: bool = true,
+    /// The serial of the last pointer button press, for asking the shell
+    /// to move the window from it.
+    press_serial: u32 = 0,
 
     buffers: [max_buffers]?Buffer = @splat(null),
     /// The buffer the frame being recorded renders into.
@@ -193,6 +199,23 @@ pub const Window = struct {
     /// Handles events that have arrived, without waiting.
     pub fn poll(w: *Window) !void {
         _ = try w.conn.dispatchPending();
+    }
+
+    /// Asks the shell to fill the screen with the window, or to make it
+    /// half the screen again; a configure follows.
+    pub fn setMaximized(w: *Window, on: bool) void {
+        var m = w.toplevel.request(if (on) p.xdg_toplevel.request.set_maximized else p.xdg_toplevel.request.unset_maximized) catch return;
+        m.end();
+        w.conn.flush() catch {};
+    }
+
+    /// Asks the shell to move the window with the pointer, from the button
+    /// press just handled (dragging the title bar), until it is released.
+    pub fn startMove(w: *Window) void {
+        const seat = w.seat orelse return;
+        var m = w.toplevel.request(p.xdg_toplevel.request.move) catch return;
+        m.uint(seat.id).uint(w.press_serial).end();
+        w.conn.flush() catch {};
     }
 
     /// Waits for events (input, a configure, a released buffer) for up to
@@ -446,10 +469,11 @@ pub const Window = struct {
                 w.pushInput(.{ .motion = w.pointer_pos });
             },
             p.wl_pointer.event.button => {
-                _ = r.uint() catch return; // serial
+                const serial = r.uint() catch return;
                 _ = r.uint() catch return; // time
                 const code = r.uint() catch return;
                 const state = r.uint() catch return;
+                if (state == p.wl_pointer.button_state.pressed) w.press_serial = serial;
                 w.pushInput(.{ .button = .{ .pos = w.pointer_pos, .code = code, .pressed = state == p.wl_pointer.button_state.pressed } });
             },
             else => {},
@@ -496,11 +520,15 @@ pub const Window = struct {
                 w.next_size = .{ r.int() catch 0, r.int() catch 0 };
                 const states = r.array() catch &.{};
                 var suspended = false;
+                var maximized = false;
                 var i: usize = 0;
-                while (i + 4 <= states.len) : (i += 4) {
-                    if (std.mem.readInt(u32, states[i..][0..4], .little) == p.xdg_toplevel.state.suspended) suspended = true;
-                }
+                while (i + 4 <= states.len) : (i += 4) switch (std.mem.readInt(u32, states[i..][0..4], .little)) {
+                    p.xdg_toplevel.state.suspended => suspended = true,
+                    p.xdg_toplevel.state.maximized => maximized = true,
+                    else => {},
+                };
                 w.suspended = suspended;
+                w.maximized = maximized;
             },
             p.xdg_toplevel.event.close => w.closed = true,
             else => {},

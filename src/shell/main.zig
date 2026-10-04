@@ -246,9 +246,9 @@ fn run(init: std.process.Init.Minimal) !void {
             defer stats.display_ns += sys.nowNs() - draw_start;
             panels_damaged = false;
             server.frameDrawn();
-            // A full-size window goes straight onto the display, with the
-            // dock on a plane below it. Otherwise (or if the display cannot
-            // show it) the frame is composited.
+            // A maximized, full-size window on top goes straight onto the
+            // display, with the dock on a plane below it. Otherwise (or if
+            // the display cannot show it) the frame is composited.
             var on_screen: ?bool = null;
             if (top) |t| if (server.scanoutBuffer(t)) |b| {
                 if (renderer.showDirect(b.dmabuf.?, server.work_area.x, server.work_area.y)) |at_once| {
@@ -259,13 +259,14 @@ fn run(init: std.process.Init.Minimal) !void {
                 }
             };
             if (on_screen == null) {
-                const window: ?render.Window = if (top) |t| .{
-                    .texture = t.xdg.surface.?.texture().?,
-                    .x = server.work_area.x,
-                    .y = server.work_area.y,
-                    .clip = server.work_area,
-                } else null;
-                if (renderer.composite(window)) |timing| {
+                var shown: [render.max_windows]*server_mod.Toplevel = undefined;
+                var windows: [render.max_windows]render.Window = undefined;
+                const visible = server.visibleWindows(&shown);
+                for (visible, windows[0..visible.len]) |t, *w| {
+                    const r = server.windowRect(t);
+                    w.* = .{ .texture = t.xdg.surface.?.texture().?, .x = r.x, .y = r.y, .clip = server.work_area };
+                }
+                if (renderer.composite(windows[0..visible.len])) |timing| {
                     stats.composited(timing);
                     on_screen = renderer.show() catch |err| blk: {
                         print("stardust-shell: cannot show the frame: {s}\n", .{@errorName(err)});

@@ -200,6 +200,12 @@ pub const xdg_toplevel = struct {
         /// the client need not draw it.
         pub const suspended = 9;
     };
+    pub const wm_capabilities = struct {
+        pub const window_menu = 1;
+        pub const maximize = 2;
+        pub const fullscreen = 3;
+        pub const minimize = 4;
+    };
 };
 
 pub const zwp_linux_dmabuf_v1 = struct {

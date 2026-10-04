@@ -154,7 +154,7 @@ with the problem marked.
 | `material.zig` | Material 3's light and dark baseline themes, and `OutlinedButton`, made of a `Pressable`, `Decorated`, `ConstrainedBox`, `Padding` and `Center` |
 | `controls.zig` | Material 3's selection controls: `Checkbox`, `Radio` (generic over the value it selects) and `Switch` (its handle slides), each with an optional label that presses it too |
 | `text_field.zig` | `TextField`: a line of text to type (Material's outlined field), optionally shown as dots for passwords; clicking it gives it the keyboard |
-| `title_bar.zig` | `TitleBar`: the bar apps draw across the top of their window, with their name and a close button (the shell draws none) |
+| `title_bar.zig` | `TitleBar`: the bar apps draw across the top of their window, with their name, maximize and close buttons, and dragging it to move the window (the shell draws none) |
 | `keymap.zig` | Linux key codes to characters, for a US keyboard (the shell sends key codes without a keymap) |
 | `painter.zig` | Painting: canvas layers and GPU draws in order, clipping, and the overflow stripes |
 | `damage.zig` | What changed between frames: each node's drawing fingerprinted and compared, kept as a few rectangles, with a history for buffers of any age |
@@ -271,8 +271,8 @@ The shell (`src/shell/`):
 | File | Contents |
 |---|---|
 | `main.zig` | Opens the GPU and display, listens on `$XDG_RUNTIME_DIR/wayland-0`, and runs the event loop: read input (clicks on the dock start or raise apps), dispatch clients, then composite a frame when something changed |
-| `server.zig` | The Wayland server: clients, objects and requests, frame callbacks and buffer releases, pointer and keyboard focus |
-| `render.zig` | Compositing with the `vc4` API: textured quads for the panels (the dock) and the window, and the cursor plane |
+| `server.zig` | The Wayland server: clients, objects and requests, frame callbacks and buffer releases, window stacking, maximizing and moving, pointer and keyboard focus |
+| `render.zig` | Compositing with the `vc4` API: textured quads for the panels (the dock) and the windows, and the cursor plane |
 | `dock.zig` | The dock: finds the apps in `/apps`, draws their icons, and finds the one clicked |
 | `shaders/quad.zig` | The textured quad's shader |
 | `input.zig` | USB keyboards and mice: finds `/dev/input/event*` nodes and decodes their events |
@@ -284,16 +284,23 @@ to a texture at commit), `zwp_linux_dmabuf_v1`, `xdg_wm_base` (toplevels)
 and `wl_seat` (a pointer and a keyboard). There are no popups or outputs
 yet.
 
-- **Windows:** each toplevel is configured to fill the screen above the
-  dock, and the newest one is shown, or the one whose app was last clicked
-  in the dock. Apps draw their own title bars (the toolkit's `TitleBar`:
-  the app's name and a close button that quits it), so the shell draws
-  none, and with no app open the screen shows just the dock.
-- **Covered windows:** the windows behind the front one cannot be seen, so
-  they are told: they get xdg_toplevel's `suspended` state (xdg-shell
-  version 6) instead of `activated`, their frame callbacks are held until
-  they are in front again, and what they commit meanwhile does not make
-  the shell draw a frame. Stardust's apps then stop drawing (the demo's
+- **Windows:** each toplevel starts maximized, filling the screen above
+  the dock. Unmaximized (`unset_maximized`), it is told half the work
+  area's width and height, and goes in the middle of it the first time,
+  or where it was last; maximized again, it fills it. A restored window
+  moves with the pointer once its client asks (`move`, with the serial of
+  a button press it is still holding): until the button is released the
+  pointer is the shell's, and the window stays where its title bar can be
+  reached. Windows are stacked newest on top; clicking a window, or its
+  app in the dock, raises it, and the top window has the keyboard
+  (`activated`). Apps draw their own title bars (the toolkit's `TitleBar`:
+  the app's name, a button that maximizes or restores the window, a close
+  button that quits it, and dragging the bar moves the window), so the
+  shell draws none, and with no app open the screen shows just the dock.
+- **Covered windows:** a window hidden behind one above it cannot be seen,
+  so it is told: it gets xdg_toplevel's `suspended` state (xdg-shell
+  version 6), its frame callbacks are held until it can be seen again, and
+  what it commits meanwhile does not make the shell draw a frame. Stardust's apps then stop drawing (the demo's
   solid stops spinning) and free the buffers they are not using, so the
   app in front has the GPU memory; raised, they draw again.
 - **GPU memory:** every buffer the GPU touches comes from the kernel's CMA
@@ -315,13 +322,14 @@ yet.
   layout is announced with the `BROADCOM_VC4_T_TILED` modifier, as Mesa's
   vc4 driver also does.
 - **Direct scanout:** the display hardware can scan out T-tiled buffers
-  and stack several planes. When the shown window's buffer is exactly the
-  work area's size (as a maximized window's is), the shell puts it on the
+  and stack several planes. When the top window is maximized and its
+  buffer is exactly the work area's size, the shell puts it on the
   display's primary plane as it is, and the dock on an overlay plane, with
   one atomic commit. Nothing is composited, which saves the GPU a
   full-screen copy and a third of the memory traffic per frame. Otherwise
-  (other sizes, shm buffers, or a driver without atomic mode setting) the
-  shell composites the frame with the GPU as before.
+  (restored windows, other sizes, shm buffers, or a driver without atomic
+  mode setting) the shell composites the frame with the GPU, drawing the
+  windows that can be seen from the bottom up.
 - **Pacing:** the shell never waits for vertical blank: it queues each
   frame and carries on serving clients and input until the page flip
   event, then draws the next frame if anything changed. A frame callback
@@ -535,7 +543,9 @@ stardust.ip=192.168.1.50/24,192.168.1.1
 
 The screen shows the shell's dock along the bottom; click the demo's
 icon in it to start it, and its window fills the space above, with its
-title bar (and close button) across the top. The solid spins at the
+title bar (with maximize and close buttons) across the top. The maximize
+button restores the window to half the size, and then the title bar drags
+it about. The solid spins at the
 display's refresh rate. The window's top left corner shows, under the
 title:
 

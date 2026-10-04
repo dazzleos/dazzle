@@ -29,9 +29,13 @@ pub const Demo = struct {
     status: [lines][]const u8,
     /// Sizes are designed for 1080 pixels high and scale with the window.
     scale: f32,
-    /// The title bar's close button; and the title bar's scale (the
-    /// screen's, so every app's title bar is the same).
+    /// The title bar's buttons (close, and maximize, which shows whether
+    /// the window is), pressing the bar (to move the window), and its scale
+    /// (the screen's, so every app's title bar is the same).
     on_close: ?ui.Callback = null,
+    on_maximize: ?ui.Callback = null,
+    on_drag: ?ui.Callback = null,
+    maximized: bool = true,
     bar_scale: f32 = 1,
 
     pub const State = struct {
@@ -123,7 +127,14 @@ pub const Demo = struct {
             }) }),
         } });
         return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &.{
-            cx.make(ui.TitleBar{ .title = "Demo", .on_close = self.on_close, .scale = self.bar_scale }),
+            cx.make(ui.TitleBar{
+                .title = "Demo",
+                .on_close = self.on_close,
+                .on_maximize = self.on_maximize,
+                .on_drag = self.on_drag,
+                .maximized = self.maximized,
+                .scale = self.bar_scale,
+            }),
             cx.make(ui.Expanded{ .child = content }),
         } });
     }

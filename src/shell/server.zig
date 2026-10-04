@@ -7,12 +7,15 @@
 //! supported) and wl_seat (a pointer and a keyboard; key codes are Linux
 //! evdev codes, without an XKB keymap).
 //!
-//! Windows are maximized into the work area above the shell's dock, and the
-//! most recently mapped (or raised) one is shown. The others are covered:
-//! they get xdg_toplevel's suspended state, their frame callbacks wait
-//! until they are in front again, and what they commit meanwhile does not
-//! make the shell draw a frame. The server does not draw: it keeps the
-//! state the renderer needs (`topWindow`), and gets textures from the
+//! Windows go in the work area above the shell's dock: maximized (filling
+//! it, as they start), or restored to half its width and height, where the
+//! client can move them with xdg_toplevel.move (dragging its title bar).
+//! They are stacked most recently mapped (or raised, or clicked) on top,
+//! and the top one has the keyboard. Windows hidden behind others are
+//! covered: they get xdg_toplevel's suspended state, their frame callbacks
+//! wait until they can be seen again, and what they commit meanwhile does
+//! not make the shell draw a frame. The server does not draw: it keeps the
+//! state the renderer needs (`visibleWindows`), and gets textures from the
 //! renderer through `Backend`, so it can run without a GPU in tests.
 //!
 //! Frame pacing: frame callbacks committed with a surface fire after the
@@ -21,8 +24,8 @@
 //! as a newer one is committed.
 //!
 //! Input: the shell reports pointer and key events (`pointerMotion`,
-//! `keyboardKey`, ...); the keyboard goes to the shown window, the pointer
-//! to it while the pointer is over it.
+//! `keyboardKey`, ...); the keyboard goes to the top window, the pointer to
+//! the window under it, except while it moves a window.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -152,9 +155,22 @@ pub const Toplevel = struct {
     title_buf: [64]u8 = undefined,
     title_len: usize = 0,
     mapped: bool = false,
-    /// Covered by another window, and told so (see `Server.updateCovered`).
+    /// Covered by other windows, and told so (see `Server.updateCovered`).
     suspended: bool = false,
+    /// Told it has the keyboard (it is the top window).
+    activated: bool = true,
     capabilities_sent: bool = false,
+    /// Filling the work area; otherwise restored, at `x`, `y` on the screen.
+    maximized: bool = true,
+    x: i32 = 0,
+    y: i32 = 0,
+    /// Restored before, so `x`, `y` are where it was.
+    placed: bool = false,
+
+    /// Mapped, with something to show.
+    fn shown(t: *const Toplevel) bool {
+        return t.mapped and t.xdg.surface != null and t.xdg.surface.?.texture() != null;
+    }
 
     pub fn title(t: *const Toplevel) []const u8 {
         return t.title_buf[0..t.title_len];
@@ -243,6 +259,18 @@ pub const Server = struct {
     /// The surfaces with pointer and keyboard focus.
     pointer_focus: ?*Surface = null,
     keyboard_focus: ?*Surface = null,
+    /// The serial of the last button press, and how many buttons are down.
+    press_serial: u32 = 0,
+    buttons_down: u32 = 0,
+    /// The window the pointer is moving, and the pointer's offset from its
+    /// corner. The pointer focuses on no surface meanwhile.
+    grab: ?Grab = null,
+
+    const Grab = struct { t: *Toplevel, dx: f64, dy: f64 };
+
+    /// How much of a window a move leaves in the work area, so it can be
+    /// moved back.
+    const grip = 48;
 
     pub fn init(gpa: std.mem.Allocator, backend: Backend, work_area: Rect) Server {
         return .{ .gpa = gpa, .backend = backend, .work_area = work_area };
@@ -404,6 +432,9 @@ pub const Server = struct {
     }
 
     fn unmap(s: *Server, t: *Toplevel) void {
+        if (s.grab) |g| if (g.t == t) {
+            s.grab = null;
+        };
         for (s.toplevels.items, 0..) |x, i| if (x == t) {
             _ = s.toplevels.orderedRemove(i);
             break;
@@ -442,8 +473,9 @@ pub const Server = struct {
     }
 
     /// The dma-buf buffer a window shows, if it can go on the display as it
-    /// is: the size of the work area (where windows are shown).
+    /// is: maximized, and the size of the work area.
     pub fn scanoutBuffer(s: *const Server, t: *const Toplevel) ?*Buffer {
+        if (!t.maximized) return null;
         const surf = t.xdg.surface orelse return null;
         const b = surf.buffer orelse return null;
         if (b.dmabuf == null or b.width != s.work_area.width or b.height != s.work_area.height) return null;
@@ -466,25 +498,120 @@ pub const Server = struct {
             i -= 1;
             const t = s.toplevels.items[i];
             if (!t.mapped or t.xdg.surface == null or t.xdg.surface.?.client.pid != pid) continue;
-            if (i + 1 != s.toplevels.items.len) {
-                _ = s.toplevels.orderedRemove(i);
-                s.toplevels.appendAssumeCapacity(t);
-                s.damaged = true;
-            }
+            s.raiseToplevel(t);
             return true;
         }
         return false;
     }
 
-    /// The window to show: the top mapped toplevel.
+    fn raiseToplevel(s: *Server, t: *Toplevel) void {
+        const i = std.mem.indexOfScalar(*Toplevel, s.toplevels.items, t) orelse return;
+        if (i + 1 == s.toplevels.items.len) return;
+        _ = s.toplevels.orderedRemove(i);
+        s.toplevels.appendAssumeCapacity(t);
+        s.damaged = true;
+    }
+
+    /// The top window, which has the keyboard.
     pub fn topWindow(s: *const Server) ?*Toplevel {
         var i = s.toplevels.items.len;
         while (i > 0) {
             i -= 1;
             const t = s.toplevels.items[i];
-            if (t.mapped and t.xdg.surface != null and t.xdg.surface.?.texture() != null) return t;
+            if (t.shown()) return t;
         }
         return null;
+    }
+
+    /// The windows to draw, bottom first: those not covered (the top ones,
+    /// if there are more than fit in `buf`).
+    pub fn visibleWindows(s: *const Server, buf: []*Toplevel) []*Toplevel {
+        var n: usize = 0;
+        var i = s.toplevels.items.len;
+        while (i > 0 and n < buf.len) {
+            i -= 1;
+            const t = s.toplevels.items[i];
+            if (!t.shown() or t.suspended) continue;
+            n += 1;
+            buf[buf.len - n] = t;
+        }
+        std.mem.copyForwards(*Toplevel, buf[0..n], buf[buf.len - n ..]);
+        return buf[0..n];
+    }
+
+    /// Where a window is on the screen, at the size of what it shows.
+    pub fn windowRect(s: *const Server, t: *const Toplevel) Rect {
+        const tex = t.xdg.surface.?.texture().?;
+        const corner: [2]i32 = if (t.maximized) .{ s.work_area.x, s.work_area.y } else .{ t.x, t.y };
+        return .{ .x = corner[0], .y = corner[1], .width = tex.width, .height = tex.height };
+    }
+
+    /// The part of a window that can be seen: what is in the work area.
+    fn visibleRect(s: *const Server, t: *const Toplevel) Rect {
+        const r = s.windowRect(t);
+        const wa = s.work_area;
+        const x0 = @max(r.x, wa.x);
+        const y0 = @max(r.y, wa.y);
+        const x1 = @min(r.x + @as(i32, @intCast(r.width)), wa.x + @as(i32, @intCast(wa.width)));
+        const y1 = @min(r.y + @as(i32, @intCast(r.height)), wa.y + @as(i32, @intCast(wa.height)));
+        return .{ .x = x0, .y = y0, .width = @intCast(@max(x1 - x0, 0)), .height = @intCast(@max(y1 - y0, 0)) };
+    }
+
+    /// The size a window is told to be: the work area's, or half of it.
+    fn configuredSize(s: *const Server, t: *const Toplevel) [2]u32 {
+        const wa = s.work_area;
+        if (t.maximized) return .{ wa.width, wa.height };
+        return .{ @max(wa.width / 2, 1), @max(wa.height / 2, 1) };
+    }
+
+    fn setMaximized(s: *Server, c: *Client, t: *Toplevel, on: bool) void {
+        if (t.maximized == on) return;
+        t.maximized = on;
+        if (!on and !t.placed) {
+            // Restored the first time: in the middle.
+            const size = s.configuredSize(t);
+            t.x = s.work_area.x + @as(i32, @intCast((s.work_area.width - size[0]) / 2));
+            t.y = s.work_area.y + @as(i32, @intCast((s.work_area.height - size[1]) / 2));
+            t.placed = true;
+        }
+        if (s.grab) |g| if (g.t == t) s.endGrab();
+        if (t.xdg.configured) s.configure(c, t);
+        s.damaged = true;
+    }
+
+    /// Moves a restored window, keeping `grip` of it in the work area (and
+    /// its top, with its title bar, below the work area's).
+    fn moveWindow(s: *Server, t: *Toplevel, x: f64, y: f64) void {
+        const wa = s.work_area;
+        const w: i32 = @intCast(s.windowRect(t).width);
+        const left = wa.x + grip - w;
+        const right = wa.x + @as(i32, @intCast(wa.width)) - grip;
+        const bottom = wa.y + @as(i32, @intCast(wa.height)) - grip;
+        const nx = std.math.clamp(@as(i32, @intFromFloat(@round(x))), @min(left, right), right);
+        const ny = std.math.clamp(@as(i32, @intFromFloat(@round(y))), wa.y, @max(bottom, wa.y));
+        if (nx == t.x and ny == t.y) return;
+        t.x = nx;
+        t.y = ny;
+        s.damaged = true;
+    }
+
+    /// A client asked to move its window with the pointer, which must be
+    /// holding a button pressed on it (`serial` being the press's).
+    fn startMove(s: *Server, t: *Toplevel, serial: u32) void {
+        if (t.maximized or !t.shown() or s.grab != null) return;
+        if (s.buttons_down == 0 or serial != s.press_serial) return;
+        const surf = s.pointer_focus orelse return;
+        if (t.xdg.surface != surf) return;
+        s.grab = .{ .t = t, .dx = s.pointer_x - @as(f64, @floatFromInt(t.x)), .dy = s.pointer_y - @as(f64, @floatFromInt(t.y)) };
+        // The pointer is the shell's until the button is released.
+        broadcast(surf.client, .pointer, p.wl_pointer.event.leave, 1, .{ s.nextSerial(), surf.id });
+        broadcast(surf.client, .pointer, p.wl_pointer.event.frame, 5, .{});
+        s.pointer_focus = null;
+    }
+
+    fn endGrab(s: *Server) void {
+        s.grab = null;
+        if (s.updatePointerFocus()) s.pointerFrame();
     }
 
     /// Call when a frame has been drawn from the current state: the frame
@@ -697,7 +824,14 @@ pub const Server = struct {
                     @memcpy(t.title_buf[0..t.title_len], title[0..t.title_len]);
                     s.damaged = true;
                 },
-                // Everything is maximized; the other requests do not apply.
+                p.xdg_toplevel.request.set_maximized => s.setMaximized(c, t, true),
+                p.xdg_toplevel.request.unset_maximized => s.setMaximized(c, t, false),
+                p.xdg_toplevel.request.move => {
+                    _ = try r.uint();
+                    s.startMove(t, try r.uint());
+                },
+                // Windows cannot be resized freely, minimized or made
+                // fullscreen, and have no menu.
                 else => {},
             },
             .dmabuf => switch (m.opcode) {
@@ -803,6 +937,7 @@ pub const Server = struct {
     pub fn pointerMotion(s: *Server, time_ms: u32, x: f64, y: f64) void {
         s.pointer_x = x;
         s.pointer_y = y;
+        if (s.grab) |g| return s.moveWindow(g.t, x - g.dx, y - g.dy);
         // Entering a surface carries the position.
         if (s.updatePointerFocus()) return;
         const surf = s.pointer_focus orelse return;
@@ -812,9 +947,27 @@ pub const Server = struct {
 
     /// `button` is a Linux button code (BTN_LEFT, ...).
     pub fn pointerButton(s: *Server, time_ms: u32, button: u32, pressed: bool) void {
+        if (pressed) {
+            s.buttons_down += 1;
+        } else if (s.buttons_down > 0) {
+            s.buttons_down -= 1;
+        }
+        if (s.grab != null) {
+            // The move ends when the buttons are released, which are not
+            // passed on.
+            if (s.buttons_down == 0) s.endGrab();
+            return;
+        }
+        // Clicking a window behind another brings it to the top.
+        if (pressed) if (s.pointer_focus) |surf| if (surf.xdg) |x| if (x.toplevel) |t| if (t != s.topWindow()) {
+            s.raiseToplevel(t);
+            s.updateFocus();
+        };
         const surf = s.pointer_focus orelse return;
         const state: u32 = if (pressed) p.wl_pointer.button_state.pressed else p.wl_pointer.button_state.released;
-        broadcast(surf.client, .pointer, p.wl_pointer.event.button, 1, .{ s.nextSerial(), time_ms, button, state });
+        const serial = s.nextSerial();
+        if (pressed) s.press_serial = serial;
+        broadcast(surf.client, .pointer, p.wl_pointer.event.button, 1, .{ serial, time_ms, button, state });
     }
 
     /// Scrolls by `value` (in surface pixels) along `axis`.
@@ -836,18 +989,23 @@ pub const Server = struct {
         broadcast(surf.client, .keyboard, p.wl_keyboard.event.key, 1, .{ s.nextSerial(), time_ms, key, state });
     }
 
-    /// Tells windows whether they are covered, after the windows change:
-    /// all but the front one are, and get the suspended state (and no frame
-    /// callbacks) until they are in front again.
+    /// Tells windows whether they are covered and activated, after the
+    /// windows change. Covered windows (hidden behind one window above) get
+    /// the suspended state, and no frame callbacks until they can be seen
+    /// again; the top window is activated.
     pub fn updateCovered(s: *Server) void {
         const top = s.topWindow();
-        for (s.toplevels.items) |t| {
-            const covered = t != top;
-            if (!t.mapped or covered == t.suspended) continue;
+        for (s.toplevels.items, 0..) |t, i| {
+            if (!t.shown()) continue;
+            const covered = s.isCovered(t, s.toplevels.items[i + 1 ..]);
+            const activated = t == top;
+            if (covered == t.suspended and activated == t.activated) continue;
+            const uncovered = t.suspended and !covered;
             t.suspended = covered;
+            t.activated = activated;
             const surf = t.xdg.surface orelse continue;
             s.configure(surf.client, t);
-            if (!covered) {
+            if (uncovered) {
                 for (surf.held_callbacks.items) |id| s.frame_callbacks.append(s.gpa, .{ .client = surf.client, .id = id }) catch {};
                 surf.held_callbacks.clearRetainingCapacity();
                 s.damaged = true;
@@ -855,9 +1013,22 @@ pub const Server = struct {
         }
     }
 
-    /// Moves the focus after the windows change: the keyboard to the shown
-    /// window, and the pointer to it if the pointer is over it. Covered
-    /// windows are told (see `updateCovered`).
+    /// Whether one of the windows `above` hides all that can be seen of `t`.
+    fn isCovered(s: *const Server, t: *const Toplevel, above: []const *Toplevel) bool {
+        const r = s.visibleRect(t);
+        for (above) |u| {
+            if (!u.shown()) continue;
+            const a = s.visibleRect(u);
+            if (a.x <= r.x and a.y <= r.y and
+                a.x + @as(i32, @intCast(a.width)) >= r.x + @as(i32, @intCast(r.width)) and
+                a.y + @as(i32, @intCast(a.height)) >= r.y + @as(i32, @intCast(r.height))) return true;
+        }
+        return false;
+    }
+
+    /// Moves the focus after the windows change: the keyboard to the top
+    /// window, and the pointer to the window under it. Windows are told
+    /// whether they are covered (see `updateCovered`).
     pub fn updateFocus(s: *Server) void {
         s.updateCovered();
         if (s.updatePointerFocus()) s.pointerFrame();
@@ -871,29 +1042,34 @@ pub const Server = struct {
         }
     }
 
-    /// The surface under the pointer, if any.
+    /// The surface under the pointer, if any: the top window there.
     fn surfaceUnderPointer(s: *Server) ?*Surface {
-        const t = s.topWindow() orelse return null;
-        const surf = t.xdg.surface.?;
-        const tex = surf.texture().?;
-        const wa = s.work_area;
-        const right = @as(f64, @floatFromInt(wa.x)) + @as(f64, @floatFromInt(@min(tex.width, wa.width)));
-        const bottom = @as(f64, @floatFromInt(wa.y)) + @as(f64, @floatFromInt(@min(tex.height, wa.height)));
-        if (s.pointer_x < @as(f64, @floatFromInt(wa.x)) or s.pointer_x >= right or
-            s.pointer_y < @as(f64, @floatFromInt(wa.y)) or s.pointer_y >= bottom) return null;
-        return surf;
+        var i = s.toplevels.items.len;
+        while (i > 0) {
+            i -= 1;
+            const t = s.toplevels.items[i];
+            if (!t.shown()) continue;
+            const r = s.visibleRect(t);
+            const x0: f64 = @floatFromInt(r.x);
+            const y0: f64 = @floatFromInt(r.y);
+            if (s.pointer_x >= x0 and s.pointer_x < x0 + @as(f64, @floatFromInt(r.width)) and
+                s.pointer_y >= y0 and s.pointer_y < y0 + @as(f64, @floatFromInt(r.height))) return t.xdg.surface;
+        }
+        return null;
     }
 
-    /// The pointer's position relative to the window (which is at the work
-    /// area's corner).
+    /// The pointer's position relative to the focused surface's window.
     fn surfaceLocal(s: *const Server) [2]f64 {
-        return .{ s.pointer_x - @as(f64, @floatFromInt(s.work_area.x)), s.pointer_y - @as(f64, @floatFromInt(s.work_area.y)) };
+        const surf = s.pointer_focus orelse return .{ 0, 0 };
+        const r = s.windowRect(surf.xdg.?.toplevel.?);
+        return .{ s.pointer_x - @as(f64, @floatFromInt(r.x)), s.pointer_y - @as(f64, @floatFromInt(r.y)) };
     }
 
     /// Sends leave and enter events if the pointer is over a different
-    /// surface. Returns whether it is.
+    /// surface. Returns whether it is. While a window is moved, the pointer
+    /// is over none.
     fn updatePointerFocus(s: *Server) bool {
-        const under = s.surfaceUnderPointer();
+        const under = if (s.grab != null) null else s.surfaceUnderPointer();
         if (under == s.pointer_focus) return false;
         if (s.pointer_focus) |old| {
             broadcast(old.client, .pointer, p.wl_pointer.event.leave, 1, .{ s.nextSerial(), old.id });
@@ -1022,31 +1198,36 @@ pub const Server = struct {
         if (!covered) s.damaged = true;
     }
 
-    /// Sends a toplevel its size and state: maximized, and activated if it
-    /// is in front, otherwise suspended (to clients that know the state).
+    /// Sends a toplevel its size and state: maximized or not, activated if
+    /// it is the top window, and suspended if it is covered (to clients
+    /// that know the state).
     fn configure(s: *Server, c: *Client, t: *Toplevel) void {
         if (t.xdg.version >= 5 and !t.capabilities_sent) {
-            // Nothing beyond what every window has: no menus, maximizing
-            // (they always are), fullscreen or minimizing.
+            // Of the optional features, only maximizing: no menus,
+            // fullscreen or minimizing.
             if (c.send(t.id, p.xdg_toplevel.event.wm_capabilities)) |m0| {
                 var e = m0;
-                e.array(&.{}).end();
+                var caps: [4]u8 = undefined;
+                std.mem.writeInt(u32, &caps, p.xdg_toplevel.wm_capabilities.maximize, .little);
+                e.array(&caps).end();
             }
             t.capabilities_sent = true;
         }
         if (c.send(t.id, p.xdg_toplevel.event.configure)) |m0| {
             var e = m0;
-            var states: [8]u8 = undefined;
-            std.mem.writeInt(u32, states[0..4], p.xdg_toplevel.state.maximized, .little);
-            var n: usize = 4;
-            if (!t.suspended) {
-                std.mem.writeInt(u32, states[4..8], p.xdg_toplevel.state.activated, .little);
-                n = 8;
-            } else if (t.xdg.version >= 6) {
-                std.mem.writeInt(u32, states[4..8], p.xdg_toplevel.state.suspended, .little);
-                n = 8;
-            }
-            e.int(@intCast(s.work_area.width)).int(@intCast(s.work_area.height)).array(states[0..n]).end();
+            var states: [12]u8 = undefined;
+            var n: usize = 0;
+            const set = [_]struct { bool, u32 }{
+                .{ t.maximized, p.xdg_toplevel.state.maximized },
+                .{ t.activated, p.xdg_toplevel.state.activated },
+                .{ t.suspended and t.xdg.version >= 6, p.xdg_toplevel.state.suspended },
+            };
+            for (set) |st| if (st[0]) {
+                std.mem.writeInt(u32, states[n..][0..4], st[1], .little);
+                n += 4;
+            };
+            const size = s.configuredSize(t);
+            e.int(@intCast(size[0])).int(@intCast(size[1])).array(states[0..n]).end();
         }
         if (c.send(t.xdg.id, p.xdg_surface.event.configure)) |m0| {
             var e = m0;

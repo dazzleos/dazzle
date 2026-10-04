@@ -46,9 +46,13 @@ pub const Settings = struct {
     wifi: ?*const info.wifi.Report = null,
     /// Sizes are designed for a window 900 pixels high and scale with it.
     scale: f32,
-    /// The title bar's close button; and the title bar's scale (the
-    /// screen's, so every app's title bar is the same).
+    /// The title bar's buttons (close, and maximize, which shows whether
+    /// the window is), pressing the bar (to move the window), and its scale
+    /// (the screen's, so every app's title bar is the same).
     on_close: ?ui.Callback = null,
+    on_maximize: ?ui.Callback = null,
+    on_drag: ?ui.Callback = null,
+    maximized: bool = true,
     bar_scale: f32 = 1,
 
     pub const State = struct {
@@ -89,7 +93,14 @@ pub const Settings = struct {
             },
         }) });
         return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &.{
-            cx.make(ui.TitleBar{ .title = "Settings", .on_close = self.on_close, .scale = self.bar_scale }),
+            cx.make(ui.TitleBar{
+                .title = "Settings",
+                .on_close = self.on_close,
+                .on_maximize = self.on_maximize,
+                .on_drag = self.on_drag,
+                .maximized = self.maximized,
+                .scale = self.bar_scale,
+            }),
             cx.make(ui.Expanded{ .child = content }),
         } });
     }
@@ -590,9 +601,12 @@ test "everything is shown, and fits the window at the shell's sizes" {
     defer u.destroy();
     const d = sample();
     const wifi = sampleWifi();
-    for ([_][2]u32{ .{ 1920, 960 }, .{ 1280, 600 }, .{ 1024, 668 } }) |size| {
+    // Maximized, and (on a 1080p screen) restored to half the size, with
+    // the title bar still at the whole screen's scale. Smaller screens'
+    // halves are too small for it all.
+    for ([_][3]u32{ .{ 1920, 960, 1920 }, .{ 1280, 600, 1280 }, .{ 1024, 668, 1024 }, .{ 960, 480, 1920 } }) |size| {
         const scale = scaleFor(size[0], size[1]);
-        u.frame(size[0], size[1], 0, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .wifi = &wifi, .scale = scale });
+        u.frame(size[0], size[1], 0, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .wifi = &wifi, .scale = scale, .bar_scale = @as(f32, @floatFromInt(size[2])) / 1920 });
         try testing.expect(!overflows(u.root.?));
     }
     var all: std.ArrayList(u8) = .empty;
@@ -735,7 +749,7 @@ test "choosing a network, typing its password and connecting" {
     var joining = wifi;
     joining.connection = .{ .state = .authenticating };
     joining.connection.setSsid("Cafe");
-    for ([_]*const info.wifi.Report{ &wifi, &joining }) |report| for ([_][2]u32{ .{ 1920, 960 }, .{ 1280, 600 }, .{ 1024, 668 } }) |size| {
+    for ([_]*const info.wifi.Report{ &wifi, &joining }) |report| for ([_][2]u32{ .{ 1920, 960 }, .{ 1280, 600 }, .{ 1024, 668 }, .{ 960, 480 } }) |size| {
         u.frame(size[0], size[1], 2, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .wifi = report, .scale = scaleFor(size[0], size[1]) });
         try testing.expect(!overflows(u.root.?));
     };
