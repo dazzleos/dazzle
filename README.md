@@ -152,6 +152,8 @@ with the problem marked.
 | `text.zig` | `Text`: lines at `\n`, wrapped at spaces to fit |
 | `material.zig` | Material 3's light and dark baseline themes, and `OutlinedButton`, made of a `Pressable`, `Decorated`, `ConstrainedBox`, `Padding` and `Center` |
 | `controls.zig` | Material 3's selection controls: `Checkbox`, `Radio` (generic over the value it selects) and `Switch` (its handle slides), each with an optional label that presses it too |
+| `text_field.zig` | `TextField`: a line of text to type (Material's outlined field), optionally shown as dots for passwords; clicking it gives it the keyboard |
+| `keymap.zig` | Linux key codes to characters, for a US keyboard (the shell sends key codes without a keymap) |
 | `painter.zig` | Painting: canvas layers and GPU draws in order, clipping, and the overflow stripes |
 | `damage.zig` | What changed between frames: each node's drawing fingerprinted and compared, kept as a few rectangles, with a history for buffers of any age |
 | `runtime.zig` | `Ui`: builds, lays out and paints each frame, records it into a `vc4` frame (or draws it on the CPU, for tests), and sends pointer events to the widgets under the pointer |
@@ -366,8 +368,10 @@ passwords or logins.
   configuring interfaces and routes (`CAP_NET_ADMIN`), tying its DHCP
   socket to the interface (`CAP_NET_RAW`) and binding the DHCP client port
   (`CAP_NET_BIND_SERVICE`). Init restarts it if it ever stops.
-- The Wi-Fi manager runs as the user, keeping only `CAP_NET_ADMIN`
-  (starting a scan and bringing the adapter up need it). It answers only
+- The Wi-Fi manager runs as the user, keeping only the network manager's
+  three capabilities: `CAP_NET_ADMIN` (nl80211 needs it to scan, connect
+  and install keys), `CAP_NET_RAW` (the supplicant's packet socket, and
+  DHCP) and `CAP_NET_BIND_SERVICE` (DHCP). It answers only
   the settings app: every app runs as the same user, so the socket's
   permissions cannot tell them apart, and it checks instead which program
   the connecting process runs (`/proc/<pid>/exe`, from the socket's peer
@@ -474,8 +478,8 @@ onto any FAT32-formatted card. The same card works in either board.
 
 Connect HDMI, and a USB Ethernet adapter cabled to your network: on the
 Zero's USB (OTG) port via a micro-USB OTG adapter, or in the Pi 3 A+'s USB
-port (with a hub for the keyboard and mouse). The boards' Wi-Fi only
-scans for networks so far (in the settings app); it cannot join one yet.
+port (with a hub for the keyboard and mouse), or join a Wi-Fi network from
+the settings app (open and WPA2 networks).
 The kernel has drivers for
 common adapter chipsets: Realtek RTL8152/8153, ASIX AX88772/AX88179, SMSC
 LAN95xx, Microchip LAN78xx and generic CDC Ethernet.
@@ -614,15 +618,38 @@ change read again every second (`src/settings/info.zig`):
 - **Network:** the hostname, each adapter's link (and speed), its address
   (and whether it came from DHCP or `stardust.ip=`), traffic and MAC
   address, and the default gateway.
-- **Wi-Fi:** the adapter and the networks around, strongest first: their
-  signal, name, security (open, WEP, WPA, WPA2, WPA3 or enterprise) and
-  band, each network once (its strongest access point).
+- **Wi-Fi:** the adapter, the connection, and the networks around,
+  strongest first: their signal, name, security (open, WEP, WPA, WPA2,
+  WPA3 or enterprise) and band, each network once (its strongest access
+  point). Click a network to join it: a WPA2 network asks for its password
+  (type it and press Enter, or Connect). The connection line follows it
+  (connecting, checking the password, getting an address, connected with
+  the address DHCP gave) and says why if it fails (a wrong password, out of
+  range, refused, no answer, or a security not supported yet); Disconnect
+  ends it.
 
 Everything but Wi-Fi comes from files any user can read (`/proc`, `/sys`),
-so it runs unprivileged like the other apps. Scanning needs
-`CAP_NET_ADMIN`, so the app asks init's Wi-Fi manager
-(`src/init/wifi.zig`), which serves only this app; it scans when asked, at
-most every 10 seconds, so nothing scans while the app is closed or covered.
+so it runs unprivileged like the other apps. Wi-Fi needs `CAP_NET_ADMIN`,
+so the app asks init's Wi-Fi manager (`src/init/wifi.zig`), which serves
+only this app; it scans when asked, at most every 10 seconds (and not
+while joining), so nothing scans while the app is closed or covered.
+
+Joining a network: the manager asks the driver to connect to the
+network's strongest access point (the chips' firmware associates by
+itself). For WPA2, the supplicant (`src/init/supplicant.zig`) then does
+the 4-way handshake over EAPOL frames on a packet socket: the passphrase
+becomes the pairwise master key (PBKDF2-SHA1 over the SSID), message 1's
+nonce and its own make the pairwise keys (the 802.11 PRF), message 2
+proves it knows the key (an HMAC-SHA1 MIC), message 3's MIC and RSN
+element are checked (a changed element would be a downgrade) and its
+group key unwrapped (AES key wrap), and after message 4 the keys go to the
+driver over nl80211. Group key updates are handled the same way. A child
+process then runs the network manager's DHCP client on the interface until
+the connection ends; a connection that is lost is tried again. Only CCMP
+pairwise keys with PSK key management are supported: WPA2, and mixed
+WPA2/WPA3 networks through WPA2. WPA3-only (SAE), enterprise, WPA and WEP
+networks are not. The password is kept only in the manager's memory, and
+nothing is remembered across a reboot (the system runs from RAM).
 
 The Wi-Fi chips are the Zero W's CYW43430 and the 3 A+'s CYW43455, on the
 SDIO bus. The kernel's brcmfmac driver runs them; they need firmware, which
@@ -768,9 +795,13 @@ GPU or display).
 - A Vulkan-style API on `vc4`.
 - Text: ligatures and other GSUB features, and hinting or stem darkening
   for small sizes.
-- The toolkit: more widgets (scrolling, text fields, images, the other
-  Material buttons), keyboard focus, animations, and logical pixels (a
-  scale for the display's density).
+- The toolkit: more widgets (scrolling, images, the other Material
+  buttons), text selection and non-ASCII typing, keyboard layouts other
+  than US, animations, and logical pixels (a scale for the display's
+  density).
+- Wi-Fi: WPA3 (SAE), remembering networks across reboots (once there is
+  storage), and turning a passphrase into a key without holding up the
+  manager.
 - The shell: `wl_output`, more than one visible window, blending for
   translucent windows, pointer acceleration, keymaps (XKB) and key repeat,
   and touch screens.

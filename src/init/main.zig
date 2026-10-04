@@ -198,4 +198,5 @@ test {
     _ = @import("devices.zig");
     _ = @import("wifi.zig");
     _ = @import("nl80211.zig");
+    _ = @import("supplicant.zig");
 }

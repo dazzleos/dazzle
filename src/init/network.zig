@@ -290,6 +290,28 @@ fn manage(ctl: linux.fd_t, ifc: *const Interface, cfg: Config) Error!void {
     }
 }
 
+/// Gets and keeps an address by DHCP for the interface called `name`, for
+/// the Wi-Fi manager once it has joined a network (it runs this in a child
+/// process, and stops it when the connection ends). Never returns.
+pub fn runDhcp(name: []const u8) noreturn {
+    var ifc: Interface = .{ .name_len = @min(name.len, linux.IFNAMESIZE - 1) };
+    @memcpy(ifc.name_buf[0..ifc.name_len], name[0..ifc.name_len]);
+    var attr_buf: [32]u8 = undefined;
+    ifc.mac = parseMac(ifc.attr("address", &attr_buf) orelse linux.exit(1)) orelse linux.exit(1);
+    const ctl: linux.fd_t = @intCast(sys.check(linux.socket(linux.AF.INET, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0)) catch linux.exit(1));
+    manage(ctl, &ifc, .{}) catch |err| print("stardust: network: {s}: {s}\n", .{ ifc.name(), @errorName(err) });
+    linux.exit(0);
+}
+
+/// Removes the address of the interface called `name`.
+pub fn removeAddress(name: []const u8) void {
+    var ifc: Interface = .{ .name_len = @min(name.len, linux.IFNAMESIZE - 1) };
+    @memcpy(ifc.name_buf[0..ifc.name_len], name[0..ifc.name_len]);
+    const ctl: linux.fd_t = @intCast(sys.check(linux.socket(linux.AF.INET, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0)) catch return);
+    defer sys.close(ctl);
+    deconfigure(ctl, &ifc);
+}
+
 fn checkLink(ifc: *const Interface) Error!void {
     if (!ifc.exists()) return error.InterfaceGone;
     if (!ifc.carrier()) return error.LinkDown;

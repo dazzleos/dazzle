@@ -78,6 +78,19 @@ pub const Event = union(enum) {
     release: struct { pos: Point, button: u32, inside: bool },
     /// The pointer moved, over it or while it has the pointer.
     motion: Point,
+    /// It got the keyboard (`Ui.focus`), or lost it.
+    focus,
+    blur,
+    /// A key went down or up while it has the keyboard.
+    key: Key,
+
+    pub const Key = struct {
+        /// A Linux key code (see keymap.zig).
+        code: u32,
+        pressed: bool,
+        /// The character it types (US layout), if any.
+        char: ?u8,
+    };
 };
 
 /// Something to call later, typically a method of a widget's state:

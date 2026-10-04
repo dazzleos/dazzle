@@ -320,7 +320,7 @@ pub const Pressable = struct {
                 if (r.inside) if (self.on_press) |f| f.call();
                 return true;
             },
-            .motion => {},
+            else => {},
         }
         return false;
     }

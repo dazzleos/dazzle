@@ -1,6 +1,8 @@
 //! The settings app's window, as widgets: cards about the system (its
 //! build, Linux and the board), the network, the resources in use (with
-//! meters) and the Wi-Fi networks around, in two columns.
+//! meters) and the Wi-Fi networks around, in two columns. Choosing a Wi-Fi
+//! network shows a password field (for WPA2) and a Connect button; what is
+//! asked of the Wi-Fi manager goes to the main loop through `Actions`.
 
 const std = @import("std");
 const ui = @import("ui");
@@ -11,8 +13,32 @@ const info = @import("info.zig");
 pub const apps_color = gfx.Color.argb(0xff4fd8c4);
 pub const user_color = gfx.Color.argb(0xffffb68a);
 
+/// What the window asks of the Wi-Fi manager; the main loop sends it, then
+/// clears it.
+pub const Actions = struct {
+    connect: ?Join = null,
+    disconnect: bool = false,
+
+    pub const Join = struct {
+        ssid_buf: [32]u8 = undefined,
+        ssid_len: u8 = 0,
+        pass_buf: [63]u8 = undefined,
+        pass_len: u8 = 0,
+
+        pub fn ssid(j: *const Join) []const u8 {
+            return j.ssid_buf[0..j.ssid_len];
+        }
+
+        pub fn passphrase(j: *const Join) []const u8 {
+            return j.pass_buf[0..j.pass_len];
+        }
+    };
+};
+
 pub const Settings = struct {
     commit: []const u8,
+    /// Where the window's requests go (none in tests that do not look).
+    actions: ?*Actions = null,
     system: *const info.System,
     usage: info.Usage,
     network: *const info.Network,
@@ -21,7 +47,25 @@ pub const Settings = struct {
     /// Sizes are designed for a window 900 pixels high and scale with it.
     scale: f32,
 
-    pub fn build(self: *const Settings, cx: *ui.Context) ui.Widget {
+    pub const State = struct {
+        /// The Wi-Fi network chosen (its SSID), and the password typed.
+        selected_buf: [32]u8 = undefined,
+        selected_len: u8 = 0,
+        has_selected: bool = false,
+        password_buf: [63]u8 = undefined,
+        password_len: u8 = 0,
+
+        pub fn selected(st: *const State) ?[]const u8 {
+            return if (st.has_selected) st.selected_buf[0..st.selected_len] else null;
+        }
+
+        fn setPassword(st: *State, text: []const u8) void {
+            st.password_len = @intCast(@min(text.len, st.password_buf.len));
+            @memcpy(st.password_buf[0..st.password_len], text[0..st.password_len]);
+        }
+    };
+
+    pub fn build(self: *const Settings, cx: *ui.Context, state: *State) ui.Widget {
         const s = self.scale;
         const t = &cx.ui.theme;
         const b: Builder = .{ .cx = cx, .s = s };
@@ -37,7 +81,7 @@ pub const Settings = struct {
                     } }) }),
                     cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 20 * s, .children = &.{
                         self.resourcesCard(b),
-                        self.wifiCard(b),
+                        self.wifiCard(b, state),
                     } }) }),
                 } }) }),
             },
@@ -79,10 +123,11 @@ pub const Settings = struct {
         });
     }
 
-    /// The most networks listed.
-    pub const max_listed = 6;
+    /// The most networks listed (fewer while the form for joining one is
+    /// open).
+    pub const max_listed = 5;
 
-    fn wifiCard(self: *const Settings, b: Builder) ui.Widget {
+    fn wifiCard(self: *const Settings, b: Builder, state: *State) ui.Widget {
         const cx = b.cx;
         const report = self.wifi orelse return b.card("Wi-Fi", &.{b.item("Status", "The Wi-Fi manager is not running")});
         if (report.denied) return b.card("Wi-Fi", &.{b.item("Status", "Not allowed to scan")});
@@ -90,18 +135,83 @@ pub const Settings = struct {
         var rows: std.ArrayList(ui.Widget) = .empty;
         const a = cx.ui.arena();
         const m = adapter.mac;
-        rows.append(a, b.item("Adapter", cx.fmt("{s} ({x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2})", .{ adapter.name(), m[0], m[1], m[2], m[3], m[4], m[5] }))) catch {};
+        rows.append(a, b.item("Adapter", cx.fmt("{s} ({x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}){s}", .{ adapter.name(), m[0], m[1], m[2], m[3], m[4], m[5], if (adapter.up) "" else ", down" }))) catch {};
+        rows.append(a, self.connectionRow(b, state, &report.connection)) catch {};
+
         const nets = report.slice();
-        const status = if (!adapter.up)
-            "Adapter down"
-        else if (nets.len == 0)
+        // The chosen network, if it is still around (and not the one joined).
+        const conn = &report.connection;
+        const chosen: ?*const info.wifi.Network = if (state.selected()) |sel| for (nets) |*n| {
+            if (std.mem.eql(u8, n.ssid(), sel)) break n;
+        } else null else null;
+        const form = chosen != null and !(conn.state.joined() and std.mem.eql(u8, conn.ssid(), chosen.?.ssid()));
+        // The form and the Disconnect button take room: fewer networks then.
+        const limit: usize = max_listed - @as(usize, if (form) 1 else 0) - @as(usize, if (connectionBusy(conn)) 1 else 0);
+        // The strongest, and the chosen one even if it is weaker.
+        var picks: [max_listed]*const info.wifi.Network = undefined;
+        const shown = @min(nets.len, limit);
+        for (picks[0..shown], nets[0..shown]) |*p, *n| p.* = n;
+        if (chosen) |c| if (std.mem.indexOfScalar(*const info.wifi.Network, picks[0..shown], c) == null) {
+            picks[shown - 1] = c;
+        };
+        for (picks[0..shown]) |n| {
+            const is_chosen = chosen != null and n == chosen.?;
+            const joined = conn.state != .idle and conn.state != .failed and std.mem.eql(u8, conn.ssid(), n.ssid());
+            rows.append(a, b.network(n, is_chosen, joined, choose(cx, state, n.ssid()))) catch {};
+            if (is_chosen and form) rows.append(a, self.joinForm(b, state, n)) catch {};
+        }
+        const footer = if (nets.len == 0)
             (if (report.scanning) "Scanning…" else "No networks found")
+        else if (nets.len > shown)
+            cx.fmt("Showing {d} of {d} networks{s}", .{ shown, nets.len, if (report.scanning) ", scanning…" else "" })
+        else if (report.scanning)
+            "Scanning…"
         else
-            cx.fmt("{d} {s}{s}", .{ nets.len, if (nets.len == 1) "network" else "networks", if (report.scanning) ", scanning…" else "" });
-        rows.append(a, b.item("Networks", status)) catch {};
-        for (nets[0..@min(nets.len, max_listed)]) |*n| rows.append(a, b.network(n)) catch {};
-        if (nets.len > max_listed) rows.append(a, b.item("", cx.fmt("and {d} more", .{nets.len - max_listed}))) catch {};
+            "";
+        if (footer.len > 0) rows.append(a, b.item("", footer)) catch {};
         return b.card("Wi-Fi", rows.items);
+    }
+
+    /// The connection's state, with Disconnect while there is one.
+    fn connectionRow(self: *const Settings, b: Builder, state: *State, c: *const info.wifi.Connection) ui.Widget {
+        const cx = b.cx;
+        const name = printable(cx, c.ssid());
+        const text = switch (c.state) {
+            .idle => "Not connected",
+            .connected => if (c.address) |ip| cx.fmt("Connected to {s} ({d}.{d}.{d}.{d})", .{ name, ip[0], ip[1], ip[2], ip[3] }) else cx.fmt("Connected to {s}", .{name}),
+            .connecting, .authenticating, .addressing => cx.fmt("{s}: {s}…", .{ name, c.state.label() }),
+            .failed => cx.fmt("Could not connect to {s}: {s}", .{ name, c.failure.label() }),
+        };
+        if (!connectionBusy(c)) return b.item("Connection", text);
+        return cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12 * b.s, .children = &.{
+            b.label("Connection"),
+            cx.make(ui.Expanded{ .child = b.value(text) }),
+            cx.make(ui.OutlinedButton{ .label = "Disconnect", .on_press = if (self.actions) |acts| .of(act(cx, acts, state, ""), Act.disconnect) else null }),
+        } });
+    }
+
+    /// Joining the chosen network: a password field for WPA2, and Connect.
+    fn joinForm(self: *const Settings, b: Builder, state: *State, n: *const info.wifi.Network) ui.Widget {
+        const cx = b.cx;
+        const t = &cx.ui.theme;
+        const on_connect: ?ui.Callback = if (self.actions) |acts| .of(act(cx, acts, state, n.ssid()), Act.connect) else null;
+        const field: ui.Widget = switch (n.security) {
+            .open => cx.make(ui.Text{ .text = "An open network: what is sent can be seen", .style = .{ .size = 16 * b.s, .color = t.on_surface_variant } }),
+            .wpa2 => cx.make(ui.TextField{
+                .placeholder = "Password",
+                .obscure = true,
+                .size = 18 * b.s,
+                .on_changed = .of(state, State.setPassword),
+                .on_submit = on_connect,
+            }).withKey(std.hash.Fnv1a_64.hash(n.ssid())),
+            else => cx.make(ui.Text{ .text = cx.fmt("{s} networks are not supported yet", .{n.security.label()}), .style = .{ .size = 16 * b.s, .color = t.on_surface_variant } }),
+        };
+        const supported = n.security == .open or n.security == .wpa2;
+        return cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12 * b.s, .children = &.{
+            cx.make(ui.SizedBox{ .width = 150 * b.s }),
+            cx.make(ui.Expanded{ .child = field }),
+            cx.make(ui.OutlinedButton{ .label = "Connect", .on_press = if (supported) on_connect else null }),
+        } });
     }
 
     fn networkCard(self: *const Settings, b: Builder) ui.Widget {
@@ -139,6 +249,68 @@ pub const Settings = struct {
         return b.card("Network", rows.items);
     }
 };
+
+/// Whether a connection is being made or kept (and can be ended).
+fn connectionBusy(c: *const info.wifi.Connection) bool {
+    return c.state != .idle and !(c.state == .failed and c.failure != .lost);
+}
+
+/// Pressing a network chooses it (or, again, unchooses it).
+const Choose = struct {
+    state: *Settings.State,
+    ssid_buf: [32]u8,
+    ssid_len: u8,
+
+    fn press(c: *Choose) void {
+        const st = c.state;
+        const ssid = c.ssid_buf[0..c.ssid_len];
+        if (st.selected()) |sel| if (std.mem.eql(u8, sel, ssid)) {
+            st.has_selected = false;
+            return;
+        };
+        st.has_selected = true;
+        st.selected_len = c.ssid_len;
+        @memcpy(st.selected_buf[0..c.ssid_len], ssid);
+        st.password_len = 0;
+    }
+};
+
+fn choose(cx: *ui.Context, state: *Settings.State, ssid: []const u8) ui.Callback {
+    const c = cx.ui.arena().create(Choose) catch return .of(state, struct {
+        fn none(_: *Settings.State) void {}
+    }.none);
+    c.* = .{ .state = state, .ssid_buf = undefined, .ssid_len = @intCast(ssid.len) };
+    @memcpy(c.ssid_buf[0..ssid.len], ssid);
+    return .of(c, Choose.press);
+}
+
+/// Connect and Disconnect: requests for the main loop.
+const Act = struct {
+    actions: *Actions,
+    state: *Settings.State,
+    ssid_buf: [32]u8,
+    ssid_len: u8,
+
+    fn connect(x: *Act) void {
+        var j: Actions.Join = .{ .ssid_len = x.ssid_len, .pass_len = x.state.password_len };
+        @memcpy(j.ssid_buf[0..x.ssid_len], x.ssid_buf[0..x.ssid_len]);
+        @memcpy(j.pass_buf[0..j.pass_len], x.state.password_buf[0..j.pass_len]);
+        x.actions.connect = j;
+        // The form closes; the connection row says how it goes.
+        x.state.has_selected = false;
+    }
+
+    fn disconnect(x: *Act) void {
+        x.actions.disconnect = true;
+    }
+};
+
+fn act(cx: *ui.Context, actions: *Actions, state: *Settings.State, ssid: []const u8) *Act {
+    const x = cx.ui.arena().create(Act) catch unreachable;
+    x.* = .{ .actions = actions, .state = state, .ssid_buf = undefined, .ssid_len = @intCast(ssid.len) };
+    @memcpy(x.ssid_buf[0..ssid.len], ssid);
+    return x;
+}
 
 /// An SSID as text: bytes that are not UTF-8 (SSIDs need not be) become
 /// "?".
@@ -228,18 +400,24 @@ const Builder = struct {
         } });
     }
 
-    /// A Wi-Fi network: its signal, name, security and band.
-    fn network(b: Builder, n: *const info.wifi.Network) ui.Widget {
+    /// A Wi-Fi network: its signal, name, security and band; pressing it
+    /// chooses it.
+    fn network(b: Builder, n: *const info.wifi.Network, chosen: bool, joined: bool, on_press: ui.Callback) ui.Widget {
         const cx = b.cx;
         const t = &cx.ui.theme;
-        return cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12 * b.s, .children = &.{
+        const row = cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12 * b.s, .children = &.{
             cx.make(ui.SizedBox{ .width = 150 * b.s, .child = cx.make(ui.Row{ .spacing = 8 * b.s, .main_axis_size = .min, .cross_axis_alignment = .center, .children = &.{
                 cx.make(SignalBars{ .bars = n.bars(), .size = @round(18 * b.s) }),
                 cx.make(ui.Text{ .text = cx.fmt("{d} dBm", .{n.dbm()}), .style = .{ .size = 16 * b.s, .color = t.on_surface_variant }, .wrap = false }),
             } }) }),
-            cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = printable(cx, n.ssid()), .style = .{ .size = 18 * b.s, .color = t.on_surface }, .wrap = false }) }),
+            cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = printable(cx, n.ssid()), .style = .{ .size = 18 * b.s, .color = if (joined) t.primary else t.on_surface }, .wrap = false }) }),
             cx.make(ui.Text{ .text = cx.fmt("{s} · {s}", .{ n.security.label(), n.band() }), .style = .{ .size = 16 * b.s, .color = t.on_surface_variant }, .wrap = false }),
         } });
+        return cx.make(ui.Pressable{ .on_press = on_press, .child = cx.make(ui.Decorated{
+            .color = if (chosen) t.secondary_container else gfx.Color.argb(0),
+            .radius = .all(8 * b.s),
+            .child = cx.make(ui.Padding{ .padding = .{ .top = 3 * b.s, .bottom = 3 * b.s }, .child = row }),
+        }) });
     }
 
     /// A label, its value and a meter showing how much is used.
@@ -434,13 +612,13 @@ test "everything is shown, and fits the window at the shell's sizes" {
         "Not connected: no cable",
         "192.168.1.1",
         "wlan0 (b8:27:eb:01:02:03)",
-        "11 networks, scanning…",
+        "Showing 5 of 11 networks, scanning…",
+        "Not connected",
         "Home",
         "WPA2 · 5 GHz",
         "-48 dBm",
         "Open · 2.4 GHz",
         "Enterprise · 2.4 GHz",
-        "and 5 more",
     }) |want| {
         if (std.mem.indexOf(u8, all.items, want) == null) {
             std.debug.print("missing \"{s}\" in:\n{s}\n", .{ want, all.items });
@@ -511,4 +689,94 @@ test "SSIDs that are not text are shown readably" {
     defer all.deinit(testing.allocator);
     texts(u.root.?, &all);
     try testing.expect(std.mem.indexOf(u8, all.items, "bad?name") != null);
+}
+
+fn findText(node: *ui.Node, text: []const u8) ?*ui.Node {
+    if (node.widget.as(ui.Text)) |t| if (std.mem.eql(u8, t.text, text)) return node;
+    for (node.children.items) |ch| if (findText(ch, text)) |n| return n;
+    return null;
+}
+
+fn findType(node: *ui.Node, comptime T: type) ?*ui.Node {
+    if (node.widget.is(T)) return node;
+    for (node.children.items) |ch| if (findType(ch, T)) |n| return n;
+    return null;
+}
+
+fn click(u: *ui.Ui, n: *ui.Node) void {
+    const at = n.position();
+    const p: ui.Point = .{ at[0] + 4, at[1] + n.size.h / 2 };
+    u.pointerMotion(p);
+    u.pointerButton(p, ui.widgets.btn_left, true);
+    u.pointerButton(p, ui.widgets.btn_left, false);
+}
+
+test "choosing a network, typing its password and connecting" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    const d = sample();
+    const wifi = sampleWifi();
+    var actions: Actions = .{};
+    const settings: Settings = .{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .wifi = &wifi, .scale = 1 };
+    u.frame(1920, 960, 0, settings);
+    click(u, findText(u.root.?, "Home").?);
+    u.frame(1920, 960, 1, settings);
+    // The form fits at every size the shell gives, even with another
+    // connection being made (and its Disconnect button).
+    var joining = wifi;
+    joining.connection = .{ .state = .authenticating };
+    joining.connection.setSsid("Cafe");
+    for ([_]*const info.wifi.Report{ &wifi, &joining }) |report| for ([_][2]u32{ .{ 1920, 960 }, .{ 1280, 600 }, .{ 1024, 668 } }) |size| {
+        u.frame(size[0], size[1], 2, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .wifi = report, .scale = scaleFor(size[0], size[1]) });
+        try testing.expect(!overflows(u.root.?));
+    };
+    u.frame(1920, 960, 3, settings);
+    click(u, findType(u.root.?, ui.TextField).?);
+    for ("hunter22") |c| {
+        const code: u32 = switch (c) {
+            'h' => 35,
+            'u' => 22,
+            'n' => 49,
+            't' => 20,
+            'e' => 18,
+            'r' => 19,
+            '2' => 3,
+            else => unreachable,
+        };
+        u.keyEvent(code, true);
+        u.keyEvent(code, false);
+    }
+    u.keyEvent(ui.keymap.enter, true);
+    const j = actions.connect.?;
+    try testing.expectEqualStrings("Home", j.ssid());
+    try testing.expectEqualStrings("hunter22", j.passphrase());
+    // The form closes once asked.
+    u.frame(1920, 960, 4, settings);
+    try testing.expect(findType(u.root.?, ui.TextField) == null);
+
+    // Connected: the connection row says so, with Disconnect.
+    var joined = wifi;
+    joined.connection = .{ .state = .connected, .address = .{ 192, 168, 1, 50 } };
+    joined.connection.setSsid("Home");
+    u.frame(1920, 960, 5, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .wifi = &joined, .scale = 1 });
+    try testing.expect(findText(u.root.?, "Connected to Home (192.168.1.50)") != null);
+    click(u, findText(u.root.?, "Disconnect").?);
+    try testing.expect(actions.disconnect);
+
+    // A network whose security is not supported cannot be joined.
+    actions = .{};
+    u.frame(1920, 960, 6, settings);
+    click(u, findText(u.root.?, "Library").?);
+    u.frame(1920, 960, 7, settings);
+    try testing.expect(findText(u.root.?, "Enterprise networks are not supported yet") != null);
+    click(u, findText(u.root.?, "Connect").?);
+    try testing.expect(actions.connect == null);
+
+    // Failures say why.
+    var failed = wifi;
+    failed.connection = .{ .state = .failed, .failure = .wrong_password };
+    failed.connection.setSsid("Home");
+    u.frame(1920, 960, 8, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .wifi = &failed, .scale = 1 });
+    try testing.expect(findText(u.root.?, "Could not connect to Home: wrong password") != null);
 }

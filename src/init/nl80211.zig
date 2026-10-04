@@ -1,6 +1,8 @@
 //! nl80211, Linux's Wi-Fi configuration interface, over generic netlink:
-//! finding the Wi-Fi adapter, starting scans, hearing when they finish and
-//! reading what they found. Just what the Wi-Fi manager needs.
+//! finding the Wi-Fi adapter, scanning, connecting (the driver does the
+//! association itself: the chip's firmware is "full MAC"), installing the
+//! supplicant's keys, and hearing about all of it. Just what the Wi-Fi
+//! manager needs.
 //!
 //! Generic netlink messages are a netlink header, a generic netlink header
 //! (the command) and attributes: type-length-value records, 4-byte aligned,
@@ -29,6 +31,7 @@ const ctrl_attr_family_name = 2;
 const ctrl_attr_mcast_groups = 7;
 const ctrl_attr_mcast_grp_name = 1;
 const ctrl_attr_mcast_grp_id = 2;
+const nla_f_nested = 0x8000;
 
 // nl80211.h
 pub const cmd = struct {
@@ -38,15 +41,46 @@ pub const cmd = struct {
     pub const trigger_scan = 33;
     pub const new_scan_results = 34;
     pub const scan_aborted = 35;
+    pub const set_key = 10;
+    pub const new_key = 11;
+    pub const set_station = 18;
+    pub const connect = 46;
+    pub const disconnect = 48;
 };
 const attr = struct {
     const ifindex = 3;
     const ifname = 4;
     const iftype = 5;
     const mac = 6;
+    const key_data = 7;
+    const key_idx = 8;
+    const key_cipher = 9;
+    const key_seq = 10;
+    const key_default = 11;
+    const wiphy_freq = 38;
+    const ie = 42;
     const bss = 47;
+    const ssid = 52;
+    const auth_type = 53;
+    const reason_code = 54;
+    const key_type = 55;
+    const sta_flags2 = 67;
+    const control_port = 68;
+    const privacy = 70;
+    const status_code = 72;
+    const cipher_suites_pairwise = 73;
+    const cipher_suite_group = 74;
+    const wpa_versions = 75;
+    const akm_suites = 76;
+    const key_default_types = 110;
 };
+const key_default_type_multicast = 2;
+const keytype_group = 0;
+const keytype_pairwise = 1;
+const wpa_version_2 = 2;
+const sta_flag_authorized = 1;
 const bss = struct {
+    const bssid = 1;
     const frequency = 2;
     const capability = 5;
     const information_elements = 6;
@@ -212,7 +246,43 @@ pub const Interface = struct {
     adapter: wifi.Adapter,
 };
 
-pub const Event = enum { none, scan_done, scan_aborted };
+/// What the events since the last look said.
+pub const Events = struct {
+    scan_done: bool = false,
+    scan_aborted: bool = false,
+    /// A connection attempt finished: 0 is success, else an 802.11
+    /// status code; and the access point.
+    connected: ?struct { status: u16, bssid: [6]u8 } = null,
+    /// The connection was lost: the 802.11 reason code.
+    disconnected: ?u16 = null,
+};
+
+/// An access point found by a scan, with what connecting to it needs.
+pub const Bss = struct {
+    network: wifi.Network,
+    bssid: [6]u8,
+    /// Its RSN element as advertised (empty for open and WPA1 networks).
+    rsn_buf: [64]u8 = undefined,
+    rsn_len: u8 = 0,
+    group_cipher: u32 = 0,
+    /// It offers CCMP for pairwise keys, and PSK key management.
+    ccmp: bool = false,
+    psk: bool = false,
+
+    pub fn rsn(b: *const Bss) []const u8 {
+        return b.rsn_buf[0..b.rsn_len];
+    }
+};
+
+/// What connecting needs to say.
+pub const ConnectParams = struct {
+    ssid: []const u8,
+    bssid: [6]u8,
+    freq_mhz: u32,
+    /// For WPA2: our RSN element and the group cipher; null for an open
+    /// network.
+    wpa2: ?struct { rsn: []const u8, group_cipher: u32 } = null,
+};
 
 pub const Nl80211 = struct {
     req: Socket,
@@ -233,7 +303,9 @@ pub const Nl80211 = struct {
         if (found.id == 0) return error.NoNl80211;
         const events = try Socket.open();
         errdefer sys.close(events.fd);
-        if (found.scan_group) |g| _ = try sys.check(linux.setsockopt(events.fd, sol_netlink, netlink_add_membership, std.mem.asBytes(&g), 4));
+        for ([_]?u32{ found.scan_group, found.mlme_group }) |group| if (group) |g| {
+            _ = try sys.check(linux.setsockopt(events.fd, sol_netlink, netlink_add_membership, std.mem.asBytes(&g), 4));
+        };
         return .{ .req = req, .events = events, .family = found.id };
     }
 
@@ -272,20 +344,119 @@ pub const Nl80211 = struct {
         }.on);
     }
 
-    /// Reads waiting scan events: whether a scan finished (or was given
-    /// up).
-    pub fn readEvents(n: *Nl80211) Event {
-        var event: Event = .none;
+    /// The strongest access point of the network with this SSID in the
+    /// last scan.
+    pub fn findBss(n: *Nl80211, ifindex: u32, ssid: []const u8) Error!?Bss {
+        var m: Message = .{};
+        m.put(attr.ifindex, std.mem.asBytes(&ifindex));
+        const Found = struct { ssid: []const u8, best: ?Bss = null };
+        var found: Found = .{ .ssid = ssid };
+        try n.req.request(&m, n.family, nlm_f_dump, cmd.get_scan, &found, struct {
+            fn on(f: *Found, msg: Received) void {
+                if (msg.command != cmd.new_scan_results) return;
+                const b = Attrs.find(msg.attrs, attr.bss) orelse return;
+                const info = parseBssDetail(b.data) orelse return;
+                if (!std.mem.eql(u8, info.network.ssid(), f.ssid)) return;
+                if (f.best == null or info.network.signal_mbm > f.best.?.network.signal_mbm) f.best = info;
+            }
+        }.on);
+        return found.best;
+    }
+
+    /// Starts connecting; an event says how it went.
+    pub fn connect(n: *Nl80211, ifindex: u32, p: ConnectParams) Error!void {
+        var m: Message = .{};
+        m.put(attr.ifindex, std.mem.asBytes(&ifindex));
+        m.put(attr.ssid, p.ssid);
+        m.put(attr.mac, &p.bssid);
+        m.put(attr.wiphy_freq, std.mem.asBytes(&p.freq_mhz));
+        const open_system: u32 = 0;
+        m.put(attr.auth_type, std.mem.asBytes(&open_system));
+        if (p.wpa2) |w| {
+            const version: u32 = wpa_version_2;
+            const pairwise: u32 = @import("supplicant.zig").cipher_ccmp;
+            const akm: u32 = @import("supplicant.zig").akm_psk;
+            m.put(attr.privacy, &.{});
+            m.put(attr.wpa_versions, std.mem.asBytes(&version));
+            m.put(attr.cipher_suites_pairwise, std.mem.asBytes(&pairwise));
+            m.put(attr.cipher_suite_group, std.mem.asBytes(&w.group_cipher));
+            m.put(attr.akm_suites, std.mem.asBytes(&akm));
+            m.put(attr.ie, w.rsn);
+            // The supplicant does the handshake (over EAPOL frames): until
+            // then only those frames may pass.
+            m.put(attr.control_port, &.{});
+        }
+        try n.req.request(&m, n.family, 0, cmd.connect, {}, ignore);
+    }
+
+    pub fn disconnect(n: *Nl80211, ifindex: u32) Error!void {
+        var m: Message = .{};
+        m.put(attr.ifindex, std.mem.asBytes(&ifindex));
+        const unspecified: u16 = 3; // deauthenticated: leaving
+        m.put(attr.reason_code, std.mem.asBytes(&unspecified));
+        try n.req.request(&m, n.family, 0, cmd.disconnect, {}, ignore);
+    }
+
+    /// Installs the pairwise key (CCMP) for the access point.
+    pub fn setPairwiseKey(n: *Nl80211, ifindex: u32, bssid: [6]u8, tk: [16]u8) Error!void {
+        var m: Message = .{};
+        m.put(attr.ifindex, std.mem.asBytes(&ifindex));
+        m.put(attr.mac, &bssid);
+        const idx: u8 = 0;
+        const cipher: u32 = @import("supplicant.zig").cipher_ccmp;
+        const typ: u32 = keytype_pairwise;
+        m.put(attr.key_idx, std.mem.asBytes(&idx));
+        m.put(attr.key_cipher, std.mem.asBytes(&cipher));
+        m.put(attr.key_data, &tk);
+        m.put(attr.key_type, std.mem.asBytes(&typ));
+        try n.req.request(&m, n.family, 0, cmd.new_key, {}, ignore);
+    }
+
+    /// Installs a group key, and makes it the one broadcasts use.
+    pub fn setGroupKey(n: *Nl80211, ifindex: u32, cipher: u32, index: u8, key: []const u8, rsc: [6]u8) Error!void {
+        var m: Message = .{};
+        m.put(attr.ifindex, std.mem.asBytes(&ifindex));
+        const typ: u32 = keytype_group;
+        m.put(attr.key_idx, std.mem.asBytes(&index));
+        m.put(attr.key_cipher, std.mem.asBytes(&cipher));
+        m.put(attr.key_data, key);
+        m.put(attr.key_seq, &rsc);
+        m.put(attr.key_type, std.mem.asBytes(&typ));
+        try n.req.request(&m, n.family, 0, cmd.new_key, {}, ignore);
+        var d: Message = .{};
+        d.put(attr.ifindex, std.mem.asBytes(&ifindex));
+        d.put(attr.key_idx, std.mem.asBytes(&index));
+        d.put(attr.key_default, &.{});
+        var types: [4]u8 = undefined;
+        std.mem.writeInt(u16, types[0..2], 4, .little);
+        std.mem.writeInt(u16, types[2..4], key_default_type_multicast, .little);
+        d.put(attr.key_default_types | nla_f_nested, &types);
+        // Drivers that pick the group key themselves refuse this.
+        n.req.request(&d, n.family, 0, cmd.set_key, {}, ignore) catch {};
+    }
+
+    /// Marks the access point authorized (the port open for traffic), for
+    /// drivers that want to be told.
+    pub fn authorize(n: *Nl80211, ifindex: u32, bssid: [6]u8) void {
+        var m: Message = .{};
+        m.put(attr.ifindex, std.mem.asBytes(&ifindex));
+        m.put(attr.mac, &bssid);
+        var flags: [8]u8 = undefined;
+        std.mem.writeInt(u32, flags[0..4], 1 << sta_flag_authorized, .little);
+        std.mem.writeInt(u32, flags[4..8], 1 << sta_flag_authorized, .little);
+        m.put(attr.sta_flags2, &flags);
+        n.req.request(&m, n.family, 0, cmd.set_station, {}, ignore) catch {};
+    }
+
+    /// Reads waiting events: scans finishing, connections made and lost.
+    pub fn readEvents(n: *Nl80211) Events {
+        var events: Events = .{};
         var buf: [8192]u8 align(4) = undefined;
         while (true) {
             const rc = linux.recvfrom(n.events.fd, &buf, buf.len, linux.MSG.DONTWAIT, null, null);
-            if (linux.errno(rc) != .SUCCESS or rc == 0) return event;
+            if (linux.errno(rc) != .SUCCESS or rc == 0) return events;
             var it: Messages = .{ .rest = buf[0..rc] };
-            while (it.next()) |r| {
-                if (r.type != n.family) continue;
-                if (r.command == cmd.new_scan_results) event = .scan_done;
-                if (r.command == cmd.scan_aborted and event == .none) event = .scan_aborted;
-            }
+            while (it.next()) |r| if (r.type == n.family) parseEvent(r, &events);
         }
     }
 
@@ -295,9 +466,30 @@ pub const Nl80211 = struct {
     }
 };
 
+fn ignore(_: void, _: Received) void {}
+
+fn parseEvent(r: Received, events: *Events) void {
+    switch (r.command) {
+        cmd.new_scan_results => events.scan_done = true,
+        cmd.scan_aborted => events.scan_aborted = true,
+        cmd.connect => {
+            var bssid: [6]u8 = @splat(0);
+            if (Attrs.find(r.attrs, attr.mac)) |a| if (a.data.len >= 6) {
+                bssid = a.data[0..6].*;
+            };
+            // No status code: it timed out.
+            const status = if (Attrs.find(r.attrs, attr.status_code)) |a| a.int(u16) orelse 1 else 1;
+            events.connected = .{ .status = status, .bssid = bssid };
+        },
+        cmd.disconnect => events.disconnected = if (Attrs.find(r.attrs, attr.reason_code)) |a| a.int(u16) orelse 0 else 0,
+        else => {},
+    }
+}
+
 const Family = struct {
     id: u16 = 0,
     scan_group: ?u32 = null,
+    mlme_group: ?u32 = null,
 
     fn on(f: *Family, r: Received) void {
         f.* = parseFamily(r.attrs);
@@ -315,6 +507,7 @@ fn parseFamily(attrs: []const u8) Family {
         const name = Attrs.find(g.data, ctrl_attr_mcast_grp_name) orelse continue;
         const id = Attrs.find(g.data, ctrl_attr_mcast_grp_id) orelse continue;
         if (std.mem.eql(u8, name.string(), "scan")) f.scan_group = id.int(u32);
+        if (std.mem.eql(u8, name.string(), "mlme")) f.mlme_group = id.int(u32);
     }
     return f;
 }
@@ -340,6 +533,54 @@ pub fn parseBss(attrs: []const u8) ?wifi.Network {
     n.setSsid(ssidOf(ies) orelse return null);
     n.security = securityOf(capability, ies);
     return n;
+}
+
+/// An access point's scan result with its address and RSN details.
+pub fn parseBssDetail(attrs: []const u8) ?Bss {
+    var b: Bss = .{ .network = parseBss(attrs) orelse return null, .bssid = undefined };
+    const addr = Attrs.find(attrs, bss.bssid) orelse return null;
+    if (addr.data.len < 6) return null;
+    b.bssid = addr.data[0..6].*;
+    const ies = if (Attrs.find(attrs, bss.information_elements)) |a| a.data else &.{};
+    var it = Elements{ .rest = ies };
+    while (it.next()) |e| if (e.id == 48 and e.data.len + 2 <= b.rsn_buf.len) {
+        b.rsn_len = @intCast(e.data.len + 2);
+        b.rsn_buf[0] = 48;
+        b.rsn_buf[1] = @intCast(e.data.len);
+        @memcpy(b.rsn_buf[2..b.rsn_len], e.data);
+        const r = rsnDetail(e.data);
+        b.group_cipher = r.group;
+        b.ccmp = r.ccmp;
+        b.psk = r.psk;
+        break;
+    };
+    return b;
+}
+
+/// The group cipher, and whether CCMP and PSK are on offer, from an RSN
+/// element's body.
+fn rsnDetail(rsn: []const u8) struct { group: u32, ccmp: bool, psk: bool } {
+    var out: @TypeOf(rsnDetail(rsn)) = .{ .group = 0, .ccmp = false, .psk = false };
+    if (rsn.len < 6) return out;
+    out.group = std.mem.readInt(u32, rsn[2..6], .big);
+    if (rsn.len < 8) return out;
+    const pairwise = std.mem.readInt(u16, rsn[6..8], .little);
+    for (0..pairwise) |i| {
+        const at = 8 + i * 4;
+        if (rsn.len < at + 4) return out;
+        if (std.mem.readInt(u32, rsn[at..][0..4], .big) == 0x000fac04) out.ccmp = true;
+    }
+    const akm_at = 8 + @as(usize, pairwise) * 4;
+    if (rsn.len < akm_at + 2) return out;
+    const count = std.mem.readInt(u16, rsn[akm_at..][0..2], .little);
+    for (0..count) |i| {
+        const at = akm_at + 2 + i * 4;
+        if (rsn.len < at + 4) break;
+        const suite = std.mem.readInt(u32, rsn[at..][0..4], .big);
+        // PSK with SHA-1 (not SHA-256, suite 6: a different MIC).
+        if (suite == 0x000fac02) out.psk = true;
+    }
+    return out;
 }
 
 /// The SSID from information elements (element 0).
@@ -515,5 +756,44 @@ test "this machine's kernel: nl80211 resolves, or there is no Wi-Fi" {
     defer n.close();
     try testing.expect(n.family >= genl_id_ctrl);
     _ = try n.findStation();
-    try testing.expectEqual(Event.none, n.readEvents());
+    const e = n.readEvents();
+    try testing.expect(!e.scan_done and e.connected == null and e.disconnected == null);
+}
+
+test "an access point's address and RSN details, for connecting" {
+    // RSN: version 1, group TKIP, pairwise CCMP and TKIP, AKM PSK, caps.
+    const rsn = [_]u8{ 1, 0, 0x00, 0x0f, 0xac, 2, 2, 0, 0x00, 0x0f, 0xac, 4, 0x00, 0x0f, 0xac, 2, 1, 0, 0x00, 0x0f, 0xac, 2, 0, 0 };
+    const ies = [_]u8{ 0, 4, 'H', 'o', 'm', 'e', 48, rsn.len } ++ rsn;
+    var buf: [192]u8 = undefined;
+    const mbm: i32 = -6000;
+    const result = attrBytes(&buf, &.{
+        .{ bss.bssid, &.{ 0x02, 0x11, 0x22, 0x33, 0x44, 0x55 } },
+        .{ bss.frequency, &.{ 0x6c, 0x09, 0, 0 } }, // 2412
+        .{ bss.signal_mbm, std.mem.asBytes(&mbm) },
+        .{ bss.capability, &.{ 0x11, 0x04 } },
+        .{ bss.information_elements, &ies },
+    });
+    const b = parseBssDetail(result).?;
+    try testing.expectEqual([6]u8{ 0x02, 0x11, 0x22, 0x33, 0x44, 0x55 }, b.bssid);
+    try testing.expectEqual(@as(u32, 0x000fac02), b.group_cipher);
+    try testing.expect(b.ccmp and b.psk);
+    try testing.expectEqualSlices(u8, &([_]u8{ 48, rsn.len } ++ rsn), b.rsn());
+
+    // PSK-SHA256 only is not something the supplicant can do.
+    const sha256 = [_]u8{ 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 6 };
+    try testing.expect(!rsnDetail(&sha256).psk);
+}
+
+test "connection events" {
+    var buf: [64]u8 = undefined;
+    var ev: Events = .{};
+    parseEvent(.{ .type = 0x1c, .flags = 0, .seq = 0, .command = cmd.connect, .attrs = attrBytes(&buf, &.{ .{ attr.mac, &.{ 2, 1, 2, 3, 4, 5 } }, .{ attr.status_code, &.{ 0, 0 } } }) }, &ev);
+    try testing.expectEqual(@as(u16, 0), ev.connected.?.status);
+    try testing.expectEqual([6]u8{ 2, 1, 2, 3, 4, 5 }, ev.connected.?.bssid);
+    // Timed out: no status code.
+    ev = .{};
+    parseEvent(.{ .type = 0x1c, .flags = 0, .seq = 0, .command = cmd.connect, .attrs = &.{} }, &ev);
+    try testing.expect(ev.connected.?.status != 0);
+    parseEvent(.{ .type = 0x1c, .flags = 0, .seq = 0, .command = cmd.disconnect, .attrs = attrBytes(&buf, &.{.{ attr.reason_code, &.{ 15, 0 } }}) }, &ev);
+    try testing.expectEqual(@as(?u16, 15), ev.disconnected);
 }

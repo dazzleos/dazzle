@@ -1,7 +1,8 @@
 //! `Ui`: runs a widget tree. Each frame it builds the root widget (keeping
 //! the nodes and state that still match), lays it out to the window's
 //! size, and paints it; `render` then records it into a vc4 frame.
-//! Pointer events go to the widgets under the pointer.
+//! Pointer events go to the widgets under the pointer, and keys to the
+//! widget with the keyboard (`focus`).
 //!
 //!     const ui = try Ui.create(gpa, &fira);
 //!     try ui.attachGpu(dev);
@@ -18,6 +19,7 @@ const widget = @import("widget.zig");
 const painter_mod = @import("painter.zig");
 const material = @import("material.zig");
 const damage_mod = @import("damage.zig");
+const keymap = @import("keymap.zig");
 
 const Point = geometry.Point;
 const Size = geometry.Size;
@@ -54,6 +56,10 @@ pub const Ui = struct {
     hover_scratch: std.ArrayList(*Node) = .empty,
     /// The handler that took the pointer when a button went down.
     captured: ?*Node = null,
+    /// The widget keys go to.
+    focused: ?*Node = null,
+    shift: u2 = 0,
+    caps_lock: bool = false,
     /// The window's size at the last frame.
     frame_size: [2]u32 = .{ 1, 1 },
     /// What changed in the last frame (and the frames before).
@@ -237,6 +243,8 @@ pub const Ui = struct {
         ui.needs_frame = true;
         if (pressed) {
             if (ui.captured != null) return;
+            // Clicking elsewhere takes the keyboard away.
+            if (ui.focused) |f| if (std.mem.indexOfScalar(*Node, ui.hovered.items, f) == null) ui.focus(null);
             for (ui.hovered.items) |n| if (send(n, .{ .press = .{ .pos = local(n, pos), .button = button } })) {
                 ui.captured = n;
                 return;
@@ -246,6 +254,33 @@ pub const Ui = struct {
             const inside = std.mem.indexOfScalar(*Node, ui.hovered.items, n) != null;
             _ = send(n, .{ .release = .{ .pos = local(n, pos), .button = button, .inside = inside } });
         }
+    }
+
+    /// Gives the keyboard to a widget (null: to none).
+    pub fn focus(ui: *Ui, n: ?*Node) void {
+        if (ui.focused == n) return;
+        if (ui.focused) |old| _ = send(old, .blur);
+        ui.focused = n;
+        if (n) |new| _ = send(new, .focus);
+        ui.needs_frame = true;
+    }
+
+    /// A key (a Linux key code) went down or up; it goes to the widget with
+    /// the keyboard.
+    pub fn keyEvent(ui: *Ui, code: u32, pressed: bool) void {
+        switch (code) {
+            keymap.left_shift, keymap.right_shift => {
+                ui.shift = if (pressed) ui.shift +| 1 else ui.shift -| 1;
+                return;
+            },
+            keymap.caps_lock => if (pressed) {
+                ui.caps_lock = !ui.caps_lock;
+            },
+            else => {},
+        }
+        const n = ui.focused orelse return;
+        _ = send(n, .{ .key = .{ .code = code, .pressed = pressed, .char = if (pressed) keymap.char(code, ui.shift > 0, ui.caps_lock) else null } });
+        ui.needs_frame = true;
     }
 
     /// The pointer left the window.
@@ -286,6 +321,7 @@ pub const Ui = struct {
     /// Drops references to a node being freed.
     pub fn forget(ui: *Ui, n: *Node) void {
         if (ui.captured == n) ui.captured = null;
+        if (ui.focused == n) ui.focused = null;
         if (std.mem.indexOfScalar(*Node, ui.hovered.items, n)) |i| _ = ui.hovered.orderedRemove(i);
     }
 };

@@ -72,6 +72,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     const runtime_dir = std.process.Environ.getPosix(init.environ, "XDG_RUNTIME_DIR");
     var wifi: ?info.wifi.Report = null;
     var next_wifi: u64 = 0;
+    // What the window asks of the Wi-Fi manager (Connect, Disconnect).
+    var actions: view.Actions = .{};
 
     var next_update: u64 = sys.nowNs() + std.time.ns_per_s;
     var dirty = true;
@@ -102,7 +104,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         for (win.takeInput()) |e| switch (e) {
             .motion => |pos| window_ui.pointerMotion(pos),
             .button => |b| window_ui.pointerButton(b.pos, b.code, b.pressed),
-            .key => {},
+            .key => |k| window_ui.keyEvent(k.code, k.pressed),
         };
 
         // The figures change every second.
@@ -112,11 +114,21 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             network = info.Network.read();
             dirty = true;
         }
+        if (actions.connect != null or actions.disconnect) if (runtime_dir) |dir| {
+            var req_buf: [256]u8 = undefined;
+            const req = if (actions.connect) |*j| info.wifi.connectRequest(&req_buf, j.ssid(), j.passphrase()) else "disconnect\n";
+            if (actions.connect) |*j| print("stardust-settings: joining \"{s}\"\n", .{j.ssid()});
+            wifi = info.askWifi(dir, req);
+            actions = .{};
+            next_wifi = sys.nowNs() + std.time.ns_per_s;
+            dirty = true;
+        };
         if (!suspended and now >= next_wifi) {
             // Soon after the first answer (to show what the first scan
-            // found), then every few seconds.
-            next_wifi = now + @as(u64, if (wifi == null or wifi.?.scanning) 2 else 5) * std.time.ns_per_s;
-            wifi = if (runtime_dir) |dir| info.readWifi(dir) else null;
+            // found) and while joining a network, then every few seconds.
+            const busy = if (wifi) |w| w.scanning or w.connection.state == .connecting or w.connection.state == .authenticating or w.connection.state == .addressing else true;
+            next_wifi = now + @as(u64, if (busy) 1 else 5) * std.time.ns_per_s;
+            wifi = if (runtime_dir) |dir| info.askWifi(dir, "scan\n") else null;
             dirty = true;
         }
 
@@ -129,6 +141,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
                 .usage = usage,
                 .network = &network,
                 .wifi = if (wifi) |*w| w else null,
+                .actions = &actions,
                 .scale = view.scaleFor(width, height),
             });
             if (window_ui.changed()) {
