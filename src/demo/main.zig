@@ -152,7 +152,6 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
                 window_ui.pointerMotion(pos);
             },
             .button => |b| {
-                if (b.pressed) rings.add(frame_start, b.pos[0], b.pos[1], .argb(buttonColor(b.code)));
                 window_ui.pointerButton(b.pos, b.code, b.pressed);
                 dirty = true;
             },
@@ -270,15 +269,6 @@ const Stats = struct {
         };
     }
 };
-
-fn buttonColor(code: u32) u32 {
-    return switch (code) {
-        wayland.protocol.input.btn_left => 0xff60d0ff,
-        wayland.protocol.input.btn_right => 0xffffa040,
-        wayland.protocol.input.btn_middle => 0xff80ff80,
-        else => 0xffffffff,
-    };
-}
 
 /// What the panel shows about input.
 const InputStatus = struct {

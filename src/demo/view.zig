@@ -15,11 +15,10 @@ const rings_mod = @import("rings.zig");
 
 const Shape = solids.Shape;
 
-pub const title_color = gfx.Color.argb(0xffffffff);
 pub const text_color = gfx.Color.argb(0xffd8e0f0);
 pub const dim_color = gfx.Color.argb(0xff8090b0);
 
-/// Lines of statistics under the title.
+/// Lines of statistics at the top of the panel.
 pub const lines = 5;
 
 pub const Demo = struct {
@@ -79,7 +78,6 @@ pub const Demo = struct {
         if (!state.paused or self.rings.len > 0) cx.requestFrame();
 
         const s = self.scale;
-        const title = 52 * s;
         const small = 28 * s;
 
         var status: [lines]ui.Widget = undefined;
@@ -92,15 +90,13 @@ pub const Demo = struct {
             w.* = cx.make(ui.Radio(Shape){ .value = shape, .group_value = state.shape, .on_changed = .of(state, State.choose), .label = shape.name() });
         }
 
-        const content = cx.make(ui.Overlay{ .children = &.{
-            cx.make(RingsView{ .rings = self.rings, .now = now, .unit = s }),
+        const content = cx.make(RingsView{ .rings = self.rings, .now = now, .unit = s, .child = cx.make(ui.Overlay{ .children = &.{
             cx.make(SolidView{ .solids = self.solids, .time = state.time, .shape = state.shape, .look = state.look }),
             cx.make(ui.Padding{ .padding = .all(@floor(24 * s)), .child = cx.make(ui.Column{
                 .cross_axis_alignment = .start,
                 .main_axis_size = .min,
                 .spacing = 6 * s,
                 .children = &.{
-                    cx.make(ui.Text{ .text = "Stardust", .style = .{ .size = title, .color = title_color }, .wrap = false }),
                     status[0],
                     status[1],
                     status[2],
@@ -125,7 +121,7 @@ pub const Demo = struct {
                     cx.make(ui.Switch{ .value = state.look.texturing, .on_changed = .of(state, State.setTexturing), .label = "Texture" }),
                 },
             }) }),
-        } });
+        } }) });
         return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &.{
             cx.make(ui.TitleBar{
                 .title = "Demo",
@@ -165,16 +161,47 @@ pub const SolidView = struct {
     }
 };
 
-/// The rings where the pointer clicked, over the whole window.
+/// The rings where the pointer clicked (with any button), behind the
+/// content and clipped to it: clicks on the title bar make none.
 pub const RingsView = struct {
     rings: *rings_mod.Rings,
     now: u64,
     unit: f32,
+    child: ?ui.Widget = null,
+
+    pub const clips_children = true;
 
     pub fn paint(self: *const RingsView, _: *ui.Node, p: *ui.Painter) void {
         self.rings.draw(p.canvas(), self.now, self.unit);
     }
+
+    /// A press anywhere in it (on a control too) starts a ring there; the
+    /// press still goes on to whatever is under it.
+    pub fn event(self: *const RingsView, n: *ui.Node, e: ui.Event) bool {
+        switch (e) {
+            .press => |pr| {
+                self.rings.add(@import("sys").nowNs(), pr.pos[0], pr.pos[1], .argb(buttonColor(pr.button)));
+                n.ui.needs_frame = true;
+            },
+            else => {},
+        }
+        return false;
+    }
 };
+
+/// Linux button codes.
+const btn_left = 0x110;
+const btn_right = 0x111;
+const btn_middle = 0x112;
+
+pub fn buttonColor(code: u32) u32 {
+    return switch (code) {
+        btn_left => 0xff60d0ff,
+        btn_right => 0xffffa040,
+        btn_middle => 0xff80ff80,
+        else => 0xffffffff,
+    };
+}
 
 // --- Tests -------------------------------------------------------------------
 
@@ -311,4 +338,28 @@ test "while paused and still, frames change nothing and none are asked for" {
     u.frame(1920, 1080, 2, demo);
     try testing.expect(!u.changed());
     try testing.expect(!u.needs_frame);
+}
+
+test "clicks make rings where they are in the content, and none on the title bar" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    var rings: rings_mod.Rings = .{};
+    const status: [lines][]const u8 = @splat("");
+    u.frame(1920, 1036, 0, Demo{ .solids = null, .rings = &rings, .status = status, .scale = 1 });
+    const content = findNode(u.root.?, RingsView).?;
+    const top = content.position()[1];
+    try testing.expect(top > 0);
+    // On the title bar: none.
+    u.pointerMotion(.{ 960, top / 2 });
+    u.pointerButton(.{ 960, top / 2 }, btn_left, true);
+    u.pointerButton(.{ 960, top / 2 }, btn_left, false);
+    try testing.expectEqual(@as(usize, 0), rings.len);
+    // In the content: one, where the click was in it.
+    u.pointerMotion(.{ 1500, top + 300 });
+    u.pointerButton(.{ 1500, top + 300 }, btn_right, true);
+    u.pointerButton(.{ 1500, top + 300 }, btn_right, false);
+    try testing.expectEqual(@as(usize, 1), rings.len);
+    try testing.expectEqual(gfx.Point{ 1500, 300 }, rings.rings[0].center);
+    try testing.expectEqual(gfx.Color.argb(buttonColor(btn_right)), rings.rings[0].color);
 }
