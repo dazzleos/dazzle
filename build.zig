@@ -299,7 +299,7 @@ fn addKernel(b: *std.Build) Kernel {
     check_config.addArg(b.pathJoin(&.{ out, ".config" }));
     Chain.add(&last, check_config);
     Chain.add(&last, make(b, linux_dir, out, toolchain, &.{
-        b.fmt("-j{d}", .{jobs}), "zImage", "broadcom/bcm2835-rpi-zero.dtb", "broadcom/bcm2835-rpi-zero-w.dtb",
+        b.fmt("-j{d}", .{jobs}), "zImage", "broadcom/bcm2835-rpi-zero.dtb", "broadcom/bcm2835-rpi-zero-w.dtb", "broadcom/bcm2837-rpi-3-a-plus.dtb",
     }));
     return .{ .step = last, .out = out };
 }
@@ -345,6 +345,7 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.B
         .{ "zImage", kernel.file(b, "arch/arm/boot/zImage") },
         .{ "bcm2835-rpi-zero.dtb", kernel.file(b, "arch/arm/boot/dts/broadcom/bcm2835-rpi-zero.dtb") },
         .{ "bcm2835-rpi-zero-w.dtb", kernel.file(b, "arch/arm/boot/dts/broadcom/bcm2835-rpi-zero-w.dtb") },
+        .{ "bcm2837-rpi-3-a-plus.dtb", kernel.file(b, "arch/arm/boot/dts/broadcom/bcm2837-rpi-3-a-plus.dtb") },
         .{ "initramfs.cpio", initramfs },
         .{ "config.txt", b.path("boot/config.txt") },
         .{ "cmdline.txt", b.path("boot/cmdline.txt") },
@@ -365,14 +366,30 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.B
     return image_step;
 }
 
-/// Boots the kernel and initramfs in QEMU's raspi0 machine, with the log
-/// server on http://localhost:8080 (-Dhttp-port to change).
+/// The boards Stardust runs on, as QEMU emulates them.
+const QemuBoard = enum {
+    zero,
+    @"pi3a+",
+
+    fn dtb(q: QemuBoard) []const u8 {
+        return switch (q) {
+            .zero => "bcm2835-rpi-zero.dtb",
+            .@"pi3a+" => "bcm2837-rpi-3-a-plus.dtb",
+        };
+    }
+};
+
+/// Boots the kernel and initramfs in QEMU's raspi0 machine (or raspi3ap,
+/// with -Dqemu-board=pi3a+), with the log server on http://localhost:8080
+/// (-Dhttp-port to change).
 fn addQemu(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) void {
-    const tools = requireTools(b, &.{ "qemu-system-arm:qemu-system-arm", "fdtput:device-tree-compiler" });
+    const board = b.option(QemuBoard, "qemu-board", "The board QEMU emulates: zero (default) or pi3a+") orelse .zero;
+    const program = if (board == .zero) "qemu-system-arm" else "qemu-system-aarch64";
+    const tools = requireTools(b, &.{ b.fmt("{s}:{s}", .{ program, program }), "fdtput:device-tree-compiler" });
     // QEMU lacks the power management block the watchdog driver waits for.
-    const dtb = b.pathFromRoot("build/qemu-rpi-zero.dtb");
+    const dtb = b.pathFromRoot(b.fmt("build/qemu-{s}", .{board.dtb()}));
     const copy = b.addSystemCommand(&.{"cp"});
-    copy.addFileArg(kernel.file(b, "arch/arm/boot/dts/broadcom/bcm2835-rpi-zero.dtb"));
+    copy.addFileArg(kernel.file(b, b.fmt("arch/arm/boot/dts/broadcom/{s}", .{board.dtb()})));
     copy.addArg(dtb);
     copy.step.dependOn(kernel.step);
     copy.step.dependOn(&tools.step);
@@ -381,28 +398,44 @@ fn addQemu(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) void {
     patch.step.dependOn(&copy.step);
     patch.has_side_effects = true;
     const port = b.option(u16, "http-port", "Host port for the HTTP log server when running in QEMU (default 8080)") orelse 8080;
-    const qemu = b.addSystemCommand(&.{ "qemu-system-arm", "-M", "raspi0", "-kernel" });
-    qemu.addFileArg(kernel.file(b, "arch/arm/boot/zImage"));
+    const qemu = b.addSystemCommand(&.{ program, "-M", if (board == .zero) "raspi0" else "raspi3ap", "-kernel" });
+    const zimage = kernel.file(b, "arch/arm/boot/zImage");
+    switch (board) {
+        .zero => qemu.addFileArg(zimage),
+        // QEMU starts the Pi 3 in AArch64: a stub switches to AArch32 for
+        // the 32-bit kernel. (QEMU's spin loop for the other cores is
+        // AArch64 too, so the kernel brings up only the first.)
+        .@"pi3a+" => {
+            const stub = b.addRunArtifact(hostTool(b, "aarch32boot"));
+            stub.addFileArg(zimage);
+            stub.step.dependOn(kernel.step);
+            qemu.addFileArg(stub.addOutputFileArg("zImage-aarch64"));
+        },
+    }
     qemu.addArgs(&.{ "-dtb", dtb, "-initrd" });
     qemu.addFileArg(initramfs);
     qemu.addArgs(&.{
-        "-append",  "console=ttyAMA0 printk.devkmsg=on",
+        "-append",  "printk.devkmsg=on",
         "-device",  "usb-net,netdev=net0",
         "-netdev",  b.fmt("user,id=net0,hostfwd=tcp:127.0.0.1:{d}-:80", .{port}),
         "-display", "none",
-        "-serial",  "mon:stdio",
     });
+    // The console: the PL011 on the Zero, the mini UART (the second serial
+    // port) on the Pi 3 A+.
+    if (board == .zero) qemu.addArgs(&.{ "-serial", "mon:stdio" }) else qemu.addArgs(&.{ "-serial", "null", "-serial", "mon:stdio" });
     if (b.args) |args| qemu.addArgs(args);
     qemu.step.dependOn(&patch.step);
     qemu.stdio = .inherit;
     qemu.has_side_effects = true;
-    const step = b.step("qemu", "Boot the kernel and initramfs in QEMU (arguments after -- go to QEMU)");
+    const step = b.step("qemu", "Boot the kernel and initramfs in QEMU (-Dqemu-board=pi3a+ for the Pi 3 A+; arguments after -- go to QEMU)");
     step.dependOn(&qemu.step);
 }
 
 pub fn build(b: *std.Build) void {
-    // The Raspberry Pi Zero / Zero W: BCM2835, ARM1176JZF-S with VFPv2.
-    // No libc: the program talks to the kernel through raw system calls.
+    // The Raspberry Pi Zero / Zero W: BCM2835, ARM1176JZF-S with VFPv2. The
+    // same programs run on the Pi 3 A+'s Cortex-A53 (in AArch32, which runs
+    // ARMv6 code). No libc: the programs talk to the kernel through raw
+    // system calls.
     const target = b.resolveTargetQuery(.{
         .cpu_arch = .arm,
         .cpu_model = .{ .explicit = &std.Target.arm.cpu.arm1176jzf_s },

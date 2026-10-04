@@ -12,7 +12,8 @@ pub const Sample = struct {
     temperature: ?f32 = null,
     /// The CPU's speed compared with the first sample, in percent.
     speed: f32 = 100,
-    /// CPU use since the previous sample, in percent of the one core.
+    /// CPU use since the previous sample, in percent of all the cores (on a
+    /// Pi 3 A+, a program keeping one of its four cores busy is 25%).
     total_busy: f32 = 0,
     demo_busy: f32 = 0,
     shell_busy: f32 = 0,

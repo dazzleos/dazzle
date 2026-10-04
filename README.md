@@ -1,8 +1,8 @@
 # Stardust
 
 A lightweight operating system for the Raspberry Pi, written in Zig on top of
-a minimal mainline Linux kernel. The first target is the Raspberry Pi Zero /
-Zero W (BCM2835).
+a minimal mainline Linux kernel. It runs on the Raspberry Pi Zero / Zero W
+(BCM2835) and the Raspberry Pi 3 A+ (BCM2837), from the same SD card image.
 
 Stardust is its own stack. Everything draws with **`vc4`**, a low-level
 API for the VideoCore IV GPU written in Zig on the kernel's `vc4` driver:
@@ -335,9 +335,10 @@ There is no C library: programs make raw system calls through
   LLVM 17 or newer (used by default; `sudo apt install clang lld llvm`) or
   an ARM GCC cross compiler (`-Dcross-compile=arm-linux-gnueabihf-`).
 - To fetch the Raspberry Pi firmware: `curl`.
-- Optional, for the QEMU boot test: `qemu-system-arm` and `fdtput` (`sudo
-  apt install qemu-system-arm device-tree-compiler`; on Ubuntu releases with
-  a hardware enablement stack the QEMU package is `qemu-system-arm-hwe`).
+- Optional, for the QEMU boot test: `qemu-system-arm` (for the Zero) or
+  `qemu-system-aarch64` (for the Pi 3 A+), and `fdtput` (`sudo apt install
+  qemu-system-arm device-tree-compiler`; on Ubuntu releases with a hardware
+  enablement stack the QEMU package is `qemu-system-arm-hwe`).
 
 The build checks for these before it needs them and names any packages to
 install. The SD image is written by a Zig tool, so no partitioning or
@@ -367,7 +368,7 @@ scripts/zig build test              # host unit tests
 scripts/zig build programs          # just the programs and zig-out/initramfs.cpio
 scripts/zig build shaders           # just the shader programs (zig-out/shaders)
 scripts/zig build kernel            # just the kernel
-scripts/zig build qemu              # boot in QEMU (arguments after -- go to QEMU)
+scripts/zig build qemu              # boot in QEMU as a Zero (-Dqemu-board=pi3a+ for the Pi 3 A+; arguments after -- go to QEMU)
 ```
 
 Options: `-Dlinux=path/to/linux` uses an existing kernel tree,
@@ -377,17 +378,26 @@ LLVM, `-Dimage-size=<MiB>` sets the image size (default 64) and
 
 The kernel comes from `make tinyconfig` plus `kernel/stardust.config`. The
 build fails if any requested option is dropped because a dependency is
-missing. The result is a zImage of about 1.8 MB that includes the vc4 DRM
+missing. The result is a zImage of about 2 MB that includes the vc4 DRM
 driver, networking and the USB Ethernet drivers.
 
-## Running on a Pi Zero
+One 32-bit kernel serves both boards: it is built for ARMv6 (the Zero's
+ARM1176) and ARMv7 (the Pi 3 A+'s Cortex-A53, which the firmware starts
+in AArch32), with SMP for the A+'s four cores (on the Zero's single core
+the SMP-only instructions are patched out at boot). The programs are
+ARMv6 code, which the A53 runs as it is. The firmware picks each board's
+device tree (`config.txt`).
+
+## Running on a Pi Zero or Pi 3 A+
 
 Write `zig-out/stardust.img` to an SD card (`dd`, or Raspberry Pi Imager's
 "Use custom" option). Alternatively, copy the contents of `zig-out/boot/`
-onto any FAT32-formatted card.
+onto any FAT32-formatted card. The same card works in either board.
 
-Connect HDMI, and a USB Ethernet adapter on the Zero's USB (OTG) port via a
-micro-USB OTG adapter, cabled to your network. The kernel has drivers for
+Connect HDMI, and a USB Ethernet adapter cabled to your network: on the
+Zero's USB (OTG) port via a micro-USB OTG adapter, or in the Pi 3 A+'s USB
+port (with a hub for the keyboard and mouse). Neither board's Wi-Fi works
+yet. The kernel has drivers for
 common adapter chipsets: Realtek RTL8152/8153, ASIX AX88772/AX88179, SMSC
 LAN95xx, Microchip LAN78xx and generic CDC Ethernet.
 
@@ -495,8 +505,13 @@ everything but the text is drawn and the log says why.
 The serial console on GPIO 14 (TX) and 15 (RX), 115200 baud, still works and
 shows the same messages. It is the fallback if the network does not come up.
 
-The firmware picks the Zero or Zero W device tree in `config.txt`. The Zero
-2 W has a different SoC (BCM2710, ARMv8) and is not supported yet.
+The firmware picks the Zero, Zero W or Pi 3 A+ device tree in
+`config.txt`. Other boards are not supported yet: the Pi 3 B and B+ and
+the Zero 2 W have the same SoC as the 3 A+ and would mostly need their
+device trees; the Pi 4 and 5 have different GPUs.
+
+On the Pi 3 A+ the CPU figures in the demo are shares of all four cores, so
+a program keeping one core busy shows 25%.
 
 ## Faster development loops
 
@@ -511,7 +526,12 @@ The firmware picks the Zero or Zero W device tree in `config.txt`. The Zero
   path as its argument). Press Ctrl+C to stop.
   Iterating on GPU code this way avoids rebuilding the SD card.
 - **QEMU:** `scripts/zig build qemu` boots the kernel and initramfs in QEMU's
-  `raspi0` machine with an emulated USB network card. `http://localhost:8080/`
+  `raspi0` machine with an emulated USB network card; `-Dqemu-board=pi3a+`
+  uses its `raspi3ap` machine instead. QEMU starts its Pi 3 in 64-bit mode
+  (the real firmware starts a 32-bit kernel in 32-bit mode), so a small
+  stub (`tools/aarch32boot.zig`) switches to 32-bit mode first; QEMU's
+  other cores wait in a 64-bit loop the kernel cannot use, so it runs on
+  one. `http://localhost:8080/`
   reaches the log server. QEMU does not emulate the 3D engine or HDMI,
   so this checks the kernel, init, privileges and networking only. The log
   ends with `stardust-shell: error: NoVc4Device` and `stardust: shell exited
@@ -594,8 +614,11 @@ at a steady 60 frames per second, with mouse input working. The demo's
 `vc4` frames pass a userspace build of the kernel's job and shader
 validators; the native version still needs confirming on a Pi.
 
-In QEMU the kernel boots and init's network manager gets an address by DHCP
-over an emulated USB network card. That holds whether the card is there at
+The Pi 3 A+ has not been tried on hardware yet: in QEMU its kernel boots
+on the Cortex-A53, and init, the log server and networking work.
+
+In QEMU, as a Zero and as a Pi 3 A+, the kernel boots and init's network
+manager gets an address by DHCP over an emulated USB network card. That holds whether the card is there at
 boot or added later. The lease renews, a static `stardust.ip=` works, and
 the log server streams the log (QEMU cannot emulate the
 GPU or display).
