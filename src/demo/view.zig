@@ -1,17 +1,19 @@
-//! The demo's window, as widgets: the rings and the cube behind a column
-//! with the statistics, buttons for the cube's speed, and the shape
-//! showcase.
+//! The demo's window, as widgets: the rings and the spinning solid behind
+//! a column with the statistics, buttons for the solid's speed, radio
+//! buttons to choose the Platonic solid, and switches for lighting and
+//! texture.
 //!
-//! The cube, the rings and the showcase are widgets that paint themselves:
-//! the cube draws straight into the GPU frame, the others on the canvas.
+//! The solid and the rings are widgets that paint themselves: the solid
+//! draws straight into the GPU frame, the rings on the canvas.
 
 const std = @import("std");
 const ui = @import("ui");
 const gfx = @import("gfx");
 const vc4 = @import("vc4");
-const cube_mod = @import("cube.zig");
+const solids = @import("solids.zig");
 const rings_mod = @import("rings.zig");
-const shapes = @import("shapes.zig");
+
+const Shape = solids.Shape;
 
 pub const title_color = gfx.Color.argb(0xffffffff);
 pub const text_color = gfx.Color.argb(0xffd8e0f0);
@@ -22,7 +24,7 @@ pub const lines = 6;
 
 pub const Demo = struct {
     /// Null in tests (nothing is drawn where it would be).
-    cube: ?*cube_mod.Cube,
+    solids: ?*solids.Solids,
     rings: *rings_mod.Rings,
     subtitle: []const u8,
     status: [lines][]const u8,
@@ -30,8 +32,10 @@ pub const Demo = struct {
     scale: f32,
 
     pub const State = struct {
-        /// The cube's rotation, in seconds at normal speed.
+        /// The solid's rotation, in seconds at normal speed.
         time: f32 = 0,
+        shape: Shape = .cube,
+        look: solids.Look = .{},
         last_ns: ?u64 = null,
         speed: f32 = 1,
         paused: bool = false,
@@ -46,6 +50,15 @@ pub const Demo = struct {
         }
         fn pause(s: *State) void {
             s.paused = !s.paused;
+        }
+        fn choose(s: *State, shape: Shape) void {
+            s.shape = shape;
+        }
+        fn setLighting(s: *State, on: bool) void {
+            s.look.lighting = on;
+        }
+        fn setTexturing(s: *State, on: bool) void {
+            s.look.texturing = on;
         }
     };
 
@@ -69,10 +82,14 @@ pub const Demo = struct {
             w.* = cx.make(ui.Text{ .text = line, .style = .{ .size = small, .color = if (i == 0) text_color else dim_color }, .wrap = false });
         }
         const speed = if (state.paused) "Paused" else cx.fmt("Spinning at {d}×", .{state.speed});
+        var radios: [solids.shapes.len]ui.Widget = undefined;
+        for (&radios, solids.shapes) |*w, shape| {
+            w.* = cx.make(ui.Radio(Shape){ .value = shape, .group_value = state.shape, .on_changed = .of(state, State.choose), .label = shape.name() });
+        }
 
         return cx.make(ui.Overlay{ .children = &.{
             cx.make(RingsView{ .rings = self.rings, .now = now, .unit = s }),
-            cx.make(CubeView{ .cube = self.cube, .time = state.time }),
+            cx.make(SolidView{ .solids = self.solids, .time = state.time, .shape = state.shape, .look = state.look }),
             cx.make(ui.Padding{ .padding = .all(@floor(24 * s)), .child = cx.make(ui.Column{
                 .cross_axis_alignment = .start,
                 .main_axis_size = .min,
@@ -96,24 +113,34 @@ pub const Demo = struct {
                         cx.make(ui.Padding{ .padding = .{ .left = 8 }, .child = cx.make(ui.Text{ .text = speed, .style = .{ .size = 18 * s, .color = dim_color }, .wrap = false }) }),
                     } }),
                     cx.make(ui.SizedBox{ .height = 10 * s }),
-                    cx.make(ShowcaseView{}),
+                    cx.make(ui.Text{ .text = cx.fmt("{s}  ·  {d} triangles", .{ state.shape.name(), state.shape.triangles() }), .style = .{ .size = 18 * s, .color = dim_color }, .wrap = false }),
+                    radios[0],
+                    radios[1],
+                    radios[2],
+                    radios[3],
+                    radios[4],
+                    cx.make(ui.SizedBox{ .height = 4 * s }),
+                    cx.make(ui.Switch{ .value = state.look.lighting, .on_changed = .of(state, State.setLighting), .label = "Lighting" }),
+                    cx.make(ui.Switch{ .value = state.look.texturing, .on_changed = .of(state, State.setTexturing), .label = "Texture" }),
                 },
             }) }),
         } });
     }
 };
 
-/// The spinning cube, filling its space, drawn straight into the frame.
-pub const CubeView = struct {
-    cube: ?*cube_mod.Cube,
+/// The spinning solid, filling its space, drawn straight into the frame.
+pub const SolidView = struct {
+    solids: ?*solids.Solids,
     time: f32,
+    shape: Shape,
+    look: solids.Look,
 
-    pub fn paint(self: *const CubeView, _: *ui.Node, p: *ui.Painter) void {
-        if (self.cube != null) p.gpu(self, draw);
+    pub fn paint(self: *const SolidView, _: *ui.Node, p: *ui.Painter) void {
+        if (self.solids != null) p.gpu(self, draw);
     }
 
-    fn draw(self: *const CubeView, frame: *vc4.render.Frame, area: ui.GpuArea) anyerror!void {
-        try self.cube.?.draw(frame, area.viewport, area.scissor, self.time);
+    fn draw(self: *const SolidView, frame: *vc4.render.Frame, area: ui.GpuArea) anyerror!void {
+        try self.solids.?.draw(frame, area.viewport, area.scissor, self.time, self.shape, self.look);
     }
 };
 
@@ -128,17 +155,6 @@ pub const RingsView = struct {
     }
 };
 
-/// The 2D canvas's shape showcase (see shapes.zig), at its own size.
-pub const ShowcaseView = struct {
-    pub fn layout(_: *const ShowcaseView, _: *ui.Node, c: ui.Constraints) ui.Size {
-        return c.constrain(.{ .w = shapes.size[0], .h = shapes.size[1] });
-    }
-
-    pub fn paint(_: *const ShowcaseView, _: *ui.Node, p: *ui.Painter) void {
-        shapes.draw(p.canvas(), p.origin);
-    }
-};
-
 // --- Tests -------------------------------------------------------------------
 
 const testing = std.testing;
@@ -150,15 +166,15 @@ fn findNode(n: *ui.Node, comptime T: type) ?*ui.Node {
     return null;
 }
 
-test "the panel fits beside the cube in the shell's window, without overflowing" {
+test "the panel fits beside the solids in the shell's window, without overflowing" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
     const u = try ui.Ui.create(testing.allocator, &f);
     defer u.destroy();
     var rings: rings_mod.Rings = .{};
-    const status = [lines][]const u8{ "192.168.1.20  (eth0)", "60.0 fps  ·  1920×1036  ·  12 triangles", "GPU 6.50 ms per frame", "CPU 0.50 ms per frame", "Pointer 1919, 1035  ·  last key Backspace", "62 °C  ·  CPU speed 100%  ·  busy 45%" };
+    const status = [lines][]const u8{ "192.168.1.20  (eth0)", "60.0 fps  ·  1920×1036", "GPU 6.50 ms per frame", "CPU 0.50 ms per frame", "Pointer 1919, 1035  ·  last key Backspace", "62 °C  ·  CPU speed 100%  ·  busy 45%" };
     for ([_][2]u32{ .{ 1920, 1036 }, .{ 1920, 1080 } }) |size| {
         const scale = @min(@as(f32, @floatFromInt(size[0])) / 1920, @as(f32, @floatFromInt(size[1])) / 1080);
-        u.frame(size[0], size[1], 0, Demo{ .cube = null, .rings = &rings, .subtitle = "build 0123abc-dirty", .status = status, .scale = scale });
+        u.frame(size[0], size[1], 0, Demo{ .solids = null, .rings = &rings, .subtitle = "build 0123abc-dirty", .status = status, .scale = scale });
         const col = findNode(u.root.?, ui.Column).?;
         const Check = struct {
             fn none(n: *ui.Node) !void {
@@ -167,18 +183,22 @@ test "the panel fits beside the cube in the shell's window, without overflowing"
             }
         };
         try Check.none(u.root.?);
-        // The panel's widest child, against the cube's left edge.
+        // The panel's widest child, against every solid's left edge.
         var right: f32 = 0;
         for (col.children.items) |ch| right = @max(right, ch.position()[0] + ch.size.w);
         const w: f32 = @floatFromInt(size[0]);
-        var t: f32 = 0;
-        while (t < 20) : (t += 0.01) {
-            const m = cube_mod.mvp(size[0], size[1], t);
-            for (0..8) |i| {
-                const p = [3]f32{ if (i & 1 != 0) 1 else -1, if (i & 2 != 0) 1 else -1, if (i & 4 != 0) 1 else -1 };
-                const cw = p[0] * m[3] + p[1] * m[7] + p[2] * m[11] + m[15];
-                const x = ((p[0] * m[0] + p[1] * m[4] + p[2] * m[8] + m[12]) / cw + 1) / 2 * w;
-                try testing.expect(x > right);
+        for (solids.shapes) |shape| {
+            const m = try solids.mesh(testing.allocator, shape);
+            defer m.deinit(testing.allocator);
+            var t: f32 = 0;
+            while (t < 20) : (t += 0.05) {
+                const mat = solids.mvp(size[0], size[1], t);
+                for (m.vertices) |v| {
+                    const p = v.pos;
+                    const cw = p[0] * mat[3] + p[1] * mat[7] + p[2] * mat[11] + mat[15];
+                    const x = ((p[0] * mat[0] + p[1] * mat[4] + p[2] * mat[8] + mat[12]) / cw + 1) / 2 * w;
+                    try testing.expect(x > right);
+                }
             }
         }
     }
@@ -188,7 +208,7 @@ test "the speed buttons" {
     const u = try ui.Ui.create(testing.allocator, null);
     defer u.destroy();
     var rings: rings_mod.Rings = .{};
-    const demo: Demo = .{ .cube = null, .rings = &rings, .subtitle = "", .status = @splat(""), .scale = 1 };
+    const demo: Demo = .{ .solids = null, .rings = &rings, .subtitle = "", .status = @splat(""), .scale = 1 };
     u.frame(1920, 1080, 0, demo);
     var buttons: [3]*ui.Node = undefined;
     var n: usize = 0;
@@ -217,4 +237,42 @@ test "the speed buttons" {
     u.frame(1920, 1080, std.time.ns_per_s, demo);
     u.frame(1920, 1080, 2 * std.time.ns_per_s, demo);
     try testing.expectEqual(@as(f32, 0), u.root.?.state(Demo.State).time);
+}
+
+test "the radio buttons choose the solid, and the switches its look" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    var rings: rings_mod.Rings = .{};
+    const demo: Demo = .{ .solids = null, .rings = &rings, .subtitle = "", .status = @splat(""), .scale = 1 };
+    u.frame(1920, 1080, 0, demo);
+    const Collect = struct {
+        fn all(node: *ui.Node, comptime T: type, out: []*ui.Node, k: *usize) void {
+            if (node.widget.is(T) and k.* < out.len) {
+                out[k.*] = node;
+                k.* += 1;
+            }
+            for (node.children.items) |ch| all(ch, T, out, k);
+        }
+    };
+    var radios: [5]*ui.Node = undefined;
+    var n: usize = 0;
+    Collect.all(u.root.?, ui.Radio(Shape), &radios, &n);
+    try testing.expectEqual(@as(usize, 5), n);
+    var switches: [2]*ui.Node = undefined;
+    n = 0;
+    Collect.all(u.root.?, ui.Switch, &switches, &n);
+    try testing.expectEqual(@as(usize, 2), n);
+    for ([_]*ui.Node{ radios[4], switches[0], switches[1], switches[1] }) |w| {
+        const at = w.position();
+        const p: ui.Point = .{ at[0] + 10, at[1] + 20 };
+        u.pointerMotion(p);
+        u.pointerButton(p, ui.widgets.btn_left, true);
+        u.pointerButton(p, ui.widgets.btn_left, false);
+        u.frame(1920, 1080, 0, demo);
+    }
+    const st = u.root.?.state(Demo.State);
+    try testing.expectEqual(Shape.icosahedron, st.shape);
+    try testing.expect(!st.look.lighting);
+    try testing.expect(st.look.texturing);
 }

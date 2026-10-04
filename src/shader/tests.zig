@@ -17,7 +17,7 @@ const programs = [_]struct { name: []const u8, program: []const u8, spirv: []con
     .{ .name = "shape", .program = @embedFile("shape.shader"), .spirv = @embedFile("shape.spv") },
     .{ .name = "solid", .program = @embedFile("solid.shader"), .spirv = @embedFile("solid.spv") },
     .{ .name = "text", .program = @embedFile("text.shader"), .spirv = @embedFile("text.spv") },
-    .{ .name = "cube", .program = @embedFile("cube.shader"), .spirv = @embedFile("cube.spv") },
+    .{ .name = "polyhedron", .program = @embedFile("polyhedron.shader"), .spirv = @embedFile("polyhedron.spv") },
     .{ .name = "quad", .program = @embedFile("quad.shader"), .spirv = @embedFile("quad.spv") },
 };
 
@@ -77,28 +77,45 @@ fn lane(base: f32, step: f32) sim.Vec {
     return v;
 }
 
-test "cube vertex and coordinate shaders" {
-    const p = try load("cube");
-    try testing.expectEqual(@as(u32, 16), p.uniform_words);
+/// The polyhedron shader's uniforms: the matrix, a rotation of 0.6
+/// radians about z, lighting and texturing, then the viewport scale.
+fn polyhedronUniforms(m: [16]f32, lighting: f32, texturing: f32) [34]u32 {
+    var user: [34]u32 = undefined;
+    for (m, 0..) |e, i| user[i] = f2u(e);
+    const c = @cos(@as(f32, 0.6));
+    const s = @sin(@as(f32, 0.6));
+    const rotation = [12]f32{ c, s, 0, 0, -s, c, 0, 0, 0, 0, 1, 0 };
+    for (rotation, 0..) |e, i| user[16 + i] = f2u(e);
+    for ([4]f32{ lighting, texturing, 0, 0 }, 0..) |e, i| user[28 + i] = f2u(e);
+    user[32] = f2u(400 * 16);
+    user[33] = f2u(-300 * 16);
+    return user;
+}
+
+test "polyhedron vertex and coordinate shaders" {
+    const p = try load("polyhedron");
+    try testing.expectEqual(@as(u32, 32), p.uniform_words);
     // A perspective-ish matrix with every element non-zero.
     var m: [16]f32 = undefined;
     for (&m, 0..) |*e, i| e.* = 0.1 * @as(f32, @floatFromInt(i + 1)) * (if (i % 3 == 0) @as(f32, -1.0) else 1.0);
     m[15] = 4.0; // keep w positive
-    var user: [18]u32 = undefined;
-    for (m, 0..) |e, i| user[i] = f2u(e);
-    user[16] = f2u(400 * 16);
-    user[17] = f2u(-300 * 16);
+    const user = polyhedronUniforms(m, 1, 1);
     var buf: [64]u32 = undefined;
     const attrs = [_]sim.Vec{
         lane(-1, 0.13), lane(1, -0.12), lane(-0.5, 0.07), // position
         lane(0, 0.06), lane(1, -0.05), // uv
         lane(0.2, 0.0), lane(0.4, 0.01), lane(0.6, 0.02), // tint
+        lane(-1, 0.125), lane(0.3, 0), lane(0.5, -0.06), // normal (not unit; the shader takes it as it is)
     };
-    try testing.expectEqual(@as(u32, 8), p.vs.num_vpm_reads);
+    try testing.expectEqual(@as(u32, 11), p.vs.num_vpm_reads);
     const vs_unif = uniformStream(&buf, &p.vs, &user, .{ 0, 0 });
     const r = try sim.run(p.vs.code(), .{ .uniforms = vs_unif, .vpm_in = &attrs });
     try testing.expectEqual(vs_unif.len, r.uniforms_read);
-    try testing.expectEqual(@as(usize, 3 + 5), r.vpm_out_len);
+    try testing.expectEqual(@as(usize, 3 + 6), r.vpm_out_len);
+    // Unlit, the shade is 1.
+    const unlit_user = polyhedronUniforms(m, 0, 1);
+    const unlit = try sim.run(p.vs.code(), .{ .uniforms = uniformStream(&buf, &p.vs, &unlit_user, .{ 0, 0 }), .vpm_in = &attrs });
+    for (0..sim.lanes) |i| try testing.expectApproxEqAbs(@as(f32, 1), u2f(unlit.vpm_out[8][i]), 1e-6);
 
     // The coordinate shader reads the position alone.
     try testing.expectEqual(@as(u32, 3), p.cs.num_vpm_reads);
@@ -123,6 +140,13 @@ test "cube vertex and coordinate shaders" {
         try testing.expectApproxEqRel(c[2] * 0.5 * rw + 0.5, u2f(r.vpm_out[1][i]), 1e-5);
         try testing.expectApproxEqRel(rw, u2f(r.vpm_out[2][i]), 1e-6);
         for (0..5) |k| try testing.expectEqual(attrs[3 + k][i], r.vpm_out[3 + k][i]);
+        // The normal, rotated, lit from the fixed direction.
+        const n = [3]f32{ u2f(attrs[8][i]), u2f(attrs[9][i]), u2f(attrs[10][i]) };
+        const co = @cos(@as(f32, 0.6));
+        const si = @sin(@as(f32, 0.6));
+        const rn = [3]f32{ co * n[0] - si * n[1], si * n[0] + co * n[1], n[2] };
+        const diffuse = @max(rn[0] * -0.35 + rn[1] * 0.55 + rn[2] * 0.76, 0);
+        try testing.expectApproxEqAbs(0.3 + 0.7 * diffuse, u2f(r.vpm_out[8][i]), 1e-5);
         // The coordinate shader's header matches the vertex shader's.
         for (0..3) |k| try testing.expectEqual(r.vpm_out[k][i], rc.vpm_out[4 + k][i]);
     }
@@ -151,29 +175,38 @@ const TestTexture = struct {
     }
 };
 
-test "cube fragment shader samples and tints the texture, and keeps the depth" {
-    const p = try load("cube");
+test "polyhedron fragment shader tints and shades the texture (or white), and keeps the depth" {
+    const p = try load("polyhedron");
     var tex: TestTexture = undefined;
     tex.init();
     try testing.expectEqual(@as(u32, 1), p.fs.num_texture_samples);
-    var buf: [8]u32 = undefined;
-    const stream = uniformStream(&buf, &p.fs, &.{}, .{ texture.p0(tex.cfg), texture.p1(tex.cfg) });
     const varyings = [_]sim.Vec{
         lane(TestTexture.u[0], TestTexture.u[1]), lane(TestTexture.v[0], TestTexture.v[1]),
         lane(1.0, 0),                             lane(0.5, 0),
-        lane(0.25, 0),
+        lane(0.25, 0),                            lane(0.8, 0),
     };
-    const r = try sim.run(p.fs.code(), .{ .uniforms = stream, .varyings = &varyings, .frag_w = sim.splatF(1.5), .frag_z = sim.splat(0x123456), .texture_memory = &tex.memory });
-    try testing.expectEqual(@as(usize, 1), r.texture_samples);
-    try testing.expectEqualSlices(u32, &sim.splat(0x123456), &r.tlb_z.?);
-    for (0..sim.lanes) |i| {
-        const t = tex.at(i);
-        const ch = struct {
-            fn f(x: u32, s: u5) f32 {
-                return @as(f32, @floatFromInt((x >> s) & 0xff)) / 255.0;
+    const ch = struct {
+        fn f(x: u32, s: u5) f32 {
+            return @as(f32, @floatFromInt((x >> s) & 0xff)) / 255.0;
+        }
+    }.f;
+    for ([_]f32{ 1, 0 }) |texturing| {
+        const user = polyhedronUniforms(@splat(0), 1, texturing);
+        var buf: [8]u32 = undefined;
+        const stream = uniformStream(&buf, &p.fs, &user, .{ texture.p0(tex.cfg), texture.p1(tex.cfg) });
+        const r = try sim.run(p.fs.code(), .{ .uniforms = stream, .varyings = &varyings, .frag_w = sim.splatF(1.5), .frag_z = sim.splat(0x123456), .texture_memory = &tex.memory });
+        try testing.expectEqual(stream.len, r.uniforms_read);
+        try testing.expectEqualSlices(u32, &sim.splat(0x123456), &r.tlb_z.?);
+        for (0..sim.lanes) |i| {
+            const t = tex.at(i);
+            const c = if (texturing == 1) [3]f32{ ch(t, 16), ch(t, 8), ch(t, 0) } else [3]f32{ 1, 1, 1 };
+            const want = sim.packColor(c[0] * 1.0 * 0.8, c[1] * 0.5 * 0.8, c[2] * 0.25 * 0.8, 1.0);
+            // The shader's sums round differently: within one level.
+            for ([_]u5{ 0, 8, 16 }) |sh| {
+                const d = @as(i32, @intCast(want >> sh & 0xff)) - @as(i32, @intCast(r.tlb_color.?[i] >> sh & 0xff));
+                try testing.expect(d >= -1 and d <= 1);
             }
-        }.f;
-        try testing.expectEqual(sim.packColor(ch(t, 16) * 1.0, ch(t, 8) * 0.5, ch(t, 0) * 0.25, 1.0), r.tlb_color.?[i]);
+        }
     }
 }
 

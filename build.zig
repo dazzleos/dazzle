@@ -109,7 +109,7 @@ const shader_programs = [_]struct { source: []const u8, owner: ShaderOwner, args
     .{ .source = "src/gfx/shaders/shape.zig", .owner = .gfx, .args = &.{"--blend=source-over"} },
     .{ .source = "src/gfx/shaders/solid.zig", .owner = .gfx, .args = &.{"--blend=source-over"} },
     .{ .source = "src/gfx/shaders/text.zig", .owner = .gfx, .args = &.{"--blend=source-over"} },
-    .{ .source = "src/demo/shaders/cube.zig", .owner = .demo, .args = &.{"--depth-test"} },
+    .{ .source = "src/demo/shaders/polyhedron.zig", .owner = .demo, .args = &.{"--depth-test"} },
     .{ .source = "src/shell/shaders/quad.zig", .owner = .shell, .args = &.{} },
 };
 

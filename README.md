@@ -15,9 +15,10 @@ On top of it is **stardust-shell**, a minimal Wayland compositor. Init (PID 1, t
 privileges) starts the shell as an unprivileged user, and the shell starts
 the demo as its Wayland client. USB mice and keyboards work: the shell
 shows a cursor and passes input to the window. The demo, a native app built
-with Stardust's widget toolkit, shows a spinning, textured, depth-tested
-cube, with buttons to change its speed, and a showcase of the 2D graphics
-library in Material 3's shapes and colours. Rings spread out and fade
+with Stardust's widget toolkit, shows a spinning, depth-tested Platonic
+solid, with Material 3 buttons to change its speed, radio buttons to
+choose the solid and switches to turn its lighting and texture on and
+off. Rings spread out and fade
 where the pointer clicks. The IP address, rendering
 statistics and the last key pressed appear in its top left, in Fira Sans.
 A Vulkan-style API may follow.
@@ -118,8 +119,8 @@ const Counter = struct {
 
 Any struct with `paint` draws whatever it likes: shapes and text on the 2D
 canvas, or its own draws straight into the GPU frame, layered in the
-tree's order. The demo's cube is one: a widget whose `paint` adds a draw
-of the cube with the widget's box as the viewport. `layout` sizes a widget
+tree's order. The demo's spinning solid is one: a widget whose `paint`
+adds a draw of the solid with the widget's box as the viewport. `layout` sizes a widget
 within the constraints its parent gives (Flutter's box constraints) and
 places its children, and `event` takes pointer events.
 
@@ -137,6 +138,7 @@ with the problem marked.
 | `widgets.zig` | `Row`, `Column`, `Expanded`, `Padding`, `Align`, `Center`, `SizedBox`, `ConstrainedBox`, `Overlay`, `Decorated` (a filled or outlined rounded rectangle) and `Pressable` (clicks, hover and press) |
 | `text.zig` | `Text`: lines at `\n`, wrapped at spaces to fit |
 | `material.zig` | Material 3's light and dark baseline themes, and `OutlinedButton`, made of a `Pressable`, `Decorated`, `ConstrainedBox`, `Padding` and `Center` |
+| `controls.zig` | Material 3's selection controls: `Checkbox`, `Radio` (generic over the value it selects) and `Switch` (its handle slides), each with an optional label that presses it too |
 | `painter.zig` | Painting: canvas layers and GPU draws in order, clipping, and the overflow stripes |
 | `runtime.zig` | `Ui`: builds, lays out and paints each frame, records it into a `vc4` frame (or draws it on the CPU, for tests), and sends pointer events to the widgets under the pointer |
 | `tests.zig` | Tests: overflow, nonsense layouts, state and keys, buttons, overlays, GPU draws' order, rows and columns |
@@ -209,7 +211,7 @@ loops need branches in the compiler; `@floor` and the trigonometric
 built-ins are not there yet.
 
 The 2D shaders' programs draw the `gfx` showcase identically to the
-builder-API versions they replaced, and the cube's are checked in the
+builder-API versions they replaced, and the demo's are checked in the
 simulator against the same maths done on the CPU.
 
 The shell (`src/shell/`):
@@ -267,12 +269,11 @@ The demo program (`src/demo/`):
 | File | Contents |
 |---|---|
 | `main.zig` | The window (from the `app` module), the frame loop, input and timing statistics |
-| `view.zig` | The window's widgets: the rings and cube behind a column with the statistics, the speed buttons and the showcase |
+| `view.zig` | The window's widgets: the rings and the solid behind a column with the statistics, the speed buttons, the radio buttons choosing the solid, and the lighting and texture switches |
 | `rings.zig` | The rings drawn where the pointer clicks: stroked circles on the 2D canvas, fading out |
-| `shapes.zig` | The showcase of the 2D canvas: a card, buttons, FABs, chips, text fields, selection controls, polygons, strokes and translucent circles, in Material 3's baseline colours |
-| `cube.zig` | The cube: a pipeline with depth testing and culling, vertex and index buffers, and a tiled texture |
+| `solids.zig` | The five Platonic solids: meshes found from their corners (with flat normals, a tint per face and a checkerboard across each), drawn with depth testing and culling, lit and textured or not |
 | `netinfo.zig` | Looks up the IPv4 address (SIOCGIFCONF, no privileges needed) |
-| `shaders/` | The cube's shader |
+| `shaders/` | The solids' shader: tint, optional lighting (diffuse from a fixed light, with ambient) and optional texture |
 
 ### Privileges
 
@@ -437,12 +438,12 @@ stardust.ip=192.168.1.50/24,192.168.1.1
 ### The demo
 
 The screen shows the shell's bar along the top, and below it the demo's
-window. The cube spins at the display's refresh rate. The window's top left
+window. The solid spins at the display's refresh rate. The window's top left
 corner shows, after the title, the git commit it was built from (short,
 with `-dirty` if there were uncommitted changes), then:
 
 - the IPv4 address, or "No network";
-- frames per second and the triangle count;
+- frames per second and the window's size;
 - the window size;
 - GPU time per frame: from submitting the frame to the GPU finishing it
   (`glFinish`, before `eglSwapBuffers` hands the frame to the shell). It
@@ -479,13 +480,15 @@ Moving a USB mouse moves the cursor. Over the window, each click starts a
 small ring: blue for the left button, orange for the right and green for
 the middle. The rings grow and fade out.
 
-Below the statistics, Material outlined buttons slow the cube down, pause
-it and speed it up, and the shape showcase draws a set of Material 3
-components with the 2D canvas. In a window too small for it all, the
-column overflows at the bottom and shows the stripes.
+Below the statistics, Material outlined buttons slow the solid down,
+pause it and speed it up. Radio buttons choose the solid (tetrahedron,
+cube, octahedron, dodecahedron or icosahedron; its triangle count is
+above them), and switches turn the lighting and the checkerboard texture
+on and off. In a window too small for it all, the column overflows at the
+bottom and shows the stripes.
 
 The statistics change twice a second, and the same statistics go to the
-log every 5 seconds. If the cube shows its inside faces rather than its
+log every 5 seconds. If the solid shows its inside faces rather than its
 outside, face culling's winding is reversed. If the font cannot be loaded,
 everything but the text is drawn and the log says why.
 

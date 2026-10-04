@@ -1,8 +1,9 @@
-//! The Stardust demo: a spinning, textured cube, with the machine's IP
+//! The Stardust demo: a spinning Platonic solid, with the machine's IP
 //! address and rendering statistics in the top left corner, written in
 //! Fira Sans (its own copy, next to the executable), buttons that change
-//! the cube's speed, and a showcase of 2D shapes. Clicks draw expanding,
-//! fading rings behind the cube.
+//! the solid's speed, radio buttons to choose the solid and switches for
+//! its lighting and texture. Clicks draw expanding, fading rings behind
+//! the solid.
 //!
 //! It is a native Stardust app: a window on stardust-shell (see the `app`
 //! module), built with the `ui` toolkit (see view.zig), drawn with the vc4
@@ -18,7 +19,7 @@ const sys = @import("sys");
 const font = @import("font");
 const vc4 = @import("vc4");
 const app = @import("app");
-const cube_mod = @import("cube.zig");
+const solids = @import("solids.zig");
 const netinfo = @import("netinfo.zig");
 const rings_mod = @import("rings.zig");
 const view = @import("view.zig");
@@ -92,7 +93,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     var height = win.height;
     print("stardust: drawing with the vc4 API, window {d}x{d}\n", .{ width, height });
 
-    var cube = try cube_mod.Cube.init(gpa, dev);
+    var all_solids = try solids.Solids.init(gpa, dev);
     var f = loadFont(gpa, font_path);
     const window_ui = try ui.Ui.create(gpa, if (f) |*fnt| fnt else null);
     try window_ui.attachGpu(dev);
@@ -145,7 +146,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
 
         const scale = @min(@as(f32, @floatFromInt(width)) / 1920, @as(f32, @floatFromInt(height)) / 1080);
         window_ui.frame(width, height, frame_start, view.Demo{
-            .cube = &cube,
+            .solids = &all_solids,
             .rings = &rings,
             .subtitle = "build " ++ build_info.commit,
             .status = status,
@@ -263,7 +264,7 @@ fn statusLines(bufs: *[view.lines][96]u8, s: Stats.Summary, width: u32, height: 
         std.fmt.bufPrint(&bufs[0], "{d}.{d}.{d}.{d}  ({s})", .{ a.ip[0], a.ip[1], a.ip[2], a.ip[3], a.name() }) catch ""
     else
         "No network";
-    out[1] = std.fmt.bufPrint(&bufs[1], "{d:.1} fps  ·  {d}×{d}  ·  {d} triangles", .{ s.fps, width, height, cube_mod.triangles }) catch "";
+    out[1] = std.fmt.bufPrint(&bufs[1], "{d:.1} fps  ·  {d}×{d}", .{ s.fps, width, height }) catch "";
     out[2] = std.fmt.bufPrint(&bufs[2], "GPU {d:.2} ms per frame", .{s.gpu_ms}) catch "";
     out[3] = std.fmt.bufPrint(&bufs[3], "CPU {d:.2} ms per frame", .{s.cpu_ms}) catch "";
     var key_buf: [16]u8 = undefined;
@@ -278,18 +279,17 @@ fn statusLines(bufs: *[view.lines][96]u8, s: Stats.Summary, width: u32, height: 
 }
 
 test {
-    _ = @import("cube.zig");
+    _ = @import("solids.zig");
     _ = @import("view.zig");
     _ = @import("netinfo.zig");
     _ = @import("rings.zig");
-    _ = @import("shapes.zig");
     _ = @import("sysinfo.zig");
 }
 
 test "status lines" {
     var bufs: [view.lines][96]u8 = undefined;
     const lines = statusLines(&bufs, .{ .fps = 59.94, .cpu_ms = 0.42, .gpu_ms = 6.5 }, 1920, 1080, .{ .pointer = .{ 12.25, 400 }, .key = 30 }, .{ .temperature = 61.6, .speed = 99.6, .total_busy = 45 });
-    try std.testing.expectEqualStrings("59.9 fps  ·  1920×1080  ·  12 triangles", lines[1]);
+    try std.testing.expectEqualStrings("59.9 fps  ·  1920×1080", lines[1]);
     try std.testing.expectEqualStrings("GPU 6.50 ms per frame", lines[2]);
     try std.testing.expectEqualStrings("Pointer 12, 400  ·  last key A", lines[4]);
     try std.testing.expectEqualStrings("62 °C  ·  CPU speed 100%  ·  busy 45%", lines[5]);
