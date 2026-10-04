@@ -170,7 +170,7 @@ pub const Style = struct {
     size: f32,
     color: u32 = 0xffffffff,
 
-    fn scale(s: Style) f32 {
+    pub fn scale(s: Style) f32 {
         return s.size / @as(f32, @floatFromInt(s.font.units_per_em));
     }
 
@@ -188,16 +188,20 @@ pub const Style = struct {
 
 /// Steps through UTF-8 text glyph by glyph, giving each glyph's pen
 /// position (kerning applied). Invalid UTF-8 shows as U+FFFD.
-const Layout = struct {
+pub const Layout = struct {
     style: Style,
     text: []const u8,
     at: usize = 0,
     x: f32,
     prev: ?u16 = null,
 
-    const Item = struct { glyph: u16, x: f32 };
+    pub const Item = struct { glyph: u16, x: f32 };
 
-    fn next(l: *Layout) ?Item {
+    pub fn init(style: Style, text: []const u8, x: f32) Layout {
+        return .{ .style = style, .text = text, .x = x };
+    }
+
+    pub fn next(l: *Layout) ?Item {
         if (l.at >= l.text.len) return null;
         const len = std.unicode.utf8ByteSequenceLength(l.text[l.at]) catch 1;
         const cp: u21 = if (l.at + len <= l.text.len)
@@ -331,4 +335,116 @@ test "invalid UTF-8 draws the replacement character" {
     const f = try Font.init(fira);
     const style: Style = .{ .font = &f, .size = 16 };
     try testing.expect(measure(style, "a\xffb") > measure(style, "ab"));
+}
+
+/// A run of text laid out: its glyphs' pen positions (from 0) and width.
+pub const Run = struct {
+    glyphs: []const Layout.Item,
+    width: f32,
+};
+
+/// Runs of text laid out once and kept while they are drawn, since laying
+/// out (character map lookups and kerning) costs much more than looking
+/// a run up. Runs not used between two `sweep`s are dropped.
+pub const RunCache = struct {
+    gpa: std.mem.Allocator,
+    /// Keyed by font, size and text.
+    map: std.StringHashMapUnmanaged(Entry) = .empty,
+
+    const Entry = struct { run: Run, used: bool };
+    /// Longer texts are laid out every time.
+    const max_text = 512;
+
+    pub fn init(gpa: std.mem.Allocator) RunCache {
+        return .{ .gpa = gpa };
+    }
+
+    pub fn deinit(c: *RunCache) void {
+        var it = c.map.iterator();
+        while (it.next()) |e| c.free(e.key_ptr.*, e.value_ptr.run);
+        c.map.deinit(c.gpa);
+    }
+
+    fn free(c: *RunCache, key: []const u8, run: Run) void {
+        c.gpa.free(key);
+        c.gpa.free(run.glyphs);
+    }
+
+    /// `text` laid out in `style`, or null if it cannot be kept (too long,
+    /// or out of memory).
+    pub fn get(c: *RunCache, style: Style, text: []const u8) ?Run {
+        if (text.len > max_text) return null;
+        var buf: [max_text + 16]u8 = undefined;
+        const key = keyFor(&buf, style, text);
+        if (c.map.getPtr(key)) |e| {
+            e.used = true;
+            return e.run;
+        }
+        var glyphs: std.ArrayList(Layout.Item) = .empty;
+        var l = Layout.init(style, text, 0);
+        while (l.next()) |item| glyphs.append(c.gpa, item) catch {
+            glyphs.deinit(c.gpa);
+            return null;
+        };
+        const run: Run = .{ .glyphs = glyphs.toOwnedSlice(c.gpa) catch {
+            glyphs.deinit(c.gpa);
+            return null;
+        }, .width = l.x };
+        const owned = c.gpa.dupe(u8, key) catch {
+            c.gpa.free(run.glyphs);
+            return null;
+        };
+        c.map.put(c.gpa, owned, .{ .run = run, .used = true }) catch {
+            c.free(owned, run);
+            return null;
+        };
+        return run;
+    }
+
+    /// The width of `text` in `style`.
+    pub fn measure(c: *RunCache, style: Style, text: []const u8) f32 {
+        return if (c.get(style, text)) |r| r.width else text_measure(style, text);
+    }
+
+    /// Drops the runs not used since the last sweep.
+    pub fn sweep(c: *RunCache) void {
+        var stale: std.ArrayList([]const u8) = .empty;
+        defer stale.deinit(c.gpa);
+        var it = c.map.iterator();
+        while (it.next()) |e| {
+            if (!e.value_ptr.used) stale.append(c.gpa, e.key_ptr.*) catch break;
+            e.value_ptr.used = false;
+        }
+        for (stale.items) |key| {
+            const kv = c.map.fetchRemove(key).?;
+            c.free(kv.key, kv.value.run);
+        }
+    }
+
+    fn keyFor(buf: []u8, style: Style, text: []const u8) []const u8 {
+        std.mem.writeInt(usize, buf[0..@sizeOf(usize)], @intFromPtr(style.font), .little);
+        std.mem.writeInt(u32, buf[@sizeOf(usize)..][0..4], @bitCast(style.size), .little);
+        const head = @sizeOf(usize) + 4;
+        @memcpy(buf[head..][0..text.len], text);
+        return buf[0 .. head + text.len];
+    }
+};
+
+const text_measure = measure;
+
+test "runs are laid out once, match measuring, and are swept when unused" {
+    const f = try Font.init(fira);
+    var c = RunCache.init(testing.allocator);
+    defer c.deinit();
+    const style: Style = .{ .font = &f, .size = 20 };
+    const r = c.get(style, "To be").?;
+    try testing.expectApproxEqAbs(measure(style, "To be"), r.width, 0.0001);
+    try testing.expectEqual(@as(usize, 5), r.glyphs.len);
+    try testing.expectEqual(r.glyphs.ptr, c.get(style, "To be").?.glyphs.ptr);
+    // Another size is another run.
+    try testing.expect(c.get(.{ .font = &f, .size = 21 }, "To be").?.glyphs.ptr != r.glyphs.ptr);
+    c.sweep();
+    try testing.expectEqual(@as(u32, 2), c.map.count());
+    c.sweep();
+    try testing.expectEqual(@as(u32, 0), c.map.count());
 }

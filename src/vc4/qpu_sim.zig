@@ -413,18 +413,26 @@ fn write(s: *State, r: *Result, env: Env, waddr: u6, file: File, value: Vec, con
     }
 }
 
-/// Nearest-neighbour sampling of an RGBA8888 texture with repeat wrapping.
+/// Nearest-neighbour sampling of an RGBA8888 texture, with repeat or
+/// clamp wrapping.
 fn sample(memory: []const u8, p0: u32, p1: u32, s: f32, t: f32) Error!u32 {
     const p = texture.decodeConfig(p0, p1);
-    if (p.type != .rgba8888 or p.mag_filter != .nearest or p.min_filter != .nearest or
-        p.wrap_s != .repeat or p.wrap_t != .repeat) return error.Unsupported;
-    const w: i64 = p.width;
-    const h: i64 = p.height;
-    const x: u32 = @intCast(@mod(@as(i64, @intFromFloat(@floor(s * @as(f32, @floatFromInt(w))))), w));
-    const y: u32 = @intCast(@mod(@as(i64, @intFromFloat(@floor(t * @as(f32, @floatFromInt(h))))), h));
+    if (p.type != .rgba8888 or p.mag_filter != .nearest or p.min_filter != .nearest) return error.Unsupported;
+    const x = try wrap(s, p.width, p.wrap_s);
+    const y = try wrap(t, p.height, p.wrap_t);
     const offset = p.offset + referenceTexelOffset(p.width, p.height, x, y);
     if (offset + 4 > memory.len) return error.Unsupported;
     return std.mem.readInt(u32, memory[offset..][0..4], .little);
+}
+
+fn wrap(coord: f32, size: u32, mode: texture.Wrap) Error!u32 {
+    const n: i64 = size;
+    const i: i64 = @intFromFloat(std.math.clamp(@floor(coord * @as(f32, @floatFromInt(size))), -1e9, 1e9));
+    return switch (mode) {
+        .repeat => @intCast(@mod(i, n)),
+        .clamp => @intCast(std.math.clamp(i, 0, n - 1)),
+        else => error.Unsupported,
+    };
 }
 
 /// Byte offset of texel (x, y) in a 32-bit-per-pixel texture, written

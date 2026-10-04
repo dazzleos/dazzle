@@ -8,6 +8,7 @@ const std = @import("std");
 const vc4 = @import("vc4");
 const shaders = @import("shaders.zig");
 const canvas_mod = @import("canvas.zig");
+const atlas_mod = @import("atlas.zig");
 
 const shader = @import("shader");
 
@@ -16,9 +17,10 @@ const sim = vc4.qpu_sim;
 pub const Programs = struct {
     shape: shader.Program,
     solid: shader.Program,
+    text: shader.Program,
 
     pub fn load() Programs {
-        return .{ .shape = shaders.shape(), .solid = shaders.solid() };
+        return .{ .shape = shaders.shape(), .solid = shaders.solid(), .text = shaders.text() };
     }
 };
 
@@ -37,17 +39,30 @@ const max_varyings = shaders.shape_floats - 2;
 
 /// Pixels waiting to be shaded together.
 const Group = struct {
+    fs: *const vc4.compiler.Compiled,
+    uniforms: []const u32 = &.{},
+    uniform_buf: [8]u32 = undefined,
+    texture: []const u8 = &.{},
     index: [sim.lanes]usize = undefined,
     varyings: [max_varyings]sim.Vec = undefined,
     n: usize = 0,
 };
 
 pub fn render(c: *const canvas_mod.Canvas, programs: *const Programs, img: Image) !void {
+    // The glyph atlas, as the texture unit reads it.
+    var texture: Texture = .{};
+    defer texture.deinit();
     for (c.batches.items) |*b| {
         const floats = canvas_mod.floatsPerVertex(b.kind);
-        const fs = if (b.kind == .shape) &programs.shape.fs else &programs.solid.fs;
+        const fs = switch (b.kind) {
+            .shape => &programs.shape.fs,
+            .solid => &programs.solid.fs,
+            .text => &programs.text.fs,
+        };
         const nvary = floats - 2;
-        var group: Group = .{};
+        var group: Group = .{ .fs = fs };
+        if (b.kind == .text) group.uniforms = try texture.uniforms(c.atlas orelse continue, fs, &group.uniform_buf);
+        group.texture = texture.memory;
         const verts = b.floats.items;
         var t: usize = 0;
         while (t + 3 * floats <= verts.len) : (t += 3 * floats) {
@@ -67,8 +82,8 @@ pub fn render(c: *const canvas_mod.Canvas, programs: *const Programs, img: Image
             if (b.clip) |clip| {
                 x0 = @max(x0, @as(i32, @intFromFloat(@floor(clip.x))));
                 y0 = @max(y0, @as(i32, @intFromFloat(@floor(clip.y))));
-                x1 = @min(x1, @as(i32, @intFromFloat(@floor(clip.x))) + @as(i32, @intFromFloat(@ceil(clip.w))));
-                y1 = @min(y1, @as(i32, @intFromFloat(@floor(clip.y))) + @as(i32, @intFromFloat(@ceil(clip.h))));
+                x1 = @min(x1, @as(i32, @intFromFloat(@ceil(clip.x + clip.w))));
+                y1 = @min(y1, @as(i32, @intFromFloat(@ceil(clip.y + clip.h))));
             }
             var y = y0;
             while (y < y1) : (y += 1) {
@@ -96,13 +111,36 @@ pub fn render(c: *const canvas_mod.Canvas, programs: *const Programs, img: Image
                         group.varyings[i][lane] = @bitCast(value);
                     }
                     group.n += 1;
-                    if (group.n == sim.lanes) try shade(fs, &group, nvary, img);
+                    if (group.n == sim.lanes) try shade(&group, nvary, img);
                 }
             }
         }
-        if (group.n > 0) try shade(fs, &group, nvary, img);
+        if (group.n > 0) try shade(&group, nvary, img);
     }
 }
+
+/// The atlas in the texture unit's layout, made when text is first drawn.
+const Texture = struct {
+    memory: []u8 = &.{},
+
+    fn deinit(t: *Texture) void {
+        std.heap.page_allocator.free(t.memory);
+    }
+
+    fn uniforms(t: *Texture, atlas: *const atlas_mod.Atlas, fs: *const vc4.compiler.Compiled, buf: []u32) ![]const u32 {
+        if (t.memory.len == 0) {
+            t.memory = try std.heap.page_allocator.alloc(u8, vc4.texture.imageSize(atlas_mod.width, atlas_mod.height));
+            vc4.texture.upload(t.memory, atlas.pixels, atlas_mod.width, atlas_mod.height);
+        }
+        const cfg: vc4.texture.Config = .{ .width = atlas_mod.width, .height = atlas_mod.height, .mag_filter = .nearest, .min_filter = .nearest, .wrap_s = .clamp, .wrap_t = .clamp };
+        for (fs.uniforms(), buf[0..fs.uniforms().len]) |u, *out| out.* = switch (u) {
+            .user => 0,
+            .tex_p0 => vc4.texture.p0(cfg),
+            .tex_p1 => vc4.texture.p1(cfg),
+        };
+        return buf[0..fs.uniforms().len];
+    }
+};
 
 fn canonicalEdge(a: [2]f32, b: [2]f32, c: [2]f32) f32 {
     const swap = a[0] > b[0] or (a[0] == b[0] and a[1] > b[1]);
@@ -123,7 +161,7 @@ fn topLeft(a: [2]f32, b: [2]f32, area: f32) bool {
     return (dy == 0 and dx < 0) or dy > 0;
 }
 
-fn shade(fs: *const vc4.compiler.Compiled, g: *Group, nvary: usize, img: Image) !void {
+fn shade(g: *Group, nvary: usize, img: Image) !void {
     // Unused lanes repeat the last pixel; their results are dropped.
     for (g.n..sim.lanes) |lane| {
         g.index[lane] = g.index[g.n - 1];
@@ -131,7 +169,7 @@ fn shade(fs: *const vc4.compiler.Compiled, g: *Group, nvary: usize, img: Image) 
     }
     var tile: sim.Vec = undefined;
     for (&tile, g.index) |*t, idx| t.* = img.pixels[idx];
-    const r = try sim.run(fs.code(), .{ .varyings = g.varyings[0..nvary], .tlb_color_in = tile });
+    const r = try sim.run(g.fs.code(), .{ .uniforms = g.uniforms, .varyings = g.varyings[0..nvary], .tlb_color_in = tile, .texture_memory = g.texture });
     for (g.index[0..g.n], 0..) |idx, lane| img.pixels[idx] = r.tlb_color.?[lane];
     g.n = 0;
 }
@@ -233,4 +271,32 @@ test "strokes and polygons" {
     try render(&c, &programs, img);
     try expectNear(0xffffffff, img.at(20, 25), 1);
     try expectNear(0xff000000, img.at(5, 10), 1);
+}
+
+test "text matches the font renderer's own drawing" {
+    const font = @import("font");
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    var atlas = try atlas_mod.Atlas.init(testing.allocator);
+    defer atlas.deinit();
+    const programs = Programs.load();
+    var c = Canvas.init(testing.allocator);
+    defer c.deinit();
+    c.begin(120, 40);
+    const style: font.Style = .{ .font = &f, .size = 20 };
+    const end = c.drawText(&atlas, style, 4.25, 28, "Stardust", Color.rgb(0xffffff));
+    try testing.expectApproxEqAbs(4.25 + font.measure(style, "Stardust"), end, 0.001);
+    var pixels: [120 * 40]u32 = @splat(0xff000000);
+    const img: Image = .{ .pixels = &pixels, .width = 120, .height = 40 };
+    try render(&c, &programs, img);
+
+    var cache = font.GlyphCache.init(testing.allocator);
+    defer cache.deinit();
+    var want: [120 * 40]u32 = @splat(0xff000000);
+    _ = try font.draw(.{ .pixels = &want, .width = 120, .height = 40, .stride = 120 }, &cache, style, 4.25, 28, "Stardust");
+    var lit: u32 = 0;
+    for (want, pixels) |w, g| {
+        try expectNear(w, g, 1);
+        lit += @intFromBool(g != 0xff000000);
+    }
+    try testing.expect(lit > 200);
 }

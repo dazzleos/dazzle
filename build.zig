@@ -18,7 +18,7 @@ const Modules = struct {
 /// * `shader`: shaders written in Zig: SPIR-V to vc4 programs, and drawing
 ///   with them
 /// * `app`: native apps' windows on stardust-shell, drawn with vc4
-/// * `gfx`: 2D graphics (rounded rectangles, polygons, strokes) on vc4
+/// * `gfx`: 2D graphics (rounded rectangles, polygons, strokes, text) on vc4
 /// * `font`: OpenType font rendering
 /// * `wayland`: the Wayland wire protocol and a client library
 /// * `build_info`: `commit`, the source's git commit (short, with "-dirty"
@@ -31,6 +31,11 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         .target = target,
         .optimize = optimize,
     });
+    const font = b.createModule(.{
+        .root_source_file = b.path("src/font/font.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const gfx = b.createModule(.{
         .root_source_file = b.path("src/gfx/gfx.zig"),
         .target = target,
@@ -38,6 +43,7 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         .imports = &.{
             .{ .name = "vc4", .module = vc4 },
             .{ .name = "shader", .module = shader },
+            .{ .name = "font", .module = font },
         },
     });
     addShaderImports(gfx, shaders, .gfx);
@@ -49,11 +55,6 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
             .{ .name = "vc4", .module = vc4 },
             .{ .name = "wayland", .module = wayland },
         },
-    });
-    const font = b.createModule(.{
-        .root_source_file = b.path("src/font/font.zig"),
-        .target = target,
-        .optimize = optimize,
     });
     const info = b.addOptions();
     info.addOption([]const u8, "commit", gitCommit(b));
@@ -95,6 +96,7 @@ const ShaderOwner = enum { gfx, demo, shell };
 const shader_programs = [_]struct { source: []const u8, owner: ShaderOwner, args: []const []const u8 }{
     .{ .source = "src/gfx/shaders/shape.zig", .owner = .gfx, .args = &.{"--blend=source-over"} },
     .{ .source = "src/gfx/shaders/solid.zig", .owner = .gfx, .args = &.{"--blend=source-over"} },
+    .{ .source = "src/gfx/shaders/text.zig", .owner = .gfx, .args = &.{"--blend=source-over"} },
     .{ .source = "src/demo/shaders/cube.zig", .owner = .demo, .args = &.{"--depth-test"} },
     .{ .source = "src/demo/shaders/hud.zig", .owner = .demo, .args = &.{} },
     .{ .source = "src/shell/shaders/quad.zig", .owner = .shell, .args = &.{} },
@@ -470,7 +472,7 @@ pub fn build(b: *std.Build) void {
         host.shader.addAnonymousImport(b.fmt("{s}.spv", .{s.name}), .{ .root_source_file = s.spirv });
     }
     // The font tests use the real system font.
-    host.font.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
+    for ([_]*std.Build.Module{ host.font, host.gfx }) |m| m.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const test_step = b.step("test", "Run unit tests on the host");
     for ([_]*std.Build.Module{
         host.sys,

@@ -21,6 +21,11 @@ pub const Font = opentype.Font;
 pub const Canvas = text.Canvas;
 pub const GlyphCache = text.GlyphCache;
 pub const Style = text.Style;
+pub const Layout = text.Layout;
+pub const Run = text.Run;
+pub const RunCache = text.RunCache;
+pub const Bitmap = text.Bitmap;
+pub const rasterizeGlyph = text.rasterizeGlyph;
 pub const draw = text.draw;
 pub const measure = text.measure;
 

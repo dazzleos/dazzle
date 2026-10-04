@@ -18,6 +18,10 @@
 const std = @import("std");
 const geometry = @import("geometry.zig");
 const shaders = @import("shaders.zig");
+const font = @import("font");
+const atlas_mod = @import("atlas.zig");
+
+pub const Atlas = atlas_mod.Atlas;
 
 pub const Point = geometry.Point;
 
@@ -88,7 +92,7 @@ pub const Radii = struct {
     }
 };
 
-pub const Kind = enum { shape, solid };
+pub const Kind = enum { shape, solid, text };
 
 pub const Batch = struct {
     kind: Kind,
@@ -108,6 +112,7 @@ pub fn floatsPerVertex(kind: Kind) usize {
     return switch (kind) {
         .shape => shaders.shape_floats,
         .solid => shaders.solid_floats,
+        .text => shaders.text_floats,
     };
 }
 
@@ -127,6 +132,8 @@ pub const Canvas = struct {
     /// Set if a shape could not be recorded (out of memory); the frame is
     /// missing it.
     failed: bool = false,
+    /// Where the glyphs of the text batches are (see `drawText`).
+    atlas: ?*Atlas = null,
 
     pub fn init(gpa: std.mem.Allocator) Canvas {
         return .{ .gpa = gpa };
@@ -143,7 +150,12 @@ pub const Canvas = struct {
     pub fn begin(c: *Canvas, width: u32, height: u32) void {
         c.width = @floatFromInt(width);
         c.height = @floatFromInt(height);
-        for (c.batches.items) |*b| {
+        // Kept in reverse, so the next frame's batches (popped off the end)
+        // get the buffers the same batches had, already big enough.
+        var i = c.batches.items.len;
+        while (i > 0) {
+            i -= 1;
+            const b = &c.batches.items[i];
             b.floats.clearRetainingCapacity();
             c.spare.append(c.gpa, b.*) catch b.floats.deinit(c.gpa);
         }
@@ -151,6 +163,7 @@ pub const Canvas = struct {
         c.clip = null;
         c.origin = .{ 0, 0 };
         c.failed = false;
+        c.atlas = null;
     }
 
     /// Limits drawing to a rectangle (whole pixels, relative to the
@@ -205,6 +218,47 @@ pub const Canvas = struct {
         const b = c.batchFor(.solid, c.moved(boundsOf(points)).outset(width * geometry.miter_limit / 2 + 1)) orelse return;
         var sink: SolidSink = .{ .canvas = c, .batch = b, .color = color, .offset = c.origin };
         geometry.strokePolyline(sink.sink(), points, closed, width);
+    }
+
+    // --- Text -----------------------------------------------------------------
+
+    /// Draws one line of text with its baseline at `baseline` (rounded to
+    /// a pixel), starting at `x`, with glyphs from `atlas` (every text
+    /// batch of a canvas uses the same one). Returns the pen position after
+    /// the text. Glyphs that do not fit in the atlas are left out.
+    pub fn drawText(c: *Canvas, atlas: *Atlas, style: font.Style, x: f32, baseline: f32, text: []const u8, color: Color) f32 {
+        c.atlas = atlas;
+        const ox = c.origin[0];
+        const base = @round(baseline + c.origin[1]);
+        const run = atlas.runs.get(style, text);
+        const end = x + if (run) |r| r.width else font.measure(style, text);
+        if (color.a <= 0 or text.len == 0) return end;
+        // Glyphs reach about an em above and below the baseline at most.
+        const b = c.batchFor(.text, .{ .x = x + ox - style.size, .y = base - 1.5 * style.size, .w = end - x + 2 * style.size, .h = 2.5 * style.size }) orelse return end;
+        const aw: f32 = @floatFromInt(atlas_mod.width);
+        const ah: f32 = @floatFromInt(atlas_mod.height);
+        var l = font.Layout.init(style, text, 0);
+        var i: usize = 0;
+        while (true) : (i += 1) {
+            const item = if (run) |r| (if (i < r.glyphs.len) r.glyphs[i] else break) else l.next() orelse break;
+            const quarter: i32 = @intFromFloat(@round(std.math.clamp(item.x + x + ox, -1e6, 1e6) * 4));
+            const e = atlas.glyph(style.font, item.glyph, style.size, @intCast(@mod(quarter, 4))) orelse continue;
+            if (e.w == 0) continue;
+            const x0: f32 = @floatFromInt(@divFloor(quarter, 4) + e.left);
+            const y0 = base + @as(f32, @floatFromInt(e.top));
+            const x1 = x0 + @as(f32, @floatFromInt(e.w));
+            const y1 = y0 + @as(f32, @floatFromInt(e.h));
+            const tu0 = @as(f32, @floatFromInt(e.x)) / aw;
+            const tv0 = @as(f32, @floatFromInt(e.y)) / ah;
+            const tu1 = @as(f32, @floatFromInt(e.x + e.w)) / aw;
+            const tv1 = @as(f32, @floatFromInt(e.y + e.h)) / ah;
+            const corners = [4][4]f32{ .{ x0, y0, tu0, tv0 }, .{ x1, y0, tu1, tv0 }, .{ x1, y1, tu1, tv1 }, .{ x0, y1, tu0, tv1 } };
+            var verts: [4][shaders.text_floats]f32 = undefined;
+            for (corners, &verts) |k, *out| out.* = .{ c.clipX(k[0]), c.clipY(k[1]), k[2], k[3], color.r, color.g, color.b, color.a };
+            const out = c.vertices(b, shaders.text_floats, 6) orelse return end;
+            for ([_]usize{ 0, 1, 2, 0, 2, 3 }, out) |k, *o| o.* = verts[k];
+        }
+        return end;
     }
 
     // --- Rounded rectangles --------------------------------------------------
@@ -352,10 +406,18 @@ pub const Canvas = struct {
     }
 
     fn append(c: *Canvas, b: *Batch, verts: []const [shaders.shape_floats]f32) void {
-        for (verts) |vert| b.floats.appendSlice(c.gpa, &vert) catch {
+        const out = c.vertices(b, shaders.shape_floats, verts.len) orelse return;
+        for (verts, out) |v_in, *o| o.* = v_in;
+    }
+
+    /// Room for `n` more vertices of `floats` floats at the end of the
+    /// batch (written whole, so each is one fixed-size copy).
+    fn vertices(c: *Canvas, b: *Batch, comptime floats: usize, n: usize) ?[][floats]f32 {
+        const more = b.floats.addManyAsSlice(c.gpa, n * floats) catch {
             c.failed = true;
-            return;
+            return null;
         };
+        return @as([*][floats]f32, @ptrCast(more.ptr))[0..n];
     }
 };
 
@@ -374,12 +436,9 @@ const SolidSink = struct {
     fn triangle(ptr: *anyopaque, a: geometry.Vertex, b: geometry.Vertex, cc: geometry.Vertex) void {
         const s: *SolidSink = @ptrCast(@alignCast(ptr));
         const c = s.canvas;
-        for ([_]geometry.Vertex{ a, b, cc }) |vert| {
-            const f = [shaders.solid_floats]f32{ c.clipX(vert.x + s.offset[0]), c.clipY(vert.y + s.offset[1]), s.color.r, s.color.g, s.color.b, s.color.a * vert.alpha };
-            s.batch.floats.appendSlice(c.gpa, &f) catch {
-                c.failed = true;
-                return;
-            };
+        const out = c.vertices(s.batch, shaders.solid_floats, 3) orelse return;
+        for ([_]geometry.Vertex{ a, b, cc }, out) |vert, *o| {
+            o.* = .{ c.clipX(vert.x + s.offset[0]), c.clipY(vert.y + s.offset[1]), s.color.r, s.color.g, s.color.b, s.color.a * vert.alpha };
         }
     }
 };
