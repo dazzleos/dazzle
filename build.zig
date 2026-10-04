@@ -252,6 +252,24 @@ const Kernel = struct {
     step: *std.Build.Step,
     /// Where make puts its output (O=).
     out: []const u8,
+    /// The source tree.
+    src: []const u8,
+
+    /// Builds a device tree of our own the way the kernel builds its own
+    /// (preprocessed, then compiled by the kernel's dtc), so it can include
+    /// one of the kernel's: `#include "arm/broadcom/<board>.dts"`.
+    fn deviceTree(k: Kernel, b: *std.Build, dts: std.Build.LazyPath, name: []const u8) std.Build.LazyPath {
+        const includes = b.pathJoin(&.{ k.src, "scripts/dtc/include-prefixes" });
+        const cpp = b.addSystemCommand(&.{ b.graph.zig_exe, "cc", "-E", "-nostdinc", "-I", includes, "-undef", "-D__DTS__", "-x", "assembler-with-cpp", "-o" });
+        const pre = cpp.addOutputFileArg(b.fmt("{s}.dts", .{name}));
+        cpp.addFileArg(dts);
+        cpp.step.dependOn(k.step);
+        const dtc = b.addSystemCommand(&.{b.pathJoin(&.{ k.out, "scripts/dtc/dtc" })});
+        dtc.addArgs(&.{ "-q", "-b", "0", b.fmt("-i{s}", .{includes}), "-@", "-o" });
+        const out = dtc.addOutputFileArg(b.fmt("{s}.dtb", .{name}));
+        dtc.addFileArg(pre);
+        return out;
+    }
 
     fn file(k: Kernel, b: *std.Build, sub_path: []const u8) std.Build.LazyPath {
         return .{ .cwd_relative = b.pathJoin(&.{ k.out, sub_path }) };
@@ -318,7 +336,7 @@ fn addKernel(b: *std.Build) Kernel {
     Chain.add(&last, make(b, linux_dir, out, toolchain, &.{
         b.fmt("-j{d}", .{jobs}), "zImage", "broadcom/bcm2835-rpi-zero.dtb", "broadcom/bcm2835-rpi-zero-w.dtb", "broadcom/bcm2837-rpi-3-a-plus.dtb",
     }));
-    return .{ .step = last, .out = out };
+    return .{ .step = last, .out = out, .src = linux_dir };
 }
 
 /// Raspberry Pi firmware (the GPU's boot loader), pinned by checksum.
@@ -397,7 +415,8 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.B
         .{ "zImage", kernel.file(b, "arch/arm/boot/zImage") },
         .{ "bcm2835-rpi-zero.dtb", kernel.file(b, "arch/arm/boot/dts/broadcom/bcm2835-rpi-zero.dtb") },
         .{ "bcm2835-rpi-zero-w.dtb", kernel.file(b, "arch/arm/boot/dts/broadcom/bcm2835-rpi-zero-w.dtb") },
-        .{ "bcm2837-rpi-3-a-plus.dtb", kernel.file(b, "arch/arm/boot/dts/broadcom/bcm2837-rpi-3-a-plus.dtb") },
+        // Mainline's, with the Wi-Fi chip's power added (see the source).
+        .{ "bcm2837-rpi-3-a-plus.dtb", kernel.deviceTree(b, b.path("boot/bcm2837-rpi-3-a-plus.dts"), "bcm2837-rpi-3-a-plus") },
         .{ "initramfs.cpio", initramfs },
         .{ "config.txt", b.path("boot/config.txt") },
         .{ "cmdline.txt", b.path("boot/cmdline.txt") },

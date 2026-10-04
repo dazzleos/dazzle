@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0
+// The Pi 3 A+, as mainline describes it, plus control of the Wi-Fi chip's
+// power. WL_REG_ON and BT_REG_ON share one line on the firmware's GPIO
+// expander, so mainline gives it to neither driver and leaves it as the
+// firmware set it: off, so the chip never appears on the SDIO bus. There
+// is no Bluetooth driver here to disturb, so the Wi-Fi power sequence
+// takes it (as on the Pi 3 B+, where the lines are separate).
+#include "arm/broadcom/bcm2837-rpi-3-a-plus.dts"
+
+&wifi_pwrseq {
+	reset-gpios = <&expgpio 1 GPIO_ACTIVE_LOW>;
+};

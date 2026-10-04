@@ -394,7 +394,8 @@ build runs: `mkinitramfs.zig` packs the initramfs, `mkimage.zig` writes the
 SD card image, `check.zig` checks for build tools, the kernel
 configuration and firmware checksums), `kernel/stardust.config` (kernel
 config fragment applied on top of `tinyconfig`), `boot/` (firmware
-`config.txt` and kernel `cmdline.txt`) and `scripts/zig` (downloads Zig).
+`config.txt`, kernel `cmdline.txt`, and the Pi 3 A+'s device tree:
+mainline's, built by the kernel's `dtc` with one change, below) and `scripts/zig` (downloads Zig).
 
 The image's filesystem (an initramfs, in RAM) is kept simple:
 
@@ -661,6 +662,12 @@ licence (`firmware/LICENCE.cypress`). The manager talks to the kernel with
 nl80211 over generic netlink (`src/init/nl80211.zig`). There is no
 regulatory database, so the kernel keeps to the world regulatory domain
 and logs that `regulatory.db` is missing.
+
+On the 3 A+, the chip's power (WL_REG_ON) shares a line on the firmware's
+GPIO expander with Bluetooth's. Mainline's device tree gives that line to
+neither driver, and the firmware leaves it off, so the chip never shows up.
+`boot/bcm2837-rpi-3-a-plus.dts` gives it to the Wi-Fi power sequence, as the
+Pi 3 B+'s does (there is no Bluetooth driver here to disturb).
 
 ## Faster development loops
 
