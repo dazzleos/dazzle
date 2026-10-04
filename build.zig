@@ -472,8 +472,8 @@ pub fn build(b: *std.Build) void {
 
     const shaders = addShaders(b);
     const pi = addModules(b, target, optimize, shaders);
-    // init runs as root; the shell and the demo (its Wayland client) run as
-    // the unprivileged Stardust user.
+    // init runs as root; the shell and the apps (its Wayland clients) run
+    // as the unprivileged Stardust user.
     const init_exe = b.addExecutable(.{
         .name = "stardust-init",
         .root_module = addProgramModule(b, "src/init/main.zig", target, optimize, pi, shaders, true),
@@ -484,6 +484,11 @@ pub fn build(b: *std.Build) void {
         .root_module = addProgramModule(b, "src/demo/main.zig", target, optimize, pi, shaders, true),
     });
     const install_demo = b.addInstallArtifact(demo_exe, .{});
+    const settings_exe = b.addExecutable(.{
+        .name = "stardust-settings",
+        .root_module = addProgramModule(b, "src/settings/main.zig", target, optimize, pi, shaders, true),
+    });
+    const install_settings = b.addInstallArtifact(settings_exe, .{});
     const shell_exe = b.addExecutable(.{
         .name = "stardust-shell",
         .root_module = addProgramModule(b, "src/shell/main.zig", target, optimize, pi, shaders, true),
@@ -503,12 +508,14 @@ pub fn build(b: *std.Build) void {
     const initramfs = run_mkinitramfs.addOutputFileArg("initramfs.cpio");
     run_mkinitramfs.addArtifactArg(init_exe);
     run_mkinitramfs.addArtifactArg(shell_exe);
-    run_mkinitramfs.addArtifactArg(demo_exe);
     run_mkinitramfs.addFileArg(b.path("fonts/FiraSans-Regular.ttf"));
     run_mkinitramfs.addFileArg(b.path("fonts/OFL.txt"));
+    // The apps, each in /apps/<name>, listed in the shell's dock.
+    run_mkinitramfs.addArtifactArg(demo_exe);
+    run_mkinitramfs.addArtifactArg(settings_exe);
     const install_initramfs = b.addInstallFile(initramfs, "initramfs.cpio");
     const programs_step = b.step("programs", "Build just the programs (zig-out/bin) and zig-out/initramfs.cpio");
-    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_shell.step, &install_initramfs.step }) |st| {
+    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_settings.step, &install_shell.step, &install_initramfs.step }) |st| {
         programs_step.dependOn(st);
         b.getInstallStep().dependOn(st);
     }
@@ -543,6 +550,8 @@ pub fn build(b: *std.Build) void {
     // The demo's layout is tested with its real font.
     const host_demo = addProgramModule(b, "src/demo/main.zig", b.graph.host, test_optimize, host, shaders, null);
     host_demo.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
+    const host_settings = addProgramModule(b, "src/settings/main.zig", b.graph.host, test_optimize, host, shaders, null);
+    host_settings.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     for ([_]*std.Build.Module{
         host.sys,
         host.vc4,
@@ -554,6 +563,7 @@ pub fn build(b: *std.Build) void {
         host.wayland,
         addProgramModule(b, "src/init/main.zig", b.graph.host, test_optimize, host, shaders, null),
         host_demo,
+        host_settings,
         addProgramModule(b, "src/shell/main.zig", b.graph.host, test_optimize, host, shaders, null),
     }) |m| {
         const t = b.addTest(.{ .root_module = m });

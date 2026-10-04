@@ -23,7 +23,9 @@ choose the solid and switches to turn its lighting and texture on and
 off. Rings spread out and fade
 where the pointer clicks. The IP address, rendering
 statistics and the last key pressed appear in its top left, in Fira Sans.
-A Vulkan-style API may follow.
+The settings app shows the build, the hardware, how much CPU, memory, GPU
+memory and storage is in use, and the network's status. A Vulkan-style
+API may follow.
 
 ## Layout
 
@@ -42,6 +44,7 @@ The code is split into Zig modules, linked statically into each program:
 | `stardust-init` | `src/init/` | The init program: mounts, network, log server, device permissions, starting the shell |
 | `stardust-shell` | `src/shell/` | The Wayland compositor and shell, described below |
 | `stardust-demo` | `src/demo/` | The demo, a native app |
+| `stardust-settings` | `src/settings/` | The settings app: the build, the hardware, what is in use and the network |
 
 The `vc4` module:
 
@@ -373,6 +376,7 @@ The image's filesystem (an initramfs, in RAM) is kept simple:
 /init                       stardust-init
 /shell/                     stardust-shell, FiraSans-Regular.ttf and its license
 /apps/stardust-demo/        stardust-demo, FiraSans-Regular.ttf and its license
+/apps/stardust-settings/    stardust-settings, FiraSans-Regular.ttf and its license
 /dev /proc /sys /run        mounted or created by init
 ```
 
@@ -568,6 +572,29 @@ device trees; the Pi 4 and 5 have different GPUs.
 
 On the Pi 3 A+ the CPU figures in the demo are shares of all four cores, so
 a program keeping one core busy shows 25%.
+
+### The settings app
+
+Click "S" in the dock. Its window has four cards, with the figures that
+change read again every second (`src/settings/info.zig`):
+
+- **System:** the build (git commit), Linux's version and how long the
+  system has been up.
+- **Hardware:** the board (from the device tree), the chip, the CPU's core
+  and how many there are, the GPU (the V3D's version, QPUs and slices,
+  from the vc4 driver), the memory, and the board's revision and serial
+  number.
+- **In use:** how busy the CPU is, the SoC's temperature, memory, the GPU's
+  memory (the CMA pool all GPU buffers come from: the V3D has no MMU), and
+  the system's files. Stardust has no driver for the SD card: the firmware
+  loads the system into memory at boot and it runs from there, so its
+  storage is that filesystem in RAM. The meters turn red above 90%.
+- **Network:** the hostname, each adapter's link (and speed), its address
+  (and whether it came from DHCP or `stardust.ip=`), traffic and hardware
+  address, and the default gateway.
+
+Everything comes from files any user can read (`/proc`, `/sys`) and the
+GPU's render node, so it runs unprivileged like the other apps.
 
 ## Faster development loops
 

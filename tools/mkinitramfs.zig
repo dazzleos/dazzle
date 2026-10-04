@@ -9,12 +9,14 @@
 //!     /shell/stardust-shell
 //!     /shell/FiraSans-Regular.ttf
 //!     /shell/FiraSans-OFL.txt
-//!     /apps/stardust-demo/stardust-demo
-//!     /apps/stardust-demo/FiraSans-Regular.ttf
-//!     /apps/stardust-demo/FiraSans-OFL.txt
+//!     /apps/<app>/<app>                         for each app binary
+//!     /apps/<app>/FiraSans-Regular.ttf
+//!     /apps/<app>/FiraSans-OFL.txt
 //!     /dev, /proc, /sys                         mount points
 //!
-//! Usage: mkinitramfs <output.cpio> <init-binary> <shell-binary> <demo-binary> <font> <font-license>
+//! An app is named after its binary (stardust-demo, stardust-settings).
+//!
+//! Usage: mkinitramfs <output.cpio> <init-binary> <shell-binary> <font> <font-license> <app-binary>...
 
 const std = @import("std");
 
@@ -63,24 +65,24 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 7) {
-        std.debug.print("usage: {s} <output.cpio> <init-binary> <shell-binary> <demo-binary> <font> <font-license>\n", .{args[0]});
+    if (args.len < 6) {
+        std.debug.print("usage: {s} <output.cpio> <init-binary> <shell-binary> <font> <font-license> <app-binary>...\n", .{args[0]});
         std.process.exit(2);
     }
+    const arena = init.arena.allocator();
 
     const cwd = std.Io.Dir.cwd();
     const init_bin = try cwd.readFileAlloc(io, args[2], gpa, .limited(64 * 1024 * 1024));
     defer gpa.free(init_bin);
     const shell_bin = try cwd.readFileAlloc(io, args[3], gpa, .limited(64 * 1024 * 1024));
     defer gpa.free(shell_bin);
-    const demo_bin = try cwd.readFileAlloc(io, args[4], gpa, .limited(64 * 1024 * 1024));
-    defer gpa.free(demo_bin);
-    const font = try cwd.readFileAlloc(io, args[5], gpa, .limited(16 * 1024 * 1024));
+    const font = try cwd.readFileAlloc(io, args[4], gpa, .limited(16 * 1024 * 1024));
     defer gpa.free(font);
-    const font_license = try cwd.readFileAlloc(io, args[6], gpa, .limited(1024 * 1024));
+    const font_license = try cwd.readFileAlloc(io, args[5], gpa, .limited(1024 * 1024));
     defer gpa.free(font_license);
 
-    const entries = [_]Entry{
+    var entries: std.ArrayList(Entry) = .empty;
+    try entries.appendSlice(arena, &.{
         .{ .name = "dev", .mode = S_IFDIR | 0o755 },
         .{ .name = "dev/console", .mode = S_IFCHR | 0o600, .rdev_major = 5, .rdev_minor = 1 },
         .{ .name = "proc", .mode = S_IFDIR | 0o755 },
@@ -91,16 +93,22 @@ pub fn main(init: std.process.Init) !void {
         .{ .name = "shell/FiraSans-Regular.ttf", .mode = S_IFREG | 0o644, .data = font },
         .{ .name = "shell/FiraSans-OFL.txt", .mode = S_IFREG | 0o644, .data = font_license },
         .{ .name = "apps", .mode = S_IFDIR | 0o755 },
-        .{ .name = "apps/stardust-demo", .mode = S_IFDIR | 0o755 },
-        .{ .name = "apps/stardust-demo/stardust-demo", .mode = S_IFREG | 0o755, .data = demo_bin },
-        .{ .name = "apps/stardust-demo/FiraSans-Regular.ttf", .mode = S_IFREG | 0o644, .data = font },
-        .{ .name = "apps/stardust-demo/FiraSans-OFL.txt", .mode = S_IFREG | 0o644, .data = font_license },
-        .{ .name = "TRAILER!!!", .mode = 0 },
-    };
+    });
+    for (args[6..]) |path| {
+        const name = std.fs.path.basename(path);
+        const bin = try cwd.readFileAlloc(io, path, arena, .limited(64 * 1024 * 1024));
+        try entries.appendSlice(arena, &.{
+            .{ .name = try std.fmt.allocPrint(arena, "apps/{s}", .{name}), .mode = S_IFDIR | 0o755 },
+            .{ .name = try std.fmt.allocPrint(arena, "apps/{s}/{s}", .{ name, name }), .mode = S_IFREG | 0o755, .data = bin },
+            .{ .name = try std.fmt.allocPrint(arena, "apps/{s}/FiraSans-Regular.ttf", .{name}), .mode = S_IFREG | 0o644, .data = font },
+            .{ .name = try std.fmt.allocPrint(arena, "apps/{s}/FiraSans-OFL.txt", .{name}), .mode = S_IFREG | 0o644, .data = font_license },
+        });
+    }
+    try entries.append(arena, .{ .name = "TRAILER!!!", .mode = 0 });
 
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
-    for (entries, 1..) |e, ino| try writeEntry(&out, gpa, @intCast(ino), e);
+    for (entries.items, 1..) |e, ino| try writeEntry(&out, gpa, @intCast(ino), e);
     // Pad the archive to a 512-byte block like cpio(1) does.
     try out.appendNTimes(gpa, 0, std.mem.alignForward(usize, out.items.len, 512) - out.items.len);
 
