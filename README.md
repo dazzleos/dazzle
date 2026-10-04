@@ -731,10 +731,14 @@ Pi 3 B+'s does (there is no Bluetooth driver here to disturb).
 
 ### The Files app
 
-Click "F" in the dock. It starts at the root of the filesystem: the tree
-of folders on the left, and the open folder on the right as a grid of
-icons (folders, files, programs, devices; links get an arrow in the
-corner), with its path and an Up button above (Backspace goes up too).
+Click "F" in the dock. It shows the user's files: `/data`, the SD card's
+space for them (Home, at the top of the tree), and nothing above it. The
+System files switch at the bottom left shows the whole filesystem instead
+(the tree then starts at `/`); turned off again, it goes back home. The
+tree of folders is on the left, and the open folder on the right as a grid
+of icons (folders, files, programs, devices; links get an arrow in the
+corner), with its path and an Up button above (Backspace goes up too, as
+far as the top of the tree).
 Clicking a folder in the tree or the grid opens it, and its row in the
 tree comes into view; the arrow beside a folder opens or closes it in
 the tree. Clicking anything else picks it, and the line under the grid
