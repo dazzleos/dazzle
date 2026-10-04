@@ -46,7 +46,7 @@ The `vc4` module:
 | File | Contents |
 |---|---|
 | `device.zig` | GPU buffers, shader upload and job submission (`vc4` ioctls) |
-| `compiler.zig` | Shader compiler: SSA builder, register allocation and QPU code generation |
+| `compiler.zig` | Shader compiler: SSA builder, register allocation and QPU code generation, with threaded fragment shaders |
 | `qpu_schedule.zig` | Instruction scheduler: latency-aware reordering and add/mul pairing |
 | `render.zig` | Records a frame: any number of draw calls into one render target, as one job |
 | `texture.zig` | Texture tiling (T and LT layouts) and texture unit configuration |
@@ -587,6 +587,19 @@ a program keeping one core busy shows 25%.
    including the texture config words the texture unit reads implicitly.
    `qpu.validate` checks the result against the hardware's instruction
    restrictions.
+
+   Fragment shaders that sample textures run two threads per QPU, as
+   Mesa's do: after each texture request the QPU switches to the other
+   thread while the texture unit fetches, hiding its latency (the last
+   switch is marked as the last, so the threads take the tile buffer in
+   order). Each thread then has only half of each register file, and
+   accumulators do not survive a switch, so values live across one go in
+   the register files. The code between switches is scheduled on its own,
+   and each switch's signal is fitted into the last instructions before it
+   (it takes effect after two delay slots). A shader that needs more
+   registers than half compiles single-threaded instead, and the draw's
+   shader record says which. In the simulator, the accumulators are filled
+   with garbage at each switch, so the tests catch a value kept in one.
 3. **Upload.** `DRM_IOCTL_VC4_CREATE_SHADER_BO` uploads each program. The
    kernel validates it, because the V3D has no MMU.
 4. **Job.** `render.zig` records a frame: the binning control list (tile binning

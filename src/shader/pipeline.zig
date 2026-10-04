@@ -136,6 +136,7 @@ pub const Pipeline = struct {
             .vs = p.vs.binding(p.values),
             .cs = p.cs.binding(p.values),
             .fs_num_varyings = prog.varying_components,
+            .fs_threaded = prog.fs.threaded,
             .attributes = attrs[0..prog.num_attributes],
             .vs_attribute_mask = @intCast((@as(u16, 1) << @intCast(prog.num_attributes)) - 1),
             .vs_attributes_size = vs_size,

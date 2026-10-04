@@ -273,6 +273,9 @@ pub const Compiled = struct {
     num_vpm_writes: u32 = 0,
     num_varyings: u32 = 0,
     num_texture_samples: u32 = 0,
+    /// A fragment shader that runs two threads per QPU (see
+    /// `Options.threaded`): its draws must say so in their shader record.
+    threaded: bool = false,
 
     pub fn code(c: *const Compiled) []const qpu.Inst {
         return c.code_buf[0..c.code_len];
@@ -285,6 +288,8 @@ pub const Compiled = struct {
 
 pub const Error = qpu.EncodeError || qpu.ValidationError || qpu_schedule.Error || error{
     OutOfRegisters,
+    /// `Options.threaded` was true for a shader that cannot be threaded.
+    CannotThread,
     ProgramTooLong,
     TooManyUniforms,
 };
@@ -346,6 +351,7 @@ fn encodeSmallImm(bits: u32) ?u6 {
 
 const Allocator = struct {
     acc_free: [3]bool = @splat(true),
+
     a_free: [32]bool = blk: {
         var f: [32]bool = @splat(true);
         f[14] = false;
@@ -358,6 +364,13 @@ const Allocator = struct {
         f[15] = false;
         break :blk f;
     },
+
+    /// For a threaded shader: each thread has only the lower half of each
+    /// register file.
+    fn halve(al: *Allocator) void {
+        for (al.a_free[16..]) |*f| f.* = false;
+        for (al.b_free[16..]) |*f| f.* = false;
+    }
 
     fn take(al: *Allocator, comptime field: []const u8) ?u5 {
         const arr = &@field(al, field);
@@ -384,7 +397,31 @@ pub const Options = struct {
     /// Reorder and pair instructions (see qpu_schedule.zig). Without it,
     /// code runs one operation per instruction with NOPs for hazards.
     schedule: bool = true,
+    /// Run a fragment shader two threads per QPU: after each texture
+    /// request the QPU switches to the other thread while the texture unit
+    /// fetches, hiding its latency. Each thread then has half the register
+    /// files, and no value may stay in an accumulator across a switch.
+    /// Null (the default) threads fragment shaders that sample textures,
+    /// falling back to one thread if the registers run out.
+    threaded: ?bool = null,
 };
+
+/// Whether a fragment shader can be threaded: it samples a texture, and
+/// touches the tile buffer only after its last sample (the last thread
+/// switch must come before the scoreboard is taken).
+fn canThread(shader: *const Shader, live: *const [max_insts]bool) bool {
+    if (shader.stage != .fragment) return false;
+    var last_tex: ?usize = null;
+    for (0..shader.len) |j| if (live[j] and shader.insts[j].op == .tex) {
+        last_tex = j;
+    };
+    const t = last_tex orelse return false;
+    for (0..t) |j| if (live[j]) switch (shader.insts[j].op) {
+        .tlb_color_load, .tlb_z, .tlb_color => return false,
+        else => {},
+    };
+    return true;
+}
 
 fn liveness(shader: *const Shader, live: *[max_insts]bool, uses: *[max_insts]u16, last_use: *[max_insts]u16) void {
     var i: usize = shader.len;
@@ -418,6 +455,22 @@ pub fn compile(shader: *const Shader) Error!Compiled {
 }
 
 pub fn compileWithOptions(shader: *const Shader, options: Options) Error!Compiled {
+    if (options.threaded orelse true) {
+        var live: [max_insts]bool = @splat(false);
+        var uses: [max_insts]u16 = @splat(0);
+        var last_use: [max_insts]u16 = @splat(0);
+        liveness(shader, &live, &uses, &last_use);
+        if (canThread(shader, &live)) {
+            if (compileThreaded(shader, options, true)) |c| return c else |err| {
+                // Half the registers were not enough: one thread, then.
+                if (err != error.OutOfRegisters or options.threaded != null) return err;
+            }
+        } else if (options.threaded == true) return error.CannotThread;
+    }
+    return compileThreaded(shader, options, false);
+}
+
+fn compileThreaded(shader: *const Shader, options: Options, threaded: bool) Error!Compiled {
     const n = shader.len;
     var live: [max_insts]bool = @splat(false);
     var uses: [max_insts]u16 = @splat(0);
@@ -508,6 +561,17 @@ pub fn compileWithOptions(shader: *const Shader, options: Options) Error!Compile
     // after the instruction holding its last use, so a destination never
     // shares a register with one of its own sources.
     var al: Allocator = .{};
+    if (threaded) al.halve();
+    // Thread switches come after texture requests: accumulators do not
+    // survive them.
+    var crosses_switch: [max_insts]bool = @splat(false);
+    if (threaded) {
+        for (0..n) |t| if (live[t] and shader.insts[t].op == .tex) {
+            for (0..t) |d| if (live[d] and last_use[d] > t) {
+                crosses_switch[d] = true;
+            };
+        };
+    }
     var next_file_a = true;
     var active: [max_insts]bool = @splat(false);
     for (0..n) |j| {
@@ -544,7 +608,8 @@ pub fn compileWithOptions(shader: *const Shader, options: Options) Error!Compile
         }
         const span = last_use[j] - j;
         var r: ?Reg = null;
-        if (class[j] == .any and span <= 4) {
+        const acc_ok = class[j] == .any and !crosses_switch[j];
+        if (acc_ok and span <= 4) {
             if (al.take("acc_free")) |a| r = .{ .acc = @intCast(a) };
         }
         if (r == null) {
@@ -562,7 +627,7 @@ pub fn compileWithOptions(shader: *const Shader, options: Options) Error!Compile
             if (r == null and class[j] == .any and !prefer_a) {
                 if (al.take("a_free")) |a| r = .{ .a = a };
             }
-            if (r == null and class[j] == .any) {
+            if (r == null and acc_ok) {
                 if (al.take("acc_free")) |a| r = .{ .acc = @intCast(a) };
             }
             next_file_a = !next_file_a;
@@ -572,7 +637,7 @@ pub fn compileWithOptions(shader: *const Shader, options: Options) Error!Compile
     }
 
     // 4. Code generation.
-    var g: Gen = .{ .stage = shader.stage, .out = .{ .stage = shader.stage } };
+    var g: Gen = .{ .stage = shader.stage, .out = .{ .stage = shader.stage, .threaded = threaded } };
     for (0..n) |j| {
         if (!live[j]) continue;
         switch (shader.insts[j].op) {
@@ -678,6 +743,12 @@ pub fn compileWithOptions(shader: *const Shader, options: Options) Error!Compile
                 try g.addUniform(.{ .tex_p0 = 0 });
                 try g.emit(try qpu.mov(.{ .periph = qpu.W.tmu0_s }, s_reg.src()));
                 try g.addUniform(.{ .tex_p1 = 0 });
+                // Threaded: let the other thread run while the texture
+                // unit fetches (placed by `placeThreadSwitches`).
+                if (threaded) {
+                    try g.push(qpu.nop(.thread_switch));
+                    g.last_switch = g.out.code_len - 1;
+                }
                 try g.emit(qpu.nop(.load_tmu0));
                 try g.emit(try qpu.mov(dst.dst(), qpu.r(4)));
                 g.out.num_texture_samples += 1;
@@ -705,12 +776,10 @@ pub fn compileWithOptions(shader: *const Shader, options: Options) Error!Compile
         }
     }
 
-    if (options.schedule) {
-        const sched = try qpu_schedule.schedule(g.out.code(), shader.stage);
-        if (sched.len + 3 > max_code) return error.ProgramTooLong;
-        @memcpy(g.out.code_buf[0..sched.len], sched.slice());
-        g.out.code_len = sched.len;
-    }
+    // The last switch says it is the last: the QPU then runs this thread
+    // to its end before the other takes the scoreboard.
+    if (g.last_switch) |ip| g.out.code_buf[ip] = qpu.nop(.last_thread_switch);
+    try placeThreadSwitches(&g.out, shader.stage, options.schedule);
 
     // Thread end and its two delay slots; fragment shaders release the tile
     // buffer scoreboard in the last one.
@@ -734,6 +803,8 @@ const Gen = struct {
     sfu_ip: ?usize = null,
     /// A fragment shader has waited for the tile buffer scoreboard.
     scoreboard_waited: bool = false,
+    /// Where the last thread switch marker is (threaded shaders).
+    last_switch: ?usize = null,
 
     fn addUniform(g: *Gen, k: UniformKind) Error!void {
         if (g.out.uniform_len == max_uniforms) return error.TooManyUniforms;
@@ -805,6 +876,82 @@ const Gen = struct {
     }
 };
 
+/// Schedules the code between thread switches separately (nothing moves
+/// across a switch: accumulators and flags do not survive it), and fits
+/// each switch's signal into one of the last three instructions before it,
+/// so that it takes effect, after its two delay slots, just where the code
+/// after it starts.
+fn placeThreadSwitches(out: *Compiled, stage: Stage, schedule: bool) Error!void {
+    var body: [max_code]qpu.Inst = undefined;
+    const code = out.code();
+    @memcpy(body[0..code.len], code);
+    const src = body[0..code.len];
+    out.code_len = 0;
+    var start: usize = 0;
+    var first = true;
+    var ip: usize = 0;
+    while (ip <= src.len) : (ip += 1) {
+        const at_end = ip == src.len;
+        const sig: ?qpu.Sig = if (at_end) null else qpu.getSig(src[ip]);
+        if (!at_end and sig != .thread_switch and sig != .last_thread_switch) continue;
+        const segment_start = out.code_len;
+        const piece = src[start..ip];
+        if (schedule and piece.len > 0) {
+            const sched = try qpu_schedule.scheduleSegment(piece, stage, first);
+            try appendSegment(out, sched.slice());
+        } else try appendSegment(out, piece);
+        first = false;
+        start = ip + 1;
+        if (at_end) break;
+        // The signal: in the latest of the segment's last three
+        // instructions that has no signal of its own, or a NOP; then NOPs
+        // until it takes effect.
+        var at: ?usize = null;
+        var k = out.code_len;
+        while (k > segment_start and k + 3 > out.code_len) {
+            k -= 1;
+            if (qpu.getSig(out.code_buf[k]) == .none) at = k;
+        }
+        const sig_ip = at orelse blk: {
+            if (out.code_len == max_code) return error.ProgramTooLong;
+            out.code_buf[out.code_len] = qpu.nop(.none);
+            out.code_len += 1;
+            break :blk out.code_len - 1;
+        };
+        out.code_buf[sig_ip] = setSig(out.code_buf[sig_ip], sig.?);
+        while (out.code_len < sig_ip + 3) {
+            if (out.code_len == max_code) return error.ProgramTooLong;
+            out.code_buf[out.code_len] = qpu.nop(.none);
+            out.code_len += 1;
+        }
+    }
+    if (out.code_len + 3 > max_code) return error.ProgramTooLong;
+}
+
+/// Appends code, with a NOP first if it would read a register the previous
+/// instruction wrote.
+fn appendSegment(out: *Compiled, code: []const qpu.Inst) Error!void {
+    if (code.len == 0) return;
+    if (out.code_len > 0 and hazard(out.code_buf[out.code_len - 1], code[0])) {
+        if (out.code_len == max_code) return error.ProgramTooLong;
+        out.code_buf[out.code_len] = qpu.nop(.none);
+        out.code_len += 1;
+    }
+    if (out.code_len + code.len > max_code) return error.ProgramTooLong;
+    @memcpy(out.code_buf[out.code_len..][0..code.len], code);
+    out.code_len += code.len;
+}
+
+fn hazard(prev: qpu.Inst, cur: qpu.Inst) bool {
+    var pair = [_]qpu.Inst{ prev, cur, qpu.nop(.prog_end), qpu.nop(.none), qpu.nop(.none) };
+    qpu.validate(&pair, .vertex, null) catch |e| return e == error.ReadAfterWriteHazard;
+    return false;
+}
+
+fn setSig(inst: qpu.Inst, sig: qpu.Sig) qpu.Inst {
+    return (inst & ~(@as(qpu.Inst, 0xf) << 60)) | (@as(qpu.Inst, @intFromEnum(sig)) << 60);
+}
+
 fn sfuWrite(inst: qpu.Inst) bool {
     inline for (.{ qpu.W.sfu_recip, qpu.W.sfu_recipsqrt, qpu.W.sfu_exp, qpu.W.sfu_log }) |w|
         if (qpu.writesAddr(inst, w)) return true;
@@ -816,4 +963,105 @@ fn isTlb(inst: qpu.Inst) bool {
     if (sig == .wait_scoreboard or sig == .color_load) return true;
     return qpu.writesAddr(inst, qpu.W.tlb_z) or qpu.writesAddr(inst, qpu.W.tlb_color_all) or
         qpu.writesAddr(inst, qpu.W.tlb_color_ms) or qpu.writesAddr(inst, qpu.W.tlb_stencil_setup);
+}
+
+fn countSig(code: []const qpu.Inst, sig: qpu.Sig) usize {
+    var n: usize = 0;
+    for (code) |i| n += @intFromBool(qpu.getSig(i) == sig);
+    return n;
+}
+
+/// Whether any instruction reads or writes the upper half of a register
+/// file (which a threaded shader's other thread owns).
+fn usesUpperHalf(code: []const qpu.Inst) bool {
+    for (code) |i| {
+        const sig = qpu.getSig(i);
+        if (sig == .load_imm or sig == .branch) {
+            if (qpu.getWaddrAdd(i) >= 16 and qpu.getWaddrAdd(i) < 32) return true;
+            if (qpu.getWaddrMul(i) >= 16 and qpu.getWaddrMul(i) < 32) return true;
+            continue;
+        }
+        for ([_]u6{ qpu.getWaddrAdd(i), qpu.getWaddrMul(i) }) |w| if (w >= 16 and w < 32) return true;
+        const raddr_a: u6 = @truncate(i >> 18);
+        const raddr_b: u6 = @truncate(i >> 12);
+        if (raddr_a >= 16 and raddr_a < 32) return true;
+        if (sig != .small_imm and raddr_b >= 16 and raddr_b < 32) return true;
+    }
+    return false;
+}
+
+/// A fragment shader that samples a texture at its varyings, with `extra`
+/// more varyings added to the result (live across the sample).
+fn texturedShader(extra: usize) Shader {
+    var s = Shader.init(.fragment);
+    const u = s.varying();
+    const v = s.varying();
+    var keep: [40]Value = undefined;
+    for (keep[0..extra]) |*k| k.* = s.varying();
+    var t = s.texture(u, v);
+    for (keep[0..extra]) |k| t = s.fadd(t, k);
+    s.tlbColor(t);
+    return s;
+}
+
+test "fragment shaders that sample textures run threaded" {
+    const sim = @import("qpu_sim.zig");
+    const texture = @import("texture.zig");
+    var s = texturedShader(3);
+    const c = try compile(&s);
+    try std.testing.expect(c.threaded);
+    // One switch, the last, and none of the other thread's registers.
+    try std.testing.expectEqual(@as(usize, 1), countSig(c.code(), .last_thread_switch));
+    try std.testing.expectEqual(@as(usize, 0), countSig(c.code(), .thread_switch));
+    try std.testing.expect(!usesUpperHalf(c.code()));
+    // Values kept across the switch survive it (the simulator trashes the
+    // accumulators there): the same as one thread.
+    const single = try compileWithOptions(&s, .{ .threaded = false });
+    try std.testing.expect(!single.threaded);
+    var pixels: [16 * 16]u32 = undefined;
+    for (&pixels, 0..) |*p, i| p.* = @truncate(i *% 2654435761);
+    var memory: [texture.imageSize(16, 16)]u8 = undefined;
+    texture.upload(&memory, &pixels, 16, 16);
+    const cfg: texture.Config = .{ .width = 16, .height = 16, .mag_filter = .nearest, .min_filter = .nearest };
+    const unif = [_]u32{ texture.p0(cfg), texture.p1(cfg) };
+    var vary: [5]sim.Vec = undefined;
+    for (&vary, 0..) |*v, k| {
+        for (v, 0..) |*e, lane| e.* = @bitCast((@as(f32, @floatFromInt(lane)) + 0.5) / 16 + @as(f32, @floatFromInt(k)) * 0.01);
+    }
+    const a = try sim.run(c.code(), .{ .uniforms = &unif, .varyings = &vary, .texture_memory = &memory });
+    const b = try sim.run(single.code(), .{ .uniforms = &unif, .varyings = &vary, .texture_memory = &memory });
+    try std.testing.expectEqual(b.tlb_color.?, a.tlb_color.?);
+}
+
+test "shaders without textures, or needing more registers, run one thread" {
+    var plain = Shader.init(.fragment);
+    plain.tlbColor(plain.varying());
+    try std.testing.expect(!(try compile(&plain)).threaded);
+    try std.testing.expectError(error.CannotThread, compileWithOptions(&plain, .{ .threaded = true }));
+    // 36 values across the switch: more than half the registers hold.
+    var big = texturedShader(36);
+    const c = try compile(&big);
+    try std.testing.expect(!c.threaded);
+    try std.testing.expectEqual(@as(usize, 0), countSig(c.code(), .last_thread_switch));
+}
+
+test "each texture sample switches threads, the last one last" {
+    var s = Shader.init(.fragment);
+    const u = s.varying();
+    const v = s.varying();
+    const t0 = s.texture(u, v);
+    const t1 = s.texture(v, u);
+    s.tlbColor(s.fadd(t0, t1));
+    const c = try compile(&s);
+    try std.testing.expect(c.threaded);
+    try std.testing.expectEqual(@as(usize, 1), countSig(c.code(), .thread_switch));
+    try std.testing.expectEqual(@as(usize, 1), countSig(c.code(), .last_thread_switch));
+    // At least three instructions apart (the kernel's rule).
+    var last: ?usize = null;
+    for (c.code(), 0..) |i, ip| {
+        const sig = qpu.getSig(i);
+        if (sig != .thread_switch and sig != .last_thread_switch) continue;
+        if (last) |l| try std.testing.expect(ip >= l + 3);
+        last = ip;
+    }
 }

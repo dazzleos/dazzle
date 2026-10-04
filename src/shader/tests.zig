@@ -39,6 +39,15 @@ test "compiling a program's SPIR-V gives what the build embedded" {
     }
 }
 
+test "programs that sample textures have threaded fragment shaders" {
+    for (programs) |p| {
+        const prog = try Program.decode(p.program);
+        const samples = prog.fs.num_texture_samples > 0;
+        try testing.expectEqual(samples, prog.fs.threaded);
+        try testing.expect(!prog.vs.threaded and !prog.cs.threaded);
+    }
+}
+
 test "every program passes the hardware rules" {
     for (programs) |p| {
         const prog = try Program.decode(p.program);

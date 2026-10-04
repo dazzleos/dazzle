@@ -244,6 +244,12 @@ pub const Result = struct {
 
 /// Schedules `code` (the program body, without the thread end sequence).
 pub fn schedule(code: []const qpu.Inst, stage: qpu.Stage) Error!Result {
+    return scheduleSegment(code, stage, true);
+}
+
+/// Schedules part of a program on its own (the code between thread
+/// switches); `at_start` if it begins the program.
+pub fn scheduleSegment(code: []const qpu.Inst, stage: qpu.Stage, at_start: bool) Error!Result {
     var g: Graph = .{};
     try buildGraph(&g, code);
     const n = g.n;
@@ -292,7 +298,7 @@ pub fn schedule(code: []const qpu.Inst, stage: qpu.Stage) Error!Result {
 
     // A fragment shader must not touch the tile buffer in its first two
     // instructions; shift the program down if it does.
-    if (stage == .fragment) {
+    if (stage == .fragment and at_start) {
         var shift: usize = 0;
         for (out.code[0..@min(2, out.len)], 0..) |inst, ip| {
             if (touchesTlb(inst)) shift = @max(shift, 2 - ip);

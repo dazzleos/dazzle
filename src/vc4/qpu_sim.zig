@@ -197,9 +197,18 @@ pub fn run(code: []const qpu.Inst, env: Env) Error!Result {
     s.rb[qpu.R.frag_payload_zw] = env.frag_z;
 
     var end_at: ?usize = null;
+    // Where a thread switch takes effect (after its two delay slots).
+    var switch_at: ?usize = null;
     var ip: usize = 0;
     while (ip < code.len) : (ip += 1) {
         if (end_at) |e| if (ip > e) break;
+        if (switch_at == ip) {
+            // The other thread ran meanwhile: accumulators and flags are
+            // undefined. Fill them with garbage, so code that keeps a
+            // value in one across a switch gives wrong results.
+            for (&s.acc) |*a| a.* = splat(0x7fc0dead);
+            switch_at = null;
+        }
         const inst = code[ip];
         r.instructions += 1;
         const sig = qpu.getSig(inst);
@@ -285,7 +294,8 @@ pub fn run(code: []const qpu.Inst, env: Env) Error!Result {
             },
             .color_load => s.acc[4] = env.tlb_color_in,
             .prog_end => end_at = ip + 2,
-            .none, .small_imm, .load_imm, .scoreboard_unlock, .wait_scoreboard, .thread_switch, .last_thread_switch => {},
+            .thread_switch, .last_thread_switch => switch_at = ip + 3,
+            .none, .small_imm, .load_imm, .scoreboard_unlock, .wait_scoreboard => {},
             else => return error.Unsupported,
         }
     }

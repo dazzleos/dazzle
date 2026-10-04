@@ -148,7 +148,7 @@ pub const Program = struct {
     // --- Encoding ---------------------------------------------------------------
 
     const format_magic = "SDSH";
-    const format_version: u32 = 1;
+    const format_version: u32 = 2;
 
     /// The program as bytes, for embedding (see `decode`).
     pub fn encode(p: *const Program, gpa: std.mem.Allocator) ![]u8 {
@@ -172,6 +172,7 @@ pub const Program = struct {
             try putInt(&out, gpa, c.num_vpm_writes);
             try putInt(&out, gpa, c.num_varyings);
             try putInt(&out, gpa, c.num_texture_samples);
+            try putInt(&out, gpa, @intFromBool(c.threaded));
             try putInt(&out, gpa, @intCast(c.code_len));
             for (c.code()) |inst| {
                 try putInt(&out, gpa, @truncate(inst));
@@ -212,6 +213,7 @@ pub const Program = struct {
             c.num_vpm_writes = try r.int();
             c.num_varyings = try r.int();
             c.num_texture_samples = try r.int();
+            c.threaded = try r.int() != 0;
             const code_len = try r.int();
             if (code_len > c.code_buf.len) return error.BadProgram;
             for (c.code_buf[0..code_len]) |*inst| {

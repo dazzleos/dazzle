@@ -73,6 +73,9 @@ pub const Draw = struct {
     vs: ShaderBinding,
     cs: ShaderBinding,
     fs_num_varyings: u8,
+    /// The fragment shader runs two threads per QPU (it was compiled
+    /// threaded: `compiler.Compiled.threaded`).
+    fs_threaded: bool = false,
     attributes: []const Attribute,
     vs_attribute_mask: u8,
     vs_attributes_size: u8,
@@ -249,7 +252,7 @@ pub const Frame = struct {
             .cs_vpm_offset = a.cs_vpm_offset,
         };
         cl.writeShaderRecord(&f.rec, .{
-            .flags = cl.shader_flag_fs_single_thread | cl.shader_flag_enable_clipping,
+            .flags = @as(u16, if (d.fs_threaded) 0 else cl.shader_flag_fs_single_thread) | cl.shader_flag_enable_clipping,
             .fs_num_varyings = d.fs_num_varyings,
             .fs_bo_index = try f.index(d.fs.handle),
             .vs_bo_index = try f.index(d.vs.handle),
