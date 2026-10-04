@@ -406,6 +406,38 @@ pub fn defaultGateway(routes: []const u8) ?[4]u8 {
     return null;
 }
 
+// --- Wi-Fi ----------------------------------------------------------------------
+
+pub const wifi = sys.wifi;
+
+/// Asks the Wi-Fi manager what it has found (and has it scan again if its
+/// last scan is old). Null if the manager cannot be reached.
+pub fn readWifi(runtime_dir: []const u8) ?wifi.Report {
+    var path_buf: [108]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ runtime_dir, wifi.socket_name }) catch return null;
+    const fd: linux.fd_t = @intCast(sys.check(linux.socket(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0)) catch return null);
+    defer sys.close(fd);
+    var addr: linux.sockaddr.un = .{ .path = @splat(0) };
+    @memcpy(addr.path[0..path.len], path);
+    _ = sys.check(linux.connect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.un))) catch return null;
+    _ = sys.check(linux.write(fd, "scan\n", 5)) catch return null;
+    // The manager answers at once; do not hold up the window if it does
+    // not.
+    var buf: [4096]u8 = undefined;
+    var len: usize = 0;
+    const deadline = sys.nowNs() + 300 * std.time.ns_per_ms;
+    while (len < buf.len) {
+        const now = sys.nowNs();
+        if (now >= deadline) return null;
+        var pfd = [_]linux.pollfd{.{ .fd = fd, .events = linux.POLL.IN, .revents = 0 }};
+        if (linux.poll(&pfd, 1, @intCast((deadline - now) / std.time.ns_per_ms + 1)) == 0) return null;
+        const n = sys.check(linux.read(fd, buf[len..].ptr, buf.len - len)) catch return null;
+        if (n == 0) break;
+        len += n;
+    }
+    return wifi.Report.parse(buf[0..len]);
+}
+
 // --- Formatting -----------------------------------------------------------------
 
 /// "340 KB", "9.8 MB", "1.2 GB".

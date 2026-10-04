@@ -330,16 +330,30 @@ const firmware = [_]struct { name: []const u8, sha256: []const u8 }{
     .{ .name = "LICENCE.broadcom", .sha256 = "c7283ff51f863d93a275c66e3b4cb08021a5dd4d8c1e7acc47d872fbe52d3d6b" },
 };
 
-/// The SD card image (zig-out/stardust.img), and its files in zig-out/boot
-/// for copying onto a card by hand.
-fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.Build.Step {
-    const dir = b.pathFromRoot("build/firmware");
-    // Download what is missing, then check everything.
+/// The Wi-Fi chips' firmware, which the kernel's brcmfmac driver loads from
+/// /lib/firmware/brcm, from Raspberry Pi OS's firmware-nonfree (pinned by
+/// commit and checksum), named for each board's device tree so the driver
+/// finds it. The licence (firmware/LICENCE.cypress) goes with it.
+const wifi_firmware_commit = "3bab0f823f5b53150b76aab77093adef6655b920";
+const wifi_firmware = [_]struct { name: []const u8, source: []const u8, sha256: []const u8 }{
+    // Pi Zero W: CYW43430.
+    .{ .name = "brcmfmac43430-sdio.raspberrypi,model-zero-w.bin", .source = "cypress/cyfmac43430-sdio.bin", .sha256 = "0717f8e798f3962230e76e9d840385ba127a38d31d6a55acd5c97cf53e4acc9d" },
+    .{ .name = "brcmfmac43430-sdio.raspberrypi,model-zero-w.txt", .source = "brcm/brcmfmac43430-sdio.txt", .sha256 = "fc3949a4c32f07c18308e7e145c7615be314158e7d714a80e04e4791f16495f9" },
+    .{ .name = "brcmfmac43430-sdio.raspberrypi,model-zero-w.clm_blob", .source = "cypress/cyfmac43430-sdio.clm_blob", .sha256 = "3376b9c9b32d16bf762e21c7fafb665365070ae240d092498d0d1987c22022aa" },
+    // Pi 3 A+: CYW43455.
+    .{ .name = "brcmfmac43455-sdio.raspberrypi,3-model-a-plus.bin", .source = "cypress/cyfmac43455-sdio-standard.bin", .sha256 = "d608f866582519c0a28d86db43040f4f1b98dd1d153e72e9752586546b4a36c3" },
+    .{ .name = "brcmfmac43455-sdio.raspberrypi,3-model-a-plus.txt", .source = "brcm/brcmfmac43455-sdio.txt", .sha256 = "ca709be81a78bdb6932936374f39943acbd7af07fae6151011127599a3ce9e3d" },
+    .{ .name = "brcmfmac43455-sdio.raspberrypi,3-model-a-plus.clm_blob", .source = "cypress/cyfmac43455-sdio.clm_blob", .sha256 = "9823842cae9fb9a5dd1e5fb31f595516ec7deee341354bef30bb3026eee29cc1" },
+};
+
+/// Downloads the files of `dir` that are missing from `url_of(name)`,
+/// then checks them all against their checksums. Returns the check.
+fn fetchPinned(b: *std.Build, dir: []const u8, files: anytype, comptime url_of: fn (*std.Build, @TypeOf(files[0])) []const u8) *std.Build.Step {
     var fetch: ?*std.Build.Step = null;
-    for (firmware) |f| {
+    for (files) |f| {
         const path = b.pathJoin(&.{ dir, f.name });
         if (exists(b, path)) continue;
-        const curl = b.addSystemCommand(&.{ "curl", "-fsSL", "--create-dirs", "-o", path, b.fmt("https://raw.githubusercontent.com/raspberrypi/firmware/{s}/boot/{s}", .{ firmware_tag, f.name }) });
+        const curl = b.addSystemCommand(&.{ "curl", "-fsSL", "--create-dirs", "-o", path, url_of(b, f) });
         curl.has_side_effects = true;
         if (fetch == null) {
             const tools = requireTools(b, &.{"curl:curl"});
@@ -350,9 +364,30 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.B
     }
     const verify = b.addRunArtifact(hostTool(b, "check"));
     verify.addArg("sha256");
-    for (firmware) |f| verify.addArgs(&.{ b.pathJoin(&.{ dir, f.name }), f.sha256 });
+    for (files) |f| verify.addArgs(&.{ b.pathJoin(&.{ dir, f.name }), f.sha256 });
     verify.has_side_effects = true;
     if (fetch) |f| verify.step.dependOn(f);
+    return &verify.step;
+}
+
+fn fetchWifiFirmware(b: *std.Build) *std.Build.Step {
+    return fetchPinned(b, b.pathFromRoot("build/firmware/wifi"), wifi_firmware, struct {
+        fn url(bb: *std.Build, f: @TypeOf(wifi_firmware[0])) []const u8 {
+            return bb.fmt("https://raw.githubusercontent.com/RPi-Distro/firmware-nonfree/{s}/debian/added-firmware/{s}", .{ wifi_firmware_commit, f.source });
+        }
+    }.url);
+}
+
+/// The SD card image (zig-out/stardust.img), and its files in zig-out/boot
+/// for copying onto a card by hand.
+fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.Build.Step {
+    const dir = b.pathFromRoot("build/firmware");
+    // Download what is missing, then check everything.
+    const verify_step = fetchPinned(b, dir, firmware, struct {
+        fn url(bb: *std.Build, f: @TypeOf(firmware[0])) []const u8 {
+            return bb.fmt("https://raw.githubusercontent.com/raspberrypi/firmware/{s}/boot/{s}", .{ firmware_tag, f.name });
+        }
+    }.url);
 
     const boot_files = [_]struct { []const u8, std.Build.LazyPath }{
         .{ "bootcode.bin", .{ .cwd_relative = b.pathJoin(&.{ dir, "bootcode.bin" }) } },
@@ -368,7 +403,7 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.B
         .{ "cmdline.txt", b.path("boot/cmdline.txt") },
     };
     const mkimage = b.addRunArtifact(hostTool(b, "mkimage"));
-    mkimage.step.dependOn(&verify.step);
+    mkimage.step.dependOn(verify_step);
     mkimage.step.dependOn(kernel.step);
     const img = mkimage.addOutputFileArg("stardust.img");
     mkimage.addArg(b.fmt("{d}", .{b.option(u32, "image-size", "SD image size in MiB (default 64)") orelse 64}));
@@ -510,6 +545,12 @@ pub fn build(b: *std.Build) void {
     run_mkinitramfs.addArtifactArg(shell_exe);
     run_mkinitramfs.addFileArg(b.path("fonts/FiraSans-Regular.ttf"));
     run_mkinitramfs.addFileArg(b.path("fonts/OFL.txt"));
+    // The Wi-Fi chips' firmware, for the kernel to load.
+    run_mkinitramfs.step.dependOn(fetchWifiFirmware(b));
+    for (wifi_firmware) |f| {
+        run_mkinitramfs.addArg(b.fmt("--file=lib/firmware/brcm/{s}={s}", .{ f.name, b.pathJoin(&.{ b.pathFromRoot("build/firmware/wifi"), f.name }) }));
+    }
+    run_mkinitramfs.addPrefixedFileArg("--file=lib/firmware/brcm/LICENCE.cypress=", b.path("firmware/LICENCE.cypress"));
     // The apps, each in /apps/<name>, listed in the shell's dock.
     run_mkinitramfs.addArtifactArg(demo_exe);
     run_mkinitramfs.addArtifactArg(settings_exe);

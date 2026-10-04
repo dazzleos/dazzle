@@ -5,7 +5,8 @@
 //!         program is missing from PATH.
 //!     check config <fragment> <.config>
 //!         Fails if an option the fragment sets to y did not make it into
-//!         the final kernel configuration (because a dependency is missing).
+//!         the final kernel configuration (because a dependency is missing),
+//!         or one it turns off is set after all.
 //!     check sha256 <file> <hex digest> ...
 //!         Fails (and deletes the file, so it is downloaded again) if a
 //!         file's SHA-256 digest is not the expected one.
@@ -91,6 +92,17 @@ fn checkConfig(init: std.process.Init, args: []const [:0]const u8) !bool {
     var ok = true;
     var lines = std.mem.splitScalar(u8, fragment, '\n');
     while (lines.next()) |line| {
+        // "# CONFIG_X is not set" must not be set after all (something
+        // selects it, or it cannot be turned off on its own).
+        if (std.mem.startsWith(u8, line, "# CONFIG_") and std.mem.endsWith(u8, line, " is not set")) {
+            const name = line[2 .. line.len - " is not set".len];
+            var cl = std.mem.splitScalar(u8, config, '\n');
+            while (cl.next()) |c| if (std.mem.startsWith(u8, c, name) and c.len > name.len and c[name.len] == '=') {
+                std.debug.print("error: {s} is set in the final kernel config ({s}), but the fragment turns it off\n", .{ name, c });
+                ok = false;
+            };
+            continue;
+        }
         if (!std.mem.startsWith(u8, line, "CONFIG_") or !std.mem.endsWith(u8, line, "=y")) continue;
         var found = false;
         var cl = std.mem.splitScalar(u8, config, '\n');

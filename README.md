@@ -41,7 +41,7 @@ The code is split into Zig modules, linked statically into each program:
 | `ui` | `src/ui/` | The widget toolkit: declarative widgets with state, layout, painting and input, in Material 3's style |
 | `font` | `src/font/` | OpenType font rendering, described below |
 | `wayland` | `src/wayland/` | The Wayland wire protocol (with file descriptor passing), the interfaces Stardust uses, and a small client library |
-| `stardust-init` | `src/init/` | The init program: mounts, network, log server, device permissions, starting the shell |
+| `stardust-init` | `src/init/` | The init program: mounts, network, Wi-Fi scanning, log server, device permissions, starting the shell |
 | `stardust-shell` | `src/shell/` | The Wayland compositor and shell, described below |
 | `stardust-demo` | `src/demo/` | The demo, a native app |
 | `stardust-settings` | `src/settings/` | The settings app: the build, the hardware, what is in use and the network |
@@ -366,6 +366,12 @@ passwords or logins.
   configuring interfaces and routes (`CAP_NET_ADMIN`), tying its DHCP
   socket to the interface (`CAP_NET_RAW`) and binding the DHCP client port
   (`CAP_NET_BIND_SERVICE`). Init restarts it if it ever stops.
+- The Wi-Fi manager runs as the user, keeping only `CAP_NET_ADMIN`
+  (starting a scan and bringing the adapter up need it). It answers only
+  the settings app: every app runs as the same user, so the socket's
+  permissions cannot tell them apart, and it checks instead which program
+  the connecting process runs (`/proc/<pid>/exe`, from the socket's peer
+  credentials). Init restarts it if it ever stops.
 - The device manager runs as the user, keeping only `CAP_CHOWN`. Input
   device nodes are created owned by root, so it gives each one to the user
   (at start, then on each uevent that adds one), and the shell can read
@@ -468,8 +474,9 @@ onto any FAT32-formatted card. The same card works in either board.
 
 Connect HDMI, and a USB Ethernet adapter cabled to your network: on the
 Zero's USB (OTG) port via a micro-USB OTG adapter, or in the Pi 3 A+'s USB
-port (with a hub for the keyboard and mouse). Neither board's Wi-Fi works
-yet. The kernel has drivers for
+port (with a hub for the keyboard and mouse). The boards' Wi-Fi only
+scans for networks so far (in the settings app); it cannot join one yet.
+The kernel has drivers for
 common adapter chipsets: Realtek RTL8152/8153, ASIX AX88772/AX88179, SMSC
 LAN95xx, Microchip LAN78xx and generic CDC Ethernet.
 
@@ -590,7 +597,7 @@ a program keeping one core busy shows 25%.
 
 ### The settings app
 
-Click "S" in the dock. Its window has three cards, with the figures that
+Click "S" in the dock. Its window has four cards, with the figures that
 change read again every second (`src/settings/info.zig`):
 
 - **System:** the build (git commit), Linux's version, how long the system
@@ -607,9 +614,24 @@ change read again every second (`src/settings/info.zig`):
 - **Network:** the hostname, each adapter's link (and speed), its address
   (and whether it came from DHCP or `stardust.ip=`), traffic and MAC
   address, and the default gateway.
+- **Wi-Fi:** the adapter and the networks around, strongest first: their
+  signal, name, security (open, WEP, WPA, WPA2, WPA3 or enterprise) and
+  band, each network once (its strongest access point).
 
-Everything comes from files any user can read (`/proc`, `/sys`), so it
-runs unprivileged like the other apps.
+Everything but Wi-Fi comes from files any user can read (`/proc`, `/sys`),
+so it runs unprivileged like the other apps. Scanning needs
+`CAP_NET_ADMIN`, so the app asks init's Wi-Fi manager
+(`src/init/wifi.zig`), which serves only this app; it scans when asked, at
+most every 10 seconds, so nothing scans while the app is closed or covered.
+
+The Wi-Fi chips are the Zero W's CYW43430 and the 3 A+'s CYW43455, on the
+SDIO bus. The kernel's brcmfmac driver runs them; they need firmware, which
+the build downloads from Raspberry Pi OS's `firmware-nonfree` (pinned by
+commit and checksum) into the initramfs's `/lib/firmware/brcm`, with its
+licence (`firmware/LICENCE.cypress`). The manager talks to the kernel with
+nl80211 over generic netlink (`src/init/nl80211.zig`). There is no
+regulatory database, so the kernel keeps to the world regulatory domain
+and logs that `regulatory.db` is missing.
 
 ## Faster development loops
 

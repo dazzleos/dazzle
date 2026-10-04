@@ -1,6 +1,6 @@
 //! The settings app's window, as widgets: cards about the system (its
-//! build, Linux and the board), the resources in use (with meters) and the
-//! network, in two columns.
+//! build, Linux and the board), the network, the resources in use (with
+//! meters) and the Wi-Fi networks around, in two columns.
 
 const std = @import("std");
 const ui = @import("ui");
@@ -16,6 +16,8 @@ pub const Settings = struct {
     system: *const info.System,
     usage: info.Usage,
     network: *const info.Network,
+    /// What the Wi-Fi manager last said; null if it could not be asked.
+    wifi: ?*const info.wifi.Report = null,
     /// Sizes are designed for a window 900 pixels high and scale with it.
     scale: f32,
 
@@ -35,6 +37,7 @@ pub const Settings = struct {
                     } }) }),
                     cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 20 * s, .children = &.{
                         self.resourcesCard(b),
+                        self.wifiCard(b),
                     } }) }),
                 } }) }),
             },
@@ -76,6 +79,31 @@ pub const Settings = struct {
         });
     }
 
+    /// The most networks listed.
+    pub const max_listed = 6;
+
+    fn wifiCard(self: *const Settings, b: Builder) ui.Widget {
+        const cx = b.cx;
+        const report = self.wifi orelse return b.card("Wi-Fi", &.{b.item("Status", "The Wi-Fi manager is not running")});
+        if (report.denied) return b.card("Wi-Fi", &.{b.item("Status", "Not allowed to scan")});
+        const adapter = report.adapter orelse return b.card("Wi-Fi", &.{b.item("Status", "No Wi-Fi adapter")});
+        var rows: std.ArrayList(ui.Widget) = .empty;
+        const a = cx.ui.arena();
+        const m = adapter.mac;
+        rows.append(a, b.item("Adapter", cx.fmt("{s} ({x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2})", .{ adapter.name(), m[0], m[1], m[2], m[3], m[4], m[5] }))) catch {};
+        const nets = report.slice();
+        const status = if (!adapter.up)
+            "Adapter down"
+        else if (nets.len == 0)
+            (if (report.scanning) "Scanning…" else "No networks found")
+        else
+            cx.fmt("{d} {s}{s}", .{ nets.len, if (nets.len == 1) "network" else "networks", if (report.scanning) ", scanning…" else "" });
+        rows.append(a, b.item("Networks", status)) catch {};
+        for (nets[0..@min(nets.len, max_listed)]) |*n| rows.append(a, b.network(n)) catch {};
+        if (nets.len > max_listed) rows.append(a, b.item("", cx.fmt("and {d} more", .{nets.len - max_listed}))) catch {};
+        return b.card("Wi-Fi", rows.items);
+    }
+
     fn networkCard(self: *const Settings, b: Builder) ui.Widget {
         const cx = b.cx;
         const net = self.network;
@@ -111,6 +139,17 @@ pub const Settings = struct {
         return b.card("Network", rows.items);
     }
 };
+
+/// An SSID as text: bytes that are not UTF-8 (SSIDs need not be) become
+/// "?".
+fn printable(cx: *ui.Context, ssid: []const u8) []const u8 {
+    if (std.unicode.utf8ValidateSlice(ssid)) return ssid;
+    const out = cx.ui.arena().dupe(u8, ssid) catch return "?";
+    for (out) |*c| if (c.* >= 0x80 or c.* < 0x20) {
+        c.* = '?';
+    };
+    return out;
+}
 
 fn orUnknown(s: []const u8) []const u8 {
     return if (s.len == 0) "Unknown" else s;
@@ -189,6 +228,20 @@ const Builder = struct {
         } });
     }
 
+    /// A Wi-Fi network: its signal, name, security and band.
+    fn network(b: Builder, n: *const info.wifi.Network) ui.Widget {
+        const cx = b.cx;
+        const t = &cx.ui.theme;
+        return cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12 * b.s, .children = &.{
+            cx.make(ui.SizedBox{ .width = 150 * b.s, .child = cx.make(ui.Row{ .spacing = 8 * b.s, .main_axis_size = .min, .cross_axis_alignment = .center, .children = &.{
+                cx.make(SignalBars{ .bars = n.bars(), .size = @round(18 * b.s) }),
+                cx.make(ui.Text{ .text = cx.fmt("{d} dBm", .{n.dbm()}), .style = .{ .size = 16 * b.s, .color = t.on_surface_variant }, .wrap = false }),
+            } }) }),
+            cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = printable(cx, n.ssid()), .style = .{ .size = 18 * b.s, .color = t.on_surface }, .wrap = false }) }),
+            cx.make(ui.Text{ .text = cx.fmt("{s} · {s}", .{ n.security.label(), n.band() }), .style = .{ .size = 16 * b.s, .color = t.on_surface_variant }, .wrap = false }),
+        } });
+    }
+
     /// A label, its value and a meter showing how much is used.
     fn meter(b: Builder, name: []const u8, text: []const u8, used: f32) ui.Widget {
         const cx = b.cx;
@@ -199,6 +252,29 @@ const Builder = struct {
                 cx.make(Meter{ .fraction = used, .height = @max(@round(8 * b.s), 4) }),
             } }) }),
         } });
+    }
+};
+
+/// Signal strength as four rising bars, `bars` of them lit.
+pub const SignalBars = struct {
+    bars: u8,
+    size: f32,
+
+    pub fn layout(self: *const SignalBars, _: *ui.Node, c: ui.Constraints) ui.Size {
+        return c.constrain(.{ .w = self.size, .h = self.size });
+    }
+
+    pub fn paint(self: *const SignalBars, n: *ui.Node, p: *ui.Painter) void {
+        const t = &n.ui.theme;
+        const c = p.canvas();
+        const gap = @max(@round(n.size.w / 12), 1);
+        const w = (n.size.w - 3 * gap) / 4;
+        for (0..4) |i| {
+            const f: f32 = @floatFromInt(i);
+            const h = n.size.h * (f + 1) / 4;
+            const r: gfx.Rect = .{ .x = f * (w + gap), .y = n.size.h - h, .w = w, .h = h };
+            c.fillRoundedRect(r, .all(@min(w / 3, 2)), if (i < self.bars) t.on_surface else t.surface_container_highest);
+        }
     }
 };
 
@@ -287,6 +363,28 @@ fn sample() struct { sys: info.System, net: info.Network, usage: info.Usage } {
     } };
 }
 
+fn sampleWifi() info.wifi.Report {
+    var r: info.wifi.Report = .{ .scanning = true };
+    var a: info.wifi.Adapter = .{ .mac = .{ 0xb8, 0x27, 0xeb, 1, 2, 3 }, .up = true };
+    a.setName("wlan0");
+    r.adapter = a;
+    const nets = [_]struct { []const u8, i32, u32, info.wifi.Security }{
+        .{ "Home", -4800, 5180, .wpa2 },   .{ "Cafe", -6100, 2412, .open },      .{ "Library", -7000, 2437, .enterprise },
+        .{ "Office", -7200, 2462, .wpa3 }, .{ "Neighbour", -8000, 2412, .wpa2 }, .{ "Shop", -8100, 2437, .wpa2 },
+        .{ "Bus", -8200, 2412, .open },    .{ "Old", -8400, 2462, .wep },        .{ "Far", -8800, 2412, .wpa2 },
+        .{ "Further", -9000, 2412, .wpa },
+    };
+    for (nets) |n| {
+        var net: info.wifi.Network = .{ .signal_mbm = n[1], .freq_mhz = n[2], .security = n[3] };
+        net.setSsid(n[0]);
+        r.add(net);
+    }
+    var odd: info.wifi.Network = .{ .signal_mbm = -9500, .freq_mhz = 2412, .security = .wpa2 };
+    odd.setSsid("bad\xffname");
+    r.add(odd);
+    return r;
+}
+
 fn texts(node: *ui.Node, out: *std.ArrayList(u8)) void {
     if (node.widget.is(ui.Text)) {
         out.appendSlice(testing.allocator, node.widget.as(ui.Text).?.text) catch {};
@@ -307,9 +405,10 @@ test "everything is shown, and fits the window at the shell's sizes" {
     const u = try ui.Ui.create(testing.allocator, &f);
     defer u.destroy();
     const d = sample();
+    const wifi = sampleWifi();
     for ([_][2]u32{ .{ 1920, 960 }, .{ 1280, 600 }, .{ 1024, 668 } }) |size| {
         const scale = scaleFor(size[0], size[1]);
-        u.frame(size[0], size[1], 0, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .scale = scale });
+        u.frame(size[0], size[1], 0, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .wifi = &wifi, .scale = scale });
         try testing.expect(!overflows(u.root.?));
     }
     var all: std.ArrayList(u8) = .empty;
@@ -334,6 +433,14 @@ test "everything is shown, and fits the window at the shell's sizes" {
         "12 MB received, 3.0 MB sent",
         "Not connected: no cable",
         "192.168.1.1",
+        "wlan0 (b8:27:eb:01:02:03)",
+        "11 networks, scanning…",
+        "Home",
+        "WPA2 · 5 GHz",
+        "-48 dBm",
+        "Open · 2.4 GHz",
+        "Enterprise · 2.4 GHz",
+        "and 5 more",
     }) |want| {
         if (std.mem.indexOf(u8, all.items, want) == null) {
             std.debug.print("missing \"{s}\" in:\n{s}\n", .{ want, all.items });
@@ -364,4 +471,44 @@ test "without a network adapter, the network card says so" {
 /// The scale for a window: designed for 900 pixels high (and 1500 wide).
 pub fn scaleFor(width: u32, height: u32) f32 {
     return std.math.clamp(@min(@as(f32, @floatFromInt(width)) / 1500, @as(f32, @floatFromInt(height)) / 900), 0.5, 2);
+}
+
+test "the Wi-Fi card says when it cannot list networks" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    const d = sample();
+    const no_adapter: info.wifi.Report = .{};
+    const denied: info.wifi.Report = .{ .denied = true };
+    var empty: info.wifi.Report = .{ .scanning = true };
+    empty.adapter = .{ .up = true };
+    for ([_]struct { ?*const info.wifi.Report, []const u8 }{
+        .{ null, "The Wi-Fi manager is not running" },
+        .{ &no_adapter, "No Wi-Fi adapter" },
+        .{ &denied, "Not allowed to scan" },
+        .{ &empty, "Scanning…" },
+    }) |case| {
+        u.frame(1920, 960, 0, Settings{ .commit = "x", .system = &d.sys, .usage = d.usage, .network = &d.net, .wifi = case[0], .scale = 1 });
+        var all: std.ArrayList(u8) = .empty;
+        defer all.deinit(testing.allocator);
+        texts(u.root.?, &all);
+        try testing.expect(std.mem.indexOf(u8, all.items, case[1]) != null);
+    }
+}
+
+test "SSIDs that are not text are shown readably" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    const d = sample();
+    var r: info.wifi.Report = .{};
+    r.adapter = .{ .up = true };
+    var odd: info.wifi.Network = .{ .signal_mbm = -5000, .freq_mhz = 2412, .security = .wpa2 };
+    odd.setSsid("bad\xffname");
+    r.add(odd);
+    u.frame(1920, 960, 0, Settings{ .commit = "x", .system = &d.sys, .usage = d.usage, .network = &d.net, .wifi = &r, .scale = 1 });
+    var all: std.ArrayList(u8) = .empty;
+    defer all.deinit(testing.allocator);
+    texts(u.root.?, &all);
+    try testing.expect(std.mem.indexOf(u8, all.items, "bad?name") != null);
 }

@@ -134,7 +134,8 @@ fn run(cfg: Config) noreturn {
     }
 }
 
-/// Waits for an Ethernet interface (sysfs type 1) and returns the first.
+/// Waits for a wired Ethernet interface (sysfs type 1, not Wi-Fi) and
+/// returns the first.
 fn waitForInterface() Interface {
     var reported = false;
     while (true) {
@@ -161,6 +162,9 @@ fn findInterface() ?Interface {
         var attr_buf: [32]u8 = undefined;
         // ARPHRD_ETHER; this also skips the loopback interface.
         if (!std.mem.eql(u8, i.attr("type", &attr_buf) orelse continue, "1")) continue;
+        // Wi-Fi interfaces are Ethernet-like too, but need joining a
+        // network first: they are the Wi-Fi manager's.
+        if (i.attr("phy80211/name", &attr_buf) != null) continue;
         i.mac = parseMac(i.attr("address", &attr_buf) orelse continue) orelse continue;
         return i;
     }

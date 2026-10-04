@@ -3,9 +3,17 @@
 //! Stardust talks to the kernel directly through std.os.linux rather than
 //! through a C library, so this module provides error mapping and a few
 //! wrappers used throughout the program.
+//!
+//! * `wifi`: the Wi-Fi manager's protocol, shared by init and settings
 
 const std = @import("std");
 const linux = std.os.linux;
+
+pub const wifi = @import("wifi.zig");
+
+test {
+    _ = wifi;
+}
 
 pub const Error = error{
     AccessDenied,

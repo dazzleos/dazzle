@@ -14,9 +14,12 @@
 //!     /apps/<app>/FiraSans-OFL.txt
 //!     /dev, /proc, /sys                         mount points
 //!
-//! An app is named after its binary (stardust-demo, stardust-settings).
+//!     /lib/firmware/brcm/...                    the Wi-Fi chips' firmware
 //!
-//! Usage: mkinitramfs <output.cpio> <init-binary> <shell-binary> <font> <font-license> <app-binary>...
+//! An app is named after its binary (stardust-demo, stardust-settings).
+//! Other files are given as --file=<path in the archive>=<file>.
+//!
+//! Usage: mkinitramfs <output.cpio> <init-binary> <shell-binary> <font> <font-license> [<app-binary> | --file=<path>=<file>]...
 
 const std = @import("std");
 
@@ -66,7 +69,7 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len < 6) {
-        std.debug.print("usage: {s} <output.cpio> <init-binary> <shell-binary> <font> <font-license> <app-binary>...\n", .{args[0]});
+        std.debug.print("usage: {s} <output.cpio> <init-binary> <shell-binary> <font> <font-license> [<app-binary> | --file=<path>=<file>]...\n", .{args[0]});
         std.process.exit(2);
     }
     const arena = init.arena.allocator();
@@ -95,6 +98,23 @@ pub fn main(init: std.process.Init) !void {
         .{ .name = "apps", .mode = S_IFDIR | 0o755 },
     });
     for (args[6..]) |path| {
+        // Another file: --file=<path in the archive>=<file>, its
+        // directories made as needed.
+        if (std.mem.startsWith(u8, path, "--file=")) {
+            const spec = path["--file=".len..];
+            const eq = std.mem.indexOfScalar(u8, spec, '=') orelse return error.BadFileArgument;
+            const dest = spec[0..eq];
+            var parent: usize = 0;
+            while (std.mem.indexOfScalarPos(u8, dest, parent, '/')) |slash| : (parent = slash + 1) {
+                const dir = dest[0..slash];
+                for (entries.items) |e| {
+                    if (std.mem.eql(u8, e.name, dir)) break;
+                } else try entries.append(arena, .{ .name = dir, .mode = S_IFDIR | 0o755 });
+            }
+            const data = try cwd.readFileAlloc(io, spec[eq + 1 ..], arena, .limited(16 * 1024 * 1024));
+            try entries.append(arena, .{ .name = dest, .mode = S_IFREG | 0o644, .data = data });
+            continue;
+        }
         const name = std.fs.path.basename(path);
         const bin = try cwd.readFileAlloc(io, path, arena, .limited(64 * 1024 * 1024));
         try entries.appendSlice(arena, &.{

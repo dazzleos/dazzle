@@ -1,8 +1,9 @@
 //! Stardust's settings app: what the system is and how it is doing. It
 //! shows the build, Linux's version, how long the system has been up and
 //! the board; the resources in use (CPU, temperature, memory, the GPU's
-//! memory and storage); and the network (adapters, addresses and
-//! traffic). The figures that change are
+//! memory and storage); the network (adapters, addresses and traffic);
+//! and the Wi-Fi networks around. Only this app may scan for them: it asks
+//! init's Wi-Fi manager, which answers no other program (see sys.wifi). The figures that change are
 //! read again every second (see info.zig); the window is built with the
 //! `ui` toolkit (see view.zig), and only what changed is drawn again.
 //!
@@ -67,6 +68,10 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     var monitor: info.UsageMonitor = .{};
     var usage = monitor.read(sys.nowNs());
     var network = info.Network.read();
+    // The Wi-Fi manager is asked less often: each request may start a scan.
+    const runtime_dir = std.process.Environ.getPosix(init.environ, "XDG_RUNTIME_DIR");
+    var wifi: ?info.wifi.Report = null;
+    var next_wifi: u64 = 0;
 
     var next_update: u64 = sys.nowNs() + std.time.ns_per_s;
     var dirty = true;
@@ -107,6 +112,13 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             network = info.Network.read();
             dirty = true;
         }
+        if (!suspended and now >= next_wifi) {
+            // Soon after the first answer (to show what the first scan
+            // found), then every few seconds.
+            next_wifi = now + @as(u64, if (wifi == null or wifi.?.scanning) 2 else 5) * std.time.ns_per_s;
+            wifi = if (runtime_dir) |dir| info.readWifi(dir) else null;
+            dirty = true;
+        }
 
         idle = true;
         if (!suspended and (dirty or window_ui.needs_frame)) {
@@ -116,6 +128,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
                 .system = &system,
                 .usage = usage,
                 .network = &network,
+                .wifi = if (wifi) |*w| w else null,
                 .scale = view.scaleFor(width, height),
             });
             if (window_ui.changed()) {

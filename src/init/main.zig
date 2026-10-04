@@ -12,11 +12,12 @@
 //!    are plugged in; waits for the vc4 GPU and gives the Stardust user access to its device
 //!    nodes;
 //! 4. creates the user's runtime directory (/run/user/1000, for the
-//!    Wayland socket) and starts /shell/stardust-shell, the Wayland
+//!    Wayland socket), starts the Wi-Fi manager (see wifi.zig), which scans
+//!    for the settings app, and starts /shell/stardust-shell, the Wayland
 //!    compositor, as the Stardust user, with its output going to the
 //!    kernel log; its dock starts the apps in /apps;
 //! 5. reaps exited processes forever (PID 1 must never exit), restarting the
-//!    network and device managers if they ever stop.
+//!    network, device and Wi-Fi managers if they ever stop.
 //!
 //! The Stardust user is just a user ID (see `sys.user`): there are no
 //! accounts, passwords or logins.
@@ -27,6 +28,7 @@ const sys = @import("sys");
 const logserver = @import("logserver.zig");
 const network = @import("network.zig");
 const devices = @import("devices.zig");
+const wifi = @import("wifi.zig");
 const build_info = @import("build_info");
 
 const print = sys.print;
@@ -48,8 +50,9 @@ pub fn main() void {
     const devices_pid = devices.start();
     grantGpuAccess();
     makeRuntimeDir();
+    const wifi_pid = wifi.start(runtime_dir);
     const shell_pid = startShell();
-    reapForever(shell_pid, network_pid, devices_pid);
+    reapForever(shell_pid, network_pid, devices_pid, wifi_pid);
 }
 
 fn mountPseudoFilesystems() void {
@@ -144,9 +147,10 @@ fn startShell() ?linux.pid_t {
 
 /// Waits for child processes, logging how the shell ends. Processes whose
 /// parent exits are re-parented to init, so this also collects those.
-fn reapForever(shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, first_devices_pid: ?linux.pid_t) noreturn {
+fn reapForever(shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, first_devices_pid: ?linux.pid_t, first_wifi_pid: ?linux.pid_t) noreturn {
     var network_pid = first_network_pid;
     var devices_pid = first_devices_pid;
+    var wifi_pid = first_wifi_pid;
     while (true) {
         var status: u32 = 0;
         const rc = linux.wait4(-1, &status, 0, null);
@@ -164,6 +168,12 @@ fn reapForever(shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, first_d
             print("stardust: network manager stopped (status 0x{x}); restarting it in 5 s\n", .{status});
             sys.sleepMs(5000);
             network_pid = network.start();
+            continue;
+        }
+        if (pid == wifi_pid) {
+            print("stardust: wifi manager stopped (status 0x{x}); restarting it in 5 s\n", .{status});
+            sys.sleepMs(5000);
+            wifi_pid = wifi.start(runtime_dir);
             continue;
         }
         if (pid == devices_pid) {
@@ -186,4 +196,6 @@ test {
     _ = @import("network.zig");
     _ = @import("dhcp.zig");
     _ = @import("devices.zig");
+    _ = @import("wifi.zig");
+    _ = @import("nl80211.zig");
 }
