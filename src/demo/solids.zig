@@ -323,12 +323,41 @@ pub fn model(time: f32) Mat4 {
     return mul(rotationX(time * 0.7), rotationY(time));
 }
 
-pub fn mvp(width: u32, height: u32, time: f32) Mat4 {
+/// How far the camera is from the solids' centre.
+const camera_distance = 6.0;
+
+/// The camera: projection and view, for a viewport of this size.
+pub fn viewProjection(width: u32, height: u32) Mat4 {
     const aspect = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
     // Far enough back that the solids clear the panel on the left (see
     // view.zig's test).
-    const view = translation(0, 0, -6);
-    return mul(perspective(std.math.degreesToRadians(50.0), aspect, 1.0, 20.0), mul(view, model(time)));
+    const view = translation(0, 0, -camera_distance);
+    return mul(perspective(std.math.degreesToRadians(50.0), aspect, 1.0, 20.0), view);
+}
+
+pub fn mvp(width: u32, height: u32, time: f32) Mat4 {
+    return mul(viewProjection(width, height), model(time));
+}
+
+/// Where any solid can appear in a viewport of this size, however it is
+/// turned: the outline of the sphere through its corners. The sphere is
+/// on the camera's axis, so its outline is a circle (an ellipse in pixels)
+/// around the centre, of half-height f·r/√(d² − r²) in clip space (f from
+/// the field of view, d the distance). Pixels from the viewport's top left:
+/// x, y, width, height.
+pub fn screenBounds(width: u32, height: u32) [4]f32 {
+    const w: f32 = @floatFromInt(width);
+    const h: f32 = @floatFromInt(height);
+    const f = 1.0 / @tan(std.math.degreesToRadians(50.0) / 2.0);
+    const d = camera_distance;
+    const half_y = f * radius / @sqrt(d * d - radius * radius);
+    const half_x = half_y * h / w;
+    // A pixel for the edges' rounding.
+    const x0 = @max(@floor((1 - half_x) / 2 * w) - 1, 0);
+    const y0 = @max(@floor((1 - half_y) / 2 * h) - 1, 0);
+    const x1 = @min(@ceil((1 + half_x) / 2 * w) + 1, w);
+    const y1 = @min(@ceil((1 + half_y) / 2 * h) + 1, h);
+    return .{ x0, y0, x1 - x0, y1 - y0 };
 }
 
 const testing = std.testing;
@@ -366,5 +395,27 @@ test "the solids stay in front of the camera" {
             const w = v[0] * m[3] + v[1] * m[7] + v[2] * m[11] + m[15];
             try testing.expect(w > 2.0);
         };
+    }
+}
+
+test "every solid stays within its screen bounds" {
+    for ([_][2]u32{ .{ 1920, 1036 }, .{ 640, 480 } }) |size| {
+        const b = screenBounds(size[0], size[1]);
+        try testing.expect(b[2] < @as(f32, @floatFromInt(size[0])) and b[3] < @as(f32, @floatFromInt(size[1])));
+        for (shapes) |s| {
+            const msh = try mesh(testing.allocator, s);
+            defer msh.deinit(testing.allocator);
+            var t: f32 = 0;
+            while (t < 10) : (t += 0.1) {
+                const m = mvp(size[0], size[1], t);
+                for (msh.vertices) |v| {
+                    const p = v.pos;
+                    const cw = p[0] * m[3] + p[1] * m[7] + p[2] * m[11] + m[15];
+                    const x = ((p[0] * m[0] + p[1] * m[4] + p[2] * m[8] + m[12]) / cw + 1) / 2 * @as(f32, @floatFromInt(size[0]));
+                    const y = (1 - (p[0] * m[1] + p[1] * m[5] + p[2] * m[9] + m[13]) / cw) / 2 * @as(f32, @floatFromInt(size[1]));
+                    try testing.expect(x >= b[0] and x <= b[0] + b[2] and y >= b[1] and y <= b[1] + b[3]);
+                }
+            }
+        }
     }
 }

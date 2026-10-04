@@ -140,12 +140,41 @@ with the problem marked.
 | `material.zig` | Material 3's light and dark baseline themes, and `OutlinedButton`, made of a `Pressable`, `Decorated`, `ConstrainedBox`, `Padding` and `Center` |
 | `controls.zig` | Material 3's selection controls: `Checkbox`, `Radio` (generic over the value it selects) and `Switch` (its handle slides), each with an optional label that presses it too |
 | `painter.zig` | Painting: canvas layers and GPU draws in order, clipping, and the overflow stripes |
+| `damage.zig` | What changed between frames: each node's drawing fingerprinted and compared, kept as a few rectangles, with a history for buffers of any age |
 | `runtime.zig` | `Ui`: builds, lays out and paints each frame, records it into a `vc4` frame (or draws it on the CPU, for tests), and sends pointer events to the widgets under the pointer |
-| `tests.zig` | Tests: overflow, nonsense layouts, state and keys, buttons, overlays, GPU draws' order, rows and columns |
+| `tests.zig` | Tests: overflow, nonsense layouts, state and keys, buttons, overlays, GPU draws' order, rows and columns, controls, damage |
 
 `Overlay` stacks layers, each filling it, and the topmost layer with
 something under the pointer gets the event. A button press takes the
 pointer until it is released; releasing over the button is a click.
+
+Only what changes is drawn again. While painting, the canvas fingerprints
+each node's own drawing (every shape with its position, colour and clip,
+and the node's place in the painting order) and notes the area it
+covers. A node whose fingerprint or area differs from the last frame
+damages its old and new areas; so does a node no longer painted, or
+removed. GPU draws cannot be seen into, so they count as changed every
+frame unless their widget gives a key and the area it draws in (the
+demo's solid gives its time, shape and look, and the outline of its
+bounding sphere: paused, it costs nothing). The damage is kept as up to
+four rectangles.
+
+A window's buffers are reused in turn, so a buffer last drawn some frames
+ago (its age) misses the damage since: `repaint` gives what it needs from
+a short history of damage. A `vc4` frame can be limited to those
+rectangles (`Frame.limitTo`): the kernel renders only the 64-pixel tiles
+covering them (one job per group of tiles), every other tile of the
+buffer keeps its picture, and draws entirely outside them are not even
+recorded. A frame that changed nothing is not drawn or shown at all, and
+the app sleeps until something happens. The shell is told which parts
+changed (`damage_buffer`).
+
+No intermediate buffers are used: with tile-limited rendering, unchanged
+parts cost nothing, and nothing in the demo is both costly to draw and
+under something that changes. The glyph atlas and the shell's bar (an
+overlay plane, redrawn once a second) are the retained buffers there are.
+Each frame that is drawn is still built, laid out and painted whole on the
+CPU (about 40 µs on a desktop for the demo).
 
 The `app` module gives a native app a window: a Wayland toplevel on the
 shell, with up to three buffers the GPU renders into in its T-tiled layout,
@@ -453,7 +482,8 @@ corner shows, after the title, the git commit it was built from (short,
 with `-dirty` if there were uncommitted changes), then:
 
 - the IPv4 address, or "No network";
-- frames per second and the window's size;
+- frames drawn per second (none while nothing changes), the window's size,
+  and how much of the window a frame redraws on average;
 - the window size;
 - GPU time per frame: from submitting the frame to the GPU finishing it
   (`glFinish`, before `eglSwapBuffers` hands the frame to the shell). It
@@ -566,7 +596,8 @@ a program keeping one core busy shows 25%.
    them.
 5. **Submission.** `DRM_IOCTL_VC4_SUBMIT_CL` submits the job. The kernel
    validates it, generates the rendering control list that clears and
-   stores each tile, and runs it on the V3D. The shell renders straight into
+   stores each tile (or only those in the job's tile range, when the frame
+   is limited to what changed), and runs it on the V3D. The shell renders straight into
    a linear XRGB8888 scanout buffer; Wayland clients render into T-tiled
    buffers the shell then draws as textures. Depth stays in the on-chip tile
    buffer.

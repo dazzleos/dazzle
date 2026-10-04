@@ -29,6 +29,7 @@ pub const Radii = canvas.Radii;
 pub const Point = canvas.Point;
 pub const Renderer = renderer.Renderer;
 pub const Atlas = atlas.Atlas;
+pub const Record = canvas.Record;
 
 test {
     _ = geometry;

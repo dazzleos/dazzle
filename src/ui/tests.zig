@@ -447,3 +447,105 @@ test "checkboxes, switches and radio buttons report changes, and their labels pr
     const img = try Image.init(u, 400, 400);
     img.deinit();
 }
+
+const Label = struct {
+    text: []const u8,
+    pub fn build(self: *const Label, cx: *Context) Widget {
+        return cx.make(ui.Column{ .cross_axis_alignment = .start, .children = &.{
+            cx.make(ui.Text{ .text = "Static title" }),
+            cx.make(ui.Text{ .text = self.text }),
+            cx.make(ui.OutlinedButton{ .label = "Button", .on_press = .of(&dummy_count, addDummy) }),
+        } });
+    }
+};
+
+var dummy_count: u32 = 0;
+fn addDummy(c: *u32) void {
+    c.* += 1;
+}
+
+fn within(r: ui.Rect, outer: ui.Rect) bool {
+    return r.x >= outer.x and r.y >= outer.y and r.x + r.w <= outer.x + outer.w and r.y + r.h <= outer.y + outer.h;
+}
+
+test "only what changed is damaged" {
+    const fira = try font.Font.init(fira_data);
+    const u = try ui.Ui.create(testing.allocator, &fira);
+    defer u.destroy();
+    u.frame(300, 200, 0, Label{ .text = "One" });
+    // The first frame: everything.
+    try testing.expectEqual(ui.Rect{ .x = 0, .y = 0, .w = 300, .h = 200 }, u.damaged()[0]);
+    // The same again: nothing.
+    u.frame(300, 200, 1, Label{ .text = "One" });
+    try testing.expect(!u.changed());
+    try testing.expect(u.repaint(1).isEmpty());
+
+    // New text: only around it.
+    u.frame(300, 200, 2, Label{ .text = "Two" });
+    try testing.expect(u.changed());
+    var texts: std.ArrayList(*Node) = .empty;
+    defer texts.deinit(testing.allocator);
+    try findAll(u.root.?, ui.Text, &texts);
+    const second = texts.items[1];
+    const at = second.position();
+    // Glyphs can reach an em around the text's box.
+    const near: ui.Rect = .{ .x = at[0] - 20, .y = at[1] - 30, .w = second.size.w + 60, .h = second.size.h + 50 };
+    for (u.damaged()) |r| try testing.expect(within(r, near));
+    const first = texts.items[0];
+    for (u.damaged()) |r| try testing.expect(r.y > first.position()[1]);
+
+    // Hovering the button: only the button.
+    const button = find(u.root.?, ui.OutlinedButton).?;
+    const b = button.position();
+    u.pointerMotion(.{ b[0] + 10, b[1] + 10 });
+    u.frame(300, 200, 3, Label{ .text = "Two" });
+    const box: ui.Rect = .{ .x = b[0] - 2, .y = b[1] - 2, .w = button.size.w + 4, .h = button.size.h + 4 };
+    try testing.expect(u.changed());
+    for (u.damaged()) |r| try testing.expect(within(r, box));
+    // The buffer from two frames ago also needs the text's change.
+    try testing.expect(u.repaint(2).len >= 1);
+    var covers_text = false;
+    for (u.repaint(2).slice()) |r| covers_text = covers_text or r.intersects(.{ .x = at[0], .y = at[1], .w = second.size.w, .h = second.size.h });
+    try testing.expect(covers_text);
+}
+
+const Maybe = struct {
+    show: bool,
+    pub fn build(self: *const Maybe, cx: *Context) Widget {
+        return cx.make(ui.Column{ .children = if (self.show) &.{
+            cx.make(ui.SizedBox{ .width = 50, .height = 20, .child = cx.make(ui.Decorated{ .color = red }) }),
+        } else &.{} });
+    }
+};
+
+test "a removed widget damages where it was" {
+    const u = try ui.Ui.create(testing.allocator, null);
+    defer u.destroy();
+    u.frame(200, 100, 0, Maybe{ .show = true });
+    u.frame(200, 100, 1, Maybe{ .show = true });
+    try testing.expect(!u.changed());
+    u.frame(200, 100, 2, Maybe{ .show = false });
+    try testing.expect(u.changed());
+    for (u.damaged()) |r| try testing.expect(within(r, .{ .x = 74, .y = 0, .w = 52, .h = 22 }));
+}
+
+const Keyed = struct {
+    key: ?u64,
+    fn draw(_: *const Keyed, _: *vc4.render.Frame, _: ui.GpuArea) anyerror!void {}
+    pub fn paint(self: *const Keyed, _: *Node, p: *ui.Painter) void {
+        p.gpuWith(.{ .key = self.key, .bounds = .{ .x = 10, .y = 10, .w = 20, .h = 20 } }, self, draw);
+    }
+};
+
+test "GPU draws are damaged every frame, unless their key stays the same" {
+    const u = try ui.Ui.create(testing.allocator, null);
+    defer u.destroy();
+    u.frame(100, 100, 0, Keyed{ .key = null });
+    u.frame(100, 100, 1, Keyed{ .key = null });
+    try testing.expectEqual(ui.Rect{ .x = 10, .y = 10, .w = 20, .h = 20 }, u.damaged()[0]);
+    u.frame(100, 100, 2, Keyed{ .key = 7 });
+    u.frame(100, 100, 3, Keyed{ .key = 7 });
+    try testing.expect(!u.changed());
+    u.frame(100, 100, 4, Keyed{ .key = 8 });
+    try testing.expectEqual(ui.Rect{ .x = 10, .y = 10, .w = 20, .h = 20 }, u.damaged()[0]);
+}

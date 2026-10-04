@@ -151,6 +151,13 @@ pub const Frame = struct {
     clear_z: u32 = 0xffffff,
     draws: u32 = 0,
     submit: device.SubmitCl = .{},
+    /// Tile ranges to render (inclusive: x0, y0, x1, y1); none means all.
+    regions: [max_regions][4]u8 = undefined,
+    region_count: usize = 0,
+    /// Set by `limitTo` with nothing to draw: `regionCount` is then 0.
+    limited_to_nothing: bool = false,
+
+    pub const max_regions = 4;
 
     pub fn begin(f: *Frame, target: Target, load: Load) void {
         f.bin = .init(&f.bcl_buf);
@@ -162,6 +169,8 @@ pub const Frame = struct {
         f.load = load;
         f.clear_z = 0xffffff;
         f.draws = 0;
+        f.region_count = 0;
+        f.limited_to_nothing = false;
         _ = f.index(target.handle) catch unreachable;
 
         const tiles = f.tileCounts();
@@ -275,7 +284,95 @@ pub const Frame = struct {
         f.draws += 1;
     }
 
-    /// Completes the frame and returns the ioctl argument.
+    /// Renders only the tiles covering `rects` (in target pixels): the rest
+    /// of the target keeps what it holds. Tiles are 64 pixels square, so
+    /// those within the rectangles are cleared and drawn whole. Rectangles
+    /// whose tiles overlap are rendered together; empty ones are dropped.
+    /// Without a call (or after `limitTo(null)`), everything is rendered.
+    pub fn limitTo(f: *Frame, rects: ?[]const Viewport) void {
+        f.region_count = 0;
+        f.limited_to_nothing = false;
+        const list = rects orelse return;
+        const tiles = f.tileCounts();
+        var ranges: [max_regions + 8][4]i32 = undefined;
+        var n: usize = 0;
+        for (list) |r| {
+            const x0 = @max(r.x, 0);
+            const y0 = @max(r.y, 0);
+            const x1 = @min(r.x + @as(i32, @intCast(r.width)), f.target.width);
+            const y1 = @min(r.y + @as(i32, @intCast(r.height)), f.target.height);
+            if (x1 <= x0 or y1 <= y0) continue;
+            var t: [4]i32 = .{ @divFloor(x0, cl.tile_size), @divFloor(y0, cl.tile_size), @divFloor(x1 - 1, cl.tile_size), @divFloor(y1 - 1, cl.tile_size) };
+            t[2] = @min(t[2], tiles[0] - 1);
+            t[3] = @min(t[3], tiles[1] - 1);
+            // Merge with the ranges it overlaps (repeatedly, as merging
+            // can make it overlap others).
+            var i: usize = 0;
+            while (i < n) {
+                const q = ranges[i];
+                if (t[0] <= q[2] and q[0] <= t[2] and t[1] <= q[3] and q[1] <= t[3]) {
+                    t = .{ @min(t[0], q[0]), @min(t[1], q[1]), @max(t[2], q[2]), @max(t[3], q[3]) };
+                    ranges[i] = ranges[n - 1];
+                    n -= 1;
+                    i = 0;
+                } else i += 1;
+            }
+            if (n == ranges.len) {
+                // Too many: all of them as one.
+                for (ranges[0..n]) |q| t = .{ @min(t[0], q[0]), @min(t[1], q[1]), @max(t[2], q[2]), @max(t[3], q[3]) };
+                n = 0;
+            }
+            ranges[n] = t;
+            n += 1;
+        }
+        // More than can be submitted: the last ones together.
+        while (n > max_regions) {
+            const q = ranges[n - 1];
+            const t = &ranges[n - 2];
+            t.* = .{ @min(t[0], q[0]), @min(t[1], q[1]), @max(t[2], q[2]), @max(t[3], q[3]) };
+            n -= 1;
+        }
+        for (ranges[0..n], f.regions[0..n]) |t, *out| out.* = .{ @intCast(t[0]), @intCast(t[1]), @intCast(t[2]), @intCast(t[3]) };
+        f.region_count = n;
+        if (n == 0) f.limited_to_nothing = true;
+    }
+
+    /// How many jobs the frame is submitted as (see `submitRegion`): 1
+    /// unless it was limited to several regions, 0 if to none.
+    pub fn regionCount(f: *const Frame) usize {
+        if (f.region_count == 0) return if (f.limited_to_nothing) 0 else 1;
+        return f.region_count;
+    }
+
+    /// Whether anything drawn in `r` (target pixels) can show: false if it
+    /// is outside every tile the frame is limited to.
+    pub fn covers(f: *const Frame, r: Viewport) bool {
+        if (f.limited_to_nothing) return false;
+        if (f.region_count == 0) return true;
+        const x0 = @divFloor(r.x, cl.tile_size);
+        const y0 = @divFloor(r.y, cl.tile_size);
+        const x1 = @divFloor(r.x + @as(i32, @intCast(r.width)) - 1, cl.tile_size);
+        const y1 = @divFloor(r.y + @as(i32, @intCast(r.height)) - 1, cl.tile_size);
+        for (f.regions[0..f.region_count]) |t| {
+            if (x0 <= t[2] and t[0] <= x1 and y0 <= t[3] and t[1] <= y1) return true;
+        }
+        return false;
+    }
+
+    /// After `finish`: the ioctl argument for region `i`'s job.
+    pub fn submitRegion(f: *Frame, i: usize) *device.SubmitCl {
+        if (f.region_count > 0) {
+            const t = f.regions[i];
+            f.submit.min_x_tile = t[0];
+            f.submit.min_y_tile = t[1];
+            f.submit.max_x_tile = t[2];
+            f.submit.max_y_tile = t[3];
+        }
+        return &f.submit;
+    }
+
+    /// Completes the frame and returns the ioctl argument (for the first
+    /// region, if limited to several).
     pub fn finish(f: *Frame) *device.SubmitCl {
         f.bin.finish();
         const tiles = f.tileCounts();
@@ -322,7 +419,7 @@ pub const Frame = struct {
                 .bits = cl.loadStoreBits(f.target.tiling, .color, cl.loadstore_format_rgba8888),
             };
         }
-        return &f.submit;
+        return f.submitRegion(0);
     }
 
     pub fn bcl(f: *const Frame) []const u8 {
@@ -394,4 +491,34 @@ test "multiple draws share buffers and add shader records" {
     try testing.expectEqual(@as(u32, 0), s.color_read.hindex); // keep loads the target
     const b = f.bcl();
     try testing.expectEqual(@intFromEnum(cl.Packet.flush), b[b.len - 1]);
+}
+
+test "frames limited to regions render the tiles covering them" {
+    var f: Frame = undefined;
+    f.begin(.{ .handle = 10, .width = 640, .height = 480 }, .{ .clear = 0 });
+    // Two rectangles in one tile, and one far away.
+    f.limitTo(&.{
+        .{ .x = 10, .y = 10, .width = 5, .height = 5 },
+        .{ .x = 30, .y = 40, .width = 10, .height = 10 },
+        .{ .x = 600, .y = 400, .width = 40, .height = 80 },
+    });
+    try std.testing.expectEqual(@as(usize, 2), f.regionCount());
+    _ = f.finish();
+    const a = f.submitRegion(0);
+    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, [4]u8{ a.min_x_tile, a.min_y_tile, a.max_x_tile, a.max_y_tile });
+    const b = f.submitRegion(1);
+    try std.testing.expectEqual([4]u8{ 9, 6, 9, 7 }, [4]u8{ b.min_x_tile, b.min_y_tile, b.max_x_tile, b.max_y_tile });
+    // Overlapping tile ranges merge.
+    f.limitTo(&.{ .{ .x = 0, .y = 0, .width = 100, .height = 10 }, .{ .x = 70, .y = 0, .width = 100, .height = 10 } });
+    try std.testing.expectEqual(@as(usize, 1), f.regionCount());
+    try std.testing.expect(f.covers(.{ .x = 60, .y = 0, .width = 50, .height = 5 }));
+    try std.testing.expect(!f.covers(.{ .x = 300, .y = 100, .width = 50, .height = 5 }));
+    // Nothing to draw: no jobs; no limit: one, of everything.
+    f.limitTo(&.{.{ .x = 700, .y = 0, .width = 10, .height = 10 }});
+    try std.testing.expectEqual(@as(usize, 0), f.regionCount());
+    f.limitTo(null);
+    try std.testing.expectEqual(@as(usize, 1), f.regionCount());
+    _ = f.finish();
+    const all = f.submitRegion(0);
+    try std.testing.expectEqual([4]u8{ 0, 0, 9, 7 }, [4]u8{ all.min_x_tile, all.min_y_tile, all.max_x_tile, all.max_y_tile });
 }

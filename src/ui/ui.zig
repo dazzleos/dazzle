@@ -40,6 +40,7 @@
 //! * `material`: the theme, OutlinedButton
 //! * `controls`: Checkbox, Radio, Switch
 //! * `painter`: painting, GPU draws and the overflow stripes
+//! * `damage`: what changed between frames, so only that is redrawn
 //! * `runtime`: `Ui`, which runs it all
 
 pub const geometry = @import("geometry.zig");
@@ -49,6 +50,7 @@ pub const text = @import("text.zig");
 pub const material = @import("material.zig");
 pub const controls = @import("controls.zig");
 pub const painter = @import("painter.zig");
+pub const damage = @import("damage.zig");
 pub const runtime = @import("runtime.zig");
 
 pub const Size = geometry.Size;
@@ -105,6 +107,7 @@ test {
     _ = material;
     _ = controls;
     _ = painter;
+    _ = damage;
     _ = runtime;
     _ = @import("tests.zig");
 }

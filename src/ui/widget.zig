@@ -286,6 +286,8 @@ pub const Node = struct {
     /// Whatever the widget's layout wants to keep for its paint, in the
     /// frame's arena.
     scratch: ?*anyopaque = null,
+    /// What it drew when last painted (to find what changed).
+    paint: @import("damage.zig").Painted = .{},
 
     pub fn child(n: *const Node, i: usize) *Node {
         return n.children.items[i];
@@ -388,6 +390,7 @@ pub const Node = struct {
         for (n.children.items) |ch| ch.destroy();
         n.children.deinit(n.ui.gpa);
         n.ui.forget(n);
+        n.ui.damage.removed(n);
         if (n.state_ptr) |s| {
             const ops = n.widget.vtable.state.?;
             ops.deinit(s);

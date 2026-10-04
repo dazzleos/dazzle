@@ -86,10 +86,14 @@ pub const Renderer = struct {
     }
 
     /// Records a canvas (one of those given to `prepare`) into `frame`.
+    /// Batches outside the parts of the frame being rendered (see
+    /// `render.Frame.limitTo`) are left out.
     pub fn record(r: *Renderer, c: *const Canvas, frame: *render.Frame) !void {
         for (c.batches.items) |*b| {
             const data = std.mem.sliceAsBytes(b.floats.items);
             if (data.len == 0) continue;
+            const area = if (b.clip) |clip| b.bounds.intersect(clip) orelse continue else b.bounds;
+            if (!frame.covers(scissor(area))) continue;
             const vbo = r.vbo orelse return error.NotPrepared;
             const offset = r.cursor;
             if (offset + data.len > vbo.map.len) return error.NotPrepared;

@@ -110,8 +110,19 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     var shown: Stats.Summary = .{};
     var log_window: Stats = .{ .since = start };
     var next_update: u64 = start;
+    // Something outside the UI changed (the size, the statistics): build a
+    // frame. Otherwise frames are built only while a widget asks (for an
+    // animation, or after input), and shown only if they changed.
+    var dirty = true;
+    var idle = false;
     while (true) {
-        win.poll() catch |err| {
+        const waited = if (idle) blk: {
+            // Nothing to draw: sleep until the statistics change, or
+            // something happens (input, a configure).
+            const until = if (window_ui.needs_frame) sys.nowNs() + 16 * std.time.ns_per_ms else next_update;
+            break :blk win.wait(@max(until -| sys.nowNs(), std.time.ns_per_ms));
+        } else win.poll();
+        waited catch |err| {
             if (err == error.ServerError) print("stardust: compositor error: {s}\n", .{win.conn.errorMessage()});
             return err;
         };
@@ -121,6 +132,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             width = size[0];
             height = size[1];
             next_update = 0;
+            dirty = true;
         }
         const frame_start = sys.nowNs();
         for (win.takeInput()) |e| switch (e) {
@@ -131,6 +143,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             .button => |b| {
                 if (b.pressed) rings.add(frame_start, b.pos[0], b.pos[1], .argb(buttonColor(b.code)));
                 window_ui.pointerButton(b.pos, b.code, b.pressed);
+                dirty = true;
             },
             .key => |k| if (k.pressed) {
                 input.key = k.code;
@@ -142,40 +155,58 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         if (frame_start >= next_update) {
             next_update = frame_start + std.time.ns_per_s / 2;
             status = statusLines(&status_bufs, shown, width, height, input, health);
+            dirty = true;
         }
 
-        const scale = @min(@as(f32, @floatFromInt(width)) / 1920, @as(f32, @floatFromInt(height)) / 1080);
-        window_ui.frame(width, height, frame_start, view.Demo{
-            .solids = &all_solids,
-            .rings = &rings,
-            .subtitle = "build " ++ build_info.commit,
-            .status = status,
-            .scale = scale,
-        });
-        frame.begin(try win.beginFrame(), .{ .clear = background });
-        try window_ui.render(&frame);
-        const issued = sys.nowNs();
-        // Render, then hand the frame to the shell (which may wait for the
-        // previous one to be shown), so the GPU's time is measured alone.
-        try win.render(&frame);
-        const rendered = sys.nowNs();
-        try win.show();
+        idle = true;
+        if (dirty or window_ui.needs_frame) {
+            dirty = false;
+            const scale = @min(@as(f32, @floatFromInt(width)) / 1920, @as(f32, @floatFromInt(height)) / 1080);
+            window_ui.frame(width, height, frame_start, view.Demo{
+                .solids = &all_solids,
+                .rings = &rings,
+                .subtitle = "build " ++ build_info.commit,
+                .status = status,
+                .scale = scale,
+            });
+            if (window_ui.changed()) {
+                idle = false;
+                // Only what changed since the buffer was last drawn is drawn
+                // again; the rest of it already shows this frame.
+                const target = try win.beginFrame();
+                const region = window_ui.repaint(win.bufferAge());
+                frame.begin(target, .{ .clear = background });
+                ui.Ui.limit(&frame, &region);
+                try window_ui.render(&frame);
+                const issued = sys.nowNs();
+                // Render, then hand the frame to the shell (which may wait
+                // for the previous one to be shown), so the GPU's time is
+                // measured alone.
+                try win.render(&frame);
+                const rendered = sys.nowNs();
+                var damage: [ui.damage.Region.max_rects]vc4.render.Viewport = undefined;
+                const changed = window_ui.damaged();
+                for (changed, damage[0..changed.len]) |r, *v| v.* = .{ .x = @intFromFloat(r.x), .y = @intFromFloat(r.y), .width = @intFromFloat(r.w), .height = @intFromFloat(r.h) };
+                try win.showDamaged(damage[0..changed.len]);
+                stats_window.add(issued - frame_start, rendered - issued, region.slice());
+                log_window.add(issued - frame_start, rendered - issued, region.slice());
+            }
+        }
 
-        stats_window.add(issued - frame_start, rendered - issued);
-        log_window.add(issued - frame_start, rendered - issued);
         const now = sys.nowNs();
         if (now - stats_window.since >= std.time.ns_per_s / 2) {
-            shown = stats_window.summary(now);
+            shown = stats_window.summary(now, width, height);
             stats_window = .{ .since = now };
         }
         // Also log every 5 seconds, for the network log.
         if (now - log_window.since >= 5 * std.time.ns_per_s) {
-            const s = log_window.summary(now);
+            const s = log_window.summary(now, width, height);
             health = monitor.sample();
             var temp_buf: [16]u8 = undefined;
-            print("stardust: {d:.1} fps, GPU {d:.2} ms, CPU {d:.2} ms per frame; SoC {s}, CPU speed {d:.0}%, CPU busy {d:.0}% (demo {d:.0}%, shell {d:.0}%)\n", .{
-                s.fps,        s.gpu_ms,          s.cpu_ms,         temperatureText(&temp_buf, health.temperature),
-                health.speed, health.total_busy, health.demo_busy, health.shell_busy,
+            print("stardust: {d:.1} fps ({d:.0}% of the window redrawn), GPU {d:.2} ms, CPU {d:.2} ms per frame; SoC {s}, CPU speed {d:.0}%, CPU busy {d:.0}% (demo {d:.0}%, shell {d:.0}%)\n", .{
+                s.fps,                                          s.redrawn,    s.gpu_ms,          s.cpu_ms,
+                temperatureText(&temp_buf, health.temperature), health.speed, health.total_busy, health.demo_busy,
+                health.shell_busy,
             });
             log_window = .{ .since = now };
         }
@@ -188,29 +219,37 @@ const Stats = struct {
     frames: u32 = 0,
     cpu_ns: u64 = 0,
     gpu_ns: u64 = 0,
+    /// Pixels redrawn.
+    pixels: f64 = 0,
 
     const Summary = struct {
+        /// Frames drawn per second (none while nothing changes).
         fps: f32 = 0,
         /// Recording the frame's draws.
         cpu_ms: f32 = 0,
         /// From submitting the frame to the GPU finishing it.
         gpu_ms: f32 = 0,
+        /// How much of the window a frame redrew, on average, in percent.
+        redrawn: f32 = 0,
     };
 
-    fn add(s: *Stats, cpu_ns: u64, gpu_ns: u64) void {
+    fn add(s: *Stats, cpu_ns: u64, gpu_ns: u64, region: []const ui.Rect) void {
         s.frames += 1;
         s.cpu_ns += cpu_ns;
         s.gpu_ns += gpu_ns;
+        for (region) |r| s.pixels += r.w * r.h;
     }
 
-    fn summary(s: *const Stats, now: u64) Summary {
+    fn summary(s: *const Stats, now: u64, width: u32, height: u32) Summary {
         if (s.frames == 0 or now == s.since) return .{};
         const n: f32 = @floatFromInt(s.frames);
         const ms = std.time.ns_per_ms;
+        const area: f64 = @floatFromInt(@as(u64, width) * height);
         return .{
             .fps = n / (@as(f32, @floatFromInt(now - s.since)) / std.time.ns_per_s),
             .cpu_ms = @as(f32, @floatFromInt(s.cpu_ns)) / n / ms,
             .gpu_ms = @as(f32, @floatFromInt(s.gpu_ns)) / n / ms,
+            .redrawn = @floatCast(100 * s.pixels / @max(area, 1) / n),
         };
     }
 };
@@ -264,7 +303,7 @@ fn statusLines(bufs: *[view.lines][96]u8, s: Stats.Summary, width: u32, height: 
         std.fmt.bufPrint(&bufs[0], "{d}.{d}.{d}.{d}  ({s})", .{ a.ip[0], a.ip[1], a.ip[2], a.ip[3], a.name() }) catch ""
     else
         "No network";
-    out[1] = std.fmt.bufPrint(&bufs[1], "{d:.1} fps  ·  {d}×{d}", .{ s.fps, width, height }) catch "";
+    out[1] = std.fmt.bufPrint(&bufs[1], "{d:.1} fps  ·  {d}×{d}  ·  {d:.0}% redrawn", .{ s.fps, width, height, s.redrawn }) catch "";
     out[2] = std.fmt.bufPrint(&bufs[2], "GPU {d:.2} ms per frame", .{s.gpu_ms}) catch "";
     out[3] = std.fmt.bufPrint(&bufs[3], "CPU {d:.2} ms per frame", .{s.cpu_ms}) catch "";
     var key_buf: [16]u8 = undefined;
@@ -288,8 +327,8 @@ test {
 
 test "status lines" {
     var bufs: [view.lines][96]u8 = undefined;
-    const lines = statusLines(&bufs, .{ .fps = 59.94, .cpu_ms = 0.42, .gpu_ms = 6.5 }, 1920, 1080, .{ .pointer = .{ 12.25, 400 }, .key = 30 }, .{ .temperature = 61.6, .speed = 99.6, .total_busy = 45 });
-    try std.testing.expectEqualStrings("59.9 fps  ·  1920×1080", lines[1]);
+    const lines = statusLines(&bufs, .{ .fps = 59.94, .cpu_ms = 0.42, .gpu_ms = 6.5, .redrawn = 21.3 }, 1920, 1080, .{ .pointer = .{ 12.25, 400 }, .key = 30 }, .{ .temperature = 61.6, .speed = 99.6, .total_busy = 45 });
+    try std.testing.expectEqualStrings("59.9 fps  ·  1920×1080  ·  21% redrawn", lines[1]);
     try std.testing.expectEqualStrings("GPU 6.50 ms per frame", lines[2]);
     try std.testing.expectEqualStrings("Pointer 12, 400  ·  last key A", lines[4]);
     try std.testing.expectEqualStrings("62 °C  ·  CPU speed 100%  ·  busy 45%", lines[5]);

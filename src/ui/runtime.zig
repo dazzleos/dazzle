@@ -17,6 +17,7 @@ const geometry = @import("geometry.zig");
 const widget = @import("widget.zig");
 const painter_mod = @import("painter.zig");
 const material = @import("material.zig");
+const damage_mod = @import("damage.zig");
 
 const Point = geometry.Point;
 const Size = geometry.Size;
@@ -55,6 +56,11 @@ pub const Ui = struct {
     captured: ?*Node = null,
     /// The window's size at the last frame.
     frame_size: [2]u32 = .{ 1, 1 },
+    /// What changed in the last frame (and the frames before).
+    damage: damage_mod.Tracker = .{},
+    /// Counts nodes as they are painted (their order is part of what they
+    /// draw).
+    paint_order: u64 = 0,
 
     pub fn create(gpa: std.mem.Allocator, f: ?*const font.Font) !*Ui {
         const ui = try gpa.create(Ui);
@@ -96,6 +102,7 @@ pub const Ui = struct {
         _ = ui.arenas[@intCast(ui.frame_no % 2)].reset(.retain_capacity);
         ui.now_ns = now_ns;
         ui.needs_frame = false;
+        ui.damage.begin(ui.frame_no, width, height);
         var cx: Context = .{ .ui = ui, .arena = ui.arena(), .node = undefined };
         const w = cx.make(root);
         if (ui.root) |r| if (r.widget.vtable != w.vtable) {
@@ -108,6 +115,7 @@ pub const Ui = struct {
         _ = r.layout(.tight(.{ .w = @floatFromInt(width), .h = @floatFromInt(height) }));
         r.offset = .{ 0, 0 };
         ui.paint(r, width, height);
+        ui.damage.sweep(r);
         // The layout may have moved things under the pointer.
         if (ui.pointer) |p| ui.updateHover(p);
     }
@@ -117,6 +125,7 @@ pub const Ui = struct {
         ui.canvases_used = 0;
         ui.segments.clearRetainingCapacity();
         ui.frame_size = .{ width, height };
+        ui.paint_order = 0;
         var p: Painter = .{ .ui = ui, .node = r };
         p.paintNode(r);
     }
@@ -158,6 +167,37 @@ pub const Ui = struct {
         ui.segments.append(ui.gpa, .{ .gpu = d }) catch {};
     }
 
+    /// Whether the last frame looks any different from the one before (if
+    /// not, there is nothing to draw or show).
+    pub fn changed(ui: *const Ui) bool {
+        return !ui.damage.frame.isEmpty();
+    }
+
+    /// What changed in the last frame, in window pixels (for the
+    /// compositor).
+    pub fn damaged(ui: *const Ui) []const geometry.Rect {
+        return ui.damage.frame.slice();
+    }
+
+    /// What must be drawn into a buffer last drawn `age` frames ago (1 for
+    /// the frame before; 0 if never, or unknown) to show the last frame.
+    pub fn repaint(ui: *const Ui, age: u32) damage_mod.Region {
+        return ui.damage.repaint(age);
+    }
+
+    /// Limits `frame` (begun) to drawing `region`: the rest of its target
+    /// keeps what it holds.
+    pub fn limit(frame_: *vc4.render.Frame, region: *const damage_mod.Region) void {
+        var vps: [damage_mod.Region.max_rects]vc4.render.Viewport = undefined;
+        for (region.slice(), vps[0..region.len]) |r, *v| v.* = .{
+            .x = @intFromFloat(r.x),
+            .y = @intFromFloat(r.y),
+            .width = @intFromFloat(r.w),
+            .height = @intFromFloat(r.h),
+        };
+        frame_.limitTo(vps[0..region.len]);
+    }
+
     /// Records the last frame painted into `frame` (whose previous use of
     /// the UI's buffers has finished rendering).
     pub fn render(ui: *Ui, frame_: *vc4.render.Frame) !void {
@@ -165,7 +205,7 @@ pub const Ui = struct {
         try r.prepare(ui.canvases.items[0..ui.canvases_used]);
         for (ui.segments.items) |s| switch (s) {
             .canvas => |c| try r.record(c, frame_),
-            .gpu => |g| try g.f(g.ctx, frame_, g.area),
+            .gpu => |g| if (frame_.covers(g.area.scissor orelse g.area.viewport)) try g.f(g.ctx, frame_, g.area),
         };
     }
 

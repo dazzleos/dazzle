@@ -53,6 +53,8 @@ pub const Painter = struct {
     origin: Point = .{ 0, 0 },
     /// What may be drawn on, in the frame's pixels.
     clip: ?Rect = null,
+    /// What the node being painted draws (see `damage.zig`).
+    rec: ?*gfx.Record = null,
 
     /// The canvas to draw on now, with the origin at the widget's top left
     /// and its clip applied.
@@ -60,6 +62,7 @@ pub const Painter = struct {
         const c = p.ui.currentCanvas();
         c.setOrigin(p.origin);
         c.clip = p.clip;
+        c.recorder = p.rec;
         return c;
     }
 
@@ -85,13 +88,36 @@ pub const Painter = struct {
     /// Adds a draw straight into the GPU frame over the widget's box,
     /// between what is painted before it and after it. `f` is called when
     /// the frame is recorded, with `ctx` (which must last until then: the
-    /// widget, or its state).
+    /// widget, or its state). The toolkit cannot see what it draws, so it
+    /// takes the whole box to change every frame; `gpuWith` can say less.
     pub fn gpu(p: *Painter, ctx: anytype, comptime f: fn (@TypeOf(ctx), *vc4.render.Frame, GpuArea) anyerror!void) void {
+        p.gpuWith(.{}, ctx, f);
+    }
+
+    pub const GpuOptions = struct {
+        /// The part of the box it draws on (relative to the widget), if
+        /// less than all of it.
+        bounds: ?Rect = null,
+        /// Identifies what it draws: the same key as last frame means the
+        /// same picture (so nothing needs redrawing). Without one, it
+        /// changes every frame.
+        key: ?u64 = null,
+    };
+
+    pub fn gpuWith(p: *Painter, options: GpuOptions, ctx: anytype, comptime f: fn (@TypeOf(ctx), *vc4.render.Frame, GpuArea) anyerror!void) void {
         const Ctx = @TypeOf(ctx);
         const box = p.boxRect();
         const vp = viewport(box) orelse return;
         var scissor: ?vc4.render.Viewport = null;
         if (p.clip) |clip| scissor = viewport(intersect(clip, box).?) orelse return;
+        if (p.rec) |rec| {
+            const key = options.key orelse p.ui.frame_no;
+            rec.hash.update(std.mem.asBytes(&key));
+            const b = if (options.bounds) |r| intersect(box, .{ .x = r.x + p.origin[0], .y = r.y + p.origin[1], .w = r.w, .h = r.h }).? else box;
+            if (intersect(p.clip, b)) |area| if (area.w > 0 and area.h > 0) {
+                rec.bounds = if (rec.bounds) |old| old.unite(area) else area;
+            };
+        }
         p.ui.addGpu(.{
             .ctx = @ptrCast(ctx),
             .f = struct {
@@ -126,14 +152,23 @@ pub const Painter = struct {
         // Nothing of it can show.
         if (p.clip) |c| if (c.w <= 0 or c.h <= 0) return;
 
+        // What it draws itself (not its children), and where it comes in
+        // the order of painting, to compare with the last frame.
+        var rec: gfx.Record = .{};
+        rec.hash.update(std.mem.asBytes(&p.ui.paint_order));
+        p.ui.paint_order += 1;
+        const saved_rec = p.rec;
+        defer p.rec = saved_rec;
+        p.rec = &rec;
+
         const vt = n.widget.vtable;
         if (vt.paint) |f| f(n.widget.ptr, n, p);
         for (n.children.items) |ch| p.paintNode(ch);
-        if (vt.paint_over) |f| {
-            p.node = n;
-            f(n.widget.ptr, n, p);
-        }
+        p.node = n;
+        p.rec = &rec;
+        if (vt.paint_over) |f| f(n.widget.ptr, n, p);
         if (overflowing) p.paintOverflow(n, box);
+        p.ui.damage.painted(n, &rec);
     }
 
     /// Stripes along each edge that something reaches past.
@@ -154,6 +189,7 @@ pub const Painter = struct {
         const c = p.ui.currentCanvas();
         c.setOrigin(.{ 0, 0 });
         c.clip = clip;
+        c.recorder = p.rec;
         c.fillRect(r, stripe_colors[1]);
         const half = stripe_period / 2;
         // Stripes at 45 degrees, from bottom left to top right.

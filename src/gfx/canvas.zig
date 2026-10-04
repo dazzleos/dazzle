@@ -60,18 +60,28 @@ pub const Rect = struct {
     w: f32,
     h: f32,
 
-    fn intersects(a: Rect, b: Rect) bool {
+    pub fn intersects(a: Rect, b: Rect) bool {
         return a.x < b.x + b.w and b.x < a.x + a.w and a.y < b.y + b.h and b.y < a.y + a.h;
     }
 
-    fn unite(a: Rect, b: Rect) Rect {
+    /// The overlap, or null if there is none.
+    pub fn intersect(a: Rect, b: Rect) ?Rect {
+        const x0 = @max(a.x, b.x);
+        const y0 = @max(a.y, b.y);
+        const x1 = @min(a.x + a.w, b.x + b.w);
+        const y1 = @min(a.y + a.h, b.y + b.h);
+        if (x1 <= x0 or y1 <= y0) return null;
+        return .{ .x = x0, .y = y0, .w = x1 - x0, .h = y1 - y0 };
+    }
+
+    pub fn unite(a: Rect, b: Rect) Rect {
         const x0 = @min(a.x, b.x);
         const y0 = @min(a.y, b.y);
         return .{ .x = x0, .y = y0, .w = @max(a.x + a.w, b.x + b.w) - x0, .h = @max(a.y + a.h, b.y + b.h) - y0 };
     }
 
     /// Grown by `d` on every side.
-    fn outset(r: Rect, d: f32) Rect {
+    pub fn outset(r: Rect, d: f32) Rect {
         return .{ .x = r.x - d, .y = r.y - d, .w = r.w + 2 * d, .h = r.h + 2 * d };
     }
 };
@@ -134,6 +144,8 @@ pub const Canvas = struct {
     failed: bool = false,
     /// Where the glyphs of the text batches are (see `drawText`).
     atlas: ?*Atlas = null,
+    /// If set, every shape drawn is noted in it (see `Record`).
+    recorder: ?*Record = null,
 
     pub fn init(gpa: std.mem.Allocator) Canvas {
         return .{ .gpa = gpa };
@@ -164,6 +176,7 @@ pub const Canvas = struct {
         c.origin = .{ 0, 0 };
         c.failed = false;
         c.atlas = null;
+        c.recorder = null;
     }
 
     /// Limits drawing to a rectangle (whole pixels, relative to the
@@ -208,6 +221,7 @@ pub const Canvas = struct {
 
     /// Fills a simple polygon (convex or concave, not self-intersecting).
     pub fn fillPolygon(c: *Canvas, points: []const Point, color: Color) void {
+        c.note(.polygon, c.moved(boundsOf(points)).outset(1), .{ c.origin, color }, std.mem.sliceAsBytes(points));
         const b = c.batchFor(.solid, c.moved(boundsOf(points)).outset(1)) orelse return;
         var sink: SolidSink = .{ .canvas = c, .batch = b, .color = color, .offset = c.origin };
         geometry.fillPolygon(sink.sink(), points);
@@ -215,6 +229,7 @@ pub const Canvas = struct {
 
     /// Strokes a polyline centred on it, with mitred joins and butt ends.
     pub fn strokePolyline(c: *Canvas, points: []const Point, closed: bool, width: f32, color: Color) void {
+        c.note(.polyline, c.moved(boundsOf(points)).outset(width * geometry.miter_limit / 2 + 1), .{ c.origin, color, width, closed }, std.mem.sliceAsBytes(points));
         const b = c.batchFor(.solid, c.moved(boundsOf(points)).outset(width * geometry.miter_limit / 2 + 1)) orelse return;
         var sink: SolidSink = .{ .canvas = c, .batch = b, .color = color, .offset = c.origin };
         geometry.strokePolyline(sink.sink(), points, closed, width);
@@ -233,6 +248,7 @@ pub const Canvas = struct {
         const run = atlas.runs.get(style, text);
         const end = x + if (run) |r| r.width else font.measure(style, text);
         if (color.a <= 0 or text.len == 0) return end;
+        c.note(.text, .{ .x = x + ox - style.size, .y = base - 1.5 * style.size, .w = end - x + 2 * style.size, .h = 2.5 * style.size }, .{ @intFromPtr(style.font), style.size, x + ox, base, color }, text);
         // Glyphs reach about an em above and below the baseline at most.
         const b = c.batchFor(.text, .{ .x = x + ox - style.size, .y = base - 1.5 * style.size, .w = end - x + 2 * style.size, .h = 2.5 * style.size }) orelse return end;
         const aw: f32 = @floatFromInt(atlas_mod.width);
@@ -266,6 +282,7 @@ pub const Canvas = struct {
     fn roundedRect(c: *Canvas, r_in: Rect, radii_in: Radii, stroke: f32, color: Color) void {
         const r = c.moved(r_in);
         if (r.w <= 0 or r.h <= 0 or color.a <= 0) return;
+        c.note(.rounded_rect, r.outset(1), .{ r, radii_in, stroke, color }, "");
         const hw = r.w / 2;
         const hh = r.h / 2;
         const limit = @min(hw, hh);
@@ -360,6 +377,23 @@ pub const Canvas = struct {
         return .{ .x = x, .y = y, .alpha = alpha };
     }
 
+    // --- Recording ----------------------------------------------------------------
+
+    const Op = enum(u8) { rounded_rect, polygon, polyline, text };
+
+    /// Notes a shape in the recorder: what it is (its operation, the
+    /// fixed-size `params` and the variable `data`, with the clip) and the
+    /// area it can touch.
+    fn note(c: *Canvas, op: Op, bounds: Rect, params: anytype, data: []const u8) void {
+        const rec = c.recorder orelse return;
+        rec.hash.update(&.{@intFromEnum(op)});
+        rec.hash.update(std.mem.asBytes(&params));
+        rec.hash.update(data);
+        if (c.clip) |clip| rec.hash.update(std.mem.asBytes(&clip));
+        const area = if (c.clip) |clip| bounds.intersect(clip) orelse return else bounds;
+        rec.bounds = if (rec.bounds) |b| b.unite(area) else area;
+    }
+
     // --- Batches ----------------------------------------------------------------
 
     fn moved(c: *const Canvas, r: Rect) Rect {
@@ -418,6 +452,20 @@ pub const Canvas = struct {
             return null;
         };
         return @as([*][floats]f32, @ptrCast(more.ptr))[0..n];
+    }
+};
+
+/// A fingerprint of what was drawn while a canvas's `recorder` pointed at
+/// it, and the area it covers (in target pixels, within the clip): two
+/// records with the same hash drew the same thing, so a UI can tell what
+/// changed between frames, and where, without comparing pixels.
+pub const Record = struct {
+    hash: std.hash.Wyhash = .init(0),
+    bounds: ?Rect = null,
+
+    pub fn final(r: *const Record) u64 {
+        var h = r.hash;
+        return h.final();
     }
 };
 
@@ -483,4 +531,34 @@ test "separate shapes batch together; overlapping ones keep their order" {
     c.fillCircle(.{ 50, 50 }, 20, Color.rgb(0));
     try std.testing.expectEqual(@as(usize, 1), c.batches.items.len);
     try std.testing.expectEqual(Kind.shape, c.batches.items[0].kind);
+}
+
+test "records tell what was drawn, and where" {
+    var c = Canvas.init(std.testing.allocator);
+    defer c.deinit();
+    const draw = struct {
+        fn f(cv: *Canvas, x: f32, color: Color) Record {
+            var rec: Record = .{};
+            cv.begin(200, 100);
+            cv.recorder = &rec;
+            cv.fillRoundedRect(.{ .x = x, .y = 10, .w = 50, .h = 40 }, .all(8), color);
+            cv.strokePolyline(&.{ .{ 0, 0 }, .{ 20, 5 } }, false, 2, color);
+            return rec;
+        }
+    }.f;
+    const a = draw(&c, 10, Color.rgb(0xff0000));
+    const b = draw(&c, 10, Color.rgb(0xff0000));
+    try std.testing.expectEqual(a.final(), b.final());
+    try std.testing.expect(a.final() != draw(&c, 11, Color.rgb(0xff0000)).final());
+    try std.testing.expect(a.final() != draw(&c, 10, Color.rgb(0xfe0000)).final());
+    // The rectangle and the line, with a pixel for anti-aliasing.
+    const r = a.bounds.?;
+    try std.testing.expect(r.x < 0 and r.y < 0 and r.x + r.w >= 61 and r.y + r.h >= 51);
+    // A clip limits the area.
+    var rec: Record = .{};
+    c.begin(200, 100);
+    c.recorder = &rec;
+    c.setClip(.{ .x = 0, .y = 0, .w = 20, .h = 20 });
+    c.fillRect(.{ .x = 10, .y = 10, .w = 50, .h = 50 }, Color.rgb(0));
+    try std.testing.expectEqual(Rect{ .x = 9, .y = 9, .w = 11, .h = 11 }, rec.bounds.?);
 }

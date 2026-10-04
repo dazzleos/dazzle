@@ -68,7 +68,8 @@ pub const Demo = struct {
             state.time += @as(f32, @floatFromInt(now -| last)) / std.time.ns_per_s * state.speed;
         };
         state.last_ns = now;
-        cx.requestFrame();
+        // Frames while something moves: the solid, or rings fading.
+        if (!state.paused or self.rings.len > 0) cx.requestFrame();
 
         const s = self.scale;
         const title = 52 * s;
@@ -135,8 +136,17 @@ pub const SolidView = struct {
     shape: Shape,
     look: solids.Look,
 
-    pub fn paint(self: *const SolidView, _: *ui.Node, p: *ui.Painter) void {
-        if (self.solids != null) p.gpu(self, draw);
+    pub fn paint(self: *const SolidView, n: *ui.Node, p: *ui.Painter) void {
+        if (self.solids == null) return;
+        // It draws within the projection of its bounding sphere, and draws
+        // the same while its time, shape and look are the same (so nothing
+        // is redrawn while it is paused).
+        const b = solids.screenBounds(@intFromFloat(@max(n.size.w, 1)), @intFromFloat(@max(n.size.h, 1)));
+        var key = std.hash.Wyhash.init(0);
+        key.update(std.mem.asBytes(&self.time));
+        key.update(std.mem.asBytes(&self.shape));
+        key.update(std.mem.asBytes(&self.look));
+        p.gpuWith(.{ .bounds = .{ .x = b[0], .y = b[1], .w = b[2], .h = b[3] }, .key = key.final() }, self, draw);
     }
 
     fn draw(self: *const SolidView, frame: *vc4.render.Frame, area: ui.GpuArea) anyerror!void {
@@ -275,4 +285,18 @@ test "the radio buttons choose the solid, and the switches its look" {
     try testing.expectEqual(Shape.icosahedron, st.shape);
     try testing.expect(!st.look.lighting);
     try testing.expect(st.look.texturing);
+}
+
+test "while paused and still, frames change nothing and none are asked for" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    var rings: rings_mod.Rings = .{};
+    const demo: Demo = .{ .solids = null, .rings = &rings, .subtitle = "", .status = @splat("same"), .scale = 1 };
+    u.frame(1920, 1080, 0, demo);
+    u.root.?.state(Demo.State).paused = true;
+    u.frame(1920, 1080, 1, demo);
+    u.frame(1920, 1080, 2, demo);
+    try testing.expect(!u.changed());
+    try testing.expect(!u.needs_frame);
 }

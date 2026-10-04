@@ -49,8 +49,11 @@ pub const Gpu = struct {
     }
     fn devRun(ptr: *anyopaque, frame: *vc4.render.Frame) anyerror!void {
         const dev = devOf(ptr);
-        const seqno = try dev.submit(frame.finish());
-        try dev.waitSeqno(seqno, std.time.ns_per_s);
+        _ = frame.finish();
+        // One job per region the frame is limited to.
+        var seqno: ?u64 = null;
+        for (0..frame.regionCount()) |i| seqno = try dev.submit(frame.submitRegion(i));
+        if (seqno) |s| try dev.waitSeqno(s, std.time.ns_per_s);
     }
 
     /// The real GPU. `dev` must stay in place.
@@ -74,6 +77,8 @@ const default_size = [2]u32{ 1280, 720 };
 const max_buffers = 3;
 
 const Buffer = struct {
+    /// The frame (counting from 1) last drawn in it; 0 if none.
+    drawn: u64 = 0,
     bo: vc4.Bo,
     proxy: client.Proxy,
     width: u32,
@@ -111,6 +116,8 @@ pub const Window = struct {
     back: ?usize = null,
     /// A committed frame whose frame callback has not fired yet.
     frame_pending: bool = false,
+    /// Frames shown so far.
+    frames: u64 = 0,
 
     seat: ?client.Proxy = null,
     pointer: ?client.Proxy = null,
@@ -178,6 +185,12 @@ pub const Window = struct {
         _ = try w.conn.dispatchPending();
     }
 
+    /// Waits for events (input, a configure, a released buffer) for up to
+    /// `timeout_ns`, and handles them: for when there is nothing to draw.
+    pub fn wait(w: *Window, timeout_ns: u64) !void {
+        try w.conn.dispatchTimeout(@intCast(@min(std.math.divCeil(u64, timeout_ns, std.time.ns_per_ms) catch 0, std.math.maxInt(i32))));
+    }
+
     /// Acknowledges a pending configure. Returns the new size if it changed;
     /// frames are rendered at it from the next `beginFrame`.
     pub fn applyConfigure(w: *Window) !?[2]u32 {
@@ -216,16 +229,40 @@ pub const Window = struct {
         try w.gpu.vtable.run(w.gpu.ptr, frame);
     }
 
+    /// How many frames ago the buffer `beginFrame` gave was last drawn: 1
+    /// if in the frame before, 0 if never (its contents are unknown). Only
+    /// what changed since then needs drawing into it (see
+    /// `vc4.render.Frame.limitTo`).
+    pub fn bufferAge(w: *const Window) u32 {
+        const i = w.back orelse return 0;
+        const b = &w.buffers[i].?;
+        if (b.drawn == 0) return 0;
+        return @intCast(@min(w.frames + 1 - b.drawn, std.math.maxInt(u32)));
+    }
+
     /// Hands the rendered frame to the compositor, once it has shown the
-    /// previous one.
+    /// previous one, saying the whole window changed.
     pub fn show(w: *Window) !void {
+        return w.showDamaged(null);
+    }
+
+    /// Like `show`, saying which parts of the window changed since the
+    /// last frame shown (all of it if null).
+    pub fn showDamaged(w: *Window, damage: ?[]const vc4.render.Viewport) !void {
         while (w.frame_pending) try w.conn.dispatch();
         const i = w.back orelse return error.NoFrameBegun;
         const b = &w.buffers[i].?;
         var m = try w.surface.request(p.wl_surface.request.attach);
         m.uint(b.proxy.id).int(0).int(0).end();
-        m = try w.surface.request(p.wl_surface.request.damage_buffer);
-        m.int(0).int(0).int(@intCast(b.width)).int(@intCast(b.height)).end();
+        if (damage) |rects| {
+            for (rects) |r| {
+                m = try w.surface.request(p.wl_surface.request.damage_buffer);
+                m.int(r.x).int(r.y).int(@intCast(r.width)).int(@intCast(r.height)).end();
+            }
+        } else {
+            m = try w.surface.request(p.wl_surface.request.damage_buffer);
+            m.int(0).int(0).int(@intCast(b.width)).int(@intCast(b.height)).end();
+        }
         const cb = try w.conn.newObject(.{ .ptr = w, .handler = frameDone });
         m = try w.surface.request(p.wl_surface.request.frame);
         m.uint(cb.id).end();
@@ -233,6 +270,8 @@ pub const Window = struct {
         m.end();
         try w.conn.flush();
         b.busy = true;
+        w.frames += 1;
+        b.drawn = w.frames;
         w.frame_pending = true;
         w.back = null;
     }

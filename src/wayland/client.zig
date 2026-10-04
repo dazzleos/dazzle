@@ -126,6 +126,16 @@ pub const Display = struct {
         }
     }
 
+    /// Flushes requests, then handles events, waiting up to `timeout_ms`
+    /// for one (returning sooner if one arrives).
+    pub fn dispatchTimeout(d: *Display, timeout_ms: i32) Error!void {
+        try d.flush();
+        if (try d.dispatchPending() > 0) return;
+        var fds = [_]linux.pollfd{.{ .fd = d.conn.fd, .events = linux.POLL.IN, .revents = 0 }};
+        _ = linux.poll(&fds, 1, timeout_ms);
+        _ = try d.dispatchPending();
+    }
+
     /// Waits until the server has processed every request sent so far.
     pub fn roundtrip(d: *Display) Error!void {
         var done = false;
