@@ -1,8 +1,9 @@
 //! The settings app's window, as widgets: cards about the system (its
-//! build, Linux and the board), the network, the resources in use (with
+//! build, Linux and the board), Ethernet, the resources in use (with
 //! meters) and the Wi-Fi networks around, in two columns. Choosing a Wi-Fi
-//! network shows a password field (for WPA2) and a Connect button; what is
-//! asked of the Wi-Fi manager goes to the main loop through `Actions`.
+//! network shows a password field (for WPA2) and a Connect button;
+//! choosing a static address for Ethernet shows fields for it. What is
+//! asked of the network manager goes to the main loop through `Actions`.
 
 const std = @import("std");
 const ui = @import("ui");
@@ -13,11 +14,13 @@ const info = @import("info.zig");
 pub const apps_color = gfx.Color.argb(0xff4fd8c4);
 pub const user_color = gfx.Color.argb(0xffffb68a);
 
-/// What the window asks of the Wi-Fi manager; the main loop sends it, then
-/// clears it.
+/// What the window asks of the network manager; the main loop sends it,
+/// then clears it.
 pub const Actions = struct {
     connect: ?Join = null,
     disconnect: bool = false,
+    /// How the wired adapter gets its address.
+    ethernet: ?info.manager.Addressing = null,
 
     pub const Join = struct {
         ssid_buf: [32]u8 = undefined,
@@ -42,8 +45,8 @@ pub const Settings = struct {
     system: *const info.System,
     usage: info.Usage,
     network: *const info.Network,
-    /// What the Wi-Fi manager last said; null if it could not be asked.
-    wifi: ?*const info.wifi.Report = null,
+    /// What the network manager last said; null if it could not be asked.
+    manager: ?*const info.manager.Report = null,
     /// Sizes are designed for a window 900 pixels high and scale with it.
     scale: f32,
     /// The title bar's buttons (close, and maximize, which shows whether
@@ -62,6 +65,37 @@ pub const Settings = struct {
         has_selected: bool = false,
         password_buf: [63]u8 = undefined,
         password_len: u8 = 0,
+        /// Ethernet: the form for a static address is open (chosen, before
+        /// it is applied), what is typed in it, and whether that was not an
+        /// address.
+        static_form: bool = false,
+        form_filled: bool = false,
+        form_id: u32 = 0,
+        address: Field = .{},
+        gateway: Field = .{},
+        static_invalid: bool = false,
+
+        pub const Field = struct {
+            buf: [32]u8 = undefined,
+            len: u8 = 0,
+
+            pub fn text(f: *const Field) []const u8 {
+                return f.buf[0..f.len];
+            }
+
+            pub fn set(f: *Field, t: []const u8) void {
+                f.len = @intCast(@min(t.len, f.buf.len));
+                @memcpy(f.buf[0..f.len], t[0..f.len]);
+            }
+        };
+
+        fn setAddress(st: *State, t: []const u8) void {
+            st.address.set(t);
+        }
+
+        fn setGateway(st: *State, t: []const u8) void {
+            st.gateway.set(t);
+        }
 
         pub fn selected(st: *const State) ?[]const u8 {
             return if (st.has_selected) st.selected_buf[0..st.selected_len] else null;
@@ -83,7 +117,7 @@ pub const Settings = struct {
                 cx.make(ui.Expanded{ .child = cx.make(ui.Row{ .cross_axis_alignment = .start, .spacing = 20 * s, .children = &.{
                     cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 20 * s, .children = &.{
                         self.systemCard(b),
-                        self.networkCard(b),
+                        self.networkCard(b, state),
                     } }) }),
                     cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 20 * s, .children = &.{
                         self.resourcesCard(b),
@@ -147,7 +181,7 @@ pub const Settings = struct {
 
     fn wifiCard(self: *const Settings, b: Builder, state: *State) ui.Widget {
         const cx = b.cx;
-        const report = self.wifi orelse return b.card("Wi-Fi", &.{b.item("Status", "The Wi-Fi manager is not running")});
+        const report = self.manager orelse return b.card("Wi-Fi", &.{b.item("Status", "The network manager is not running")});
         if (report.denied) return b.card("Wi-Fi", &.{b.item("Status", "Not allowed to scan")});
         const adapter = report.adapter orelse return b.card("Wi-Fi", &.{b.item("Status", "No Wi-Fi adapter")});
         var rows: std.ArrayList(ui.Widget) = .empty;
@@ -159,17 +193,17 @@ pub const Settings = struct {
         const nets = report.slice();
         // The chosen network, if it is still around (and not the one joined).
         const conn = &report.connection;
-        const chosen: ?*const info.wifi.Network = if (state.selected()) |sel| for (nets) |*n| {
+        const chosen: ?*const info.manager.Network = if (state.selected()) |sel| for (nets) |*n| {
             if (std.mem.eql(u8, n.ssid(), sel)) break n;
         } else null else null;
         const form = chosen != null and !(conn.state.joined() and std.mem.eql(u8, conn.ssid(), chosen.?.ssid()));
         // The form and the Disconnect button take room: fewer networks then.
         const limit: usize = max_listed - @as(usize, if (form) 1 else 0) - @as(usize, if (connectionBusy(conn)) 1 else 0);
         // The strongest, and the chosen one even if it is weaker.
-        var picks: [max_listed]*const info.wifi.Network = undefined;
+        var picks: [max_listed]*const info.manager.Network = undefined;
         const shown = @min(nets.len, limit);
         for (picks[0..shown], nets[0..shown]) |*p, *n| p.* = n;
-        if (chosen) |c| if (std.mem.indexOfScalar(*const info.wifi.Network, picks[0..shown], c) == null) {
+        if (chosen) |c| if (std.mem.indexOfScalar(*const info.manager.Network, picks[0..shown], c) == null) {
             picks[shown - 1] = c;
         };
         for (picks[0..shown]) |n| {
@@ -191,7 +225,7 @@ pub const Settings = struct {
     }
 
     /// The connection's state, with Disconnect while there is one.
-    fn connectionRow(self: *const Settings, b: Builder, state: *State, c: *const info.wifi.Connection) ui.Widget {
+    fn connectionRow(self: *const Settings, b: Builder, state: *State, c: *const info.manager.Connection) ui.Widget {
         const cx = b.cx;
         const name = printable(cx, c.ssid());
         const text = switch (c.state) {
@@ -209,7 +243,7 @@ pub const Settings = struct {
     }
 
     /// Joining the chosen network: a password field for WPA2, and Connect.
-    fn joinForm(self: *const Settings, b: Builder, state: *State, n: *const info.wifi.Network) ui.Widget {
+    fn joinForm(self: *const Settings, b: Builder, state: *State, n: *const info.manager.Network) ui.Widget {
         const cx = b.cx;
         const t = &cx.ui.theme;
         const on_connect: ?ui.Callback = if (self.actions) |acts| .of(act(cx, acts, state, n.ssid()), Act.connect) else null;
@@ -232,7 +266,7 @@ pub const Settings = struct {
         } });
     }
 
-    fn networkCard(self: *const Settings, b: Builder) ui.Widget {
+    fn networkCard(self: *const Settings, b: Builder, state: *State) ui.Widget {
         const cx = b.cx;
         const net = self.network;
         var rows: std.ArrayList(ui.Widget) = .empty;
@@ -250,7 +284,7 @@ pub const Settings = struct {
             else
                 "Connected";
             rows.append(a, b.item(i.name.slice(), status)) catch {};
-            const method = if (self.system.static_ip.len > 0) "static" else "DHCP";
+            const method = if (self.addressing() == .static) "static" else "DHCP";
             // An adapter without a link has no address or traffic to show.
             if (i.carrier or i.ip != null) {
                 const address = if (i.ip) |ip|
@@ -263,12 +297,127 @@ pub const Settings = struct {
             if (i.mac.len > 0) rows.append(a, b.item("MAC address", i.mac.slice())) catch {};
         }
         if (net.gateway) |g| rows.append(a, b.item("Gateway", cx.fmt("{d}.{d}.{d}.{d}", .{ g[0], g[1], g[2], g[3] }))) catch {};
+        // How the adapter gets its address, if there is one and the
+        // network manager can be asked.
+        if (net.len > 0 and self.manager != null) self.addressingRows(b, state, &rows);
         return b.card("Ethernet", rows.items);
+    }
+
+    /// How the wired adapter gets its address, as the network manager says.
+    fn addressing(self: *const Settings) info.manager.Addressing {
+        return if (self.manager) |m| m.ethernet.addressing else .dhcp;
+    }
+
+    /// DHCP or a static address, and the form for a static address while
+    /// that is chosen.
+    fn addressingRows(self: *const Settings, b: Builder, state: *State, rows: *std.ArrayList(ui.Widget)) void {
+        const cx = b.cx;
+        const a = cx.ui.arena();
+        const current = self.addressing();
+        const static = state.static_form or current == .static;
+        const choice = cx.ui.arena().create(Addressing) catch return;
+        choice.* = .{ .actions = self.actions, .state = state, .current = current };
+        const on_changed: ?ui.ValueCallback(Mode) = if (self.actions != null) .of(choice, Addressing.choose) else null;
+        rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12 * b.s, .children = &.{
+            b.label("Addressing"),
+            cx.make(ui.Radio(Mode){ .value = .dhcp, .group_value = if (static) .static else .dhcp, .on_changed = on_changed, .label = "DHCP" }),
+            cx.make(ui.Radio(Mode){ .value = .static, .group_value = if (static) .static else .dhcp, .on_changed = on_changed, .label = "Static" }),
+        } })) catch {};
+        if (!static) return;
+
+        // The fields start with the static address in use, or else the one
+        // DHCP gave.
+        if (!state.form_filled) {
+            state.form_filled = true;
+            state.form_id +%= 1;
+            state.static_invalid = false;
+            var buf: [64]u8 = undefined;
+            switch (current) {
+                .static => |st| {
+                    const ad = st.address;
+                    state.address.set(std.fmt.bufPrint(&buf, "{d}.{d}.{d}.{d}/{d}", .{ ad[0], ad[1], ad[2], ad[3], st.prefix }) catch "");
+                    state.gateway.set(if (st.gateway) |g| std.fmt.bufPrint(&buf, "{d}.{d}.{d}.{d}", .{ g[0], g[1], g[2], g[3] }) catch "" else "");
+                },
+                .dhcp => {
+                    state.address.len = 0;
+                    state.gateway.len = 0;
+                    for (self.network.slice()) |*i| if (i.ip) |ip| {
+                        state.address.set(std.fmt.bufPrint(&buf, "{d}.{d}.{d}.{d}/{d}", .{ ip[0], ip[1], ip[2], ip[3], i.prefix }) catch "");
+                        break;
+                    };
+                    if (self.network.gateway) |g| state.gateway.set(std.fmt.bufPrint(&buf, "{d}.{d}.{d}.{d}", .{ g[0], g[1], g[2], g[3] }) catch "");
+                },
+            }
+        }
+        const on_apply: ?ui.Callback = if (self.actions != null) .of(choice, Addressing.apply) else null;
+        const key = @as(u64, state.form_id) << 1;
+        rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12 * b.s, .children = &.{
+            cx.make(ui.SizedBox{ .width = 150 * b.s }),
+            cx.make(ui.Expanded{ .flex = 3, .child = cx.make(ui.TextField{
+                .placeholder = "Address/prefix",
+                .initial = state.address.text(),
+                .max_len = state.address.buf.len,
+                .size = 18 * b.s,
+                .on_changed = .of(state, State.setAddress),
+                .on_submit = on_apply,
+            }).withKey(key) }),
+            cx.make(ui.Expanded{ .flex = 2, .child = cx.make(ui.TextField{
+                .placeholder = "Gateway",
+                .initial = state.gateway.text(),
+                .max_len = state.gateway.buf.len,
+                .size = 18 * b.s,
+                .on_changed = .of(state, State.setGateway),
+                .on_submit = on_apply,
+            }).withKey(key | 1) }),
+            cx.make(ui.OutlinedButton{ .label = "Apply", .on_press = on_apply }),
+        } })) catch {};
+        if (state.static_invalid) rows.append(a, cx.make(ui.Row{ .spacing = 12 * b.s, .children = &.{
+            cx.make(ui.SizedBox{ .width = 150 * b.s }),
+            cx.make(ui.Expanded{ .child = cx.make(ui.Text{
+                .text = "Give an address and prefix length (192.168.1.50/24), and a gateway or none",
+                .style = .{ .size = 16 * b.s, .color = cx.ui.theme.@"error" },
+            }) }),
+        } })) catch {};
+    }
+};
+
+const Mode = enum { dhcp, static };
+
+/// Choosing DHCP or a static address, and applying one.
+const Addressing = struct {
+    actions: ?*Actions,
+    state: *Settings.State,
+    current: info.manager.Addressing,
+
+    fn choose(x: *Addressing, mode: Mode) void {
+        const st = x.state;
+        switch (mode) {
+            .dhcp => {
+                st.static_form = false;
+                st.form_filled = false;
+                if (x.current == .static) if (x.actions) |acts| {
+                    acts.ethernet = .dhcp;
+                };
+            },
+            // The form opens; nothing changes until it is applied.
+            .static => st.static_form = true,
+        }
+    }
+
+    fn apply(x: *Addressing) void {
+        const st = x.state;
+        const static = info.manager.Static.parse(std.mem.trim(u8, st.address.text(), " "), st.gateway.text()) orelse {
+            st.static_invalid = true;
+            return;
+        };
+        st.static_invalid = false;
+        st.static_form = false;
+        if (x.actions) |acts| acts.ethernet = .{ .static = static };
     }
 };
 
 /// Whether a connection is being made or kept (and can be ended).
-fn connectionBusy(c: *const info.wifi.Connection) bool {
+fn connectionBusy(c: *const info.manager.Connection) bool {
     return c.state != .idle and !(c.state == .failed and c.failure != .lost);
 }
 
@@ -419,7 +568,7 @@ const Builder = struct {
 
     /// A Wi-Fi network: its signal, name, security and band; pressing it
     /// chooses it.
-    fn network(b: Builder, n: *const info.wifi.Network, chosen: bool, joined: bool, on_press: ui.Callback) ui.Widget {
+    fn network(b: Builder, n: *const info.manager.Network, chosen: bool, joined: bool, on_press: ui.Callback) ui.Widget {
         const cx = b.cx;
         const t = &cx.ui.theme;
         const row = cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12 * b.s, .children = &.{
@@ -558,23 +707,23 @@ fn sample() struct { sys: info.System, net: info.Network, usage: info.Usage } {
     } };
 }
 
-fn sampleWifi() info.wifi.Report {
-    var r: info.wifi.Report = .{ .scanning = true };
-    var a: info.wifi.Adapter = .{ .mac = .{ 0xb8, 0x27, 0xeb, 1, 2, 3 }, .up = true };
+fn sampleWifi() info.manager.Report {
+    var r: info.manager.Report = .{ .scanning = true };
+    var a: info.manager.Adapter = .{ .mac = .{ 0xb8, 0x27, 0xeb, 1, 2, 3 }, .up = true };
     a.setName("wlan0");
     r.adapter = a;
-    const nets = [_]struct { []const u8, i32, u32, info.wifi.Security }{
+    const nets = [_]struct { []const u8, i32, u32, info.manager.Security }{
         .{ "Home", -4800, 5180, .wpa2 },   .{ "Cafe", -6100, 2412, .open },      .{ "Library", -7000, 2437, .enterprise },
         .{ "Office", -7200, 2462, .wpa3 }, .{ "Neighbour", -8000, 2412, .wpa2 }, .{ "Shop", -8100, 2437, .wpa2 },
         .{ "Bus", -8200, 2412, .open },    .{ "Old", -8400, 2462, .wep },        .{ "Far", -8800, 2412, .wpa2 },
         .{ "Further", -9000, 2412, .wpa },
     };
     for (nets) |n| {
-        var net: info.wifi.Network = .{ .signal_mbm = n[1], .freq_mhz = n[2], .security = n[3] };
+        var net: info.manager.Network = .{ .signal_mbm = n[1], .freq_mhz = n[2], .security = n[3] };
         net.setSsid(n[0]);
         r.add(net);
     }
-    var odd: info.wifi.Network = .{ .signal_mbm = -9500, .freq_mhz = 2412, .security = .wpa2 };
+    var odd: info.manager.Network = .{ .signal_mbm = -9500, .freq_mhz = 2412, .security = .wpa2 };
     odd.setSsid("bad\xffname");
     r.add(odd);
     return r;
@@ -606,7 +755,7 @@ test "everything is shown, and fits the window at the shell's sizes" {
     // halves are too small for it all.
     for ([_][3]u32{ .{ 1920, 960, 1920 }, .{ 1280, 600, 1280 }, .{ 1024, 668, 1024 }, .{ 960, 480, 1920 } }) |size| {
         const scale = scaleFor(size[0], size[1]);
-        u.frame(size[0], size[1], 0, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .wifi = &wifi, .scale = scale, .bar_scale = @as(f32, @floatFromInt(size[2])) / 1920 });
+        u.frame(size[0], size[1], 0, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .scale = scale, .bar_scale = @as(f32, @floatFromInt(size[2])) / 1920 });
         try testing.expect(!overflows(u.root.?));
     }
     var all: std.ArrayList(u8) = .empty;
@@ -678,17 +827,17 @@ test "the Wi-Fi card says when it cannot list networks" {
     const u = try ui.Ui.create(testing.allocator, &f);
     defer u.destroy();
     const d = sample();
-    const no_adapter: info.wifi.Report = .{};
-    const denied: info.wifi.Report = .{ .denied = true };
-    var empty: info.wifi.Report = .{ .scanning = true };
+    const no_adapter: info.manager.Report = .{};
+    const denied: info.manager.Report = .{ .denied = true };
+    var empty: info.manager.Report = .{ .scanning = true };
     empty.adapter = .{ .up = true };
-    for ([_]struct { ?*const info.wifi.Report, []const u8 }{
-        .{ null, "The Wi-Fi manager is not running" },
+    for ([_]struct { ?*const info.manager.Report, []const u8 }{
+        .{ null, "The network manager is not running" },
         .{ &no_adapter, "No Wi-Fi adapter" },
         .{ &denied, "Not allowed to scan" },
         .{ &empty, "Scanning…" },
     }) |case| {
-        u.frame(1920, 960, 0, Settings{ .commit = "x", .system = &d.sys, .usage = d.usage, .network = &d.net, .wifi = case[0], .scale = 1 });
+        u.frame(1920, 960, 0, Settings{ .commit = "x", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = case[0], .scale = 1 });
         var all: std.ArrayList(u8) = .empty;
         defer all.deinit(testing.allocator);
         texts(u.root.?, &all);
@@ -701,12 +850,12 @@ test "SSIDs that are not text are shown readably" {
     const u = try ui.Ui.create(testing.allocator, &f);
     defer u.destroy();
     const d = sample();
-    var r: info.wifi.Report = .{};
+    var r: info.manager.Report = .{};
     r.adapter = .{ .up = true };
-    var odd: info.wifi.Network = .{ .signal_mbm = -5000, .freq_mhz = 2412, .security = .wpa2 };
+    var odd: info.manager.Network = .{ .signal_mbm = -5000, .freq_mhz = 2412, .security = .wpa2 };
     odd.setSsid("bad\xffname");
     r.add(odd);
-    u.frame(1920, 960, 0, Settings{ .commit = "x", .system = &d.sys, .usage = d.usage, .network = &d.net, .wifi = &r, .scale = 1 });
+    u.frame(1920, 960, 0, Settings{ .commit = "x", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &r, .scale = 1 });
     var all: std.ArrayList(u8) = .empty;
     defer all.deinit(testing.allocator);
     texts(u.root.?, &all);
@@ -740,7 +889,7 @@ test "choosing a network, typing its password and connecting" {
     const d = sample();
     const wifi = sampleWifi();
     var actions: Actions = .{};
-    const settings: Settings = .{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .wifi = &wifi, .scale = 1 };
+    const settings: Settings = .{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .scale = 1 };
     u.frame(1920, 960, 0, settings);
     click(u, findText(u.root.?, "Home").?);
     u.frame(1920, 960, 1, settings);
@@ -749,8 +898,8 @@ test "choosing a network, typing its password and connecting" {
     var joining = wifi;
     joining.connection = .{ .state = .authenticating };
     joining.connection.setSsid("Cafe");
-    for ([_]*const info.wifi.Report{ &wifi, &joining }) |report| for ([_][2]u32{ .{ 1920, 960 }, .{ 1280, 600 }, .{ 1024, 668 }, .{ 960, 480 } }) |size| {
-        u.frame(size[0], size[1], 2, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .wifi = report, .scale = scaleFor(size[0], size[1]) });
+    for ([_]*const info.manager.Report{ &wifi, &joining }) |report| for ([_][2]u32{ .{ 1920, 960 }, .{ 1280, 600 }, .{ 1024, 668 }, .{ 960, 480 } }) |size| {
+        u.frame(size[0], size[1], 2, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = report, .scale = scaleFor(size[0], size[1]) });
         try testing.expect(!overflows(u.root.?));
     };
     u.frame(1920, 960, 3, settings);
@@ -781,7 +930,7 @@ test "choosing a network, typing its password and connecting" {
     var joined = wifi;
     joined.connection = .{ .state = .connected, .address = .{ 192, 168, 1, 50 } };
     joined.connection.setSsid("Home");
-    u.frame(1920, 960, 5, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .wifi = &joined, .scale = 1 });
+    u.frame(1920, 960, 5, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &joined, .scale = 1 });
     try testing.expect(findText(u.root.?, "Connected to Home (192.168.1.50)") != null);
     click(u, findText(u.root.?, "Disconnect").?);
     try testing.expect(actions.disconnect);
@@ -799,6 +948,64 @@ test "choosing a network, typing its password and connecting" {
     var failed = wifi;
     failed.connection = .{ .state = .failed, .failure = .wrong_password };
     failed.connection.setSsid("Home");
-    u.frame(1920, 960, 8, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .wifi = &failed, .scale = 1 });
+    u.frame(1920, 960, 8, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &failed, .scale = 1 });
     try testing.expect(findText(u.root.?, "Could not connect to Home: wrong password") != null);
+}
+
+test "choosing a static address for Ethernet, and DHCP again" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    const d = sample();
+    var report = sampleWifi();
+    var actions: Actions = .{};
+    var frame_no: u64 = 0;
+    const Draw = struct {
+        fn draw(uu: *ui.Ui, dd: anytype, r: *const info.manager.Report, acts: *Actions, n: *u64, size: [2]u32) void {
+            n.* += 1;
+            uu.frame(size[0], size[1], n.*, Settings{ .commit = "x", .actions = acts, .system = &dd.sys, .usage = dd.usage, .network = &dd.net, .manager = r, .scale = scaleFor(size[0], size[1]) });
+        }
+    }.draw;
+    Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
+    try testing.expect(findText(u.root.?, "Addressing") != null);
+    try testing.expect(findText(u.root.?, "192.168.1.42/24 (DHCP)") != null);
+    try testing.expect(findType(u.root.?, ui.TextField) == null);
+
+    // Static opens the form, filled in with what DHCP gave; it fits.
+    click(u, findText(u.root.?, "Static").?);
+    Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
+    const field = findType(u.root.?, ui.TextField).?;
+    try testing.expectEqualStrings("192.168.1.42/24", field.state(ui.TextField.State).text());
+    try testing.expect(actions.ethernet == null);
+    for ([_][2]u32{ .{ 1920, 960 }, .{ 1280, 600 }, .{ 1024, 668 }, .{ 960, 480 } }) |size| {
+        Draw(u, d, &report, &actions, &frame_no, size);
+        try testing.expect(!overflows(u.root.?));
+    }
+    Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
+
+    // Not an address: it says so, and asks nothing.
+    var st = u.root.?.state(Settings.State);
+    st.address.set("192.168.1/24");
+    click(u, findText(u.root.?, "Apply").?);
+    Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
+    try testing.expect(actions.ethernet == null);
+    try testing.expect(findText(u.root.?, "Give an address and prefix length (192.168.1.50/24), and a gateway or none") != null);
+    // An address: it is asked for.
+    st = u.root.?.state(Settings.State);
+    st.address.set("192.168.1.50/24");
+    click(u, findText(u.root.?, "Apply").?);
+    try testing.expectEqual(info.manager.Static.parse("192.168.1.50/24", "192.168.1.1").?, actions.ethernet.?.static);
+    actions = .{};
+
+    // The manager now says static: the form stays, filled in with it.
+    report.ethernet.addressing = .{ .static = info.manager.Static.parse("192.168.1.50/24", "192.168.1.1").? };
+    Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
+    try testing.expect(findText(u.root.?, "192.168.1.42/24 (static)") != null);
+    try testing.expect(findType(u.root.?, ui.TextField) != null);
+    // DHCP again is asked for at once, and the form closes.
+    click(u, findText(u.root.?, "DHCP").?);
+    try testing.expect(actions.ethernet.? == .dhcp);
+    report.ethernet.addressing = .dhcp;
+    Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
+    try testing.expect(findType(u.root.?, ui.TextField) == null);
 }

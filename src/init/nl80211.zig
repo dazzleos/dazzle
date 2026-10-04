@@ -12,7 +12,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
 
-const wifi = sys.wifi;
+const wifi = sys.network;
 
 // netlink.h, genetlink.h
 const netlink_generic = 16;

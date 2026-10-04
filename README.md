@@ -376,18 +376,17 @@ passwords or logins.
   the user ID) and execs `/shell/stardust-shell`. The shell's stdout and
   stderr are init's `/dev/kmsg` descriptor, because only root can open that
   for writing. The shell's clients inherit them.
-- The network manager runs as the same user but keeps three capabilities:
-  configuring interfaces and routes (`CAP_NET_ADMIN`), tying its DHCP
-  socket to the interface (`CAP_NET_RAW`) and binding the DHCP client port
-  (`CAP_NET_BIND_SERVICE`). Init restarts it if it ever stops.
-- The Wi-Fi manager runs as the user, keeping only the network manager's
-  three capabilities: `CAP_NET_ADMIN` (nl80211 needs it to scan, connect
-  and install keys), `CAP_NET_RAW` (the supplicant's packet socket, and
-  DHCP) and `CAP_NET_BIND_SERVICE` (DHCP). It answers only
-  the settings app: every app runs as the same user, so the socket's
-  permissions cannot tell them apart, and it checks instead which program
-  the connecting process runs (`/proc/<pid>/exe`, from the socket's peer
-  credentials). Init restarts it if it ever stops.
+- The network manager, the one process that configures the network (wired
+  and Wi-Fi), runs as the same user but keeps three capabilities:
+  `CAP_NET_ADMIN` (configuring interfaces and routes; nl80211 needs it to
+  scan, connect and install keys), `CAP_NET_RAW` (the supplicant's packet
+  socket, and tying DHCP's socket to the interface) and
+  `CAP_NET_BIND_SERVICE` (the DHCP client port). Its socket,
+  `/run/user/1000/network`, answers only the settings app: every app runs
+  as the same user, so the socket's permissions cannot tell them apart,
+  and it checks instead which program the connecting process runs
+  (`/proc/<pid>/exe`, from the socket's peer credentials). Init restarts it
+  if it ever stops.
 - The device manager runs as the user, keeping only `CAP_CHOWN`. Input
   device nodes are created owned by root, so it gives each one to the user
   (at start, then on each uevent that adds one), and the shell can read
@@ -500,18 +499,19 @@ LAN95xx, Microchip LAN78xx and generic CDC Ethernet.
 
 ### Reading the log over the network
 
-The network never holds up boot. Init starts a network manager alongside
-everything else. It waits for an Ethernet adapter and a link, gets an
-address by DHCP and keeps renewing the lease. The adapter can be plugged in
-or out, and the cable connected, at any time. A log server also starts
+The network never holds up boot. Init starts the network manager
+(`src/init/network.zig`) alongside everything else. It waits for an
+Ethernet adapter, and gets an address by DHCP once there is a link
+(renewing the lease), or uses the static address chosen in the settings
+app. The adapter can be plugged in or out, and the cable connected, at any
+time. A log server also starts
 before the GPU is touched, so the log stays readable if a GPU job hangs.
 The Pi asks the DHCP server for the hostname `stardust`, so look for that
 name in your router's lease list, then open `http://<pi-address>/` in a
 browser (or `curl http://<pi-address>/`). It shows the whole log since
 boot: kernel, init and program messages. `http://<pi-address>/follow`
 shows the same, then new messages as they arrive (`curl -N` follows it in a
-terminal). The port can be changed with `stardust.httpport=<port>` in
-`cmdline.txt`.
+terminal).
 
 ```
 Stardust 6ec3896 system log. /follow shows new messages as they arrive.
@@ -535,13 +535,9 @@ Stardust 6ec3896 system log. /follow shows new messages as they arrive.
 ```
 
 Timestamps above are illustrative, and the order varies because the network
-comes up in parallel with the demo. To use a static address instead of DHCP,
-add `stardust.ip=<address>/<prefix>[,<gateway>]` to `cmdline.txt`, for
-example:
-
-```
-stardust.ip=192.168.1.50/24,192.168.1.1
-```
+comes up in parallel with the demo. To use a static address instead of
+DHCP, choose Static under Ethernet in the settings app (it lasts until the
+system stops).
 
 ### The demo
 
@@ -633,8 +629,11 @@ change read again every second (`src/settings/info.zig`):
   memory available; the bar will say more once there is real storage. The
   meters turn red above 90%.
 - **Ethernet:** each wired adapter's link (and speed), its address
-  (and whether it came from DHCP or `stardust.ip=`), traffic and MAC
-  address, and the default gateway.
+  (and whether it came from DHCP or is static), traffic and MAC
+  address, and the default gateway. Under Addressing, choose DHCP or a
+  static address: Static opens fields for the address with its prefix
+  length (filled in with what DHCP gave) and the gateway (optional), and
+  Apply (or Enter) uses it. The choice lasts until the system stops.
 - **Wi-Fi:** the adapter, the connection, and the networks around,
   strongest first: their signal, name, security (open, WEP, WPA, WPA2,
   WPA3 or enterprise) and band, each network once (its strongest access
@@ -645,11 +644,13 @@ change read again every second (`src/settings/info.zig`):
   range, refused, no answer, or a security not supported yet); Disconnect
   ends it.
 
-Everything but Wi-Fi comes from files any user can read (`/proc`, `/sys`),
-so it runs unprivileged like the other apps. Wi-Fi needs `CAP_NET_ADMIN`,
-so the app asks init's Wi-Fi manager (`src/init/wifi.zig`), which serves
-only this app; it scans when asked, at most every 10 seconds (and not
-while joining), so nothing scans while the app is closed or covered.
+Everything but Wi-Fi and Ethernet's addressing comes from files any user
+can read (`/proc`, `/sys`), so it runs unprivileged like the other apps.
+Those need `CAP_NET_ADMIN`, so the app asks init's network manager
+(`src/init/network.zig`, with Wi-Fi in `src/init/wifi.zig`) over its socket
+(the protocol is `src/sys/network.zig`), which serves only this app; it
+scans when asked, at most every 10 seconds (and not while joining), so
+nothing scans while the app is closed or covered.
 
 Joining a network: the manager asks the driver to connect to the
 network's strongest access point (the chips' firmware associates by
@@ -661,7 +662,7 @@ proves it knows the key (an HMAC-SHA1 MIC), message 3's MIC and RSN
 element are checked (a changed element would be a downgrade) and its
 group key unwrapped (AES key wrap), and after message 4 the keys go to the
 driver over nl80211. Group key updates are handled the same way. A child
-process then runs the network manager's DHCP client on the interface until
+process then runs the DHCP client (`src/init/ipv4.zig`) on the interface until
 the connection ends; a connection that is lost is tried again. Only CCMP
 pairwise keys with PSK key management are supported: WPA2, and mixed
 WPA2/WPA3 networks through WPA2. WPA3-only (SAE), enterprise, WPA and WEP
@@ -818,7 +819,7 @@ on the Cortex-A53, and init, the log server and networking work.
 
 In QEMU, as a Zero and as a Pi 3 A+, the kernel boots and init's network
 manager gets an address by DHCP over an emulated USB network card. That holds whether the card is there at
-boot or added later. The lease renews, a static `stardust.ip=` works, and
+boot or added later. The lease renews, and
 the log server streams the log (QEMU cannot emulate the
 GPU or display).
 

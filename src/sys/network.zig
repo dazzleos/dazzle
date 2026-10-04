@@ -1,23 +1,32 @@
-//! The Wi-Fi manager's protocol. Init runs the manager (src/init/wifi.zig),
-//! the only process allowed to scan (scanning needs CAP_NET_ADMIN); it
-//! listens on a socket in the user's runtime directory and answers only the
-//! settings app, checked by the program the connecting process runs.
+//! The network manager's protocol. Init runs the manager
+//! (src/init/network.zig), the one process that configures the network
+//! (Ethernet and Wi-Fi: that needs CAP_NET_ADMIN); it listens on a socket in
+//! the user's runtime directory and answers only the settings app, checked
+//! by the program the connecting process runs.
 //!
 //! A client connects, sends a request and reads the report until the
 //! manager closes the connection. The requests are:
 //!
+//!     status
 //!     scan
 //!     connect <SSID in hex> <passphrase in hex, or - for an open network>
 //!     disconnect
+//!     ethernet dhcp
+//!     ethernet static <address>/<prefix> <gateway, or ->
 //!
 //! and the report:
 //!
+//!     ethernet eth0 static 192.168.1.50/24 192.168.1.1
 //!     adapter wlan0 b8:27:eb:01:02:03 up
 //!     scanning
 //!     connection connected none 486f6d65 192.168.1.50
 //!     network -5400 2437 wpa2 486f6d65
 //!     end
 //!
+//! "status" only reports; "scan" also scans for Wi-Fi networks if the last
+//! scan is old. "ethernet" is how the wired adapter (or "-" while there is
+//! none) gets its address: "dhcp", or "static" with the address, prefix
+//! length and gateway (or "-"); the choice is kept until the system stops.
 //! "adapter" names the Wi-Fi adapter (or "none" says there is none);
 //! "scanning" says a scan is under way; each "network" is one network: its
 //! signal in mBm (hundredths of dBm), the frequency in MHz of its strongest
@@ -30,7 +39,7 @@
 const std = @import("std");
 
 /// The socket's name in $XDG_RUNTIME_DIR.
-pub const socket_name = "stardust-wifi";
+pub const socket_name = "network";
 
 /// The only program the manager answers.
 pub const allowed_program = "/apps/stardust-settings/stardust-settings";
@@ -168,16 +177,77 @@ pub fn connectRequest(buf: []u8, ssid: []const u8, passphrase: []const u8) []con
     return w.buffered();
 }
 
+pub const Ip4 = [4]u8;
+
+/// A fixed address for the wired adapter.
+pub const Static = struct {
+    address: Ip4,
+    prefix: u6,
+    gateway: ?Ip4 = null,
+
+    /// Reads "192.168.1.50/24" and a gateway ("192.168.1.1", or "" or "-"
+    /// for none). Null if either is not a valid address.
+    pub fn parse(cidr: []const u8, gateway: []const u8) ?Static {
+        const slash = std.mem.indexOfScalar(u8, cidr, '/') orelse return null;
+        const address = parseIp4(cidr[0..slash]) orelse return null;
+        const prefix = std.fmt.parseInt(u6, cidr[slash + 1 ..], 10) catch return null;
+        if (prefix == 0 or prefix > 32) return null;
+        const gw = std.mem.trim(u8, gateway, " ");
+        if (gw.len == 0 or std.mem.eql(u8, gw, "-")) return .{ .address = address, .prefix = prefix };
+        return .{ .address = address, .prefix = prefix, .gateway = parseIp4(gw) orelse return null };
+    }
+
+    /// "192.168.1.50/24 192.168.1.1" (or "... -" without a gateway).
+    pub fn format(st: Static, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        const a = st.address;
+        try w.print("{d}.{d}.{d}.{d}/{d} ", .{ a[0], a[1], a[2], a[3], st.prefix });
+        if (st.gateway) |g| try w.print("{d}.{d}.{d}.{d}", .{ g[0], g[1], g[2], g[3] }) else try w.writeAll("-");
+    }
+};
+
+pub fn parseIp4(s: []const u8) ?Ip4 {
+    var out: Ip4 = undefined;
+    var it = std.mem.splitScalar(u8, s, '.');
+    for (&out) |*b| b.* = std.fmt.parseInt(u8, it.next() orelse return null, 10) catch return null;
+    return if (it.next() == null) out else null;
+}
+
+/// How the wired adapter gets its address.
+pub const Addressing = union(enum) {
+    dhcp,
+    static: Static,
+};
+
+/// The request choosing how the wired adapter gets its address.
+pub fn ethernetRequest(buf: []u8, a: Addressing) []const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    switch (a) {
+        .dhcp => w.writeAll("ethernet dhcp\n") catch {},
+        .static => |st| w.print("ethernet static {f}\n", .{st}) catch {},
+    }
+    return w.buffered();
+}
+
 pub const Request = union(enum) {
+    status,
     scan,
     disconnect,
     connect: struct { ssid_buf: [32]u8, ssid_len: u8, pass_buf: [63]u8, pass_len: u8 },
+    ethernet: Addressing,
 
     pub fn parse(line: []const u8) ?Request {
         var f = std.mem.tokenizeAny(u8, line, " \n");
         const kind = f.next() orelse return null;
+        if (std.mem.eql(u8, kind, "status")) return .status;
         if (std.mem.eql(u8, kind, "scan")) return .scan;
         if (std.mem.eql(u8, kind, "disconnect")) return .disconnect;
+        if (std.mem.eql(u8, kind, "ethernet")) {
+            const how = f.next() orelse return null;
+            if (std.mem.eql(u8, how, "dhcp")) return .{ .ethernet = .dhcp };
+            if (!std.mem.eql(u8, how, "static")) return null;
+            const cidr = f.next() orelse return null;
+            return .{ .ethernet = .{ .static = Static.parse(cidr, f.next() orelse "-") orelse return null } };
+        }
         if (!std.mem.eql(u8, kind, "connect")) return null;
         const ssid_hex = f.next() orelse return null;
         const pass_hex = f.next() orelse return null;
@@ -208,7 +278,15 @@ pub const Adapter = struct {
     }
 };
 
+/// The wired adapter, and how it gets its address.
+pub const Ethernet = struct {
+    adapter: ?Adapter = null,
+    addressing: Addressing = .dhcp,
+};
+
 pub const Report = struct {
+    ethernet: Ethernet = .{},
+    /// The Wi-Fi adapter.
     adapter: ?Adapter = null,
     scanning: bool = false,
     connection: Connection = .{},
@@ -251,6 +329,12 @@ pub const Report = struct {
 
     pub fn write(r: *const Report, buf: []u8) []const u8 {
         var w: std.Io.Writer = .fixed(buf);
+        const e = &r.ethernet;
+        w.print("ethernet {s} ", .{if (e.adapter) |*a| a.name() else "-"}) catch {};
+        switch (e.addressing) {
+            .dhcp => w.writeAll("dhcp\n") catch {},
+            .static => |st| w.print("static {f}\n", .{st}) catch {},
+        }
         if (r.adapter) |*a| {
             const m = a.mac;
             w.print("adapter {s} {x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2} {s}\n", .{ a.name(), m[0], m[1], m[2], m[3], m[4], m[5], if (a.up) "up" else "down" }) catch {};
@@ -280,6 +364,17 @@ pub const Report = struct {
                 return r;
             } else if (std.mem.eql(u8, kind, "scanning")) {
                 r.scanning = true;
+            } else if (std.mem.eql(u8, kind, "ethernet")) {
+                const name = f.next() orelse continue;
+                if (!std.mem.eql(u8, name, "-")) {
+                    var a: Adapter = .{};
+                    a.setName(name);
+                    r.ethernet.adapter = a;
+                }
+                if (std.mem.eql(u8, f.next() orelse "", "static")) {
+                    const cidr = f.next() orelse continue;
+                    if (Static.parse(cidr, f.next() orelse "-")) |st| r.ethernet.addressing = .{ .static = st };
+                }
             } else if (std.mem.eql(u8, kind, "connection")) {
                 var c: Connection = .{};
                 c.state = std.meta.stringToEnum(ConnectionState, f.next() orelse continue) orelse .idle;
@@ -367,7 +462,7 @@ test "reports go through the socket as text and come back the same" {
     r.add(net("Café net", -6100, 5180, .wpa3));
     var buf: [1024]u8 = undefined;
     const text = r.write(&buf);
-    try testing.expect(std.mem.startsWith(u8, text, "adapter wlan0 b8:27:eb:01:02:03 up\nscanning\nconnection idle none - -\nnetwork -5400 2437 wpa2 486f6d65\n"));
+    try testing.expect(std.mem.startsWith(u8, text, "ethernet - dhcp\nadapter wlan0 b8:27:eb:01:02:03 up\nscanning\nconnection idle none - -\nnetwork -5400 2437 wpa2 486f6d65\n"));
     const back = Report.parse(text).?;
     try testing.expectEqualStrings("wlan0", back.adapter.?.name());
     try testing.expectEqual(a.mac, back.adapter.?.mac);
@@ -407,4 +502,37 @@ test "requests and the connection state go through the socket" {
     const failed = Report.parse(rep.write(&out)).?;
     try testing.expectEqual(Failure.wrong_password, failed.connection.failure);
     try testing.expect(failed.connection.address == null and failed.connection.ssid_len == 0);
+}
+
+test "the wired adapter's addressing goes through the socket" {
+    var buf: [256]u8 = undefined;
+    const st = Static.parse("192.168.1.50/24", "192.168.1.1").?;
+    try testing.expectEqual(Ip4{ 192, 168, 1, 50 }, st.address);
+    try testing.expectEqual(@as(u6, 24), st.prefix);
+    try testing.expectEqual(Ip4{ 192, 168, 1, 1 }, st.gateway.?);
+    try testing.expect(Static.parse("10.0.0.2/8", "").?.gateway == null);
+    try testing.expect(Static.parse("10.0.0/8", "") == null);
+    try testing.expect(Static.parse("10.0.0.2/33", "") == null);
+    try testing.expect(Static.parse("10.0.0.2", "") == null);
+    try testing.expect(Static.parse("10.0.0.2/8", "10.0.0.256") == null);
+
+    const req = ethernetRequest(&buf, .{ .static = st });
+    try testing.expectEqualStrings("ethernet static 192.168.1.50/24 192.168.1.1\n", req);
+    try testing.expectEqual(st, Request.parse(req).?.ethernet.static);
+    try testing.expect(Request.parse(ethernetRequest(&buf, .dhcp)).?.ethernet == .dhcp);
+    try testing.expect(Request.parse("ethernet static 10.0.0.2/8 -\n").?.ethernet.static.gateway == null);
+    try testing.expect(Request.parse("ethernet static nonsense\n") == null);
+    try testing.expect(Request.parse("status\n").? == .status);
+
+    var r: Report = .{};
+    var a: Adapter = .{};
+    a.setName("eth0");
+    r.ethernet = .{ .adapter = a, .addressing = .{ .static = Static.parse("10.0.0.2/8", "-").? } };
+    var out: [512]u8 = undefined;
+    const text = r.write(&out);
+    try testing.expect(std.mem.startsWith(u8, text, "ethernet eth0 static 10.0.0.2/8 -\n"));
+    const back = Report.parse(text).?;
+    try testing.expectEqualStrings("eth0", back.ethernet.adapter.?.name());
+    try testing.expectEqual(r.ethernet.addressing.static, back.ethernet.addressing.static);
+    try testing.expect(Report.parse("ethernet - dhcp\nnone\nend\n").?.ethernet.adapter == null);
 }

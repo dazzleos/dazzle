@@ -51,8 +51,6 @@ pub const System = struct {
     /// network.
     kernel: Str(64) = .{},
     hostname: Str(64) = .{},
-    /// A static address from the kernel command line (otherwise DHCP).
-    static_ip: Str(48) = .{},
 
     pub fn read() System {
         var h: System = .{};
@@ -75,7 +73,6 @@ pub const System = struct {
             h.kernel.print("{s} ({s})", .{ std.mem.sliceTo(&uts.release, 0), std.mem.sliceTo(&uts.machine, 0) });
             h.hostname.set(std.mem.sliceTo(&uts.nodename, 0));
         }
-        if (sys.readFile("/proc/cmdline", &buf)) |cmdline| if (staticIp(cmdline)) |ip| h.static_ip.set(ip);
         return h;
     }
 };
@@ -111,13 +108,6 @@ pub fn parseCpuinfo(text: []const u8) Cpuinfo {
         }
     }
     return out;
-}
-
-/// The address in `stardust.ip=` on the kernel command line.
-pub fn staticIp(cmdline: []const u8) ?[]const u8 {
-    var it = std.mem.tokenizeAny(u8, cmdline, " \n");
-    while (it.next()) |arg| if (std.mem.startsWith(u8, arg, "stardust.ip=")) return arg["stardust.ip=".len..];
-    return null;
 }
 
 // --- Usage ----------------------------------------------------------------------
@@ -409,16 +399,16 @@ pub fn defaultGateway(routes: []const u8) ?[4]u8 {
     return null;
 }
 
-// --- Wi-Fi ----------------------------------------------------------------------
+// --- The network manager ----------------------------------------------------------
 
-pub const wifi = sys.wifi;
+pub const manager = sys.network;
 
-/// Sends the Wi-Fi manager a request ("scan\n", or one from
-/// `wifi.connectRequest`, or "disconnect\n") and returns its report. Null
-/// if the manager cannot be reached.
-pub fn askWifi(runtime_dir: []const u8, request: []const u8) ?wifi.Report {
+/// Sends the network manager a request ("scan\n", or one from
+/// `manager.connectRequest` or `manager.ethernetRequest`, ...) and returns
+/// its report. Null if the manager cannot be reached.
+pub fn askManager(runtime_dir: []const u8, request: []const u8) ?manager.Report {
     var path_buf: [108]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ runtime_dir, wifi.socket_name }) catch return null;
+    const path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ runtime_dir, manager.socket_name }) catch return null;
     const fd: linux.fd_t = @intCast(sys.check(linux.socket(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0)) catch return null);
     defer sys.close(fd);
     var addr: linux.sockaddr.un = .{ .path = @splat(0) };
@@ -439,7 +429,7 @@ pub fn askWifi(runtime_dir: []const u8, request: []const u8) ?wifi.Report {
         if (n == 0) break;
         len += n;
     }
-    return wifi.Report.parse(buf[0..len]);
+    return manager.Report.parse(buf[0..len]);
 }
 
 // --- Formatting -----------------------------------------------------------------
@@ -494,9 +484,6 @@ test "memory, CPU time, routes and the command line" {
     const g = defaultGateway(routes).?;
     if (@import("builtin").cpu.arch.endian() == .little) try testing.expectEqual([4]u8{ 192, 168, 1, 1 }, g);
     try testing.expect(defaultGateway("Iface\tDestination\n") == null);
-
-    try testing.expectEqualStrings("192.168.1.50/24,192.168.1.1", staticIp("console=tty1 stardust.ip=192.168.1.50/24,192.168.1.1 quiet\n").?);
-    try testing.expect(staticIp("console=tty1\n") == null);
 }
 
 test "sizes and durations read naturally" {

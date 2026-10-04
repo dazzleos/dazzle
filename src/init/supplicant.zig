@@ -1,6 +1,6 @@
 //! The WPA supplicant: the station's side of WPA2-Personal's key handshakes
 //! (IEEE 802.11-2020 12.7), as EAPOL-Key frames in and out. It has no I/O
-//! of its own: the Wi-Fi manager hands it the frames that arrive (over a
+//! of its own: the network manager hands it the frames that arrive (over a
 //! packet socket) and sends and installs what it says.
 //!
 //! Joining a WPA2-Personal network:

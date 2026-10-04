@@ -8,9 +8,6 @@
 //! Each request gets its own process reading /dev/kmsg, so a hung GPU job
 //! in the demo does not stop the log. The server runs as the Stardust user
 //! once it has bound its port.
-//!
-//! The port can be changed on the kernel command line with
-//! `stardust.httpport=<port>`.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -19,17 +16,9 @@ const build_info = @import("build_info");
 
 pub const Ip4 = [4]u8;
 
-pub const Config = struct {
-    port: u16 = 80,
-};
+/// The HTTP port it listens on.
+const http_port = 80;
 
-/// Reads `stardust.*` options from a kernel command line.
-pub fn parseCmdline(cmdline: []const u8) Config {
-    var cfg: Config = .{};
-    if (sys.cmdlineValue(cmdline, "stardust.httpport")) |v|
-        cfg.port = std.fmt.parseInt(u16, v, 10) catch cfg.port;
-    return cfg;
-}
 fn sockaddrIn(addr: Ip4, port: u16) linux.sockaddr.in {
     return .{
         .port = std.mem.nativeToBig(u16, port),
@@ -48,8 +37,6 @@ fn ignoreSignal(sig: linux.SIG) void {
 
 /// Forks the log server. Returns in the parent; the child never returns.
 pub fn start() void {
-    var cmdline_buf: [1024]u8 = undefined;
-    const cfg = parseCmdline(sys.readCmdline(&cmdline_buf));
     const rc = linux.fork();
     switch (linux.errno(rc)) {
         .SUCCESS => if (rc != 0) return,
@@ -58,11 +45,11 @@ pub fn start() void {
             return;
         },
     }
-    serve(cfg) catch |err| sys.print("stardust: log server: {s}\n", .{@errorName(err)});
+    serve() catch |err| sys.print("stardust: log server: {s}\n", .{@errorName(err)});
     linux.exit(1);
 }
 
-fn serve(cfg: Config) !void {
+fn serve() !void {
     // Reap per-client processes automatically, and turn writes to a closed
     // connection into EPIPE errors instead of killing the process.
     ignoreSignal(.CHLD);
@@ -71,14 +58,14 @@ fn serve(cfg: Config) !void {
     const listener: linux.fd_t = @intCast(try sys.check(linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0)));
     const one: c_int = 1;
     _ = linux.setsockopt(listener, linux.SOL.SOCKET, linux.SO.REUSEADDR, std.mem.asBytes(&one), @sizeOf(c_int));
-    const bind_addr = sockaddrIn(.{ 0, 0, 0, 0 }, cfg.port);
+    const bind_addr = sockaddrIn(.{ 0, 0, 0, 0 }, http_port);
     _ = try sys.check(linux.bind(listener, @ptrCast(&bind_addr), @sizeOf(@TypeOf(bind_addr))));
     _ = try sys.check(linux.listen(listener, 4));
 
     // Only binding to the port needed root. Reading /dev/kmsg does not.
     try sys.dropPrivileges();
 
-    sys.print("stardust: log server listening on HTTP port {d} as uid {d}\n", .{ cfg.port, linux.getuid() });
+    sys.print("stardust: log server listening on HTTP port {d} as uid {d}\n", .{ http_port, linux.getuid() });
 
     while (true) {
         const rc = linux.accept4(listener, null, null, linux.SOCK.CLOEXEC);
@@ -254,12 +241,6 @@ fn streamLog(client: linux.fd_t, follow: bool) void {
 }
 
 const testing = std.testing;
-
-test "parse command line options" {
-    const cfg = parseCmdline("console=ttyAMA0 stardust.httpport=8080\n");
-    try testing.expectEqual(@as(u16, 8080), cfg.port);
-    try testing.expectEqual(@as(u16, 80), parseCmdline("ip=dhcp").port);
-}
 
 test "format kmsg record" {
     var buf: [128]u8 = undefined;

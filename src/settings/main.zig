@@ -2,9 +2,10 @@
 //! shows the build, Linux's version, how long the system has been up and
 //! the board; the resources in use (CPU, temperature, memory, the GPU's
 //! memory and storage); the network (adapters, addresses and traffic);
-//! and the Wi-Fi networks around. Only this app may scan for them: it asks
-//! init's Wi-Fi manager, which answers no other program (see sys.wifi). The figures that change are
-//! read again every second (see info.zig); the window is built with the
+//! and the Wi-Fi networks around. Only this app may scan for them, join
+//! one, or choose how Ethernet gets its address: it asks init's network
+//! manager, which answers no other program (see sys.network). The figures
+//! that change are read again every second (see info.zig); the window is built with the
 //! `ui` toolkit (see view.zig), and only what changed is drawn again.
 //!
 //!     stardust-settings [font.ttf]
@@ -68,11 +69,13 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     var monitor: info.UsageMonitor = .{};
     var usage = monitor.read(sys.nowNs());
     var network = info.Network.read();
-    // The Wi-Fi manager is asked less often: each request may start a scan.
+    // The network manager is asked less often: each request may start a
+    // Wi-Fi scan.
     const runtime_dir = std.process.Environ.getPosix(init.environ, "XDG_RUNTIME_DIR");
-    var wifi: ?info.wifi.Report = null;
-    var next_wifi: u64 = 0;
-    // What the window asks of the Wi-Fi manager (Connect, Disconnect).
+    var report: ?info.manager.Report = null;
+    var next_ask: u64 = 0;
+    // What the window asks of the network manager (Connect, Disconnect, an
+    // Ethernet address).
     var actions: view.Actions = .{};
     // What the title bar's buttons do. Its size stays as it was for the
     // whole screen when the window is restored to half of it.
@@ -120,21 +123,24 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             network = info.Network.read();
             dirty = true;
         }
-        if (actions.connect != null or actions.disconnect) if (runtime_dir) |dir| {
+        if (actions.connect != null or actions.disconnect or actions.ethernet != null) if (runtime_dir) |dir| {
             var req_buf: [256]u8 = undefined;
-            const req = if (actions.connect) |*j| info.wifi.connectRequest(&req_buf, j.ssid(), j.passphrase()) else "disconnect\n";
-            if (actions.connect) |*j| print("stardust-settings: joining \"{s}\"\n", .{j.ssid()});
-            wifi = info.askWifi(dir, req);
+            if (actions.ethernet) |a| report = info.askManager(dir, info.manager.ethernetRequest(&req_buf, a));
+            if (actions.connect != null or actions.disconnect) {
+                const req = if (actions.connect) |*j| info.manager.connectRequest(&req_buf, j.ssid(), j.passphrase()) else "disconnect\n";
+                if (actions.connect) |*j| print("stardust-settings: joining \"{s}\"\n", .{j.ssid()});
+                report = info.askManager(dir, req);
+            }
             actions = .{};
-            next_wifi = sys.nowNs() + std.time.ns_per_s;
+            next_ask = sys.nowNs() + std.time.ns_per_s;
             dirty = true;
         };
-        if (!suspended and now >= next_wifi) {
+        if (!suspended and now >= next_ask) {
             // Soon after the first answer (to show what the first scan
             // found) and while joining a network, then every few seconds.
-            const busy = if (wifi) |w| w.scanning or w.connection.state == .connecting or w.connection.state == .authenticating or w.connection.state == .addressing else true;
-            next_wifi = now + @as(u64, if (busy) 1 else 5) * std.time.ns_per_s;
-            wifi = if (runtime_dir) |dir| info.askWifi(dir, "scan\n") else null;
+            const busy = if (report) |r| r.scanning or r.connection.state == .connecting or r.connection.state == .authenticating or r.connection.state == .addressing else true;
+            next_ask = now + @as(u64, if (busy) 1 else 5) * std.time.ns_per_s;
+            report = if (runtime_dir) |dir| info.askManager(dir, "scan\n") else null;
             dirty = true;
         }
 
@@ -146,7 +152,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
                 .system = &system,
                 .usage = usage,
                 .network = &network,
-                .wifi = if (wifi) |*w| w else null,
+                .manager = if (report) |*r| r else null,
                 .actions = &actions,
                 .on_close = .of(&controls, app.Controls.close),
                 .on_maximize = .of(&controls, app.Controls.toggleMaximized),

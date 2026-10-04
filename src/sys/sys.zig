@@ -4,15 +4,15 @@
 //! through a C library, so this module provides error mapping and a few
 //! wrappers used throughout the program.
 //!
-//! * `wifi`: the Wi-Fi manager's protocol, shared by init and settings
+//! * `network`: the network manager's protocol, shared by init and settings
 
 const std = @import("std");
 const linux = std.os.linux;
 
-pub const wifi = @import("wifi.zig");
+pub const network = @import("network.zig");
 
 test {
-    _ = wifi;
+    _ = network;
 }
 
 pub const Error = error{
@@ -86,31 +86,6 @@ pub fn nowNs() u64 {
         linux.SYS.clock_gettime;
     _ = linux.syscall2(sys_nr, @intFromEnum(linux.CLOCK.MONOTONIC), @intFromPtr(&ts));
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
-}
-
-/// Reads the kernel command line into `buf`.
-pub fn readCmdline(buf: []u8) []const u8 {
-    const fd = open("/proc/cmdline", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }) catch return "";
-    defer close(fd);
-    const n = check(linux.read(fd, buf.ptr, buf.len)) catch return "";
-    return buf[0..n];
-}
-
-/// The value of `key=value` on a kernel command line, if present.
-pub fn cmdlineValue(cmdline: []const u8, key: []const u8) ?[]const u8 {
-    var it = std.mem.tokenizeAny(u8, cmdline, " \t\n");
-    while (it.next()) |arg| {
-        if (arg.len > key.len and std.mem.startsWith(u8, arg, key) and arg[key.len] == '=')
-            return arg[key.len + 1 ..];
-    }
-    return null;
-}
-
-test "cmdline values" {
-    const c = "console=ttyAMA0 stardust.demo=spin stardust.httpport=8080\n";
-    try std.testing.expectEqualStrings("spin", cmdlineValue(c, "stardust.demo").?);
-    try std.testing.expectEqualStrings("8080", cmdlineValue(c, "stardust.httpport").?);
-    try std.testing.expectEqual(@as(?[]const u8, null), cmdlineValue(c, "stardust"));
 }
 
 var kmsg_fd: ?linux.fd_t = null;

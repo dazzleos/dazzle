@@ -21,6 +21,9 @@ const Size = geometry.Size;
 pub const TextField = struct {
     /// Shown, dimmed, while it is empty.
     placeholder: []const u8 = "",
+    /// What it holds when it first appears (give it a new key to start
+    /// again with another).
+    initial: []const u8 = "",
     /// Dots instead of the characters (for passwords).
     obscure: bool = false,
     max_len: usize = 63,
@@ -32,6 +35,15 @@ pub const TextField = struct {
     on_submit: ?widget.Callback = null,
 
     pub const capacity = 128;
+
+    pub fn initState(self: *const TextField) State {
+        var st: State = .{};
+        const n = @min(self.initial.len, capacity, self.max_len);
+        @memcpy(st.buf[0..n], self.initial[0..n]);
+        st.len = n;
+        st.cursor = n;
+        return st;
+    }
 
     pub const State = struct {
         buf: [capacity]u8 = undefined,
