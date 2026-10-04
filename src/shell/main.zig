@@ -1,12 +1,16 @@
 //! stardust-shell: a minimal Wayland compositor and shell.
 //!
 //! It owns the display (as the DRM master) and draws with the low-level vc4
-//! API: a bar across the top (the window title and the time since boot)
-//! and the most recent window, maximized below it. USB mice move a cursor
+//! API: a bar across the top (the window title and the time since boot), a
+//! dock along the bottom with an icon for each app in /apps (see dock.zig),
+//! and the front window, maximized between them. USB mice move a cursor
 //! (on the display's cursor plane) and, with USB keyboards, give input to
-//! that window. Clients connect on
-//! $XDG_RUNTIME_DIR/wayland-0; the shell starts the programs named on its
-//! command line as clients (by default /apps/stardust-demo).
+//! that window. Clicking an app in the dock starts it, or brings its window
+//! to the front if it is running: apps run once each.
+//!
+//! Clients connect on $XDG_RUNTIME_DIR/wayland-0. The shell starts no app
+//! itself, other than the programs named on its command line. It is not an
+//! app: it lives in /shell, with its font.
 //!
 //! Init starts it as the unprivileged Stardust user, with stdout and stderr
 //! going to the kernel log.
@@ -21,6 +25,7 @@ const font = @import("font");
 const server_mod = @import("server.zig");
 const render = @import("render.zig");
 const input = @import("input.zig");
+const dock_mod = @import("dock.zig");
 const build_info = @import("build_info");
 
 const print = sys.print;
@@ -32,7 +37,8 @@ fn logFn(comptime level: std.log.Level, comptime scope: @TypeOf(.enum_literal), 
     print("stardust-shell: " ++ (if (scope == .default) "" else @tagName(scope) ++ ": ") ++ fmt ++ "\n", args);
 }
 
-const default_client = "/apps/stardust-demo/stardust-demo";
+/// The mouse's left button.
+const btn_left = 0x110;
 
 pub fn main(init: std.process.Init.Minimal) u8 {
     sys.logToKmsgIfStderr();
@@ -55,24 +61,33 @@ fn run(init: std.process.Init.Minimal) !void {
     var renderer = try render.Renderer.init(gpa, dev, output);
     print("stardust-shell: build {s}, display {d}x{d}, {s}\n", .{
         build_info.commit, renderer.width, renderer.height,
-        if (renderer.display.kms) |k| (if (k.overlay != null) "atomic mode setting with an overlay plane" else "atomic mode setting, no overlay plane") else "legacy mode setting (no direct scanout)",
+        if (renderer.display.kms) |k| (if (k.overlays[vc4.kms.max_overlays - 1] != null) "atomic mode setting with overlay planes" else "atomic mode setting, too few overlay planes") else "legacy mode setting (no direct scanout)",
     });
 
     var bar: ?render.Bar = null;
+    var ui_font: ?font.Font = null;
     var font_buf: [512]u8 = undefined;
     const font_path = try sys.appFile(&font_buf, font.default_font_file);
     if (sys.readFileAlloc(gpa, font_path, 32 * 1024 * 1024)) |data| {
         if (font.Font.init(data)) |f| {
+            ui_font = f;
             bar = try render.Bar.init(gpa, f, renderer.width, renderer.height);
         } else |err| print("stardust-shell: font: {s}\n", .{@errorName(err)});
     } else |err| print("stardust-shell: cannot read {s}: {s}\n", .{ font_path, @errorName(err) });
     const bar_height: u32 = if (bar) |b| b.height else 0;
 
+    const apps = try dock_mod.findApps(gpa, dock_mod.apps_dir);
+    for (apps) |app| print("stardust-shell: app {s} ({s})\n", .{ app.label, app.path });
+    var dock = try dock_mod.Dock.init(gpa, ui_font, apps, renderer.width, renderer.height);
+    const dock_y: u32 = renderer.height - dock.height;
+    dock.draw();
+    renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+
     var server = server_mod.Server.init(gpa, renderer.backend(), .{
         .x = 0,
         .y = @intCast(bar_height),
         .width = renderer.width,
-        .height = renderer.height - bar_height,
+        .height = dock_y - bar_height,
     });
 
     var path_buf: [108]u8 = undefined;
@@ -80,15 +95,10 @@ fn run(init: std.process.Init.Minimal) !void {
     const listener = try listen(path);
     print("stardust-shell: listening on {s}\n", .{path});
 
-    // Start the clients.
+    // Start the clients named on the command line.
     var args = init.args.iterate();
     _ = args.skip();
-    var started = false;
-    while (args.next()) |client| {
-        _ = spawn(client, runtime_dir);
-        started = true;
-    }
-    if (!started) _ = spawn(default_client, runtime_dir);
+    while (args.next()) |client| _ = spawn(client, runtime_dir);
 
     // The pointer starts in the middle of the screen.
     var devices: input.Devices = .{};
@@ -110,13 +120,17 @@ fn run(init: std.process.Init.Minimal) !void {
     var next_tick: u64 = start;
     var last_title: [64]u8 = undefined;
     var last_title_len: usize = 0;
-    // The bar changed, and is waiting to be shown.
-    var bar_damaged = false;
+    // The bar or the dock changed, and is waiting to be shown.
+    var panels_damaged = true;
     // When a client last had a frame for the screen.
     var client_frame_ns: u64 = 0;
     watchChildren();
     while (true) {
-        if (child_exited.swap(false, .monotonic)) reapChildren();
+        if (child_exited.swap(false, .monotonic) and reapChildren(apps)) {
+            dock.draw();
+            renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+            panels_damaged = true;
+        }
         stats.wakeups += 1;
 
         // Wait for clients, input, the display (a page flip completing), or
@@ -132,7 +146,7 @@ fn run(init: std.process.Init.Minimal) !void {
         var wake = next_tick;
         if (!renderer.flipPending()) {
             if (server.damaged) wake = now;
-            if (bar_damaged) wake = @min(wake, client_frame_ns + bar_grace_ns);
+            if (panels_damaged) wake = @min(wake, client_frame_ns + bar_grace_ns);
         }
         const timeout: i32 = if (wake > now) @intCast((wake - now) / std.time.ns_per_ms + 1) else 0;
         _ = linux.poll(&fds, 2 + n_clients + n_inputs, timeout);
@@ -156,10 +170,34 @@ fn run(init: std.process.Init.Minimal) !void {
         const time_ms: u32 = @truncate((sys.nowNs() - start) / std.time.ns_per_ms);
         for (fds[2 + n_clients ..][0..n_inputs]) |f| if (f.revents != 0) {
             var events: [64]input.Event = undefined;
-            for (devices.read(f.fd, &events)) |e| pointer.handle(&server, time_ms, e);
+            for (devices.read(f.fd, &events)) |e| {
+                // Buttons over the dock are the shell's.
+                if (e == .button and pointer.y >= @as(f64, @floatFromInt(dock_y))) {
+                    pointer.flushMotion(&server, time_ms);
+                    if (!e.button.pressed or e.button.code != btn_left) continue;
+                    const i = dock.hit(pointer.x, pointer.y - @as(f64, @floatFromInt(dock_y))) orelse continue;
+                    const app = &apps[i];
+                    if (app.pid) |pid| {
+                        if (!server.raise(pid)) print("stardust-shell: {s} has no window yet\n", .{app.label});
+                    } else {
+                        app.pid = spawn(app.path, runtime_dir);
+                        dock.draw();
+                        renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+                        panels_damaged = true;
+                    }
+                    continue;
+                }
+                pointer.handle(&server, time_ms, e);
+            }
             if (pointer.moved) {
                 pointer.moved = false;
                 renderer.moveCursor(@intFromFloat(pointer.x), @intFromFloat(pointer.y));
+                const in_dock = pointer.y >= @as(f64, @floatFromInt(dock_y));
+                if (dock.pointerAt(if (in_dock) pointer.x else null, pointer.y - @as(f64, @floatFromInt(dock_y)))) {
+                    dock.draw();
+                    renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+                    panels_damaged = true;
+                }
             }
         };
 
@@ -201,8 +239,8 @@ fn run(init: std.process.Init.Minimal) !void {
             last_title_len = @min(title.len, last_title.len);
             @memcpy(last_title[0..last_title_len], title[0..last_title_len]);
             b.draw(title, (t_now - start) / std.time.ns_per_s) catch {};
-            renderer.setBar(b.pixels, b.width, b.height);
-            bar_damaged = true;
+            renderer.setPanel(.bar, b.pixels, b.width, b.height, 0);
+            panels_damaged = true;
             stats.bar_ns += sys.nowNs() - t_now;
         };
         if (t_now >= next_tick) {
@@ -217,11 +255,11 @@ fn run(init: std.process.Init.Minimal) !void {
         // out with its next frame: otherwise it would take the next
         // vertical blank, and the client's frame would be shown a refresh
         // late.
-        const bar_due = bar_damaged and sys.nowNs() >= client_frame_ns + bar_grace_ns;
+        const bar_due = panels_damaged and sys.nowNs() >= client_frame_ns + bar_grace_ns;
         if ((server.damaged or bar_due) and !renderer.flipPending()) {
             const draw_start = sys.nowNs();
             defer stats.display_ns += sys.nowNs() - draw_start;
-            bar_damaged = false;
+            panels_damaged = false;
             server.frameDrawn();
             // A full-size window goes straight onto the display, with the
             // bar on a plane above it. Otherwise (or if the display cannot
@@ -281,8 +319,8 @@ fn run(init: std.process.Init.Minimal) !void {
     }
 }
 
-/// How long a change to the bar alone waits for a client's frame to go out
-/// with (a few refreshes).
+/// How long a change to the bar or the dock alone waits for a client's
+/// frame to go out with (a few refreshes).
 const bar_grace_ns = 50 * std.time.ns_per_ms;
 
 /// The client buffers on the display, shown directly.
@@ -481,11 +519,18 @@ fn watchChildren() void {
     _ = linux.sigaction(.CHLD, &act, null);
 }
 
-fn reapChildren() void {
+/// Reaps exited clients. Returns whether one was an app (which the dock
+/// then shows as not running).
+fn reapChildren(apps: []dock_mod.App) bool {
+    var app_exited = false;
     while (true) {
         var status: u32 = 0;
         const rc = linux.wait4(-1, &status, linux.W.NOHANG, null);
-        if (linux.errno(rc) != .SUCCESS or rc == 0) return;
+        if (linux.errno(rc) != .SUCCESS or rc == 0) return app_exited;
+        for (apps) |*app| if (app.pid == @as(linux.pid_t, @intCast(rc))) {
+            app.pid = null;
+            app_exited = true;
+        };
         if (linux.W.IFEXITED(status)) {
             print("stardust-shell: client {d} exited with status {d}\n", .{ rc, linux.W.EXITSTATUS(status) });
         } else if (linux.W.IFSIGNALED(status)) {
@@ -499,4 +544,5 @@ test {
     _ = @import("server_test.zig");
     _ = @import("input.zig");
     _ = @import("cursor.zig");
+    _ = @import("dock.zig");
 }

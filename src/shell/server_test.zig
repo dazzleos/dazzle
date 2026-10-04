@@ -579,3 +579,16 @@ test "a buffer on the display is released only once it leaves the screen" {
     st.server.dropBuffer(st.held.?);
     try testing.expectEqual(@as(i32, 0), renderer.live.load(.monotonic));
 }
+
+test "clients are known by their process, which the dock raises windows by" {
+    var pair: [2]linux.fd_t = undefined;
+    try testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &pair));
+    defer _ = linux.close(pair[1]);
+    var renderer: FakeRenderer = .{};
+    var server: server_mod.Server = .init(testing.allocator, renderer.backend(), .{ .x = 0, .y = 40, .width = 800, .height = 560 });
+    defer server.deinit();
+    const c = try server.addClient(pair[0]);
+    try testing.expectEqual(@as(?linux.pid_t, linux.getpid()), c.pid);
+    // No window to raise yet.
+    try testing.expect(!server.raise(linux.getpid()));
+}

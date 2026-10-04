@@ -202,6 +202,15 @@ pub const Client = struct {
 
 const FrameCallback = struct { client: *Client, id: u32 };
 
+/// The process at the other end of a Unix socket.
+fn peerPid(fd: linux.fd_t) ?linux.pid_t {
+    const Ucred = extern struct { pid: i32, uid: u32, gid: u32 };
+    var cred: Ucred = undefined;
+    var len: linux.socklen_t = @sizeOf(Ucred);
+    if (linux.errno(linux.getsockopt(fd, linux.SOL.SOCKET, linux.SO.PEERCRED, @ptrCast(&cred), &len)) != .SUCCESS) return null;
+    return if (cred.pid > 0) cred.pid else null;
+}
+
 pub const Server = struct {
     gpa: std.mem.Allocator,
     backend: Backend,
@@ -239,7 +248,7 @@ pub const Server = struct {
     /// Adds a client connected on `fd`.
     pub fn addClient(s: *Server, fd: linux.fd_t) !*Client {
         const c = try s.gpa.create(Client);
-        c.* = .{ .server = s, .conn = .init(fd) };
+        c.* = .{ .server = s, .conn = .init(fd), .pid = peerPid(fd) };
         errdefer s.gpa.destroy(c);
         try c.objects.put(s.gpa, p.wl_display.id, .display);
         try s.clients.append(s.gpa, c);
@@ -434,6 +443,24 @@ pub const Server = struct {
             var m = m0;
             m.end();
         }
+    }
+
+    /// Raises the top window of the client with process `pid` above the
+    /// others. Returns whether it has one.
+    pub fn raise(s: *Server, pid: linux.pid_t) bool {
+        var i = s.toplevels.items.len;
+        while (i > 0) {
+            i -= 1;
+            const t = s.toplevels.items[i];
+            if (!t.mapped or t.xdg.surface == null or t.xdg.surface.?.client.pid != pid) continue;
+            if (i + 1 != s.toplevels.items.len) {
+                _ = s.toplevels.orderedRemove(i);
+                s.toplevels.appendAssumeCapacity(t);
+                s.damaged = true;
+            }
+            return true;
+        }
+        return false;
     }
 
     /// The window to show: the top mapped toplevel.

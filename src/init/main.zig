@@ -12,10 +12,9 @@
 //!    are plugged in; waits for the vc4 GPU and gives the Stardust user access to its device
 //!    nodes;
 //! 4. creates the user's runtime directory (/run/user/1000, for the
-//!    Wayland socket) and starts /apps/stardust-shell/stardust-shell, the
-//!    Wayland compositor,
-//!    as the Stardust user, with its output going to the kernel log; the
-//!    shell starts the demo as its client;
+//!    Wayland socket) and starts /shell/stardust-shell, the Wayland
+//!    compositor, as the Stardust user, with its output going to the
+//!    kernel log; its dock starts the apps in /apps;
 //! 5. reaps exited processes forever (PID 1 must never exit), restarting the
 //!    network and device managers if they ever stop.
 //!
@@ -32,7 +31,7 @@ const build_info = @import("build_info");
 
 const print = sys.print;
 
-const shell_path = "/apps/stardust-shell/stardust-shell";
+const shell_path = "/shell/stardust-shell";
 const runtime_dir = "/run/user/1000";
 
 pub fn main() void {

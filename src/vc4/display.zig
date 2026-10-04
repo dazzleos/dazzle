@@ -85,7 +85,7 @@ pub const Display = struct {
         std.debug.assert(!d.flip_pending);
         const i = d.backIndex();
         const at_once = if (d.kms) |*k|
-            try k.commit(d.fullScreen(i), null)
+            try k.commit(d.fullScreen(i), @splat(null))
         else if (d.on_screen == null) blk: {
             try drm.setCrtc(d.fd, d.output, d.buffers[i].fb_id);
             break :blk true;
@@ -103,17 +103,17 @@ pub const Display = struct {
     }
 
     /// Whether `queueLayers` can show these layers.
-    pub fn canShow(d: *const Display, primary: kms_mod.Layer, overlay: ?kms_mod.Layer) bool {
+    pub fn canShow(d: *const Display, primary: kms_mod.Layer, overlays: kms_mod.Overlays) bool {
         const k = &(d.kms orelse return false);
-        return k.check(primary, overlay);
+        return k.check(primary, overlays);
     }
 
     /// Like `queue`, but shows other buffers (framebuffers made with
     /// `drm.addFramebuffer`) on the display's planes instead.
-    pub fn queueLayers(d: *Display, primary: kms_mod.Layer, overlay: ?kms_mod.Layer) !bool {
+    pub fn queueLayers(d: *Display, primary: kms_mod.Layer, overlays: kms_mod.Overlays) !bool {
         std.debug.assert(!d.flip_pending);
         const k = &(d.kms orelse return error.Unsupported);
-        const at_once = try k.commit(primary, overlay);
+        const at_once = try k.commit(primary, overlays);
         if (at_once) {
             d.on_screen = null;
         } else {

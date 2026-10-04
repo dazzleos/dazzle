@@ -12,9 +12,11 @@ Stardust is built. There is no OpenGL layer: the one Stardust had, for porting e
 apps, is in the git history if it is needed again.
 
 On top of it is **stardust-shell**, a minimal Wayland compositor. Init (PID 1, the only process with root
-privileges) starts the shell as an unprivileged user, and the shell starts
-the demo as its Wayland client. USB mice and keyboards work: the shell
-shows a cursor and passes input to the window. The demo, a native app built
+privileges) starts the shell as an unprivileged user. Its dock along the
+bottom of the screen has an icon for each app; clicking one starts the app
+as a Wayland client, or brings its window to the front if it is already
+running. USB mice and keyboards work: the shell shows a cursor and passes
+input to the window. The demo, a native app built
 with Stardust's widget toolkit, shows a spinning, depth-tested Platonic
 solid, with Material 3 buttons to change its speed, radio buttons to
 choose the solid and switches to turn its lighting and texture on and
@@ -261,9 +263,10 @@ The shell (`src/shell/`):
 
 | File | Contents |
 |---|---|
-| `main.zig` | Opens the GPU and display, listens on `$XDG_RUNTIME_DIR/wayland-0`, starts its clients, and runs the event loop: read input, dispatch clients, then composite a frame when something changed |
+| `main.zig` | Opens the GPU and display, listens on `$XDG_RUNTIME_DIR/wayland-0`, and runs the event loop: read input (clicks on the dock start or raise apps), dispatch clients, then composite a frame when something changed |
 | `server.zig` | The Wayland server: clients, objects and requests, frame callbacks and buffer releases, pointer and keyboard focus |
-| `render.zig` | Compositing with the `vc4` API: textured quads for the bar and the window, the bar's text, and the cursor plane |
+| `render.zig` | Compositing with the `vc4` API: textured quads for the panels (the bar and the dock) and the window, the bar's text, and the cursor plane |
+| `dock.zig` | The dock: finds the apps in `/apps`, draws their icons, and finds the one clicked |
 | `shaders/quad.zig` | The textured quad's shader |
 | `input.zig` | USB keyboards and mice: finds `/dev/input/event*` nodes and decodes their events |
 | `cursor.zig` | The pointer's arrow, drawn into the cursor plane's buffer |
@@ -274,9 +277,16 @@ to a texture at commit), `zwp_linux_dmabuf_v1`, `xdg_wm_base` (toplevels)
 and `wl_seat` (a pointer and a keyboard). There are no popups or outputs
 yet.
 
-- **Windows:** each toplevel is configured to fill the screen below a bar,
-  and the newest one is shown. The bar shows the window's title and the
-  time since boot.
+- **Windows:** each toplevel is configured to fill the screen between the
+  bar and the dock, and the newest one is shown, or the one whose app was
+  last clicked in the dock. The bar shows the window's title and the time
+  since boot.
+- **Apps:** each directory in `/apps` holding a program of the same name
+  (`/apps/<name>/<name>`) is an app, with an icon in the dock: its initial
+  on a coloured square, with a dot under it while it runs. Apps run once
+  each: the shell knows each client's process (from its socket), and
+  clicking a running app raises its window. Nothing starts until it is
+  clicked, other than programs named on the shell's command line.
 - **Buffer sharing:** clients render with the GPU straight into buffers
   they share with the shell as dma-bufs, so nothing is copied. The GPU's
   texture unit cannot read ordinary (linear) images, so clients render in
@@ -286,8 +296,8 @@ yet.
 - **Direct scanout:** the display hardware can scan out T-tiled buffers
   and stack several planes. When the shown window's buffer is exactly the
   work area's size (as a maximized window's is), the shell puts it on the
-  display's primary plane as it is, and the bar on an overlay plane above
-  it, with one atomic commit. Nothing is composited, which saves the GPU a
+  display's primary plane as it is, and the bar and the dock on overlay
+  planes above it, with one atomic commit. Nothing is composited, which saves the GPU a
   full-screen copy and a third of the memory traffic per frame. Otherwise
   (other sizes, shm buffers, or a driver without atomic mode setting) the
   shell composites the frame with the GPU as before.
@@ -331,7 +341,7 @@ passwords or logins.
   touch the display.
 - Init creates `/run/user/1000` (the user's runtime directory, mode 0700),
   forks, drops to the user (no supplementary groups, then the group, then
-  the user ID) and execs `/apps/stardust-shell/stardust-shell`. The shell's stdout and
+  the user ID) and execs `/shell/stardust-shell`. The shell's stdout and
   stderr are init's `/dev/kmsg` descriptor, because only root can open that
   for writing. The shell's clients inherit them.
 - The network manager runs as the same user but keeps three capabilities:
@@ -361,7 +371,7 @@ The image's filesystem (an initramfs, in RAM) is kept simple:
 
 ```
 /init                       stardust-init
-/apps/stardust-shell/       stardust-shell, FiraSans-Regular.ttf and its license
+/shell/                     stardust-shell, FiraSans-Regular.ttf and its license
 /apps/stardust-demo/        stardust-demo, FiraSans-Regular.ttf and its license
 /dev /proc /sys /run        mounted or created by init
 ```
@@ -467,14 +477,15 @@ Stardust 6ec3896 system log. /follow shows new messages as they arrive.
 [    4.740011] stardust: network: found eth0 (<mac>)
 [    4.746230] stardust: network: eth0 link up
 [    4.940117] stardust: network: eth0 is 192.168.1.42/24, gateway 192.168.1.1 (DHCP, lease 86400 s)
-[    4.740312] stardust: started /apps/stardust-shell/stardust-shell (pid 24) as uid 1000
+[    4.740312] stardust: started /shell/stardust-shell (pid 24) as uid 1000
 [    4.741008] stardust: opened /dev/dri/card0 (vc4)
 [    4.772511] stardust-shell: build 6ec3896, display <width>x<height>
+[    4.772610] stardust-shell: app Demo (/apps/stardust-demo/stardust-demo)
 [    4.772702] stardust-shell: listening on /run/user/1000/wayland-0
-[    4.772913] stardust-shell: started /apps/stardust-demo/stardust-demo (pid 25)
 [    4.773120] stardust-shell: input: /dev/input/event0: Logitech USB Optical Mouse
 [    4.791240] stardust-shell: cursor shown
-[    4.790100] stardust-shell: client connected
+[    7.312913] stardust-shell: started /apps/stardust-demo/stardust-demo (pid 25)
+[    7.330100] stardust-shell: client connected
 [    4.802114] stardust: drawing with the vc4 API, window <width>x<height>
 [    9.840211] stardust: 60.0 fps, GPU <t> ms, CPU <t> ms per frame
 ```
@@ -490,8 +501,9 @@ stardust.ip=192.168.1.50/24,192.168.1.1
 
 ### The demo
 
-The screen shows the shell's bar along the top, and below it the demo's
-window. The solid spins at the display's refresh rate. The window's top left
+The screen shows the shell's bar along the top and its dock along the
+bottom; click the demo's icon in the dock to start it, and its window
+fills the space between them. The solid spins at the display's refresh rate. The window's top left
 corner shows, after the title, the git commit it was built from (short,
 with `-dirty` if there were uncommitted changes), then:
 

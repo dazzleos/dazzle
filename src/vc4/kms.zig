@@ -3,9 +3,9 @@
 //!
 //! The display hardware (the HVS) composes several planes as it scans out,
 //! so a buffer can be shown without copying it into a full-screen frame
-//! first. `Kms` drives a CRTC's primary plane and, when there is one free,
-//! an overlay plane above it; each `commit` sets both and the mode (the
-//! first time), and reports completion as a page flip event, like
+//! first. `Kms` drives a CRTC's primary plane and, when there are planes
+//! free, up to `max_overlays` overlay planes above it; each `commit` sets
+//! them all and the mode (the first time), and reports completion as a page flip event, like
 //! `drm.pageFlip`.
 
 const std = @import("std");
@@ -165,6 +165,12 @@ const PlaneProps = struct {
 
 pub const Plane = struct { id: u32, props: PlaneProps };
 
+/// Overlay planes `Kms` uses, at most.
+pub const max_overlays = 2;
+
+/// What is shown on each overlay plane (null: nothing).
+pub const Overlays = [max_overlays]?Layer;
+
 /// A buffer shown on a plane: its framebuffer, the part of it to show
 /// (from its top left corner), and where on the screen.
 pub const Layer = struct {
@@ -179,11 +185,11 @@ pub const Layer = struct {
 
 /// An atomic request under construction: properties grouped by object.
 pub const Request = struct {
-    objs: [4]u32 = undefined,
-    counts: [4]u32 = undefined,
+    objs: [3 + max_overlays]u32 = undefined,
+    counts: [3 + max_overlays]u32 = undefined,
     n_objs: usize = 0,
-    props: [32]u32 = undefined,
-    values: [32]u64 = undefined,
+    props: [48]u32 = undefined,
+    values: [48]u64 = undefined,
     n_props: usize = 0,
 
     fn object(r: *Request, id: u32) void {
@@ -231,13 +237,13 @@ pub const Kms = struct {
     crtc_active: u32,
     mode_blob: u32,
     primary: Plane,
-    /// A plane above the primary one, if the CRTC has one to spare.
-    overlay: ?Plane,
+    /// Planes above the primary one, as many as the CRTC has to spare.
+    overlays: [max_overlays]?Plane,
     mode_set: bool = false,
     /// What the last commit put on each plane: later commits only change
     /// what differs, so the kernel re-checks as little as it can.
     shown_primary: ?Layer = null,
-    shown_overlay: ?Layer = null,
+    shown_overlays: Overlays = @splat(null),
     /// Time spent in commit system calls, for statistics.
     commit_ns: u64 = 0,
 
@@ -260,7 +266,8 @@ pub const Kms = struct {
         try drm.ioctl(fd, IOCTL_MODE_GETPLANERESOURCES, &res);
 
         var primary: ?Plane = null;
-        var overlay: ?Plane = null;
+        var overlays: [max_overlays]?Plane = @splat(null);
+        var n_overlays: usize = 0;
         for (ids[0..res.count_planes]) |plane_id| {
             var plane: GetPlane = .{ .plane_id = plane_id };
             drm.ioctl(fd, IOCTL_MODE_GETPLANE, &plane) catch continue;
@@ -268,8 +275,9 @@ pub const Kms = struct {
             const props, const plane_type = PlaneProps.read(fd, plane_id) catch continue;
             if (plane_type == plane_type_primary and primary == null) {
                 primary = .{ .id = plane_id, .props = props };
-            } else if (plane_type == plane_type_overlay and overlay == null) {
-                overlay = .{ .id = plane_id, .props = props };
+            } else if (plane_type == plane_type_overlay and n_overlays < max_overlays) {
+                overlays[n_overlays] = .{ .id = plane_id, .props = props };
+                n_overlays += 1;
             }
         }
 
@@ -283,16 +291,15 @@ pub const Kms = struct {
             .crtc_active = try crtc.id("ACTIVE"),
             .mode_blob = blob.blob_id,
             .primary = primary orelse return error.NoPrimaryPlane,
-            .overlay = overlay,
+            .overlays = overlays,
         };
     }
 
-    /// The request for showing `primary` (and `overlay`, or nothing above
-    /// it), setting the mode if it has not been set yet. Unless `full`, it
+    /// The request for showing `primary` and `overlays` above it, setting the mode if it has not been set yet. Unless `full`, it
     /// only changes what differs from the last commit: a plane whose layer
     /// is the same is left out, and one that only shows a new buffer gets
     /// just that.
-    pub fn request(k: *const Kms, primary: Layer, overlay: ?Layer, full: bool) Request {
+    pub fn request(k: *const Kms, primary: Layer, overlays: Overlays, full: bool) Request {
         var r: Request = .{};
         const all = full or !k.mode_set;
         if (!k.mode_set) {
@@ -302,7 +309,12 @@ pub const Kms = struct {
             r.set(k.crtc_mode_id, k.mode_blob);
             r.set(k.crtc_active, 1);
         }
-        const overlay_changed = all or !std.meta.eql(k.shown_overlay, overlay);
+        var overlay_changed: [max_overlays]bool = undefined;
+        var any_overlay_changed = false;
+        for (&overlay_changed, k.overlays, k.shown_overlays, overlays) |*c, plane, shown_layer, layer| {
+            c.* = plane != null and (all or !std.meta.eql(shown_layer, layer));
+            any_overlay_changed = any_overlay_changed or c.*;
+        }
         const shown = k.shown_primary;
         if (all or shown == null or !std.meta.eql(shown.?, primary)) {
             var moved = shown orelse primary;
@@ -311,19 +323,19 @@ pub const Kms = struct {
                 r.object(k.primary.id);
                 r.set(k.primary.props.fb_id, primary.fb_id);
             } else r.plane(k.primary, k.output.crtc_id, primary);
-        } else if (!overlay_changed or k.overlay == null) {
+        } else if (!any_overlay_changed) {
             // Nothing changed; a commit needs an object for its event.
             r.object(k.primary.id);
             r.set(k.primary.props.fb_id, primary.fb_id);
         }
-        if (k.overlay) |o| if (overlay_changed) r.plane(o, k.output.crtc_id, overlay);
+        for (k.overlays, overlays, overlay_changed) |plane, layer, changed| if (changed) r.plane(plane.?, k.output.crtc_id, layer);
         return r;
     }
 
     /// Whether the display can show these layers (without showing them).
-    pub fn check(k: *const Kms, primary: Layer, overlay: ?Layer) bool {
-        if (overlay != null and k.overlay == null) return false;
-        var r = k.request(primary, overlay, true);
+    pub fn check(k: *const Kms, primary: Layer, overlays: Overlays) bool {
+        for (k.overlays, overlays) |plane, layer| if (layer != null and plane == null) return false;
+        var r = k.request(primary, overlays, true);
         const flags: u32 = atomic_test_only | @as(u32, if (k.mode_set) 0 else atomic_allow_modeset);
         k.submit(&r, flags) catch return false;
         return true;
@@ -333,8 +345,8 @@ pub const Kms = struct {
     /// flip event reports when they are on the screen. The first commit
     /// sets the mode and waits for it instead, and returns true (no event
     /// follows).
-    pub fn commit(k: *Kms, primary: Layer, overlay: ?Layer) !bool {
-        var r = k.request(primary, overlay, false);
+    pub fn commit(k: *Kms, primary: Layer, overlays: Overlays) !bool {
+        var r = k.request(primary, overlays, false);
         const t0 = sys.nowNs();
         defer k.commit_ns += sys.nowNs() - t0;
         const at_once = !k.mode_set;
@@ -350,8 +362,8 @@ pub const Kms = struct {
             };
         }
         k.shown_primary = primary;
-        // Without an overlay plane, nothing is shown above the primary.
-        k.shown_overlay = if (k.overlay != null) overlay else null;
+        // Without a plane, nothing is shown there.
+        for (&k.shown_overlays, k.overlays, overlays) |*shown_layer, plane, layer| shown_layer.* = if (plane != null) layer else null;
         return at_once;
     }
 
@@ -382,42 +394,45 @@ test "atomic requests group properties by object" {
         .crtc_active = 102,
         .mode_blob = 55,
         .primary = .{ .id = 50, .props = props },
-        .overlay = .{ .id = 60, .props = props },
+        .overlays = .{ .{ .id = 60, .props = props }, .{ .id = 61, .props = props } },
     };
     const window: Layer = .{ .fb_id = 77, .src_width = 1920, .src_height = 1036, .x = 0, .y = 44, .width = 1920, .height = 1036 };
-    var r = k.request(window, null, false);
-    // The mode set: connector, CRTC, then both planes.
-    try std.testing.expectEqualSlices(u32, &.{ 30, 40, 50, 60 }, r.objs[0..r.n_objs]);
-    try std.testing.expectEqualSlices(u32, &.{ 1, 2, 10, 2 }, r.counts[0..r.n_objs]);
+    var r = k.request(window, .{ null, null }, false);
+    // The mode set: connector, CRTC, then all the planes.
+    try std.testing.expectEqualSlices(u32, &.{ 30, 40, 50, 60, 61 }, r.objs[0..r.n_objs]);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2, 10, 2, 2 }, r.counts[0..r.n_objs]);
     try std.testing.expectEqual(@as(u64, 1036 << 16), r.values[3 + 5]);
     try std.testing.expectEqual(@as(u64, 44), r.values[3 + 7]);
-    // The overlay is switched off.
-    try std.testing.expectEqualSlices(u64, &.{ 0, 0 }, r.values[r.n_props - 2 .. r.n_props]);
+    // The overlays are switched off.
+    try std.testing.expectEqualSlices(u64, &.{ 0, 0, 0, 0 }, r.values[r.n_props - 4 .. r.n_props]);
 
     k.mode_set = true;
-    r = k.request(window, window, false);
+    r = k.request(window, .{ window, null }, false);
     try std.testing.expectEqualSlices(u32, &.{ 50, 60 }, r.objs[0..r.n_objs]);
     try std.testing.expectEqual(@as(usize, 20), r.n_props);
 
     // After that is shown, a new buffer in the same place changes only the
     // primary plane's framebuffer.
     k.shown_primary = window;
-    k.shown_overlay = window;
+    k.shown_overlays = .{ window, null };
     var next = window;
     next.fb_id = 78;
-    r = k.request(next, window, false);
+    r = k.request(next, .{ window, null }, false);
     try std.testing.expectEqualSlices(u32, &.{50}, r.objs[0..r.n_objs]);
     try std.testing.expectEqualSlices(u32, &.{1}, r.props[0..r.n_props]);
     try std.testing.expectEqual(@as(u64, 78), r.values[0]);
     // A new bar changes only the overlay plane.
     var bar = window;
     bar.fb_id = 90;
-    r = k.request(window, bar, false);
+    r = k.request(window, .{ bar, null }, false);
     try std.testing.expectEqualSlices(u32, &.{60}, r.objs[0..r.n_objs]);
+    // A dock appearing changes only the second.
+    r = k.request(window, .{ window, bar }, false);
+    try std.testing.expectEqualSlices(u32, &.{61}, r.objs[0..r.n_objs]);
     // Nothing new still names the primary plane, for the flip event.
-    r = k.request(window, window, false);
+    r = k.request(window, .{ window, null }, false);
     try std.testing.expectEqualSlices(u32, &.{50}, r.objs[0..r.n_objs]);
     // A full request sets everything.
-    r = k.request(window, window, true);
-    try std.testing.expectEqual(@as(usize, 20), r.n_props);
+    r = k.request(window, .{ window, bar }, true);
+    try std.testing.expectEqual(@as(usize, 30), r.n_props);
 }
