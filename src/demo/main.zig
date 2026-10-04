@@ -115,11 +115,13 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     // animation, or after input), and shown only if they changed.
     var dirty = true;
     var idle = false;
+    var suspended = false;
     while (true) {
         const waited = if (idle) blk: {
             // Nothing to draw: sleep until the statistics change, or
-            // something happens (input, a configure).
-            const until = if (window_ui.needs_frame) sys.nowNs() + 16 * std.time.ns_per_ms else next_update;
+            // something happens (input, a configure). While covered there
+            // is nothing to animate.
+            const until = if (window_ui.needs_frame and !win.suspended) sys.nowNs() + 16 * std.time.ns_per_ms else next_update;
             break :blk win.wait(@max(until -| sys.nowNs(), std.time.ns_per_ms));
         } else win.poll();
         waited catch |err| {
@@ -133,6 +135,13 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             height = size[1];
             next_update = 0;
             dirty = true;
+        }
+        // Covered by another window: draw nothing, and let the window in
+        // front have the GPU memory; draw again when uncovered.
+        if (win.suspended != suspended) {
+            suspended = win.suspended;
+            if (suspended) win.releaseSpareBuffers() else dirty = true;
+            print("stardust: {s}\n", .{if (suspended) "covered: not drawing" else "in front: drawing"});
         }
         const frame_start = sys.nowNs();
         for (win.takeInput()) |e| switch (e) {
@@ -159,7 +168,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         }
 
         idle = true;
-        if (dirty or window_ui.needs_frame) {
+        if (!suspended and (dirty or window_ui.needs_frame)) {
             dirty = false;
             const scale = @min(@as(f32, @floatFromInt(width)) / 1920, @as(f32, @floatFromInt(height)) / 1080);
             window_ui.frame(width, height, frame_start, view.Demo{

@@ -7,8 +7,11 @@
 //! supported) and wl_seat (a pointer and a keyboard; key codes are Linux
 //! evdev codes, without an XKB keymap).
 //!
-//! Windows are maximized into the work area below the shell's bar, and the
-//! most recently mapped one is shown. The server does not draw: it keeps the
+//! Windows are maximized into the work area between the shell's bar and
+//! dock, and the most recently mapped (or raised) one is shown. The others
+//! are covered: they get xdg_toplevel's suspended state, their frame
+//! callbacks wait until they are in front again, and what they commit
+//! meanwhile does not make the shell draw a frame. The server does not draw: it keeps the
 //! state the renderer needs (`topWindow`), and gets textures from the
 //! renderer through `Backend`, so it can run without a GPU in tests.
 //!
@@ -70,7 +73,8 @@ const Object = union(enum) {
     shm,
     shm_pool: *ShmPool,
     buffer: *Buffer,
-    wm_base,
+    /// With the version the client bound.
+    wm_base: u32,
     positioner,
     xdg_surface: *XdgSurface,
     toplevel: *Toplevel,
@@ -88,6 +92,8 @@ pub const Surface = struct {
     pending_buffer: ?*Buffer = null,
     pending_attach: bool = false,
     pending_callbacks: std.ArrayList(u32) = .empty,
+    /// Frame callbacks committed while the window was covered.
+    held_callbacks: std.ArrayList(u32) = .empty,
     /// The dmabuf buffer being shown, if any.
     buffer: ?*Buffer = null,
     /// A copy of the last shm buffer, owned by the surface.
@@ -136,6 +142,8 @@ pub const XdgSurface = struct {
     id: u32,
     toplevel: ?*Toplevel = null,
     configured: bool = false,
+    /// The xdg_wm_base version it was made with.
+    version: u32 = 1,
 };
 
 pub const Toplevel = struct {
@@ -144,6 +152,9 @@ pub const Toplevel = struct {
     title_buf: [64]u8 = undefined,
     title_len: usize = 0,
     mapped: bool = false,
+    /// Covered by another window, and told so (see `Server.updateCovered`).
+    suspended: bool = false,
+    capabilities_sent: bool = false,
 
     pub fn title(t: *const Toplevel) []const u8 {
         return t.title_buf[0..t.title_len];
@@ -375,7 +386,9 @@ pub const Server = struct {
         if (surf.copy) |t| s.backend.vtable.destroyTexture(s.backend.ptr, t);
         // Frame callbacks of a destroyed surface never fire.
         for (surf.pending_callbacks.items) |id| _ = surf.client.objects.remove(id);
+        for (surf.held_callbacks.items) |id| _ = surf.client.objects.remove(id);
         surf.pending_callbacks.deinit(s.gpa);
+        surf.held_callbacks.deinit(s.gpa);
         if (surf.xdg) |x| {
             // The xdg_surface lives on, without a surface.
             if (x.toplevel) |t| s.unmap(t);
@@ -629,7 +642,7 @@ pub const Server = struct {
                 };
                 if (b.uses == 0) s.freeBuffer(b);
             },
-            .wm_base => switch (m.opcode) {
+            .wm_base => |version| switch (m.opcode) {
                 p.xdg_wm_base.request.destroy => c.deleteId(m.object),
                 p.xdg_wm_base.request.create_positioner => try c.addObject(try r.uint(), .positioner),
                 p.xdg_wm_base.request.get_xdg_surface => {
@@ -640,7 +653,7 @@ pub const Server = struct {
                     };
                     if (surf.xdg != null) return c.postError(m.object, p.xdg_wm_base.err.role, "surface already has a role", .{});
                     const x = try s.gpa.create(XdgSurface);
-                    x.* = .{ .surface = surf, .id = id };
+                    x.* = .{ .surface = surf, .id = id, .version = version };
                     c.addObject(id, .{ .xdg_surface = x }) catch |e| {
                         s.gpa.destroy(x);
                         return e;
@@ -718,7 +731,7 @@ pub const Server = struct {
                     e.uint(f).end();
                 };
             },
-            3 => try c.addObject(id, .wm_base),
+            3 => try c.addObject(id, .{ .wm_base = version }),
             4 => {
                 try c.addObject(id, .dmabuf);
                 const mod = p.modifier.broadcom_vc4_t_tiled;
@@ -823,9 +836,30 @@ pub const Server = struct {
         broadcast(surf.client, .keyboard, p.wl_keyboard.event.key, 1, .{ s.nextSerial(), time_ms, key, state });
     }
 
+    /// Tells windows whether they are covered, after the windows change:
+    /// all but the front one are, and get the suspended state (and no frame
+    /// callbacks) until they are in front again.
+    pub fn updateCovered(s: *Server) void {
+        const top = s.topWindow();
+        for (s.toplevels.items) |t| {
+            const covered = t != top;
+            if (!t.mapped or covered == t.suspended) continue;
+            t.suspended = covered;
+            const surf = t.xdg.surface orelse continue;
+            s.configure(surf.client, t);
+            if (!covered) {
+                for (surf.held_callbacks.items) |id| s.frame_callbacks.append(s.gpa, .{ .client = surf.client, .id = id }) catch {};
+                surf.held_callbacks.clearRetainingCapacity();
+                s.damaged = true;
+            }
+        }
+    }
+
     /// Moves the focus after the windows change: the keyboard to the shown
-    /// window, and the pointer to it if the pointer is over it.
+    /// window, and the pointer to it if the pointer is over it. Covered
+    /// windows are told (see `updateCovered`).
     pub fn updateFocus(s: *Server) void {
+        s.updateCovered();
         if (s.updatePointerFocus()) s.pointerFrame();
         const top: ?*Surface = if (s.topWindow()) |t| t.xdg.surface else null;
         if (top == s.keyboard_focus) return;
@@ -961,7 +995,14 @@ pub const Server = struct {
                 surf.copy = null;
             }
         }
-        for (surf.pending_callbacks.items) |id| try s.frame_callbacks.append(s.gpa, .{ .client = c, .id = id });
+        // A covered window's frame callbacks wait until it is uncovered:
+        // its client need not draw what cannot be seen.
+        const covered = if (surf.xdg) |x| (if (x.toplevel) |t| t.mapped and t.suspended else false) else false;
+        if (covered) {
+            try surf.held_callbacks.appendSlice(s.gpa, surf.pending_callbacks.items);
+        } else {
+            for (surf.pending_callbacks.items) |id| try s.frame_callbacks.append(s.gpa, .{ .client = c, .id = id });
+        }
         surf.pending_callbacks.clearRetainingCapacity();
 
         if (surf.xdg) |x| if (x.toplevel) |t| {
@@ -977,16 +1018,35 @@ pub const Server = struct {
                 s.unmap(t);
             }
         };
-        s.damaged = true;
+        // What a covered window shows changes nothing on the screen.
+        if (!covered) s.damaged = true;
     }
 
+    /// Sends a toplevel its size and state: maximized, and activated if it
+    /// is in front, otherwise suspended (to clients that know the state).
     fn configure(s: *Server, c: *Client, t: *Toplevel) void {
+        if (t.xdg.version >= 5 and !t.capabilities_sent) {
+            // Nothing beyond what every window has: no menus, maximizing
+            // (they always are), fullscreen or minimizing.
+            if (c.send(t.id, p.xdg_toplevel.event.wm_capabilities)) |m0| {
+                var e = m0;
+                e.array(&.{}).end();
+            }
+            t.capabilities_sent = true;
+        }
         if (c.send(t.id, p.xdg_toplevel.event.configure)) |m0| {
             var e = m0;
             var states: [8]u8 = undefined;
             std.mem.writeInt(u32, states[0..4], p.xdg_toplevel.state.maximized, .little);
-            std.mem.writeInt(u32, states[4..8], p.xdg_toplevel.state.activated, .little);
-            e.int(@intCast(s.work_area.width)).int(@intCast(s.work_area.height)).array(&states).end();
+            var n: usize = 4;
+            if (!t.suspended) {
+                std.mem.writeInt(u32, states[4..8], p.xdg_toplevel.state.activated, .little);
+                n = 8;
+            } else if (t.xdg.version >= 6) {
+                std.mem.writeInt(u32, states[4..8], p.xdg_toplevel.state.suspended, .little);
+                n = 8;
+            }
+            e.int(@intCast(s.work_area.width)).int(@intCast(s.work_area.height)).array(states[0..n]).end();
         }
         if (c.send(t.xdg.id, p.xdg_surface.event.configure)) |m0| {
             var e = m0;

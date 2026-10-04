@@ -284,6 +284,19 @@ yet.
   bar and the dock, and the newest one is shown, or the one whose app was
   last clicked in the dock. The bar shows the window's title and the time
   since boot.
+- **Covered windows:** the windows behind the front one cannot be seen, so
+  they are told: they get xdg_toplevel's `suspended` state (xdg-shell
+  version 6) instead of `activated`, their frame callbacks are held until
+  they are in front again, and what they commit meanwhile does not make
+  the shell draw a frame. Stardust's apps then stop drawing (the demo's
+  solid stops spinning) and free the buffers they are not using, so the
+  app in front has the GPU memory; raised, they draw again.
+- **GPU memory:** every buffer the GPU touches comes from the kernel's CMA
+  pool (the V3D has no MMU). At 1080p the shell's two screen buffers take
+  17 MB and each window up to three 7 MB buffers, more than the device
+  tree's 64 MB pool leaves once the kernel's binner memory is taken, so
+  `cmdline.txt` sets `cma=128M`. An app that cannot get another buffer
+  makes do with those it has, or waits for memory to be freed.
 - **Apps:** each directory in `/apps` holding a program of the same name
   (`/apps/<name>/<name>`) is an app, with an icon in the dock: its initial
   on a coloured square, with a dot under it while it runs. Apps run once

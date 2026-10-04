@@ -118,6 +118,8 @@ const State = struct {
     frames_done: u32 = 0,
     released: [4]bool = @splat(false),
     buffer_ids: [4]u32 = @splat(0),
+    activated: bool = false,
+    suspended: bool = false,
 
     fn dmabufEvent(ptr: ?*anyopaque, _: *client.Display, _: u32, opcode: u16, r: *wire.Reader) void {
         const s: *State = @ptrCast(@alignCast(ptr.?));
@@ -139,6 +141,15 @@ const State = struct {
         if (opcode != p.xdg_toplevel.event.configure) return;
         s.configure_width = r.int() catch 0;
         s.configure_height = r.int() catch 0;
+        const states = r.array() catch &.{};
+        s.activated = false;
+        s.suspended = false;
+        var i: usize = 0;
+        while (i + 4 <= states.len) : (i += 4) switch (std.mem.readInt(u32, states[i..][0..4], .little)) {
+            p.xdg_toplevel.state.activated => s.activated = true,
+            p.xdg_toplevel.state.suspended => s.suspended = true,
+            else => {},
+        };
     }
 
     fn xdgSurfaceEvent(ptr: ?*anyopaque, _: *client.Display, _: u32, _: u16, r: *wire.Reader) void {
@@ -591,4 +602,157 @@ test "clients are known by their process, which the dock raises windows by" {
     try testing.expectEqual(@as(?linux.pid_t, linux.getpid()), c.pid);
     // No window to raise yet.
     try testing.expect(!server.raise(linux.getpid()));
+}
+
+/// Runs the server for several clients (each given a made-up process ID,
+/// 1001 onwards), until they all disconnect.
+const MultiServerThread = struct {
+    server: server_mod.Server,
+    fds: []const linux.fd_t,
+    frames: std.atomic.Value(u32) = .init(0),
+    /// Set by the test: the process whose window to raise.
+    raise_pid: std.atomic.Value(i32) = .init(0),
+
+    fn run(st: *MultiServerThread) void {
+        var clients: [4]?*server_mod.Client = @splat(null);
+        for (st.fds, 0..) |fd, i| {
+            clients[i] = st.server.addClient(fd) catch return;
+            clients[i].?.pid = @intCast(1001 + i);
+        }
+        while (true) {
+            var fds: [4]linux.pollfd = undefined;
+            var n: usize = 0;
+            for (clients) |c| if (c) |cl| {
+                fds[n] = .{ .fd = cl.conn.fd, .events = linux.POLL.IN, .revents = 0 };
+                n += 1;
+            };
+            if (n == 0) break;
+            _ = linux.poll(&fds, n, 10);
+            for (&clients) |*c| if (c.*) |cl| {
+                if (!st.server.dispatch(cl)) c.* = null;
+            };
+            const pid = st.raise_pid.swap(0, .monotonic);
+            if (pid != 0) _ = st.server.raise(pid);
+            st.server.updateFocus();
+            if (st.server.damaged) {
+                _ = st.frames.fetchAdd(1, .monotonic);
+                st.server.frameDrawn();
+                st.server.framePresented(16);
+            }
+            st.server.flushClients();
+        }
+    }
+};
+
+const TestWindow = struct {
+    d: *client.Display,
+    state: State = .{},
+    surface: client.Proxy = undefined,
+    buffer: client.Proxy = undefined,
+
+    /// Connects on `fd` and maps a 64x64 shm window.
+    fn open(tw: *TestWindow) !void {
+        const d = tw.d;
+        var globals: client.Globals = .{};
+        const registry = try globals.fetch(d);
+        const compositor = (try globals.bind(registry, p.wl_compositor.name, 4, null)).?;
+        const wm_base = (try globals.bind(registry, p.xdg_wm_base.name, 6, null)).?;
+        const shm = (try globals.bind(registry, p.wl_shm.name, 1, null)).?;
+        tw.surface = try d.newObject(null);
+        var m = try compositor.request(p.wl_compositor.request.create_surface);
+        m.uint(tw.surface.id).end();
+        const xdg_surface = try d.newObject(.{ .ptr = &tw.state, .handler = State.xdgSurfaceEvent });
+        m = try wm_base.request(p.xdg_wm_base.request.get_xdg_surface);
+        m.uint(xdg_surface.id).uint(tw.surface.id).end();
+        const toplevel = try d.newObject(.{ .ptr = &tw.state, .handler = State.toplevelEvent });
+        m = try xdg_surface.request(p.xdg_surface.request.get_toplevel);
+        m.uint(toplevel.id).end();
+        m = try tw.surface.request(p.wl_surface.request.commit);
+        m.end();
+        try d.roundtrip();
+        m = try xdg_surface.request(p.xdg_surface.request.ack_configure);
+        m.uint(tw.state.configure_serial).end();
+        const memfd: linux.fd_t = @intCast(linux.memfd_create("test", 0));
+        _ = linux.ftruncate(memfd, 64 * 64 * 4);
+        const pool = try d.newObject(null);
+        m = try shm.request(p.wl_shm.request.create_pool);
+        m.uint(pool.id).fd(memfd).int(64 * 64 * 4).end();
+        tw.buffer = try d.newObject(.{ .ptr = &tw.state, .handler = State.bufferEvent });
+        m = try pool.request(p.wl_shm_pool.request.create_buffer);
+        m.uint(tw.buffer.id).int(0).int(64).int(64).int(256).uint(p.wl_shm.format.xrgb8888).end();
+        try tw.frame();
+        while (tw.state.frames_done < 1) try d.dispatch();
+    }
+
+    fn frame(tw: *TestWindow) !void {
+        try commitBuffer(tw.surface, tw.buffer, &tw.state);
+        try tw.d.flush();
+    }
+
+    /// Handles events until `cond` holds (or a second passes).
+    fn waitFor(tw: *TestWindow, ctx: anytype, comptime cond: fn (@TypeOf(ctx)) bool) !void {
+        for (0..100) |_| {
+            if (cond(ctx)) return;
+            try tw.d.dispatchTimeout(10);
+        }
+        return error.Timeout;
+    }
+};
+
+test "a covered window is suspended, without frame callbacks or redraws, until raised" {
+    var a: [2]linux.fd_t = undefined;
+    var b: [2]linux.fd_t = undefined;
+    try testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &a));
+    try testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &b));
+    var renderer: FakeRenderer = .{};
+    const fds = [_]linux.fd_t{ a[0], b[0] };
+    const st = try testing.allocator.create(MultiServerThread);
+    defer testing.allocator.destroy(st);
+    st.* = .{ .server = .init(testing.allocator, renderer.backend(), .{ .x = 0, .y = 40, .width = 800, .height = 560 }), .fds = &fds };
+    defer st.server.deinit();
+    const thread = try std.Thread.spawn(.{}, MultiServerThread.run, .{st});
+
+    var first: TestWindow = .{ .d = try client.Display.fromFd(testing.allocator, a[1]) };
+    try first.open();
+    try testing.expect(first.state.activated and !first.state.suspended);
+
+    // A second window covers the first, which is told so.
+    var second: TestWindow = .{ .d = try client.Display.fromFd(testing.allocator, b[1]) };
+    try second.open();
+    const Cond = struct {
+        fn suspended(s: *const State) bool {
+            return s.suspended;
+        }
+        fn shown(s: *const State) bool {
+            return s.activated and !s.suspended;
+        }
+    };
+    try first.waitFor(&first.state, Cond.suspended);
+    try testing.expect(!first.state.activated);
+    try testing.expect(second.state.activated);
+
+    // A covered window's frames neither redraw the screen nor get frame
+    // callbacks.
+    const frames = st.frames.load(.monotonic);
+    try first.frame();
+    try first.d.roundtrip();
+    try first.d.roundtrip();
+    try testing.expectEqual(@as(u32, 1), first.state.frames_done);
+    try testing.expectEqual(frames, st.frames.load(.monotonic));
+
+    // Raised, it is shown again and its frame callback fires; the other is
+    // covered.
+    st.raise_pid.store(1001, .monotonic);
+    try first.waitFor(&first.state, Cond.shown);
+    const Done = struct {
+        fn two(s: *const State) bool {
+            return s.frames_done >= 2;
+        }
+    };
+    try first.waitFor(&first.state, Done.two);
+    try second.waitFor(&second.state, Cond.suspended);
+
+    first.d.disconnect();
+    second.d.disconnect();
+    thread.join();
 }

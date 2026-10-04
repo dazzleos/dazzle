@@ -71,9 +71,10 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     var next_update: u64 = sys.nowNs() + std.time.ns_per_s;
     var dirty = true;
     var idle = false;
+    var suspended = false;
     while (true) {
         const waited = if (idle) blk: {
-            const until = if (window_ui.needs_frame) sys.nowNs() + 16 * std.time.ns_per_ms else next_update;
+            const until = if (suspended) sys.nowNs() + 60 * std.time.ns_per_s else if (window_ui.needs_frame) sys.nowNs() + 16 * std.time.ns_per_ms else next_update;
             break :blk win.wait(@max(until -| sys.nowNs(), std.time.ns_per_ms));
         } else win.poll();
         waited catch |err| {
@@ -86,6 +87,12 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             height = size[1];
             dirty = true;
         }
+        // Covered by another window: nothing is read or drawn, and the
+        // window in front gets the GPU memory.
+        if (win.suspended != suspended) {
+            suspended = win.suspended;
+            if (suspended) win.releaseSpareBuffers() else next_update = 0;
+        }
         const now = sys.nowNs();
         for (win.takeInput()) |e| switch (e) {
             .motion => |pos| window_ui.pointerMotion(pos),
@@ -94,7 +101,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         };
 
         // The figures change every second.
-        if (now >= next_update) {
+        if (!suspended and now >= next_update) {
             next_update = now + std.time.ns_per_s;
             usage = monitor.read(now);
             network = info.Network.read();
@@ -102,7 +109,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         }
 
         idle = true;
-        if (dirty or window_ui.needs_frame) {
+        if (!suspended and (dirty or window_ui.needs_frame)) {
             dirty = false;
             window_ui.frame(width, height, now, view.Settings{
                 .commit = build_info.commit,

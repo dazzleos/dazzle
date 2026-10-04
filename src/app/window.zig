@@ -11,6 +11,13 @@
 //! the frame, waits for the shell to have shown the previous one (its frame
 //! callback, so at most one frame is queued) and commits the new one. A
 //! resize takes effect at the next `beginFrame`.
+//!
+//! While another window covers it, the shell says the window is
+//! `suspended` and holds its frame callbacks: the app should not draw
+//! (nothing would be seen), and the window frees the buffers it is not
+//! using, for the app in front. GPU memory is scarce (every buffer comes
+//! from the kernel's CMA pool), so a buffer that cannot be had waits for
+//! one to be released, or for memory to be freed.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -110,6 +117,8 @@ pub const Window = struct {
     /// A configure to acknowledge.
     pending_serial: ?u32 = null,
     closed: bool = false,
+    /// Covered by another window: there is no point drawing.
+    suspended: bool = false,
 
     buffers: [max_buffers]?Buffer = @splat(null),
     /// The buffer the frame being recorded renders into.
@@ -142,7 +151,8 @@ pub const Window = struct {
         w.* = .{ .gpa = gpa, .gpu = gpu, .conn = conn };
         const registry = try w.globals.fetch(conn);
         const compositor = (try w.globals.bind(registry, p.wl_compositor.name, 4, null)) orelse return error.NoCompositor;
-        w.wm_base = (try w.globals.bind(registry, p.xdg_wm_base.name, 1, .{ .ptr = w, .handler = wmBaseEvent })) orelse return error.NoXdgShell;
+        // Version 6 for the suspended state.
+        w.wm_base = (try w.globals.bind(registry, p.xdg_wm_base.name, 6, .{ .ptr = w, .handler = wmBaseEvent })) orelse return error.NoXdgShell;
         w.dmabuf = (try w.globals.bind(registry, p.zwp_linux_dmabuf_v1.name, 3, .{ .ptr = w, .handler = dmabufEvent })) orelse return error.NoDmabuf;
         // Optional: the pointer and keyboard come with the seat's capabilities.
         w.seat = try w.globals.bind(registry, p.wl_seat.name, 5, .{ .ptr = w, .handler = seatEvent });
@@ -249,7 +259,12 @@ pub const Window = struct {
     /// Like `show`, saying which parts of the window changed since the
     /// last frame shown (all of it if null).
     pub fn showDamaged(w: *Window, damage: ?[]const vc4.render.Viewport) !void {
-        while (w.frame_pending) try w.conn.dispatch();
+        while (w.frame_pending) {
+            try w.conn.dispatch();
+            // Covered while waiting: the callback comes when it is in
+            // front again.
+            if (w.suspended) w.releaseSpareBuffers();
+        }
         const i = w.back orelse return error.NoFrameBegun;
         const b = &w.buffers[i].?;
         var m = try w.surface.request(p.wl_surface.request.attach);
@@ -286,6 +301,7 @@ pub const Window = struct {
     // --- Buffers ----------------------------------------------------------------
 
     fn pickBack(w: *Window) !usize {
+        var out_of_memory_waits: u32 = 0;
         while (true) {
             // A free buffer of the right size; otherwise replace a free one
             // of the wrong size, or use an empty slot.
@@ -303,12 +319,37 @@ pub const Window = struct {
                 empty = i;
             }
             if (empty) |i| {
-                w.buffers[i] = try w.allocBuffer(i);
-                return i;
+                if (w.allocBuffer(i)) |b| {
+                    w.buffers[i] = b;
+                    return i;
+                } else |err| {
+                    if (err != error.OutOfMemory) return err;
+                    // No GPU memory for another buffer: make do with those
+                    // there are, or wait for some to be freed.
+                    const busy = for (w.buffers) |slot| {
+                        if (slot) |b| if (b.busy) break true;
+                    } else false;
+                    if (!busy) {
+                        out_of_memory_waits += 1;
+                        if (out_of_memory_waits > 40) return err;
+                        try w.conn.dispatchTimeout(50);
+                        continue;
+                    }
+                }
             }
             // All buffers are with the compositor: wait for a release.
             try w.conn.dispatch();
         }
+    }
+
+    /// Frees the buffers the compositor does not have and no frame is
+    /// being drawn into: while the window is covered, the memory is better
+    /// used by the window in front.
+    pub fn releaseSpareBuffers(w: *Window) void {
+        for (&w.buffers, 0..) |*slot, i| if (slot.*) |*b| {
+            if (b.busy or w.back == i) continue;
+            w.freeBuffer(b, slot);
+        };
     }
 
     fn allocBuffer(w: *Window, slot: usize) !Buffer {
@@ -451,7 +492,16 @@ pub const Window = struct {
     fn toplevelEvent(ptr: ?*anyopaque, _: *client.Display, _: u32, opcode: u16, r: *wire.Reader) void {
         const w: *Window = @ptrCast(@alignCast(ptr.?));
         switch (opcode) {
-            p.xdg_toplevel.event.configure => w.next_size = .{ r.int() catch 0, r.int() catch 0 },
+            p.xdg_toplevel.event.configure => {
+                w.next_size = .{ r.int() catch 0, r.int() catch 0 };
+                const states = r.array() catch &.{};
+                var suspended = false;
+                var i: usize = 0;
+                while (i + 4 <= states.len) : (i += 4) {
+                    if (std.mem.readInt(u32, states[i..][0..4], .little) == p.xdg_toplevel.state.suspended) suspended = true;
+                }
+                w.suspended = suspended;
+            },
             p.xdg_toplevel.event.close => w.closed = true,
             else => {},
         }

@@ -119,7 +119,9 @@ pub const wl_shm_pool = struct {
 
 pub const xdg_wm_base = struct {
     pub const name = "xdg_wm_base";
-    pub const version = 1;
+    /// Version 6 adds the suspended state (popups' requests from versions 3
+    /// and later are not supported).
+    pub const version = 6;
     pub const request = struct {
         pub const destroy = 0;
         pub const create_positioner = 1;
@@ -179,12 +181,24 @@ pub const xdg_toplevel = struct {
     pub const event = struct {
         pub const configure = 0;
         pub const close = 1;
+        /// Since version 4.
+        pub const configure_bounds = 2;
+        /// Since version 5.
+        pub const wm_capabilities = 3;
     };
     pub const state = struct {
         pub const maximized = 1;
         pub const fullscreen = 2;
         pub const resizing = 3;
         pub const activated = 4;
+        /// Since version 2.
+        pub const tiled_left = 5;
+        pub const tiled_right = 6;
+        pub const tiled_top = 7;
+        pub const tiled_bottom = 8;
+        /// Since version 6: the window cannot be seen (it is covered), so
+        /// the client need not draw it.
+        pub const suspended = 9;
     };
 };
 
