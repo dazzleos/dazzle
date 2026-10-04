@@ -1,10 +1,10 @@
 //! stardust-shell: a minimal Wayland compositor and shell.
 //!
 //! It owns the display (as the DRM master) and draws with the low-level vc4
-//! API: a bar across the top (the front window's title and a button that
-//! closes it; see bar.zig), a dock along the bottom with an icon for each
-//! app in /apps (see dock.zig), and the front window, maximized between
-//! them. USB mice move a cursor
+//! API: a dock along the bottom with an icon for each app in /apps (see
+//! dock.zig), and the front window, maximized above it. Apps draw their own
+//! title bars (with the toolkit's TitleBar), so with no app open the screen
+//! shows just the dock. USB mice move a cursor
 //! (on the display's cursor plane) and, with USB keyboards, give input to
 //! that window. Clicking an app in the dock starts it, or brings its window
 //! to the front if it is running: apps run once each.
@@ -27,7 +27,6 @@ const server_mod = @import("server.zig");
 const render = @import("render.zig");
 const input = @import("input.zig");
 const dock_mod = @import("dock.zig");
-const bar_mod = @import("bar.zig");
 const build_info = @import("build_info");
 
 const print = sys.print;
@@ -66,17 +65,14 @@ fn run(init: std.process.Init.Minimal) !void {
         if (renderer.display.kms) |k| (if (k.overlays[vc4.kms.max_overlays - 1] != null) "atomic mode setting with overlay planes" else "atomic mode setting, too few overlay planes") else "legacy mode setting (no direct scanout)",
     });
 
-    var bar: ?bar_mod.Bar = null;
     var ui_font: ?font.Font = null;
     var font_buf: [512]u8 = undefined;
     const font_path = try sys.appFile(&font_buf, font.default_font_file);
     if (sys.readFileAlloc(gpa, font_path, 32 * 1024 * 1024)) |data| {
         if (font.Font.init(data)) |f| {
             ui_font = f;
-            bar = try bar_mod.Bar.init(gpa, f, renderer.width, renderer.height);
         } else |err| print("stardust-shell: font: {s}\n", .{@errorName(err)});
     } else |err| print("stardust-shell: cannot read {s}: {s}\n", .{ font_path, @errorName(err) });
-    const bar_height: u32 = if (bar) |b| b.height else 0;
 
     const apps = try dock_mod.findApps(gpa, dock_mod.apps_dir);
     for (apps) |app| print("stardust-shell: app {s} ({s})\n", .{ app.label, app.path });
@@ -87,9 +83,9 @@ fn run(init: std.process.Init.Minimal) !void {
 
     var server = server_mod.Server.init(gpa, renderer.backend(), .{
         .x = 0,
-        .y = @intCast(bar_height),
+        .y = 0,
         .width = renderer.width,
-        .height = dock_y - bar_height,
+        .height = dock_y,
     });
 
     var path_buf: [108]u8 = undefined;
@@ -120,12 +116,7 @@ fn run(init: std.process.Init.Minimal) !void {
     // frame replaces it on the screen.
     var scanout: Scanout = .{};
     var next_tick: u64 = start;
-    var last_title: [64]u8 = undefined;
-    var last_title_len: usize = 0;
-    var last_had_window = false;
-    // The bar needs drawing again.
-    var bar_stale = true;
-    // The bar or the dock changed, and is waiting to be shown.
+    // The dock changed, and is waiting to be shown.
     var panels_damaged = true;
     // When a client last had a frame for the screen.
     var client_frame_ns: u64 = 0;
@@ -151,7 +142,7 @@ fn run(init: std.process.Init.Minimal) !void {
         var wake = next_tick;
         if (!renderer.flipPending()) {
             if (server.damaged) wake = now;
-            if (panels_damaged) wake = @min(wake, client_frame_ns + bar_grace_ns);
+            if (panels_damaged) wake = @min(wake, client_frame_ns + panel_grace_ns);
         }
         const timeout: i32 = if (wake > now) @intCast((wake - now) / std.time.ns_per_ms + 1) else 0;
         _ = linux.poll(&fds, 2 + n_clients + n_inputs, timeout);
@@ -192,15 +183,6 @@ fn run(init: std.process.Init.Minimal) !void {
                     }
                     continue;
                 }
-                // And over the bar: its close button closes the front
-                // window.
-                if (e == .button and pointer.y < @as(f64, @floatFromInt(bar_height))) {
-                    pointer.flushMotion(&server, time_ms);
-                    if (e.button.pressed and e.button.code == btn_left) if (bar) |*b| if (b.hitClose(pointer.x, pointer.y)) {
-                        _ = server.closeTop();
-                    };
-                    continue;
-                }
                 pointer.handle(&server, time_ms, e);
             }
             if (pointer.moved) {
@@ -212,10 +194,6 @@ fn run(init: std.process.Init.Minimal) !void {
                     renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
                     panels_damaged = true;
                 }
-                const in_bar = pointer.y < @as(f64, @floatFromInt(bar_height));
-                if (bar) |*b| if (b.pointerAt(if (in_bar) pointer.x else null, pointer.y)) {
-                    bar_stale = true;
-                };
             }
         };
 
@@ -248,23 +226,8 @@ fn run(init: std.process.Init.Minimal) !void {
         // have changed.
         server.updateFocus();
 
-        // The bar: when the front window or its title changes, or the
-        // close button's highlight.
         const top = server.topWindow();
-        const title: ?[]const u8 = if (top) |t| t.title() else null;
         const t_now = sys.nowNs();
-        const shown_title = title orelse "";
-        if (!std.mem.eql(u8, shown_title, last_title[0..last_title_len]) or (title != null) != last_had_window) bar_stale = true;
-        if (bar) |*b| if (bar_stale) {
-            bar_stale = false;
-            last_title_len = @min(shown_title.len, last_title.len);
-            @memcpy(last_title[0..last_title_len], shown_title[0..last_title_len]);
-            last_had_window = title != null;
-            b.draw(title);
-            renderer.setPanel(.bar, b.pixels, b.width, b.height, 0);
-            panels_damaged = true;
-            stats.bar_ns += sys.nowNs() - t_now;
-        };
         if (t_now >= next_tick) {
             next_tick = start + ((t_now - start) / std.time.ns_per_s + 1) * std.time.ns_per_s;
             // Keyboards and mice plugged in since.
@@ -273,18 +236,18 @@ fn run(init: std.process.Init.Minimal) !void {
 
         // Draw while the previous frame is on the screen; it is shown at
         // the next vertical blank, without waiting here. A change to the
-        // bar alone waits for a while if a client is animating, and goes
+        // dock alone waits for a while if a client is animating, and goes
         // out with its next frame: otherwise it would take the next
         // vertical blank, and the client's frame would be shown a refresh
         // late.
-        const bar_due = panels_damaged and sys.nowNs() >= client_frame_ns + bar_grace_ns;
-        if ((server.damaged or bar_due) and !renderer.flipPending()) {
+        const dock_due = panels_damaged and sys.nowNs() >= client_frame_ns + panel_grace_ns;
+        if ((server.damaged or dock_due) and !renderer.flipPending()) {
             const draw_start = sys.nowNs();
             defer stats.display_ns += sys.nowNs() - draw_start;
             panels_damaged = false;
             server.frameDrawn();
             // A full-size window goes straight onto the display, with the
-            // bar on a plane above it. Otherwise (or if the display cannot
+            // dock on a plane below it. Otherwise (or if the display cannot
             // show it) the frame is composited.
             var on_screen: ?bool = null;
             if (top) |t| if (server.scanoutBuffer(t)) |b| {
@@ -341,9 +304,9 @@ fn run(init: std.process.Init.Minimal) !void {
     }
 }
 
-/// How long a change to the bar or the dock alone waits for a client's
+/// How long a change to the dock alone waits for a client's
 /// frame to go out with (a few refreshes).
-const bar_grace_ns = 50 * std.time.ns_per_ms;
+const panel_grace_ns = 50 * std.time.ns_per_ms;
 
 /// The client buffers on the display, shown directly.
 const Scanout = struct {
@@ -369,10 +332,9 @@ const FrameStats = struct {
     frames: u32 = 0,
     direct: u32 = 0,
     /// The shell's own work (not waiting): in all, handling clients'
-    /// requests, redrawing the bar, and drawing or showing frames.
+    /// requests, and drawing or showing frames.
     work_ns: u64 = 0,
     clients_ns: u64 = 0,
-    bar_ns: u64 = 0,
     display_ns: u64 = 0,
     /// Handling page flips: frame callbacks and buffer releases.
     flips_ns: u64 = 0,
@@ -422,11 +384,10 @@ const FrameStats = struct {
         const shown = s.frames + s.direct;
         if (shown > 0) {
             const n: f64 = @floatFromInt(shown);
-            const other = s.work_ns -| (s.clients_ns + s.bar_ns + s.display_ns + s.flips_ns);
-            print("stardust-shell: work {d:.2} ms per frame (clients {d:.2}, bar {d:.2}, display {d:.2} of which commits {d:.2}, flips {d:.2}, other {d:.2}), {d:.1} wakeups per frame, {d:.1}% of the time\n", .{
+            const other = s.work_ns -| (s.clients_ns + s.display_ns + s.flips_ns);
+            print("stardust-shell: work {d:.2} ms per frame (clients {d:.2}, display {d:.2} of which commits {d:.2}, flips {d:.2}, other {d:.2}), {d:.1} wakeups per frame, {d:.1}% of the time\n", .{
                 @as(f64, @floatFromInt(s.work_ns)) / n / ms,
                 @as(f64, @floatFromInt(s.clients_ns)) / n / ms,
-                @as(f64, @floatFromInt(s.bar_ns)) / n / ms,
                 @as(f64, @floatFromInt(s.display_ns)) / n / ms,
                 @as(f64, @floatFromInt(s.commit_ns)) / n / ms,
                 @as(f64, @floatFromInt(s.flips_ns)) / n / ms,
@@ -567,5 +528,4 @@ test {
     _ = @import("input.zig");
     _ = @import("cursor.zig");
     _ = @import("dock.zig");
-    _ = @import("bar.zig");
 }

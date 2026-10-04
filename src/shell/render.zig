@@ -1,8 +1,8 @@
 //! The shell's renderer, on the low-level vc4 API: each frame is one GPU
-//! job that clears the screen and draws the panels (the bar and the dock)
-//! and the top window as textured quads, then is shown with a page flip.
-//! A window the size of the work area is shown directly instead, with the
-//! panels on overlay planes.
+//! job that clears the screen and draws the panels (the dock) and the top
+//! window as textured quads, then is shown with a page flip. A window the
+//! size of the work area is shown directly instead, with the panels on
+//! overlay planes.
 //!
 //! Window contents are textures: clients' dma-bufs used in place (they
 //! render in the GPU's T-tiled layout, which the texture unit reads), or
@@ -86,7 +86,8 @@ fn quad(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, index: us
 const Scanout = struct { bo: vc4.Bo, fb_id: u32 };
 
 /// The shell's own strips across the screen, drawn on the CPU.
-pub const PanelId = enum { bar, dock };
+pub const PanelId = enum { dock };
+const n_panels = @typeInfo(PanelId).@"enum".fields.len;
 
 /// A panel's picture, copied where it is needed when a frame is drawn: into
 /// an overlay plane's buffer above a window shown directly, or (when the
@@ -120,7 +121,7 @@ pub const Renderer = struct {
     /// Buffers backing the textures the renderer allocated (shm copies), by
     /// GEM handle. Imported dma-bufs have only a handle.
     owned: std.AutoHashMapUnmanaged(u32, vc4.Bo) = .empty,
-    panels: [2]Panel = .{ .{}, .{} },
+    panels: [n_panels]Panel = @splat(.{}),
     /// Framebuffers for clients' buffers shown directly, by GEM handle
     /// (null if the display cannot show that buffer).
     client_fbs: std.AutoHashMapUnmanaged(u32, ?u32) = .empty,
@@ -208,7 +209,7 @@ pub const Renderer = struct {
     }
 
     /// Shows a client's buffer directly on the display's primary plane at
-    /// (`x`, `y`), with the bar on an overlay plane above it, so nothing
+    /// (`x`, `y`), with the panels on overlay planes, so nothing
     /// is composited. Returns null if the display cannot (the buffer is not
     /// T-tiled, or the planes are not available), and the frame must be
     /// composited instead; otherwise whether it is already on the screen,
@@ -310,7 +311,7 @@ pub const Renderer = struct {
     /// while no flip is pending (`flipPending`).
     pub fn composite(r: *Renderer, window: ?Window) !Timing {
         const t0 = sys.nowNs();
-        var quads: [2]?PanelQuad = @splat(null);
+        var quads: [n_panels]?PanelQuad = @splat(null);
         for (&r.panels, &quads) |*p, *q| {
             if (p.width == 0 or p.height == 0) continue;
             if (p.texture_stale) {

@@ -1,5 +1,5 @@
-//! The demo's window, as widgets: the rings and the spinning solid behind
-//! a column with the statistics, buttons for the solid's speed, radio
+//! The demo's window, as widgets: its title bar, and under it the rings and
+//! the spinning solid behind a column with the statistics, buttons for the solid's speed, radio
 //! buttons to choose the Platonic solid, and switches for lighting and
 //! texture.
 //!
@@ -20,16 +20,19 @@ pub const text_color = gfx.Color.argb(0xffd8e0f0);
 pub const dim_color = gfx.Color.argb(0xff8090b0);
 
 /// Lines of statistics under the title.
-pub const lines = 6;
+pub const lines = 5;
 
 pub const Demo = struct {
     /// Null in tests (nothing is drawn where it would be).
     solids: ?*solids.Solids,
     rings: *rings_mod.Rings,
-    subtitle: []const u8,
     status: [lines][]const u8,
     /// Sizes are designed for 1080 pixels high and scale with the window.
     scale: f32,
+    /// The title bar's close button; and the title bar's scale (the
+    /// screen's, so every app's title bar is the same).
+    on_close: ?ui.Callback = null,
+    bar_scale: f32 = 1,
 
     pub const State = struct {
         /// The solid's rotation, in seconds at normal speed.
@@ -74,9 +77,6 @@ pub const Demo = struct {
         const s = self.scale;
         const title = 52 * s;
         const small = 28 * s;
-        // Bottom-aligned, the subtitle sits lower than the title by the
-        // difference in their descents: lift it to share the baseline.
-        const descent: f32 = if (cx.ui.font) |f| -@as(f32, @floatFromInt(f.descender)) / @as(f32, @floatFromInt(f.units_per_em)) else 0;
 
         var status: [lines]ui.Widget = undefined;
         for (&status, self.status, 0..) |*w, line, i| {
@@ -88,7 +88,7 @@ pub const Demo = struct {
             w.* = cx.make(ui.Radio(Shape){ .value = shape, .group_value = state.shape, .on_changed = .of(state, State.choose), .label = shape.name() });
         }
 
-        return cx.make(ui.Overlay{ .children = &.{
+        const content = cx.make(ui.Overlay{ .children = &.{
             cx.make(RingsView{ .rings = self.rings, .now = now, .unit = s }),
             cx.make(SolidView{ .solids = self.solids, .time = state.time, .shape = state.shape, .look = state.look }),
             cx.make(ui.Padding{ .padding = .all(@floor(24 * s)), .child = cx.make(ui.Column{
@@ -96,16 +96,12 @@ pub const Demo = struct {
                 .main_axis_size = .min,
                 .spacing = 6 * s,
                 .children = &.{
-                    cx.make(ui.Row{ .cross_axis_alignment = .end, .spacing = 16 * s, .main_axis_size = .min, .children = &.{
-                        cx.make(ui.Text{ .text = "Stardust", .style = .{ .size = title, .color = title_color }, .wrap = false }),
-                        cx.make(ui.Padding{ .padding = .{ .bottom = (title - small) * descent }, .child = cx.make(ui.Text{ .text = self.subtitle, .style = .{ .size = small, .color = dim_color }, .wrap = false }) }),
-                    } }),
+                    cx.make(ui.Text{ .text = "Stardust", .style = .{ .size = title, .color = title_color }, .wrap = false }),
                     status[0],
                     status[1],
                     status[2],
                     status[3],
                     status[4],
-                    status[5],
                     cx.make(ui.SizedBox{ .height = 10 * s }),
                     cx.make(ui.Row{ .spacing = 8, .main_axis_size = .min, .children = &.{
                         cx.make(ui.OutlinedButton{ .label = "Slower", .on_press = .of(state, State.slower) }),
@@ -125,6 +121,10 @@ pub const Demo = struct {
                     cx.make(ui.Switch{ .value = state.look.texturing, .on_changed = .of(state, State.setTexturing), .label = "Texture" }),
                 },
             }) }),
+        } });
+        return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &.{
+            cx.make(ui.TitleBar{ .title = "Demo", .on_close = self.on_close, .scale = self.bar_scale }),
+            cx.make(ui.Expanded{ .child = content }),
         } });
     }
 };
@@ -181,11 +181,12 @@ test "the panel fits beside the solids in the shell's window, without overflowin
     const u = try ui.Ui.create(testing.allocator, &f);
     defer u.destroy();
     var rings: rings_mod.Rings = .{};
-    const status = [lines][]const u8{ "192.168.1.20  (eth0)", "60.0 fps  ·  1920×1036", "GPU 6.50 ms per frame", "CPU 0.50 ms per frame", "Pointer 1919, 1035  ·  last key Backspace", "62 °C  ·  CPU speed 100%  ·  busy 45%" };
+    const status = [lines][]const u8{ "60.0 fps  ·  1920×1036", "GPU 6.50 ms per frame", "CPU 0.50 ms per frame", "Pointer 1919, 1035  ·  last key Backspace", "62 °C  ·  CPU speed 100%  ·  busy 45%" };
     for ([_][2]u32{ .{ 1920, 1036 }, .{ 1920, 1080 } }) |size| {
         const scale = @min(@as(f32, @floatFromInt(size[0])) / 1920, @as(f32, @floatFromInt(size[1])) / 1080);
-        u.frame(size[0], size[1], 0, Demo{ .solids = null, .rings = &rings, .subtitle = "build 0123abc-dirty", .status = status, .scale = scale });
-        const col = findNode(u.root.?, ui.Column).?;
+        u.frame(size[0], size[1], 0, Demo{ .solids = null, .rings = &rings, .status = status, .scale = scale });
+        // The panel: the column in the content (under the title bar).
+        const col = findNode(findNode(u.root.?, ui.Expanded).?, ui.Column).?;
         const Check = struct {
             fn none(n: *ui.Node) !void {
                 try testing.expect(!n.overflow.any());
@@ -218,7 +219,7 @@ test "the speed buttons" {
     const u = try ui.Ui.create(testing.allocator, null);
     defer u.destroy();
     var rings: rings_mod.Rings = .{};
-    const demo: Demo = .{ .solids = null, .rings = &rings, .subtitle = "", .status = @splat(""), .scale = 1 };
+    const demo: Demo = .{ .solids = null, .rings = &rings, .status = @splat(""), .scale = 1 };
     u.frame(1920, 1080, 0, demo);
     var buttons: [3]*ui.Node = undefined;
     var n: usize = 0;
@@ -254,7 +255,7 @@ test "the radio buttons choose the solid, and the switches its look" {
     const u = try ui.Ui.create(testing.allocator, &f);
     defer u.destroy();
     var rings: rings_mod.Rings = .{};
-    const demo: Demo = .{ .solids = null, .rings = &rings, .subtitle = "", .status = @splat(""), .scale = 1 };
+    const demo: Demo = .{ .solids = null, .rings = &rings, .status = @splat(""), .scale = 1 };
     u.frame(1920, 1080, 0, demo);
     const Collect = struct {
         fn all(node: *ui.Node, comptime T: type, out: []*ui.Node, k: *usize) void {
@@ -292,7 +293,7 @@ test "while paused and still, frames change nothing and none are asked for" {
     const u = try ui.Ui.create(testing.allocator, &f);
     defer u.destroy();
     var rings: rings_mod.Rings = .{};
-    const demo: Demo = .{ .solids = null, .rings = &rings, .subtitle = "", .status = @splat("same"), .scale = 1 };
+    const demo: Demo = .{ .solids = null, .rings = &rings, .status = @splat("same"), .scale = 1 };
     u.frame(1920, 1080, 0, demo);
     u.root.?.state(Demo.State).paused = true;
     u.frame(1920, 1080, 1, demo);

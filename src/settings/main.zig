@@ -74,6 +74,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     var next_wifi: u64 = 0;
     // What the window asks of the Wi-Fi manager (Connect, Disconnect).
     var actions: view.Actions = .{};
+    // The title bar's close button.
+    var quit: Quit = .{};
 
     var next_update: u64 = sys.nowNs() + std.time.ns_per_s;
     var dirty = true;
@@ -88,7 +90,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             if (err == error.ServerError) print("stardust-settings: compositor error: {s}\n", .{win.conn.errorMessage()});
             return err;
         };
-        if (win.closed) return;
+        if (win.closed or quit.requested) return;
         if (try win.applyConfigure()) |size| {
             width = size[0];
             height = size[1];
@@ -142,6 +144,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
                 .network = &network,
                 .wifi = if (wifi) |*w| w else null,
                 .actions = &actions,
+                .on_close = .of(&quit, Quit.request),
+                .bar_scale = @as(f32, @floatFromInt(width)) / 1920,
                 .scale = view.scaleFor(width, height),
             });
             if (window_ui.changed()) {
@@ -160,6 +164,14 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         }
     }
 }
+
+const Quit = struct {
+    requested: bool = false,
+
+    fn request(q: *Quit) void {
+        q.requested = true;
+    }
+};
 
 /// Opens a window on the Wayland compositor.
 fn openWindow(gpa: std.mem.Allocator, init: std.process.Init.Minimal, dev: *vc4.Device) !*app.Window {

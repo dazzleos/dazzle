@@ -1,9 +1,8 @@
-//! The Stardust demo: a spinning Platonic solid, with the machine's IP
-//! address and rendering statistics in the top left corner, written in
-//! Fira Sans (its own copy, next to the executable), buttons that change
-//! the solid's speed, radio buttons to choose the solid and switches for
-//! its lighting and texture. Clicks draw expanding, fading rings behind
-//! the solid.
+//! The Stardust demo: a spinning Platonic solid, with rendering statistics
+//! in the top left corner, written in Fira Sans (its own copy, next to the
+//! executable), buttons that change the solid's speed, radio buttons to
+//! choose the solid and switches for its lighting and texture. Clicks draw
+//! expanding, fading rings behind the solid.
 //!
 //! It is a native Stardust app: a window on stardust-shell (see the `app`
 //! module), built with the `ui` toolkit (see view.zig), drawn with the vc4
@@ -20,7 +19,6 @@ const font = @import("font");
 const vc4 = @import("vc4");
 const app = @import("app");
 const solids = @import("solids.zig");
-const netinfo = @import("netinfo.zig");
 const rings_mod = @import("rings.zig");
 const view = @import("view.zig");
 const ui = @import("ui");
@@ -116,6 +114,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     var dirty = true;
     var idle = false;
     var suspended = false;
+    // The title bar's close button.
+    var quit: Quit = .{};
     while (true) {
         const waited = if (idle) blk: {
             // Nothing to draw: sleep until the statistics change, or
@@ -128,7 +128,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             if (err == error.ServerError) print("stardust: compositor error: {s}\n", .{win.conn.errorMessage()});
             return err;
         };
-        if (win.closed) return;
+        if (win.closed or quit.requested) return;
         if (try win.applyConfigure()) |size| {
             // The next frame is rendered at the new size.
             width = size[0];
@@ -174,9 +174,10 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             window_ui.frame(width, height, frame_start, view.Demo{
                 .solids = &all_solids,
                 .rings = &rings,
-                .subtitle = "build " ++ build_info.commit,
                 .status = status,
                 .scale = scale,
+                .on_close = .of(&quit, Quit.request),
+                .bar_scale = @as(f32, @floatFromInt(width)) / 1920,
             });
             if (window_ui.changed()) {
                 idle = false;
@@ -305,31 +306,34 @@ fn temperatureText(buf: []u8, t: ?f32) []const u8 {
     return std.fmt.bufPrint(buf, "{d:.0} °C", .{c}) catch "";
 }
 
+const Quit = struct {
+    requested: bool = false,
+
+    fn request(q: *Quit) void {
+        q.requested = true;
+    }
+};
+
 /// The panel's lines of statistics.
 fn statusLines(bufs: *[view.lines][96]u8, s: Stats.Summary, width: u32, height: u32, input: InputStatus, health: sysinfo.Sample) [view.lines][]const u8 {
     var out: [view.lines][]const u8 = undefined;
-    out[0] = if (netinfo.primaryAddress()) |a|
-        std.fmt.bufPrint(&bufs[0], "{d}.{d}.{d}.{d}  ({s})", .{ a.ip[0], a.ip[1], a.ip[2], a.ip[3], a.name() }) catch ""
-    else
-        "No network";
-    out[1] = std.fmt.bufPrint(&bufs[1], "{d:.1} fps  ·  {d}×{d}  ·  {d:.0}% redrawn", .{ s.fps, width, height, s.redrawn }) catch "";
-    out[2] = std.fmt.bufPrint(&bufs[2], "GPU {d:.2} ms per frame", .{s.gpu_ms}) catch "";
-    out[3] = std.fmt.bufPrint(&bufs[3], "CPU {d:.2} ms per frame", .{s.cpu_ms}) catch "";
+    out[0] = std.fmt.bufPrint(&bufs[0], "{d:.1} fps  ·  {d}×{d}  ·  {d:.0}% redrawn", .{ s.fps, width, height, s.redrawn }) catch "";
+    out[1] = std.fmt.bufPrint(&bufs[1], "GPU {d:.2} ms per frame", .{s.gpu_ms}) catch "";
+    out[2] = std.fmt.bufPrint(&bufs[2], "CPU {d:.2} ms per frame", .{s.cpu_ms}) catch "";
     var key_buf: [16]u8 = undefined;
     const key = if (input.key) |k| keyName(&key_buf, k) else "none";
-    out[4] = if (input.pointer) |pos|
-        std.fmt.bufPrint(&bufs[4], "Pointer {d:.0}, {d:.0}  ·  last key {s}", .{ pos[0], pos[1], key }) catch ""
+    out[3] = if (input.pointer) |pos|
+        std.fmt.bufPrint(&bufs[3], "Pointer {d:.0}, {d:.0}  ·  last key {s}", .{ pos[0], pos[1], key }) catch ""
     else
-        std.fmt.bufPrint(&bufs[4], "No pointer  ·  last key {s}", .{key}) catch "";
+        std.fmt.bufPrint(&bufs[3], "No pointer  ·  last key {s}", .{key}) catch "";
     var temp_buf: [24]u8 = undefined;
-    out[5] = std.fmt.bufPrint(&bufs[5], "{s}  ·  CPU speed {d:.0}%  ·  busy {d:.0}%", .{ temperatureText(&temp_buf, health.temperature), health.speed, health.total_busy }) catch "";
+    out[4] = std.fmt.bufPrint(&bufs[4], "{s}  ·  CPU speed {d:.0}%  ·  busy {d:.0}%", .{ temperatureText(&temp_buf, health.temperature), health.speed, health.total_busy }) catch "";
     return out;
 }
 
 test {
     _ = @import("solids.zig");
     _ = @import("view.zig");
-    _ = @import("netinfo.zig");
     _ = @import("rings.zig");
     _ = @import("sysinfo.zig");
 }
@@ -337,10 +341,10 @@ test {
 test "status lines" {
     var bufs: [view.lines][96]u8 = undefined;
     const lines = statusLines(&bufs, .{ .fps = 59.94, .cpu_ms = 0.42, .gpu_ms = 6.5, .redrawn = 21.3 }, 1920, 1080, .{ .pointer = .{ 12.25, 400 }, .key = 30 }, .{ .temperature = 61.6, .speed = 99.6, .total_busy = 45 });
-    try std.testing.expectEqualStrings("59.9 fps  ·  1920×1080  ·  21% redrawn", lines[1]);
-    try std.testing.expectEqualStrings("GPU 6.50 ms per frame", lines[2]);
-    try std.testing.expectEqualStrings("Pointer 12, 400  ·  last key A", lines[4]);
-    try std.testing.expectEqualStrings("62 °C  ·  CPU speed 100%  ·  busy 45%", lines[5]);
+    try std.testing.expectEqualStrings("59.9 fps  ·  1920×1080  ·  21% redrawn", lines[0]);
+    try std.testing.expectEqualStrings("GPU 6.50 ms per frame", lines[1]);
+    try std.testing.expectEqualStrings("Pointer 12, 400  ·  last key A", lines[3]);
+    try std.testing.expectEqualStrings("62 °C  ·  CPU speed 100%  ·  busy 45%", lines[4]);
     var buf: [16]u8 = undefined;
     try std.testing.expectEqualStrings("Space", keyName(&buf, 57));
     try std.testing.expectEqualStrings("0", keyName(&buf, 11));

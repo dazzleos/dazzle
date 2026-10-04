@@ -7,11 +7,11 @@
 //! supported) and wl_seat (a pointer and a keyboard; key codes are Linux
 //! evdev codes, without an XKB keymap).
 //!
-//! Windows are maximized into the work area between the shell's bar and
-//! dock, and the most recently mapped (or raised) one is shown. The others
-//! are covered: they get xdg_toplevel's suspended state, their frame
-//! callbacks wait until they are in front again, and what they commit
-//! meanwhile does not make the shell draw a frame. The server does not draw: it keeps the
+//! Windows are maximized into the work area above the shell's dock, and the
+//! most recently mapped (or raised) one is shown. The others are covered:
+//! they get xdg_toplevel's suspended state, their frame callbacks wait
+//! until they are in front again, and what they commit meanwhile does not
+//! make the shell draw a frame. The server does not draw: it keeps the
 //! state the renderer needs (`topWindow`), and gets textures from the
 //! renderer through `Backend`, so it can run without a GPU in tests.
 //!
@@ -474,19 +474,6 @@ pub const Server = struct {
             return true;
         }
         return false;
-    }
-
-    /// Asks the front window's client to close it (as its own close button
-    /// would). Returns whether there is a window.
-    pub fn closeTop(s: *Server) bool {
-        const t = s.topWindow() orelse return false;
-        const c = t.xdg.surface.?.client;
-        if (c.send(t.id, p.xdg_toplevel.event.close)) |m0| {
-            var m = m0;
-            m.end();
-        }
-        c.conn.flush() catch {};
-        return true;
     }
 
     /// The window to show: the top mapped toplevel.

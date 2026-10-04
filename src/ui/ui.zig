@@ -40,6 +40,7 @@
 //! * `material`: the theme, OutlinedButton
 //! * `controls`: Checkbox, Radio, Switch
 //! * `text_field`: TextField
+//! * `title_bar`: TitleBar, the bar apps draw across the top of their window
 //! * `keymap`: key codes to characters
 //! * `painter`: painting, GPU draws and the overflow stripes
 //! * `damage`: what changed between frames, so only that is redrawn
@@ -52,6 +53,7 @@ pub const text = @import("text.zig");
 pub const material = @import("material.zig");
 pub const controls = @import("controls.zig");
 pub const text_field = @import("text_field.zig");
+pub const title_bar = @import("title_bar.zig");
 pub const keymap = @import("keymap.zig");
 pub const painter = @import("painter.zig");
 pub const damage = @import("damage.zig");
@@ -99,6 +101,7 @@ pub const Checkbox = controls.Checkbox;
 pub const Radio = controls.Radio;
 pub const Switch = controls.Switch;
 pub const TextField = text_field.TextField;
+pub const TitleBar = title_bar.TitleBar;
 
 pub const Painter = painter.Painter;
 pub const GpuArea = painter.GpuArea;
@@ -112,6 +115,7 @@ test {
     _ = material;
     _ = controls;
     _ = text_field;
+    _ = title_bar;
     _ = keymap;
     _ = painter;
     _ = damage;

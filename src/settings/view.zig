@@ -46,6 +46,10 @@ pub const Settings = struct {
     wifi: ?*const info.wifi.Report = null,
     /// Sizes are designed for a window 900 pixels high and scale with it.
     scale: f32,
+    /// The title bar's close button; and the title bar's scale (the
+    /// screen's, so every app's title bar is the same).
+    on_close: ?ui.Callback = null,
+    bar_scale: f32 = 1,
 
     pub const State = struct {
         /// The Wi-Fi network chosen (its SSID), and the password typed.
@@ -67,13 +71,11 @@ pub const Settings = struct {
 
     pub fn build(self: *const Settings, cx: *ui.Context, state: *State) ui.Widget {
         const s = self.scale;
-        const t = &cx.ui.theme;
         const b: Builder = .{ .cx = cx, .s = s };
-        return cx.make(ui.Padding{ .padding = .all(@floor(32 * s)), .child = cx.make(ui.Column{
+        const content = cx.make(ui.Padding{ .padding = .all(@floor(32 * s)), .child = cx.make(ui.Column{
             .cross_axis_alignment = .stretch,
             .spacing = 20 * s,
             .children = &.{
-                cx.make(ui.Text{ .text = "Settings", .style = .{ .size = 44 * s, .color = t.on_surface }, .wrap = false }),
                 cx.make(ui.Expanded{ .child = cx.make(ui.Row{ .cross_axis_alignment = .start, .spacing = 20 * s, .children = &.{
                     cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 20 * s, .children = &.{
                         self.systemCard(b),
@@ -86,6 +88,10 @@ pub const Settings = struct {
                 } }) }),
             },
         }) });
+        return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &.{
+            cx.make(ui.TitleBar{ .title = "Settings", .on_close = self.on_close, .scale = self.bar_scale }),
+            cx.make(ui.Expanded{ .child = content }),
+        } });
     }
 
     fn systemCard(self: *const Settings, b: Builder) ui.Widget {
@@ -99,6 +105,7 @@ pub const Settings = struct {
             b.item("Linux", orUnknown(sys.kernel.slice())),
             b.item("Up for", cx.fmt("{s}", .{info.formatDuration(&dur, self.usage.uptime_s)})),
             b.item("Board", orUnknown(sys.model.slice())),
+            b.item("Hostname", orUnknown(sys.hostname.slice())),
         }) catch {};
         if (sys.serial.len > 0) rows.append(a, b.item("Serial", sys.serial.slice())) catch {};
         return b.card("System", rows.items);
@@ -219,9 +226,8 @@ pub const Settings = struct {
         const net = self.network;
         var rows: std.ArrayList(ui.Widget) = .empty;
         const a = cx.ui.arena();
-        rows.append(a, b.item("Name", orUnknown(self.system.hostname.slice()))) catch {};
         if (net.len == 0) {
-            rows.append(a, b.item("Status", "No network adapter: plug in a USB Ethernet adapter")) catch {};
+            rows.append(a, b.item("Status", "No adapter: plug in a USB Ethernet adapter")) catch {};
         }
         for (net.slice()) |*i| {
             var b1: [32]u8 = undefined;
@@ -246,7 +252,7 @@ pub const Settings = struct {
             if (i.mac.len > 0) rows.append(a, b.item("MAC address", i.mac.slice())) catch {};
         }
         if (net.gateway) |g| rows.append(a, b.item("Gateway", cx.fmt("{d}.{d}.{d}.{d}", .{ g[0], g[1], g[2], g[3] }))) catch {};
-        return b.card("Network", rows.items);
+        return b.card("Ethernet", rows.items);
     }
 };
 
@@ -366,8 +372,8 @@ const Builder = struct {
         } });
     }
 
-    /// Storage: what the system, the apps and the user take, in a bar of
-    /// coloured segments with a key above, and the free space below.
+    /// Storage: what the system, the apps and the user take, and what is
+    /// free, in a bar of coloured segments with a key above.
     fn storage(b: Builder, st: info.Storage) ui.Widget {
         const cx = b.cx;
         const t = &cx.ui.theme;
@@ -376,26 +382,26 @@ const Builder = struct {
             .{ .name = "System", .bytes = st.system, .color = t.primary },
             .{ .name = "Apps", .bytes = st.apps, .color = apps_color },
             .{ .name = "User", .bytes = st.user, .color = user_color },
+            // The bar's track.
+            .{ .name = "Free", .bytes = st.free, .color = t.surface_container_highest },
         };
         const a = cx.ui.arena();
-        const segments = a.alloc(SegmentBar.Segment, parts.len) catch return cx.make(ui.Empty{});
+        const segments = a.alloc(SegmentBar.Segment, parts.len - 1) catch return cx.make(ui.Empty{});
         const key = a.alloc(ui.Widget, parts.len) catch return cx.make(ui.Empty{});
         const dot = @round(10 * b.s);
-        for (parts, segments, key) |part, *seg, *k| {
+        for (parts, key, 0..) |part, *k, i| {
             var buf: [32]u8 = undefined;
-            seg.* = .{ .fraction = fraction(part.bytes, total), .color = part.color };
+            if (i < segments.len) segments[i] = .{ .fraction = fraction(part.bytes, total), .color = part.color };
             k.* = cx.make(ui.Row{ .spacing = 6 * b.s, .main_axis_size = .min, .children = &.{
                 cx.make(ui.SizedBox{ .width = dot, .height = dot, .child = cx.make(ui.Decorated{ .color = part.color, .radius = .all(dot / 2) }) }),
                 cx.make(ui.Text{ .text = cx.fmt("{s} {s}", .{ part.name, info.formatBytes(&buf, part.bytes) }), .style = .{ .size = 16 * b.s, .color = t.on_surface }, .wrap = false }),
             } });
         }
-        var free_buf: [32]u8 = undefined;
         return cx.make(ui.Row{ .cross_axis_alignment = .start, .spacing = 12 * b.s, .children = &.{
             b.label("Storage"),
             cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 6 * b.s, .children = &.{
                 cx.make(ui.Row{ .spacing = 16 * b.s, .main_axis_size = .min, .children = key }),
                 cx.make(SegmentBar{ .segments = segments, .height = @max(@round(8 * b.s), 4) }),
-                b.value(cx.fmt("{s} free", .{info.formatBytes(&free_buf, st.free)})),
             } }) }),
         } });
     }
@@ -604,7 +610,9 @@ test "everything is shown, and fits the window at the shell's sizes" {
         "System 600 KB",
         "Apps 2.0 MB",
         "User 0 bytes",
-        "300 MB free",
+        "Free 300 MB",
+        "Hostname",
+        "Ethernet",
         "2 h 5 min",
         "Connected at 100 Mb/s",
         "192.168.1.42/24 (DHCP)",
@@ -642,7 +650,7 @@ test "without a network adapter, the network card says so" {
     var all: std.ArrayList(u8) = .empty;
     defer all.deinit(testing.allocator);
     texts(u.root.?, &all);
-    try testing.expect(std.mem.indexOf(u8, all.items, "No network adapter") != null);
+    try testing.expect(std.mem.indexOf(u8, all.items, "No adapter: plug in a USB Ethernet adapter") != null);
     try testing.expect(std.mem.indexOf(u8, all.items, "Measuring") != null);
 }
 

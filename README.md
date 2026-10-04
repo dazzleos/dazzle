@@ -21,10 +21,11 @@ with Stardust's widget toolkit, shows a spinning, depth-tested Platonic
 solid, with Material 3 buttons to change its speed, radio buttons to
 choose the solid and switches to turn its lighting and texture on and
 off. Rings spread out and fade
-where the pointer clicks. The IP address, rendering
-statistics and the last key pressed appear in its top left, in Fira Sans.
+where the pointer clicks. Rendering statistics and the last key pressed
+appear in its top left, in Fira Sans.
 The settings app shows the build, the hardware, how much CPU, memory, GPU
-memory and storage is in use, and the network's status. A Vulkan-style
+memory and storage is in use, and the Ethernet and Wi-Fi status, and joins
+Wi-Fi networks. A Vulkan-style
 API may follow.
 
 ## Layout
@@ -153,6 +154,7 @@ with the problem marked.
 | `material.zig` | Material 3's light and dark baseline themes, and `OutlinedButton`, made of a `Pressable`, `Decorated`, `ConstrainedBox`, `Padding` and `Center` |
 | `controls.zig` | Material 3's selection controls: `Checkbox`, `Radio` (generic over the value it selects) and `Switch` (its handle slides), each with an optional label that presses it too |
 | `text_field.zig` | `TextField`: a line of text to type (Material's outlined field), optionally shown as dots for passwords; clicking it gives it the keyboard |
+| `title_bar.zig` | `TitleBar`: the bar apps draw across the top of their window, with their name and a close button (the shell draws none) |
 | `keymap.zig` | Linux key codes to characters, for a US keyboard (the shell sends key codes without a keymap) |
 | `painter.zig` | Painting: canvas layers and GPU draws in order, clipping, and the overflow stripes |
 | `damage.zig` | What changed between frames: each node's drawing fingerprinted and compared, kept as a few rectangles, with a history for buffers of any age |
@@ -186,8 +188,8 @@ changed (`damage_buffer`).
 
 No intermediate buffers are used: with tile-limited rendering, unchanged
 parts cost nothing, and nothing in the demo is both costly to draw and
-under something that changes. The glyph atlas and the shell's bar (an
-overlay plane, redrawn once a second) are the retained buffers there are.
+under something that changes. The glyph atlas and the shell's dock (an
+overlay plane) are the retained buffers there are.
 Each frame that is drawn is still built, laid out and painted whole on the
 CPU (about 40 µs on a desktop for the demo).
 
@@ -270,8 +272,7 @@ The shell (`src/shell/`):
 |---|---|
 | `main.zig` | Opens the GPU and display, listens on `$XDG_RUNTIME_DIR/wayland-0`, and runs the event loop: read input (clicks on the dock start or raise apps), dispatch clients, then composite a frame when something changed |
 | `server.zig` | The Wayland server: clients, objects and requests, frame callbacks and buffer releases, pointer and keyboard focus |
-| `render.zig` | Compositing with the `vc4` API: textured quads for the panels (the bar and the dock) and the window, and the cursor plane |
-| `bar.zig` | The bar: the front window's title and its close button |
+| `render.zig` | Compositing with the `vc4` API: textured quads for the panels (the dock) and the window, and the cursor plane |
 | `dock.zig` | The dock: finds the apps in `/apps`, draws their icons, and finds the one clicked |
 | `shaders/quad.zig` | The textured quad's shader |
 | `input.zig` | USB keyboards and mice: finds `/dev/input/event*` nodes and decodes their events |
@@ -283,11 +284,11 @@ to a texture at commit), `zwp_linux_dmabuf_v1`, `xdg_wm_base` (toplevels)
 and `wl_seat` (a pointer and a keyboard). There are no popups or outputs
 yet.
 
-- **Windows:** each toplevel is configured to fill the screen between the
-  bar and the dock, and the newest one is shown, or the one whose app was
-  last clicked in the dock. The bar shows the window's title ("Stardust"
-  when no app is open) and, while there is a window, a close button that
-  asks its app to close it (xdg_toplevel's close event).
+- **Windows:** each toplevel is configured to fill the screen above the
+  dock, and the newest one is shown, or the one whose app was last clicked
+  in the dock. Apps draw their own title bars (the toolkit's `TitleBar`:
+  the app's name and a close button that quits it), so the shell draws
+  none, and with no app open the screen shows just the dock.
 - **Covered windows:** the windows behind the front one cannot be seen, so
   they are told: they get xdg_toplevel's `suspended` state (xdg-shell
   version 6) instead of `activated`, their frame callbacks are held until
@@ -316,8 +317,8 @@ yet.
 - **Direct scanout:** the display hardware can scan out T-tiled buffers
   and stack several planes. When the shown window's buffer is exactly the
   work area's size (as a maximized window's is), the shell puts it on the
-  display's primary plane as it is, and the bar and the dock on overlay
-  planes above it, with one atomic commit. Nothing is composited, which saves the GPU a
+  display's primary plane as it is, and the dock on an overlay plane, with
+  one atomic commit. Nothing is composited, which saves the GPU a
   full-screen copy and a third of the memory traffic per frame. Otherwise
   (other sizes, shm buffers, or a driver without atomic mode setting) the
   shell composites the frame with the GPU as before.
@@ -531,13 +532,12 @@ stardust.ip=192.168.1.50/24,192.168.1.1
 
 ### The demo
 
-The screen shows the shell's bar along the top and its dock along the
-bottom; click the demo's icon in the dock to start it, and its window
-fills the space between them. The solid spins at the display's refresh rate. The window's top left
-corner shows, after the title, the git commit it was built from (short,
-with `-dirty` if there were uncommitted changes), then:
+The screen shows the shell's dock along the bottom; click the demo's
+icon in it to start it, and its window fills the space above, with its
+title bar (and close button) across the top. The solid spins at the
+display's refresh rate. The window's top left corner shows, under the
+title:
 
-- the IPv4 address, or "No network";
 - frames drawn per second (none while nothing changes), the window's size,
   and how much of the window a frame redraws on average;
 - the window size;
@@ -561,15 +561,16 @@ directly, and how many refreshes went by without a new frame:
 
 ```
 stardust-shell: 60.0 frames/s, all shown directly, 0 refreshes skipped
-stardust-shell: work 2.40 ms per frame (clients 0.18, bar 0.04, display 1.27 of which commits 1.10, flips 0.30, other 0.60), 3.0 wakeups per frame, 14.4% of the time
+stardust-shell: work 2.40 ms per frame (clients 0.18, display 1.27 of which commits 1.10, flips 0.30, other 0.60), 3.0 wakeups per frame, 14.4% of the time
 ```
 
 The second line is the shell's own work, by part: handling clients'
-requests, redrawing the bar (once a second), drawing or showing frames
+requests, drawing or showing frames
 (with the time the kernel takes for the display commits), handling page
 flips (frame callbacks and buffer releases), and the rest of the loop.
 Display commits only change what differs from the last one: usually just
-the primary plane's buffer, with the bar's overlay plane left alone. A change to the bar alone does not take a refresh while a client
+the primary plane's buffer, with the dock's overlay plane left alone. A
+change to the dock alone does not take a refresh while a client
 is animating; it goes out with the client's next frame.
 
 Moving a USB mouse moves the cursor. Over the window, each click starts a
@@ -606,16 +607,17 @@ change read again every second (`src/settings/info.zig`):
 
 - **System:** the build (git commit), Linux's version, how long the system
   has been up, the board (from the device tree, which also tells the chip,
-  CPU and GPU) and its serial number when the firmware gives it.
+  CPU and GPU), the hostname, and the board's serial number when the
+  firmware gives it.
 - **Resources:** how busy the CPU is, the SoC's temperature, memory, the
   GPU's memory (the CMA pool all GPU buffers come from: the V3D has no
   MMU), and storage: a bar of what the system, the apps and the user's
-  files take, and the free space. Stardust has no driver for the SD card:
+  files take, with a key that ends with the free space. Stardust has no driver for the SD card:
   the firmware loads the system into memory at boot and it runs from
   there, so its storage is that filesystem in RAM and its free space the
   memory available; the bar will say more once there is real storage. The
   meters turn red above 90%.
-- **Network:** the hostname, each adapter's link (and speed), its address
+- **Ethernet:** each wired adapter's link (and speed), its address
   (and whether it came from DHCP or `stardust.ip=`), traffic and MAC
   address, and the default gateway.
 - **Wi-Fi:** the adapter, the connection, and the networks around,

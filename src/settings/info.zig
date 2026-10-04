@@ -332,6 +332,9 @@ pub const Network = struct {
                 const name = std.mem.sliceTo(buf[at + 19 .. at + reclen], 0);
                 at += reclen;
                 if (name.len == 0 or name[0] == '.' or std.mem.eql(u8, name, "lo")) continue;
+                // Wi-Fi interfaces are the Wi-Fi card's.
+                var phy_buf: [32]u8 = undefined;
+                if (sysfs(name, "phy80211/name", &phy_buf) != null) continue;
                 if (net.len == max_interfaces) break;
                 net.interfaces[net.len] = readInterface(name, sock);
                 net.len += 1;
