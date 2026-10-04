@@ -16,6 +16,7 @@ const testing = std.testing;
 const programs = [_]struct { name: []const u8, program: []const u8, spirv: []const u8 }{
     .{ .name = "shape", .program = @embedFile("shape.shader"), .spirv = @embedFile("shape.spv") },
     .{ .name = "solid", .program = @embedFile("solid.shader"), .spirv = @embedFile("solid.spv") },
+    .{ .name = "opaque", .program = @embedFile("opaque.shader"), .spirv = @embedFile("opaque.spv") },
     .{ .name = "text", .program = @embedFile("text.shader"), .spirv = @embedFile("text.spv") },
     .{ .name = "polyhedron", .program = @embedFile("polyhedron.shader"), .spirv = @embedFile("polyhedron.spv") },
     .{ .name = "quad", .program = @embedFile("quad.shader"), .spirv = @embedFile("quad.spv") },

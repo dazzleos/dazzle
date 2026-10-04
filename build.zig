@@ -105,9 +105,13 @@ const ShaderOwner = enum { gfx, demo, shell };
 /// The shader programs: Zig sources compiled to SPIR-V, then for the GPU
 /// by tools/shaderc.zig (with the render state that changes their code),
 /// and embedded in their owner as `@embedFile("<name>.shader")`.
-const shader_programs = [_]struct { source: []const u8, owner: ShaderOwner, args: []const []const u8 }{
+/// A program is named after its source unless given a name (to build one
+/// source twice, with different options).
+const shader_programs = [_]struct { source: []const u8, name: ?[]const u8 = null, owner: ShaderOwner, args: []const []const u8 }{
     .{ .source = "src/gfx/shaders/shape.zig", .owner = .gfx, .args = &.{"--blend=source-over"} },
     .{ .source = "src/gfx/shaders/solid.zig", .owner = .gfx, .args = &.{"--blend=source-over"} },
+    // The same, for triangles that are opaque all over: no blending.
+    .{ .source = "src/gfx/shaders/solid.zig", .name = "opaque", .owner = .gfx, .args = &.{"--blend=none"} },
     .{ .source = "src/gfx/shaders/text.zig", .owner = .gfx, .args = &.{"--blend=source-over"} },
     .{ .source = "src/demo/shaders/polyhedron.zig", .owner = .demo, .args = &.{"--depth-test"} },
     .{ .source = "src/shell/shaders/quad.zig", .owner = .shell, .args = &.{} },
@@ -136,7 +140,7 @@ fn addShaders(b: *std.Build) []const ShaderBlob {
 
     const blobs = b.allocator.alloc(ShaderBlob, shader_programs.len) catch @panic("OOM");
     for (shader_programs, blobs) |p, *blob| {
-        const name = std.fs.path.stem(p.source);
+        const name = p.name orelse std.fs.path.stem(p.source);
         const obj = b.addObject(.{
             .name = name,
             .root_module = b.createModule(.{

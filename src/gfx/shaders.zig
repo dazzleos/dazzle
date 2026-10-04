@@ -10,6 +10,9 @@
 //!   and turns it into coverage over one pixel.
 //! * `solid`: triangles with a colour per vertex, for polygons and strokes
 //!   whose anti-aliased edges are fringes fading to transparent.
+//! * `opaque`: `solid` without blending, for triangles opaque all over
+//!   (the insides of filled shapes, the cores of strokes): it does not read
+//!   the tile buffer, so it saves the wait for it and the arithmetic.
 //! * `text`: glyphs, their coverage from the glyph atlas texture.
 
 const std = @import("std");
@@ -61,12 +64,16 @@ pub fn solid() Program {
     return Program.decode(@embedFile("solid.shader")) catch unreachable;
 }
 
+pub fn opaqueSolid() Program {
+    return Program.decode(@embedFile("opaque.shader")) catch unreachable;
+}
+
 pub fn text() Program {
     return Program.decode(@embedFile("text.shader")) catch unreachable;
 }
 
 test "the 2D shaders pass the hardware rules, and read the vertex layouts" {
-    for ([_]Program{ shape(), solid(), text() }, [_]shader.pipeline.Options{ shape_layout, solid_layout, text_layout }, [_]u32{ shape_floats, solid_floats, text_floats }) |p, layout, floats| {
+    for ([_]Program{ shape(), solid(), opaqueSolid(), text() }, [_]shader.pipeline.Options{ shape_layout, solid_layout, solid_layout, text_layout }, [_]u32{ shape_floats, solid_floats, solid_floats, text_floats }) |p, layout, floats| {
         for ([_]vc4.compiler.Compiled{ p.fs, p.vs, p.cs }) |c| try vc4.qpu.validate(c.code(), c.stage, null);
         try std.testing.expectEqual(layout.attributes.len, p.num_attributes);
         var total: u32 = 0;

@@ -102,7 +102,13 @@ pub const Radii = struct {
     }
 };
 
-pub const Kind = enum { shape, solid, text };
+pub const Kind = enum {
+    shape,
+    solid,
+    /// Solid triangles opaque all over, drawn without blending.
+    @"opaque",
+    text,
+};
 
 pub const Batch = struct {
     kind: Kind,
@@ -121,7 +127,7 @@ pub const Batch = struct {
 pub fn floatsPerVertex(kind: Kind) usize {
     return switch (kind) {
         .shape => shaders.shape_floats,
-        .solid => shaders.solid_floats,
+        .solid, .@"opaque" => shaders.solid_floats,
         .text => shaders.text_floats,
     };
 }
@@ -222,16 +228,14 @@ pub const Canvas = struct {
     /// Fills a simple polygon (convex or concave, not self-intersecting).
     pub fn fillPolygon(c: *Canvas, points: []const Point, color: Color) void {
         c.note(.polygon, c.moved(boundsOf(points)).outset(1), .{ c.origin, color }, std.mem.sliceAsBytes(points));
-        const b = c.batchFor(.solid, c.moved(boundsOf(points)).outset(1)) orelse return;
-        var sink: SolidSink = .{ .canvas = c, .batch = b, .color = color, .offset = c.origin };
+        var sink: SolidSink = .{ .canvas = c, .bounds = c.moved(boundsOf(points)).outset(1), .color = color, .offset = c.origin };
         geometry.fillPolygon(sink.sink(), points);
     }
 
     /// Strokes a polyline centred on it, with mitred joins and butt ends.
     pub fn strokePolyline(c: *Canvas, points: []const Point, closed: bool, width: f32, color: Color) void {
         c.note(.polyline, c.moved(boundsOf(points)).outset(width * geometry.miter_limit / 2 + 1), .{ c.origin, color, width, closed }, std.mem.sliceAsBytes(points));
-        const b = c.batchFor(.solid, c.moved(boundsOf(points)).outset(width * geometry.miter_limit / 2 + 1)) orelse return;
-        var sink: SolidSink = .{ .canvas = c, .batch = b, .color = color, .offset = c.origin };
+        var sink: SolidSink = .{ .canvas = c, .bounds = c.moved(boundsOf(points)).outset(width * geometry.miter_limit / 2 + 1), .color = color, .offset = c.origin };
         geometry.strokePolyline(sink.sink(), points, closed, width);
     }
 
@@ -305,8 +309,8 @@ pub const Canvas = struct {
         const bounds = r.outset(m);
         // Solid parts: the edges between the corners, and the centre.
         if (x1 - ex > x0 + ex or y1 - ey > y0 + ey) {
-            if (c.batchFor(.solid, bounds)) |b| {
-                var s: SolidSink = .{ .canvas = c, .batch = b, .color = color };
+            {
+                var s: SolidSink = .{ .canvas = c, .bounds = bounds, .color = color };
                 const out = s.sink();
                 // Across an edge (from outside in): faded, solid, then the
                 // stroke's inner edge fading again, or the corner cell's
@@ -408,24 +412,24 @@ pub const Canvas = struct {
         return 1 - y / c.height * 2;
     }
 
-    /// The batch a shape of `kind` covering `bounds` goes in: the last one
-    /// if it is of that kind, or the one before if nothing in the last one
-    /// overlaps the shape; otherwise a new one.
+    /// How far back `batchFor` looks for a batch to add to.
+    const lookback = 8;
+
+    /// The batch a shape of `kind` covering `bounds` goes in: the latest of
+    /// that kind (and clip) among the last few, if nothing in the batches
+    /// after it overlaps the shape (so drawing it earlier changes nothing);
+    /// otherwise a new one.
     fn batchFor(c: *Canvas, kind: Kind, bounds: Rect) ?*Batch {
         const items = c.batches.items;
-        if (items.len > 0) {
-            const last = &items[items.len - 1];
-            if (last.kind == kind and std.meta.eql(last.clip, c.clip)) {
-                last.bounds = last.bounds.unite(bounds);
-                return last;
+        var i = items.len;
+        while (i > 0 and items.len - i < lookback) {
+            i -= 1;
+            const b = &items[i];
+            if (b.kind == kind and std.meta.eql(b.clip, c.clip)) {
+                b.bounds = b.bounds.unite(bounds);
+                return b;
             }
-            if (items.len > 1) {
-                const prev = &items[items.len - 2];
-                if (prev.kind == kind and std.meta.eql(prev.clip, c.clip) and !last.bounds.intersects(bounds)) {
-                    prev.bounds = prev.bounds.unite(bounds);
-                    return prev;
-                }
-            }
+            if (b.bounds.intersects(bounds)) break;
         }
         var b: Batch = if (c.spare.pop()) |s| s else .{ .kind = kind, .bounds = bounds, .clip = null };
         b.kind = kind;
@@ -469,22 +473,41 @@ pub const Record = struct {
     }
 };
 
-/// Turns geometry's triangles into solid vertices of one colour.
+/// Turns geometry's triangles into solid vertices of one colour: those
+/// opaque all over in an opaque batch (drawn without blending), the rest
+/// (anti-aliasing fringes, translucent shapes) in a solid one. The order
+/// between them does not matter: blending a colour over itself gives the
+/// same colour.
 const SolidSink = struct {
     canvas: *Canvas,
-    batch: *Batch,
+    /// The shape's area (for the batches).
+    bounds: Rect,
     color: Color,
     /// Added to the triangles' points.
     offset: Point = .{ 0, 0 },
+    /// The batches it has added to, by index (adding a batch can move the
+    /// others): solid, then opaque.
+    batches: [2]?usize = .{ null, null },
 
     fn sink(s: *SolidSink) geometry.Sink {
         return .{ .ptr = s, .triangle = triangle };
     }
 
+    fn batch(s: *SolidSink, opaque_triangle: bool) ?*Batch {
+        const c = s.canvas;
+        const slot = &s.batches[@intFromBool(opaque_triangle)];
+        if (slot.*) |i| return &c.batches.items[i];
+        const b = c.batchFor(if (opaque_triangle) .@"opaque" else .solid, s.bounds) orelse return null;
+        slot.* = (@intFromPtr(b) - @intFromPtr(c.batches.items.ptr)) / @sizeOf(Batch);
+        return b;
+    }
+
     fn triangle(ptr: *anyopaque, a: geometry.Vertex, b: geometry.Vertex, cc: geometry.Vertex) void {
         const s: *SolidSink = @ptrCast(@alignCast(ptr));
         const c = s.canvas;
-        const out = c.vertices(s.batch, shaders.solid_floats, 3) orelse return;
+        const opaque_triangle = s.color.a >= 1 and a.alpha >= 1 and b.alpha >= 1 and cc.alpha >= 1;
+        const target = s.batch(opaque_triangle) orelse return;
+        const out = c.vertices(target, shaders.solid_floats, 3) orelse return;
         for ([_]geometry.Vertex{ a, b, cc }, out) |vert, *o| {
             o.* = .{ c.clipX(vert.x + s.offset[0]), c.clipY(vert.y + s.offset[1]), s.color.r, s.color.g, s.color.b, s.color.a * vert.alpha };
         }
@@ -510,14 +533,26 @@ test "separate shapes batch together; overlapping ones keep their order" {
     var c = Canvas.init(std.testing.allocator);
     defer c.deinit();
     c.begin(200, 100);
-    // Three cards side by side: solid parts and corners, two batches.
+    // Three cards side by side: anti-aliased edges, opaque insides and
+    // corners, three batches.
     for (0..3) |i| c.fillRoundedRect(.{ .x = 10 + @as(f32, @floatFromInt(i)) * 60, .y = 10, .w = 50, .h = 40 }, .all(8), Color.rgb(0x6750a4));
-    try std.testing.expectEqual(@as(usize, 2), c.batches.items.len);
-    // A card over the first: its corners must follow the first card's.
+    try std.testing.expectEqual(@as(usize, 3), c.batches.items.len);
+    try std.testing.expectEqual(Kind.solid, c.batches.items[0].kind);
+    try std.testing.expectEqual(Kind.@"opaque", c.batches.items[1].kind);
+    try std.testing.expectEqual(Kind.shape, c.batches.items[2].kind);
+    // Opaque triangles are opaque at every vertex; the fringes are not.
+    const o = c.batches.items[1].floats.items;
+    var k: usize = 5;
+    while (k < o.len) : (k += shaders.solid_floats) try std.testing.expectEqual(@as(f32, 1), o[k]);
+    // A card over the first: its batches must follow the first card's.
     c.fillRoundedRect(.{ .x = 20, .y = 20, .w = 30, .h = 20 }, .all(4), Color.rgb(0xffffff));
-    try std.testing.expectEqual(@as(usize, 4), c.batches.items.len);
+    try std.testing.expectEqual(@as(usize, 6), c.batches.items.len);
     // Corners: six vertices per corner, four corners per card.
-    try std.testing.expectEqual(@as(u32, 3 * 4 * 6), c.batches.items[1].vertexCount());
+    try std.testing.expectEqual(@as(u32, 3 * 4 * 6), c.batches.items[2].vertexCount());
+    // A translucent shape has nothing opaque.
+    c.begin(200, 100);
+    c.fillRect(.{ .x = 10, .y = 10, .w = 50, .h = 40 }, Color.rgb(0).withAlpha(0.5));
+    for (c.batches.items) |b| try std.testing.expect(b.kind != .@"opaque");
 
     // The origin moves shapes, polygons included.
     c.begin(100, 100);

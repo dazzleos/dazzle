@@ -19,6 +19,7 @@ pub const Renderer = struct {
     dev: vc4.Device,
     shape: shader.Pipeline,
     solid: shader.Pipeline,
+    @"opaque": shader.Pipeline,
     text: shader.Pipeline,
     /// The frame's vertices; replaced by a bigger one when it fills up.
     vbo: ?vc4.Bo = null,
@@ -33,12 +34,15 @@ pub const Renderer = struct {
         errdefer shape.deinit(dev);
         var solid = try shader.Pipeline.init(gpa, dev, shaders.solid(), shaders.solid_layout);
         errdefer solid.deinit(dev);
-        return .{ .dev = dev, .shape = shape, .solid = solid, .text = try shader.Pipeline.init(gpa, dev, shaders.text(), shaders.text_layout) };
+        var opaque_solid = try shader.Pipeline.init(gpa, dev, shaders.opaqueSolid(), shaders.solid_layout);
+        errdefer opaque_solid.deinit(dev);
+        return .{ .dev = dev, .shape = shape, .solid = solid, .@"opaque" = opaque_solid, .text = try shader.Pipeline.init(gpa, dev, shaders.text(), shaders.text_layout) };
     }
 
     pub fn deinit(r: *Renderer) void {
         r.shape.deinit(r.dev);
         r.solid.deinit(r.dev);
+        r.@"opaque".deinit(r.dev);
         r.text.deinit(r.dev);
         if (r.vbo) |bo| r.dev.destroyBo(bo);
         if (r.atlas_bo) |bo| r.dev.destroyBo(bo);
@@ -102,6 +106,7 @@ pub const Renderer = struct {
             const p = switch (b.kind) {
                 .shape => &r.shape,
                 .solid => &r.solid,
+                .@"opaque" => &r.@"opaque",
                 .text => &r.text,
             };
             const texture: ?render.Texture = if (b.kind == .text) .{

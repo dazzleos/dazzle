@@ -65,7 +65,7 @@ The `gfx` module draws 2D shapes, the toolkit's foundation:
 | `canvas.zig` | `Canvas`: records shapes and text (on the CPU) into batches of vertices: rectangles with per-corner radii, circles, polygons and polylines, filled or stroked, and lines of text, with an origin and a clip rectangle |
 | `atlas.zig` | `Atlas`: glyphs rasterized by the font renderer, packed into one texture, and the text runs laid out recently |
 | `geometry.zig` | Polygon triangulation (ear clipping, concave polygons included) and stroke strips with mitred joins, with anti-aliasing fringes |
-| `shaders/` | The 2D shaders (`shape.zig`, `solid.zig`, `text.zig`) |
+| `shaders/` | The 2D shaders (`shape.zig`, `solid.zig`, also built without blending as `opaque`, and `text.zig`) |
 | `shaders.zig` | The 2D shader programs, as the build compiled them, and their vertex layouts |
 | `renderer.zig` | `Renderer`: draws canvases into a `vc4` frame (several per frame, with other draws between them), and uploads the glyphs added to the atlas |
 | `preview.zig` | Renders a canvas on the CPU through the real shaders (in the QPU simulator), for tests and preview images |
@@ -80,7 +80,15 @@ straight edges fade over a one-pixel fringe. So the costlier shader only
 runs over the corners, and a stroked rectangle skips its inside entirely.
 Polygons and polylines are triangulated on the CPU with the same fringes.
 Shapes of one kind are drawn together when nothing drawn in between
-overlaps them, so a screen of separate cards is a couple of draws.
+overlaps them, so a screen of separate cards is a few draws.
+
+Blending costs a wait for the tile buffer and arithmetic per pixel, so
+triangles that are opaque all over (the insides of filled shapes and the
+cores of strokes, in an opaque colour) are drawn with the solid shader
+compiled without blending; only the anti-aliased fringes, the corner
+cells, text and translucent shapes blend. Within a shape the order does
+not matter (blending a colour over itself gives the same colour), and the
+result is the same, pixel for pixel.
 
 Text is drawn by the GPU too: each glyph is a quad sampling its coverage
 from the atlas, in the text's colour, blended like the shapes. Glyphs are

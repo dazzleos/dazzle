@@ -17,10 +17,11 @@ const sim = vc4.qpu_sim;
 pub const Programs = struct {
     shape: shader.Program,
     solid: shader.Program,
+    @"opaque": shader.Program,
     text: shader.Program,
 
     pub fn load() Programs {
-        return .{ .shape = shaders.shape(), .solid = shaders.solid(), .text = shaders.text() };
+        return .{ .shape = shaders.shape(), .solid = shaders.solid(), .@"opaque" = shaders.opaqueSolid(), .text = shaders.text() };
     }
 };
 
@@ -57,6 +58,7 @@ pub fn render(c: *const canvas_mod.Canvas, programs: *const Programs, img: Image
         const fs = switch (b.kind) {
             .shape => &programs.shape.fs,
             .solid => &programs.solid.fs,
+            .@"opaque" => &programs.@"opaque".fs,
             .text => &programs.text.fs,
         };
         const nvary = floats - 2;
