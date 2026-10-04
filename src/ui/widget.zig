@@ -100,6 +100,28 @@ pub const Callback = struct {
     }
 };
 
+/// A callback given a value (a control's new value, say):
+/// `ValueCallback(bool).of(state, State.setLighting)`.
+pub fn ValueCallback(comptime T: type) type {
+    return struct {
+        ctx: *anyopaque,
+        f: *const fn (*anyopaque, T) void,
+
+        pub fn of(ptr: anytype, comptime f: fn (@TypeOf(ptr), T) void) @This() {
+            const P = @TypeOf(ptr);
+            return .{ .ctx = @ptrCast(@constCast(ptr)), .f = struct {
+                fn call(ctx: *anyopaque, v: T) void {
+                    f(@as(P, @ptrCast(@alignCast(ctx))), v);
+                }
+            }.call };
+        }
+
+        pub fn call(c: @This(), v: T) void {
+            c.f(c.ctx, v);
+        }
+    };
+}
+
 pub const VTable = struct {
     name: []const u8,
     build: ?*const fn (*const anyopaque, *Context, ?*anyopaque) Widget,

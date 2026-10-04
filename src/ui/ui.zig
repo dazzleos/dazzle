@@ -38,6 +38,7 @@
 //!   ConstrainedBox, Overlay, Decorated, Pressable
 //! * `text`: Text
 //! * `material`: the theme, OutlinedButton
+//! * `controls`: Checkbox, Radio, Switch
 //! * `painter`: painting, GPU draws and the overflow stripes
 //! * `runtime`: `Ui`, which runs it all
 
@@ -46,6 +47,7 @@ pub const widget = @import("widget.zig");
 pub const widgets = @import("widgets.zig");
 pub const text = @import("text.zig");
 pub const material = @import("material.zig");
+pub const controls = @import("controls.zig");
 pub const painter = @import("painter.zig");
 pub const runtime = @import("runtime.zig");
 
@@ -61,6 +63,7 @@ pub const Context = widget.Context;
 pub const Node = widget.Node;
 pub const Event = widget.Event;
 pub const Callback = widget.Callback;
+pub const ValueCallback = widget.ValueCallback;
 
 pub const Empty = widgets.Empty;
 pub const SizedBox = widgets.SizedBox;
@@ -86,6 +89,9 @@ pub const TextAlign = text.TextAlign;
 
 pub const Theme = material.Theme;
 pub const OutlinedButton = material.OutlinedButton;
+pub const Checkbox = controls.Checkbox;
+pub const Radio = controls.Radio;
+pub const Switch = controls.Switch;
 
 pub const Painter = painter.Painter;
 pub const GpuArea = painter.GpuArea;
@@ -97,6 +103,7 @@ test {
     _ = widgets;
     _ = text;
     _ = material;
+    _ = controls;
     _ = painter;
     _ = runtime;
     _ = @import("tests.zig");

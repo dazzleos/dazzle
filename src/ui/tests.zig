@@ -362,3 +362,88 @@ test "rows and columns align and space their children" {
     try testing.expectEqual(ui.Point{ 170, 0 }, r2.child(2).offset);
     try testing.expectEqual(ui.Point{ 20, 15 }, r2.child(1).offset);
 }
+
+const Choice = enum { a, b, c };
+
+const Controls = struct {
+    pub const State = struct {
+        checked: bool = false,
+        on: bool = false,
+        choice: Choice = .a,
+        fn setChecked(s: *State, v: bool) void {
+            s.checked = v;
+        }
+        fn setOn(s: *State, v: bool) void {
+            s.on = v;
+        }
+        fn choose(s: *State, v: Choice) void {
+            s.choice = v;
+        }
+    };
+
+    pub fn build(_: *const Controls, cx: *Context, state: *State) Widget {
+        return cx.make(ui.Column{ .cross_axis_alignment = .start, .children = &.{
+            cx.make(ui.Checkbox{ .value = state.checked, .on_changed = .of(state, State.setChecked), .label = "Check" }),
+            cx.make(ui.Switch{ .value = state.on, .on_changed = .of(state, State.setOn), .label = "Switch" }),
+            cx.make(ui.Radio(Choice){ .value = .a, .group_value = state.choice, .on_changed = .of(state, State.choose), .label = "A" }),
+            cx.make(ui.Radio(Choice){ .value = .b, .group_value = state.choice, .on_changed = .of(state, State.choose), .label = "B" }),
+            cx.make(ui.Radio(Choice){ .value = .c, .group_value = state.choice, .label = "C (disabled)" }),
+            cx.make(ui.Checkbox{ .value = true }),
+        } });
+    }
+};
+
+fn clickAt(u: *ui.Ui, p: ui.Point) void {
+    u.pointerMotion(p);
+    u.pointerButton(p, ui.widgets.btn_left, true);
+    u.pointerButton(p, ui.widgets.btn_left, false);
+}
+
+test "checkboxes, switches and radio buttons report changes, and their labels press them" {
+    const fira = try font.Font.init(fira_data);
+    const u = try ui.Ui.create(testing.allocator, &fira);
+    defer u.destroy();
+    u.frame(400, 400, 0, Controls{});
+    var items: std.ArrayList(*Node) = .empty;
+    defer items.deinit(testing.allocator);
+    try findAll(u.root.?, ui.Pressable, &items);
+    try testing.expectEqual(@as(usize, 6), items.items.len);
+    for (items.items[0..5]) |n| try testing.expectEqual(@as(f32, 40), n.size.h);
+    const st = u.root.?.state(Controls.State);
+
+    // The box itself, then the label.
+    click(u, find(items.items[0], ui.controls.CheckboxMark).?);
+    try testing.expect(st.checked);
+    u.frame(400, 400, 1, Controls{});
+    const label = find(items.items[0], ui.Text).?;
+    click(u, label);
+    try testing.expect(!st.checked);
+    u.frame(400, 400, 2, Controls{});
+
+    // The switch slides over, asking for frames until it is there.
+    click(u, items.items[1]);
+    try testing.expect(st.on);
+    u.frame(400, 400, 3, Controls{});
+    try testing.expect(u.needs_frame);
+    u.frame(400, 400, 3 + ui.Switch.travel_ns / 2, Controls{});
+    const mark = find(items.items[1], ui.controls.SwitchMark).?.widget.as(ui.controls.SwitchMark).?;
+    try testing.expect(mark.position > 0.3 and mark.position < 0.7);
+    u.frame(400, 400, 3 + ui.Switch.travel_ns * 2, Controls{});
+    try testing.expectEqual(@as(f32, 1), find(items.items[1], ui.controls.SwitchMark).?.widget.as(ui.controls.SwitchMark).?.position);
+    u.frame(400, 400, 4 + ui.Switch.travel_ns * 2, Controls{});
+    try testing.expect(!u.needs_frame);
+
+    // Radio buttons: choosing B selects it; C is disabled.
+    click(u, items.items[3]);
+    try testing.expectEqual(Choice.b, st.choice);
+    click(u, items.items[4]);
+    try testing.expectEqual(Choice.b, st.choice);
+    u.frame(400, 400, 5 + ui.Switch.travel_ns * 2, Controls{});
+    try testing.expect(!find(items.items[2], ui.controls.RadioMark).?.widget.as(ui.controls.RadioMark).?.selected);
+    try testing.expect(find(items.items[3], ui.controls.RadioMark).?.widget.as(ui.controls.RadioMark).?.selected);
+
+    // A disabled checkbox ignores clicks (and draws without failing).
+    click(u, items.items[5]);
+    const img = try Image.init(u, 400, 400);
+    img.deinit();
+}
