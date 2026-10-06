@@ -18,6 +18,9 @@ pub const TextStyle = struct {
     size: ?f32 = null,
     /// The theme's text colour if not given.
     color: ?gfx.Color = null,
+    /// The UI's font if not given (another must last as long as the text
+    /// is shown).
+    font: ?*const font.Font = null,
 };
 
 pub const TextAlign = enum { start, center, end };
@@ -39,7 +42,7 @@ pub const Text = struct {
     const Laid = struct { lines: []const Line, style: font.Style };
 
     fn fontStyle(self: *const Text, n: *const Node) ?font.Style {
-        const f = n.ui.font orelse return null;
+        const f = self.style.font orelse n.ui.font orelse return null;
         const size = self.style.size orelse n.ui.theme.body_size;
         if (!(size > 0) or !std.math.isFinite(size)) return null;
         return .{ .font = f, .size = size };

@@ -727,6 +727,47 @@ test "icons are drawn from the icon font, in their box" {
     try testing.expect(find(buttons.items[1], ui.Text) == null);
 }
 
+test "images fit the space given, keeping their shape, and text can have its own font" {
+    const fira = try font.Font.init(fira_data);
+    const u = try ui.Ui.create(testing.allocator, &fira);
+    defer u.destroy();
+    const pixels: [8]u32 = .{ 0xffff0000, 0xffff0000, 0xffff0000, 0xffff0000, 0xff0000ff, 0xff0000ff, 0xff0000ff, 0xff0000ff };
+    const pic = gfx.Image.init(&pixels, 4, 2);
+    const App = struct {
+        pic: *const gfx.Image,
+        width: f32,
+        pub fn build(self: *const @This(), cx: *Context) Widget {
+            return cx.make(ui.Align{ .alignment = .top_left, .child = cx.make(ui.SizedBox{ .width = self.width, .height = 100, .child = cx.make(ui.Center{ .child = cx.make(ui.Image{ .image = self.pic }) }) }) });
+        }
+    };
+    // Smaller than the space: as big as it is.
+    u.frame(300, 200, 0, App{ .pic = &pic, .width = 300 });
+    try testing.expectEqual(ui.Size{ .w = 4, .h = 2 }, find(u.root.?, ui.Image).?.size);
+    // Bigger: made to fit, keeping its shape (and drawn, top red, bottom blue).
+    const big = gfx.Image.init(&(.{0xffff0000} ** (200 * 50) ++ .{0xff0000ff} ** (200 * 50)), 200, 100);
+    u.frame(300, 200, 1, App{ .pic = &big, .width = 100 });
+    const node = find(u.root.?, ui.Image).?;
+    try testing.expectEqual(ui.Size{ .w = 100, .h = 50 }, node.size);
+    try testing.expectEqual(ui.Point{ 0, 25 }, node.offset);
+    var img = try Image.init(u, 300, 200);
+    defer img.deinit();
+    try testing.expectEqual(@as(u32, 0xffff0000), img.at(50, 30));
+    try testing.expectEqual(@as(u32, 0xff0000ff), img.at(50, 70));
+    try testing.expectEqual(@as(u32, 0xff000000), img.at(50, 80));
+
+    // Text in another font: the icon font draws "folder" as its icon.
+    const icon_font = try font.Font.init(ui.icons.font_data);
+    const Shown = struct {
+        f: *const font.Font,
+        pub fn build(self: *const @This(), cx: *Context) Widget {
+            return cx.make(ui.Align{ .alignment = .top_left, .child = cx.make(ui.Text{ .text = "\u{e2c7}", .style = .{ .size = 40, .font = self.f } }) });
+        }
+    };
+    u.frame(300, 200, 2, Shown{ .f = &icon_font });
+    const text = find(u.root.?, ui.Text).?;
+    try testing.expectApproxEqAbs(@as(f32, 40), text.size.w, 0.5);
+}
+
 test "a scroll view scrolls with the wheel and its bar, and paints only what shows" {
     const u = try ui.Ui.create(testing.allocator, null);
     defer u.destroy();
