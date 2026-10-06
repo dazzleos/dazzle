@@ -112,10 +112,12 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     var dirty = true;
     var idle = false;
     var suspended = false;
-    // What the title bar's buttons do. Its size stays as it was for the
-    // whole screen when the window is restored to half of it.
+    // What the title bar's buttons do. Its size, and the text's, stays as
+    // it was for the whole screen (the window starts maximized) when the
+    // window is restored to half of it.
     var controls: app.Controls = .{ .win = win };
     const bar_scale = @as(f32, @floatFromInt(width)) / 1920;
+    const scale = @min(@as(f32, @floatFromInt(width)) / 1920, @as(f32, @floatFromInt(height)) / 1080);
     while (true) {
         const waited = if (idle) blk: {
             // Nothing to draw: sleep until the statistics change, or
@@ -171,7 +173,6 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         idle = true;
         if (!suspended and (dirty or window_ui.needs_frame)) {
             dirty = false;
-            const scale = @min(@as(f32, @floatFromInt(width)) / 1920, @as(f32, @floatFromInt(height)) / 1080);
             window_ui.frame(width, height, frame_start, view.Demo{
                 .solids = &all_solids,
                 .rings = &rings,

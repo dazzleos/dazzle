@@ -26,7 +26,8 @@ pub const Demo = struct {
     solids: ?*solids.Solids,
     rings: *rings_mod.Rings,
     status: [lines][]const u8,
-    /// Sizes are designed for 1080 pixels high and scale with the window.
+    /// Sizes are designed for a 1080p screen and scale with it (not with
+    /// the window: text stays the same size when it is restored).
     scale: f32,
     /// The title bar's buttons (close, and maximize, which shows whether
     /// the window is), pressing the bar (to move the window), and its scale
@@ -90,38 +91,46 @@ pub const Demo = struct {
             w.* = cx.make(ui.Radio(Shape){ .value = shape, .group_value = state.shape, .on_changed = .of(state, State.choose), .label = shape.name() });
         }
 
-        const content = cx.make(RingsView{ .rings = self.rings, .now = now, .unit = s, .child = cx.make(ui.Overlay{ .children = &.{
-            cx.make(SolidView{ .solids = self.solids, .time = state.time, .shape = state.shape, .look = state.look }),
-            cx.make(ui.Padding{ .padding = .all(@floor(24 * s)), .child = cx.make(ui.Column{
-                .cross_axis_alignment = .start,
-                .main_axis_size = .min,
-                .spacing = 6 * s,
+        const content = cx.make(RingsView{
+            .rings = self.rings,
+            .now = now,
+            .unit = s,
+            .child = cx.make(ui.Overlay{
                 .children = &.{
-                    status[0],
-                    status[1],
-                    status[2],
-                    status[3],
-                    status[4],
-                    cx.make(ui.SizedBox{ .height = 10 * s }),
-                    cx.make(ui.Row{ .spacing = 8, .main_axis_size = .min, .children = &.{
-                        cx.make(ui.OutlinedButton{ .label = "Slower", .on_press = .of(state, State.slower) }),
-                        cx.make(ui.OutlinedButton{ .label = if (state.paused) "Resume" else "Pause", .on_press = .of(state, State.pause) }),
-                        cx.make(ui.OutlinedButton{ .label = "Faster", .on_press = .of(state, State.faster) }),
-                        cx.make(ui.Padding{ .padding = .{ .left = 8 }, .child = cx.make(ui.Text{ .text = speed, .style = .{ .size = 18 * s, .color = dim_color }, .wrap = false }) }),
-                    } }),
-                    cx.make(ui.SizedBox{ .height = 10 * s }),
-                    cx.make(ui.Text{ .text = cx.fmt("{s}  ·  {d} triangles", .{ state.shape.name(), state.shape.triangles() }), .style = .{ .size = 18 * s, .color = dim_color }, .wrap = false }),
-                    radios[0],
-                    radios[1],
-                    radios[2],
-                    radios[3],
-                    radios[4],
-                    cx.make(ui.SizedBox{ .height = 4 * s }),
-                    cx.make(ui.Switch{ .value = state.look.lighting, .on_changed = .of(state, State.setLighting), .label = "Lighting" }),
-                    cx.make(ui.Switch{ .value = state.look.texturing, .on_changed = .of(state, State.setTexturing), .label = "Texture" }),
+                    cx.make(SolidView{ .solids = self.solids, .time = state.time, .shape = state.shape, .look = state.look }),
+                    // The panel scrolls if the window is too small for it.
+                    cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(@floor(24 * s)), .child = cx.make(ui.Column{
+                        .cross_axis_alignment = .start,
+                        .main_axis_size = .min,
+                        .spacing = 6 * s,
+                        .children = &.{
+                            status[0],
+                            status[1],
+                            status[2],
+                            status[3],
+                            status[4],
+                            cx.make(ui.SizedBox{ .height = 10 * s }),
+                            cx.make(ui.Row{ .spacing = 8, .main_axis_size = .min, .children = &.{
+                                cx.make(ui.OutlinedButton{ .label = "Slower", .on_press = .of(state, State.slower) }),
+                                cx.make(ui.OutlinedButton{ .label = if (state.paused) "Resume" else "Pause", .on_press = .of(state, State.pause) }),
+                                cx.make(ui.OutlinedButton{ .label = "Faster", .on_press = .of(state, State.faster) }),
+                                cx.make(ui.Padding{ .padding = .{ .left = 8 }, .child = cx.make(ui.Text{ .text = speed, .style = .{ .size = 18 * s, .color = dim_color }, .wrap = false }) }),
+                            } }),
+                            cx.make(ui.SizedBox{ .height = 10 * s }),
+                            cx.make(ui.Text{ .text = cx.fmt("{s}  ·  {d} triangles", .{ state.shape.name(), state.shape.triangles() }), .style = .{ .size = 18 * s, .color = dim_color }, .wrap = false }),
+                            radios[0],
+                            radios[1],
+                            radios[2],
+                            radios[3],
+                            radios[4],
+                            cx.make(ui.SizedBox{ .height = 4 * s }),
+                            cx.make(ui.Switch{ .value = state.look.lighting, .on_changed = .of(state, State.setLighting), .label = "Lighting" }),
+                            cx.make(ui.Switch{ .value = state.look.texturing, .on_changed = .of(state, State.setTexturing), .label = "Texture" }),
+                        },
+                    }) }) }),
                 },
-            }) }),
-        } }) });
+            }),
+        });
         return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &.{
             cx.make(ui.TitleBar{
                 .title = "Demo",
@@ -220,9 +229,10 @@ test "the panel fits beside the solids in the shell's window, without overflowin
     defer u.destroy();
     var rings: rings_mod.Rings = .{};
     const status = [lines][]const u8{ "60.0 fps  ·  1920×1036", "GPU 6.50 ms per frame", "CPU 0.50 ms per frame", "Pointer 1919, 1035  ·  last key Backspace", "62 °C  ·  CPU speed 100%  ·  busy 45%" };
-    for ([_][2]u32{ .{ 1920, 1036 }, .{ 1920, 1080 } }) |size| {
-        const scale = @min(@as(f32, @floatFromInt(size[0])) / 1920, @as(f32, @floatFromInt(size[1])) / 1080);
-        u.frame(size[0], size[1], 0, Demo{ .solids = null, .rings = &rings, .status = status, .scale = scale });
+    // Maximized, full screen and restored to half the size (on a 1080p
+    // screen, so at its scale).
+    for ([_][2]u32{ .{ 1920, 1036 }, .{ 1920, 1080 }, .{ 960, 518 } }) |size| {
+        u.frame(size[0], size[1], 0, Demo{ .solids = null, .rings = &rings, .status = status, .scale = 1036.0 / 1080.0 });
         // The panel: the column in the content (under the title bar).
         const col = findNode(findNode(u.root.?, ui.Expanded).?, ui.Column).?;
         const Check = struct {
@@ -232,6 +242,8 @@ test "the panel fits beside the solids in the shell's window, without overflowin
             }
         };
         try Check.none(u.root.?);
+        // Restored, the solid is smaller and may go behind the panel.
+        if (size[0] < 1920) continue;
         // The panel's widest child, against every solid's left edge.
         var right: f32 = 0;
         for (col.children.items) |ch| right = @max(right, ch.position()[0] + ch.size.w);

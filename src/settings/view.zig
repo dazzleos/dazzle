@@ -47,8 +47,13 @@ pub const Settings = struct {
     network: *const info.Network,
     /// What the network manager last said; null if it could not be asked.
     manager: ?*const info.manager.Report = null,
-    /// Sizes are designed for a window 900 pixels high and scale with it.
+    /// Sizes are designed for a screen whose maximized windows are 900
+    /// pixels high, and scale with it (not with the window: text stays
+    /// the same size when it is restored).
     scale: f32,
+    /// The window's width: the cards are in two columns if they fit, else
+    /// one.
+    width: f32 = 1920,
     /// The title bar's buttons (close, and maximize, which shows whether
     /// the window is), pressing the bar (to move the window), and its scale
     /// (the screen's, so every app's title bar is the same).
@@ -110,22 +115,17 @@ pub const Settings = struct {
     pub fn build(self: *const Settings, cx: *ui.Context, state: *State) ui.Widget {
         const s = self.scale;
         const b: Builder = .{ .cx = cx, .s = s };
-        const content = cx.make(ui.Padding{ .padding = .all(@floor(32 * s)), .child = cx.make(ui.Column{
-            .cross_axis_alignment = .stretch,
-            .spacing = 20 * s,
-            .children = &.{
-                cx.make(ui.Expanded{ .child = cx.make(ui.Row{ .cross_axis_alignment = .start, .spacing = 20 * s, .children = &.{
-                    cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 20 * s, .children = &.{
-                        self.systemCard(b),
-                        self.networkCard(b, state),
-                    } }) }),
-                    cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 20 * s, .children = &.{
-                        self.resourcesCard(b),
-                        self.wifiCard(b, state),
-                    } }) }),
-                } }) }),
-            },
-        }) });
+        const system = self.systemCard(b);
+        const network = self.networkCard(b, state);
+        const resources = self.resourcesCard(b);
+        const wifi = self.wifiCard(b, state);
+        const two_columns = self.width >= two_column_width * s;
+        const cards = if (two_columns) cx.make(ui.Row{ .cross_axis_alignment = .start, .spacing = 20 * s, .children = &.{
+            cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 20 * s, .children = &.{ system, network } }) }),
+            cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 20 * s, .children = &.{ resources, wifi } }) }),
+        } }) else cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 20 * s, .children = &.{ system, resources, network, wifi } });
+        // What does not fit the window scrolls.
+        const content = cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(@floor(32 * s)), .child = cards }) });
         return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &.{
             cx.make(ui.TitleBar{
                 .title = "Settings",
@@ -174,6 +174,9 @@ pub const Settings = struct {
             b.storage(u.storage),
         });
     }
+
+    /// The narrowest window (at scale 1) with the cards in two columns.
+    pub const two_column_width = 1200;
 
     /// The most networks listed (fewer while the form for joining one is
     /// open).
@@ -552,18 +555,30 @@ const Builder = struct {
         for (parts, key, 0..) |part, *k, i| {
             var buf: [32]u8 = undefined;
             if (i < segments.len) segments[i] = .{ .fraction = fraction(part.bytes, total), .color = part.color };
-            k.* = cx.make(ui.Row{ .spacing = 6 * b.s, .main_axis_size = .min, .children = &.{
+            k.* = cx.make(ui.Row{ .spacing = 6 * b.s, .cross_axis_alignment = .center, .children = &.{
                 cx.make(ui.SizedBox{ .width = dot, .height = dot, .child = cx.make(ui.Decorated{ .color = part.color, .radius = .all(dot / 2) }) }),
-                cx.make(ui.Text{ .text = cx.fmt("{s} {s}", .{ part.name, info.formatBytes(&buf, part.bytes) }), .style = .{ .size = 16 * b.s, .color = t.on_surface }, .wrap = false }),
+                cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = cx.fmt("{s} {s}", .{ part.name, info.formatBytes(&buf, part.bytes) }), .style = .{ .size = 16 * b.s, .color = t.on_surface }, .wrap = false, .ellipsis = true }) }),
             } });
         }
-        return cx.make(ui.Row{ .cross_axis_alignment = .start, .spacing = 12 * b.s, .children = &.{
-            b.label("Storage"),
-            cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 6 * b.s, .children = &.{
-                cx.make(ui.Row{ .spacing = 16 * b.s, .main_axis_size = .min, .children = key }),
-                cx.make(SegmentBar{ .segments = segments, .height = @max(@round(8 * b.s), 4) }),
-            } }) }),
-        } });
+        return cx.make(ui.Row{
+            .cross_axis_alignment = .start,
+            .spacing = 12 * b.s,
+            .children = &.{
+                b.label("Storage"),
+                cx.make(ui.Expanded{
+                    .child = cx.make(ui.Column{
+                        .cross_axis_alignment = .stretch,
+                        .main_axis_size = .min,
+                        .spacing = 6 * b.s,
+                        .children = &.{
+                            // On as many lines as it takes.
+                            cx.make(ui.Grid{ .cell = .{ .w = @round(140 * b.s), .h = @round(22 * b.s) }, .spacing = @round(6 * b.s), .children = key }),
+                            cx.make(SegmentBar{ .segments = segments, .height = @max(@round(8 * b.s), 4) }),
+                        },
+                    }),
+                }),
+            },
+        });
     }
 
     /// A Wi-Fi network: its signal, name, security and band; pressing it
@@ -744,18 +759,28 @@ fn overflows(node: *ui.Node) bool {
     return false;
 }
 
+/// The sizes the shell gives windows, and the size of a maximized one
+/// (which sets the scale): maximized and restored on a 1080p screen, a
+/// 720p one and a 1024×768 one.
+const shell_sizes = [_][4]u32{
+    .{ 1920, 1036, 1920, 1036 },
+    .{ 960, 518, 1920, 1036 },
+    .{ 1280, 668, 1280, 668 },
+    .{ 640, 334, 1280, 668 },
+    .{ 1024, 724, 1024, 724 },
+    .{ 512, 362, 1024, 724 },
+};
+
 test "everything is shown, and fits the window at the shell's sizes" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
     const u = try ui.Ui.create(testing.allocator, &f);
     defer u.destroy();
     const d = sample();
     const wifi = sampleWifi();
-    // Maximized, and (on a 1080p screen) restored to half the size, with
-    // the title bar still at the whole screen's scale. Smaller screens'
-    // halves are too small for it all.
-    for ([_][3]u32{ .{ 1920, 960, 1920 }, .{ 1280, 600, 1280 }, .{ 1024, 668, 1024 }, .{ 960, 480, 1920 } }) |size| {
-        const scale = scaleFor(size[0], size[1]);
-        u.frame(size[0], size[1], 0, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .scale = scale, .bar_scale = @as(f32, @floatFromInt(size[2])) / 1920 });
+    // Maximized, and restored to half the size, with everything still at
+    // the whole screen's scale.
+    for (shell_sizes) |size| {
+        u.frame(size[0], size[1], 0, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .scale = scaleFor(size[2], size[3]), .width = @floatFromInt(size[0]), .bar_scale = @as(f32, @floatFromInt(size[2])) / 1920 });
         try testing.expect(!overflows(u.root.?));
     }
     var all: std.ArrayList(u8) = .empty;
@@ -817,7 +842,8 @@ test "without a network adapter, the network card says so" {
     try testing.expect(std.mem.indexOf(u8, all.items, "Measuring") != null);
 }
 
-/// The scale for a window: designed for 900 pixels high (and 1500 wide).
+/// The scale for a screen whose maximized windows are `width`×`height`:
+/// designed for 900 pixels high (and 1500 wide).
 pub fn scaleFor(width: u32, height: u32) f32 {
     return std.math.clamp(@min(@as(f32, @floatFromInt(width)) / 1500, @as(f32, @floatFromInt(height)) / 900), 0.5, 2);
 }
@@ -898,8 +924,8 @@ test "choosing a network, typing its password and connecting" {
     var joining = wifi;
     joining.connection = .{ .state = .authenticating };
     joining.connection.setSsid("Cafe");
-    for ([_]*const info.manager.Report{ &wifi, &joining }) |report| for ([_][2]u32{ .{ 1920, 960 }, .{ 1280, 600 }, .{ 1024, 668 }, .{ 960, 480 } }) |size| {
-        u.frame(size[0], size[1], 2, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = report, .scale = scaleFor(size[0], size[1]) });
+    for ([_]*const info.manager.Report{ &wifi, &joining }) |report| for (shell_sizes) |size| {
+        u.frame(size[0], size[1], 2, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = report, .scale = scaleFor(size[2], size[3]), .width = @floatFromInt(size[0]) });
         try testing.expect(!overflows(u.root.?));
     };
     u.frame(1920, 960, 3, settings);
