@@ -117,11 +117,52 @@ pub const Batch = struct {
     floats: std.ArrayList(f32) = .empty,
     /// Everything drawn in it.
     bounds: Rect,
+    /// The parts of `bounds` drawn in, more closely: shapes next to each
+    /// other, or level, share one, and the last takes in the rest when
+    /// there are `max_areas`. Shapes drawn later only have to come after this batch
+    /// if they overlap one (not just `bounds`, which grows to cover
+    /// everything between shapes far apart: a grid's icons, say).
+    areas: std.ArrayList(Rect) = .empty,
     clip: ?Rect,
+
+    pub const max_areas = 64;
 
     pub fn vertexCount(b: *const Batch) u32 {
         return @intCast(b.floats.items.len / floatsPerVertex(b.kind));
     }
+
+    /// Whether anything drawn in it may be in `r`.
+    pub fn overlaps(b: *const Batch, r: Rect) bool {
+        if (!b.bounds.intersects(r)) return false;
+        if (b.areas.items.len == 0) return true;
+        for (b.areas.items) |a| if (a.intersects(r)) return true;
+        return false;
+    }
+
+    /// Notes that a shape covering `r` is drawn in it.
+    fn cover(b: *Batch, gpa: std.mem.Allocator, r: Rect) void {
+        b.bounds = b.bounds.unite(r);
+        const items = b.areas.items;
+        if (items.len > 0) {
+            const last = &items[items.len - 1];
+            // Next to, over or level with the last shape (a row of a
+            // grid's icons): one area. Out of room, or memory: the last
+            // takes it in.
+            const level = r.y < last.y + last.h and last.y < r.y + r.h;
+            if (level or last.outset(area_gap).intersects(r) or items.len == max_areas) {
+                last.* = last.unite(r);
+                return;
+            }
+        }
+        b.areas.append(gpa, r) catch {
+            if (b.areas.items.len == 0) return;
+            const last = &b.areas.items[b.areas.items.len - 1];
+            last.* = last.unite(r);
+        };
+    }
+
+    /// Shapes this close together share an area.
+    const area_gap = 2;
 };
 
 pub fn floatsPerVertex(kind: Kind) usize {
@@ -158,8 +199,14 @@ pub const Canvas = struct {
     }
 
     pub fn deinit(c: *Canvas) void {
-        for (c.batches.items) |*b| b.floats.deinit(c.gpa);
-        for (c.spare.items) |*b| b.floats.deinit(c.gpa);
+        for (c.batches.items) |*b| {
+            b.floats.deinit(c.gpa);
+            b.areas.deinit(c.gpa);
+        }
+        for (c.spare.items) |*b| {
+            b.floats.deinit(c.gpa);
+            b.areas.deinit(c.gpa);
+        }
         c.batches.deinit(c.gpa);
         c.spare.deinit(c.gpa);
     }
@@ -175,7 +222,11 @@ pub const Canvas = struct {
             i -= 1;
             const b = &c.batches.items[i];
             b.floats.clearRetainingCapacity();
-            c.spare.append(c.gpa, b.*) catch b.floats.deinit(c.gpa);
+            b.areas.clearRetainingCapacity();
+            c.spare.append(c.gpa, b.*) catch {
+                b.floats.deinit(c.gpa);
+                b.areas.deinit(c.gpa);
+            };
         }
         c.batches.clearRetainingCapacity();
         c.clip = null;
@@ -413,30 +464,38 @@ pub const Canvas = struct {
     }
 
     /// How far back `batchFor` looks for a batch to add to.
-    const lookback = 8;
+    const lookback = 32;
 
-    /// The batch a shape of `kind` covering `bounds` goes in: the latest of
-    /// that kind (and clip) among the last few, if nothing in the batches
-    /// after it overlaps the shape (so drawing it earlier changes nothing);
-    /// otherwise a new one.
+    /// The batch a shape of `kind` covering `bounds` goes in: the earliest
+    /// of that kind (and clip) among the last few that nothing drawn after
+    /// it overlaps (so drawing the shape there changes nothing); otherwise
+    /// a new one. The earliest, so that things drawn alike (a grid's
+    /// icons, each several shapes over each other) share batches: the
+    /// second icon's first shape goes in the first icon's first batch, its
+    /// second in the second, and so on.
     fn batchFor(c: *Canvas, kind: Kind, bounds: Rect) ?*Batch {
         const items = c.batches.items;
+        var found: ?*Batch = null;
         var i = items.len;
         while (i > 0 and items.len - i < lookback) {
             i -= 1;
             const b = &items[i];
-            if (b.kind == kind and std.meta.eql(b.clip, c.clip)) {
-                b.bounds = b.bounds.unite(bounds);
-                return b;
-            }
-            if (b.bounds.intersects(bounds)) break;
+            if (b.kind == kind and std.meta.eql(b.clip, c.clip)) found = b;
+            if (b.overlaps(bounds)) break;
+        }
+        if (found) |b| {
+            b.cover(c.gpa, bounds);
+            return b;
         }
         var b: Batch = if (c.spare.pop()) |s| s else .{ .kind = kind, .bounds = bounds, .clip = null };
         b.kind = kind;
         b.bounds = bounds;
         b.clip = c.clip;
+        b.areas.clearRetainingCapacity();
+        b.areas.append(c.gpa, bounds) catch {};
         c.batches.append(c.gpa, b) catch {
             b.floats.deinit(c.gpa);
+            b.areas.deinit(c.gpa);
             c.failed = true;
             return null;
         };
@@ -566,6 +625,43 @@ test "separate shapes batch together; overlapping ones keep their order" {
     c.fillCircle(.{ 50, 50 }, 20, Color.rgb(0));
     try std.testing.expectEqual(@as(usize, 1), c.batches.items.len);
     try std.testing.expectEqual(Kind.shape, c.batches.items[0].kind);
+}
+
+test "things drawn alike share batches, in order" {
+    var c = Canvas.init(std.testing.allocator);
+    defer c.deinit();
+    // An icon: a translucent-edged card, a smaller one over it, and a mark
+    // over that (each over the last, so each layer's batches must come
+    // after the one below's).
+    const icon = struct {
+        fn draw(cv: *Canvas, x: f32, y: f32) void {
+            cv.fillRoundedRect(.{ .x = x, .y = y, .w = 40, .h = 40 }, .all(6), Color.rgb(0x6750a4));
+            cv.fillRoundedRect(.{ .x = x + 8, .y = y + 8, .w = 24, .h = 24 }, .all(4), Color.rgb(0xffffff));
+            cv.fillPolygon(&.{ .{ x + 14, y + 14 }, .{ x + 26, y + 20 }, .{ x + 14, y + 26 } }, Color.rgb(0x00ff00));
+        }
+    }.draw;
+    c.begin(400, 200);
+    icon(&c, 10, 10);
+    const one = c.batches.items.len;
+    // A grid of them: no more batches than one.
+    c.begin(400, 200);
+    for (0..4) |row| for (0..8) |col| icon(&c, 10 + @as(f32, @floatFromInt(col)) * 48, 10 + @as(f32, @floatFromInt(row)) * 48);
+    try std.testing.expectEqual(one, c.batches.items.len);
+    // Drawn, every icon shows its layers in order: the mark over the
+    // small card over the big one.
+    const preview = @import("preview.zig");
+    const pixels = try std.testing.allocator.alloc(u32, 400 * 200);
+    defer std.testing.allocator.free(pixels);
+    @memset(pixels, 0xff000000);
+    const programs = preview.Programs.load();
+    try preview.render(&c, &programs, .{ .pixels = pixels, .width = 400, .height = 200 });
+    for (0..4) |row| for (0..8) |col| {
+        const x = 10 + col * 48;
+        const y = 10 + row * 48;
+        try std.testing.expectEqual(@as(u32, 0xff6750a4), pixels[(y + 4) * 400 + x + 20]);
+        try std.testing.expectEqual(@as(u32, 0xffffffff), pixels[(y + 30) * 400 + x + 20]);
+        try std.testing.expectEqual(@as(u32, 0xff00ff00), pixels[(y + 20) * 400 + x + 18]);
+    };
 }
 
 test "records tell what was drawn, and where" {
