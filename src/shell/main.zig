@@ -329,12 +329,19 @@ fn run(init: std.process.Init.Minimal) !void {
             // The cursor plane needs the mode the first frame set.
             if (!cursor_shown) {
                 cursor_shown = true;
-                if (renderer.showCursor()) {
+                if (renderer.showCursor(.arrow)) {
                     renderer.moveCursor(@intFromFloat(pointer.x), @intFromFloat(pointer.y));
                     print("dazzle-shell: cursor shown\n", .{});
                 } else |err| print("dazzle-shell: no cursor: {s}\n", .{@errorName(err)});
             }
         }
+        // The pointer's picture: a resize while one is under way, or what
+        // the window under it chose.
+        if (renderer.cursor_shape) |shown| if (server.cursor() != shown) {
+            if (renderer.showCursor(server.cursor())) {
+                renderer.moveCursor(@intFromFloat(pointer.x), @intFromFloat(pointer.y));
+            } else |err| print("dazzle-shell: cannot change the cursor: {s}\n", .{@errorName(err)});
+        };
         server.flushClients();
         const work_end = sys.nowNs();
         stats.work_ns += work_end - work_start;

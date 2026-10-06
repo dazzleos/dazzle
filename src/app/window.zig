@@ -12,6 +12,14 @@
 //! callback, so at most one frame is queued) and commits the new one. A
 //! resize takes effect at the next `beginFrame`.
 //!
+//! The window is resized by dragging its edges when it is not maximized:
+//! a press within `resize_border` of an edge (inside the window: it has
+//! nothing outside) asks the shell to resize it (xdg_toplevel.resize)
+//! rather than going to the app, and the pointer shows a resize arrow
+//! there (with wp_cursor_shape_v1, if the shell has it). The app says how
+//! small it may be with `setMinSize`, and draws at whatever size it is
+//! given at or above that.
+//!
 //! While another window covers it, the shell says the window is
 //! `suspended` and holds its frame callbacks: the app should not draw
 //! (nothing would be seen), and the window frees the buffers it is not
@@ -87,6 +95,17 @@ pub const InputEvent = union(enum) {
 /// Used when the compositor leaves the size to us.
 const default_size = [2]u32{ 1280, 720 };
 
+/// How far in from a window's edges a press resizes it, and how far along
+/// them from a corner the corner is taken.
+pub const resize_border = 6;
+pub const resize_corner = 20;
+
+/// A window's edges (xdg_toplevel.resize_edge's bits).
+pub const edge_top = 1;
+pub const edge_bottom = 2;
+pub const edge_left = 4;
+pub const edge_right = 8;
+
 const max_buffers = 3;
 
 const Buffer = struct {
@@ -125,12 +144,19 @@ pub const Window = struct {
     closed: bool = false,
     /// Covered by another window: there is no point drawing.
     suspended: bool = false,
-    /// Filling the screen (the shell's configure says so); otherwise half
-    /// the screen, and movable.
+    /// Filling the screen (the shell's configure says so); otherwise
+    /// movable and resizable.
     maximized: bool = true,
     /// The serial of the last pointer button press, for asking the shell
     /// to move the window from it.
     press_serial: u32 = 0,
+    /// The serial of the pointer entering, for choosing its picture.
+    enter_serial: u32 = 0,
+    /// The shell's cursor shapes, the pointer's device for them, and the
+    /// edges the shape shown is for (null if not chosen since entering).
+    cursor_shape_manager: ?client.Proxy = null,
+    cursor_device: ?client.Proxy = null,
+    cursor_edges: ?u32 = null,
 
     buffers: [max_buffers]?Buffer = @splat(null),
     /// The buffer the frame being recorded renders into.
@@ -166,7 +192,9 @@ pub const Window = struct {
         // Version 6 for the suspended state.
         w.wm_base = (try w.globals.bind(registry, p.xdg_wm_base.name, 6, .{ .ptr = w, .handler = wmBaseEvent })) orelse return error.NoXdgShell;
         w.dmabuf = (try w.globals.bind(registry, p.zwp_linux_dmabuf_v1.name, 3, .{ .ptr = w, .handler = dmabufEvent })) orelse return error.NoDmabuf;
-        // Optional: the pointer and keyboard come with the seat's capabilities.
+        // Optional: the pointer's pictures, and the pointer and keyboard
+        // (which come with the seat's capabilities).
+        w.cursor_shape_manager = try w.globals.bind(registry, p.wp_cursor_shape_manager_v1.name, 1, null);
         w.seat = try w.globals.bind(registry, p.wl_seat.name, 5, .{ .ptr = w, .handler = seatEvent });
 
         w.surface = try conn.newObject(null);
@@ -208,11 +236,56 @@ pub const Window = struct {
     }
 
     /// Asks the shell to fill the screen with the window, or to make it
-    /// half the screen again; a configure follows.
+    /// its own size again; a configure follows.
     pub fn setMaximized(w: *Window, on: bool) void {
         var m = w.toplevel.request(if (on) p.xdg_toplevel.request.set_maximized else p.xdg_toplevel.request.unset_maximized) catch return;
         m.end();
         w.conn.flush() catch {};
+    }
+
+    /// Tells the shell how small the window may be made: as small as its
+    /// content can be shown in.
+    pub fn setMinSize(w: *Window, width: u32, height: u32) void {
+        var m = w.toplevel.request(p.xdg_toplevel.request.set_min_size) catch return;
+        m.int(@intCast(width)).int(@intCast(height)).end();
+        w.conn.flush() catch {};
+    }
+
+    /// The edges a press at `pos` would resize the window by (0 for none:
+    /// a maximized window is not resized).
+    pub fn edgesAt(w: *const Window, pos: [2]f32) u32 {
+        if (w.maximized) return 0;
+        const width: f32 = @floatFromInt(w.width);
+        const height: f32 = @floatFromInt(w.height);
+        const x = pos[0];
+        const y = pos[1];
+        var edges: u32 = 0;
+        if (x < resize_border) edges |= edge_left else if (x >= width - resize_border) edges |= edge_right;
+        if (y < resize_border) edges |= edge_top else if (y >= height - resize_border) edges |= edge_bottom;
+        // Near a corner: both edges at it.
+        if (edges & (edge_left | edge_right) != 0 and edges & (edge_top | edge_bottom) == 0) {
+            if (y < resize_corner) edges |= edge_top else if (y >= height - resize_corner) edges |= edge_bottom;
+        }
+        if (edges & (edge_top | edge_bottom) != 0 and edges & (edge_left | edge_right) == 0) {
+            if (x < resize_corner) edges |= edge_left else if (x >= width - resize_corner) edges |= edge_right;
+        }
+        return edges;
+    }
+
+    /// Shows the pointer as a resize over the edges (an arrow elsewhere).
+    fn updateCursor(w: *Window) void {
+        const edges = w.edgesAt(w.pointer_pos);
+        if (w.cursor_edges == edges) return;
+        const device = w.cursor_device orelse return;
+        const sh = p.wp_cursor_shape_device_v1.shape;
+        const vertical = edges & (edge_top | edge_bottom);
+        const horizontal = edges & (edge_left | edge_right);
+        const shape: u32 = if (vertical != 0 and horizontal != 0)
+            (if ((vertical == edge_top) == (horizontal == edge_left)) sh.nwse_resize else sh.nesw_resize)
+        else if (horizontal != 0) sh.ew_resize else if (vertical != 0) sh.ns_resize else sh.default;
+        var m = device.request(p.wp_cursor_shape_device_v1.request.set_shape) catch return;
+        m.uint(w.enter_serial).uint(shape).end();
+        w.cursor_edges = edges;
     }
 
     /// Asks the shell to move the window with the pointer, from the button
@@ -464,6 +537,12 @@ pub const Window = struct {
             var m = w.seat.?.request(p.wl_seat.request.get_pointer) catch return;
             m.uint(pointer.id).end();
             w.pointer = pointer;
+            if (w.cursor_shape_manager) |manager| {
+                const device = d.newObject(null) catch return;
+                m = manager.request(p.wp_cursor_shape_manager_v1.request.get_pointer) catch return;
+                m.uint(device.id).uint(pointer.id).end();
+                w.cursor_device = device;
+            }
         }
         if (caps & p.wl_seat.capability.keyboard != 0 and w.keyboard == null) {
             const keyboard = d.newObject(.{ .ptr = w, .handler = keyboardEvent }) catch return;
@@ -478,11 +557,17 @@ pub const Window = struct {
         switch (opcode) {
             p.wl_pointer.event.enter, p.wl_pointer.event.motion => {
                 // enter: serial, surface; motion: time.
-                _ = r.uint() catch return;
-                if (opcode == p.wl_pointer.event.enter) _ = r.uint() catch return;
+                const first = r.uint() catch return;
+                if (opcode == p.wl_pointer.event.enter) {
+                    _ = r.uint() catch return;
+                    w.enter_serial = first;
+                    // The shell shows an arrow until told otherwise.
+                    w.cursor_edges = 0;
+                }
                 const x = r.fixed() catch return;
                 const y = r.fixed() catch return;
                 w.pointer_pos = .{ @floatCast(x), @floatCast(y) };
+                w.updateCursor();
                 w.pushInput(.{ .motion = w.pointer_pos });
             },
             p.wl_pointer.event.button => {
@@ -490,8 +575,19 @@ pub const Window = struct {
                 _ = r.uint() catch return; // time
                 const code = r.uint() catch return;
                 const state = r.uint() catch return;
-                if (state == p.wl_pointer.button_state.pressed) w.press_serial = serial;
-                w.pushInput(.{ .button = .{ .pos = w.pointer_pos, .code = code, .pressed = state == p.wl_pointer.button_state.pressed } });
+                const pressed = state == p.wl_pointer.button_state.pressed;
+                if (pressed) w.press_serial = serial;
+                // Pressing an edge resizes the window; the app does not
+                // see it (nor its release: the shell has the pointer).
+                if (pressed and code == p.input.btn_left) {
+                    const edges = w.edgesAt(w.pointer_pos);
+                    if (edges != 0) if (w.seat) |seat| {
+                        var m = w.toplevel.request(p.xdg_toplevel.request.resize) catch return;
+                        m.uint(seat.id).uint(serial).uint(edges).end();
+                        return;
+                    };
+                }
+                w.pushInput(.{ .button = .{ .pos = w.pointer_pos, .code = code, .pressed = pressed } });
             },
             p.wl_pointer.event.axis => {
                 _ = r.uint() catch return; // time
@@ -500,7 +596,10 @@ pub const Window = struct {
                 const vertical = axis == p.wl_pointer.axis.vertical_scroll;
                 w.pushInput(.{ .scroll = .{ .pos = w.pointer_pos, .dx = if (vertical) 0 else value, .dy = if (vertical) value else 0 } });
             },
-            p.wl_pointer.event.leave => w.pushInput(.leave),
+            p.wl_pointer.event.leave => {
+                w.cursor_edges = null;
+                w.pushInput(.leave);
+            },
             else => {},
         }
     }

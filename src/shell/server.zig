@@ -4,12 +4,19 @@
 //! ignored), wl_shm (ARGB8888 and XRGB8888, copied to the GPU at commit),
 //! zwp_linux_dmabuf_v1 (buffers in the VideoCore IV's T-tiled layout, used
 //! by the GPU directly), xdg_wm_base (toplevel windows; popups are not
-//! supported) and wl_seat (a pointer and a keyboard; key codes are Linux
-//! evdev codes, without an XKB keymap).
+//! supported), wl_seat (a pointer and a keyboard; key codes are Linux
+//! evdev codes, without an XKB keymap) and wp_cursor_shape_manager_v1 (the
+//! pointer's picture, by name).
 //!
 //! Windows go in the work area above the shell's dock: maximized (filling
-//! it, as they start), or restored to half its width and height, where the
-//! client can move them with xdg_toplevel.move (dragging its title bar).
+//! it, as they start), or restored (at first to half its width and height),
+//! where the client can move them with xdg_toplevel.move (dragging its
+//! title bar) and resize with xdg_toplevel.resize (dragging an edge), no
+//! smaller than the size it asks for with xdg_toplevel.set_min_size, nor
+//! bigger than the work area. While a window is resized, it is told a new
+//! size only once it has drawn at the last one, so a slow client is not
+//! sent sizes it cannot keep up with. Clients choose the pointer's picture
+//! over their windows with wp_cursor_shape_v1 (an arrow, or a resize).
 //! They are stacked most recently mapped (or raised, or clicked) on top,
 //! and the top one has the keyboard. Windows hidden behind others are
 //! covered: they get xdg_toplevel's suspended state, their frame callbacks
@@ -64,6 +71,7 @@ const globals = [_]struct { name: []const u8, version: u32 }{
     .{ .name = p.xdg_wm_base.name, .version = p.xdg_wm_base.version },
     .{ .name = p.zwp_linux_dmabuf_v1.name, .version = p.zwp_linux_dmabuf_v1.version },
     .{ .name = p.wl_seat.name, .version = p.wl_seat.version },
+    .{ .name = p.wp_cursor_shape_manager_v1.name, .version = p.wp_cursor_shape_manager_v1.version },
 };
 
 const Object = union(enum) {
@@ -87,6 +95,8 @@ const Object = union(enum) {
     seat: u32,
     pointer: u32,
     keyboard: u32,
+    cursor_shape_manager,
+    cursor_shape_device,
 };
 
 pub const Surface = struct {
@@ -164,8 +174,27 @@ pub const Toplevel = struct {
     maximized: bool = true,
     x: i32 = 0,
     y: i32 = 0,
-    /// Restored before, so `x`, `y` are where it was.
+    /// Restored before, so `x`, `y` and its size are where and how big it
+    /// was.
     placed: bool = false,
+    /// Its size when restored.
+    width: u32 = 0,
+    height: u32 = 0,
+    /// The smallest it may be (xdg_toplevel.set_min_size; 0 for any).
+    min_width: u32 = 0,
+    min_height: u32 = 0,
+    /// While its left or top edge is dragged, and until it has drawn at
+    /// the size it was told, its right or bottom edge stays put: its
+    /// corner follows from these and the size of what it shows.
+    anchor_right: ?i32 = null,
+    anchor_bottom: ?i32 = null,
+    /// The last configure: its serial, and whether the client has drawn
+    /// since acknowledging it (or need not, its size being unchanged).
+    configure_serial: u32 = 0,
+    acked: bool = true,
+    drawn: bool = true,
+    /// Its size changed while it was drawing: it is told once it has.
+    resend: bool = false,
 
     /// Mapped, with something to show.
     fn shown(t: *const Toplevel) bool {
@@ -262,11 +291,28 @@ pub const Server = struct {
     /// The serial of the last button press, and how many buttons are down.
     press_serial: u32 = 0,
     buttons_down: u32 = 0,
-    /// The window the pointer is moving, and the pointer's offset from its
-    /// corner. The pointer focuses on no surface meanwhile.
+    /// The window the pointer is moving (with the pointer's offset from
+    /// its corner) or resizing. The pointer focuses on no surface
+    /// meanwhile.
     grab: ?Grab = null,
+    /// The pointer's picture the client under it chose (an arrow until it
+    /// does).
+    client_cursor: Cursor = .arrow,
 
-    const Grab = struct { t: *Toplevel, dx: f64, dy: f64 };
+    const Grab = struct { t: *Toplevel, dx: f64, dy: f64, resize: ?Resize = null };
+
+    /// A resize: the edges dragged (xdg_toplevel.resize_edge's bits), and
+    /// where the pointer and the window were when it started.
+    const Resize = struct { edges: u32, x: f64, y: f64, rect: Rect };
+
+    /// The edges of a window (xdg_toplevel.resize_edge's bits).
+    pub const edge_top = 1;
+    pub const edge_bottom = 2;
+    pub const edge_left = 4;
+    pub const edge_right = 8;
+
+    /// The smallest a window may be made, whatever the client says.
+    pub const min_size = 64;
 
     /// How much of a window a move leaves in the work area, so it can be
     /// moved back.
@@ -554,8 +600,13 @@ pub const Server = struct {
     /// Where a window is on the screen, at the size of what it shows.
     pub fn windowRect(s: *const Server, t: *const Toplevel) Rect {
         const tex = t.xdg.surface.?.texture().?;
-        const corner: [2]i32 = if (t.maximized) .{ s.work_area.x, s.work_area.y } else .{ t.x, t.y };
-        return .{ .x = corner[0], .y = corner[1], .width = tex.width, .height = tex.height };
+        if (t.maximized) return .{ .x = s.work_area.x, .y = s.work_area.y, .width = tex.width, .height = tex.height };
+        return .{
+            .x = if (t.anchor_right) |r| r - @as(i32, @intCast(tex.width)) else t.x,
+            .y = if (t.anchor_bottom) |b| b - @as(i32, @intCast(tex.height)) else t.y,
+            .width = tex.width,
+            .height = tex.height,
+        };
     }
 
     /// The part of a window that can be seen: what is in the work area.
@@ -569,26 +620,59 @@ pub const Server = struct {
         return .{ .x = x0, .y = y0, .width = @intCast(@max(x1 - x0, 0)), .height = @intCast(@max(y1 - y0, 0)) };
     }
 
-    /// The size a window is told to be: the work area's, or half of it.
-    fn configuredSize(s: *const Server, t: *const Toplevel) [2]u32 {
+    /// The size a window is told to be: the work area's, or its restored
+    /// size (at first half the work area), no smaller than its minimum
+    /// nor bigger than the work area.
+    pub fn configuredSize(s: *const Server, t: *const Toplevel) [2]u32 {
         const wa = s.work_area;
         if (t.maximized) return .{ wa.width, wa.height };
-        return .{ @max(wa.width / 2, 1), @max(wa.height / 2, 1) };
+        const w = if (t.width != 0) t.width else wa.width / 2;
+        const h = if (t.height != 0) t.height else wa.height / 2;
+        return .{ s.clampWidth(t, w, wa.width), s.clampHeight(t, h, wa.height) };
+    }
+
+    /// A width for `t` between its minimum and `max` (if the minimum fits).
+    fn clampWidth(_: *const Server, t: *const Toplevel, w: u32, max: u32) u32 {
+        const min = @max(t.min_width, min_size);
+        return @max(@min(w, max), @min(min, max), 1);
+    }
+
+    fn clampHeight(_: *const Server, t: *const Toplevel, h: u32, max: u32) u32 {
+        const min = @max(t.min_height, min_size);
+        return @max(@min(h, max), @min(min, max), 1);
     }
 
     fn setMaximized(s: *Server, c: *Client, t: *Toplevel, on: bool) void {
         if (t.maximized == on) return;
+        if (s.grab) |g| if (g.t == t) s.endGrab();
         t.maximized = on;
         if (!on and !t.placed) {
-            // Restored the first time: in the middle.
+            // Restored the first time: half the work area (or its minimum
+            // size), in the middle.
             const size = s.configuredSize(t);
-            t.x = s.work_area.x + @as(i32, @intCast((s.work_area.width - size[0]) / 2));
-            t.y = s.work_area.y + @as(i32, @intCast((s.work_area.height - size[1]) / 2));
+            t.width = size[0];
+            t.height = size[1];
+            t.x = s.work_area.x + @divTrunc(@as(i32, @intCast(s.work_area.width)) - @as(i32, @intCast(size[0])), 2);
+            t.y = s.work_area.y + @max(@divTrunc(@as(i32, @intCast(s.work_area.height)) - @as(i32, @intCast(size[1])), 2), 0);
             t.placed = true;
         }
-        if (s.grab) |g| if (g.t == t) s.endGrab();
+        t.anchor_right = null;
+        t.anchor_bottom = null;
         if (t.xdg.configured) s.configure(c, t);
         s.damaged = true;
+    }
+
+    /// The client says how small its window may be: a restored window
+    /// smaller than that grows.
+    fn setMinSize(s: *Server, c: *Client, t: *Toplevel, w: i32, h: i32) void {
+        t.min_width = @intCast(@max(w, 0));
+        t.min_height = @intCast(@max(h, 0));
+        if (t.maximized or !t.placed) return;
+        const size = s.configuredSize(t);
+        if (size[0] == t.width and size[1] == t.height) return;
+        t.width = size[0];
+        t.height = size[1];
+        if (t.xdg.configured) s.requestConfigure(c, t);
     }
 
     /// Moves a restored window, keeping `grip` of it in the work area (and
@@ -610,20 +694,135 @@ pub const Server = struct {
     /// A client asked to move its window with the pointer, which must be
     /// holding a button pressed on it (`serial` being the press's).
     fn startMove(s: *Server, t: *Toplevel, serial: u32) void {
-        if (t.maximized or !t.shown() or s.grab != null) return;
-        if (s.buttons_down == 0 or serial != s.press_serial) return;
-        const surf = s.pointer_focus orelse return;
-        if (t.xdg.surface != surf) return;
+        if (!s.clientGrabAllowed(t, serial)) return;
+        s.settle(t, true);
         s.grab = .{ .t = t, .dx = s.pointer_x - @as(f64, @floatFromInt(t.x)), .dy = s.pointer_y - @as(f64, @floatFromInt(t.y)) };
-        // The pointer is the shell's until the button is released.
+        s.takePointer();
+    }
+
+    /// A client asked to resize its window by `edges` with the pointer, as
+    /// for `startMove`.
+    fn clientResize(s: *Server, t: *Toplevel, serial: u32, edges: u32) void {
+        if (!s.clientGrabAllowed(t, serial)) return;
+        const valid = edges != 0 and edges & (edge_top | edge_bottom) != edge_top | edge_bottom and edges & (edge_left | edge_right) != edge_left | edge_right;
+        if (!valid or edges > 15) return;
+        s.startResize(t, edges);
+    }
+
+    fn clientGrabAllowed(s: *const Server, t: *const Toplevel, serial: u32) bool {
+        if (t.maximized or !t.shown() or s.grab != null) return false;
+        if (s.buttons_down == 0 or serial != s.press_serial) return false;
+        const surf = s.pointer_focus orelse return false;
+        return t.xdg.surface == surf;
+    }
+
+    /// Resizes `t` by its `edges` as the pointer moves, until the buttons
+    /// are released.
+    fn startResize(s: *Server, t: *Toplevel, edges: u32) void {
+        s.settle(t, true);
+        const size = s.configuredSize(t);
+        s.grab = .{ .t = t, .dx = 0, .dy = 0, .resize = .{
+            .edges = edges,
+            .x = s.pointer_x,
+            .y = s.pointer_y,
+            .rect = .{ .x = t.x, .y = t.y, .width = size[0], .height = size[1] },
+        } };
+        s.takePointer();
+    }
+
+    /// The pointer is the shell's (for a move or resize) until the buttons
+    /// are released: it leaves the window it is over.
+    fn takePointer(s: *Server) void {
+        const surf = s.pointer_focus orelse return;
         broadcast(surf.client, .pointer, p.wl_pointer.event.leave, 1, .{ s.nextSerial(), surf.id });
         broadcast(surf.client, .pointer, p.wl_pointer.event.frame, 5, .{});
         s.pointer_focus = null;
     }
 
+    /// The pointer moved to (`x`, `y`) while resizing.
+    fn resizeTo(s: *Server, t: *Toplevel, r: Resize, x: f64, y: f64) void {
+        const wa = s.work_area;
+        const dx: i32 = @intFromFloat(@round(x - r.x));
+        const dy: i32 = @intFromFloat(@round(y - r.y));
+        const w0: i32 = @intCast(r.rect.width);
+        const h0: i32 = @intCast(r.rect.height);
+        var w = t.width;
+        var h = t.height;
+        if (r.edges & edge_right != 0) w = s.clampWidth(t, @intCast(@max(w0 + dx, 1)), wa.width);
+        if (r.edges & edge_left != 0) {
+            w = s.clampWidth(t, @intCast(@max(w0 - dx, 1)), wa.width);
+            t.anchor_right = r.rect.x + w0;
+        }
+        if (r.edges & edge_bottom != 0) h = s.clampHeight(t, @intCast(@max(h0 + dy, 1)), wa.height);
+        if (r.edges & edge_top != 0) {
+            // Its top stays below the work area's.
+            const bottom = r.rect.y + h0;
+            h = s.clampHeight(t, @intCast(@max(h0 - dy, 1)), @intCast(@max(bottom - wa.y, 1)));
+            t.anchor_bottom = bottom;
+        }
+        if (w == t.width and h == t.height) return;
+        t.width = w;
+        t.height = h;
+        const surf = t.xdg.surface orelse return;
+        s.requestConfigure(surf.client, t);
+    }
+
+    /// Fixes a restored window's corner where it is, once it has drawn at
+    /// the size it was told (or now, if `force`), and no longer keeps an
+    /// edge where it was.
+    fn settle(s: *Server, t: *Toplevel, force: bool) void {
+        if (t.anchor_right == null and t.anchor_bottom == null) return;
+        if (!force and (!t.drawn or s.resizing(t))) return;
+        if (t.shown()) {
+            const r = s.windowRect(t);
+            t.x = r.x;
+            t.y = r.y;
+        }
+        t.anchor_right = null;
+        t.anchor_bottom = null;
+        s.damaged = true;
+    }
+
+    fn resizing(s: *const Server, t: *const Toplevel) bool {
+        const g = s.grab orelse return false;
+        return g.t == t and g.resize != null;
+    }
+
     fn endGrab(s: *Server) void {
+        const g = s.grab orelse return;
         s.grab = null;
+        s.settle(g.t, false);
         if (s.updatePointerFocus()) s.pointerFrame();
+    }
+
+    /// The picture shown for a cursor-shape protocol shape: the resizes,
+    /// and an arrow for the others (null if there is no such shape).
+    fn cursorForShape(shape: u32) ?Cursor {
+        const sh = p.wp_cursor_shape_device_v1.shape;
+        return switch (shape) {
+            sh.e_resize, sh.w_resize, sh.ew_resize => .resize_horizontal,
+            sh.n_resize, sh.s_resize, sh.ns_resize => .resize_vertical,
+            sh.nw_resize, sh.se_resize, sh.nwse_resize => .resize_diagonal_down,
+            sh.ne_resize, sh.sw_resize, sh.nesw_resize => .resize_diagonal_up,
+            1...17, 30...34 => .arrow,
+            else => null,
+        };
+    }
+
+    /// The pointer's pictures.
+    pub const Cursor = @import("cursor.zig").Shape;
+
+    /// The pointer's picture: a resize while resizing; otherwise the one
+    /// the client under it chose.
+    pub fn cursor(s: *const Server) Cursor {
+        const g = s.grab orelse return if (s.pointer_focus != null) s.client_cursor else .arrow;
+        const edges = if (g.resize) |r| r.edges else 0;
+        const v = edges & (edge_top | edge_bottom);
+        const h = edges & (edge_left | edge_right);
+        if (v != 0 and h != 0) return if ((v == edge_top) == (h == edge_left)) .resize_diagonal_down else .resize_diagonal_up;
+        if (h != 0) return .resize_horizontal;
+        if (v != 0) return .resize_vertical;
+        return .arrow;
     }
 
     /// Call when a frame has been drawn from the current state: the frame
@@ -822,7 +1021,11 @@ pub const Server = struct {
                     x.toplevel = t;
                 },
                 p.xdg_surface.request.get_popup => return c.postError(m.object, p.xdg_wm_base.err.invalid_popup_parent, "popups are not supported", .{}),
-                p.xdg_surface.request.set_window_geometry, p.xdg_surface.request.ack_configure => {},
+                p.xdg_surface.request.ack_configure => {
+                    const serial = try r.uint();
+                    if (x.toplevel) |t| if (serial == t.configure_serial) s.acked(t);
+                },
+                p.xdg_surface.request.set_window_geometry => {},
                 else => return error.InvalidOpcode,
             },
             .toplevel => |t| switch (m.opcode) {
@@ -842,8 +1045,17 @@ pub const Server = struct {
                     _ = try r.uint();
                     s.startMove(t, try r.uint());
                 },
-                // Windows cannot be resized freely, minimized or made
-                // fullscreen, and have no menu.
+                p.xdg_toplevel.request.resize => {
+                    _ = try r.uint();
+                    const serial = try r.uint();
+                    s.clientResize(t, serial, try r.uint());
+                },
+                p.xdg_toplevel.request.set_min_size => {
+                    const w = try r.int();
+                    s.setMinSize(c, t, w, try r.int());
+                },
+                // Windows have no largest size (but the work area), cannot
+                // be minimized or made fullscreen, and have no menu.
                 else => {},
             },
             .dmabuf => switch (m.opcode) {
@@ -864,6 +1076,29 @@ pub const Server = struct {
             // The cursor is the shell's own.
             .pointer => if (m.opcode == p.wl_pointer.request.release) c.deleteId(m.object),
             .keyboard => if (m.opcode == p.wl_keyboard.request.release) c.deleteId(m.object),
+            .cursor_shape_manager => switch (m.opcode) {
+                p.wp_cursor_shape_manager_v1.request.destroy => c.deleteId(m.object),
+                p.wp_cursor_shape_manager_v1.request.get_pointer => {
+                    const id = try r.uint();
+                    _ = try r.uint();
+                    try c.addObject(id, .cursor_shape_device);
+                },
+                // There are no tablets.
+                else => return error.InvalidOpcode,
+            },
+            .cursor_shape_device => switch (m.opcode) {
+                p.wp_cursor_shape_device_v1.request.destroy => c.deleteId(m.object),
+                p.wp_cursor_shape_device_v1.request.set_shape => {
+                    _ = try r.uint();
+                    const shape = try r.uint();
+                    const picture = cursorForShape(shape) orelse return c.postError(m.object, p.wp_cursor_shape_device_v1.err.invalid_shape, "no cursor shape {d}", .{shape});
+                    // Only over its own window.
+                    if (s.pointer_focus) |surf| if (surf.client == c) {
+                        s.client_cursor = picture;
+                    };
+                },
+                else => return error.InvalidOpcode,
+            },
         }
     }
 
@@ -903,6 +1138,7 @@ pub const Server = struct {
                     e.string("seat0").end();
                 };
             },
+            6 => try c.addObject(id, .cursor_shape_manager),
             else => unreachable,
         }
         _ = s;
@@ -949,7 +1185,10 @@ pub const Server = struct {
     pub fn pointerMotion(s: *Server, time_ms: u32, x: f64, y: f64) void {
         s.pointer_x = x;
         s.pointer_y = y;
-        if (s.grab) |g| return s.moveWindow(g.t, x - g.dx, y - g.dy);
+        if (s.grab) |g| {
+            if (g.resize) |r| return s.resizeTo(g.t, r, x, y);
+            return s.moveWindow(g.t, x - g.dx, y - g.dy);
+        }
         // Entering a surface carries the position.
         if (s.updatePointerFocus()) return;
         const surf = s.pointer_focus orelse return;
@@ -1088,6 +1327,8 @@ pub const Server = struct {
             broadcast(old.client, .pointer, p.wl_pointer.event.frame, 5, .{});
         }
         s.pointer_focus = under;
+        // A window it enters chooses its picture again.
+        s.client_cursor = .arrow;
         if (under) |surf| {
             const local = s.surfaceLocal();
             broadcast(surf.client, .pointer, p.wl_pointer.event.enter, 1, .{ s.nextSerial(), surf.id, local[0], local[1] });
@@ -1205,6 +1446,9 @@ pub const Server = struct {
             } else if (surf.texture() == null and t.mapped) {
                 s.unmap(t);
             }
+            // Drawn since acknowledging the last configure: the next size
+            // can be sent.
+            if (t.acked and !t.drawn) s.drewConfigure(c, t);
         };
         // What a covered window shows changes nothing on the screen.
         if (!covered) s.damaged = true;
@@ -1213,6 +1457,30 @@ pub const Server = struct {
     /// Sends a toplevel its size and state: maximized or not, activated if
     /// it is the top window, and suspended if it is covered (to clients
     /// that know the state).
+    /// Configures `t` with its new size, or once it has drawn at the last
+    /// one it was told.
+    fn requestConfigure(s: *Server, c: *Client, t: *Toplevel) void {
+        if (t.drawn) s.configure(c, t) else t.resend = true;
+    }
+
+    /// The client acknowledged the last configure: it draws at its size
+    /// next (or need not, if the size is the one it shows).
+    fn acked(s: *Server, t: *Toplevel) void {
+        t.acked = true;
+        const surf = t.xdg.surface orelse return;
+        const tex = surf.texture() orelse return;
+        const size = s.configuredSize(t);
+        if (tex.width == size[0] and tex.height == size[1]) s.drewConfigure(surf.client, t);
+    }
+
+    fn drewConfigure(s: *Server, c: *Client, t: *Toplevel) void {
+        t.drawn = true;
+        if (t.resend) {
+            t.resend = false;
+            s.configure(c, t);
+        } else s.settle(t, false);
+    }
+
     fn configure(s: *Server, c: *Client, t: *Toplevel) void {
         if (t.xdg.version >= 5 and !t.capabilities_sent) {
             // Of the optional features, only maximizing: no menus,
@@ -1227,10 +1495,11 @@ pub const Server = struct {
         }
         if (c.send(t.id, p.xdg_toplevel.event.configure)) |m0| {
             var e = m0;
-            var states: [12]u8 = undefined;
+            var states: [16]u8 = undefined;
             var n: usize = 0;
             const set = [_]struct { bool, u32 }{
                 .{ t.maximized, p.xdg_toplevel.state.maximized },
+                .{ s.resizing(t), p.xdg_toplevel.state.resizing },
                 .{ t.activated, p.xdg_toplevel.state.activated },
                 .{ t.suspended and t.xdg.version >= 6, p.xdg_toplevel.state.suspended },
             };
@@ -1243,7 +1512,11 @@ pub const Server = struct {
         }
         if (c.send(t.xdg.id, p.xdg_surface.event.configure)) |m0| {
             var e = m0;
-            e.uint(s.nextSerial()).end();
+            t.configure_serial = s.nextSerial();
+            t.acked = false;
+            t.drawn = false;
+            t.resend = false;
+            e.uint(t.configure_serial).end();
         }
     }
 

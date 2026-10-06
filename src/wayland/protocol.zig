@@ -333,6 +333,45 @@ pub const wl_keyboard = struct {
     };
 };
 
+/// The cursor-shape protocol (staging): clients choose the pointer's
+/// picture by name rather than drawing it.
+pub const wp_cursor_shape_manager_v1 = struct {
+    pub const name = "wp_cursor_shape_manager_v1";
+    pub const version = 1;
+    pub const request = struct {
+        pub const destroy = 0;
+        pub const get_pointer = 1;
+        pub const get_tablet_tool_v2 = 2;
+    };
+};
+
+pub const wp_cursor_shape_device_v1 = struct {
+    pub const name = "wp_cursor_shape_device_v1";
+    pub const request = struct {
+        pub const destroy = 0;
+        pub const set_shape = 1;
+    };
+    /// The shapes Dazzle uses (of CSS's cursor names).
+    pub const shape = struct {
+        pub const default = 1;
+        pub const e_resize = 18;
+        pub const n_resize = 19;
+        pub const ne_resize = 20;
+        pub const nw_resize = 21;
+        pub const s_resize = 22;
+        pub const se_resize = 23;
+        pub const sw_resize = 24;
+        pub const w_resize = 25;
+        pub const ew_resize = 26;
+        pub const ns_resize = 27;
+        pub const nesw_resize = 28;
+        pub const nwse_resize = 29;
+    };
+    pub const err = struct {
+        pub const invalid_shape = 1;
+    };
+};
+
 /// Linux input event codes (linux/input-event-codes.h) used by Dazzle.
 pub const input = struct {
     pub const btn_left = 0x110;

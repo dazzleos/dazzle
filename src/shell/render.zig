@@ -121,6 +121,8 @@ const Panel = struct {
     shown: u1 = 0,
 };
 
+const n_cursors = @typeInfo(cursor.Shape).@"enum".fields.len;
+
 pub const Renderer = struct {
     gpa: std.mem.Allocator,
     dev: vc4.Device,
@@ -138,8 +140,9 @@ pub const Renderer = struct {
     /// Framebuffers for clients' buffers shown directly, by GEM handle
     /// (null if the display cannot show that buffer).
     client_fbs: std.AutoHashMapUnmanaged(u32, ?u32) = .empty,
-    /// The cursor's picture, once it is shown.
-    cursor_bo: ?vc4.Bo = null,
+    /// The cursor's pictures, made when first shown, and the one shown.
+    cursor_bos: [n_cursors]?vc4.Bo = @splat(null),
+    cursor_shape: ?cursor.Shape = null,
     cursor_move_failed: bool = false,
 
     pub fn init(gpa: std.mem.Allocator, dev: vc4.Device, output: vc4.drm.Output) !Renderer {
@@ -292,21 +295,27 @@ pub const Renderer = struct {
         return p.planes[i];
     }
 
-    /// Shows the pointer's arrow on the display's cursor plane, once the
-    /// first frame has set the mode.
-    pub fn showCursor(r: *Renderer) !void {
-        const bytes = cursor.size * cursor.size * 4;
-        const bo = try r.dev.createBo(bytes);
-        errdefer r.dev.destroyBo(bo);
-        cursor.draw(std.mem.bytesAsValue([cursor.size * cursor.size]u32, bo.map[0..bytes]));
-        try vc4.drm.setCursor(r.dev.fd, r.display.output.crtc_id, bo.handle, cursor.size, cursor.size);
-        r.cursor_bo = bo;
+    /// Shows the pointer as `shape` on the display's cursor plane, once the
+    /// first frame has set the mode. Move it afterwards (`moveCursor`):
+    /// shapes' hotspots differ.
+    pub fn showCursor(r: *Renderer, shape: cursor.Shape) !void {
+        if (r.cursor_shape == shape) return;
+        const slot = &r.cursor_bos[@intFromEnum(shape)];
+        if (slot.* == null) {
+            const bytes = cursor.size * cursor.size * 4;
+            const bo = try r.dev.createBo(bytes);
+            cursor.draw(std.mem.bytesAsValue([cursor.size * cursor.size]u32, bo.map[0..bytes]), shape);
+            slot.* = bo;
+        }
+        try vc4.drm.setCursor(r.dev.fd, r.display.output.crtc_id, slot.*.?.handle, cursor.size, cursor.size);
+        r.cursor_shape = shape;
     }
 
-    /// Moves the arrow's tip to (`x`, `y`) on the screen.
+    /// Moves the pointer's hotspot to (`x`, `y`) on the screen.
     pub fn moveCursor(r: *Renderer, x: i32, y: i32) void {
-        if (r.cursor_bo == null) return;
-        vc4.drm.moveCursor(r.dev.fd, r.display.output.crtc_id, x - cursor.hotspot[0], y - cursor.hotspot[1]) catch |err| {
+        const shape = r.cursor_shape orelse return;
+        const hot = cursor.hotspot(shape);
+        vc4.drm.moveCursor(r.dev.fd, r.display.output.crtc_id, x - hot[0], y - hot[1]) catch |err| {
             if (!r.cursor_move_failed) sys.print("dazzle-shell: cannot move the cursor: {s}\n", .{@errorName(err)});
             r.cursor_move_failed = true;
         };

@@ -235,7 +235,7 @@ test "a client maps a window, gets frame callbacks and buffer releases" {
     var state: State = .{};
     var globals: client.Globals = .{};
     const registry = try globals.fetch(d);
-    try testing.expectEqual(@as(usize, 5), globals.len);
+    try testing.expectEqual(@as(usize, 6), globals.len);
     const compositor = (try globals.bind(registry, p.wl_compositor.name, 4, null)).?;
     const wm_base = (try globals.bind(registry, p.xdg_wm_base.name, 1, null)).?;
     const dmabuf = (try globals.bind(registry, p.zwp_linux_dmabuf_v1.name, 3, .{ .ptr = &state, .handler = State.dmabufEvent })).?;
@@ -648,6 +648,12 @@ const MultiServerThread = struct {
         drag_release,
         /// Click in the first window (maximized, at 0,40).
         click_first,
+        /// Press in the second window (restored at 300,240, showing 64x64
+        /// whatever size it is told), as if at its corner.
+        press_corner,
+        /// Move by (40, 30), then by (50, 40) more.
+        drag_resize,
+        release,
     };
 
     fn feed(srv: *server_mod.Server, input: Input) void {
@@ -666,6 +672,22 @@ const MultiServerThread = struct {
                 srv.pointerMotion(3, 310, 250);
                 srv.pointerFrame();
                 srv.pointerButton(4, left, false);
+                srv.pointerFrame();
+            },
+            .press_corner => {
+                srv.pointerMotion(7, 350, 290);
+                srv.pointerFrame();
+                srv.pointerButton(7, left, true);
+                srv.pointerFrame();
+            },
+            .drag_resize => {
+                srv.pointerMotion(8, 390, 320);
+                srv.pointerFrame();
+                srv.pointerMotion(9, 440, 360);
+                srv.pointerFrame();
+            },
+            .release => {
+                srv.pointerButton(10, left, false);
                 srv.pointerFrame();
             },
             .click_first => {
@@ -720,6 +742,7 @@ const TestWindow = struct {
     state: State = .{},
     surface: client.Proxy = undefined,
     buffer: client.Proxy = undefined,
+    xdg_surface: client.Proxy = undefined,
     toplevel: client.Proxy = undefined,
     seat: ?client.Proxy = null,
 
@@ -747,6 +770,7 @@ const TestWindow = struct {
         var m = try compositor.request(p.wl_compositor.request.create_surface);
         m.uint(tw.surface.id).end();
         const xdg_surface = try d.newObject(.{ .ptr = &tw.state, .handler = State.xdgSurfaceEvent });
+        tw.xdg_surface = xdg_surface;
         m = try wm_base.request(p.xdg_wm_base.request.get_xdg_surface);
         m.uint(xdg_surface.id).uint(tw.surface.id).end();
         tw.toplevel = try d.newObject(.{ .ptr = &tw.state, .handler = State.toplevelEvent });
@@ -772,6 +796,14 @@ const TestWindow = struct {
     fn frame(tw: *TestWindow) !void {
         try commitBuffer(tw.surface, tw.buffer, &tw.state);
         try tw.d.flush();
+    }
+
+    /// Acknowledges the last configure, and draws (its 64x64 buffer, as
+    /// it always does).
+    fn ackAndDraw(tw: *TestWindow) !void {
+        var m = try tw.xdg_surface.request(p.xdg_surface.request.ack_configure);
+        m.uint(tw.state.configure_serial).end();
+        try tw.frame();
     }
 
     /// Handles events until `cond` holds (or a second passes).
@@ -923,6 +955,60 @@ test "a restored window is half the size, moves by its grab, and windows are cli
     // A move with a stale serial (no button down) does nothing.
     m = try second.toplevel.request(p.xdg_toplevel.request.move);
     m.uint(second.seat.?.id).uint(second.state.press_serial).end();
+    try second.d.roundtrip();
+    try testing.expect(st.server.grab == null);
+
+    // Resizing by the bottom right corner: the window is told each new
+    // size only once it has drawn at the last.
+    const Size = struct {
+        fn is(s: *const State, w: i32, h: i32) bool {
+            return s.configure_width == w and s.configure_height == h;
+        }
+        fn step1(s: *const State) bool {
+            return is(s, 440, 310);
+        }
+        fn step2(s: *const State) bool {
+            return is(s, 490, 350);
+        }
+        fn grown(s: *const State) bool {
+            return is(s, 520, 400);
+        }
+    };
+    try second.ackAndDraw();
+    // Its minimum is smaller than it is: nothing changes.
+    m = try second.toplevel.request(p.xdg_toplevel.request.set_min_size);
+    m.int(380).int(260).end();
+    try second.d.roundtrip();
+    try testing.expect(Size.is(&second.state, 400, 280));
+    const pressed_before = second.state.press_serial;
+    st.input.store(@intFromEnum(MultiServerThread.Input.press_corner), .monotonic);
+    for (0..100) |_| {
+        if (second.state.press_serial != pressed_before) break;
+        try second.d.dispatchTimeout(10);
+    }
+    m = try second.toplevel.request(p.xdg_toplevel.request.resize);
+    m.uint(second.seat.?.id).uint(second.state.press_serial).uint(server_mod.Server.edge_bottom | server_mod.Server.edge_right).end();
+    try second.d.roundtrip();
+    try testing.expect(!second.state.pointer_in);
+    st.input.store(@intFromEnum(MultiServerThread.Input.drag_resize), .monotonic);
+    try second.waitFor(&second.state, Size.step1);
+    // The pointer has moved on, but the window has not drawn yet.
+    for (0..5) |_| try second.d.dispatchTimeout(10);
+    try testing.expect(Size.step1(&second.state));
+    try second.ackAndDraw();
+    try second.waitFor(&second.state, Size.step2);
+    try second.ackAndDraw();
+    st.input.store(@intFromEnum(MultiServerThread.Input.release), .monotonic);
+    try second.d.roundtrip();
+    // A bigger minimum makes it bigger.
+    m = try second.toplevel.request(p.xdg_toplevel.request.set_min_size);
+    m.int(520).int(400).end();
+    try second.d.flush();
+    try second.waitFor(&second.state, Size.grown);
+    try second.ackAndDraw();
+    // A resize with no button down does nothing.
+    m = try second.toplevel.request(p.xdg_toplevel.request.resize);
+    m.uint(second.seat.?.id).uint(second.state.press_serial).uint(server_mod.Server.edge_right).end();
     try second.d.roundtrip();
     try testing.expect(st.server.grab == null);
 
