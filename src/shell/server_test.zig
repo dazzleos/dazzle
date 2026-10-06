@@ -235,7 +235,7 @@ test "a client maps a window, gets frame callbacks and buffer releases" {
     var state: State = .{};
     var globals: client.Globals = .{};
     const registry = try globals.fetch(d);
-    try testing.expectEqual(@as(usize, 6), globals.len);
+    try testing.expectEqual(@as(usize, 9), globals.len);
     const compositor = (try globals.bind(registry, p.wl_compositor.name, 4, null)).?;
     const wm_base = (try globals.bind(registry, p.xdg_wm_base.name, 1, null)).?;
     const dmabuf = (try globals.bind(registry, p.zwp_linux_dmabuf_v1.name, 3, .{ .ptr = &state, .handler = State.dmabufEvent })).?;
@@ -406,6 +406,10 @@ test "app windows render, present through the compositor and resize" {
 const InputState = struct {
     capabilities: u32 = 0,
     keymap_format: ?u32 = null,
+    keymap_size: u32 = 0,
+    /// The keymap's start.
+    keymap_head: [16]u8 = @splat(0),
+    repeat_rate: i32 = 0,
     keyboard_entered: bool = false,
     pointer_entered: bool = false,
     enter_x: f64 = 0,
@@ -458,8 +462,13 @@ const InputState = struct {
         switch (opcode) {
             p.wl_keyboard.event.keymap => {
                 s.keymap_format = r.uint() catch null;
-                if (r.fd()) |fd| _ = linux.close(fd) else |_| {}
+                if (r.fd()) |fd| {
+                    _ = linux.pread(fd, &s.keymap_head, s.keymap_head.len, 0);
+                    _ = linux.close(fd);
+                } else |_| {}
+                s.keymap_size = r.uint() catch 0;
             },
+            p.wl_keyboard.event.repeat_info => s.repeat_rate = r.int() catch 0,
             p.wl_keyboard.event.enter => s.keyboard_entered = true,
             p.wl_keyboard.event.key => {
                 _ = r.uint() catch 0;
@@ -503,7 +512,11 @@ test "the shown window gets the pointer and keyboard" {
     m.uint(keyboard.id).end();
     try d.roundtrip();
     try testing.expectEqual(@as(u32, p.wl_seat.capability.pointer | p.wl_seat.capability.keyboard), input.capabilities);
-    try testing.expectEqual(@as(?u32, p.wl_keyboard.keymap_format.no_keymap), input.keymap_format);
+    // An XKB keymap, in a file the client can read; keys repeat.
+    try testing.expectEqual(@as(?u32, p.wl_keyboard.keymap_format.xkb_v1), input.keymap_format);
+    try testing.expectEqual(@as(u32, @import("keyboard.zig").keymap.len), input.keymap_size);
+    try testing.expectEqualStrings("// A US keyboar", input.keymap_head[0..15]);
+    try testing.expectEqual(@as(i32, 25), input.repeat_rate);
 
     // A mapped window (an shm buffer) gets the keyboard focus.
     const surface = try d.newObject(null);

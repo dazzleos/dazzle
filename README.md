@@ -296,12 +296,39 @@ The shell (`src/shell/`):
 | `cursor.zig` | The pointer's pictures (an arrow, and arrows for resizing), drawn into the cursor plane's buffer |
 | `screenshot.zig` | Print Screen: the screen saved as `/data/user/Screenshot N.png` |
 | `png.zig` | Writing PNG images |
-| `server_test.zig` | Protocol tests on the host, described below |
+| `keyboard.zig`, `us.xkb` | The keyboard for clients: a US XKB keymap, and the modifiers' state |
+| `server_test.zig`, `protocol_test.zig` | Protocol tests on the host, described below (`protocol_test.zig`'s run the server and clients on one thread, step by step) |
 
-The server offers `wl_compositor`, `wl_shm` (ARGB8888 and XRGB8888, copied
-to a texture at commit), `zwp_linux_dmabuf_v1`, `xdg_wm_base` (toplevels)
-`wl_seat` (a pointer and a keyboard) and `wp_cursor_shape_manager_v1`
-(the pointer's picture, by name). There are no popups or outputs yet.
+The server offers `wl_compositor`, `wl_subcompositor`, `wl_shm` (ARGB8888
+and XRGB8888, copied to a texture at commit), `zwp_linux_dmabuf_v1`,
+`xdg_wm_base` (toplevels and popups), `wl_output`, `wl_seat` (a pointer and
+a keyboard), `wl_data_device_manager` (copy and paste) and
+`wp_cursor_shape_manager_v1` (the pointer's picture, by name): what common
+Wayland clients expect, with the parts below left out. Damage and regions
+are accepted and ignored (the shell draws whole surfaces, and the whole of
+a surface takes the pointer); buffer scales other than 1 and transforms are
+refused.
+
+- **Output:** one, the screen: its mode (size and refresh rate), scale 1
+  and name. Surfaces are told they are on it (`wl_surface.enter`) when
+  first shown.
+- **Subsurfaces:** drawn above their parent, at the place it gives (which
+  takes effect when the parent is committed), in the order `place_above`
+  and `place_below` give, and taking the pointer where they are. Their
+  state is applied when they are committed, as if desynchronized.
+- **Popups:** menus and tooltips, above their parent's window, placed by
+  their positioner (its anchor rectangle, anchor, gravity and offset), and
+  slid into the work area if they would go outside it (the positioner's
+  other constraint adjustments are not done). A popup that grabs (a menu)
+  takes the keyboard, and is closed (`popup_done`, with the popups on it)
+  when anything but its client's own surfaces is clicked, or its window
+  goes. `reposition` moves one.
+- **Copy and paste:** the client with the keyboard copies by setting the
+  selection (a `wl_data_source` and its MIME types); a client is told what
+  the clipboard holds (a `wl_data_offer`) just before it gets the
+  keyboard, and when it changes, and asks for it as a MIME type, which its
+  source writes into a pipe the client reads. A copy replaces the last
+  (whose source is cancelled). Drag and drop is not supported yet.
 
 - **Windows:** each toplevel starts maximized, filling the screen above
   the dock. Unmaximized (`unset_maximized`), it is told half the work
@@ -374,9 +401,12 @@ to a texture at commit), `zwp_linux_dmabuf_v1`, `xdg_wm_base` (toplevels)
   motion moves the pointer, without acceleration, and the shell moves the
   display's hardware cursor plane, so moving it costs no new frame. The
   shown window gets the keyboard, and it gets the pointer while the pointer
-  is over it, in window coordinates. There is no XKB keymap: the keymap
-  format is `no_keymap`, so key events carry Linux key codes, and key
-  repeat is off. Clients choose the pointer's picture by name
+  is over it, in window coordinates. Clients get an XKB keymap for a US
+  keyboard (`us.xkb`, in a sealed memory file; key events carry Linux key
+  codes, the keymap's less 8), and the modifiers (Shift, Caps Lock,
+  Control, Alt, Num Lock, Super) as they change; they repeat held keys
+  themselves, 25 a second after 600 ms. Dazzle's own apps map the key
+  codes themselves (`ui/keymap.zig`). Clients choose the pointer's picture by name
   (`wp_cursor_shape_v1`: an arrow, or the resize arrows, drawn by the
   shell); their own images (`set_cursor`) are ignored.
   Devices plugged in later are found within a second.

@@ -62,6 +62,11 @@ pub const wl_surface = struct {
         pub const set_buffer_scale = 8;
         pub const damage_buffer = 9;
     };
+    pub const event = struct {
+        /// It is shown on an output (or no longer is).
+        pub const enter = 0;
+        pub const leave = 1;
+    };
     pub const err = struct {
         pub const invalid_scale = 0;
         pub const invalid_transform = 1;
@@ -117,10 +122,69 @@ pub const wl_shm_pool = struct {
     };
 };
 
+/// Surfaces in other surfaces (a video in a window, say), placed relative
+/// to their parent.
+pub const wl_subcompositor = struct {
+    pub const name = "wl_subcompositor";
+    pub const version = 1;
+    pub const request = struct {
+        pub const destroy = 0;
+        pub const get_subsurface = 1;
+    };
+    pub const err = struct {
+        pub const bad_surface = 0;
+        pub const bad_parent = 1;
+    };
+};
+
+pub const wl_subsurface = struct {
+    pub const name = "wl_subsurface";
+    pub const request = struct {
+        pub const destroy = 0;
+        pub const set_position = 1;
+        pub const place_above = 2;
+        pub const place_below = 3;
+        pub const set_sync = 4;
+        pub const set_desync = 5;
+    };
+    pub const err = struct {
+        pub const bad_surface = 0;
+    };
+};
+
+/// A screen.
+pub const wl_output = struct {
+    pub const name = "wl_output";
+    pub const version = 4;
+    pub const request = struct {
+        /// Since version 3.
+        pub const release = 0;
+    };
+    pub const event = struct {
+        pub const geometry = 0;
+        pub const mode = 1;
+        /// Since version 2: the end of a batch of these events.
+        pub const done = 2;
+        pub const scale = 3;
+        /// Since version 4.
+        pub const name = 4;
+        pub const description = 5;
+    };
+    pub const subpixel = struct {
+        pub const unknown = 0;
+    };
+    pub const transform = struct {
+        pub const normal = 0;
+    };
+    pub const mode_flags = struct {
+        pub const current = 1;
+        pub const preferred = 2;
+    };
+};
+
 pub const xdg_wm_base = struct {
     pub const name = "xdg_wm_base";
-    /// Version 6 adds the suspended state (popups' requests from versions 3
-    /// and later are not supported).
+    /// Version 6 adds the suspended state.
     pub const version = 6;
     pub const request = struct {
         pub const destroy = 0;
@@ -157,6 +221,60 @@ pub const xdg_surface = struct {
         pub const not_constructed = 1;
         pub const already_constructed = 2;
         pub const unconfigured_buffer = 3;
+    };
+};
+
+/// Where a popup goes, relative to its parent.
+pub const xdg_positioner = struct {
+    pub const name = "xdg_positioner";
+    pub const request = struct {
+        pub const destroy = 0;
+        pub const set_size = 1;
+        pub const set_anchor_rect = 2;
+        pub const set_anchor = 3;
+        pub const set_gravity = 4;
+        pub const set_constraint_adjustment = 5;
+        pub const set_offset = 6;
+        /// Since version 3.
+        pub const set_reactive = 7;
+        pub const set_parent_size = 8;
+        pub const set_parent_configure = 9;
+    };
+    /// Anchors (on the anchor rectangle) and gravities (the direction the
+    /// popup extends from the anchor) share these values.
+    pub const anchor = struct {
+        pub const none = 0;
+        pub const top = 1;
+        pub const bottom = 2;
+        pub const left = 3;
+        pub const right = 4;
+        pub const top_left = 5;
+        pub const bottom_left = 6;
+        pub const top_right = 7;
+        pub const bottom_right = 8;
+    };
+    pub const err = struct {
+        pub const invalid_input = 0;
+    };
+};
+
+/// A menu, tooltip or the like: a surface above its parent.
+pub const xdg_popup = struct {
+    pub const name = "xdg_popup";
+    pub const request = struct {
+        pub const destroy = 0;
+        pub const grab = 1;
+        /// Since version 3.
+        pub const reposition = 2;
+    };
+    pub const event = struct {
+        pub const configure = 0;
+        pub const popup_done = 1;
+        /// Since version 3.
+        pub const repositioned = 2;
+    };
+    pub const err = struct {
+        pub const invalid_grab = 0;
     };
 };
 
@@ -330,6 +448,77 @@ pub const wl_keyboard = struct {
     pub const key_state = struct {
         pub const released = 0;
         pub const pressed = 1;
+    };
+};
+
+/// Copy and paste (the clipboard is the "selection"). Drag and drop is
+/// part of the same interfaces; Dazzle does not do it yet.
+pub const wl_data_device_manager = struct {
+    pub const name = "wl_data_device_manager";
+    pub const version = 3;
+    pub const request = struct {
+        pub const create_data_source = 0;
+        pub const get_data_device = 1;
+    };
+};
+
+pub const wl_data_source = struct {
+    pub const name = "wl_data_source";
+    pub const request = struct {
+        pub const offer = 0;
+        pub const destroy = 1;
+        /// Since version 3.
+        pub const set_actions = 2;
+    };
+    pub const event = struct {
+        pub const target = 0;
+        /// Write the data, as this MIME type, to the file descriptor, then
+        /// close it.
+        pub const send = 1;
+        /// Another source replaced it: it can be destroyed.
+        pub const cancelled = 2;
+        pub const dnd_drop_performed = 3;
+        pub const dnd_finished = 4;
+        pub const action = 5;
+    };
+};
+
+pub const wl_data_device = struct {
+    pub const name = "wl_data_device";
+    pub const request = struct {
+        pub const start_drag = 0;
+        pub const set_selection = 1;
+        /// Since version 2.
+        pub const release = 2;
+    };
+    pub const event = struct {
+        /// A new wl_data_offer (its MIME types follow).
+        pub const data_offer = 0;
+        pub const enter = 1;
+        pub const leave = 2;
+        pub const motion = 3;
+        pub const drop = 4;
+        /// The clipboard's offer (or none), sent before keyboard focus
+        /// and when it changes.
+        pub const selection = 5;
+    };
+};
+
+pub const wl_data_offer = struct {
+    pub const name = "wl_data_offer";
+    pub const request = struct {
+        pub const accept = 0;
+        /// Asks for the data, as a MIME type, written to a file descriptor.
+        pub const receive = 1;
+        pub const destroy = 2;
+        /// Since version 3.
+        pub const finish = 3;
+        pub const set_actions = 4;
+    };
+    pub const event = struct {
+        pub const offer = 0;
+        pub const source_actions = 1;
+        pub const action = 2;
     };
 };
 

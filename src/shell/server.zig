@@ -1,12 +1,14 @@
 //! The shell's Wayland server: clients, their objects, and the protocol.
 //!
 //! Supported globals: wl_compositor (surfaces; regions are accepted and
-//! ignored), wl_shm (ARGB8888 and XRGB8888, copied to the GPU at commit),
+//! ignored), wl_subcompositor (subsurfaces, drawn above their parent),
+//! wl_shm (ARGB8888 and XRGB8888, copied to the GPU at commit),
 //! zwp_linux_dmabuf_v1 (buffers in the VideoCore IV's T-tiled layout, used
-//! by the GPU directly), xdg_wm_base (toplevel windows; popups are not
-//! supported), wl_seat (a pointer and a keyboard; key codes are Linux
-//! evdev codes, without an XKB keymap) and wp_cursor_shape_manager_v1 (the
-//! pointer's picture, by name).
+//! by the GPU directly), xdg_wm_base (toplevel windows, and popups above
+//! them: see `Popup`), wl_output (the screen), wl_seat (a pointer, and a
+//! keyboard with a US XKB keymap: see keyboard.zig), wp_cursor_shape_manager_v1
+//! (the pointer's picture, by name) and wl_data_device_manager (copy and
+//! paste: see `setSelection`; drag and drop is not supported yet).
 //!
 //! Windows go in the work area above the shell's dock: maximized (filling
 //! it, as they start), or restored (at first to half its width and height),
@@ -40,6 +42,8 @@ const wayland = @import("wayland");
 const wire = wayland.wire;
 const p = wayland.protocol;
 
+const keyboard = @import("keyboard.zig");
+
 const log = std.log.scoped(.shell);
 
 pub const Texture = struct {
@@ -72,6 +76,17 @@ const globals = [_]struct { name: []const u8, version: u32 }{
     .{ .name = p.zwp_linux_dmabuf_v1.name, .version = p.zwp_linux_dmabuf_v1.version },
     .{ .name = p.wl_seat.name, .version = p.wl_seat.version },
     .{ .name = p.wp_cursor_shape_manager_v1.name, .version = p.wp_cursor_shape_manager_v1.version },
+    .{ .name = p.wl_data_device_manager.name, .version = p.wl_data_device_manager.version },
+    .{ .name = p.wl_subcompositor.name, .version = p.wl_subcompositor.version },
+    .{ .name = p.wl_output.name, .version = p.wl_output.version },
+};
+
+/// The screen, as wl_output describes it.
+pub const Output = struct {
+    width: u32 = 1920,
+    height: u32 = 1080,
+    /// The refresh rate, in thousandths of a hertz.
+    refresh_mhz: i32 = 60000,
 };
 
 const Object = union(enum) {
@@ -86,7 +101,11 @@ const Object = union(enum) {
     buffer: *Buffer,
     /// With the version the client bound.
     wm_base: u32,
-    positioner,
+    positioner: *Positioner,
+    popup: *Popup,
+    subcompositor,
+    subsurface: *Subsurface,
+    output: u32,
     xdg_surface: *XdgSurface,
     toplevel: *Toplevel,
     dmabuf,
@@ -97,6 +116,24 @@ const Object = union(enum) {
     keyboard: u32,
     cursor_shape_manager,
     cursor_shape_device,
+    data_device_manager,
+    data_source: *DataSource,
+    data_device,
+    data_offer: *DataOffer,
+};
+
+/// What a client offers to paste, as MIME types. The clipboard (the
+/// selection) holds one at a time.
+pub const DataSource = struct {
+    client: *Client,
+    id: u32,
+    mime_types: std.ArrayList([]u8) = .empty,
+};
+
+/// What the clipboard holds, as offered to a client: what it can ask for
+/// (`receive`). Null once the source has gone.
+pub const DataOffer = struct {
+    source: ?*DataSource,
 };
 
 pub const Surface = struct {
@@ -112,6 +149,12 @@ pub const Surface = struct {
     /// A copy of the last shm buffer, owned by the surface.
     copy: ?Texture = null,
     xdg: ?*XdgSurface = null,
+    /// Its place in its parent, if it is a subsurface.
+    sub: ?*Subsurface = null,
+    /// Its subsurfaces, bottom first, drawn above it.
+    subsurfaces: std.ArrayList(*Subsurface) = .empty,
+    /// Told it is on the output (wl_surface.enter).
+    entered: bool = false,
 
     pub fn texture(s: *const Surface) ?Texture {
         if (s.buffer) |b| return b.dmabuf;
@@ -149,11 +192,58 @@ pub const Buffer = struct {
     destroyed: bool = false,
 };
 
+/// A surface in another (wl_subsurface): drawn above it, at a place
+/// relative to it, and taking the pointer there.
+pub const Subsurface = struct {
+    id: u32,
+    /// Null once the wl_surface or its parent has been destroyed.
+    surface: ?*Surface,
+    parent: ?*Surface,
+    x: i32 = 0,
+    y: i32 = 0,
+    /// A new place, taking effect when the parent is next committed.
+    pending: ?[2]i32 = null,
+};
+
+/// Where a popup goes (xdg_positioner): a rectangle of its parent to
+/// anchor it to, the point of it to anchor at, the way the popup extends
+/// from there, and an offset. Constraints are met by sliding the popup
+/// into the work area.
+pub const Positioner = struct {
+    width: i32 = 0,
+    height: i32 = 0,
+    anchor_rect: [4]i32 = .{ 0, 0, 0, 0 },
+    anchor: u32 = 0,
+    gravity: u32 = 0,
+    offset: [2]i32 = .{ 0, 0 },
+};
+
+/// A menu, tooltip or the like (xdg_popup): a surface above its parent's
+/// window, placed by a positioner. A popup that grabs (menus do) takes
+/// the keyboard, and is dismissed (popup_done) when a surface of another
+/// client is clicked.
+pub const Popup = struct {
+    xdg: *XdgSurface,
+    id: u32,
+    /// Null once the parent is gone (and the popup dismissed).
+    parent: ?*XdgSurface,
+    /// Its place relative to the parent's surface, and size.
+    x: i32 = 0,
+    y: i32 = 0,
+    width: u32 = 0,
+    height: u32 = 0,
+    mapped: bool = false,
+    grab: bool = false,
+    /// popup_done was sent: it is not shown again.
+    done: bool = false,
+};
+
 pub const XdgSurface = struct {
     /// Null once the wl_surface has been destroyed.
     surface: ?*Surface,
     id: u32,
     toplevel: ?*Toplevel = null,
+    popup: ?*Popup = null,
     configured: bool = false,
     /// The xdg_wm_base version it was made with.
     version: u32 = 1,
@@ -180,9 +270,12 @@ pub const Toplevel = struct {
     /// Its size when restored.
     width: u32 = 0,
     height: u32 = 0,
-    /// The smallest it may be (xdg_toplevel.set_min_size; 0 for any).
+    /// The smallest and biggest it may be (xdg_toplevel.set_min_size and
+    /// set_max_size; 0 for any).
     min_width: u32 = 0,
     min_height: u32 = 0,
+    max_width: u32 = 0,
+    max_height: u32 = 0,
     /// While its left or top edge is dragged, and until it has drawn at
     /// the size it was told, its right or bottom edge stays put: its
     /// corner follows from these and the size of what it shows.
@@ -218,6 +311,8 @@ pub const Client = struct {
     objects: std.AutoHashMapUnmanaged(u32, Object) = .empty,
     dead: bool = false,
     pid: ?linux.pid_t = null,
+    /// IDs for objects the server makes (data offers).
+    next_server_id: u32 = 0xff000000,
 
     fn send(c: *Client, object: u32, opcode: u16) ?wire.Builder {
         if (c.dead) return null;
@@ -298,6 +393,16 @@ pub const Server = struct {
     /// The pointer's picture the client under it chose (an arrow until it
     /// does).
     client_cursor: Cursor = .arrow,
+    /// What the clipboard holds (from the client that last copied), and
+    /// the offers of it made to clients.
+    selection: ?*DataSource = null,
+    offers: std.ArrayList(*DataOffer) = .empty,
+    /// The screen.
+    output: Output = .{},
+    /// The popups shown, bottom first.
+    popups: std.ArrayList(*Popup) = .empty,
+    /// The keyboard's modifiers.
+    modifiers: keyboard.Modifiers = .{},
 
     const Grab = struct { t: *Toplevel, dx: f64, dy: f64, resize: ?Resize = null };
 
@@ -328,6 +433,8 @@ pub const Server = struct {
         s.toplevels.deinit(s.gpa);
         s.frame_callbacks.deinit(s.gpa);
         s.presenting.deinit(s.gpa);
+        s.offers.deinit(s.gpa);
+        s.popups.deinit(s.gpa);
     }
 
     /// Adds a client connected on `fd`.
@@ -386,6 +493,8 @@ pub const Server = struct {
     }
 
     pub fn removeClient(s: *Server, c: *Client) void {
+        // Nothing more is sent to it (nor made for it).
+        c.dead = true;
         // Objects refer to each other, so they go in order: what surfaces
         // show, toplevels, xdg_surfaces, surfaces, then the rest, and
         // buffers last.
@@ -399,13 +508,13 @@ pub const Server = struct {
             },
             else => {},
         };
-        inline for (.{ .toplevel, .xdg_surface, .surface }) |tag| {
+        inline for (.{ .popup, .toplevel, .subsurface, .xdg_surface, .surface }) |tag| {
             it = c.objects.iterator();
             while (it.next()) |e| if (e.value_ptr.* == tag) s.destroyObject(c, e.value_ptr.*);
         }
         it = c.objects.iterator();
         while (it.next()) |e| switch (e.value_ptr.*) {
-            .toplevel, .xdg_surface, .surface, .buffer => {},
+            .popup, .toplevel, .subsurface, .xdg_surface, .surface, .buffer => {},
             else => s.destroyObject(c, e.value_ptr.*),
         };
         it = c.objects.iterator();
@@ -448,6 +557,11 @@ pub const Server = struct {
                 if (pr.fd) |fd| _ = linux.close(fd);
                 s.gpa.destroy(pr);
             },
+            .data_source => |src| s.destroySource(src),
+            .data_offer => |offer| s.destroyOffer(offer),
+            .positioner => |pos| s.gpa.destroy(pos),
+            .popup => |pp| s.destroyPopup(pp),
+            .subsurface => |sub| s.destroySubsurface(sub),
             else => {},
         }
     }
@@ -466,8 +580,16 @@ pub const Server = struct {
         if (surf.xdg) |x| {
             // The xdg_surface lives on, without a surface.
             if (x.toplevel) |t| s.unmap(t);
+            if (x.popup) |pp| s.unmapPopup(pp);
             x.surface = null;
         }
+        // Subsurfaces live on, without their surface or parent.
+        if (surf.sub) |sub| {
+            s.detachSubsurface(sub);
+            sub.surface = null;
+        }
+        for (surf.subsurfaces.items) |child| child.parent = null;
+        surf.subsurfaces.deinit(s.gpa);
         s.gpa.destroy(surf);
     }
 
@@ -481,6 +603,14 @@ pub const Server = struct {
         if (s.grab) |g| if (g.t == t) {
             s.grab = null;
         };
+        // Its popups close.
+        var n = s.popups.items.len;
+        while (n > 0) {
+            n -= 1;
+            if (n >= s.popups.items.len) continue;
+            const pp = s.popups.items[n];
+            if (pp.xdg.surface) |ps| if (s.rootToplevel(ps) == t) s.dismissPopup(pp);
+        }
         for (s.toplevels.items, 0..) |x, i| if (x == t) {
             _ = s.toplevels.orderedRemove(i);
             break;
@@ -535,6 +665,9 @@ pub const Server = struct {
     pub fn scanoutBuffer(s: *const Server, t: *const Toplevel) ?*Buffer {
         if (!t.maximized) return null;
         const surf = t.xdg.surface orelse return null;
+        // Subsurfaces and popups are drawn on it.
+        if (surf.subsurfaces.items.len > 0) return null;
+        for (s.popups.items) |pp| if (pp.xdg.surface) |ps| if (s.rootToplevel(ps) == t) return null;
         const b = surf.buffer orelse return null;
         if (b.dmabuf == null or b.width != s.work_area.width or b.height != s.work_area.height) return null;
         return b;
@@ -631,15 +764,18 @@ pub const Server = struct {
         return .{ s.clampWidth(t, w, wa.width), s.clampHeight(t, h, wa.height) };
     }
 
-    /// A width for `t` between its minimum and `max` (if the minimum fits).
+    /// A width for `t` between its minimum and maximum, and no more than
+    /// `max` (the minimum, if that is more than `max`, giving way).
     fn clampWidth(_: *const Server, t: *const Toplevel, w: u32, max: u32) u32 {
         const min = @max(t.min_width, min_size);
-        return @max(@min(w, max), @min(min, max), 1);
+        const most = if (t.max_width != 0) @min(max, @max(t.max_width, min)) else max;
+        return @max(@min(w, most), @min(min, max), 1);
     }
 
     fn clampHeight(_: *const Server, t: *const Toplevel, h: u32, max: u32) u32 {
         const min = @max(t.min_height, min_size);
-        return @max(@min(h, max), @min(min, max), 1);
+        const most = if (t.max_height != 0) @min(max, @max(t.max_height, min)) else max;
+        return @max(@min(h, most), @min(min, max), 1);
     }
 
     fn setMaximized(s: *Server, c: *Client, t: *Toplevel, on: bool) void {
@@ -667,6 +803,18 @@ pub const Server = struct {
     fn setMinSize(s: *Server, c: *Client, t: *Toplevel, w: i32, h: i32) void {
         t.min_width = @intCast(@max(w, 0));
         t.min_height = @intCast(@max(h, 0));
+        s.sizeLimitsChanged(c, t);
+    }
+
+    /// The client says how big its window may be: a restored window bigger
+    /// than that shrinks.
+    fn setMaxSize(s: *Server, c: *Client, t: *Toplevel, w: i32, h: i32) void {
+        t.max_width = @intCast(@max(w, 0));
+        t.max_height = @intCast(@max(h, 0));
+        s.sizeLimitsChanged(c, t);
+    }
+
+    fn sizeLimitsChanged(s: *Server, c: *Client, t: *Toplevel) void {
         if (t.maximized or !t.placed) return;
         const size = s.configuredSize(t);
         if (size[0] == t.width and size[1] == t.height) return;
@@ -982,7 +1130,15 @@ pub const Server = struct {
             },
             .wm_base => |version| switch (m.opcode) {
                 p.xdg_wm_base.request.destroy => c.deleteId(m.object),
-                p.xdg_wm_base.request.create_positioner => try c.addObject(try r.uint(), .positioner),
+                p.xdg_wm_base.request.create_positioner => {
+                    const id = try r.uint();
+                    const pos = try s.gpa.create(Positioner);
+                    pos.* = .{};
+                    c.addObject(id, .{ .positioner = pos }) catch |e| {
+                        s.gpa.destroy(pos);
+                        return e;
+                    };
+                },
                 p.xdg_wm_base.request.get_xdg_surface => {
                     const id = try r.uint();
                     const surf = switch (c.objects.get(try r.uint()) orelse return error.InvalidObject) {
@@ -1001,10 +1157,84 @@ pub const Server = struct {
                 p.xdg_wm_base.request.pong => {},
                 else => return error.InvalidOpcode,
             },
-            .positioner => if (m.opcode == 0) c.deleteId(m.object),
+            .positioner => |pos| try s.positionerRequest(c, pos, m, r),
+            .popup => |pp| switch (m.opcode) {
+                p.xdg_popup.request.destroy => {
+                    c.deleteId(m.object);
+                    s.destroyPopup(pp);
+                },
+                p.xdg_popup.request.grab => {
+                    _ = try r.uint(); // seat
+                    _ = try r.uint(); // serial
+                    pp.grab = true;
+                    s.updateFocus();
+                },
+                p.xdg_popup.request.reposition => {
+                    const pos = switch (c.objects.get(try r.uint()) orelse return error.InvalidObject) {
+                        .positioner => |x| x,
+                        else => return error.InvalidObject,
+                    };
+                    const token = try r.uint();
+                    s.placePopup(pp, pos.*);
+                    sendTo(c, pp.id, p.xdg_popup.event.repositioned, .{token});
+                    s.configurePopup(c, pp);
+                },
+                else => return error.InvalidOpcode,
+            },
+            .subcompositor => switch (m.opcode) {
+                p.wl_subcompositor.request.destroy => c.deleteId(m.object),
+                p.wl_subcompositor.request.get_subsurface => {
+                    const id = try r.uint();
+                    const surf = switch (c.objects.get(try r.uint()) orelse return error.InvalidObject) {
+                        .surface => |x| x,
+                        else => return error.InvalidObject,
+                    };
+                    const parent = switch (c.objects.get(try r.uint()) orelse return error.InvalidObject) {
+                        .surface => |x| x,
+                        else => return error.InvalidObject,
+                    };
+                    if (surf.xdg != null or surf.sub != null) return c.postError(m.object, p.wl_subcompositor.err.bad_surface, "surface already has a role", .{});
+                    // Not itself, nor one of its own subsurfaces.
+                    var at: ?*Surface = parent;
+                    while (at) |a| : (at = if (a.sub) |sub| sub.parent else null) {
+                        if (a == surf) return c.postError(m.object, p.wl_subcompositor.err.bad_parent, "a surface cannot be in itself", .{});
+                    }
+                    const sub = try s.gpa.create(Subsurface);
+                    sub.* = .{ .id = id, .surface = surf, .parent = parent };
+                    c.addObject(id, .{ .subsurface = sub }) catch |e| {
+                        s.gpa.destroy(sub);
+                        return e;
+                    };
+                    parent.subsurfaces.append(s.gpa, sub) catch {};
+                    surf.sub = sub;
+                },
+                else => return error.InvalidOpcode,
+            },
+            .subsurface => |sub| switch (m.opcode) {
+                p.wl_subsurface.request.destroy => {
+                    c.deleteId(m.object);
+                    s.destroySubsurface(sub);
+                },
+                p.wl_subsurface.request.set_position => {
+                    const x = try r.int();
+                    sub.pending = .{ x, try r.int() };
+                },
+                p.wl_subsurface.request.place_above, p.wl_subsurface.request.place_below => {
+                    const sibling = switch (c.objects.get(try r.uint()) orelse return error.InvalidObject) {
+                        .surface => |x| x,
+                        else => return error.InvalidObject,
+                    };
+                    s.restack(sub, sibling, m.opcode == p.wl_subsurface.request.place_above);
+                },
+                // Subsurfaces' state is applied when they are committed
+                // (as if desynchronized, whichever they are).
+                p.wl_subsurface.request.set_sync, p.wl_subsurface.request.set_desync => {},
+                else => return error.InvalidOpcode,
+            },
+            .output => if (m.opcode == p.wl_output.request.release) c.deleteId(m.object),
             .xdg_surface => |x| switch (m.opcode) {
                 p.xdg_surface.request.destroy => {
-                    if (x.toplevel != null) return c.postError(m.object, p.xdg_wm_base.err.defunct_surfaces, "destroy the toplevel first", .{});
+                    if (x.toplevel != null or x.popup != null) return c.postError(m.object, p.xdg_wm_base.err.defunct_surfaces, "destroy the toplevel or popup first", .{});
                     if (x.surface) |surf| surf.xdg = null;
                     c.deleteId(m.object);
                     s.gpa.destroy(x);
@@ -1020,7 +1250,31 @@ pub const Server = struct {
                     };
                     x.toplevel = t;
                 },
-                p.xdg_surface.request.get_popup => return c.postError(m.object, p.xdg_wm_base.err.invalid_popup_parent, "popups are not supported", .{}),
+                p.xdg_surface.request.get_popup => {
+                    const id = try r.uint();
+                    const parent_id = try r.uint();
+                    const pos = switch (c.objects.get(try r.uint()) orelse return error.InvalidObject) {
+                        .positioner => |ps| ps,
+                        else => return error.InvalidObject,
+                    };
+                    if (x.toplevel != null or x.popup != null) return c.postError(m.object, p.xdg_surface.err.already_constructed, "already has a role", .{});
+                    // Popups need a parent here: there is no other protocol
+                    // to give them one.
+                    const parent = if (parent_id == 0) null else switch (c.objects.get(parent_id) orelse return error.InvalidObject) {
+                        .xdg_surface => |px| px,
+                        else => return error.InvalidObject,
+                    };
+                    if (parent == null) return c.postError(m.object, p.xdg_wm_base.err.invalid_popup_parent, "popups need a parent", .{});
+                    if (pos.width <= 0 or pos.height <= 0) return c.postError(m.object, p.xdg_wm_base.err.invalid_positioner, "the positioner has no size", .{});
+                    const pp = try s.gpa.create(Popup);
+                    pp.* = .{ .xdg = x, .id = id, .parent = parent };
+                    c.addObject(id, .{ .popup = pp }) catch |e| {
+                        s.gpa.destroy(pp);
+                        return e;
+                    };
+                    x.popup = pp;
+                    s.placePopup(pp, pos.*);
+                },
                 p.xdg_surface.request.ack_configure => {
                     const serial = try r.uint();
                     if (x.toplevel) |t| if (serial == t.configure_serial) s.acked(t);
@@ -1054,8 +1308,12 @@ pub const Server = struct {
                     const w = try r.int();
                     s.setMinSize(c, t, w, try r.int());
                 },
-                // Windows have no largest size (but the work area), cannot
-                // be minimized or made fullscreen, and have no menu.
+                p.xdg_toplevel.request.set_max_size => {
+                    const w = try r.int();
+                    s.setMaxSize(c, t, w, try r.int());
+                },
+                // Windows cannot be minimized or made fullscreen, and have
+                // no menu.
                 else => {},
             },
             .dmabuf => switch (m.opcode) {
@@ -1076,6 +1334,73 @@ pub const Server = struct {
             // The cursor is the shell's own.
             .pointer => if (m.opcode == p.wl_pointer.request.release) c.deleteId(m.object),
             .keyboard => if (m.opcode == p.wl_keyboard.request.release) c.deleteId(m.object),
+            .data_device_manager => switch (m.opcode) {
+                p.wl_data_device_manager.request.create_data_source => {
+                    const id = try r.uint();
+                    const src = try s.gpa.create(DataSource);
+                    src.* = .{ .client = c, .id = id };
+                    c.addObject(id, .{ .data_source = src }) catch |e| {
+                        s.gpa.destroy(src);
+                        return e;
+                    };
+                },
+                p.wl_data_device_manager.request.get_data_device => {
+                    const id = try r.uint();
+                    _ = try r.uint(); // the seat: there is one
+                    try c.addObject(id, .data_device);
+                    // A client with the keyboard learns what the clipboard
+                    // holds.
+                    if (s.keyboard_focus) |surf| if (surf.client == c) s.sendSelectionTo(c, id);
+                },
+                else => return error.InvalidOpcode,
+            },
+            .data_source => |src| switch (m.opcode) {
+                p.wl_data_source.request.offer => {
+                    const mime = (try r.string()) orelse return error.InvalidArgument;
+                    if (src.mime_types.items.len >= max_mime_types) return;
+                    const copy = try s.gpa.dupe(u8, mime);
+                    src.mime_types.append(s.gpa, copy) catch |e| {
+                        s.gpa.free(copy);
+                        return e;
+                    };
+                },
+                p.wl_data_source.request.destroy => {
+                    c.deleteId(m.object);
+                    s.destroySource(src);
+                },
+                // Actions are for drag and drop.
+                p.wl_data_source.request.set_actions => {},
+                else => return error.InvalidOpcode,
+            },
+            .data_device => switch (m.opcode) {
+                // Drag and drop is not supported: nothing is dragged.
+                p.wl_data_device.request.start_drag => {},
+                p.wl_data_device.request.set_selection => {
+                    const id = try r.uint();
+                    _ = try r.uint(); // serial
+                    const src: ?*DataSource = if (id == 0) null else switch (c.objects.get(id) orelse return error.InvalidObject) {
+                        .data_source => |x| x,
+                        else => return error.InvalidObject,
+                    };
+                    s.setSelection(c, src);
+                },
+                p.wl_data_device.request.release => c.deleteId(m.object),
+                else => return error.InvalidOpcode,
+            },
+            .data_offer => |offer| switch (m.opcode) {
+                p.wl_data_offer.request.receive => {
+                    const mime = (try r.string()) orelse "";
+                    s.receive(offer, mime, try r.fd());
+                },
+                p.wl_data_offer.request.destroy => {
+                    // Made by the server: no delete_id.
+                    _ = c.objects.remove(m.object);
+                    s.destroyOffer(offer);
+                },
+                // Accepting, finishing and actions are for drag and drop.
+                p.wl_data_offer.request.accept, p.wl_data_offer.request.finish, p.wl_data_offer.request.set_actions => {},
+                else => return error.InvalidOpcode,
+            },
             .cursor_shape_manager => switch (m.opcode) {
                 p.wp_cursor_shape_manager_v1.request.destroy => c.deleteId(m.object),
                 p.wp_cursor_shape_manager_v1.request.get_pointer => {
@@ -1139,9 +1464,50 @@ pub const Server = struct {
                 };
             },
             6 => try c.addObject(id, .cursor_shape_manager),
+            7 => try c.addObject(id, .data_device_manager),
+            8 => try c.addObject(id, .subcompositor),
+            9 => {
+                try c.addObject(id, .{ .output = version });
+                s.describeOutput(c, id, version);
+                // The client's surfaces already shown are on it.
+                var it = c.objects.valueIterator();
+                while (it.next()) |o| switch (o.*) {
+                    .surface => |surf| if (surf.entered) sendTo(c, surf.id, p.wl_surface.event.enter, .{id}),
+                    else => {},
+                };
+            },
             else => unreachable,
         }
-        _ = s;
+    }
+
+    /// Tells a client about the screen: where it is, its mode, its scale
+    /// (always 1) and name.
+    fn describeOutput(s: *Server, c: *Client, id: u32, version: u32) void {
+        const o = s.output;
+        if (c.send(id, p.wl_output.event.geometry)) |m0| {
+            var e = m0;
+            // At 0,0; its physical size is not known.
+            e.int(0).int(0).int(0).int(0).int(p.wl_output.subpixel.unknown).string("Unknown").string("Unknown").int(p.wl_output.transform.normal).end();
+        }
+        sendTo(c, id, p.wl_output.event.mode, .{ @as(u32, p.wl_output.mode_flags.current | p.wl_output.mode_flags.preferred), @as(i32, @intCast(o.width)), @as(i32, @intCast(o.height)), o.refresh_mhz });
+        if (version >= 2) sendTo(c, id, p.wl_output.event.scale, .{@as(i32, 1)});
+        if (version >= 4) {
+            if (c.send(id, p.wl_output.event.name)) |m0| {
+                var e = m0;
+                e.string("HDMI-A-1").end();
+            }
+            if (c.send(id, p.wl_output.event.description)) |m0| {
+                var e = m0;
+                e.string("The screen").end();
+            }
+        }
+        if (version >= 2) sendTo(c, id, p.wl_output.event.done, .{});
+    }
+
+    /// Tells a client a surface is on the screen (each of its wl_outputs).
+    fn sendEnter(_: *Server, c: *Client, surf: *Surface) void {
+        var it = c.objects.iterator();
+        while (it.next()) |e| if (e.value_ptr.* == .output) sendTo(c, surf.id, p.wl_surface.event.enter, .{e.key_ptr.*});
     }
 
     fn seatRequest(s: *Server, c: *Client, version: u32, m: wire.Message, r: *wire.Reader) !void {
@@ -1159,23 +1525,391 @@ pub const Server = struct {
             p.wl_seat.request.get_keyboard => {
                 const id = try r.uint();
                 try c.addObject(id, .{ .keyboard = version });
-                // No XKB keymap: keys are evdev codes. The protocol still
-                // wants a file descriptor.
-                const null_fd = linux.open("/dev/null", .{ .CLOEXEC = true }, 0);
-                if (linux.errno(null_fd) == .SUCCESS) {
+                // A US keyboard's XKB keymap (key events carry Linux key
+                // codes, which are its key codes less 8).
+                if (keyboard.keymapFile()) |fd| {
                     if (c.send(id, p.wl_keyboard.event.keymap)) |m0| {
                         var e = m0;
-                        e.uint(p.wl_keyboard.keymap_format.no_keymap).fd(@intCast(null_fd)).uint(0).end();
-                    } else _ = linux.close(@intCast(null_fd));
-                }
-                // Key repeat is the client's business; a rate of 0 turns it off.
-                if (version >= 4) sendTo(c, id, p.wl_keyboard.event.repeat_info, .{ @as(i32, 0), @as(i32, 0) });
+                        e.uint(p.wl_keyboard.keymap_format.xkb_v1).fd(fd).uint(keyboard.keymap.len).end();
+                    } else _ = linux.close(fd);
+                } else |err| log.info("no keymap: {s}", .{@errorName(err)});
+                // Clients repeat held keys themselves: 25 a second, after
+                // 600 ms.
+                if (version >= 4) sendTo(c, id, p.wl_keyboard.event.repeat_info, .{ @as(i32, 25), @as(i32, 600) });
                 if (s.keyboard_focus) |surf| if (surf.client == c) s.sendKeyboardEnter(c, id, surf);
             },
             p.wl_seat.request.get_touch => return c.postError(m.object, p.wl_display.err.invalid_method, "no touch screen", .{}),
             p.wl_seat.request.release => c.deleteId(m.object),
             else => return error.InvalidOpcode,
         }
+    }
+
+    // --- Popups -----------------------------------------------------------------
+
+    fn positionerRequest(_: *Server, c: *Client, pos: *Positioner, m: wire.Message, r: *wire.Reader) !void {
+        const req = p.xdg_positioner.request;
+        switch (m.opcode) {
+            req.destroy => {
+                c.deleteId(m.object);
+                c.server.gpa.destroy(pos);
+            },
+            req.set_size => {
+                const w = try r.int();
+                const h = try r.int();
+                if (w <= 0 or h <= 0) return c.postError(m.object, p.xdg_positioner.err.invalid_input, "a popup's size must be positive", .{});
+                pos.width = w;
+                pos.height = h;
+            },
+            req.set_anchor_rect => {
+                const rect = [4]i32{ try r.int(), try r.int(), try r.int(), try r.int() };
+                if (rect[2] < 0 or rect[3] < 0) return c.postError(m.object, p.xdg_positioner.err.invalid_input, "the anchor rectangle's size is negative", .{});
+                pos.anchor_rect = rect;
+            },
+            req.set_anchor => pos.anchor = try r.uint(),
+            req.set_gravity => pos.gravity = try r.uint(),
+            req.set_offset => {
+                const x = try r.int();
+                pos.offset = .{ x, try r.int() };
+            },
+            // Constraints are met by sliding; nothing is reactive, and the
+            // parent's size is known.
+            req.set_constraint_adjustment, req.set_reactive, req.set_parent_size, req.set_parent_configure => {},
+            else => return error.InvalidOpcode,
+        }
+    }
+
+    /// Which way an anchor or gravity points, across and down: -1, 0 or 1.
+    fn direction(value: u32) [2]i32 {
+        const a = p.xdg_positioner.anchor;
+        return switch (value) {
+            a.top => .{ 0, -1 },
+            a.bottom => .{ 0, 1 },
+            a.left => .{ -1, 0 },
+            a.right => .{ 1, 0 },
+            a.top_left => .{ -1, -1 },
+            a.bottom_left => .{ -1, 1 },
+            a.top_right => .{ 1, -1 },
+            a.bottom_right => .{ 1, 1 },
+            else => .{ 0, 0 },
+        };
+    }
+
+    /// Places a popup as its positioner says, relative to its parent, slid
+    /// into the work area if it would go outside it.
+    fn placePopup(s: *const Server, pp: *Popup, pos: Positioner) void {
+        const rect = pos.anchor_rect;
+        const anchor = direction(pos.anchor);
+        const gravity = direction(pos.gravity);
+        const w = pos.width;
+        const h = pos.height;
+        // The anchor point on the rectangle, then the popup extending from
+        // it the way gravity says (centred on it for none).
+        const ax = rect[0] + @divTrunc(rect[2] * (anchor[0] + 1), 2);
+        const ay = rect[1] + @divTrunc(rect[3] * (anchor[1] + 1), 2);
+        var x = ax - @divTrunc(w * (1 - gravity[0]), 2) + pos.offset[0];
+        var y = ay - @divTrunc(h * (1 - gravity[1]), 2) + pos.offset[1];
+        if (pp.parent) |parent| if (parent.surface) |ps| if (s.surfaceOrigin(ps)) |o| {
+            const wa = s.work_area;
+            const right = wa.x + @as(i32, @intCast(wa.width));
+            const bottom = wa.y + @as(i32, @intCast(wa.height));
+            x = std.math.clamp(o[0] + x, wa.x, @max(right - w, wa.x)) - o[0];
+            y = std.math.clamp(o[1] + y, wa.y, @max(bottom - h, wa.y)) - o[1];
+        };
+        pp.x = x;
+        pp.y = y;
+        pp.width = @intCast(w);
+        pp.height = @intCast(h);
+    }
+
+    /// Tells a popup where it is and how big.
+    fn configurePopup(s: *Server, c: *Client, pp: *Popup) void {
+        sendTo(c, pp.id, p.xdg_popup.event.configure, .{ pp.x, pp.y, @as(i32, @intCast(pp.width)), @as(i32, @intCast(pp.height)) });
+        sendTo(c, pp.xdg.id, p.xdg_surface.event.configure, .{s.nextSerial()});
+    }
+
+    fn mapPopup(s: *Server, pp: *Popup) void {
+        if (pp.mapped or pp.done) return;
+        pp.mapped = true;
+        s.popups.append(s.gpa, pp) catch {
+            pp.mapped = false;
+            return;
+        };
+        s.damaged = true;
+        s.updateFocus();
+    }
+
+    fn unmapPopup(s: *Server, pp: *Popup) void {
+        // Popups on it go too.
+        var i = s.popups.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (i >= s.popups.items.len) continue;
+            const other = s.popups.items[i];
+            if (other.parent == pp.xdg) s.dismissPopup(other);
+        }
+        if (std.mem.indexOfScalar(*Popup, s.popups.items, pp)) |j| _ = s.popups.orderedRemove(j);
+        if (!pp.mapped) return;
+        pp.mapped = false;
+        s.damaged = true;
+        s.updateFocus();
+    }
+
+    /// Closes a popup: it is told (popup_done), and no longer shown.
+    fn dismissPopup(s: *Server, pp: *Popup) void {
+        if (!pp.done) {
+            pp.done = true;
+            if (pp.xdg.surface) |surf| sendTo(surf.client, pp.id, p.xdg_popup.event.popup_done, .{});
+        }
+        s.unmapPopup(pp);
+    }
+
+    fn destroyPopup(s: *Server, pp: *Popup) void {
+        s.unmapPopup(pp);
+        pp.xdg.popup = null;
+        // Popups on it lose their parent.
+        for (s.popups.items) |other| if (other.parent == pp.xdg) {
+            other.parent = null;
+        };
+        s.gpa.destroy(pp);
+    }
+
+    /// Dismisses every grabbing popup (when something else is clicked).
+    fn dismissGrabs(s: *Server) void {
+        var i = s.popups.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (i >= s.popups.items.len) continue;
+            if (s.popups.items[i].grab) s.dismissPopup(s.popups.items[i]);
+        }
+    }
+
+    // --- Subsurfaces ------------------------------------------------------------
+
+    /// Takes a subsurface out of its parent's list.
+    fn detachSubsurface(_: *Server, sub: *Subsurface) void {
+        const parent = sub.parent orelse return;
+        if (std.mem.indexOfScalar(*Subsurface, parent.subsurfaces.items, sub)) |i| _ = parent.subsurfaces.orderedRemove(i);
+    }
+
+    fn destroySubsurface(s: *Server, sub: *Subsurface) void {
+        s.detachSubsurface(sub);
+        if (sub.surface) |surf| surf.sub = null;
+        s.damaged = true;
+        s.gpa.destroy(sub);
+    }
+
+    /// Moves a subsurface just above or below a sibling (or to the bottom
+    /// of the parent's subsurfaces, for the parent itself: they are all
+    /// above it).
+    fn restack(s: *Server, sub: *Subsurface, sibling: *Surface, above: bool) void {
+        const parent = sub.parent orelse return;
+        s.detachSubsurface(sub);
+        const list = &parent.subsurfaces;
+        var at: usize = 0;
+        if (sibling != parent) if (sibling.sub) |other| if (std.mem.indexOfScalar(*Subsurface, list.items, other)) |i| {
+            at = if (above) i + 1 else i;
+        };
+        list.insert(s.gpa, at, sub) catch {};
+        s.damaged = true;
+    }
+
+    // --- Where surfaces are -------------------------------------------------------
+
+    /// The window a surface belongs to: its own, its parent's (for a
+    /// subsurface) or its popup parent's.
+    pub fn rootToplevel(_: *const Server, surf: *const Surface) ?*Toplevel {
+        var at = surf;
+        var depth: usize = 0;
+        while (depth < 64) : (depth += 1) {
+            if (at.sub) |sub| {
+                at = sub.parent orelse return null;
+                continue;
+            }
+            const x = at.xdg orelse return null;
+            if (x.toplevel) |t| return t;
+            const pp = x.popup orelse return null;
+            const parent = pp.parent orelse return null;
+            at = parent.surface orelse return null;
+        }
+        return null;
+    }
+
+    /// Where a surface's top left is on the screen, if it is shown.
+    pub fn surfaceOrigin(s: *const Server, surf: *const Surface) ?[2]i32 {
+        if (surf.sub) |sub| {
+            const parent = sub.parent orelse return null;
+            const o = s.surfaceOrigin(parent) orelse return null;
+            return .{ o[0] + sub.x, o[1] + sub.y };
+        }
+        const x = surf.xdg orelse return null;
+        if (x.toplevel) |t| {
+            if (!t.shown()) return null;
+            const r = s.windowRect(t);
+            return .{ r.x, r.y };
+        }
+        const pp = x.popup orelse return null;
+        if (!pp.mapped) return null;
+        const parent = pp.parent orelse return null;
+        const ps = parent.surface orelse return null;
+        const o = s.surfaceOrigin(ps) orelse return null;
+        return .{ o[0] + pp.x, o[1] + pp.y };
+    }
+
+    /// Something to draw: a surface's picture, at a place on the screen,
+    /// clipped to an area.
+    pub const Quad = struct { texture: Texture, x: i32, y: i32, clip: Rect };
+
+    /// What to draw, bottom first: each window that can be seen, with its
+    /// subsurfaces, then its popups (the top ones, if there are more than
+    /// fit in `buf`).
+    pub fn drawList(s: *const Server, buf: []Quad) []Quad {
+        var shown: [32]*Toplevel = undefined;
+        var list: std.ArrayList(Quad) = .initBuffer(buf);
+        for (s.visibleWindows(&shown)) |t| {
+            const surf = t.xdg.surface orelse continue;
+            s.addTree(&list, surf);
+            for (s.popups.items) |pp| if (pp.xdg.surface) |ps| if (s.rootToplevel(ps) == t) s.addTree(&list, ps);
+        }
+        return list.items;
+    }
+
+    /// A surface and its subsurfaces, above it.
+    fn addTree(s: *const Server, list: *std.ArrayList(Quad), surf: *const Surface) void {
+        const o = s.surfaceOrigin(surf) orelse return;
+        if (surf.texture()) |tex| {
+            // Over the most there is room for: the newest, at the top.
+            if (list.items.len == list.capacity) _ = list.orderedRemove(0);
+            list.appendAssumeCapacity(.{ .texture = tex, .x = o[0], .y = o[1], .clip = s.work_area });
+        }
+        for (surf.subsurfaces.items) |sub| if (sub.surface) |child| s.addTree(list, child);
+    }
+
+    /// The topmost surface of a tree (`surf` and its subsurfaces) at
+    /// (`x`, `y`) on the screen.
+    fn hitTree(s: *const Server, surf: *Surface, x: f64, y: f64) ?*Surface {
+        var i = surf.subsurfaces.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (surf.subsurfaces.items[i].surface) |child| if (s.hitTree(child, x, y)) |hit| return hit;
+        }
+        const tex = surf.texture() orelse return null;
+        const o = s.surfaceOrigin(surf) orelse return null;
+        const x0: f64 = @floatFromInt(o[0]);
+        const y0: f64 = @floatFromInt(o[1]);
+        if (x >= x0 and x < x0 + @as(f64, @floatFromInt(tex.width)) and y >= y0 and y < y0 + @as(f64, @floatFromInt(tex.height))) return surf;
+        return null;
+    }
+
+    // --- Copy and paste --------------------------------------------------------
+
+    /// The most MIME types a source may offer.
+    const max_mime_types = 16;
+
+    /// `c` copied `src` (or emptied the clipboard): it replaces what the
+    /// clipboard held, whose source is told (cancelled). Only the client
+    /// with the keyboard may, so a window behind cannot take the clipboard;
+    /// from another, the source is cancelled at once.
+    fn setSelection(s: *Server, c: *Client, src: ?*DataSource) void {
+        const focused = if (s.keyboard_focus) |surf| surf.client == c else false;
+        if (!focused) {
+            if (src) |x| sendCancelled(x);
+            return;
+        }
+        if (s.selection == src) return;
+        if (s.selection) |old| {
+            s.forgetSource(old);
+            sendCancelled(old);
+        }
+        s.selection = src;
+        s.sendSelection();
+    }
+
+    fn sendCancelled(src: *DataSource) void {
+        if (src.client.send(src.id, p.wl_data_source.event.cancelled)) |m0| {
+            var m = m0;
+            m.end();
+        }
+    }
+
+    /// Offers will not reach `src` any more.
+    fn forgetSource(s: *Server, src: *DataSource) void {
+        for (s.offers.items) |offer| if (offer.source == src) {
+            offer.source = null;
+        };
+    }
+
+    fn destroySource(s: *Server, src: *DataSource) void {
+        s.forgetSource(src);
+        if (s.selection == src) {
+            s.selection = null;
+            s.sendSelection();
+        }
+        for (src.mime_types.items) |mime| s.gpa.free(mime);
+        src.mime_types.deinit(s.gpa);
+        s.gpa.destroy(src);
+    }
+
+    fn destroyOffer(s: *Server, offer: *DataOffer) void {
+        if (std.mem.indexOfScalar(*DataOffer, s.offers.items, offer)) |i| _ = s.offers.swapRemove(i);
+        s.gpa.destroy(offer);
+    }
+
+    /// Tells the client with the keyboard what the clipboard holds.
+    fn sendSelection(s: *Server) void {
+        const surf = s.keyboard_focus orelse return;
+        const c = surf.client;
+        var devices: [4]u32 = undefined;
+        var n: usize = 0;
+        var it = c.objects.iterator();
+        while (it.next()) |e| if (e.value_ptr.* == .data_device and n < devices.len) {
+            devices[n] = e.key_ptr.*;
+            n += 1;
+        };
+        // (Offers are added to the objects: not while iterating them.)
+        for (devices[0..n]) |id| s.sendSelectionTo(c, id);
+    }
+
+    /// Sends a client's data device a new offer of what the clipboard
+    /// holds, with its MIME types, as the selection (or that it is empty).
+    fn sendSelectionTo(s: *Server, c: *Client, device: u32) void {
+        if (c.dead) return;
+        const src = s.selection orelse {
+            sendTo(c, device, p.wl_data_device.event.selection, .{@as(u32, 0)});
+            return;
+        };
+        const offer = s.gpa.create(DataOffer) catch return;
+        offer.* = .{ .source = src };
+        const id = c.next_server_id;
+        c.next_server_id += 1;
+        s.offers.append(s.gpa, offer) catch {
+            s.gpa.destroy(offer);
+            return;
+        };
+        c.objects.put(s.gpa, id, .{ .data_offer = offer }) catch {
+            _ = s.offers.pop();
+            s.gpa.destroy(offer);
+            return;
+        };
+        sendTo(c, device, p.wl_data_device.event.data_offer, .{id});
+        for (src.mime_types.items) |mime| if (c.send(id, p.wl_data_offer.event.offer)) |m0| {
+            var m = m0;
+            m.string(mime).end();
+        };
+        sendTo(c, device, p.wl_data_device.event.selection, .{id});
+    }
+
+    /// A client asks for what the clipboard holds, as `mime`, written to
+    /// `fd`: its source is asked to write it. If it has gone, `fd` is
+    /// closed (and the client reads nothing).
+    fn receive(_: *Server, offer: *DataOffer, mime: []const u8, fd: linux.fd_t) void {
+        const src = offer.source orelse {
+            _ = linux.close(fd);
+            return;
+        };
+        if (src.client.send(src.id, p.wl_data_source.event.send)) |m0| {
+            var m = m0;
+            m.string(mime).fd(fd).end();
+        } else _ = linux.close(fd);
     }
 
     // --- Input ----------------------------------------------------------------
@@ -1209,11 +1943,20 @@ pub const Server = struct {
             if (s.buttons_down == 0) s.endGrab();
             return;
         }
-        // Clicking a window behind another brings it to the top.
-        if (pressed) if (s.pointer_focus) |surf| if (surf.xdg) |x| if (x.toplevel) |t| if (t != s.topWindow()) {
-            s.raiseToplevel(t);
-            s.updateFocus();
-        };
+        if (pressed) {
+            // Clicking anything but the grabbing client's own surfaces
+            // closes its menus.
+            const owner: ?*Client = if (s.pointer_focus) |surf| surf.client else null;
+            for (s.popups.items) |pp| if (pp.grab) if (pp.xdg.surface) |ps| if (ps.client != owner) {
+                s.dismissGrabs();
+                break;
+            };
+            // Clicking a window behind another brings it to the top.
+            if (s.pointer_focus) |surf| if (s.rootToplevel(surf)) |t| if (t != s.topWindow()) {
+                s.raiseToplevel(t);
+                s.updateFocus();
+            };
+        }
         const surf = s.pointer_focus orelse return;
         const state: u32 = if (pressed) p.wl_pointer.button_state.pressed else p.wl_pointer.button_state.released;
         const serial = s.nextSerial();
@@ -1235,9 +1978,12 @@ pub const Server = struct {
 
     /// `key` is a Linux key code (KEY_A, ...).
     pub fn keyboardKey(s: *Server, time_ms: u32, key: u32, pressed: bool) void {
+        const changed = s.modifiers.update(key, pressed);
         const surf = s.keyboard_focus orelse return;
         const state: u32 = if (pressed) p.wl_keyboard.key_state.pressed else p.wl_keyboard.key_state.released;
         broadcast(surf.client, .keyboard, p.wl_keyboard.event.key, 1, .{ s.nextSerial(), time_ms, key, state });
+        // The modifiers after the key, as the keymap has them.
+        if (changed) broadcast(surf.client, .keyboard, p.wl_keyboard.event.modifiers, 1, .{ s.nextSerial(), s.modifiers.depressed(), @as(u32, 0), s.modifiers.locked, @as(u32, 0) });
     }
 
     /// Tells windows whether they are covered and activated, after the
@@ -1283,10 +2029,17 @@ pub const Server = struct {
     pub fn updateFocus(s: *Server) void {
         s.updateCovered();
         if (s.updatePointerFocus()) s.pointerFrame();
-        const top: ?*Surface = if (s.topWindow()) |t| t.xdg.surface else null;
+        // The top window has the keyboard, or its topmost grabbing popup
+        // (a menu) has.
+        var top: ?*Surface = if (s.topWindow()) |t| t.xdg.surface else null;
+        if (s.topWindow()) |t| for (s.popups.items) |pp| if (pp.grab) if (pp.xdg.surface) |ps| if (s.rootToplevel(ps) == t) {
+            top = ps;
+        };
         if (top == s.keyboard_focus) return;
         if (s.keyboard_focus) |old| broadcast(old.client, .keyboard, p.wl_keyboard.event.leave, 1, .{ s.nextSerial(), old.id });
         s.keyboard_focus = top;
+        // What the clipboard holds comes just before the keyboard.
+        s.sendSelection();
         if (top) |surf| {
             var it = surf.client.objects.iterator();
             while (it.next()) |e| if (e.value_ptr.* == .keyboard) s.sendKeyboardEnter(surf.client, e.key_ptr.*, surf);
@@ -1295,25 +2048,37 @@ pub const Server = struct {
 
     /// The surface under the pointer, if any: the top window there.
     fn surfaceUnderPointer(s: *Server) ?*Surface {
+        // Only what is in the work area can be seen.
+        const wa = s.work_area;
+        const x = s.pointer_x;
+        const y = s.pointer_y;
+        if (x < @as(f64, @floatFromInt(wa.x)) or y < @as(f64, @floatFromInt(wa.y)) or
+            x >= @as(f64, @floatFromInt(wa.x + @as(i32, @intCast(wa.width)))) or
+            y >= @as(f64, @floatFromInt(wa.y + @as(i32, @intCast(wa.height))))) return null;
         var i = s.toplevels.items.len;
         while (i > 0) {
             i -= 1;
             const t = s.toplevels.items[i];
-            if (!t.shown()) continue;
-            const r = s.visibleRect(t);
-            const x0: f64 = @floatFromInt(r.x);
-            const y0: f64 = @floatFromInt(r.y);
-            if (s.pointer_x >= x0 and s.pointer_x < x0 + @as(f64, @floatFromInt(r.width)) and
-                s.pointer_y >= y0 and s.pointer_y < y0 + @as(f64, @floatFromInt(r.height))) return t.xdg.surface;
+            if (!t.shown() or t.suspended) continue;
+            // Its popups, topmost first, are above it.
+            var j = s.popups.items.len;
+            while (j > 0) {
+                j -= 1;
+                const ps = s.popups.items[j].xdg.surface orelse continue;
+                if (s.rootToplevel(ps) != t) continue;
+                if (s.hitTree(ps, x, y)) |hit| return hit;
+            }
+            const surf = t.xdg.surface orelse continue;
+            if (s.hitTree(surf, x, y)) |hit| return hit;
         }
         return null;
     }
 
-    /// The pointer's position relative to the focused surface's window.
+    /// The pointer's position relative to the focused surface.
     fn surfaceLocal(s: *const Server) [2]f64 {
         const surf = s.pointer_focus orelse return .{ 0, 0 };
-        const r = s.windowRect(surf.xdg.?.toplevel.?);
-        return .{ s.pointer_x - @as(f64, @floatFromInt(r.x)), s.pointer_y - @as(f64, @floatFromInt(r.y)) };
+        const o = s.surfaceOrigin(surf) orelse return .{ 0, 0 };
+        return .{ s.pointer_x - @as(f64, @floatFromInt(o[0])), s.pointer_y - @as(f64, @floatFromInt(o[1])) };
     }
 
     /// Sends leave and enter events if the pointer is over a different
@@ -1339,7 +2104,7 @@ pub const Server = struct {
     fn sendKeyboardEnter(s: *Server, c: *Client, id: u32, surf: *Surface) void {
         const no_keys: []const u8 = &.{};
         sendTo(c, id, p.wl_keyboard.event.enter, .{ s.nextSerial(), surf.id, no_keys });
-        sendTo(c, id, p.wl_keyboard.event.modifiers, .{ s.serial, @as(u32, 0), @as(u32, 0), @as(u32, 0), @as(u32, 0) });
+        sendTo(c, id, p.wl_keyboard.event.modifiers, .{ s.serial, s.modifiers.depressed(), @as(u32, 0), s.modifiers.locked, @as(u32, 0) });
     }
 
     /// Sends an event to each of a client's pointers or keyboards (bound at
@@ -1426,7 +2191,18 @@ pub const Server = struct {
         }
         // A covered window's frame callbacks wait until it is uncovered:
         // its client need not draw what cannot be seen.
-        const covered = if (surf.xdg) |x| (if (x.toplevel) |t| t.mapped and t.suspended else false) else false;
+        const covered = if (s.rootToplevel(surf)) |t| t.mapped and t.suspended else false;
+        // Subsurfaces take their new places with their parent.
+        for (surf.subsurfaces.items) |sub| if (sub.pending) |pos| {
+            sub.x = pos[0];
+            sub.y = pos[1];
+            sub.pending = null;
+        };
+        // Shown for the first time: on the screen.
+        if (!surf.entered and surf.texture() != null) {
+            surf.entered = true;
+            s.sendEnter(c, surf);
+        }
         if (covered) {
             try surf.held_callbacks.appendSlice(s.gpa, surf.pending_callbacks.items);
         } else {
@@ -1449,6 +2225,18 @@ pub const Server = struct {
             // Drawn since acknowledging the last configure: the next size
             // can be sent.
             if (t.acked and !t.drawn) s.drewConfigure(c, t);
+        };
+        if (surf.xdg) |x| if (x.popup) |pp| {
+            if (!x.configured) {
+                if (surf.texture() != null) return c.postError(x.id, p.xdg_surface.err.unconfigured_buffer, "buffer before the first configure", .{});
+                // Placed again: the parent may have moved since.
+                s.configurePopup(c, pp);
+                x.configured = true;
+            } else if (surf.texture() != null and !pp.mapped) {
+                s.mapPopup(pp);
+            } else if (surf.texture() == null and pp.mapped) {
+                s.unmapPopup(pp);
+            }
         };
         // What a covered window shows changes nothing on the screen.
         if (!covered) s.damaged = true;
@@ -1493,6 +2281,8 @@ pub const Server = struct {
             }
             t.capabilities_sent = true;
         }
+        // The biggest it can usefully be: the work area.
+        if (t.xdg.version >= 4) sendTo(c, t.id, p.xdg_toplevel.event.configure_bounds, .{ @as(i32, @intCast(s.work_area.width)), @as(i32, @intCast(s.work_area.height)) });
         if (c.send(t.id, p.xdg_toplevel.event.configure)) |m0| {
             var e = m0;
             var states: [16]u8 = undefined;

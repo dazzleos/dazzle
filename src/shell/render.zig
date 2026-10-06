@@ -34,9 +34,9 @@ pub const Window = struct {
     clip: server.Rect,
 };
 
-/// The most windows a frame draws (the vertex buffer holds this many quads
-/// besides the panels').
-pub const max_windows = 16;
+/// The most surfaces a frame draws (windows, their subsurfaces and popups:
+/// the vertex buffer holds this many quads besides the panels').
+pub const max_windows = 48;
 
 /// A panel's picture, drawn across the screen at `y`.
 pub const PanelQuad = struct { texture: server.Texture, y: i32 };
@@ -90,7 +90,7 @@ fn quad(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, index: us
 
 /// Room for the panels' and windows' quads (each two triangles of four
 /// floats per vertex).
-const vbo_size = 4096;
+const vbo_size = 8192;
 comptime {
     std.debug.assert((n_panels + max_windows) * 6 * 4 * @sizeOf(f32) <= vbo_size);
 }

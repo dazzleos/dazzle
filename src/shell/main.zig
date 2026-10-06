@@ -110,6 +110,12 @@ fn run(init: std.process.Init.Minimal) !void {
         .width = renderer.width,
         .height = renderer.height,
     });
+    // The screen, for clients that ask (wl_output).
+    server.output = .{
+        .width = renderer.width,
+        .height = renderer.height,
+        .refresh_mhz = @intCast(std.time.us_per_s * 1000 / @max(renderer.display.refreshPeriodUs(), 1)),
+    };
 
     var path_buf: [108]u8 = undefined;
     const path = if (runtime_dir) |dir| try std.fmt.bufPrintZ(&path_buf, "{s}/wayland-0", .{dir}) else wayland.client.default_socket;
@@ -535,15 +541,13 @@ fn spawn(program: [*:0]const u8, runtime_dir: ?[:0]const u8) ?linux.pid_t {
     linux.exit(127);
 }
 
-/// The windows that can be seen, bottom first, as the renderer draws them.
+/// The surfaces that can be seen (windows, their subsurfaces and popups),
+/// bottom first, as the renderer draws them.
 fn frameWindows(server: *server_mod.Server, out: *[render.max_windows]render.Window) []const render.Window {
-    var shown: [render.max_windows]*server_mod.Toplevel = undefined;
-    const visible = server.visibleWindows(&shown);
-    for (visible, out[0..visible.len]) |t, *w| {
-        const r = server.windowRect(t);
-        w.* = .{ .texture = t.xdg.surface.?.texture().?, .x = r.x, .y = r.y, .clip = server.work_area };
-    }
-    return out[0..visible.len];
+    var quads: [render.max_windows]server_mod.Server.Quad = undefined;
+    const list = server.drawList(&quads);
+    for (list, out[0..list.len]) |q, *w| w.* = .{ .texture = q.texture, .x = q.x, .y = q.y, .clip = q.clip };
+    return out[0..list.len];
 }
 
 /// Set when a child process exits (SIGCHLD: a client, or one saving a
@@ -594,4 +598,6 @@ test {
     _ = @import("dock.zig");
     _ = @import("screenshot.zig");
     _ = @import("png.zig");
+    _ = @import("keyboard.zig");
+    _ = @import("protocol_test.zig");
 }
