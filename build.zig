@@ -618,8 +618,8 @@ pub fn build(b: *std.Build) void {
     run_mkinitramfs.addArtifactArg(shell_exe);
     run_mkinitramfs.addFileArg(b.path("fonts/FiraSans-Regular.ttf"));
     run_mkinitramfs.addFileArg(b.path("fonts/OFL.txt"));
-    // The icon font is built into the programs; its licence goes with them.
-    run_mkinitramfs.addPrefixedFileArg("--file=os/fonts/MaterialIcons-LICENSE.txt=", b.path("fonts/MaterialIcons-LICENSE.txt"));
+    // The notices for the third-party software built into the programs.
+    run_mkinitramfs.addPrefixedFileArg("--file=os/NOTICES=", b.path("NOTICES"));
     // The Wi-Fi chips' firmware, for the kernel to load.
     run_mkinitramfs.step.dependOn(fetchWifiFirmware(b));
     for (wifi_firmware) |f| {

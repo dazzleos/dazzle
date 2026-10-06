@@ -426,9 +426,9 @@ The image's filesystem (an initramfs, in RAM) is kept simple:
 /os/init                      dazzle-init (rdinit=/os/init in cmdline.txt)
 /os/shell/                    dazzle-shell, and its own apps (dazzle-settings
                               and dazzle-setup, which cannot be removed)
+/os/NOTICES                   the licences of third-party software built into
+                              the programs (the icon font)
 /os/fonts/                    the font every program shares, and its licence
-                              (and the licence of the icon font, which is
-                              built into the programs)
 /os/firmware/brcm/            the Wi-Fi chips' firmware, and its licence
 /os/sockets/                  the shell's socket (wayland-0) and the network
                               and system managers' (network, system); the
