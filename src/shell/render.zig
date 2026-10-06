@@ -22,8 +22,9 @@ const texture = vc4.texture;
 
 pub const background = 0xff101830;
 
-/// Frames are large; the shell has one.
+/// Frames are large; the shell has one (and one for screenshots).
 var static_frame: render.Frame = undefined;
+var capture_frame: render.Frame = undefined;
 
 pub const Window = struct {
     texture: server.Texture,
@@ -323,6 +324,17 @@ pub const Renderer = struct {
     /// while no flip is pending (`flipPending`).
     pub fn composite(r: *Renderer, windows: []const Window) !Timing {
         const t0 = sys.nowNs();
+        const quads = try r.panelQuads();
+        static_frame.begin(r.display.backTarget(), .{ .clear = background });
+        try recordFrame(&static_frame, &r.quads, r.vbo, &quads, windows);
+        const t1 = sys.nowNs();
+        const seqno = try r.dev.submit(static_frame.finish());
+        try r.dev.waitSeqno(seqno, std.time.ns_per_s);
+        return .{ .cpu_ns = t1 - t0, .gpu_ns = sys.nowNs() - t1 };
+    }
+
+    /// The panels as textures, with their latest pictures.
+    fn panelQuads(r: *Renderer) ![n_panels]?PanelQuad {
         var quads: [n_panels]?PanelQuad = @splat(null);
         for (&r.panels, &quads) |*p, *q| {
             if (p.width == 0 or p.height == 0) continue;
@@ -332,12 +344,29 @@ pub const Renderer = struct {
             }
             q.* = .{ .texture = p.texture.?, .y = p.y };
         }
-        static_frame.begin(r.display.backTarget(), .{ .clear = background });
-        try recordFrame(&static_frame, &r.quads, r.vbo, &quads, windows);
-        const t1 = sys.nowNs();
-        const seqno = try r.dev.submit(static_frame.finish());
+        return quads;
+    }
+
+    /// What the screen shows (the panels and `windows`, as `composite`
+    /// draws them; the cursor is left out), drawn again into a buffer of
+    /// its own and read back: `width` by `height` pixels, 0xffRRGGBB, in
+    /// `gpa`. Waits for the GPU; only while no frame is being drawn.
+    pub fn capture(r: *Renderer, gpa: std.mem.Allocator, windows: []const Window) ![]u32 {
+        const quads = try r.panelQuads();
+        const pitch = render.Target.pitch(@intCast(r.width));
+        const bo = try r.dev.createBo(pitch * r.height);
+        defer r.dev.destroyBo(bo);
+        capture_frame.begin(.{ .handle = bo.handle, .width = @intCast(r.width), .height = @intCast(r.height), .tiling = .linear }, .{ .clear = background });
+        try recordFrame(&capture_frame, &r.quads, r.vbo, &quads, windows);
+        const seqno = try r.dev.submit(capture_frame.finish());
         try r.dev.waitSeqno(seqno, std.time.ns_per_s);
-        return .{ .cpu_ns = t1 - t0, .gpu_ns = sys.nowNs() - t1 };
+        const pixels = try gpa.alloc(u32, @as(usize, r.width) * r.height);
+        for (0..r.height) |y| {
+            const row = std.mem.bytesAsSlice(u32, bo.map[y * pitch ..][0 .. r.width * 4]);
+            // Windows' buffers need not be opaque where the screen is.
+            for (pixels[y * r.width ..][0..r.width], row) |*out, in| out.* = in | 0xff000000;
+        }
+        return pixels;
     }
 
     /// Shows the composited frame at the next vertical blank, without

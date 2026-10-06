@@ -33,6 +33,7 @@ const server_mod = @import("server.zig");
 const render = @import("render.zig");
 const input = @import("input.zig");
 const dock_mod = @import("dock.zig");
+const screenshot = @import("screenshot.zig");
 const build_info = @import("build_info");
 
 const print = sys.print;
@@ -140,6 +141,8 @@ fn run(init: std.process.Init.Minimal) !void {
     var next_tick: u64 = start;
     // The dock changed, and is waiting to be shown.
     var panels_damaged = true;
+    // Print Screen was pressed: the screen is saved once input is handled.
+    var screenshot_wanted = false;
     // When a client last had a frame for the screen.
     var client_frame_ns: u64 = 0;
     watchChildren();
@@ -198,6 +201,11 @@ fn run(init: std.process.Init.Minimal) !void {
         for (fds[2 + n_clients ..][0..n_inputs]) |f| if (f.revents != 0) {
             var events: [64]input.Event = undefined;
             for (devices.read(f.fd, &events)) |e| {
+                // Print Screen is the shell's: it saves the screen.
+                if (e == .key and e.key.code == screenshot.key_print) {
+                    if (e.key.pressed) screenshot_wanted = true;
+                    continue;
+                }
                 // Buttons over the dock are the shell's.
                 if (dock_shown and e == .button and pointer.y >= @as(f64, @floatFromInt(dock_y))) {
                     pointer.flushMotion(&server, time_ms);
@@ -227,6 +235,14 @@ fn run(init: std.process.Init.Minimal) !void {
                 }
             }
         };
+
+        if (screenshot_wanted) {
+            screenshot_wanted = false;
+            var windows: [render.max_windows]render.Window = undefined;
+            if (renderer.capture(gpa, frameWindows(&server, &windows))) |pixels| {
+                screenshot.save(gpa, screenshot.folder, pixels, renderer.width, renderer.height);
+            } else |err| print("dazzle-shell: cannot take a screenshot: {s}\n", .{@errorName(err)});
+        }
 
         if (fds[0].revents != 0) {
             const rc = linux.accept4(listener, null, null, linux.SOCK.CLOEXEC);
@@ -290,14 +306,8 @@ fn run(init: std.process.Init.Minimal) !void {
                 }
             };
             if (on_screen == null) {
-                var shown: [render.max_windows]*server_mod.Toplevel = undefined;
                 var windows: [render.max_windows]render.Window = undefined;
-                const visible = server.visibleWindows(&shown);
-                for (visible, windows[0..visible.len]) |t, *w| {
-                    const r = server.windowRect(t);
-                    w.* = .{ .texture = t.xdg.surface.?.texture().?, .x = r.x, .y = r.y, .clip = server.work_area };
-                }
-                if (renderer.composite(windows[0..visible.len])) |timing| {
+                if (renderer.composite(frameWindows(&server, &windows))) |timing| {
                     stats.composited(timing);
                     on_screen = renderer.show() catch |err| blk: {
                         print("dazzle-shell: cannot show the frame: {s}\n", .{@errorName(err)});
@@ -518,7 +528,19 @@ fn spawn(program: [*:0]const u8, runtime_dir: ?[:0]const u8) ?linux.pid_t {
     linux.exit(127);
 }
 
-/// Set when a client process exits (SIGCHLD), so it is reaped.
+/// The windows that can be seen, bottom first, as the renderer draws them.
+fn frameWindows(server: *server_mod.Server, out: *[render.max_windows]render.Window) []const render.Window {
+    var shown: [render.max_windows]*server_mod.Toplevel = undefined;
+    const visible = server.visibleWindows(&shown);
+    for (visible, out[0..visible.len]) |t, *w| {
+        const r = server.windowRect(t);
+        w.* = .{ .texture = t.xdg.surface.?.texture().?, .x = r.x, .y = r.y, .clip = server.work_area };
+    }
+    return out[0..visible.len];
+}
+
+/// Set when a child process exits (SIGCHLD: a client, or one saving a
+/// screenshot), so it is reaped.
 var child_exited: std.atomic.Value(bool) = .init(true);
 
 fn onChildExit(_: linux.SIG) callconv(.c) void {
@@ -563,4 +585,6 @@ test {
     _ = @import("input.zig");
     _ = @import("cursor.zig");
     _ = @import("dock.zig");
+    _ = @import("screenshot.zig");
+    _ = @import("png.zig");
 }

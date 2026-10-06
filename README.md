@@ -294,6 +294,8 @@ The shell (`src/shell/`):
 | `shaders/quad.zig` | The textured quad's shader |
 | `input.zig` | USB keyboards and mice: finds `/dev/input/event*` nodes and decodes their events |
 | `cursor.zig` | The pointer's arrow, drawn into the cursor plane's buffer |
+| `screenshot.zig` | Print Screen: the screen saved as `/data/user/Screenshots/Screenshot N.png` |
+| `png.zig` | Writing PNG images |
 | `server_test.zig` | Protocol tests on the host, described below |
 
 The server offers `wl_compositor`, `wl_shm` (ARGB8888 and XRGB8888, copied
@@ -679,8 +681,8 @@ a program keeping one core busy shows 25%.
 
 ### The settings app
 
-Click "S" in the dock (Settings is one of the shell's own apps, in
-`/os/shell`). Its window has four cards, with the figures that
+Click the gear in the dock (Settings is one of the shell's own apps, in
+`/os/shell`). Its window has four pages, chosen with the tabs on the left, with the figures that
 change read again every second (`src/settings/info.zig`):
 
 - **System:** the build (git commit), Linux's version, how long the system
@@ -781,6 +783,16 @@ dragging their bars. Names starting with a dot are left out, a folder
 shows at most 1000 entries, and folders are read when they are opened
 (`src/files/fs.zig`), as the app's unprivileged user: a folder it may not
 read says so.
+
+### Screenshots
+
+Print Screen saves what the screen shows (the dock and the windows; not
+the pointer) as `Screenshot 1.png`, `Screenshot 2.png` and so on in
+`/data/user/Screenshots` (the Files app shows them, under Home). The shell
+draws the screen again into a buffer of its own and reads it back
+(`render.Renderer.capture`), and a child process compresses and writes the
+PNG (`src/shell/screenshot.zig`), so the shell goes on drawing meanwhile.
+The key does not reach the app with the keyboard.
 
 ## Faster development loops
 
