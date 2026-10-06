@@ -2,10 +2,17 @@
 //! The shell sends key codes without a keymap (wl_keyboard's no_keymap), so
 //! the toolkit maps them itself.
 
+pub const escape = 1;
 pub const backspace = 14;
 pub const tab = 15;
 pub const enter = 28;
+pub const left_ctrl = 29;
+pub const right_ctrl = 97;
+pub const key_a = 30;
 pub const left_shift = 42;
+pub const key_x = 45;
+pub const key_c = 46;
+pub const key_v = 47;
 pub const right_shift = 54;
 pub const caps_lock = 58;
 pub const home = 102;

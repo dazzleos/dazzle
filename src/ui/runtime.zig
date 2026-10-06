@@ -2,7 +2,12 @@
 //! the nodes and state that still match), lays it out to the window's
 //! size, and paints it; `render` then records it into a vc4 frame.
 //! Pointer events go to the widgets under the pointer, and keys to the
-//! widget with the keyboard (`focus`).
+//! widget with the keyboard (`focus`). A menu (`openMenu`) is shown above
+//! everything and gets the pointer first; the right button, or the left
+//! held down without moving (`long_press_ns`), asks the widget under the
+//! pointer for one (`Event.context`). Text is copied and pasted through
+//! `clipboard` (the system's, which the app gives), or within the app if
+//! there is none.
 //!
 //!     const ui = try Ui.create(gpa, &fira);
 //!     try ui.attachGpu(dev);
@@ -20,6 +25,7 @@ const painter_mod = @import("painter.zig");
 const Theme = @import("theme.zig").Theme;
 const damage_mod = @import("damage.zig");
 const keymap = @import("keymap.zig");
+const menu_mod = @import("menu.zig");
 
 const Point = geometry.Point;
 const Size = geometry.Size;
@@ -30,6 +36,31 @@ const Context = widget.Context;
 const Event = widget.Event;
 const Painter = painter_mod.Painter;
 const Segment = painter_mod.Segment;
+
+/// The system's clipboard, for text: `Clipboard.of(&app_clipboard)`, for
+/// a type with `copy(self, text)` and `paste(self, allocator) ?[]u8`.
+pub const Clipboard = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        copy: *const fn (*anyopaque, []const u8) void,
+        paste: *const fn (*anyopaque, std.mem.Allocator) ?[]const u8,
+    };
+
+    pub fn of(impl: anytype) Clipboard {
+        const T = @typeInfo(@TypeOf(impl)).pointer.child;
+        return .{ .ptr = impl, .vtable = &struct {
+            const vtable: VTable = .{ .copy = copy, .paste = paste };
+            fn copy(ptr: *anyopaque, text: []const u8) void {
+                T.copy(@ptrCast(@alignCast(ptr)), text);
+            }
+            fn paste(ptr: *anyopaque, a: std.mem.Allocator) ?[]const u8 {
+                return T.paste(@ptrCast(@alignCast(ptr)), a);
+            }
+        }.vtable };
+    }
+};
 
 pub const Ui = struct {
     gpa: std.mem.Allocator,
@@ -61,7 +92,23 @@ pub const Ui = struct {
     /// The widget keys go to.
     focused: ?*Node = null,
     shift: u2 = 0,
+    ctrl: u2 = 0,
     caps_lock: bool = false,
+    /// The system's clipboard (the app gives it); without one, text is
+    /// copied within the app (`local_clipboard`).
+    clipboard: ?Clipboard = null,
+    local_clipboard: std.ArrayList(u8) = .empty,
+    /// The menu shown, if any: its items (with their own copy), where it
+    /// was asked for (in the window), and the widget that asked (which
+    /// takes it away if it goes). Its nodes are made at the next frame.
+    menu: ?struct { items: []menu_mod.Item, at: Point, owner: *Node } = null,
+    menu_root: ?*Node = null,
+    /// A left button held down on a widget, which becomes a long press
+    /// (`Event.context`) if it stays there: where it went down, and when
+    /// the first frame after saw it.
+    hold: ?struct { node: *Node, pos: Point, since: ?u64 = null } = null,
+    /// The release of a press that became a long press is not sent.
+    swallow_release: bool = false,
     /// The window's size at the last frame.
     frame_size: [2]u32 = .{ 1, 1 },
     /// What changed in the last frame (and the frames before).
@@ -81,7 +128,10 @@ pub const Ui = struct {
     }
 
     pub fn destroy(ui: *Ui) void {
+        ui.closeMenu();
+        if (ui.menu_root) |m| m.destroy();
         if (ui.root) |r| r.destroy();
+        ui.local_clipboard.deinit(ui.gpa);
         ui.hovered.deinit(ui.gpa);
         ui.hover_scratch.deinit(ui.gpa);
         for (ui.canvases.items) |c| {
@@ -113,6 +163,7 @@ pub const Ui = struct {
         _ = ui.arenas[@intCast(ui.frame_no % 2)].reset(.retain_capacity);
         ui.now_ns = now_ns;
         ui.needs_frame = false;
+        ui.checkHold();
         ui.damage.begin(ui.frame_no, width, height);
         var cx: Context = .{ .ui = ui, .arena = ui.arena(), .node = undefined };
         const w = cx.make(root);
@@ -123,15 +174,38 @@ pub const Ui = struct {
         if (ui.root == null) ui.root = Node.create(ui, w);
         const r = ui.root orelse return;
         r.build(w);
-        _ = r.layout(.tight(.{ .w = @floatFromInt(width), .h = @floatFromInt(height) }));
+        const window: Size = .{ .w = @floatFromInt(width), .h = @floatFromInt(height) };
+        _ = r.layout(.tight(window));
         r.offset = .{ 0, 0 };
-        ui.paint(r, width, height);
+        const m = ui.buildMenu(window);
+        ui.paint(r, m, width, height);
         ui.damage.sweep(r);
+        if (m) |n| ui.damage.sweep(n);
         // The layout may have moved things under the pointer.
         if (ui.pointer) |p| ui.updateHover(p);
+        // A long press is waited for frame by frame.
+        if (ui.hold != null) ui.needs_frame = true;
     }
 
-    fn paint(ui: *Ui, r: *Node, width: u32, height: u32) void {
+    /// The menu's nodes, laid out where it goes; none if no menu is shown
+    /// (one closed since the last frame goes now).
+    fn buildMenu(ui: *Ui, window: Size) ?*Node {
+        const menu = ui.menu orelse {
+            if (ui.menu_root) |n| n.destroy();
+            ui.menu_root = null;
+            return null;
+        };
+        var cx: Context = .{ .ui = ui, .arena = ui.arena(), .node = undefined };
+        const w = cx.make(menu_mod.Menu{ .items = menu.items });
+        if (ui.menu_root == null) ui.menu_root = Node.create(ui, w);
+        const n = ui.menu_root orelse return null;
+        n.build(w);
+        const size = n.layout(.{ .max_w = window.w, .max_h = window.h });
+        n.offset = menu_mod.place(window, menu.at, size);
+        return n;
+    }
+
+    fn paint(ui: *Ui, r: *Node, menu: ?*Node, width: u32, height: u32) void {
         ui.atlas.beginFrame();
         ui.canvases_used = 0;
         ui.segments.clearRetainingCapacity();
@@ -139,6 +213,69 @@ pub const Ui = struct {
         ui.paint_order = 0;
         var p: Painter = .{ .ui = ui, .node = r };
         p.paintNode(r);
+        // The menu above everything.
+        if (menu) |m| p.paintNode(m);
+    }
+
+    // --- Menus ------------------------------------------------------------------
+
+    /// Shows a menu of `items` at `at` (in the window), for `owner` (the
+    /// widget asking, whose going closes it). It replaces any other.
+    pub fn openMenu(ui: *Ui, owner: *Node, at: Point, items: []const menu_mod.Item) void {
+        ui.closeMenu();
+        const copy = ui.gpa.dupe(menu_mod.Item, items) catch return;
+        ui.menu = .{ .items = copy, .at = at, .owner = owner };
+        ui.needs_frame = true;
+    }
+
+    /// Closes the menu, if one is shown.
+    pub fn closeMenu(ui: *Ui) void {
+        const menu = ui.menu orelse return;
+        ui.gpa.free(menu.items);
+        ui.menu = null;
+        ui.needs_frame = true;
+    }
+
+    // --- Copy and paste -----------------------------------------------------------
+
+    /// Puts text on the clipboard.
+    pub fn copyText(ui: *Ui, text: []const u8) void {
+        if (ui.clipboard) |c| return c.vtable.copy(c.ptr, text);
+        ui.local_clipboard.clearRetainingCapacity();
+        ui.local_clipboard.appendSlice(ui.gpa, text) catch {};
+    }
+
+    /// The text on the clipboard (in `a`), if there is any.
+    pub fn pasteText(ui: *Ui, a: std.mem.Allocator) ?[]const u8 {
+        if (ui.clipboard) |c| return c.vtable.paste(c.ptr, a);
+        if (ui.local_clipboard.items.len == 0) return null;
+        return a.dupe(u8, ui.local_clipboard.items) catch null;
+    }
+
+    // --- Long presses ---------------------------------------------------------------
+
+    /// How long the left button is held down without moving for a menu.
+    pub const long_press_ns = 500 * std.time.ns_per_ms;
+    /// How far it may move meanwhile.
+    pub const long_press_slop = 8;
+
+    /// A hold that has lasted becomes a long press: the widget is asked for
+    /// a menu, and if it shows one, the press is its (the release is not
+    /// sent).
+    fn checkHold(ui: *Ui) void {
+        const h = &(ui.hold orelse return);
+        const since = h.since orelse {
+            h.since = ui.now_ns;
+            return;
+        };
+        if (ui.now_ns -| since < long_press_ns) return;
+        const n = h.node;
+        const pos = h.pos;
+        ui.hold = null;
+        if (send(n, .{ .context = local(n, pos) })) {
+            ui.captured = null;
+            ui.swallow_release = true;
+        }
     }
 
     /// The canvas painting goes on: the last segment's, or a new one after
@@ -234,6 +371,9 @@ pub const Ui = struct {
 
     pub fn pointerMotion(ui: *Ui, pos: Point) void {
         ui.pointer = pos;
+        if (ui.hold) |h| if (@abs(pos[0] - h.pos[0]) > long_press_slop or @abs(pos[1] - h.pos[1]) > long_press_slop) {
+            ui.hold = null;
+        };
         ui.updateHover(pos);
         for (ui.hovered.items) |n| _ = send(n, .{ .motion = local(n, pos) });
         if (ui.captured) |n| if (std.mem.indexOfScalar(*Node, ui.hovered.items, n) == null) {
@@ -248,13 +388,26 @@ pub const Ui = struct {
         ui.needs_frame = true;
         if (pressed) {
             if (ui.captured != null) return;
+            // With a menu shown, a press outside it closes it (and does
+            // nothing else).
+            if (ui.menu != null and !ui.overMenu()) {
+                ui.closeMenu();
+                return;
+            }
             // Clicking elsewhere takes the keyboard away.
             if (ui.focused) |f| if (std.mem.indexOfScalar(*Node, ui.hovered.items, f) == null) ui.focus(null);
+            // The right button asks for a menu, if a widget has one.
+            if (button == widget.btn_right) for (ui.hovered.items) |n| if (send(n, .{ .context = local(n, pos) })) return;
             for (ui.hovered.items) |n| if (send(n, .{ .press = .{ .pos = local(n, pos), .button = button } })) {
                 ui.captured = n;
+                if (button == widget.btn_left) ui.hold = .{ .node = n, .pos = pos };
                 return;
             };
+        } else if (ui.swallow_release) {
+            ui.swallow_release = false;
+            ui.hold = null;
         } else if (ui.captured) |n| {
+            ui.hold = null;
             ui.captured = null;
             const inside = std.mem.indexOfScalar(*Node, ui.hovered.items, n) != null;
             _ = send(n, .{ .release = .{ .pos = local(n, pos), .button = button, .inside = inside } });
@@ -282,20 +435,36 @@ pub const Ui = struct {
     }
 
     /// A key (a Linux key code) went down or up; it goes to the widget with
-    /// the keyboard.
+    /// the keyboard. Escape closes a menu.
     pub fn keyEvent(ui: *Ui, code: u32, pressed: bool) void {
         switch (code) {
             keymap.left_shift, keymap.right_shift => {
                 ui.shift = if (pressed) ui.shift +| 1 else ui.shift -| 1;
                 return;
             },
+            keymap.left_ctrl, keymap.right_ctrl => {
+                ui.ctrl = if (pressed) ui.ctrl +| 1 else ui.ctrl -| 1;
+                return;
+            },
             keymap.caps_lock => if (pressed) {
                 ui.caps_lock = !ui.caps_lock;
+            },
+            keymap.escape => if (pressed and ui.menu != null) {
+                ui.closeMenu();
+                return;
             },
             else => {},
         }
         const n = ui.focused orelse return;
-        _ = send(n, .{ .key = .{ .code = code, .pressed = pressed, .char = if (pressed) keymap.char(code, ui.shift > 0, ui.caps_lock) else null } });
+        const ctrl = ui.ctrl > 0;
+        const shift = ui.shift > 0;
+        _ = send(n, .{ .key = .{
+            .code = code,
+            .pressed = pressed,
+            .char = if (pressed and !ctrl) keymap.char(code, shift, ui.caps_lock) else null,
+            .ctrl = ctrl,
+            .shift = shift,
+        } });
         ui.needs_frame = true;
     }
 
@@ -311,7 +480,10 @@ pub const Ui = struct {
         // The last path's list is reused for the new one.
         var path = ui.hover_scratch;
         path.clearRetainingCapacity();
-        if (ui.root) |r| _ = r.hitTest(pos, &path);
+        // With a menu shown, only it is under the pointer.
+        if (ui.menu != null) {
+            if (ui.menu_root) |m| _ = m.hitTest(.{ pos[0] - m.offset[0], pos[1] - m.offset[1] }, &path);
+        } else if (ui.root) |r| _ = r.hitTest(pos, &path);
         for (ui.hovered.items) |n| if (std.mem.indexOfScalar(*Node, path.items, n) == null) {
             _ = send(n, .leave);
             ui.needs_frame = true;
@@ -334,9 +506,21 @@ pub const Ui = struct {
         return .{ pos[0] - at[0], pos[1] - at[1] };
     }
 
+    /// Whether the pointer is over the menu shown (as last laid out).
+    fn overMenu(ui: *const Ui) bool {
+        const m = ui.menu_root orelse return false;
+        const pos = ui.pointer orelse return false;
+        const x = pos[0] - m.offset[0];
+        const y = pos[1] - m.offset[1];
+        return x >= 0 and y >= 0 and x < m.size.w and y < m.size.h;
+    }
+
     /// Drops references to a node being freed.
     pub fn forget(ui: *Ui, n: *Node) void {
-        if (ui.captured == n) ui.captured = null;
+        if (ui.menu) |m| if (m.owner == n) ui.closeMenu();
+        if (ui.hold) |h| if (h.node == n) {
+            ui.hold = null;
+        };
         if (ui.focused == n) ui.focused = null;
         if (std.mem.indexOfScalar(*Node, ui.hovered.items, n)) |i| _ = ui.hovered.orderedRemove(i);
     }

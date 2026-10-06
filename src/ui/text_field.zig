@@ -2,6 +2,13 @@
 //! Clicking it gives it the keyboard; typing, Backspace, Delete, the arrow
 //! keys, Home and End edit it; Enter submits. With `obscure` (for
 //! passwords) it shows dots. ASCII only, for now.
+//!
+//! Text is selected by dragging over it, or with Shift and the arrow keys,
+//! Home or End (Ctrl+A: all of it). Ctrl+X cuts the selection, Ctrl+C
+//! copies it and Ctrl+V pastes over it (through the UI's clipboard: see
+//! `Ui.copyText`); the right button, or holding the left down, shows a
+//! menu with the same (`Ui.openMenu`). An obscured field's text cannot be
+//! cut or copied.
 
 const std = @import("std");
 const gfx = @import("gfx");
@@ -12,6 +19,7 @@ const painter_mod = @import("painter.zig");
 const keymap = @import("keymap.zig");
 const btn_left = widget.btn_left;
 const Column = @import("flex.zig").Column;
+const menu = @import("menu.zig");
 const Padding = @import("padding.zig").Padding;
 
 const Node = widget.Node;
@@ -52,20 +60,56 @@ pub const TextField = struct {
         len: usize = 0,
         /// Where typing goes: a byte index.
         cursor: usize = 0,
+        /// The other end of the selection (the cursor is one end), if
+        /// there is one.
+        anchor: ?usize = null,
         focused: bool = false,
         hovered: bool = false,
+        /// Selecting by dragging.
+        dragging: bool = false,
+        /// What the menu's actions need, from the widget as last seen.
+        ui: ?*@import("runtime.zig").Ui = null,
+        max_len: usize = capacity,
+        obscure: bool = false,
+        on_changed: ?widget.ValueCallback([]const u8) = null,
 
         pub fn text(s: *const State) []const u8 {
             return s.buf[0..s.len];
         }
 
-        fn insert(s: *State, c: u8, max: usize) bool {
-            if (s.len >= @min(max, capacity)) return false;
-            std.mem.copyBackwards(u8, s.buf[s.cursor + 1 .. s.len + 1], s.buf[s.cursor..s.len]);
-            s.buf[s.cursor] = c;
-            s.len += 1;
-            s.cursor += 1;
+        /// The selected bytes' start and end, if any are.
+        pub fn selection(s: *const State) ?[2]usize {
+            const a = s.anchor orelse return null;
+            if (a == s.cursor) return null;
+            return .{ @min(a, s.cursor), @max(a, s.cursor) };
+        }
+
+        /// Removes the selection's text. Returns whether there was any.
+        fn deleteSelection(s: *State) bool {
+            const sel = s.selection() orelse return false;
+            std.mem.copyForwards(u8, s.buf[sel[0] .. s.len - (sel[1] - sel[0])], s.buf[sel[1]..s.len]);
+            s.len -= sel[1] - sel[0];
+            s.cursor = sel[0];
+            s.anchor = null;
             return true;
+        }
+
+        /// Puts `t` at the cursor, over the selection: its printable ASCII
+        /// (line breaks and tabs as spaces), as much as fits. Returns
+        /// whether the text changed.
+        fn insert(s: *State, t: []const u8, max: usize) bool {
+            var changed = s.deleteSelection();
+            for (t) |c0| {
+                const c = if (c0 == '\n' or c0 == '\t' or c0 == '\r') ' ' else c0;
+                if (c < 0x20 or c > 0x7e) continue;
+                if (s.len >= @min(max, capacity)) break;
+                std.mem.copyBackwards(u8, s.buf[s.cursor + 1 .. s.len + 1], s.buf[s.cursor..s.len]);
+                s.buf[s.cursor] = c;
+                s.len += 1;
+                s.cursor += 1;
+                changed = true;
+            }
+            return changed;
         }
 
         fn removeAt(s: *State, i: usize) void {
@@ -73,23 +117,84 @@ pub const TextField = struct {
             s.len -= 1;
         }
 
+        /// Moves the cursor, extending the selection (from where the cursor
+        /// was) or dropping it.
+        fn moveTo(s: *State, to: usize, extend: bool) void {
+            if (extend) {
+                if (s.anchor == null) s.anchor = s.cursor;
+            } else s.anchor = null;
+            s.cursor = to;
+        }
+
+        pub fn selectAll(s: *State) void {
+            s.anchor = 0;
+            s.cursor = s.len;
+        }
+
+        /// Copies the selection (not from an obscured field).
+        pub fn copy(s: *State) void {
+            const sel = s.selection() orelse return;
+            if (s.obscure) return;
+            if (s.ui) |u| u.copyText(s.buf[sel[0]..sel[1]]);
+        }
+
+        pub fn cut(s: *State) void {
+            if (s.obscure or s.selection() == null) return;
+            s.copy();
+            if (s.deleteSelection()) s.notifyChanged();
+        }
+
+        /// Pastes the clipboard's text over the selection.
+        pub fn paste(s: *State) void {
+            const u = s.ui orelse return;
+            const t = u.pasteText(u.arena()) orelse return;
+            if (s.insert(t, s.max_len)) s.notifyChanged();
+        }
+
+        fn notifyChanged(s: *State) void {
+            if (s.on_changed) |f| f.call(s.text());
+            if (s.ui) |u| u.needs_frame = true;
+        }
+
         /// Edits for a key; returns whether the text changed.
         fn key(s: *State, k: Event.Key, max: usize) bool {
+            if (k.ctrl) {
+                switch (k.code) {
+                    keymap.key_a => s.selectAll(),
+                    keymap.key_c => s.copy(),
+                    keymap.key_x => if (!s.obscure and s.selection() != null) {
+                        s.copy();
+                        return s.deleteSelection();
+                    },
+                    keymap.key_v => {
+                        const u = s.ui orelse return false;
+                        const t = u.pasteText(u.arena()) orelse return false;
+                        return s.insert(t, max);
+                    },
+                    else => {},
+                }
+                return false;
+            }
             switch (k.code) {
-                keymap.backspace => if (s.cursor > 0) {
+                keymap.backspace => {
+                    if (s.deleteSelection()) return true;
+                    if (s.cursor == 0) return false;
                     s.cursor -= 1;
                     s.removeAt(s.cursor);
                     return true;
                 },
-                keymap.delete => if (s.cursor < s.len) {
+                keymap.delete => {
+                    if (s.deleteSelection()) return true;
+                    if (s.cursor == s.len) return false;
                     s.removeAt(s.cursor);
                     return true;
                 },
-                keymap.left => s.cursor -|= 1,
-                keymap.right => s.cursor = @min(s.cursor + 1, s.len),
-                keymap.home => s.cursor = 0,
-                keymap.end => s.cursor = s.len,
-                else => if (k.char) |c| return s.insert(c, max),
+                // Without Shift, a selection collapses to its start or end.
+                keymap.left => if (!k.shift and s.selection() != null) s.moveTo(s.selection().?[0], false) else s.moveTo(s.cursor -| 1, k.shift),
+                keymap.right => if (!k.shift and s.selection() != null) s.moveTo(s.selection().?[1], false) else s.moveTo(@min(s.cursor + 1, s.len), k.shift),
+                keymap.home => s.moveTo(0, k.shift),
+                keymap.end => s.moveTo(s.len, k.shift),
+                else => if (k.char) |c| return s.insert(&.{c}, max),
             }
             return false;
         }
@@ -104,9 +209,20 @@ pub const TextField = struct {
         return .{ .font = f, .size = self.size orelse n.ui.theme.body_size };
     }
 
+    /// Notes what the state's actions (the menu's, which come later) need.
+    fn remember(self: *const TextField, n: *Node) *State {
+        const st = n.state(State);
+        st.ui = n.ui;
+        st.max_len = self.max_len;
+        st.obscure = self.obscure;
+        st.on_changed = self.on_changed;
+        return st;
+    }
+
     pub fn layout(self: *const TextField, n: *Node, c: Constraints) Size {
         const s = self.fontStyle(n);
         const h: f32 = if (s) |st| @max(height, @ceil(st.lineHeight() + 20)) else height;
+        _ = self.remember(n);
         return c.constrain(.{ .w = self.width, .h = h });
     }
 
@@ -116,6 +232,12 @@ pub const TextField = struct {
         const count = @min(text.len, buf.len / dot.len);
         for (0..count) |i| @memcpy(buf[i * dot.len ..][0..dot.len], dot);
         return buf[0 .. count * dot.len];
+    }
+
+    /// How far into the text (as shown) byte `i` is.
+    fn xOf(self: *const TextField, style: font.Style, st: *const State, i: usize) f32 {
+        var buf: [capacity * dot.len]u8 = undefined;
+        return font.measure(style, self.shown(&buf, st.text()[0..i]));
     }
 
     pub fn paint(self: *const TextField, n: *Node, p: *Painter) void {
@@ -132,37 +254,52 @@ pub const TextField = struct {
         const baseline = @round((n.size.h - style.lineHeight()) / 2 + style.ascent());
         var buf: [capacity * dot.len]u8 = undefined;
         const text = self.shown(&buf, st.text());
-        var before_buf: [capacity * dot.len]u8 = undefined;
-        const before = self.shown(&before_buf, st.text()[0..st.cursor]);
-        const cursor_x = font.measure(style, before);
+        const cursor_x = self.xOf(style, st, st.cursor);
         // Long text scrolls to keep the cursor in view.
         const room = n.size.w - 2 * pad;
         const scroll = @max(cursor_x - room, 0);
         const old = p.clipTo(.{ .x = pad - 2, .y = 0, .w = room + 4, .h = n.size.h });
         defer p.restoreClip(old);
+        // The selection behind its text.
+        if (st.selection()) |sel| {
+            const x0 = self.xOf(style, st, sel[0]);
+            const x1 = self.xOf(style, st, sel[1]);
+            c.fillRect(.{ .x = @round(pad - scroll + x0), .y = baseline - style.ascent(), .w = @round(x1 - x0), .h = style.lineHeight() }, t.primary.withAlpha(if (st.focused) 0.35 else 0.15));
+        }
         if (st.len == 0 and !st.focused) {
             _ = p.text(style.size, pad, baseline, self.placeholder, t.on_surface_variant);
         } else {
             _ = p.text(style.size, pad - scroll, baseline, text, t.on_surface);
         }
-        if (st.focused) {
+        if (st.focused and st.selection() == null) {
             const x = @round(pad - scroll + cursor_x);
             c.fillRect(.{ .x = x, .y = baseline - style.ascent(), .w = 2, .h = style.lineHeight() }, t.primary);
         }
     }
 
     pub fn event(self: *const TextField, n: *Node, e: Event) bool {
-        const st = n.state(State);
+        const st = self.remember(n);
         switch (e) {
             .enter => st.hovered = true,
             .leave => st.hovered = false,
             .press => |pr| {
                 if (pr.button != btn_left) return false;
                 n.ui.focus(n);
-                st.cursor = self.cursorAt(n, pr.pos[0]);
+                // Dragging selects from where it went down.
+                st.moveTo(self.cursorAt(n, pr.pos[0]), false);
+                st.anchor = st.cursor;
+                st.dragging = true;
                 return true;
             },
-            .release => return true,
+            .motion => |pos| if (st.dragging) {
+                st.cursor = self.cursorAt(n, pos[0]);
+                n.ui.needs_frame = true;
+            },
+            .release => {
+                st.dragging = false;
+                if (st.selection() == null) st.anchor = null;
+                return true;
+            },
             .focus => st.focused = true,
             .blur => st.focused = false,
             .key => |k| {
@@ -174,7 +311,24 @@ pub const TextField = struct {
                 if (st.key(k, self.max_len)) if (self.on_changed) |f| f.call(st.text());
                 return true;
             },
-            .motion, .scroll => {},
+            .context => |pos| {
+                n.ui.focus(n);
+                st.dragging = false;
+                // Outside the selection, the cursor goes where it was asked.
+                const at = self.cursorAt(n, pos[0]);
+                const inside = if (st.selection()) |sel| at >= sel[0] and at <= sel[1] else false;
+                if (!inside) st.moveTo(at, false);
+                const can_copy = st.selection() != null and !self.obscure;
+                const origin = n.position();
+                n.ui.openMenu(n, .{ origin[0] + pos[0], origin[1] + pos[1] }, &.{
+                    .{ .label = "Cut", .shortcut = "Ctrl+X", .enabled = can_copy, .on_press = .of(st, State.cut) },
+                    .{ .label = "Copy", .shortcut = "Ctrl+C", .enabled = can_copy, .on_press = .of(st, State.copy) },
+                    .{ .label = "Paste", .shortcut = "Ctrl+V", .on_press = .of(st, State.paste) },
+                    .{ .label = "Select all", .shortcut = "Ctrl+A", .enabled = st.len > 0, .on_press = .of(st, State.selectAll) },
+                });
+                return true;
+            },
+            .scroll => {},
         }
         return false;
     }
@@ -183,12 +337,10 @@ pub const TextField = struct {
     fn cursorAt(self: *const TextField, n: *const Node, x: f32) usize {
         const st = n.state(State);
         const style = self.fontStyle(n) orelse return st.len;
-        var buf: [capacity * dot.len]u8 = undefined;
         var best: usize = 0;
         var best_d = std.math.inf(f32);
         for (0..st.len + 1) |i| {
-            const w = font.measure(style, self.shown(&buf, st.text()[0..i]));
-            const d = @abs(pad + w - x);
+            const d = @abs(pad + self.xOf(style, st, i) - x);
             if (d < best_d) {
                 best = i;
                 best_d = d;
@@ -260,4 +412,180 @@ test "typing into a text field" {
     try testing.expect(u.focused == null);
     u.keyEvent(30, true);
     try testing.expectEqualStrings("AXb", sink.text[0..sink.len]);
+}
+
+test "selecting, copying, cutting and pasting, with keys and the menu" {
+    const Ui = @import("runtime.zig").Ui;
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    // The system's clipboard, as the app gives it.
+    const Board = struct {
+        text: [64]u8 = undefined,
+        len: usize = 0,
+        pub fn copy(b: *@This(), t: []const u8) void {
+            @memcpy(b.text[0..t.len], t);
+            b.len = t.len;
+        }
+        pub fn paste(b: *@This(), a: std.mem.Allocator) ?[]const u8 {
+            if (b.len == 0) return null;
+            return a.dupe(u8, b.text[0..b.len]) catch null;
+        }
+    };
+    var board: Board = .{};
+    u.clipboard = .of(&board);
+    const Sink = struct {
+        text: [64]u8 = undefined,
+        len: usize = 0,
+        fn changed(s: *@This(), t: []const u8) void {
+            @memcpy(s.text[0..t.len], t);
+            s.len = t.len;
+        }
+    };
+    var sinks: [3]Sink = @splat(.{});
+    // Three fields, one under another: "hello world", empty, and a
+    // password.
+    const App = struct {
+        sinks: *[3]Sink,
+        pub fn build(self: *const @This(), cx: *widget.Context) widget.Widget {
+            return cx.make(Padding{ .padding = .all(20), .child = cx.make(Column{ .cross_axis_alignment = .start, .spacing = 10, .children = &.{
+                cx.make(TextField{ .initial = "hello world", .on_changed = .of(&self.sinks[0], Sink.changed) }),
+                cx.make(TextField{ .on_changed = .of(&self.sinks[1], Sink.changed) }),
+                cx.make(TextField{ .initial = "secret", .obscure = true, .on_changed = .of(&self.sinks[2], Sink.changed) }),
+            } }) });
+        }
+    };
+    var now: u64 = 0;
+    const T = struct {
+        fn frame(uu: *Ui, s: *[3]Sink, n: *u64) void {
+            n.* += 16 * std.time.ns_per_ms;
+            uu.frame(500, 400, n.*, App{ .sinks = s });
+        }
+        fn click(uu: *Ui, at: geometry.Point, button: u32) void {
+            uu.pointerMotion(at);
+            uu.pointerButton(at, button, true);
+            uu.pointerButton(at, button, false);
+        }
+        fn keys(uu: *Ui, ctrl: bool, shift: bool, codes: []const u32) void {
+            if (ctrl) uu.keyEvent(keymap.left_ctrl, true);
+            if (shift) uu.keyEvent(keymap.left_shift, true);
+            for (codes) |c| {
+                uu.keyEvent(c, true);
+                uu.keyEvent(c, false);
+            }
+            if (shift) uu.keyEvent(keymap.left_shift, false);
+            if (ctrl) uu.keyEvent(keymap.left_ctrl, false);
+        }
+        fn field(uu: *Ui, i: usize) *TextField.State {
+            var n = uu.root.?;
+            while (!n.widget.is(Column)) n = n.children.items[0];
+            return n.children.items[i].state(TextField.State);
+        }
+        fn findText(n: *Node, text: []const u8) ?*Node {
+            if (n.widget.as(@import("text.zig").Text)) |t| if (std.mem.eql(u8, t.text, text)) return n;
+            for (n.children.items) |ch| if (findText(ch, text)) |x| return x;
+            return null;
+        }
+        fn middle(n: *Node) geometry.Point {
+            const at = n.position();
+            return .{ at[0] + n.size.w / 2, at[1] + n.size.h / 2 };
+        }
+    };
+    T.frame(u, &sinks, &now);
+    const rows = [3]f32{ 42, 96, 150 };
+
+    // All of the first copied, and pasted into the second.
+    T.click(u, .{ 60, rows[0] }, btn_left);
+    T.keys(u, true, false, &.{ keymap.key_a, keymap.key_c });
+    try testing.expectEqualStrings("hello world", board.text[0..board.len]);
+    T.click(u, .{ 60, rows[1] }, btn_left);
+    T.keys(u, true, false, &.{keymap.key_v});
+    try testing.expectEqualStrings("hello world", sinks[1].text[0..sinks[1].len]);
+    // Shift and Left select the last five characters; Ctrl+X cuts them.
+    T.keys(u, false, true, &.{ keymap.left, keymap.left, keymap.left, keymap.left, keymap.left });
+    try testing.expectEqual([2]usize{ 6, 11 }, T.field(u, 1).selection().?);
+    T.frame(u, &sinks, &now);
+    T.keys(u, true, false, &.{keymap.key_x});
+    try testing.expectEqualStrings("hello ", sinks[1].text[0..sinks[1].len]);
+    try testing.expectEqualStrings("world", board.text[0..board.len]);
+    // Typing replaces a selection.
+    T.keys(u, false, true, &.{keymap.home});
+    T.keys(u, false, false, &.{48}); // b
+    try testing.expectEqualStrings("b", sinks[1].text[0..sinks[1].len]);
+
+    // A password cannot be copied out.
+    T.click(u, .{ 60, rows[2] }, btn_left);
+    T.keys(u, true, false, &.{ keymap.key_a, keymap.key_c, keymap.key_x });
+    try testing.expectEqualStrings("world", board.text[0..board.len]);
+    try testing.expectEqualStrings("secret", T.field(u, 2).text());
+
+    // Dragging over the first field selects what it goes over.
+    T.frame(u, &sinks, &now);
+    u.pointerMotion(.{ 34, rows[0] });
+    u.pointerButton(.{ 34, rows[0] }, btn_left, true);
+    u.pointerMotion(.{ 200, rows[0] });
+    u.pointerButton(.{ 200, rows[0] }, btn_left, false);
+    const sel = T.field(u, 0).selection().?;
+    try testing.expectEqual(@as(usize, 0), sel[0]);
+    try testing.expect(sel[1] > 5);
+
+    // The right button on the second field: a menu, with Cut and Copy
+    // dimmed (nothing is selected), over the window. Paste in it pastes.
+    T.frame(u, &sinks, &now);
+    T.click(u, .{ 60, rows[1] }, widget.btn_right);
+    T.frame(u, &sinks, &now);
+    const m = u.menu_root.?;
+    try testing.expect(T.findText(m, "Copy") != null and T.findText(m, "Ctrl+V") != null);
+    try testing.expect(!m.overflow.any());
+    T.click(u, T.middle(T.findText(m, "Paste").?), btn_left);
+    try testing.expect(u.menu == null);
+    T.frame(u, &sinks, &now);
+    try testing.expect(u.menu_root == null);
+    try testing.expectEqualStrings("bworld", sinks[1].text[0..sinks[1].len]);
+
+    // A press outside the menu closes it, and does nothing else; so does
+    // Escape.
+    T.click(u, .{ 60, rows[1] }, widget.btn_right);
+    T.frame(u, &sinks, &now);
+    T.click(u, .{ 480, 380 }, btn_left);
+    try testing.expect(u.menu == null);
+    try testing.expect(u.focused != null);
+    T.click(u, .{ 60, rows[1] }, widget.btn_right);
+    u.keyEvent(keymap.escape, true);
+    try testing.expect(u.menu == null);
+
+    // Holding the left button down shows it too, once it has been held
+    // for a while; the release is not a click.
+    u.pointerMotion(.{ 60, rows[0] });
+    u.pointerButton(.{ 60, rows[0] }, btn_left, true);
+    T.frame(u, &sinks, &now);
+    try testing.expect(u.needs_frame);
+    for (0..40) |_| T.frame(u, &sinks, &now);
+    try testing.expect(u.menu != null);
+    u.pointerButton(.{ 60, rows[0] }, btn_left, false);
+    T.frame(u, &sinks, &now);
+    try testing.expect(u.menu_root != null);
+    // Select all, from the menu.
+    T.click(u, T.middle(T.findText(u.menu_root.?, "Select all").?), btn_left);
+    try testing.expectEqual([2]usize{ 0, 11 }, T.field(u, 0).selection().?);
+    // A hold that moves is a drag, not a long press.
+    T.frame(u, &sinks, &now);
+    u.pointerMotion(.{ 60, rows[0] });
+    u.pointerButton(.{ 60, rows[0] }, btn_left, true);
+    T.frame(u, &sinks, &now);
+    u.pointerMotion(.{ 120, rows[0] });
+    for (0..40) |_| T.frame(u, &sinks, &now);
+    try testing.expect(u.menu == null);
+    u.pointerButton(.{ 120, rows[0] }, btn_left, false);
+}
+
+test "without the system's clipboard, text is copied within the app" {
+    const Ui = @import("runtime.zig").Ui;
+    const u = try Ui.create(testing.allocator, null);
+    defer u.destroy();
+    try testing.expect(u.pasteText(testing.allocator) == null);
+    u.copyText("abc");
+    const t = u.pasteText(testing.allocator).?;
+    defer testing.allocator.free(t);
+    try testing.expectEqualStrings("abc", t);
 }

@@ -88,19 +88,28 @@ pub const Event = union(enum) {
     blur,
     /// A key went down or up while it has the keyboard.
     key: Key,
+    /// A menu is asked for at a point in it: the right button was pressed
+    /// there, or the left held down there without moving. Returning true
+    /// says it showed one (`Ui.openMenu`).
+    context: Point,
 
     pub const Key = struct {
         /// A Linux key code (see keymap.zig).
         code: u32,
         pressed: bool,
-        /// The character it types (US layout), if any.
+        /// The character it types (US layout), if any: none while Control
+        /// is held.
         char: ?u8,
+        /// Modifiers held.
+        ctrl: bool = false,
+        shift: bool = false,
     };
 };
 
 /// The left mouse button (a Linux button code), in `Event.press` and
 /// `.release`.
 pub const btn_left = 0x110;
+pub const btn_right = 0x111;
 
 /// Something to call later, typically a method of a widget's state:
 /// `Callback.of(state, State.increment)`.

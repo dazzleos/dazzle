@@ -1046,3 +1046,80 @@ test "a restored window is half the size, moves by its grab, and windows are cli
     second.d.disconnect();
     thread.join();
 }
+
+test "text copied in one app window is pasted in another, through the shell" {
+    var a: [2]linux.fd_t = undefined;
+    var b: [2]linux.fd_t = undefined;
+    try testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &a));
+    try testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &b));
+    var renderer: FakeRenderer = .{};
+    const fds = [_]linux.fd_t{ a[0], b[0] };
+    const st = try testing.allocator.create(MultiServerThread);
+    defer testing.allocator.destroy(st);
+    st.* = .{ .server = .init(testing.allocator, renderer.backend(), .{ .x = 0, .y = 40, .width = 320, .height = 200 }), .fds = &fds };
+    defer st.server.deinit();
+    const thread = try std.Thread.spawn(.{}, MultiServerThread.run, .{st});
+
+    var fake: FakeGpu = .{};
+    const show = struct {
+        fn f(win: *app.Window) !void {
+            test_frame.begin(try win.beginFrame(), .{ .clear = 0xff000000 });
+            try win.present(&test_frame);
+            while (win.frame_pending) try win.conn.dispatch();
+        }
+    }.f;
+    // The first window, with the keyboard, copies.
+    const first = try app.Window.openOn(testing.allocator, fake.gpu(), try client.Display.fromFd(testing.allocator, a[1]), "First");
+    try show(first);
+    first.clipboard.copy("hello from the first");
+    try first.conn.roundtrip();
+    // Its own copy pastes without the shell.
+    const own = first.clipboard.paste(testing.allocator).?;
+    defer testing.allocator.free(own);
+    try testing.expectEqualStrings("hello from the first", own);
+
+    // The second window opens on top, with the keyboard, and is told what
+    // the clipboard holds.
+    const second = try app.Window.openOn(testing.allocator, fake.gpu(), try client.Display.fromFd(testing.allocator, b[1]), "Second");
+    try show(second);
+    for (0..100) |_| {
+        if (second.clipboard.offer_mime != null) break;
+        try second.conn.dispatchTimeout(10);
+    }
+    try testing.expect(second.clipboard.offer_mime != null);
+    // Pasting waits for the first window to write the text, which it does
+    // as it handles its events (here, on this thread, while the second
+    // waits on another).
+    const Paste = struct {
+        win: *app.Window,
+        result: ?[]const u8 = null,
+        done: std.atomic.Value(bool) = .init(false),
+        fn run(pp: *@This()) void {
+            pp.result = pp.win.clipboard.paste(testing.allocator);
+            pp.done.store(true, .monotonic);
+        }
+    };
+    var paste: Paste = .{ .win = second };
+    const paster = try std.Thread.spawn(.{}, Paste.run, .{&paste});
+    while (!paste.done.load(.monotonic)) try first.conn.dispatchTimeout(10);
+    paster.join();
+    defer if (paste.result) |r| testing.allocator.free(r);
+    try testing.expectEqualStrings("hello from the first", paste.result.?);
+
+    // The second copies: the first's copy is cancelled (its next paste
+    // asks the shell), and the second pastes its own.
+    second.clipboard.copy("now the second");
+    try second.conn.roundtrip();
+    for (0..100) |_| {
+        if (first.clipboard.source == null) break;
+        try first.conn.dispatchTimeout(10);
+    }
+    try testing.expect(first.clipboard.source == null);
+    const again = second.clipboard.paste(testing.allocator).?;
+    defer testing.allocator.free(again);
+    try testing.expectEqualStrings("now the second", again);
+
+    first.close();
+    second.close();
+    thread.join();
+}

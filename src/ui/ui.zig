@@ -46,7 +46,8 @@
 //! * `outlined_button`, `spinner`: OutlinedButton, Spinner
 //! * `checkbox`, `radio`, `switch`: Checkbox, Radio, Switch (and `control`,
 //!   what they share)
-//! * `text_field`: TextField
+//! * `text_field`: TextField, with selection, and copying and pasting
+//! * `menu`: Menu, shown above everything (`Ui.openMenu`)
 //! * `title_bar`: TitleBar, the bar apps draw across the top of their
 //!   window (with `bar_button`'s buttons)
 //! * `keymap`: key codes to characters
@@ -77,6 +78,7 @@ pub const checkbox = @import("checkbox.zig");
 pub const radio = @import("radio.zig");
 pub const @"switch" = @import("switch.zig");
 pub const text_field = @import("text_field.zig");
+pub const menu = @import("menu.zig");
 pub const title_bar = @import("title_bar.zig");
 pub const bar_button = @import("bar_button.zig");
 pub const scroll_view = @import("scroll_view.zig");
@@ -105,6 +107,7 @@ pub const Callback = widget.Callback;
 pub const ValueCallback = widget.ValueCallback;
 
 pub const btn_left = widget.btn_left;
+pub const btn_right = widget.btn_right;
 
 pub const Empty = empty.Empty;
 pub const SizedBox = sized_box.SizedBox;
@@ -138,6 +141,8 @@ pub const Checkbox = checkbox.Checkbox;
 pub const Radio = radio.Radio;
 pub const Switch = @"switch".Switch;
 pub const TextField = text_field.TextField;
+pub const Menu = menu.Menu;
+pub const MenuItem = menu.Item;
 pub const TitleBar = title_bar.TitleBar;
 pub const BarButton = bar_button.BarButton;
 pub const ScrollView = scroll_view.ScrollView;
@@ -148,6 +153,7 @@ pub const Image = image.Image;
 pub const Painter = painter.Painter;
 pub const GpuArea = painter.GpuArea;
 pub const Ui = runtime.Ui;
+pub const Clipboard = runtime.Clipboard;
 
 test {
     _ = geometry;
@@ -173,6 +179,7 @@ test {
     _ = radio;
     _ = @"switch";
     _ = text_field;
+    _ = menu;
     _ = title_bar;
     _ = bar_button;
     _ = scroll_view;

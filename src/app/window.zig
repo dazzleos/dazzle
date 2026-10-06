@@ -33,6 +33,7 @@ const vc4 = @import("vc4");
 const wayland = @import("wayland");
 
 const client = wayland.client;
+const Clipboard = @import("clipboard.zig").Clipboard;
 const p = wayland.protocol;
 const wire = wayland.wire;
 
@@ -167,6 +168,8 @@ pub const Window = struct {
     frames: u64 = 0,
 
     seat: ?client.Proxy = null,
+    /// The system's clipboard (for the toolkit's `Ui.clipboard`).
+    clipboard: Clipboard,
     pointer: ?client.Proxy = null,
     keyboard: ?client.Proxy = null,
     pointer_pos: [2]f32 = .{ 0, 0 },
@@ -186,7 +189,7 @@ pub const Window = struct {
     pub fn openOn(gpa: std.mem.Allocator, gpu: Gpu, conn: *client.Display, title: []const u8) !*Window {
         const w = try gpa.create(Window);
         errdefer gpa.destroy(w);
-        w.* = .{ .gpa = gpa, .gpu = gpu, .conn = conn };
+        w.* = .{ .gpa = gpa, .gpu = gpu, .conn = conn, .clipboard = .{ .gpa = gpa } };
         const registry = try w.globals.fetch(conn);
         const compositor = (try w.globals.bind(registry, p.wl_compositor.name, 4, null)) orelse return error.NoCompositor;
         // Version 6 for the suspended state.
@@ -196,6 +199,8 @@ pub const Window = struct {
         // (which come with the seat's capabilities).
         w.cursor_shape_manager = try w.globals.bind(registry, p.wp_cursor_shape_manager_v1.name, 1, null);
         w.seat = try w.globals.bind(registry, p.wl_seat.name, 5, .{ .ptr = w, .handler = seatEvent });
+        // Optional: copy and paste.
+        try w.clipboard.attach(conn, try w.globals.bind(registry, p.wl_data_device_manager.name, 3, null), w.seat);
 
         w.surface = try conn.newObject(null);
         var m = try compositor.request(p.wl_compositor.request.create_surface);
@@ -219,6 +224,7 @@ pub const Window = struct {
 
     /// Frees the buffers and disconnects.
     pub fn close(w: *Window) void {
+        w.clipboard.deinit();
         for (&w.buffers) |*slot| if (slot.*) |*b| w.freeBuffer(b, slot);
         w.conn.flush() catch {};
         w.conn.disconnect();
@@ -576,7 +582,10 @@ pub const Window = struct {
                 const code = r.uint() catch return;
                 const state = r.uint() catch return;
                 const pressed = state == p.wl_pointer.button_state.pressed;
-                if (pressed) w.press_serial = serial;
+                if (pressed) {
+                    w.press_serial = serial;
+                    w.clipboard.serial = serial;
+                }
                 // Pressing an edge resizes the window; the app does not
                 // see it (nor its release: the shell has the pointer).
                 if (pressed and code == p.input.btn_left) {
@@ -614,10 +623,12 @@ pub const Window = struct {
                 _ = linux.close(fd);
             },
             p.wl_keyboard.event.key => {
-                _ = r.uint() catch return; // serial
+                const serial = r.uint() catch return;
                 _ = r.uint() catch return; // time
                 const code = r.uint() catch return;
                 const state = r.uint() catch return;
+                // Copying (Ctrl+C) needs the key's serial.
+                if (state == p.wl_keyboard.key_state.pressed) w.clipboard.serial = serial;
                 w.pushInput(.{ .key = .{ .code = code, .pressed = state == p.wl_keyboard.key_state.pressed } });
             },
             else => {},

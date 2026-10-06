@@ -39,7 +39,7 @@ The code is split into Zig modules, linked statically into each program:
 | `sys` | `src/sys/` | Linux system call helpers (sleeping, clocks, logging, the kernel command line) |
 | `vc4` | `src/vc4/` | The low-level graphics API for the VideoCore IV, described below |
 | `shader` | `src/shader/` | Shaders written in Zig: SPIR-V translated to `vc4` programs, and pipelines for drawing with them |
-| `app` | `src/app/` | Native apps' windows on dazzle-shell: buffers shared with the shell, frame pacing and input |
+| `app` | `src/app/` | Native apps' windows on dazzle-shell: buffers shared with the shell, frame pacing and input, and the system's clipboard (`clipboard.zig`: text copied as a Wayland data source, and pasted from the selection's offer through a pipe) |
 | `gfx` | `src/gfx/` | 2D graphics for the toolkit: anti-aliased rounded rectangles, circles, polygons and polylines, filled or stroked, and text, blended |
 | `ui` | `src/ui/` | The widget toolkit: declarative widgets with state, layout, painting and input, in Material 3's style |
 | `font` | `src/font/` | OpenType font rendering, described below |
@@ -169,7 +169,8 @@ with the problem marked.
 | `outlined_button.zig` | `OutlinedButton`, made of a `Pressable`, `Decorated`, `ConstrainedBox`, `Padding` and `Center`, with a label, an icon or both |
 | `spinner.zig` | `Spinner`: Material's indeterminate circular progress indicator |
 | `checkbox.zig`, `radio.zig`, `switch.zig` | Material 3's selection controls: `Checkbox`, `Radio` (generic over the value it selects) and `Switch` (its handle slides), each with an optional label that presses it too; `control.zig` has what they share |
-| `text_field.zig` | `TextField`: a line of text to type (Material's outlined field), optionally shown as dots for passwords; clicking it gives it the keyboard |
+| `text_field.zig` | `TextField`: a line of text to type (Material's outlined field), optionally shown as dots for passwords; clicking it gives it the keyboard. Text is selected by dragging, or with Shift and the arrow keys, Home and End (Ctrl+A: all); Ctrl+X, Ctrl+C and Ctrl+V cut, copy and paste, and so does the menu the right button (or holding the left down) shows. A password cannot be cut or copied |
+| `menu.zig` | `Menu`: Material's menu of actions, which `Ui.openMenu` shows above everything at a point (down and right of it, flipped up or left where there is no room, and kept in the window); pressing an item closes it and does the action, and pressing elsewhere or Escape closes it. The runtime asks the widget under the pointer for one (`Event.context`) when the right button is pressed, or the left is held for half a second without moving |
 | `title_bar.zig` | `TitleBar`: the bar apps draw across the top of their window, with their name, maximize and close buttons, and dragging it to move the window (the shell draws none) |
 | `bar_button.zig` | `BarButton`: the title bar's round icon buttons |
 | `keymap.zig` | Linux key codes to characters, for a US keyboard (the shell sends key codes without a keymap) |
@@ -332,6 +333,8 @@ refused.
   keyboard, and when it changes, and asks for it as a MIME type, which its
   source writes into a pipe the client reads. A copy replaces the last
   (whose source is cancelled). Drag and drop is not supported yet.
+  Dazzle's apps copy and paste text this way (`app/clipboard.zig`, for the
+  toolkit's text fields); text an app copied it pastes from its own copy.
 
 - **Windows:** each toplevel starts maximized, filling the screen above
   the dock. Unmaximized (`unset_maximized`), it is told half the work

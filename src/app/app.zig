@@ -6,6 +6,7 @@
 //! * `Gpu`: what a window needs from the GPU (the device, or a fake in
 //!   tests)
 //! * `Controls`: what the title bar's buttons (and dragging it) do
+//! * `Clipboard`: the system's clipboard, for text (`Window.clipboard`)
 //!
 //!     const dev = try vc4.device.openRender();
 //!     const win = try app.Window.open(gpa, .device(&dev), socket_path, "Hello");
@@ -17,6 +18,8 @@
 //!     }
 
 pub const window = @import("window.zig");
+pub const clipboard = @import("clipboard.zig");
+pub const Clipboard = clipboard.Clipboard;
 pub const Window = window.Window;
 pub const Gpu = window.Gpu;
 pub const InputEvent = window.InputEvent;
@@ -47,4 +50,5 @@ pub const Controls = struct {
 
 test {
     _ = window;
+    _ = clipboard;
 }

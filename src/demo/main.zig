@@ -92,6 +92,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     var all_solids = try solids.Solids.init(gpa, dev);
     var f = loadFont(gpa, font_path);
     const window_ui = try ui.Ui.create(gpa, if (f) |*fnt| fnt else null);
+    // Copying and pasting go through the system's clipboard.
+    window_ui.clipboard = .of(&win.clipboard);
     try window_ui.attachGpu(dev);
     var rings: rings_mod.Rings = .{};
     var status_bufs: [view.lines][96]u8 = undefined;
