@@ -208,12 +208,12 @@ pub const Settings = struct {
             if (std.mem.eql(u8, n.ssid(), sel)) break n;
         } else null else null;
         const form = chosen != null and !(conn.state.joined() and std.mem.eql(u8, conn.ssid(), chosen.?.ssid()));
-        for (nets) |*n| {
-            const is_chosen = chosen != null and n == chosen.?;
-            const joined = conn.state != .idle and conn.state != .failed and std.mem.eql(u8, conn.ssid(), n.ssid());
-            rows.append(a, b.network(n, is_chosen, joined, choose(cx, state, n.ssid()))) catch {};
-            if (is_chosen and form) rows.append(a, self.joinForm(b, state, n)) catch {};
-        }
+        // The networks, in lists that make only the rows that show; the
+        // form for joining the chosen one goes under it, between two.
+        const split = if (form) chosen.? - nets.ptr + 1 else nets.len;
+        if (split > 0) rows.append(a, networkList(b, state, report, nets[0..split], chosen)) catch {};
+        if (form) rows.append(a, self.joinForm(b, state, chosen.?)) catch {};
+        if (split < nets.len) rows.append(a, networkList(b, state, report, nets[split..], chosen)) catch {};
         const footer = if (report.scanning) "Scanning…" else if (nets.len == 0) "No networks found" else "";
         if (footer.len > 0) rows.append(a, b.item("", footer)) catch {};
         return b.card("Wi-Fi", rows.items);
@@ -408,6 +408,39 @@ const Addressing = struct {
         st.static_invalid = false;
         st.static_form = false;
         if (x.actions) |acts| acts.ethernet = .{ .static = static };
+    }
+};
+
+/// Wi-Fi networks, a row each; rows are made only for those that show.
+fn networkList(b: Builder, state: *Settings.State, report: *const info.manager.Report, nets: []const info.manager.Network, chosen: ?*const info.manager.Network) ui.Widget {
+    const cx = b.cx;
+    const list = cx.ui.arena().create(Networks) catch return cx.make(ui.Empty{});
+    list.* = .{ .s = b.s, .state = state, .conn = &report.connection, .nets = nets, .chosen = chosen };
+    return cx.make(ui.LazyGrid{
+        .count = nets.len,
+        .cell = .{ .w = std.math.inf(f32), .h = @round(network_row_height * b.s) },
+        .spacing = 10 * b.s,
+        .item = .of(list, Networks.row),
+    });
+}
+
+/// How tall a network's row is (at scale 1).
+const network_row_height = 32;
+
+/// Networks to make rows of (in the frame's arena).
+const Networks = struct {
+    s: f32,
+    state: *Settings.State,
+    conn: *const info.manager.Connection,
+    nets: []const info.manager.Network,
+    chosen: ?*const info.manager.Network,
+
+    fn row(l: *const Networks, cx: *ui.Context, i: usize) ui.Widget {
+        const b: Builder = .{ .cx = cx, .s = l.s };
+        const n = &l.nets[i];
+        const is_chosen = l.chosen != null and n == l.chosen.?;
+        const joined = l.conn.state != .idle and l.conn.state != .failed and std.mem.eql(u8, l.conn.ssid(), n.ssid());
+        return b.network(n, is_chosen, joined, choose(cx, l.state, n.ssid()));
     }
 };
 
@@ -645,8 +678,8 @@ const Builder = struct {
         });
     }
 
-    /// A Wi-Fi network: its signal, name, security and band; pressing it
-    /// chooses it.
+    /// A Wi-Fi network: its signal, name, security and band, in the middle
+    /// of its row (`network_row_height`); pressing it chooses it.
     fn network(b: Builder, n: *const info.manager.Network, chosen: bool, joined: bool, on_press: ui.Callback) ui.Widget {
         const cx = b.cx;
         const t = &cx.ui.theme;
@@ -852,6 +885,10 @@ test "everything is shown, and fits the window at the shell's sizes" {
             u.frame(size[0], size[1], frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .scale = scaleFor(size[2], size[3]), .bar_scale = @as(f32, @floatFromInt(size[2])) / 1920 });
             try testing.expect(!overflows(u.root.?));
         }
+        // What shows maximized (in a smaller window, rows of the lists
+        // further down are not made).
+        frame_no += 1;
+        u.frame(1920, 1036, frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .scale = scaleFor(1920, 1036), .bar_scale = 1 });
         texts(u.root.?, &all);
         // The next page, from its tab.
         if (@as(usize, @intFromEnum(page)) + 1 < std.enums.values(Page).len) {
@@ -898,6 +935,12 @@ test "everything is shown, and fits the window at the shell's sizes" {
             return error.TestUnexpectedResult;
         }
     }
+    // In a small window, only the networks that show are made.
+    u.root.?.state(Settings.State).page = .wifi;
+    u.frame(512, 362, frame_no + 1, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .scale = scaleFor(1024, 724) });
+    u.frame(512, 362, frame_no + 2, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .scale = scaleFor(1024, 724) });
+    try testing.expect(findText(u.root.?, "Home") != null);
+    try testing.expect(findText(u.root.?, "bad?name") == null);
     // The build is in the system card, not beside the title; the hardware
     // is the board alone.
     for ([_][]const u8{ "Dazzle build", "Hardware\n", "Chip", "GPU\n", "Revision", "In use" }) |gone| {
