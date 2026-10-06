@@ -37,6 +37,7 @@
 //! * `widgets`: Row, Column, Expanded, Padding, Align, Center, SizedBox,
 //!   ConstrainedBox, Grid, Overlay, Decorated, Pressable
 //! * `scroll_view`: ScrollView
+//! * `lazy_grid`: LazyGrid, a grid that makes only the items that show
 //! * `text`: Text
 //! * `material`: the theme, OutlinedButton, Spinner
 //! * `controls`: Checkbox, Radio, Switch
@@ -56,6 +57,7 @@ pub const controls = @import("controls.zig");
 pub const text_field = @import("text_field.zig");
 pub const title_bar = @import("title_bar.zig");
 pub const scroll_view = @import("scroll_view.zig");
+pub const lazy_grid = @import("lazy_grid.zig");
 pub const keymap = @import("keymap.zig");
 pub const painter = @import("painter.zig");
 pub const damage = @import("damage.zig");
@@ -107,6 +109,7 @@ pub const Switch = controls.Switch;
 pub const TextField = text_field.TextField;
 pub const TitleBar = title_bar.TitleBar;
 pub const ScrollView = scroll_view.ScrollView;
+pub const LazyGrid = lazy_grid.LazyGrid;
 
 pub const Painter = painter.Painter;
 pub const GpuArea = painter.GpuArea;
@@ -122,6 +125,7 @@ test {
     _ = text_field;
     _ = title_bar;
     _ = scroll_view;
+    _ = lazy_grid;
     _ = keymap;
     _ = painter;
     _ = damage;

@@ -35,6 +35,7 @@ pub const ScrollView = struct {
     reveal: ?u64 = null,
 
     pub const clips_children = true;
+    pub const scrolls = true;
 
     pub const State = struct {
         /// How far down the child is scrolled.
@@ -81,6 +82,10 @@ pub const ScrollView = struct {
                 return if (std.math.isFinite(w)) .{ .min_w = w, .max_w = w } else .{};
             }
         }.f;
+        // Widgets in it that make only what shows learn what does once it
+        // is laid out.
+        n.ui.scrolling += 1;
+        defer n.ui.scrolling -= 1;
         var size = ch.layout(inner(width));
         const height = if (c.boundedHeight()) c.max_h else size.h;
         // Too tall: the bar takes its width.
@@ -106,6 +111,7 @@ pub const ScrollView = struct {
         }
         s.offset = std.math.clamp(s.offset, 0, s.maxOffset());
         ch.place(0, -@round(s.offset));
+        ch.realizeIn(.{ .x = 0, .y = @round(s.offset), .w = if (std.math.isFinite(width)) width else size.w, .h = height });
         return c.constrain(.{ .w = if (std.math.isFinite(width)) width else size.w + bar, .h = height });
     }
 

@@ -19,7 +19,8 @@
 //!   by default a widget passes its constraints to its children, stacks
 //!   them at its top left and is as big as allowed. Children are found in
 //!   a `child: Widget` (or `?Widget`) or a `children: []const Widget`
-//!   field.
+//!   field, or made by `lazyChildren` (for widgets that make only the
+//!   children that show: see `realize` and lazy_grid.zig).
 //!
 //! A node is a widget's place in the tree. Each frame the new widgets are
 //! matched to the nodes of the last (by position and type, or by key), so
@@ -148,6 +149,14 @@ pub const VTable = struct {
     paint_over: ?*const fn (*const anyopaque, *Node, *Painter) void,
     event: ?*const fn (*const anyopaque, *Node, Event) bool,
     hit_test: ?*const fn (*const anyopaque, *Node, Point) bool,
+    /// Makes its children (instead of `children`), when the tree is built.
+    lazy_children: ?*const fn (*const anyopaque, *Context, *Node) []const Widget,
+    /// Told, once laid out in a scroll view, what of it shows (relative to
+    /// itself), to make the children there.
+    realize: ?*const fn (*const anyopaque, *Node, Rect) void,
+    /// Scrolls its child (`pub const scrolls = true`): it tells the
+    /// widgets in it what shows (see `Node.realizeIn`).
+    scrolls: bool,
     state: ?StateOps,
     /// Shows only what of its children is within its bounds, without
     /// counting the rest as overflow (`pub const clips_children = true`:
@@ -203,6 +212,12 @@ fn makeVTable(comptime T: type) VTable {
         fn hitTest(ptr: *const anyopaque, n: *Node, p: Point) bool {
             return T.hitTest(self(ptr), n, p);
         }
+        fn lazyChildren(ptr: *const anyopaque, cx: *Context, n: *Node) []const Widget {
+            return T.lazyChildren(self(ptr), cx, n);
+        }
+        fn realize(ptr: *const anyopaque, n: *Node, visible: Rect) void {
+            T.realize(self(ptr), n, visible);
+        }
         fn initState(ptr: *const anyopaque, state: *anyopaque) void {
             const st: *T.State = @ptrCast(@alignCast(state));
             st.* = if (@hasDecl(T, "initState")) T.initState(self(ptr)) else .{};
@@ -220,6 +235,9 @@ fn makeVTable(comptime T: type) VTable {
         .paint_over = if (@hasDecl(T, "paintOver")) S.paintOver else null,
         .event = if (@hasDecl(T, "event")) S.event else null,
         .hit_test = if (@hasDecl(T, "hitTest")) S.hitTest else null,
+        .lazy_children = if (@hasDecl(T, "lazyChildren")) S.lazyChildren else null,
+        .realize = if (@hasDecl(T, "realize")) S.realize else null,
+        .scrolls = @hasDecl(T, "scrolls") and T.scrolls,
         .clips_children = @hasDecl(T, "clips_children") and T.clips_children,
         .state = if (@hasDecl(T, "State")) .{
             .size = @sizeOf(T.State),
@@ -429,6 +447,9 @@ pub const Node = struct {
             var cx: Context = .{ .ui = n.ui, .arena = n.ui.arena(), .node = n };
             const built = f(w.ptr, &cx, n.state_ptr);
             n.reconcile(&.{built});
+        } else if (w.vtable.lazy_children) |f| {
+            var cx: Context = .{ .ui = n.ui, .arena = n.ui.arena(), .node = n };
+            n.reconcile(f(w.ptr, &cx, n));
         } else {
             n.reconcile(w.vtable.children(w.ptr));
         }
@@ -436,8 +457,9 @@ pub const Node = struct {
 
     /// Matches the children's widgets to the existing child nodes (same
     /// type, and the same key or position), makes nodes for the rest, and
-    /// frees the nodes left over.
-    fn reconcile(n: *Node, widgets: []const Widget) void {
+    /// frees the nodes left over. (Widgets that make their children as
+    /// they are laid out call it then.)
+    pub fn reconcile(n: *Node, widgets: []const Widget) void {
         const gpa = n.ui.gpa;
         const arena = n.ui.arena();
         // The old children, aside (the list's memory is reused).
@@ -500,6 +522,18 @@ pub const Node = struct {
         if (!hit) hit = if (vt.hit_test) |f| f(n.widget.ptr, n, p) else vt.event != null;
         if (hit and vt.event != null) path.append(n.ui.gpa, n) catch {};
         return hit;
+    }
+
+    /// Tells the widgets that make only the children that show
+    /// (`realize`), in it and below, what of them shows: `visible`
+    /// (relative to this node). Scroll views below tell their own.
+    pub fn realizeIn(n: *Node, visible: Rect) void {
+        if (n.laid_out != n.ui.frame_no) return;
+        if (n.widget.vtable.realize) |f| return f(n.widget.ptr, n, visible);
+        for (n.children.items) |ch| {
+            if (ch.widget.vtable.scrolls) continue;
+            ch.realizeIn(.{ .x = visible.x - ch.offset[0], .y = visible.y - ch.offset[1], .w = visible.w, .h = visible.h });
+        }
     }
 
     /// Where the node's top left is in the window (as last laid out).

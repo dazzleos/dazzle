@@ -67,6 +67,9 @@ pub const Ui = struct {
     /// Counts nodes as they are painted (their order is part of what they
     /// draw).
     paint_order: u64 = 0,
+    /// How many scroll views are laying out their children: what in them
+    /// shows is known only after (see `Node.realizeIn`).
+    scrolling: u32 = 0,
 
     pub fn create(gpa: std.mem.Allocator, f: ?*const font.Font) !*Ui {
         const ui = try gpa.create(Ui);

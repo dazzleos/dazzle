@@ -574,6 +574,72 @@ test "a grid puts as many cells in a row as fit" {
     try testing.expectEqual(ui.Size{ .w = 250, .h = 140 }, grid.size);
 }
 
+const LazyItems = struct {
+    pressed: ?usize = null,
+    made: usize = 0,
+
+    const Press = struct {
+        items: *LazyItems,
+        i: usize,
+        fn f(p: *const Press) void {
+            p.items.pressed = p.i;
+        }
+    };
+
+    fn item(items: *LazyItems, cx: *Context, i: usize) Widget {
+        items.made += 1;
+        const p = cx.arena.create(Press) catch unreachable;
+        p.* = .{ .items = items, .i = i };
+        return cx.make(ui.Pressable{ .on_press = .of(p, Press.f), .child = cx.make(ui.Decorated{ .color = if (i % 2 == 0) red else blue }) });
+    }
+};
+
+const LazyApp = struct {
+    items: *LazyItems,
+    in_scroll_view: bool = true,
+    pub fn build(self: *const @This(), cx: *Context) Widget {
+        const grid = cx.make(ui.LazyGrid{ .count = 100, .cell = .{ .w = 50, .h = 40 }, .spacing = 10, .item = .of(self.items, LazyItems.item) });
+        return cx.make(ui.Align{ .alignment = .top_left, .child = cx.make(ui.SizedBox{ .width = 200, .height = 300, .child = if (self.in_scroll_view) cx.make(ui.ScrollView{ .child = grid }) else grid }) });
+    }
+};
+
+test "a lazy grid makes only the rows that show, as it scrolls" {
+    const u = try ui.Ui.create(testing.allocator, null);
+    defer u.destroy();
+    var items: LazyItems = .{};
+    u.frame(400, 400, 0, LazyApp{ .items = &items });
+    const view = find(u.root.?, ui.ScrollView).?;
+    const grid = view.child(0);
+    // 188 wide beside the bar: three columns; 34 rows of 50.
+    try testing.expectEqual(ui.Size{ .w = 188, .h = 34 * 50 - 10 }, grid.size);
+    // Rows 0 to 5 show (300 of 50 each), and one more is made.
+    try testing.expectEqual(@as(usize, 21), grid.childCount());
+    try testing.expectEqual(ui.Point{ 60, 50 }, grid.child(4).offset);
+    try testing.expectEqual(ui.Size{ .w = 50, .h = 40 }, grid.child(4).size);
+    // The next frame makes the same ones, with the rest of the tree.
+    items.made = 0;
+    u.frame(400, 400, 1, LazyApp{ .items = &items });
+    try testing.expectEqual(@as(usize, 21), items.made);
+
+    // Scrolled to 1000: rows 20 to 25 show; 19 to 26 are made.
+    _ = view.state(ui.ScrollView.State).scrollTo(1000);
+    u.frame(400, 400, 2, LazyApp{ .items = &items });
+    try testing.expectEqual(@as(usize, 24), grid.childCount());
+    try testing.expectEqual(@as(?u64, 57), grid.child(0).widget.key);
+    try testing.expectEqual(ui.Point{ 0, 19 * 50 }, grid.child(0).offset);
+    try testing.expect(!grid.child(0).paint.valid);
+    try testing.expect(grid.child(3).paint.valid);
+    // Pressing one presses the right item.
+    u.pointerMotion(.{ 70, 15 });
+    u.pointerButton(.{ 70, 15 }, ui.widgets.btn_left, true);
+    u.pointerButton(.{ 70, 15 }, ui.widgets.btn_left, false);
+    try testing.expectEqual(@as(?usize, 61), items.pressed);
+
+    // Not in a scroll view: all of it shows.
+    u.frame(400, 400, 3, LazyApp{ .items = &items, .in_scroll_view = false });
+    try testing.expectEqual(@as(usize, 100), find(u.root.?, ui.LazyGrid).?.childCount());
+}
+
 test "a scroll view scrolls with the wheel and its bar, and paints only what shows" {
     const u = try ui.Ui.create(testing.allocator, null);
     defer u.destroy();
