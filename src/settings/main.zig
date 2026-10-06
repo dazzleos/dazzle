@@ -77,12 +77,9 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     // What the window asks of the network manager (Connect, Disconnect, an
     // Ethernet address).
     var actions: view.Actions = .{};
-    // What the title bar's buttons do. Its size, and everything else's,
-    // stays as it was for the whole screen (the window starts maximized)
-    // when the window is restored to half of it.
+    // What the title bar's buttons do, and how small the window may be.
     var controls: app.Controls = .{ .win = win };
-    const bar_scale = @as(f32, @floatFromInt(width)) / 1920;
-    const scale = view.scaleFor(width, height);
+    win.setMinSize(view.min_size[0], view.min_size[1]);
 
     var next_update: u64 = sys.nowNs() + std.time.ns_per_s;
     var dirty = true;
@@ -166,8 +163,6 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
                 .on_maximize = .of(&controls, app.Controls.toggleMaximized),
                 .on_drag = .of(&controls, app.Controls.drag),
                 .maximized = win.maximized,
-                .bar_scale = bar_scale,
-                .scale = scale,
             });
             if (window_ui.changed()) {
                 idle = false;

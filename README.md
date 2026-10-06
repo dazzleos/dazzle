@@ -293,24 +293,38 @@ The shell (`src/shell/`):
 | `dock.zig` | The dock: finds the apps in `/apps`, draws their icons, and finds the one clicked |
 | `shaders/quad.zig` | The textured quad's shader |
 | `input.zig` | USB keyboards and mice: finds `/dev/input/event*` nodes and decodes their events |
-| `cursor.zig` | The pointer's arrow, drawn into the cursor plane's buffer |
+| `cursor.zig` | The pointer's pictures (an arrow, and arrows for resizing), drawn into the cursor plane's buffer |
 | `screenshot.zig` | Print Screen: the screen saved as `/data/user/Screenshot N.png` |
 | `png.zig` | Writing PNG images |
 | `server_test.zig` | Protocol tests on the host, described below |
 
 The server offers `wl_compositor`, `wl_shm` (ARGB8888 and XRGB8888, copied
 to a texture at commit), `zwp_linux_dmabuf_v1`, `xdg_wm_base` (toplevels)
-and `wl_seat` (a pointer and a keyboard). There are no popups or outputs
-yet.
+`wl_seat` (a pointer and a keyboard) and `wp_cursor_shape_manager_v1`
+(the pointer's picture, by name). There are no popups or outputs yet.
 
 - **Windows:** each toplevel starts maximized, filling the screen above
   the dock. Unmaximized (`unset_maximized`), it is told half the work
-  area's width and height, and goes in the middle of it the first time,
-  or where it was last; maximized again, it fills it. A restored window
-  moves with the pointer once its client asks (`move`, with the serial of
-  a button press it is still holding): until the button is released the
-  pointer is the shell's, and the window stays where its title bar can be
-  reached. Windows are stacked newest on top; clicking a window, or its
+  area's width and height (or its minimum size, if bigger) the first
+  time, in the middle of it, and afterwards the size and place it had;
+  maximized again, it fills it. A restored window moves with the pointer
+  once its client asks (`move`, with the serial of a button press it is
+  still holding): until the button is released the pointer is the
+  shell's, and the window stays where its title bar can be reached.
+- **Resizing:** apps resize their windows, as Wayland clients do: a press
+  near a restored window's edge or corner (within 6 pixels inside it; the
+  `app` library's `Window` finds it) asks the shell to `resize` by those
+  edges, and the shell follows the pointer, with the opposite edges kept
+  where they are, until the button is released. A window is no smaller
+  than its client's `set_min_size` (each app's `min_size`) nor bigger than
+  the work area. The shell tells it a new size only once it has drawn at
+  the last one (acknowledged the configure and committed), so a slow app
+  is not sent sizes faster than it can draw them; while it catches up,
+  what it shows stays anchored at the edge not being dragged. Over the
+  edges the app asks for a resize arrow (`wp_cursor_shape_v1`), and the
+  shell shows it while resizing too. Apps lay out again at every size,
+  and nothing in them scales: text, buttons and spacing are the same size
+  in pixels in any window, and a bigger one shows more. Windows are stacked newest on top; clicking a window, or its
   app in the dock, raises it, and the top window has the keyboard
   (`activated`). Apps draw their own title bars (the toolkit's `TitleBar`:
   the app's name, a button that maximizes or restores the window, a close
@@ -362,7 +376,9 @@ yet.
   shown window gets the keyboard, and it gets the pointer while the pointer
   is over it, in window coordinates. There is no XKB keymap: the keymap
   format is `no_keymap`, so key events carry Linux key codes, and key
-  repeat is off. Clients' own cursor images (`set_cursor`) are ignored.
+  repeat is off. Clients choose the pointer's picture by name
+  (`wp_cursor_shape_v1`: an arrow, or the resize arrows, drawn by the
+  shell); their own images (`set_cursor`) are ignored.
   Devices plugged in later are found within a second.
 
 The demo program (`src/demo/`):
@@ -613,7 +629,7 @@ The screen shows the shell's dock along the bottom; click the demo's
 icon in it to start it, and its window fills the space above, with its
 title bar (with maximize and close buttons) across the top. The maximize
 button restores the window to half the size, and then the title bar drags
-it about. The solid spins at the
+it about and its edges resize it. The solid spins at the
 display's refresh rate. The window's top left corner shows, under the
 title:
 

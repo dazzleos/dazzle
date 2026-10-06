@@ -30,8 +30,8 @@ pub const Rings = struct {
         r.len += 1;
     }
 
-    /// Draws the live rings; `unit` scales them (1 at 1080 pixels high).
-    pub fn draw(r: *Rings, c: *gfx.Canvas, now: u64, unit: f32) void {
+    /// Draws the live rings.
+    pub fn draw(r: *Rings, c: *gfx.Canvas, now: u64) void {
         var kept: usize = 0;
         for (r.rings[0..r.len]) |ring| {
             const age = now -| ring.born;
@@ -41,8 +41,8 @@ pub const Rings = struct {
             const t = @as(f32, @floatFromInt(age)) / @as(f32, @floatFromInt(lifetime));
             // Fast at first, slowing down; thinning and fading as it goes.
             const grow = 1 - (1 - t) * (1 - t);
-            const radius = (4 + 36 * grow) * unit;
-            const width = (3 * (1 - t) + 1) * unit;
+            const radius = 4 + 36 * grow;
+            const width = 3 * (1 - t) + 1;
             c.strokeCircle(ring.center, radius, width, ring.color.withAlpha(1 - t));
         }
         r.len = kept;
@@ -56,10 +56,10 @@ test "rings expire, and the oldest makes way" {
     for (0..max_rings + 5) |i| r.add(i, 10, 10, .rgb(0xffffff));
     try std.testing.expectEqual(@as(usize, max_rings), r.len);
     c.begin(100, 100);
-    r.draw(&c, lifetime / 2, 1);
+    r.draw(&c, lifetime / 2);
     try std.testing.expectEqual(@as(usize, max_rings), r.len);
     try std.testing.expect(c.batches.items.len > 0);
     c.begin(100, 100);
-    r.draw(&c, 2 * lifetime, 1);
+    r.draw(&c, 2 * lifetime);
     try std.testing.expectEqual(@as(usize, 0), r.len);
 }

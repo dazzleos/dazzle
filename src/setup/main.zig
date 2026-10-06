@@ -122,7 +122,6 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         if (!win.suspended and (dirty or window_ui.needs_frame)) {
             dirty = false;
             window_ui.frame(width, height, now, view.Setup{
-                .scale = view.scaleFor(width, height),
                 .suggestion = suggestion,
                 .report = if (report) |*r| r else null,
                 .actions = &actions,

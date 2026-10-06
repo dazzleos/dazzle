@@ -26,14 +26,9 @@ pub const Actions = struct {
     without_storage: bool = false,
 };
 
-/// Sizes are designed for a window 900 pixels high (and 1600 wide), and
-/// scale with it.
-pub fn scaleFor(width: u32, height: u32) f32 {
-    return std.math.clamp(@min(@as(f32, @floatFromInt(width)) / 1600, @as(f32, @floatFromInt(height)) / 900), 0.6, 2);
-}
-
+/// Everything is the same size in pixels, whatever the window's: the card
+/// in the middle of it.
 pub const Setup = struct {
-    scale: f32,
     /// The name to start with.
     suggestion: []const u8,
     /// What the system manager last said; null if it could not be asked.
@@ -66,53 +61,51 @@ pub const Setup = struct {
     }
 
     pub fn build(self: *const Setup, cx: *ui.Context, state: *State) ui.Widget {
-        const s = self.scale;
         const nav = cx.ui.arena().create(Nav) catch return cx.make(ui.Empty{});
         nav.* = .{ .state = state, .actions = self.actions };
         const content = if (state.finishing) self.finishing(cx, nav) else self.page(cx, state, nav);
-        return cx.make(ui.Decorated{ .color = cx.theme().surface, .child = cx.make(ui.Center{ .child = cx.make(ui.SizedBox{
-            .width = @round(720 * s),
-            .child = cx.make(ui.Padding{ .padding = .all(@round(24 * s)), .child = content }),
+        // At most 720 pixels wide, narrower in a narrower window.
+        return cx.make(ui.Decorated{ .color = cx.theme().surface, .child = cx.make(ui.Center{ .child = cx.make(ui.ConstrainedBox{
+            .constraints = .{ .max_w = 720 },
+            .child = cx.make(ui.Padding{ .padding = .all(24), .child = content }),
         }) }) });
     }
 
     /// A page: its heading, what it asks, and the buttons.
     fn page(self: *const Setup, cx: *ui.Context, state: *State, nav: *Nav) ui.Widget {
-        const s = self.scale;
         const t = cx.theme();
         const body = switch (pages[state.page]) {
             .hostname => self.hostnamePage(cx, state, nav),
         };
-        return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = @round(24 * s), .children = &.{
-            cx.make(ui.Text{ .text = "Welcome to Dazzle", .style = .{ .size = 40 * s, .color = t.primary } }),
+        return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 24, .children = &.{
+            cx.make(ui.Text{ .text = "Welcome to Dazzle", .style = .{ .size = 40, .color = t.primary } }),
             body,
-            cx.make(ui.Row{ .spacing = @round(12 * s), .main_axis_alignment = .end, .children = &.{
+            cx.make(ui.Row{ .spacing = 12, .main_axis_alignment = .end, .children = &.{
                 if (state.page > 0) cx.make(ui.OutlinedButton{ .label = "Back", .icon = .arrow_back, .on_press = .of(nav, Nav.back) }) else cx.make(ui.Empty{}),
                 cx.make(ui.OutlinedButton{ .label = "Next", .icon = .arrow_forward, .on_press = .of(nav, Nav.next) }),
             } }),
         } });
     }
 
-    fn hostnamePage(self: *const Setup, cx: *ui.Context, state: *State, nav: *Nav) ui.Widget {
-        const s = self.scale;
+    fn hostnamePage(_: *const Setup, cx: *ui.Context, state: *State, nav: *Nav) ui.Widget {
         const t = cx.theme();
-        return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = @round(12 * s), .children = &.{
-            cx.make(ui.Text{ .text = "Name this computer", .style = .{ .size = 28 * s } }),
+        return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 12, .children = &.{
+            cx.make(ui.Text{ .text = "Name this computer", .style = .{ .size = 28 } }),
             cx.make(ui.Text{
                 .text = "Other computers on the network know it by this name. It can have lowercase letters, numbers and hyphens.",
-                .style = .{ .size = 18 * s, .color = t.on_surface_variant },
+                .style = .{ .size = 18, .color = t.on_surface_variant },
             }),
             cx.make(ui.TextField{
                 .initial = state.name(),
                 .max_len = state.name_buf.len,
-                .size = 20 * s,
-                .width = @round(400 * s),
+                .size = 20,
+                .width = 400,
                 .on_changed = .of(state, State.setName),
                 .on_submit = .of(nav, Nav.next),
             }),
             if (state.name_invalid) cx.make(ui.Text{
                 .text = "Use 1 to 63 lowercase letters, numbers and hyphens, not starting or ending with a hyphen",
-                .style = .{ .size = 16 * s, .color = t.@"error" },
+                .style = .{ .size = 16, .color = t.@"error" },
             }) else cx.make(ui.Empty{}),
         } });
     }
@@ -120,15 +113,14 @@ pub const Setup = struct {
     /// After the last page: waiting for the card, or why it could not be
     /// prepared.
     fn finishing(self: *const Setup, cx: *ui.Context, nav: *Nav) ui.Widget {
-        const s = self.scale;
         const t = cx.theme();
         const r = self.report;
         if (r != null and r.?.storage == .failed) {
-            return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = @round(16 * s), .children = &.{
-                cx.make(ui.Text{ .text = "The SD card could not be prepared", .style = .{ .size = 28 * s } }),
+            return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 16, .children = &.{
+                cx.make(ui.Text{ .text = "The SD card could not be prepared", .style = .{ .size = 28 } }),
                 cx.make(ui.Text{
                     .text = cx.fmt("Dazzle cannot keep files: {s}. Setup will run again when the computer next starts.", .{r.?.failure.label()}),
-                    .style = .{ .size = 18 * s, .color = t.on_surface_variant },
+                    .style = .{ .size = 18, .color = t.on_surface_variant },
                 }),
                 cx.make(ui.Row{ .main_axis_alignment = .end, .children = &.{
                     cx.make(ui.OutlinedButton{ .label = "Continue", .on_press = .of(nav, Nav.continueWithout) }),
@@ -136,10 +128,10 @@ pub const Setup = struct {
             } });
         }
         const progress = if (r) |rep| (if (rep.storage == .preparing) cx.fmt("{d}%", .{rep.progress}) else "") else "";
-        return cx.make(ui.Column{ .main_axis_size = .min, .spacing = @round(20 * s), .children = &.{
-            cx.make(ui.Spinner{ .size = @round(64 * s) }),
-            cx.make(ui.Text{ .text = "Getting the SD card ready", .style = .{ .size = 24 * s } }),
-            cx.make(ui.Text{ .text = progress, .style = .{ .size = 18 * s, .color = t.on_surface_variant } }),
+        return cx.make(ui.Column{ .main_axis_size = .min, .spacing = 20, .children = &.{
+            cx.make(ui.Spinner{ .size = 64 }),
+            cx.make(ui.Text{ .text = "Getting the SD card ready", .style = .{ .size = 24 } }),
+            cx.make(ui.Text{ .text = progress, .style = .{ .size = 18, .color = t.on_surface_variant } }),
         } });
     }
 };
@@ -215,10 +207,10 @@ test "naming the computer, then waiting for the card" {
     const Draw = struct {
         fn draw(uu: *ui.Ui, r: *const proto.Report, a: *Actions, n: *u64, size: [2]u32) void {
             n.* += 1;
-            uu.frame(size[0], size[1], n.*, Setup{ .scale = scaleFor(size[0], size[1]), .suggestion = "awesome-elephant", .report = r, .actions = a });
+            uu.frame(size[0], size[1], n.*, Setup{ .suggestion = "awesome-elephant", .report = r, .actions = a });
         }
     }.draw;
-    for ([_][2]u32{ .{ 1920, 1080 }, .{ 1280, 720 }, .{ 1024, 768 } }) |size| {
+    for ([_][2]u32{ .{ 1920, 1080 }, .{ 1280, 720 }, .{ 1024, 768 }, .{ 800, 600 }, .{ 640, 480 } }) |size| {
         Draw(u, &report, &actions, &now, size);
         try testing.expect(!overflows(u.root.?));
     }

@@ -39,6 +39,15 @@ pub const Actions = struct {
     };
 };
 
+/// The smallest the window may be: the tabs, and the widest card's rows
+/// beside them. Everything is the same size in pixels whatever the
+/// window's size; the cards grow to fill the width (up to
+/// `max_page_width`), and their pages scroll.
+pub const min_size = [2]u32{ 720, 440 };
+
+/// The widest a page is.
+const max_page_width = 960;
+
 pub const Settings = struct {
     commit: []const u8,
     /// Where the window's requests go (none in tests that do not look).
@@ -48,18 +57,12 @@ pub const Settings = struct {
     network: *const info.Network,
     /// What the network manager last said; null if it could not be asked.
     manager: ?*const info.manager.Report = null,
-    /// Sizes are designed for a screen whose maximized windows are 900
-    /// pixels high, and scale with it (not with the window: text stays
-    /// the same size when it is restored).
-    scale: f32,
     /// The title bar's buttons (close, and maximize, which shows whether
-    /// the window is), pressing the bar (to move the window), and its scale
-    /// (the screen's, so every app's title bar is the same).
+    /// the window is), and pressing the bar (to move the window).
     on_close: ?ui.Callback = null,
     on_maximize: ?ui.Callback = null,
     on_drag: ?ui.Callback = null,
     maximized: bool = true,
-    bar_scale: f32 = 1,
 
     pub const State = struct {
         /// The page shown.
@@ -113,8 +116,7 @@ pub const Settings = struct {
     };
 
     pub fn build(self: *const Settings, cx: *ui.Context, state: *State) ui.Widget {
-        const s = self.scale;
-        const b: Builder = .{ .cx = cx, .s = s };
+        const b: Builder = .{ .cx = cx };
         const page = switch (state.page) {
             .wifi => self.wifiCard(b, state),
             .ethernet => self.networkCard(b, state),
@@ -125,21 +127,25 @@ pub const Settings = struct {
         var tabs: [std.meta.fields(Page).len]ui.Widget = undefined;
         inline for (&tabs, std.meta.fields(Page)) |*w, field| {
             const p: Page = @enumFromInt(field.value);
-            w.* = cx.make(Tab{ .label = p.label(), .icon = p.icon(), .selected = state.page == p, .scale = s, .on_press = pick(cx, state, p) });
+            w.* = cx.make(Tab{ .label = p.label(), .icon = p.icon(), .selected = state.page == p, .on_press = pick(cx, state, p) });
         }
-        const sidebar = cx.make(ui.SizedBox{ .width = @round(190 * s), .child = cx.make(ui.Decorated{
+        const sidebar = cx.make(ui.SizedBox{ .width = 190, .child = cx.make(ui.Decorated{
             .color = t.surface_container,
-            .child = cx.make(ui.Padding{ .padding = .all(@round(12 * s)), .child = cx.make(ui.Column{
+            .child = cx.make(ui.Padding{ .padding = .all(12), .child = cx.make(ui.Column{
                 .cross_axis_alignment = .stretch,
-                .spacing = @round(4 * s),
+                .spacing = 4,
                 .children = &tabs,
             }) }),
         }) });
         // A page longer than the window scrolls; another page starts at
-        // its top.
+        // its top. In a wide window the page is no wider than reads well,
+        // in the middle.
         const content = cx.make(ui.Row{ .cross_axis_alignment = .stretch, .children = &.{
             sidebar,
-            cx.make(ui.Expanded{ .child = cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(@floor(24 * s)), .child = page }) }).withKey(@as(u64, @intFromEnum(state.page)) + 1) }),
+            cx.make(ui.Expanded{ .child = cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(24), .child = cx.make(ui.Align{
+                .alignment = .top_center,
+                .child = cx.make(ui.ConstrainedBox{ .constraints = .{ .max_w = max_page_width }, .child = page }),
+            }) }) }).withKey(@as(u64, @intFromEnum(state.page)) + 1) }),
         } });
         return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &.{
             cx.make(ui.TitleBar{
@@ -148,7 +154,6 @@ pub const Settings = struct {
                 .on_maximize = self.on_maximize,
                 .on_drag = self.on_drag,
                 .maximized = self.maximized,
-                .scale = self.bar_scale,
             }),
             cx.make(ui.Expanded{ .child = content }),
         } });
@@ -230,7 +235,7 @@ pub const Settings = struct {
             .failed => cx.fmt("Could not connect to {s}: {s}", .{ name, c.failure.label() }),
         };
         if (!connectionBusy(c)) return b.item("Connection", text);
-        return cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12 * b.s, .children = &.{
+        return cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
             b.label("Connection"),
             cx.make(ui.Expanded{ .child = b.value(text) }),
             cx.make(ui.OutlinedButton{ .label = "Disconnect", .on_press = if (self.actions) |acts| .of(act(cx, acts, state, ""), Act.disconnect) else null }),
@@ -243,19 +248,19 @@ pub const Settings = struct {
         const t = &cx.ui.theme;
         const on_connect: ?ui.Callback = if (self.actions) |acts| .of(act(cx, acts, state, n.ssid()), Act.connect) else null;
         const field: ui.Widget = switch (n.security) {
-            .open => cx.make(ui.Text{ .text = "An open network: what is sent can be seen", .style = .{ .size = 16 * b.s, .color = t.on_surface_variant } }),
+            .open => cx.make(ui.Text{ .text = "An open network: what is sent can be seen", .style = .{ .size = 16, .color = t.on_surface_variant } }),
             .wpa2 => cx.make(ui.TextField{
                 .placeholder = "Password",
                 .obscure = true,
-                .size = 18 * b.s,
+                .size = 18,
                 .on_changed = .of(state, State.setPassword),
                 .on_submit = on_connect,
             }).withKey(std.hash.Fnv1a_64.hash(n.ssid())),
-            else => cx.make(ui.Text{ .text = cx.fmt("{s} networks are not supported yet", .{n.security.label()}), .style = .{ .size = 16 * b.s, .color = t.on_surface_variant } }),
+            else => cx.make(ui.Text{ .text = cx.fmt("{s} networks are not supported yet", .{n.security.label()}), .style = .{ .size = 16, .color = t.on_surface_variant } }),
         };
         const supported = n.security == .open or n.security == .wpa2;
-        return cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12 * b.s, .children = &.{
-            cx.make(ui.SizedBox{ .width = 150 * b.s }),
+        return cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
+            cx.make(ui.SizedBox{ .width = 150 }),
             cx.make(ui.Expanded{ .child = field }),
             cx.make(ui.OutlinedButton{ .label = "Connect", .on_press = if (supported) on_connect else null }),
         } });
@@ -313,7 +318,7 @@ pub const Settings = struct {
         const choice = cx.ui.arena().create(Addressing) catch return;
         choice.* = .{ .actions = self.actions, .state = state, .current = current };
         const on_changed: ?ui.ValueCallback(Mode) = if (self.actions != null) .of(choice, Addressing.choose) else null;
-        rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12 * b.s, .children = &.{
+        rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
             b.label("Addressing"),
             cx.make(ui.Radio(Mode){ .value = .dhcp, .group_value = if (static) .static else .dhcp, .on_changed = on_changed, .label = "DHCP" }),
             cx.make(ui.Radio(Mode){ .value = .static, .group_value = if (static) .static else .dhcp, .on_changed = on_changed, .label = "Static" }),
@@ -346,13 +351,13 @@ pub const Settings = struct {
         }
         const on_apply: ?ui.Callback = if (self.actions != null) .of(choice, Addressing.apply) else null;
         const key = @as(u64, state.form_id) << 1;
-        rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12 * b.s, .children = &.{
-            cx.make(ui.SizedBox{ .width = 150 * b.s }),
+        rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
+            cx.make(ui.SizedBox{ .width = 150 }),
             cx.make(ui.Expanded{ .flex = 3, .child = cx.make(ui.TextField{
                 .placeholder = "Address/prefix",
                 .initial = state.address.text(),
                 .max_len = state.address.buf.len,
-                .size = 18 * b.s,
+                .size = 18,
                 .on_changed = .of(state, State.setAddress),
                 .on_submit = on_apply,
             }).withKey(key) }),
@@ -360,17 +365,17 @@ pub const Settings = struct {
                 .placeholder = "Gateway",
                 .initial = state.gateway.text(),
                 .max_len = state.gateway.buf.len,
-                .size = 18 * b.s,
+                .size = 18,
                 .on_changed = .of(state, State.setGateway),
                 .on_submit = on_apply,
             }).withKey(key | 1) }),
             cx.make(ui.OutlinedButton{ .label = "Apply", .on_press = on_apply }),
         } })) catch {};
-        if (state.static_invalid) rows.append(a, cx.make(ui.Row{ .spacing = 12 * b.s, .children = &.{
-            cx.make(ui.SizedBox{ .width = 150 * b.s }),
+        if (state.static_invalid) rows.append(a, cx.make(ui.Row{ .spacing = 12, .children = &.{
+            cx.make(ui.SizedBox{ .width = 150 }),
             cx.make(ui.Expanded{ .child = cx.make(ui.Text{
                 .text = "Give an address and prefix length (192.168.1.50/24), and a gateway or none",
-                .style = .{ .size = 16 * b.s, .color = cx.ui.theme.@"error" },
+                .style = .{ .size = 16, .color = cx.ui.theme.@"error" },
             }) }),
         } })) catch {};
     }
@@ -415,28 +420,27 @@ const Addressing = struct {
 fn networkList(b: Builder, state: *Settings.State, report: *const info.manager.Report, nets: []const info.manager.Network, chosen: ?*const info.manager.Network) ui.Widget {
     const cx = b.cx;
     const list = cx.ui.arena().create(Networks) catch return cx.make(ui.Empty{});
-    list.* = .{ .s = b.s, .state = state, .conn = &report.connection, .nets = nets, .chosen = chosen };
+    list.* = .{ .state = state, .conn = &report.connection, .nets = nets, .chosen = chosen };
     return cx.make(ui.LazyGrid{
         .count = nets.len,
-        .cell = .{ .w = std.math.inf(f32), .h = @round(network_row_height * b.s) },
-        .spacing = 10 * b.s,
+        .cell = .{ .w = std.math.inf(f32), .h = network_row_height },
+        .spacing = 10,
         .item = .of(list, Networks.row),
     });
 }
 
-/// How tall a network's row is (at scale 1).
+/// How tall a network's row is.
 const network_row_height = 32;
 
 /// Networks to make rows of (in the frame's arena).
 const Networks = struct {
-    s: f32,
     state: *Settings.State,
     conn: *const info.manager.Connection,
     nets: []const info.manager.Network,
     chosen: ?*const info.manager.Network,
 
     fn row(l: *const Networks, cx: *ui.Context, i: usize) ui.Widget {
-        const b: Builder = .{ .cx = cx, .s = l.s };
+        const b: Builder = .{ .cx = cx };
         const n = &l.nets[i];
         const is_chosen = l.chosen != null and n == l.chosen.?;
         const joined = l.conn.state != .idle and l.conn.state != .failed and std.mem.eql(u8, l.conn.ssid(), n.ssid());
@@ -487,7 +491,6 @@ const Tab = struct {
     label: []const u8,
     icon: ui.icons.Icon,
     selected: bool,
-    scale: f32,
     on_press: ?ui.Callback,
 
     pub const State = struct {
@@ -495,22 +498,21 @@ const Tab = struct {
     };
 
     pub fn build(self: *const Tab, cx: *ui.Context, state: *State) ui.Widget {
-        const s = self.scale;
         const t = cx.theme();
-        const height = @round(48 * s);
+        const height = 48;
         const color = if (self.selected) t.on_surface else t.on_surface_variant;
         const highlight: ?gfx.Color = if (self.selected) t.secondary_container else if (state.interaction.hovered) t.on_surface.withAlpha(0.08) else null;
         return cx.make(ui.Pressable{ .on_press = self.on_press, .interaction = &state.interaction, .child = cx.make(ui.Decorated{
             .color = highlight,
             .radius = .all(height / 2),
-            .child = cx.make(ui.SizedBox{ .height = height, .child = cx.make(ui.Padding{ .padding = .symmetric(@round(16 * s), 0), .child = cx.make(ui.Row{
+            .child = cx.make(ui.SizedBox{ .height = height, .child = cx.make(ui.Padding{ .padding = .symmetric(16, 0), .child = cx.make(ui.Row{
                 .cross_axis_alignment = .center,
-                .spacing = @round(12 * s),
+                .spacing = 12,
                 .children = &.{
-                    cx.make(ui.Icon{ .icon = self.icon, .size = @round(22 * s), .color = color }),
+                    cx.make(ui.Icon{ .icon = self.icon, .size = 22, .color = color }),
                     cx.make(ui.Expanded{ .child = cx.make(ui.Text{
                         .text = self.label,
-                        .style = .{ .size = 18 * s, .color = color },
+                        .style = .{ .size = 18, .color = color },
                         .wrap = false,
                         .ellipsis = true,
                     }) }),
@@ -613,35 +615,34 @@ fn fraction(part: u64, whole: u64) f32 {
     return @as(f32, @floatFromInt(part)) / @as(f32, @floatFromInt(whole));
 }
 
-/// Makes the cards and their rows, sized for the window.
+/// Makes the cards and their rows.
 const Builder = struct {
     cx: *ui.Context,
-    s: f32,
 
     fn card(b: Builder, title: []const u8, rows: []const ui.Widget) ui.Widget {
         const cx = b.cx;
         const t = &cx.ui.theme;
         const children = cx.ui.arena().alloc(ui.Widget, rows.len + 1) catch return cx.make(ui.Empty{});
-        children[0] = cx.make(ui.Padding{ .padding = .{ .bottom = 4 * b.s }, .child = cx.make(ui.Text{ .text = title, .style = .{ .size = 24 * b.s, .color = t.primary }, .wrap = false }) });
+        children[0] = cx.make(ui.Padding{ .padding = .{ .bottom = 4 }, .child = cx.make(ui.Text{ .text = title, .style = .{ .size = 24, .color = t.primary }, .wrap = false }) });
         @memcpy(children[1..], rows);
-        return cx.make(ui.Decorated{ .color = t.surface_container, .radius = .all(16 * b.s), .child = cx.make(ui.Padding{
-            .padding = .all(@floor(20 * b.s)),
-            .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 10 * b.s, .children = children }),
+        return cx.make(ui.Decorated{ .color = t.surface_container, .radius = .all(16), .child = cx.make(ui.Padding{
+            .padding = .all(20),
+            .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 10, .children = children }),
         }) });
     }
 
     fn label(b: Builder, text: []const u8) ui.Widget {
         const cx = b.cx;
-        return cx.make(ui.SizedBox{ .width = 150 * b.s, .child = cx.make(ui.Text{ .text = text, .style = .{ .size = 18 * b.s, .color = cx.ui.theme.on_surface_variant }, .wrap = false }) });
+        return cx.make(ui.SizedBox{ .width = 150, .child = cx.make(ui.Text{ .text = text, .style = .{ .size = 18, .color = cx.ui.theme.on_surface_variant }, .wrap = false }) });
     }
 
     fn value(b: Builder, text: []const u8) ui.Widget {
-        return b.cx.make(ui.Text{ .text = text, .style = .{ .size = 18 * b.s, .color = b.cx.ui.theme.on_surface } });
+        return b.cx.make(ui.Text{ .text = text, .style = .{ .size = 18, .color = b.cx.ui.theme.on_surface } });
     }
 
     /// A label and its value.
     fn item(b: Builder, name: []const u8, text: []const u8) ui.Widget {
-        return b.cx.make(ui.Row{ .cross_axis_alignment = .start, .spacing = 12 * b.s, .children = &.{
+        return b.cx.make(ui.Row{ .cross_axis_alignment = .start, .spacing = 12, .children = &.{
             b.label(name),
             b.cx.make(ui.Expanded{ .child = b.value(text) }),
         } });
@@ -663,29 +664,29 @@ const Builder = struct {
         const a = cx.ui.arena();
         const segments = a.alloc(SegmentBar.Segment, parts.len - 1) catch return cx.make(ui.Empty{});
         const key = a.alloc(ui.Widget, parts.len) catch return cx.make(ui.Empty{});
-        const dot = @round(10 * b.s);
+        const dot = 10;
         for (parts, key, 0..) |part, *k, i| {
             var buf: [32]u8 = undefined;
             if (i < segments.len) segments[i] = .{ .fraction = fraction(part.bytes, total), .color = part.color };
-            k.* = cx.make(ui.Row{ .spacing = 6 * b.s, .cross_axis_alignment = .center, .children = &.{
+            k.* = cx.make(ui.Row{ .spacing = 6, .cross_axis_alignment = .center, .children = &.{
                 cx.make(ui.SizedBox{ .width = dot, .height = dot, .child = cx.make(ui.Decorated{ .color = part.color, .radius = .all(dot / 2) }) }),
-                cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = cx.fmt("{s} {s}", .{ part.name, info.formatBytes(&buf, part.bytes) }), .style = .{ .size = 16 * b.s, .color = t.on_surface }, .wrap = false, .ellipsis = true }) }),
+                cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = cx.fmt("{s} {s}", .{ part.name, info.formatBytes(&buf, part.bytes) }), .style = .{ .size = 16, .color = t.on_surface }, .wrap = false, .ellipsis = true }) }),
             } });
         }
         return cx.make(ui.Row{
             .cross_axis_alignment = .start,
-            .spacing = 12 * b.s,
+            .spacing = 12,
             .children = &.{
                 b.label("Storage"),
                 cx.make(ui.Expanded{
                     .child = cx.make(ui.Column{
                         .cross_axis_alignment = .stretch,
                         .main_axis_size = .min,
-                        .spacing = 6 * b.s,
+                        .spacing = 6,
                         .children = &.{
                             // On as many lines as it takes.
-                            cx.make(ui.Grid{ .cell = .{ .w = @round(140 * b.s), .h = @round(22 * b.s) }, .spacing = @round(6 * b.s), .children = key }),
-                            cx.make(SegmentBar{ .segments = segments, .height = @max(@round(8 * b.s), 4) }),
+                            cx.make(ui.Grid{ .cell = .{ .w = 140, .h = 22 }, .spacing = 6, .children = key }),
+                            cx.make(SegmentBar{ .segments = segments, .height = @max(8, 4) }),
                         },
                     }),
                 }),
@@ -698,29 +699,29 @@ const Builder = struct {
     fn network(b: Builder, n: *const info.manager.Network, chosen: bool, joined: bool, on_press: ui.Callback) ui.Widget {
         const cx = b.cx;
         const t = &cx.ui.theme;
-        const row = cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12 * b.s, .children = &.{
-            cx.make(ui.SizedBox{ .width = 150 * b.s, .child = cx.make(ui.Row{ .spacing = 8 * b.s, .main_axis_size = .min, .cross_axis_alignment = .center, .children = &.{
-                cx.make(Signal{ .bars = n.bars(), .size = @round(20 * b.s) }),
-                cx.make(ui.Text{ .text = cx.fmt("{d} dBm", .{n.dbm()}), .style = .{ .size = 16 * b.s, .color = t.on_surface_variant }, .wrap = false }),
+        const row = cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
+            cx.make(ui.SizedBox{ .width = 150, .child = cx.make(ui.Row{ .spacing = 8, .main_axis_size = .min, .cross_axis_alignment = .center, .children = &.{
+                cx.make(Signal{ .bars = n.bars(), .size = 20 }),
+                cx.make(ui.Text{ .text = cx.fmt("{d} dBm", .{n.dbm()}), .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }),
             } }) }),
-            cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = printable(cx, n.ssid()), .style = .{ .size = 18 * b.s, .color = if (joined) t.primary else t.on_surface }, .wrap = false }) }),
-            cx.make(ui.Text{ .text = cx.fmt("{s} · {s}", .{ n.security.label(), n.band() }), .style = .{ .size = 16 * b.s, .color = t.on_surface_variant }, .wrap = false }),
+            cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = printable(cx, n.ssid()), .style = .{ .size = 18, .color = if (joined) t.primary else t.on_surface }, .wrap = false }) }),
+            cx.make(ui.Text{ .text = cx.fmt("{s} · {s}", .{ n.security.label(), n.band() }), .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }),
         } });
         return cx.make(ui.Pressable{ .on_press = on_press, .child = cx.make(ui.Decorated{
             .color = if (chosen) t.secondary_container else gfx.Color.argb(0),
-            .radius = .all(8 * b.s),
-            .child = cx.make(ui.Padding{ .padding = .{ .top = 3 * b.s, .bottom = 3 * b.s }, .child = row }),
+            .radius = .all(8),
+            .child = cx.make(ui.Padding{ .padding = .{ .top = 3, .bottom = 3 }, .child = row }),
         }) });
     }
 
     /// A label, its value and a meter showing how much is used.
     fn meter(b: Builder, name: []const u8, text: []const u8, used: f32) ui.Widget {
         const cx = b.cx;
-        return cx.make(ui.Row{ .cross_axis_alignment = .start, .spacing = 12 * b.s, .children = &.{
+        return cx.make(ui.Row{ .cross_axis_alignment = .start, .spacing = 12, .children = &.{
             b.label(name),
-            cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 6 * b.s, .children = &.{
+            cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 6, .children = &.{
                 b.value(text),
-                cx.make(Meter{ .fraction = used, .height = @max(@round(8 * b.s), 4) }),
+                cx.make(Meter{ .fraction = used, .height = @max(8, 4) }),
             } }) }),
         } });
     }
@@ -875,19 +876,20 @@ fn overflows(node: *ui.Node) bool {
     return false;
 }
 
-/// The sizes the shell gives windows, and the size of a maximized one
-/// (which sets the scale): maximized and restored on a 1080p screen, a
-/// 720p one and a 1024×768 one.
-const shell_sizes = [_][4]u32{
-    .{ 1920, 1036, 1920, 1036 },
-    .{ 960, 518, 1920, 1036 },
-    .{ 1280, 668, 1280, 668 },
-    .{ 640, 334, 1280, 668 },
-    .{ 1024, 724, 1024, 724 },
-    .{ 512, 362, 1024, 724 },
+/// The sizes to lay out at: the smallest the window may be, as narrow
+/// and as short as it may be, a restored window's first size on a 1080p
+/// screen, and maximized on a 720p and a 1080p screen. Everything is the
+/// same size in pixels in each.
+const test_sizes = [_][2]u32{
+    min_size,
+    .{ min_size[0], 1036 },
+    .{ 1920, min_size[1] },
+    .{ 960, 518 },
+    .{ 1280, 668 },
+    .{ 1920, 1036 },
 };
 
-test "everything is shown, and fits the window at the shell's sizes" {
+test "everything is shown, and fits from the smallest window to the biggest" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
     const u = try ui.Ui.create(testing.allocator, &f);
     defer u.destroy();
@@ -895,19 +897,18 @@ test "everything is shown, and fits the window at the shell's sizes" {
     const wifi = sampleWifi();
     var all: std.ArrayList(u8) = .empty;
     defer all.deinit(testing.allocator);
-    // Every page, maximized and restored to half the size, with everything
-    // still at the whole screen's scale.
+    // Every page, at every size.
     var frame_no: u64 = 0;
     for (std.enums.values(Page)) |page| {
-        for (shell_sizes) |size| {
+        for (test_sizes) |size| {
             frame_no += 1;
-            u.frame(size[0], size[1], frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .scale = scaleFor(size[2], size[3]), .bar_scale = @as(f32, @floatFromInt(size[2])) / 1920 });
+            u.frame(size[0], size[1], frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi });
             try testing.expect(!overflows(u.root.?));
         }
         // What shows maximized (in a smaller window, rows of the lists
         // further down are not made).
         frame_no += 1;
-        u.frame(1920, 1036, frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .scale = scaleFor(1920, 1036), .bar_scale = 1 });
+        u.frame(1920, 1036, frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi });
         texts(u.root.?, &all);
         // The next page, from its tab.
         if (@as(usize, @intFromEnum(page)) + 1 < std.enums.values(Page).len) {
@@ -956,8 +957,8 @@ test "everything is shown, and fits the window at the shell's sizes" {
     }
     // In a small window, only the networks that show are made.
     u.root.?.state(Settings.State).page = .wifi;
-    u.frame(512, 362, frame_no + 1, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .scale = scaleFor(1024, 724) });
-    u.frame(512, 362, frame_no + 2, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .scale = scaleFor(1024, 724) });
+    u.frame(min_size[0], min_size[1], frame_no + 1, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi });
+    u.frame(min_size[0], min_size[1], frame_no + 2, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi });
     try testing.expect(findText(u.root.?, "Home") != null);
     try testing.expect(findText(u.root.?, "bad?name") == null);
     // The build is in the system card, not beside the title; the hardware
@@ -973,7 +974,7 @@ test "without a network adapter, the network card says so" {
     defer u.destroy();
     const d = sample();
     const none: info.Network = .{};
-    const settings: Settings = .{ .commit = "x", .system = &d.sys, .usage = .{}, .network = &none, .scale = 1 };
+    const settings: Settings = .{ .commit = "x", .system = &d.sys, .usage = .{}, .network = &none };
     u.frame(1920, 960, 0, settings);
     u.root.?.state(Settings.State).page = .ethernet;
     u.frame(1920, 960, 1, settings);
@@ -981,12 +982,6 @@ test "without a network adapter, the network card says so" {
     u.root.?.state(Settings.State).page = .resources;
     u.frame(1920, 960, 2, settings);
     try testing.expect(findText(u.root.?, "Measuring…") != null);
-}
-
-/// The scale for a screen whose maximized windows are `width`×`height`:
-/// designed for 900 pixels high (and 1500 wide).
-pub fn scaleFor(width: u32, height: u32) f32 {
-    return std.math.clamp(@min(@as(f32, @floatFromInt(width)) / 1500, @as(f32, @floatFromInt(height)) / 900), 0.5, 2);
 }
 
 test "the Wi-Fi card says when it cannot list networks" {
@@ -1004,7 +999,7 @@ test "the Wi-Fi card says when it cannot list networks" {
         .{ &denied, "Not allowed to scan" },
         .{ &empty, "Scanning…" },
     }) |case| {
-        u.frame(1920, 960, 0, Settings{ .commit = "x", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = case[0], .scale = 1 });
+        u.frame(1920, 960, 0, Settings{ .commit = "x", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = case[0] });
         var all: std.ArrayList(u8) = .empty;
         defer all.deinit(testing.allocator);
         texts(u.root.?, &all);
@@ -1022,7 +1017,7 @@ test "SSIDs that are not text are shown readably" {
     var odd: info.manager.Network = .{ .signal_mbm = -5000, .freq_mhz = 2412, .security = .wpa2 };
     odd.setSsid("bad\xffname");
     r.add(odd);
-    u.frame(1920, 960, 0, Settings{ .commit = "x", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &r, .scale = 1 });
+    u.frame(1920, 960, 0, Settings{ .commit = "x", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &r });
     var all: std.ArrayList(u8) = .empty;
     defer all.deinit(testing.allocator);
     texts(u.root.?, &all);
@@ -1063,7 +1058,7 @@ test "choosing a network, typing its password and connecting" {
     const d = sample();
     const wifi = sampleWifi();
     var actions: Actions = .{};
-    const settings: Settings = .{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .scale = 1 };
+    const settings: Settings = .{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi };
     u.frame(1920, 960, 0, settings);
     click(u, findText(u.root.?, "Home").?);
     u.frame(1920, 960, 1, settings);
@@ -1072,8 +1067,8 @@ test "choosing a network, typing its password and connecting" {
     var joining = wifi;
     joining.connection = .{ .state = .authenticating };
     joining.connection.setSsid("Cafe");
-    for ([_]*const info.manager.Report{ &wifi, &joining }) |report| for (shell_sizes) |size| {
-        u.frame(size[0], size[1], 2, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = report, .scale = scaleFor(size[2], size[3]) });
+    for ([_]*const info.manager.Report{ &wifi, &joining }) |report| for (test_sizes) |size| {
+        u.frame(size[0], size[1], 2, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = report });
         try testing.expect(!overflows(u.root.?));
     };
     u.frame(1920, 960, 3, settings);
@@ -1104,7 +1099,7 @@ test "choosing a network, typing its password and connecting" {
     var joined = wifi;
     joined.connection = .{ .state = .connected, .address = .{ 192, 168, 1, 50 } };
     joined.connection.setSsid("Home");
-    u.frame(1920, 960, 5, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &joined, .scale = 1 });
+    u.frame(1920, 960, 5, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &joined });
     try testing.expect(findText(u.root.?, "Connected to Home (192.168.1.50)") != null);
     click(u, findText(u.root.?, "Disconnect").?);
     try testing.expect(actions.disconnect);
@@ -1122,7 +1117,7 @@ test "choosing a network, typing its password and connecting" {
     var failed = wifi;
     failed.connection = .{ .state = .failed, .failure = .wrong_password };
     failed.connection.setSsid("Home");
-    u.frame(1920, 960, 8, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &failed, .scale = 1 });
+    u.frame(1920, 960, 8, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &failed });
     try testing.expect(findText(u.root.?, "Could not connect to Home: wrong password") != null);
 }
 
@@ -1137,7 +1132,7 @@ test "choosing a static address for Ethernet, and DHCP again" {
     const Draw = struct {
         fn draw(uu: *ui.Ui, dd: anytype, r: *const info.manager.Report, acts: *Actions, n: *u64, size: [2]u32) void {
             n.* += 1;
-            uu.frame(size[0], size[1], n.*, Settings{ .commit = "x", .actions = acts, .system = &dd.sys, .usage = dd.usage, .network = &dd.net, .manager = r, .scale = scaleFor(size[0], size[1]) });
+            uu.frame(size[0], size[1], n.*, Settings{ .commit = "x", .actions = acts, .system = &dd.sys, .usage = dd.usage, .network = &dd.net, .manager = r });
         }
     }.draw;
     Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });

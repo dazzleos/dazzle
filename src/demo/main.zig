@@ -112,12 +112,9 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     var dirty = true;
     var idle = false;
     var suspended = false;
-    // What the title bar's buttons do. Its size, and the text's, stays as
-    // it was for the whole screen (the window starts maximized) when the
-    // window is restored to half of it.
+    // What the title bar's buttons do, and how small the window may be.
     var controls: app.Controls = .{ .win = win };
-    const bar_scale = @as(f32, @floatFromInt(width)) / 1920;
-    const scale = @min(@as(f32, @floatFromInt(width)) / 1920, @as(f32, @floatFromInt(height)) / 1080);
+    win.setMinSize(view.min_size[0], view.min_size[1]);
     while (true) {
         const waited = if (idle) blk: {
             // Nothing to draw: sleep until the statistics change, or
@@ -177,12 +174,10 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
                 .solids = &all_solids,
                 .rings = &rings,
                 .status = status,
-                .scale = scale,
                 .on_close = .of(&controls, app.Controls.close),
                 .on_maximize = .of(&controls, app.Controls.toggleMaximized),
                 .on_drag = .of(&controls, app.Controls.drag),
                 .maximized = win.maximized,
-                .bar_scale = bar_scale,
             });
             if (window_ui.changed()) {
                 idle = false;

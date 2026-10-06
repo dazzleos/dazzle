@@ -21,22 +21,23 @@ pub const dim_color = gfx.Color.argb(0xff8090b0);
 /// Lines of statistics at the top of the panel.
 pub const lines = 5;
 
+/// The smallest the window may be: the panel's widest row, and a few of
+/// its rows (it scrolls in a window shorter than it). Everything is the
+/// same size in pixels whatever the window's size; the solid fills what
+/// there is.
+pub const min_size = [2]u32{ 560, 420 };
+
 pub const Demo = struct {
     /// Null in tests (nothing is drawn where it would be).
     solids: ?*solids.Solids,
     rings: *rings_mod.Rings,
     status: [lines][]const u8,
-    /// Sizes are designed for a 1080p screen and scale with it (not with
-    /// the window: text stays the same size when it is restored).
-    scale: f32,
     /// The title bar's buttons (close, and maximize, which shows whether
-    /// the window is), pressing the bar (to move the window), and its scale
-    /// (the screen's, so every app's title bar is the same).
+    /// the window is), and pressing the bar (to move the window).
     on_close: ?ui.Callback = null,
     on_maximize: ?ui.Callback = null,
     on_drag: ?ui.Callback = null,
     maximized: bool = true,
-    bar_scale: f32 = 1,
 
     pub const State = struct {
         /// The solid's rotation, in seconds at normal speed.
@@ -78,8 +79,7 @@ pub const Demo = struct {
         // Frames while something moves: the solid, or rings fading.
         if (!state.paused or self.rings.len > 0) cx.requestFrame();
 
-        const s = self.scale;
-        const small = 28 * s;
+        const small = 28;
 
         var status: [lines]ui.Widget = undefined;
         for (&status, self.status, 0..) |*w, line, i| {
@@ -94,36 +94,35 @@ pub const Demo = struct {
         const content = cx.make(RingsView{
             .rings = self.rings,
             .now = now,
-            .unit = s,
             .child = cx.make(ui.Overlay{
                 .children = &.{
                     cx.make(SolidView{ .solids = self.solids, .time = state.time, .shape = state.shape, .look = state.look }),
                     // The panel scrolls if the window is too small for it.
-                    cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(@floor(24 * s)), .child = cx.make(ui.Column{
+                    cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(24), .child = cx.make(ui.Column{
                         .cross_axis_alignment = .start,
                         .main_axis_size = .min,
-                        .spacing = 6 * s,
+                        .spacing = 6,
                         .children = &.{
                             status[0],
                             status[1],
                             status[2],
                             status[3],
                             status[4],
-                            cx.make(ui.SizedBox{ .height = 10 * s }),
+                            cx.make(ui.SizedBox{ .height = 10 }),
                             cx.make(ui.Row{ .spacing = 8, .main_axis_size = .min, .children = &.{
                                 cx.make(ui.OutlinedButton{ .label = "Slower", .icon = .fast_rewind, .on_press = .of(state, State.slower) }),
                                 cx.make(ui.OutlinedButton{ .label = if (state.paused) "Resume" else "Pause", .icon = if (state.paused) .play_arrow else .pause, .on_press = .of(state, State.pause) }),
                                 cx.make(ui.OutlinedButton{ .label = "Faster", .icon = .fast_forward, .on_press = .of(state, State.faster) }),
-                                cx.make(ui.Padding{ .padding = .{ .left = 8 }, .child = cx.make(ui.Text{ .text = speed, .style = .{ .size = 18 * s, .color = dim_color }, .wrap = false }) }),
+                                cx.make(ui.Padding{ .padding = .{ .left = 8 }, .child = cx.make(ui.Text{ .text = speed, .style = .{ .size = 18, .color = dim_color }, .wrap = false }) }),
                             } }),
-                            cx.make(ui.SizedBox{ .height = 10 * s }),
-                            cx.make(ui.Text{ .text = cx.fmt("{s}  ·  {d} triangles", .{ state.shape.name(), state.shape.triangles() }), .style = .{ .size = 18 * s, .color = dim_color }, .wrap = false }),
+                            cx.make(ui.SizedBox{ .height = 10 }),
+                            cx.make(ui.Text{ .text = cx.fmt("{s}  ·  {d} triangles", .{ state.shape.name(), state.shape.triangles() }), .style = .{ .size = 18, .color = dim_color }, .wrap = false }),
                             radios[0],
                             radios[1],
                             radios[2],
                             radios[3],
                             radios[4],
-                            cx.make(ui.SizedBox{ .height = 4 * s }),
+                            cx.make(ui.SizedBox{ .height = 4 }),
                             cx.make(ui.Switch{ .value = state.look.lighting, .on_changed = .of(state, State.setLighting), .label = "Lighting" }),
                             cx.make(ui.Switch{ .value = state.look.texturing, .on_changed = .of(state, State.setTexturing), .label = "Texture" }),
                         },
@@ -138,7 +137,6 @@ pub const Demo = struct {
                 .on_maximize = self.on_maximize,
                 .on_drag = self.on_drag,
                 .maximized = self.maximized,
-                .scale = self.bar_scale,
             }),
             cx.make(ui.Expanded{ .child = content }),
         } });
@@ -175,13 +173,12 @@ pub const SolidView = struct {
 pub const RingsView = struct {
     rings: *rings_mod.Rings,
     now: u64,
-    unit: f32,
     child: ?ui.Widget = null,
 
     pub const clips_children = true;
 
     pub fn paint(self: *const RingsView, _: *ui.Node, p: *ui.Painter) void {
-        self.rings.draw(p.canvas(), self.now, self.unit);
+        self.rings.draw(p.canvas(), self.now);
     }
 
     /// A press anywhere in it (on a control too) starts a ring there; the
@@ -229,10 +226,10 @@ test "the panel fits beside the solids in the shell's window, without overflowin
     defer u.destroy();
     var rings: rings_mod.Rings = .{};
     const status = [lines][]const u8{ "60.0 fps  ·  1920×1036", "GPU 6.50 ms per frame", "CPU 0.50 ms per frame", "Pointer 1919, 1035  ·  last key Backspace", "62 °C  ·  CPU speed 100%  ·  busy 45%" };
-    // Maximized, full screen and restored to half the size (on a 1080p
-    // screen, so at its scale).
-    for ([_][2]u32{ .{ 1920, 1036 }, .{ 1920, 1080 }, .{ 960, 518 } }) |size| {
-        u.frame(size[0], size[1], 0, Demo{ .solids = null, .rings = &rings, .status = status, .scale = 1036.0 / 1080.0 });
+    // Maximized, full screen, restored to half the size, and from the
+    // smallest it may be to as wide or tall as a screen.
+    for ([_][2]u32{ .{ 1920, 1036 }, .{ 1920, 1080 }, .{ 960, 518 }, min_size, .{ min_size[0], 1036 }, .{ 1920, min_size[1] }, .{ 1280, 668 } }) |size| {
+        u.frame(size[0], size[1], 0, Demo{ .solids = null, .rings = &rings, .status = status });
         // The panel: the column in the content (under the title bar).
         const col = findNode(findNode(u.root.?, ui.Expanded).?, ui.Column).?;
         const Check = struct {
@@ -242,8 +239,8 @@ test "the panel fits beside the solids in the shell's window, without overflowin
             }
         };
         try Check.none(u.root.?);
-        // Restored, the solid is smaller and may go behind the panel.
-        if (size[0] < 1920) continue;
+        // Smaller, the solid is smaller and may go behind the panel.
+        if (size[0] < 1920 or size[1] < 1036) continue;
         // The panel's widest child, against every solid's left edge.
         var right: f32 = 0;
         for (col.children.items) |ch| right = @max(right, ch.position()[0] + ch.size.w);
@@ -269,7 +266,7 @@ test "the speed buttons" {
     const u = try ui.Ui.create(testing.allocator, null);
     defer u.destroy();
     var rings: rings_mod.Rings = .{};
-    const demo: Demo = .{ .solids = null, .rings = &rings, .status = @splat(""), .scale = 1 };
+    const demo: Demo = .{ .solids = null, .rings = &rings, .status = @splat("") };
     u.frame(1920, 1080, 0, demo);
     var buttons: [3]*ui.Node = undefined;
     var n: usize = 0;
@@ -305,7 +302,7 @@ test "the radio buttons choose the solid, and the switches its look" {
     const u = try ui.Ui.create(testing.allocator, &f);
     defer u.destroy();
     var rings: rings_mod.Rings = .{};
-    const demo: Demo = .{ .solids = null, .rings = &rings, .status = @splat(""), .scale = 1 };
+    const demo: Demo = .{ .solids = null, .rings = &rings, .status = @splat("") };
     u.frame(1920, 1080, 0, demo);
     const Collect = struct {
         fn all(node: *ui.Node, comptime T: type, out: []*ui.Node, k: *usize) void {
@@ -343,7 +340,7 @@ test "while paused and still, frames change nothing and none are asked for" {
     const u = try ui.Ui.create(testing.allocator, &f);
     defer u.destroy();
     var rings: rings_mod.Rings = .{};
-    const demo: Demo = .{ .solids = null, .rings = &rings, .status = @splat("same"), .scale = 1 };
+    const demo: Demo = .{ .solids = null, .rings = &rings, .status = @splat("same") };
     u.frame(1920, 1080, 0, demo);
     u.root.?.state(Demo.State).paused = true;
     u.frame(1920, 1080, 1, demo);
@@ -358,7 +355,7 @@ test "clicks make rings where they are in the content, and none on the title bar
     defer u.destroy();
     var rings: rings_mod.Rings = .{};
     const status: [lines][]const u8 = @splat("");
-    u.frame(1920, 1036, 0, Demo{ .solids = null, .rings = &rings, .status = status, .scale = 1 });
+    u.frame(1920, 1036, 0, Demo{ .solids = null, .rings = &rings, .status = status });
     const content = findNode(u.root.?, RingsView).?;
     const top = content.position()[1];
     try testing.expect(top > 0);

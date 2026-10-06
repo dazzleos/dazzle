@@ -32,7 +32,8 @@ pub const Controls = struct {
         c.quit = true;
     }
 
-    /// The maximize button: fill the screen, or half of it.
+    /// The maximize button: fill the screen, or go back to the window's
+    /// own size.
     pub fn toggleMaximized(c: *Controls) void {
         c.win.setMaximized(!c.win.maximized);
     }

@@ -36,20 +36,17 @@ pub const TitleBar = struct {
     maximized: bool = true,
     /// A press on the bar itself, to start moving the window.
     on_drag: ?widget.Callback = null,
-    /// Sizes are designed for a 1080-pixel screen and scale with this.
-    scale: f32 = 1,
 
     pub const height = 44;
 
     pub fn build(self: *const TitleBar, cx: *Context) Widget {
         const t = cx.theme();
-        const s = self.scale;
-        const size = @round(34 * s);
+        const size = 34;
         var buttons: [2]Widget = undefined;
         var n: usize = 0;
         if (self.on_maximize) |f| {
             // A square fills the screen; two, one behind the other, go back
-            // to half of it.
+            // to the window's own size.
             buttons[n] = cx.make(BarButton{ .on_press = f, .size = size, .icon = if (self.maximized) .filter_none else .crop_square });
             n += 1;
         }
@@ -58,13 +55,13 @@ pub const TitleBar = struct {
             n += 1;
         }
         const row = cx.make(Align{ .alignment = .center_right, .child = cx.make(Padding{
-            .padding = .{ .right = @round(8 * s) },
-            .child = cx.make(Row{ .spacing = @round(4 * s), .main_axis_size = .min, .children = cx.ui.arena().dupe(Widget, buttons[0..n]) catch &.{} }),
+            .padding = .{ .right = 8 },
+            .child = cx.make(Row{ .spacing = 4, .main_axis_size = .min, .children = cx.ui.arena().dupe(Widget, buttons[0..n]) catch &.{} }),
         }) });
         return cx.make(DragArea{ .on_drag = self.on_drag, .child = cx.make(Decorated{ .color = t.surface_container, .child = cx.make(SizedBox{
-            .height = @round(height * s),
+            .height = height,
             .child = cx.make(Overlay{ .children = &.{
-                cx.make(Center{ .child = cx.make(@import("text.zig").Text{ .text = self.title, .style = .{ .size = 22 * s, .color = t.on_surface }, .wrap = false }) }),
+                cx.make(Center{ .child = cx.make(@import("text.zig").Text{ .text = self.title, .style = .{ .size = 22, .color = t.on_surface }, .wrap = false }) }),
                 row,
             } }),
         }) }) });
