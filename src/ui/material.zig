@@ -4,7 +4,13 @@
 const std = @import("std");
 const gfx = @import("gfx");
 const widget = @import("widget.zig");
-const widgets = @import("widgets.zig");
+const Center = @import("center.zig").Center;
+const ConstrainedBox = @import("constrained_box.zig").ConstrainedBox;
+const Decorated = @import("decorated.zig").Decorated;
+const Interaction = @import("pressable.zig").Interaction;
+const Padding = @import("padding.zig").Padding;
+const Pressable = @import("pressable.zig").Pressable;
+const Row = @import("flex.zig").Row;
 const text = @import("text.zig");
 const geometry = @import("geometry.zig");
 const painter = @import("painter.zig");
@@ -81,7 +87,7 @@ pub const OutlinedButton = struct {
     on_press: ?Callback = null,
 
     pub const State = struct {
-        interaction: widgets.Interaction = .{},
+        interaction: Interaction = .{},
     };
 
     pub const height = 40;
@@ -103,20 +109,20 @@ pub const OutlinedButton = struct {
         });
         const content = self.child orelse if (self.icon) |which| blk: {
             const glyph = cx.make(@import("icon.zig").Icon{ .icon = which, .size = icon_size, .color = label_color });
-            break :blk if (self.label.len == 0) glyph else cx.make(widgets.Row{ .spacing = 8, .main_axis_size = .min, .cross_axis_alignment = .center, .children = &.{ glyph, label } });
+            break :blk if (self.label.len == 0) glyph else cx.make(Row{ .spacing = 8, .main_axis_size = .min, .cross_axis_alignment = .center, .children = &.{ glyph, label } });
         } else label;
-        return cx.make(widgets.Pressable{
+        return cx.make(Pressable{
             .on_press = self.on_press,
             .interaction = &state.interaction,
-            .child = cx.make(widgets.Decorated{
+            .child = cx.make(Decorated{
                 .color = if (layer > 0) t.primary.withAlpha(layer) else null,
                 .border = .{ .width = 1, .color = border },
                 .radius = .all(height / 2),
-                .child = cx.make(widgets.ConstrainedBox{
+                .child = cx.make(ConstrainedBox{
                     .constraints = .{ .min_w = 48, .min_h = height },
-                    .child = cx.make(widgets.Padding{
+                    .child = cx.make(Padding{
                         .padding = .symmetric(padding, 0),
-                        .child = cx.make(widgets.Center{ .width_factor = 1, .height_factor = 1, .child = content }),
+                        .child = cx.make(Center{ .width_factor = 1, .height_factor = 1, .child = content }),
                     }),
                 }),
             }),

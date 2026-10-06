@@ -10,7 +10,9 @@ const geometry = @import("geometry.zig");
 const widget = @import("widget.zig");
 const painter_mod = @import("painter.zig");
 const keymap = @import("keymap.zig");
-const btn_left = @import("widgets.zig").btn_left;
+const btn_left = widget.btn_left;
+const Column = @import("flex.zig").Column;
+const Padding = @import("padding.zig").Padding;
 
 const Node = widget.Node;
 const Event = widget.Event;
@@ -200,7 +202,6 @@ const testing = std.testing;
 
 test "typing into a text field" {
     const Ui = @import("runtime.zig").Ui;
-    const widgets = @import("widgets.zig");
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
     const u = try Ui.create(testing.allocator, &f);
     defer u.destroy();
@@ -221,7 +222,7 @@ test "typing into a text field" {
         sink: *Sink,
         obscure: bool,
         pub fn build(self: *const @This(), cx: *widget.Context) widget.Widget {
-            return cx.make(widgets.Padding{ .padding = .all(20), .child = cx.make(widgets.Column{ .cross_axis_alignment = .start, .children = &.{
+            return cx.make(Padding{ .padding = .all(20), .child = cx.make(Column{ .cross_axis_alignment = .start, .children = &.{
                 cx.make(TextField{ .placeholder = "Password", .obscure = self.obscure, .on_changed = .of(self.sink, Sink.changed), .on_submit = .of(self.sink, Sink.submit) }),
             } }) });
         }
@@ -229,8 +230,8 @@ test "typing into a text field" {
     u.frame(400, 200, 0, App{ .sink = &sink, .obscure = false });
     const at: geometry.Point = .{ 40, 40 };
     u.pointerMotion(at);
-    u.pointerButton(at, widgets.btn_left, true);
-    u.pointerButton(at, widgets.btn_left, false);
+    u.pointerButton(at, btn_left, true);
+    u.pointerButton(at, btn_left, false);
     try testing.expect(u.focused != null);
     // Shift-A, b, 1, then Backspace, Left, X: "AXb".
     u.keyEvent(keymap.left_shift, true);
@@ -254,8 +255,8 @@ test "typing into a text field" {
     try testing.expectEqualStrings("AXb", n.state(TextField.State).text());
     // Clicking elsewhere takes the keyboard away: keys go nowhere.
     u.pointerMotion(.{ 300, 150 });
-    u.pointerButton(.{ 300, 150 }, widgets.btn_left, true);
-    u.pointerButton(.{ 300, 150 }, widgets.btn_left, false);
+    u.pointerButton(.{ 300, 150 }, btn_left, true);
+    u.pointerButton(.{ 300, 150 }, btn_left, false);
     try testing.expect(u.focused == null);
     u.keyEvent(30, true);
     try testing.expectEqualStrings("AXb", sink.text[0..sink.len]);

@@ -154,7 +154,15 @@ with the problem marked.
 |---|---|
 | `widget.zig` | `Widget`, `Context` (for `build`), `Callback`, and `Node`: the tree kept between frames, matching each frame's widgets to it, layout and hit testing |
 | `geometry.zig` | Sizes, constraints (made usable whatever they are), insets, alignment |
-| `widgets.zig` | `Row`, `Column`, `Expanded`, `Padding`, `Align`, `Center`, `SizedBox`, `ConstrainedBox`, `Grid` (cells in rows, as many to a row as fit), `Overlay`, `Decorated` (a filled or outlined rounded rectangle) and `Pressable` (clicks, hover and press) |
+| `flex.zig` | `Row` and `Column` (both `Flex`): children one after another, with their alignments |
+| `expanded.zig` | `Expanded`: a share of the space the other children of a row or column leave |
+| `padding.zig`, `align.zig`, `center.zig`, `sized_box.zig`, `constrained_box.zig`, `empty.zig` | `Padding`, `Align`, `Center`, `SizedBox`, `ConstrainedBox` and `Empty`: placing and sizing a child |
+| `grid.zig` | `Grid`: cells in rows, as many to a row as fit |
+| `lazy_grid.zig` | `LazyGrid`: a grid (or list) of many items all the same size, of which only those that show are made |
+| `overlay.zig` | `Overlay`: layers over each other |
+| `decorated.zig` | `Decorated`: a filled or outlined rounded rectangle behind the child |
+| `pressable.zig` | `Pressable`: clicks, hover and press |
+| `icon.zig`, `image.zig` | `Icon` (a Material icon) and `Image` (pixels, as big as they fit) |
 | `text.zig` | `Text`: lines at `\n`, wrapped at spaces to fit, or cut short with "…" |
 | `scroll_view.zig` | `ScrollView`: the part of a taller child scrolled to, with the wheel or by dragging its bar, and scrolling to a widget in it (`reveal`) |
 | `material.zig` | Material 3's light and dark baseline themes, and `OutlinedButton`, made of a `Pressable`, `Decorated`, `ConstrainedBox`, `Padding` and `Center` |

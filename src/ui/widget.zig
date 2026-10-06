@@ -98,6 +98,10 @@ pub const Event = union(enum) {
     };
 };
 
+/// The left mouse button (a Linux button code), in `Event.press` and
+/// `.release`.
+pub const btn_left = 0x110;
+
 /// Something to call later, typically a method of a widget's state:
 /// `Callback.of(state, State.increment)`.
 pub const Callback = struct {

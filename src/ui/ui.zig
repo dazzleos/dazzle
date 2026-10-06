@@ -34,8 +34,9 @@
 //!
 //! * `widget`: `Widget`, `Context`, `Node` (the tree kept between frames)
 //! * `geometry`: sizes, constraints, insets, alignment
-//! * `widgets`: Row, Column, Expanded, Padding, Align, Center, SizedBox,
-//!   ConstrainedBox, Grid, Overlay, Decorated, Pressable
+//! * a file each for the basic widgets: `flex` (Row and Column),
+//!   `expanded`, `padding`, `align`, `center`, `sized_box`,
+//!   `constrained_box`, `grid`, `overlay`, `decorated`, `pressable`, `empty`
 //! * `scroll_view`: ScrollView
 //! * `lazy_grid`: LazyGrid, a grid that makes only the items that show
 //! * `icon`: Icon, a Material icon
@@ -52,7 +53,18 @@
 
 pub const geometry = @import("geometry.zig");
 pub const widget = @import("widget.zig");
-pub const widgets = @import("widgets.zig");
+pub const empty = @import("empty.zig");
+pub const sized_box = @import("sized_box.zig");
+pub const constrained_box = @import("constrained_box.zig");
+pub const padding = @import("padding.zig");
+pub const @"align" = @import("align.zig");
+pub const center = @import("center.zig");
+pub const flex = @import("flex.zig");
+pub const expanded = @import("expanded.zig");
+pub const grid = @import("grid.zig");
+pub const overlay = @import("overlay.zig");
+pub const decorated = @import("decorated.zig");
+pub const pressable = @import("pressable.zig");
 pub const text = @import("text.zig");
 pub const material = @import("material.zig");
 pub const controls = @import("controls.zig");
@@ -83,24 +95,28 @@ pub const Event = widget.Event;
 pub const Callback = widget.Callback;
 pub const ValueCallback = widget.ValueCallback;
 
-pub const Empty = widgets.Empty;
-pub const SizedBox = widgets.SizedBox;
-pub const ConstrainedBox = widgets.ConstrainedBox;
-pub const Padding = widgets.Padding;
-pub const Align = widgets.Align;
-pub const Center = widgets.Center;
-pub const Row = widgets.Row;
-pub const Column = widgets.Column;
-pub const Expanded = widgets.Expanded;
-pub const Grid = widgets.Grid;
-pub const Overlay = widgets.Overlay;
-pub const Decorated = widgets.Decorated;
-pub const Border = widgets.Border;
-pub const Pressable = widgets.Pressable;
-pub const Interaction = widgets.Interaction;
-pub const MainAxisAlignment = widgets.MainAxisAlignment;
-pub const CrossAxisAlignment = widgets.CrossAxisAlignment;
-pub const MainAxisSize = widgets.MainAxisSize;
+pub const btn_left = widget.btn_left;
+
+pub const Empty = empty.Empty;
+pub const SizedBox = sized_box.SizedBox;
+pub const ConstrainedBox = constrained_box.ConstrainedBox;
+pub const Padding = padding.Padding;
+pub const Align = @"align".Align;
+pub const Center = center.Center;
+pub const Row = flex.Row;
+pub const Column = flex.Column;
+pub const Flex = flex.Flex;
+pub const Axis = flex.Axis;
+pub const Expanded = expanded.Expanded;
+pub const Grid = grid.Grid;
+pub const Overlay = overlay.Overlay;
+pub const Decorated = decorated.Decorated;
+pub const Border = decorated.Border;
+pub const Pressable = pressable.Pressable;
+pub const Interaction = pressable.Interaction;
+pub const MainAxisAlignment = flex.MainAxisAlignment;
+pub const CrossAxisAlignment = flex.CrossAxisAlignment;
+pub const MainAxisSize = flex.MainAxisSize;
 
 pub const Text = text.Text;
 pub const TextStyle = text.TextStyle;
@@ -126,7 +142,18 @@ pub const Ui = runtime.Ui;
 test {
     _ = geometry;
     _ = widget;
-    _ = widgets;
+    _ = empty;
+    _ = sized_box;
+    _ = constrained_box;
+    _ = padding;
+    _ = @"align";
+    _ = center;
+    _ = flex;
+    _ = expanded;
+    _ = grid;
+    _ = overlay;
+    _ = decorated;
+    _ = pressable;
     _ = text;
     _ = material;
     _ = controls;

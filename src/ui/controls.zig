@@ -13,7 +13,10 @@ const std = @import("std");
 const gfx = @import("gfx");
 const geometry = @import("geometry.zig");
 const widget = @import("widget.zig");
-const widgets = @import("widgets.zig");
+const Interaction = @import("pressable.zig").Interaction;
+const Padding = @import("padding.zig").Padding;
+const Pressable = @import("pressable.zig").Pressable;
+const Row = @import("flex.zig").Row;
 const text = @import("text.zig");
 const painter_mod = @import("painter.zig");
 const material = @import("material.zig");
@@ -26,7 +29,6 @@ const Context = widget.Context;
 const Node = widget.Node;
 const Callback = widget.Callback;
 const ValueCallback = widget.ValueCallback;
-const Interaction = widgets.Interaction;
 const Painter = painter_mod.Painter;
 const Theme = material.Theme;
 
@@ -57,19 +59,19 @@ fn layerAlpha(i: Interaction, enabled: bool) f32 {
 /// The control's mark beside its label (if any), pressable as a whole.
 fn control(cx: *Context, interaction: *Interaction, on_press: ?Callback, mark: Widget, label: []const u8, gap: f32) Widget {
     const t = cx.theme();
-    const content = if (label.len == 0) mark else cx.make(widgets.Row{
+    const content = if (label.len == 0) mark else cx.make(Row{
         .main_axis_size = .min,
         .spacing = gap,
         .children = &.{
             mark,
-            cx.make(widgets.Padding{ .padding = .{ .right = 8 }, .child = cx.make(text.Text{
+            cx.make(Padding{ .padding = .{ .right = 8 }, .child = cx.make(text.Text{
                 .text = label,
                 .style = .{ .color = if (on_press != null) t.on_surface else t.on_surface.withAlpha(0.38) },
                 .wrap = false,
             }) }),
         },
     });
-    return cx.make(widgets.Pressable{ .on_press = on_press, .interaction = interaction, .child = content });
+    return cx.make(Pressable{ .on_press = on_press, .interaction = interaction, .child = content });
 }
 
 pub const Checkbox = struct {

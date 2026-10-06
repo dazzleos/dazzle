@@ -288,8 +288,8 @@ test "the speed buttons" {
         const at = buttons[b].position();
         const p: ui.Point = .{ at[0] + 10, at[1] + 10 };
         u.pointerMotion(p);
-        u.pointerButton(p, ui.widgets.btn_left, true);
-        u.pointerButton(p, ui.widgets.btn_left, false);
+        u.pointerButton(p, ui.btn_left, true);
+        u.pointerButton(p, ui.btn_left, false);
     }
     const st = u.root.?.state(Demo.State);
     try testing.expectEqual(@as(f32, 2), st.speed);
@@ -328,8 +328,8 @@ test "the radio buttons choose the solid, and the switches its look" {
         const at = w.position();
         const p: ui.Point = .{ at[0] + 10, at[1] + 20 };
         u.pointerMotion(p);
-        u.pointerButton(p, ui.widgets.btn_left, true);
-        u.pointerButton(p, ui.widgets.btn_left, false);
+        u.pointerButton(p, ui.btn_left, true);
+        u.pointerButton(p, ui.btn_left, false);
         u.frame(1920, 1080, 0, demo);
     }
     const st = u.root.?.state(Demo.State);

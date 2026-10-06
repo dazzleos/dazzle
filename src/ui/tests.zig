@@ -165,8 +165,8 @@ fn click(u: *ui.Ui, n: *Node) void {
     const at = n.position();
     const p: ui.Point = .{ at[0] + n.size.w / 2, at[1] + n.size.h / 2 };
     u.pointerMotion(p);
-    u.pointerButton(p, ui.widgets.btn_left, true);
-    u.pointerButton(p, ui.widgets.btn_left, false);
+    u.pointerButton(p, ui.btn_left, true);
+    u.pointerButton(p, ui.btn_left, false);
 }
 
 test "buttons call back, state lasts between frames, and hovering tints" {
@@ -199,9 +199,9 @@ test "buttons call back, state lasts between frames, and hovering tints" {
     const b = buttons.items[0];
     const at = b.position();
     u.pointerMotion(.{ at[0] + 5, at[1] + 20 });
-    u.pointerButton(.{ at[0] + 5, at[1] + 20 }, ui.widgets.btn_left, true);
+    u.pointerButton(.{ at[0] + 5, at[1] + 20 }, ui.btn_left, true);
     u.pointerMotion(.{ 299, 199 });
-    u.pointerButton(.{ 299, 199 }, ui.widgets.btn_left, false);
+    u.pointerButton(.{ 299, 199 }, ui.btn_left, false);
     try testing.expectEqual(@as(u32, 2), u.root.?.state(Counter.State).count);
 }
 
@@ -295,8 +295,8 @@ test "an overlay's top layer takes the pointer where it has something" {
     u.frame(200, 200, 0, Root(S.f){});
     for ([_]ui.Point{ .{ 10, 10 }, .{ 100, 100 }, .{ 20, 40 } }) |p| {
         u.pointerMotion(p);
-        u.pointerButton(p, ui.widgets.btn_left, true);
-        u.pointerButton(p, ui.widgets.btn_left, false);
+        u.pointerButton(p, ui.btn_left, true);
+        u.pointerButton(p, ui.btn_left, false);
     }
     try testing.expectEqual(@as(u32, 2), S.above);
     try testing.expectEqual(@as(u32, 1), S.below);
@@ -395,8 +395,8 @@ const Controls = struct {
 
 fn clickAt(u: *ui.Ui, p: ui.Point) void {
     u.pointerMotion(p);
-    u.pointerButton(p, ui.widgets.btn_left, true);
-    u.pointerButton(p, ui.widgets.btn_left, false);
+    u.pointerButton(p, ui.btn_left, true);
+    u.pointerButton(p, ui.btn_left, false);
 }
 
 test "checkboxes, switches and radio buttons report changes, and their labels press them" {
@@ -631,8 +631,8 @@ test "a lazy grid makes only the rows that show, as it scrolls" {
     try testing.expect(grid.child(3).paint.valid);
     // Pressing one presses the right item.
     u.pointerMotion(.{ 70, 15 });
-    u.pointerButton(.{ 70, 15 }, ui.widgets.btn_left, true);
-    u.pointerButton(.{ 70, 15 }, ui.widgets.btn_left, false);
+    u.pointerButton(.{ 70, 15 }, ui.btn_left, true);
+    u.pointerButton(.{ 70, 15 }, ui.btn_left, false);
     try testing.expectEqual(@as(?usize, 61), items.pressed);
 
     // Not in a scroll view: all of it shows.
@@ -817,12 +817,12 @@ test "a scroll view scrolls with the wheel and its bar, and paints only what sho
     // Pressing the bar below the thumb (90 tall: 300 of 1000) jumps there,
     // centred on the pointer; dragging moves it.
     u.pointerMotion(.{ 194, 255 });
-    u.pointerButton(.{ 194, 255 }, ui.widgets.btn_left, true);
+    u.pointerButton(.{ 194, 255 }, ui.btn_left, true);
     // The thumb's top at 210 of the 210 it can travel: the end.
     try testing.expectEqual(@as(f32, 700), st.offset);
     u.pointerMotion(.{ 194, 150 });
     try testing.expectEqual(@as(f32, 350), st.offset);
-    u.pointerButton(.{ 194, 150 }, ui.widgets.btn_left, false);
+    u.pointerButton(.{ 194, 150 }, ui.btn_left, false);
     try testing.expect(st.grab == null);
     u.frame(400, 400, 4, Root(build){});
     try testing.expectEqual(ui.Point{ 0, -350 }, column.offset);

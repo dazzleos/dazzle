@@ -12,7 +12,17 @@ const std = @import("std");
 const gfx = @import("gfx");
 const geometry = @import("geometry.zig");
 const widget = @import("widget.zig");
-const widgets = @import("widgets.zig");
+const Align = @import("align.zig").Align;
+const Center = @import("center.zig").Center;
+const Column = @import("flex.zig").Column;
+const Decorated = @import("decorated.zig").Decorated;
+const Interaction = @import("pressable.zig").Interaction;
+const Overlay = @import("overlay.zig").Overlay;
+const Padding = @import("padding.zig").Padding;
+const Pressable = @import("pressable.zig").Pressable;
+const Row = @import("flex.zig").Row;
+const SizedBox = @import("sized_box.zig").SizedBox;
+const btn_left = @import("widget.zig").btn_left;
 const painter_mod = @import("painter.zig");
 const icons = @import("icons");
 
@@ -54,14 +64,14 @@ pub const TitleBar = struct {
             buttons[n] = cx.make(BarButton{ .on_press = f, .size = size, .icon = .close });
             n += 1;
         }
-        const row = cx.make(widgets.Align{ .alignment = .center_right, .child = cx.make(widgets.Padding{
+        const row = cx.make(Align{ .alignment = .center_right, .child = cx.make(Padding{
             .padding = .{ .right = @round(8 * s) },
-            .child = cx.make(widgets.Row{ .spacing = @round(4 * s), .main_axis_size = .min, .children = cx.ui.arena().dupe(Widget, buttons[0..n]) catch &.{} }),
+            .child = cx.make(Row{ .spacing = @round(4 * s), .main_axis_size = .min, .children = cx.ui.arena().dupe(Widget, buttons[0..n]) catch &.{} }),
         }) });
-        return cx.make(DragArea{ .on_drag = self.on_drag, .child = cx.make(widgets.Decorated{ .color = t.surface_container, .child = cx.make(widgets.SizedBox{
+        return cx.make(DragArea{ .on_drag = self.on_drag, .child = cx.make(Decorated{ .color = t.surface_container, .child = cx.make(SizedBox{
             .height = @round(height * s),
-            .child = cx.make(widgets.Overlay{ .children = &.{
-                cx.make(widgets.Center{ .child = cx.make(@import("text.zig").Text{ .text = self.title, .style = .{ .size = 22 * s, .color = t.on_surface }, .wrap = false }) }),
+            .child = cx.make(Overlay{ .children = &.{
+                cx.make(Center{ .child = cx.make(@import("text.zig").Text{ .text = self.title, .style = .{ .size = 22 * s, .color = t.on_surface }, .wrap = false }) }),
                 row,
             } }),
         }) }) });
@@ -77,7 +87,7 @@ const DragArea = struct {
 
     pub fn event(self: *const DragArea, _: *Node, e: widget.Event) bool {
         switch (e) {
-            .press => |p| if (p.button == widgets.btn_left) if (self.on_drag) |f| f.call(),
+            .press => |p| if (p.button == btn_left) if (self.on_drag) |f| f.call(),
             else => {},
         }
         return false;
@@ -91,11 +101,11 @@ pub const BarButton = struct {
     icon: icons.Icon,
 
     pub const State = struct {
-        interaction: widgets.Interaction = .{},
+        interaction: Interaction = .{},
     };
 
     pub fn build(self: *const BarButton, cx: *Context, state: *State) Widget {
-        return cx.make(widgets.Pressable{ .on_press = self.on_press, .interaction = &state.interaction, .child = cx.make(Mark{
+        return cx.make(Pressable{ .on_press = self.on_press, .interaction = &state.interaction, .child = cx.make(Mark{
             .icon = self.icon,
             .size = self.size,
             .hovered = state.interaction.hovered,
@@ -147,11 +157,11 @@ test "the title bar's buttons, and dragging it" {
         }
     };
     var app: App = .{};
-    u.frame(800, 600, 0, widgets.Column{ .cross_axis_alignment = .stretch, .children = &.{} });
+    u.frame(800, 600, 0, Column{ .cross_axis_alignment = .stretch, .children = &.{} });
     const Root = struct {
         app: *App,
         pub fn build(self: *const @This(), cx: *Context) Widget {
-            return cx.make(widgets.Column{ .cross_axis_alignment = .stretch, .children = &.{
+            return cx.make(Column{ .cross_axis_alignment = .stretch, .children = &.{
                 cx.make(TitleBar{ .title = "Settings", .on_close = .of(self.app, App.close), .on_maximize = .of(self.app, App.maximize), .on_drag = .of(self.app, App.drag) }),
             } });
         }
@@ -160,13 +170,13 @@ test "the title bar's buttons, and dragging it" {
     // The bar is across the top, 44 high; the button at its right end.
     const at: geometry.Point = .{ 800 - 8 - 17, 22 };
     u.pointerMotion(at);
-    u.pointerButton(at, widgets.btn_left, true);
-    u.pointerButton(at, widgets.btn_left, false);
+    u.pointerButton(at, btn_left, true);
+    u.pointerButton(at, btn_left, false);
     try testing.expect(app.closed);
     // Elsewhere on the bar starts a drag (and closes nothing).
     app.closed = false;
     u.pointerMotion(.{ 400, 22 });
-    u.pointerButton(.{ 400, 22 }, widgets.btn_left, true);
+    u.pointerButton(.{ 400, 22 }, btn_left, true);
     try testing.expect(!app.closed);
     try testing.expectEqual(@as(u32, 1), app.drags);
     // The shell takes the pointer for the drag, so no release comes; the
@@ -174,8 +184,8 @@ test "the title bar's buttons, and dragging it" {
     // button.
     const max_at: geometry.Point = .{ 800 - 8 - 34 - 4 - 17, 22 };
     u.pointerMotion(max_at);
-    u.pointerButton(max_at, widgets.btn_left, true);
-    u.pointerButton(max_at, widgets.btn_left, false);
+    u.pointerButton(max_at, btn_left, true);
+    u.pointerButton(max_at, btn_left, false);
     try testing.expectEqual(@as(u32, 1), app.maximizes);
     try testing.expectEqual(@as(u32, 1), app.drags);
 }

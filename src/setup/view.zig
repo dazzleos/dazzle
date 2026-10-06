@@ -201,8 +201,8 @@ fn click(u: *ui.Ui, n: *ui.Node) void {
     const at = n.position();
     const p: ui.Point = .{ at[0] + n.size.w / 2, at[1] + n.size.h / 2 };
     u.pointerMotion(p);
-    u.pointerButton(p, ui.widgets.btn_left, true);
-    u.pointerButton(p, ui.widgets.btn_left, false);
+    u.pointerButton(p, ui.btn_left, true);
+    u.pointerButton(p, ui.btn_left, false);
 }
 
 test "naming the computer, then waiting for the card" {
