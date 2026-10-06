@@ -412,7 +412,7 @@ test "checkboxes, switches and radio buttons report changes, and their labels pr
     const st = u.root.?.state(Controls.State);
 
     // The box itself, then the label.
-    click(u, find(items.items[0], ui.controls.CheckboxMark).?);
+    click(u, find(items.items[0], ui.checkbox.CheckboxMark).?);
     try testing.expect(st.checked);
     u.frame(400, 400, 1, Controls{});
     const label = find(items.items[0], ui.Text).?;
@@ -426,10 +426,10 @@ test "checkboxes, switches and radio buttons report changes, and their labels pr
     u.frame(400, 400, 3, Controls{});
     try testing.expect(u.needs_frame);
     u.frame(400, 400, 3 + ui.Switch.travel_ns / 2, Controls{});
-    const mark = find(items.items[1], ui.controls.SwitchMark).?.widget.as(ui.controls.SwitchMark).?;
+    const mark = find(items.items[1], ui.@"switch".SwitchMark).?.widget.as(ui.@"switch".SwitchMark).?;
     try testing.expect(mark.position > 0.3 and mark.position < 0.7);
     u.frame(400, 400, 3 + ui.Switch.travel_ns * 2, Controls{});
-    try testing.expectEqual(@as(f32, 1), find(items.items[1], ui.controls.SwitchMark).?.widget.as(ui.controls.SwitchMark).?.position);
+    try testing.expectEqual(@as(f32, 1), find(items.items[1], ui.@"switch".SwitchMark).?.widget.as(ui.@"switch".SwitchMark).?.position);
     u.frame(400, 400, 4 + ui.Switch.travel_ns * 2, Controls{});
     try testing.expect(!u.needs_frame);
 
@@ -439,8 +439,8 @@ test "checkboxes, switches and radio buttons report changes, and their labels pr
     click(u, items.items[4]);
     try testing.expectEqual(Choice.b, st.choice);
     u.frame(400, 400, 5 + ui.Switch.travel_ns * 2, Controls{});
-    try testing.expect(!find(items.items[2], ui.controls.RadioMark).?.widget.as(ui.controls.RadioMark).?.selected);
-    try testing.expect(find(items.items[3], ui.controls.RadioMark).?.widget.as(ui.controls.RadioMark).?.selected);
+    try testing.expect(!find(items.items[2], ui.radio.RadioMark).?.widget.as(ui.radio.RadioMark).?.selected);
+    try testing.expect(find(items.items[3], ui.radio.RadioMark).?.widget.as(ui.radio.RadioMark).?.selected);
 
     // A disabled checkbox ignores clicks (and draws without failing).
     click(u, items.items[5]);

@@ -284,7 +284,7 @@ pub const Context = struct {
         return std.fmt.allocPrint(cx.arena, f, args) catch "…";
     }
 
-    pub fn theme(cx: *const Context) *const @import("material.zig").Theme {
+    pub fn theme(cx: *const Context) *const @import("theme.zig").Theme {
         return &cx.ui.theme;
     }
 

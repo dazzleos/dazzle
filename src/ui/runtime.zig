@@ -17,7 +17,7 @@ const font = @import("font");
 const geometry = @import("geometry.zig");
 const widget = @import("widget.zig");
 const painter_mod = @import("painter.zig");
-const material = @import("material.zig");
+const Theme = @import("theme.zig").Theme;
 const damage_mod = @import("damage.zig");
 const keymap = @import("keymap.zig");
 
@@ -37,7 +37,7 @@ pub const Ui = struct {
     font: ?*const font.Font,
     /// Icons are drawn with it (see `Icon`).
     icon_font: font.Font,
-    theme: material.Theme = .dark,
+    theme: Theme = .dark,
     atlas: gfx.Atlas,
     renderer: ?gfx.Renderer = null,
     root: ?*Node = null,

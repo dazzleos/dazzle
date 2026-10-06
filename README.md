@@ -165,10 +165,13 @@ with the problem marked.
 | `icon.zig`, `image.zig` | `Icon` (a Material icon) and `Image` (pixels, as big as they fit) |
 | `text.zig` | `Text`: lines at `\n`, wrapped at spaces to fit, or cut short with "…" |
 | `scroll_view.zig` | `ScrollView`: the part of a taller child scrolled to, with the wheel or by dragging its bar, and scrolling to a widget in it (`reveal`) |
-| `material.zig` | Material 3's light and dark baseline themes, and `OutlinedButton`, made of a `Pressable`, `Decorated`, `ConstrainedBox`, `Padding` and `Center` |
-| `controls.zig` | Material 3's selection controls: `Checkbox`, `Radio` (generic over the value it selects) and `Switch` (its handle slides), each with an optional label that presses it too |
+| `theme.zig` | `Theme`: Material 3's light and dark baseline colour schemes, and text sizes |
+| `outlined_button.zig` | `OutlinedButton`, made of a `Pressable`, `Decorated`, `ConstrainedBox`, `Padding` and `Center`, with a label, an icon or both |
+| `spinner.zig` | `Spinner`: Material's indeterminate circular progress indicator |
+| `checkbox.zig`, `radio.zig`, `switch.zig` | Material 3's selection controls: `Checkbox`, `Radio` (generic over the value it selects) and `Switch` (its handle slides), each with an optional label that presses it too; `control.zig` has what they share |
 | `text_field.zig` | `TextField`: a line of text to type (Material's outlined field), optionally shown as dots for passwords; clicking it gives it the keyboard |
 | `title_bar.zig` | `TitleBar`: the bar apps draw across the top of their window, with their name, maximize and close buttons, and dragging it to move the window (the shell draws none) |
+| `bar_button.zig` | `BarButton`: the title bar's round icon buttons |
 | `keymap.zig` | Linux key codes to characters, for a US keyboard (the shell sends key codes without a keymap) |
 | `painter.zig` | Painting: canvas layers and GPU draws in order, clipping (nothing outside the clip is painted), and the overflow stripes |
 | `damage.zig` | What changed between frames: each node's drawing fingerprinted and compared, kept as a few rectangles, with a history for buffers of any age |

@@ -42,10 +42,13 @@
 //! * `icon`: Icon, a Material icon
 //! * `image`: Image, pixels shown as big as they fit
 //! * `text`: Text
-//! * `material`: the theme, OutlinedButton, Spinner
-//! * `controls`: Checkbox, Radio, Switch
+//! * `theme`: Theme, Material 3's colours and text sizes
+//! * `outlined_button`, `spinner`: OutlinedButton, Spinner
+//! * `checkbox`, `radio`, `switch`: Checkbox, Radio, Switch (and `control`,
+//!   what they share)
 //! * `text_field`: TextField
-//! * `title_bar`: TitleBar, the bar apps draw across the top of their window
+//! * `title_bar`: TitleBar, the bar apps draw across the top of their
+//!   window (with `bar_button`'s buttons)
 //! * `keymap`: key codes to characters
 //! * `painter`: painting, GPU draws and the overflow stripes
 //! * `damage`: what changed between frames, so only that is redrawn
@@ -66,10 +69,16 @@ pub const overlay = @import("overlay.zig");
 pub const decorated = @import("decorated.zig");
 pub const pressable = @import("pressable.zig");
 pub const text = @import("text.zig");
-pub const material = @import("material.zig");
-pub const controls = @import("controls.zig");
+pub const theme = @import("theme.zig");
+pub const outlined_button = @import("outlined_button.zig");
+pub const spinner = @import("spinner.zig");
+pub const control = @import("control.zig");
+pub const checkbox = @import("checkbox.zig");
+pub const radio = @import("radio.zig");
+pub const @"switch" = @import("switch.zig");
 pub const text_field = @import("text_field.zig");
 pub const title_bar = @import("title_bar.zig");
+pub const bar_button = @import("bar_button.zig");
 pub const scroll_view = @import("scroll_view.zig");
 pub const lazy_grid = @import("lazy_grid.zig");
 pub const icon = @import("icon.zig");
@@ -122,14 +131,15 @@ pub const Text = text.Text;
 pub const TextStyle = text.TextStyle;
 pub const TextAlign = text.TextAlign;
 
-pub const Theme = material.Theme;
-pub const OutlinedButton = material.OutlinedButton;
-pub const Spinner = material.Spinner;
-pub const Checkbox = controls.Checkbox;
-pub const Radio = controls.Radio;
-pub const Switch = controls.Switch;
+pub const Theme = theme.Theme;
+pub const OutlinedButton = outlined_button.OutlinedButton;
+pub const Spinner = spinner.Spinner;
+pub const Checkbox = checkbox.Checkbox;
+pub const Radio = radio.Radio;
+pub const Switch = @"switch".Switch;
 pub const TextField = text_field.TextField;
 pub const TitleBar = title_bar.TitleBar;
+pub const BarButton = bar_button.BarButton;
 pub const ScrollView = scroll_view.ScrollView;
 pub const LazyGrid = lazy_grid.LazyGrid;
 pub const Icon = icon.Icon;
@@ -155,10 +165,16 @@ test {
     _ = decorated;
     _ = pressable;
     _ = text;
-    _ = material;
-    _ = controls;
+    _ = theme;
+    _ = outlined_button;
+    _ = spinner;
+    _ = control;
+    _ = checkbox;
+    _ = radio;
+    _ = @"switch";
     _ = text_field;
     _ = title_bar;
+    _ = bar_button;
     _ = scroll_view;
     _ = lazy_grid;
     _ = icon;

@@ -9,29 +9,22 @@
 //!     } })
 
 const std = @import("std");
-const gfx = @import("gfx");
 const geometry = @import("geometry.zig");
 const widget = @import("widget.zig");
 const Align = @import("align.zig").Align;
 const Center = @import("center.zig").Center;
 const Column = @import("flex.zig").Column;
 const Decorated = @import("decorated.zig").Decorated;
-const Interaction = @import("pressable.zig").Interaction;
 const Overlay = @import("overlay.zig").Overlay;
 const Padding = @import("padding.zig").Padding;
-const Pressable = @import("pressable.zig").Pressable;
 const Row = @import("flex.zig").Row;
 const SizedBox = @import("sized_box.zig").SizedBox;
+const BarButton = @import("bar_button.zig").BarButton;
 const btn_left = @import("widget.zig").btn_left;
-const painter_mod = @import("painter.zig");
-const icons = @import("icons");
 
 const Node = widget.Node;
 const Context = widget.Context;
 const Widget = widget.Widget;
-const Painter = painter_mod.Painter;
-const Constraints = geometry.Constraints;
-const Size = geometry.Size;
 
 pub const TitleBar = struct {
     title: []const u8,
@@ -91,46 +84,6 @@ const DragArea = struct {
             else => {},
         }
         return false;
-    }
-};
-
-/// A round button with an icon, highlighted under the pointer.
-pub const BarButton = struct {
-    on_press: widget.Callback,
-    size: f32,
-    icon: icons.Icon,
-
-    pub const State = struct {
-        interaction: Interaction = .{},
-    };
-
-    pub fn build(self: *const BarButton, cx: *Context, state: *State) Widget {
-        return cx.make(Pressable{ .on_press = self.on_press, .interaction = &state.interaction, .child = cx.make(Mark{
-            .icon = self.icon,
-            .size = self.size,
-            .hovered = state.interaction.hovered,
-            .pressed = state.interaction.pressed,
-        }) });
-    }
-};
-
-const Mark = struct {
-    icon: icons.Icon,
-    size: f32,
-    hovered: bool,
-    pressed: bool,
-
-    pub fn layout(self: *const Mark, _: *Node, c: Constraints) Size {
-        return c.constrain(.{ .w = self.size, .h = self.size });
-    }
-
-    pub fn paint(self: *const Mark, n: *Node, p: *Painter) void {
-        const t = &n.ui.theme;
-        const c = p.canvas();
-        const mid: gfx.Point = .{ n.size.w / 2, n.size.h / 2 };
-        if (self.hovered or self.pressed) c.fillCircle(mid, n.size.w / 2, t.on_surface.withAlpha(if (self.pressed) 0.16 else 0.08));
-        const s = @round(n.size.w * 0.6);
-        p.icon(self.icon, @round((n.size.w - s) / 2), @round((n.size.h - s) / 2), s, t.on_surface_variant);
     }
 };
 
