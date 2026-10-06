@@ -745,18 +745,27 @@ Pi 3 B+'s does (there is no Bluetooth driver here to disturb).
 
 ### The Files app
 
-Click "F" in the dock. It shows the user's files: `/data`, the SD card's
+Click the folder in the dock. It shows the user's files: `/data`, the SD card's
 space for them (Home, at the top of the tree), and nothing above it. The
 System files switch at the bottom left shows the whole filesystem instead
 (the tree then starts at `/`); turned off again, it goes back home. The
 tree of folders is on the left, and the open folder on the right as a grid
-of icons (folders, files, programs, devices; links get an arrow in the
-corner), with its path and an Up button above (Backspace goes up too, as
-far as the top of the tree).
+of icons (folders, files, programs, devices; links get a badge in one
+corner, and folders that cannot be changed a lock in the other), with its
+path and an Up button above (Backspace goes up too, as far as the top of
+the tree).
 Clicking a folder in the tree or the grid opens it, and its row in the
 tree comes into view; the arrow beside a folder opens or closes it in
-the tree. Clicking anything else picks it, and the line under the grid
-gives its name, kind and size. Both sides scroll, with the wheel or by
+the tree. Clicking a file shows what is in it in place of the grid
+(`src/files/viewer.zig`), with what it holds under its path; Up goes back
+to its folder. A file is told apart by what it holds, not its name
+(`src/files/content.zig`): text is shown a line a row; images (PNG, BMP,
+binary PPM and PGM, decoded in `src/files/decode.zig`) as big as they fit;
+fonts as samples of their letters at several sizes; anything else as its
+bytes, in hexadecimal and as text, as many a row as fit. Only the first
+8 MB of a file is read. Clicking a device, pipe or socket only picks it
+(opening some devices does things: starting the watchdog, say). The line
+under the grid gives the name, kind and size of what is picked. Both sides scroll, with the wheel or by
 dragging their bars. Names starting with a dot are left out, a folder
 shows at most 1000 entries, and folders are read when they are opened
 (`src/files/fs.zig`), as the app's unprivileged user: a folder it may not
