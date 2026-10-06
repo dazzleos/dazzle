@@ -485,7 +485,8 @@ pub const Canvas = struct {
     fn note(c: *Canvas, op: Op, bounds: Rect, params: anytype, data: []const u8) void {
         const rec = c.recorder orelse return;
         rec.hash.update(&.{@intFromEnum(op)});
-        rec.hash.update(std.mem.asBytes(&params));
+        // Field by field: the tuple's padding is not set.
+        inline for (params) |field| rec.hash.update(std.mem.asBytes(&field));
         rec.hash.update(data);
         if (c.clip) |clip| rec.hash.update(std.mem.asBytes(&clip));
         const area = if (c.clip) |clip| bounds.intersect(clip) orelse return else bounds;
