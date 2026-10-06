@@ -73,6 +73,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     // Wi-Fi scan.
     var report: ?info.manager.Report = null;
     var next_ask: u64 = 0;
+    var was_wifi_page = true;
     // What the window asks of the network manager (Connect, Disconnect, an
     // Ethernet address).
     var actions: view.Actions = .{};
@@ -136,12 +137,18 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             next_ask = sys.nowNs() + std.time.ns_per_s;
             dirty = true;
         }
+        // Wi-Fi networks are scanned for only while their page is shown
+        // (at once when it is chosen); other pages only ask how things
+        // are.
+        const wifi_page = view.shownPage(window_ui) == .wifi;
+        if (wifi_page and !was_wifi_page) next_ask = 0;
+        was_wifi_page = wifi_page;
         if (!suspended and now >= next_ask) {
             // Soon after the first answer (to show what the first scan
             // found) and while joining a network, then every few seconds.
             const busy = if (report) |r| r.scanning or r.connection.state == .connecting or r.connection.state == .authenticating or r.connection.state == .addressing else true;
-            next_ask = now + @as(u64, if (busy) 1 else 5) * std.time.ns_per_s;
-            report = info.askManager("wifi scan\n");
+            next_ask = now + @as(u64, if (busy and wifi_page) 1 else 5) * std.time.ns_per_s;
+            report = info.askManager(if (wifi_page) "wifi scan\n" else "status\n");
             dirty = true;
         }
 

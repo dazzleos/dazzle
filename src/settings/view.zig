@@ -433,6 +433,13 @@ pub const Page = enum {
     }
 };
 
+/// The page `u` (running a `Settings`) shows.
+pub fn shownPage(u: *ui.Ui) Page {
+    const root = u.root orelse return .wifi;
+    if (!root.widget.is(Settings)) return .wifi;
+    return root.state(Settings.State).page;
+}
+
 /// A tab: pressing it shows its page.
 const Tab = struct {
     label: []const u8,
@@ -850,7 +857,7 @@ test "everything is shown, and fits the window at the shell's sizes" {
         if (@as(usize, @intFromEnum(page)) + 1 < std.enums.values(Page).len) {
             const next: Page = @enumFromInt(@as(usize, @intFromEnum(page)) + 1);
             click(u, up(findText(u.root.?, next.label()).?, Tab).?);
-            try testing.expectEqual(next, u.root.?.state(Settings.State).page);
+            try testing.expectEqual(next, shownPage(u));
         }
     }
     for ([_][]const u8{
