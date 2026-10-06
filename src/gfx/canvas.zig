@@ -124,11 +124,14 @@ pub const Image = struct {
 
     pub const max_size = 2048;
 
-    var next_id = std.atomic.Value(u64).init(1);
+    /// The next id. Images are made on the thread that draws (64-bit
+    /// atomics are not there on the Pi Zero's ARMv6).
+    var next_id: u64 = 1;
 
     pub fn init(pixels: []const u32, width: u32, height: u32) Image {
         std.debug.assert(pixels.len == @as(usize, width) * height and width <= max_size and height <= max_size);
-        return .{ .pixels = pixels, .width = width, .height = height, .id = next_id.fetchAdd(1, .monotonic) };
+        next_id += 1;
+        return .{ .pixels = pixels, .width = width, .height = height, .id = next_id - 1 };
     }
 };
 
