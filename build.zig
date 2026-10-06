@@ -22,6 +22,16 @@ fn addAppIcon(b: *std.Build, run: *std.Build.Step.Run, program: []const u8, icon
     run.addPrefixedFileArg(b.fmt("--file={s}.icon=", .{program}), file);
 }
 
+/// Puts a NOTICES file at `dest` in the initramfs: the third-party
+/// software built into `what`, from its sections in notices/ (by name).
+fn addNotices(b: *std.Build, run: *std.Build.Step.Run, dest: []const u8, what: []const u8, sections: []const []const u8) void {
+    const make = b.addRunArtifact(hostTool(b, "notices"));
+    const out = make.addOutputFileArg("NOTICES");
+    make.addArg(what);
+    for (sections) |s| make.addFileArg(b.path(b.fmt("notices/{s}.txt", .{s})));
+    run.addPrefixedFileArg(b.fmt("--file={s}=", .{dest}), out);
+}
+
 /// The icon font, cut down to Dazzle's icons, and their codepoints (see
 /// tools/subset_icons.zig).
 const IconFont = struct {
@@ -618,8 +628,9 @@ pub fn build(b: *std.Build) void {
     run_mkinitramfs.addArtifactArg(shell_exe);
     run_mkinitramfs.addFileArg(b.path("fonts/FiraSans-Regular.ttf"));
     run_mkinitramfs.addFileArg(b.path("fonts/OFL.txt"));
-    // The notices for the third-party software built into the programs.
-    run_mkinitramfs.addPrefixedFileArg("--file=os/NOTICES=", b.path("NOTICES"));
+    // The third-party software built into the system's programs, and its
+    // licences (each app has its own: see below).
+    addNotices(b, run_mkinitramfs, "os/NOTICES", "Dazzle's system programs", &.{"MaterialIcons"});
     // The Wi-Fi chips' firmware, for the kernel to load.
     run_mkinitramfs.step.dependOn(fetchWifiFirmware(b));
     for (wifi_firmware) |f| {
@@ -636,6 +647,10 @@ pub fn build(b: *std.Build) void {
     addAppIcon(b, run_mkinitramfs, "os/shell/dazzle-settings", .settings);
     addAppIcon(b, run_mkinitramfs, "apps/dazzle-demo/dazzle-demo", .view_in_ar);
     addAppIcon(b, run_mkinitramfs, "apps/dazzle-files/dazzle-files", .folder);
+    // The apps are independent of the system: each has the notices for
+    // what is built into it beside it.
+    addNotices(b, run_mkinitramfs, "apps/dazzle-demo/NOTICES", "the Demo app", &.{"MaterialIcons"});
+    addNotices(b, run_mkinitramfs, "apps/dazzle-files/NOTICES", "the Files app", &.{"MaterialIcons"});
     const install_initramfs = b.addInstallFile(initramfs, "initramfs.cpio");
     const programs_step = b.step("programs", "Build just the programs (zig-out/bin) and zig-out/initramfs.cpio");
     for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_settings.step, &install_files.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {

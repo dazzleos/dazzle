@@ -1,5 +1,5 @@
-//! Dazzle's icons: Material Icons (Apache License 2.0, see NOTICES,
-//! installed as /os/NOTICES), drawn from a font. The font built
+//! Dazzle's icons: Material Icons (Apache License 2.0, see
+//! notices/MaterialIcons.txt), drawn from a font. The font built
 //! into the programs has only the icons named in `Icon` (see names.zig and
 //! tools/subset_icons.zig), so it is a few kilobytes.
 //!
