@@ -23,6 +23,7 @@ pub const renderer = @import("renderer.zig");
 pub const preview = @import("preview.zig");
 
 pub const Canvas = canvas.Canvas;
+pub const Image = canvas.Image;
 pub const Color = canvas.Color;
 pub const Rect = canvas.Rect;
 pub const Radii = canvas.Radii;

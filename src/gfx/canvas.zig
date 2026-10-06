@@ -108,6 +108,28 @@ pub const Kind = enum {
     /// Solid triangles opaque all over, drawn without blending.
     @"opaque",
     text,
+    /// An image, from its own texture (`Batch.image`).
+    image,
+};
+
+/// Pixels to draw: 0xAARRGGBB (straight alpha), row by row. Each has an
+/// `id` of its own (from `init`), by which the GPU's copy is found: make a
+/// new Image, rather than change the pixels of one, to show others. At
+/// most `max_size` pixels across and down (the GPU's limit).
+pub const Image = struct {
+    pixels: []const u32,
+    width: u32,
+    height: u32,
+    id: u64,
+
+    pub const max_size = 2048;
+
+    var next_id = std.atomic.Value(u64).init(1);
+
+    pub fn init(pixels: []const u32, width: u32, height: u32) Image {
+        std.debug.assert(pixels.len == @as(usize, width) * height and width <= max_size and height <= max_size);
+        return .{ .pixels = pixels, .width = width, .height = height, .id = next_id.fetchAdd(1, .monotonic) };
+    }
 };
 
 pub const Batch = struct {
@@ -115,6 +137,8 @@ pub const Batch = struct {
     /// Vertex data, `floatsPerVertex(kind)` floats per vertex, three
     /// vertices per triangle.
     floats: std.ArrayList(f32) = .empty,
+    /// For `.image` batches: the image (one per batch).
+    image: ?*const Image = null,
     /// Everything drawn in it.
     bounds: Rect,
     /// The parts of `bounds` drawn in, more closely: shapes next to each
@@ -169,7 +193,7 @@ pub fn floatsPerVertex(kind: Kind) usize {
     return switch (kind) {
         .shape => shaders.shape_floats,
         .solid, .@"opaque" => shaders.solid_floats,
-        .text => shaders.text_floats,
+        .text, .image => shaders.text_floats,
     };
 }
 
@@ -332,6 +356,22 @@ pub const Canvas = struct {
         return end;
     }
 
+    // --- Images -----------------------------------------------------------------
+
+    /// Draws `img` stretched over `dest`, `alpha` opaque. It must last
+    /// until the frame is drawn.
+    pub fn drawImage(c: *Canvas, img: *const Image, dest_in: Rect, alpha: f32) void {
+        const r = c.moved(dest_in);
+        if (r.w <= 0 or r.h <= 0 or alpha <= 0 or img.width == 0 or img.height == 0) return;
+        c.note(.image, r, .{ img.id, alpha }, "");
+        const b = c.batchForImage(img, r) orelse return;
+        const corners = [4][4]f32{ .{ r.x, r.y, 0, 0 }, .{ r.x + r.w, r.y, 1, 0 }, .{ r.x + r.w, r.y + r.h, 1, 1 }, .{ r.x, r.y + r.h, 0, 1 } };
+        var verts: [4][shaders.text_floats]f32 = undefined;
+        for (corners, &verts) |k, *out| out.* = .{ c.clipX(k[0]), c.clipY(k[1]), k[2], k[3], 1, 1, 1, alpha };
+        const out = c.vertices(b, shaders.text_floats, 6) orelse return;
+        for ([_]usize{ 0, 1, 2, 0, 2, 3 }, out) |k, *o| o.* = verts[k];
+    }
+
     // --- Rounded rectangles --------------------------------------------------
 
     fn roundedRect(c: *Canvas, r_in: Rect, radii_in: Radii, stroke: f32, color: Color) void {
@@ -434,7 +474,7 @@ pub const Canvas = struct {
 
     // --- Recording ----------------------------------------------------------------
 
-    const Op = enum(u8) { rounded_rect, polygon, polyline, text };
+    const Op = enum(u8) { rounded_rect, polygon, polyline, text, image };
 
     /// Notes a shape in the recorder: what it is (its operation, the
     /// fixed-size `params` and the variable `data`, with the clip) and the
@@ -474,13 +514,23 @@ pub const Canvas = struct {
     /// second icon's first shape goes in the first icon's first batch, its
     /// second in the second, and so on.
     fn batchFor(c: *Canvas, kind: Kind, bounds: Rect) ?*Batch {
+        return c.batchOf(kind, null, bounds);
+    }
+
+    /// The batch an image goes in: like `batchFor`, among those of the
+    /// same image.
+    fn batchForImage(c: *Canvas, img: *const Image, bounds: Rect) ?*Batch {
+        return c.batchOf(.image, img, bounds);
+    }
+
+    fn batchOf(c: *Canvas, kind: Kind, image: ?*const Image, bounds: Rect) ?*Batch {
         const items = c.batches.items;
         var found: ?*Batch = null;
         var i = items.len;
         while (i > 0 and items.len - i < lookback) {
             i -= 1;
             const b = &items[i];
-            if (b.kind == kind and std.meta.eql(b.clip, c.clip)) found = b;
+            if (b.kind == kind and b.image == image and std.meta.eql(b.clip, c.clip)) found = b;
             if (b.overlaps(bounds)) break;
         }
         if (found) |b| {
@@ -489,6 +539,7 @@ pub const Canvas = struct {
         }
         var b: Batch = if (c.spare.pop()) |s| s else .{ .kind = kind, .bounds = bounds, .clip = null };
         b.kind = kind;
+        b.image = image;
         b.bounds = bounds;
         b.clip = c.clip;
         b.areas.clearRetainingCapacity();

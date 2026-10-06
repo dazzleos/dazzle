@@ -19,9 +19,10 @@ pub const Programs = struct {
     solid: shader.Program,
     @"opaque": shader.Program,
     text: shader.Program,
+    image: shader.Program,
 
     pub fn load() Programs {
-        return .{ .shape = shaders.shape(), .solid = shaders.solid(), .@"opaque" = shaders.opaqueSolid(), .text = shaders.text() };
+        return .{ .shape = shaders.shape(), .solid = shaders.solid(), .@"opaque" = shaders.opaqueSolid(), .text = shaders.text(), .image = shaders.image() };
     }
 };
 
@@ -60,11 +61,28 @@ pub fn render(c: *const canvas_mod.Canvas, programs: *const Programs, img: Image
             .solid => &programs.solid.fs,
             .@"opaque" => &programs.@"opaque".fs,
             .text => &programs.text.fs,
+            .image => &programs.image.fs,
         };
         const nvary = floats - 2;
         var group: Group = .{ .fs = fs };
-        if (b.kind == .text) group.uniforms = try texture.uniforms(c.atlas orelse continue, fs, &group.uniform_buf);
-        group.texture = texture.memory;
+        // An image's own texture (sampled nearest: the simulator has no
+        // filtering).
+        var image_texture: []u8 = &.{};
+        defer std.heap.page_allocator.free(image_texture);
+        switch (b.kind) {
+            .text => {
+                group.uniforms = try texture.uniforms(c.atlas orelse continue, fs, &group.uniform_buf);
+                group.texture = texture.memory;
+            },
+            .image => {
+                const pic = b.image orelse continue;
+                image_texture = try std.heap.page_allocator.alloc(u8, vc4.texture.imageSize(pic.width, pic.height));
+                vc4.texture.upload(image_texture, pic.pixels, pic.width, pic.height);
+                group.uniforms = textureUniforms(.{ .width = pic.width, .height = pic.height, .mag_filter = .nearest, .min_filter = .nearest, .wrap_s = .clamp, .wrap_t = .clamp }, fs, &group.uniform_buf);
+                group.texture = image_texture;
+            },
+            else => group.texture = texture.memory,
+        }
         const verts = b.floats.items;
         var t: usize = 0;
         while (t + 3 * floats <= verts.len) : (t += 3 * floats) {
@@ -135,14 +153,18 @@ const Texture = struct {
             vc4.texture.upload(t.memory, atlas.pixels, atlas_mod.width, atlas_mod.height);
         }
         const cfg: vc4.texture.Config = .{ .width = atlas_mod.width, .height = atlas_mod.height, .mag_filter = .nearest, .min_filter = .nearest, .wrap_s = .clamp, .wrap_t = .clamp };
-        for (fs.uniforms(), buf[0..fs.uniforms().len]) |u, *out| out.* = switch (u) {
-            .user => 0,
-            .tex_p0 => vc4.texture.p0(cfg),
-            .tex_p1 => vc4.texture.p1(cfg),
-        };
-        return buf[0..fs.uniforms().len];
+        return textureUniforms(cfg, fs, buf);
     }
 };
+
+fn textureUniforms(cfg: vc4.texture.Config, fs: *const vc4.compiler.Compiled, buf: []u32) []const u32 {
+    for (fs.uniforms(), buf[0..fs.uniforms().len]) |u, *out| out.* = switch (u) {
+        .user => 0,
+        .tex_p0 => vc4.texture.p0(cfg),
+        .tex_p1 => vc4.texture.p1(cfg),
+    };
+    return buf[0..fs.uniforms().len];
+}
 
 fn canonicalEdge(a: [2]f32, b: [2]f32, c: [2]f32) f32 {
     const swap = a[0] > b[0] or (a[0] == b[0] and a[1] > b[1]);
@@ -301,4 +323,29 @@ test "text matches the font renderer's own drawing" {
         lit += @intFromBool(g != 0xff000000);
     }
     try testing.expect(lit > 200);
+}
+
+test "images are drawn from their own textures, stretched, tinted by how opaque" {
+    const programs = Programs.load();
+    var c = Canvas.init(testing.allocator);
+    defer c.deinit();
+    c.begin(64, 32);
+    // Red, green / blue, translucent white.
+    const pic = canvas_mod.Image.init(&.{ 0xffff0000, 0xff00ff00, 0xff0000ff, 0x80ffffff }, 2, 2);
+    c.drawImage(&pic, .{ .x = 0, .y = 0, .w = 20, .h = 20 }, 1);
+    // The same image again, half opaque: the same batch.
+    c.drawImage(&pic, .{ .x = 30, .y = 0, .w = 20, .h = 20 }, 0.5);
+    try testing.expectEqual(@as(usize, 1), c.batches.items.len);
+    var pixels: [64 * 32]u32 = @splat(0xff000000);
+    const img: Image = .{ .pixels = &pixels, .width = 64, .height = 32 };
+    try render(&c, &programs, img);
+    try testing.expectEqual(@as(u32, 0xffff0000), img.at(4, 4));
+    try testing.expectEqual(@as(u32, 0xff00ff00), img.at(15, 4));
+    try testing.expectEqual(@as(u32, 0xff0000ff), img.at(4, 15));
+    try expectNear(0xff808080, img.at(15, 15), 1);
+    // Half opaque: red over black, half way.
+    try expectNear(0xff800000, img.at(34, 4), 1);
+    // Outside it, nothing.
+    try testing.expectEqual(@as(u32, 0xff000000), img.at(25, 4));
+    try testing.expectEqual(@as(u32, 0xff000000), img.at(4, 25));
 }

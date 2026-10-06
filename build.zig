@@ -163,6 +163,7 @@ const shader_programs = [_]struct { source: []const u8, name: ?[]const u8 = null
     // The same, for triangles that are opaque all over: no blending.
     .{ .source = "src/gfx/shaders/solid.zig", .name = "opaque", .owner = .gfx, .args = &.{"--blend=none"} },
     .{ .source = "src/gfx/shaders/text.zig", .owner = .gfx, .args = &.{"--blend=source-over"} },
+    .{ .source = "src/gfx/shaders/image.zig", .owner = .gfx, .args = &.{"--blend=source-over"} },
     .{ .source = "src/demo/shaders/polyhedron.zig", .owner = .demo, .args = &.{"--depth-test"} },
     .{ .source = "src/shell/shaders/quad.zig", .owner = .shell, .args = &.{} },
 };

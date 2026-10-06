@@ -21,6 +21,10 @@ pub const Renderer = struct {
     solid: shader.Pipeline,
     @"opaque": shader.Pipeline,
     text: shader.Pipeline,
+    image: shader.Pipeline,
+    gpa: std.mem.Allocator,
+    /// The images' textures, by image id; those no frame draws are freed.
+    images: std.AutoHashMapUnmanaged(u64, vc4.Bo) = .empty,
     /// The frame's vertices; replaced by a bigger one when it fills up.
     vbo: ?vc4.Bo = null,
     /// Where the next canvas's vertices go.
@@ -36,7 +40,9 @@ pub const Renderer = struct {
         errdefer solid.deinit(dev);
         var opaque_solid = try shader.Pipeline.init(gpa, dev, shaders.opaqueSolid(), shaders.solid_layout);
         errdefer opaque_solid.deinit(dev);
-        return .{ .dev = dev, .shape = shape, .solid = solid, .@"opaque" = opaque_solid, .text = try shader.Pipeline.init(gpa, dev, shaders.text(), shaders.text_layout) };
+        var text = try shader.Pipeline.init(gpa, dev, shaders.text(), shaders.text_layout);
+        errdefer text.deinit(dev);
+        return .{ .dev = dev, .gpa = gpa, .shape = shape, .solid = solid, .@"opaque" = opaque_solid, .text = text, .image = try shader.Pipeline.init(gpa, dev, shaders.image(), shaders.text_layout) };
     }
 
     pub fn deinit(r: *Renderer) void {
@@ -44,6 +50,10 @@ pub const Renderer = struct {
         r.solid.deinit(r.dev);
         r.@"opaque".deinit(r.dev);
         r.text.deinit(r.dev);
+        r.image.deinit(r.dev);
+        var it = r.images.valueIterator();
+        while (it.next()) |bo| r.dev.destroyBo(bo.*);
+        r.images.deinit(r.gpa);
         if (r.vbo) |bo| r.dev.destroyBo(bo);
         if (r.atlas_bo) |bo| r.dev.destroyBo(bo);
     }
@@ -70,6 +80,28 @@ pub const Renderer = struct {
             r.vbo = try r.dev.createBo(@intCast(std.mem.alignForward(usize, bytes * 2, 64 * 1024)));
         }
         for (canvases) |c| if (c.atlas) |a| try r.upload(a);
+        try r.uploadImages(canvases);
+    }
+
+    /// Gives each image drawn a texture (uploaded once), and frees those of
+    /// images no longer drawn.
+    fn uploadImages(r: *Renderer, canvases: []const *const Canvas) !void {
+        var used: std.AutoHashMapUnmanaged(u64, void) = .empty;
+        defer used.deinit(r.gpa);
+        for (canvases) |c| for (c.batches.items) |*b| {
+            const img = b.image orelse continue;
+            try used.put(r.gpa, img.id, {});
+            if (r.images.contains(img.id)) continue;
+            const bo = try r.dev.createBo(vc4.texture.imageSize(img.width, img.height));
+            errdefer r.dev.destroyBo(bo);
+            vc4.texture.upload(bo.map, img.pixels, img.width, img.height);
+            try r.images.put(r.gpa, img.id, bo);
+        };
+        var stale: std.ArrayList(u64) = .empty;
+        defer stale.deinit(r.gpa);
+        var it = r.images.iterator();
+        while (it.next()) |e| if (!used.contains(e.key_ptr.*)) try stale.append(r.gpa, e.key_ptr.*);
+        for (stale.items) |id| r.dev.destroyBo(r.images.fetchRemove(id).?.value);
     }
 
     fn upload(r: *Renderer, a: *atlas_mod.Atlas) !void {
@@ -111,18 +143,27 @@ pub const Renderer = struct {
                 .solid => &r.solid,
                 .@"opaque" => &r.@"opaque",
                 .text => &r.text,
+                .image => &r.image,
             };
-            const texture: ?render.Texture = if (b.kind == .text) .{
-                .handle = (r.atlas_bo orelse return error.NotPrepared).handle,
-                .config = .{
-                    .width = atlas_mod.width,
-                    .height = atlas_mod.height,
-                    .mag_filter = .nearest,
-                    .min_filter = .nearest,
-                    .wrap_s = .clamp,
-                    .wrap_t = .clamp,
+            const texture: ?render.Texture = switch (b.kind) {
+                .text => .{
+                    .handle = (r.atlas_bo orelse return error.NotPrepared).handle,
+                    .config = .{
+                        .width = atlas_mod.width,
+                        .height = atlas_mod.height,
+                        .mag_filter = .nearest,
+                        .min_filter = .nearest,
+                        .wrap_s = .clamp,
+                        .wrap_t = .clamp,
+                    },
                 },
-            } else null;
+                // Scaled smoothly.
+                .image => .{
+                    .handle = (r.images.get((b.image orelse continue).id) orelse return error.NotPrepared).handle,
+                    .config = .{ .width = b.image.?.width, .height = b.image.?.height, .wrap_s = .clamp, .wrap_t = .clamp },
+                },
+                else => null,
+            };
             try p.draw(frame, .{
                 .vertices = vbo.handle,
                 .vertex_offset = offset,
