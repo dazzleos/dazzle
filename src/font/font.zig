@@ -29,7 +29,7 @@ pub const rasterizeGlyph = text.rasterizeGlyph;
 pub const draw = text.draw;
 pub const measure = text.measure;
 
-/// The file name apps ship Fira Sans under.
+/// The file name Fira Sans is under (in /os/fonts, see `sys.fontFile`).
 pub const default_font_file = "FiraSans-Regular.ttf";
 
 test {

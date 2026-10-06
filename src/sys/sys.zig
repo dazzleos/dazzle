@@ -241,6 +241,17 @@ pub fn readFileAlloc(gpa: std.mem.Allocator, path: [*:0]const u8, max_size: usiz
     return buf;
 }
 
+/// Where Dazzle's fonts are, shared by every program.
+pub const fonts_dir = "/os/fonts";
+
+/// The path of the font file `name`: in /os/fonts, or (run elsewhere, as on
+/// Raspberry Pi OS) beside the running program.
+pub fn fontFile(buf: []u8, name: []const u8) [:0]const u8 {
+    const shared = std.fmt.bufPrintZ(buf, "{s}/{s}", .{ fonts_dir, name }) catch return fonts_dir;
+    if (linux.errno(linux.access(shared, linux.F_OK)) == .SUCCESS) return shared;
+    return appFile(buf, name) catch shared;
+}
+
 /// The path of a file in the running program's own directory. Each app
 /// lives in a directory of its own with everything it needs (the system
 /// provides no shared files).

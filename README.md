@@ -275,7 +275,7 @@ The shell (`src/shell/`):
 
 | File | Contents |
 |---|---|
-| `main.zig` | Opens the GPU and display, listens on `/wayland-0`, and runs the event loop: read input (clicks on the dock start or raise apps), dispatch clients, then composite a frame when something changed |
+| `main.zig` | Opens the GPU and display, listens on `/os/sockets/wayland-0`, and runs the event loop: read input (clicks on the dock start or raise apps), dispatch clients, then composite a frame when something changed |
 | `server.zig` | The Wayland server: clients, objects and requests, frame callbacks and buffer releases, window stacking, maximizing and moving, pointer and keyboard focus |
 | `render.zig` | Compositing with the `vc4` API: textured quads for the panels (the dock) and the windows, and the cursor plane |
 | `dock.zig` | The dock: finds the apps in `/apps`, draws their icons, and finds the one clicked |
@@ -372,13 +372,13 @@ passwords or logins.
   DRM master and can set modes and flip pages without privileges. Clients
   use the render node (`/dev/dri/renderD128`), which can render but not
   touch the display.
-- Init lets the user's sockets go in the root directory (the shell's
-  `/wayland-0`, the managers' `/network` and `/system`): it gives `/` to
-  the user's group, mode 1775. The sticky bit keeps everything of root's
-  in it (`/init`, `/shell`, ...) from being removed or replaced. It also
-  removes `/root`, which the kernel's own built-in initramfs makes and
-  nothing uses. Then it forks, drops to the user (no supplementary groups,
-  then the group, then the user ID) and execs `/shell/dazzle-shell`. The shell's stdout and
+- The user's programs make their sockets (the shell's `wayland-0`, the
+  managers' `network` and `system`) in `/os/sockets`, the one directory
+  the initramfs gives the user (mode 0700); everything else in it is
+  root's, and only root can write to it. Init removes `/root`, which the
+  kernel's own built-in initramfs makes and nothing uses. Then it forks,
+  drops to the user (no supplementary groups, then the group, then the
+  user ID) and execs `/os/shell/dazzle-shell`. The shell's stdout and
   stderr are init's `/dev/kmsg` descriptor, because only root can open that
   for writing. The shell's clients inherit them.
 - The network manager, the one process that configures the network (wired
@@ -387,7 +387,7 @@ passwords or logins.
   scan, connect and install keys), `CAP_NET_RAW` (the supplicant's packet
   socket, and tying DHCP's socket to the interface) and
   `CAP_NET_BIND_SERVICE` (the DHCP client port). Its socket,
-  `/network`, answers only the settings app: every app runs
+  `/os/sockets/network`, answers only the settings app: every app runs
   as the same user, so the socket's permissions cannot tell them apart,
   and it checks instead which program the connecting process runs
   (`/proc/<pid>/exe`, from the socket's peer credentials). Init restarts it
@@ -397,7 +397,7 @@ passwords or logins.
   the card's partition table, mounting and setting the hostname),
   `CAP_DAC_OVERRIDE` (the card's device node and the root-owned `/data`)
   and `CAP_CHOWN` (giving `/data/system` to root). Its socket,
-  `/system`, answers only `/shell/dazzle-setup`.
+  `/os/sockets/system`, answers only `/os/shell/dazzle-setup`.
 - The device manager runs as the user, keeping only `CAP_CHOWN`. Input
   device nodes are created owned by root, so it gives each one to the user
   (at start, then on each uevent that adds one), and the shell can read
@@ -421,25 +421,29 @@ mainline's, built by the kernel's `dtc` with one change, below) and `scripts/zig
 The image's filesystem (an initramfs, in RAM) is kept simple:
 
 ```
-/init                       dazzle-init
-/shell/                     dazzle-shell, its own apps (dazzle-settings and
-                            dazzle-setup, which cannot be removed),
-                            FiraSans-Regular.ttf and its license
-/apps/dazzle-demo/          dazzle-demo, FiraSans-Regular.ttf and its license
-/apps/dazzle-files/         dazzle-files, FiraSans-Regular.ttf and its license
-/brcm/                      the Wi-Fi chips' firmware, and its licence
-/dev /proc /sys             mounted by init
-/wayland-0                  the shell's socket, which apps find there
-/network /system            the network and system managers' sockets
-/data                       the SD card's space for files, once setup has
+/os/                        Dazzle itself:
+/os/init                      dazzle-init (rdinit=/os/init in cmdline.txt)
+/os/shell/                    dazzle-shell, and its own apps (dazzle-settings
+                              and dazzle-setup, which cannot be removed)
+/os/fonts/                    the font every program shares, and its licence
+/os/firmware/brcm/            the Wi-Fi chips' firmware, and its licence
+/os/sockets/                  the shell's socket (wayland-0) and the network
+                              and system managers' (network, system); the
+                              user's
+/apps/                      the apps: dazzle-demo/ and dazzle-files/, each
+                            holding its program
+/data/                      the SD card's space for files, once setup has
                             prepared it: /data/system (the computer's name,
                             and a mark that setup has finished; root's) and
                             /data/user (the user's)
+/dev /proc /sys             mounted by init, for Linux
 ```
 
-Dazzle's apps look for the shell on `/wayland-0` unless `WAYLAND_DISPLAY`
-or `XDG_RUNTIME_DIR` says otherwise; other Linux programs, once they are
-supported, will be given `WAYLAND_DISPLAY=/wayland-0`.
+Dazzle's apps look for the shell on `/os/sockets/wayland-0` unless
+`WAYLAND_DISPLAY` or `XDG_RUNTIME_DIR` says otherwise; other Linux programs,
+once they are supported, will be given
+`WAYLAND_DISPLAY=/os/sockets/wayland-0`. Programs find the font in
+`/os/fonts` (`sys.fontFile`), or, run elsewhere, beside themselves.
 
 There is no C library: programs make raw system calls through
 `std.os.linux`.
@@ -516,7 +520,7 @@ Write `zig-out/dazzle.img` to an SD card (`dd`, or Raspberry Pi Imager's
 ### The first run
 
 The first time it starts, the screen shows the setup app
-(`/shell/dazzle-setup`) and no dock. It asks for the computer's name, filled
+(`/os/shell/dazzle-setup`) and no dock. It asks for the computer's name, filled
 in with a random two words (like `awesome-elephant`), on pages with Next
 buttons (more pages, such as the language, keyboard and network, are to
 come). Meanwhile init's system manager (`src/init/system.zig`) makes the
@@ -565,11 +569,11 @@ Dazzle 6ec3896 system log. /follow shows new messages as they arrive.
 [    4.740011] dazzle: network: found eth0 (<mac>)
 [    4.746230] dazzle: network: eth0 link up
 [    4.940117] dazzle: network: eth0 is 192.168.1.42/24, gateway 192.168.1.1 (DHCP, lease 86400 s)
-[    4.740312] dazzle: started /shell/dazzle-shell (pid 24) as uid 1000
+[    4.740312] dazzle: started /os/shell/dazzle-shell (pid 24) as uid 1000
 [    4.741008] dazzle: opened /dev/dri/card0 (vc4)
 [    4.772511] dazzle-shell: build 6ec3896, display <width>x<height>
 [    4.772610] dazzle-shell: app Demo (/apps/dazzle-demo/dazzle-demo)
-[    4.772702] dazzle-shell: listening on /wayland-0
+[    4.772702] dazzle-shell: listening on /os/sockets/wayland-0
 [    4.773120] dazzle-shell: input: /dev/input/event0: Logitech USB Optical Mouse
 [    4.791240] dazzle-shell: cursor shown
 [    7.312913] dazzle-shell: started /apps/dazzle-demo/dazzle-demo (pid 25)
@@ -658,7 +662,7 @@ a program keeping one core busy shows 25%.
 ### The settings app
 
 Click "S" in the dock (Settings is one of the shell's own apps, in
-`/shell`). Its window has four cards, with the figures that
+`/os/shell`). Its window has four cards, with the figures that
 change read again every second (`src/settings/info.zig`):
 
 - **System:** the build (git commit), Linux's version, how long the system
@@ -717,10 +721,11 @@ nothing is remembered across a reboot (the system runs from RAM).
 The Wi-Fi chips are the Zero W's CYW43430 and the 3 A+'s CYW43455, on the
 SDIO bus. The kernel's brcmfmac driver runs them; they need firmware, which
 the build downloads from Raspberry Pi OS's `firmware-nonfree` (pinned by
-commit and checksum) into the initramfs's `/brcm`, with its licence
-(`firmware/LICENCE.cypress`). The driver asks for `brcm/<name>`, so the
-files need that directory; `firmware_class.path=/` in `cmdline.txt` has the
-kernel look for them from the root directory rather than `/lib/firmware`. The manager talks to the kernel with
+commit and checksum) into the initramfs's `/os/firmware/brcm`, with its
+licence (`firmware/LICENCE.cypress`). The driver asks for `brcm/<name>`, so
+the files need that directory; `firmware_class.path=/os/firmware` in
+`cmdline.txt` has the kernel look for them there rather than in
+`/lib/firmware`. The manager talks to the kernel with
 nl80211 over generic netlink (`src/init/nl80211.zig`). There is no
 regulatory database, so the kernel keeps to the world regulatory domain
 and logs that `regulatory.db` is missing.
@@ -758,8 +763,8 @@ read says so.
   `vc4` driver. From a text console, as a user in the `video` and `input`
   groups, run the shell with `XDG_RUNTIME_DIR` set (it then listens there,
   as other compositors do, and tells the programs it starts):
-  `dazzle-shell path/to/dazzle-demo`. Each program looks for
-  `FiraSans-Regular.ttf` next to its executable, so copy
+  `dazzle-shell path/to/dazzle-demo`. Without `/os/fonts`, each program
+  looks for `FiraSans-Regular.ttf` next to its executable, so copy
   `fonts/FiraSans-Regular.ttf` there (`dazzle-demo` also takes a font
   path as its argument). Press Ctrl+C to stop.
   Iterating on GPU code this way avoids rebuilding the SD card.

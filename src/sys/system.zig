@@ -1,6 +1,6 @@
 //! The system manager's protocol. On the first run, init runs the manager
 //! (src/init/system.zig), which prepares the SD card's free space for files
-//! and sets the computer's name; it listens on a socket, /system, and
+//! and sets the computer's name; it listens on a socket, /os/sockets/system, and
 //! answers only the setup app, checked by the program the connecting
 //! process runs.
 //!
@@ -25,10 +25,10 @@
 const std = @import("std");
 
 /// The manager's socket.
-pub const socket_path = "/system";
+pub const socket_path = "/os/sockets/system";
 
 /// The only program the manager answers.
-pub const allowed_program = "/shell/dazzle-setup";
+pub const allowed_program = "/os/shell/dazzle-setup";
 
 /// Where the card's free space is mounted, and the files in it.
 pub const data_dir = "/data";

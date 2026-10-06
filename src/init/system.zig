@@ -5,9 +5,9 @@
 //! keeping only the capabilities this needs: writing the card, mounting it
 //! and setting the hostname (CAP_SYS_ADMIN), writing the card's device and
 //! the root-owned /data (CAP_DAC_OVERRIDE), and giving /data/system to root
-//! (CAP_CHOWN). It listens on /system (see `sys.system` for
+//! (CAP_CHOWN). It listens on /os/sockets/system (see `sys.system` for
 //! the protocol) and answers only the setup app: the program the
-//! connecting process runs must be /shell/dazzle-setup.
+//! connecting process runs must be /os/shell/dazzle-setup.
 //!
 //! Preparing (asked for when setup starts, so it goes on while the user
 //! fills in the pages): a partition after the system's to the end of the

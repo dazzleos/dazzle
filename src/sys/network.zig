@@ -1,7 +1,7 @@
 //! The network manager's protocol. Init runs the manager
 //! (src/init/network.zig), the one process that configures the network
 //! (Ethernet and Wi-Fi: that needs CAP_NET_ADMIN); it listens on a socket,
-//! /network, and answers only the settings app, checked by the program the
+//! /os/sockets/network, and answers only the settings app, checked by the program the
 //! connecting process runs.
 //!
 //! A client connects, sends a request and reads the report until the
@@ -39,10 +39,10 @@
 const std = @import("std");
 
 /// The manager's socket.
-pub const socket_path = "/network";
+pub const socket_path = "/os/sockets/network";
 
 /// The only program the manager answers.
-pub const allowed_program = "/shell/dazzle-settings";
+pub const allowed_program = "/os/shell/dazzle-settings";
 
 pub const max_networks = 24;
 

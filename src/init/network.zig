@@ -13,9 +13,9 @@
 //! renews the lease itself), or a static one chosen in the settings app.
 //! Wi-Fi: see wifi.zig.
 //!
-//! It listens on /network (see `sys.network` for the
+//! It listens on /os/sockets/network (see `sys.network` for the
 //! protocol) and answers only the settings app: the program the connecting
-//! process runs must be /shell/dazzle-settings. Every
+//! process runs must be /os/shell/dazzle-settings. Every
 //! app runs as the same user, so the socket's permissions alone could not
 //! tell them apart. Nothing is remembered across a reboot: the system lives
 //! in RAM.
@@ -227,9 +227,9 @@ fn listen(path: [:0]const u8) !linux.fd_t {
 }
 
 test "only the settings app is answered" {
-    try std.testing.expect(isAllowedProgram("/shell/dazzle-settings"));
+    try std.testing.expect(isAllowedProgram("/os/shell/dazzle-settings"));
     try std.testing.expect(!isAllowedProgram("/apps/dazzle-demo/dazzle-demo"));
-    try std.testing.expect(!isAllowedProgram("/shell/dazzle-settings (deleted)"));
+    try std.testing.expect(!isAllowedProgram("/os/shell/dazzle-settings (deleted)"));
     try std.testing.expect(!isAllowedProgram("/tmp/dazzle-settings"));
 }
 

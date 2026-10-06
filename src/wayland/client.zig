@@ -175,10 +175,10 @@ fn sysCheck(rc: usize) !usize {
 }
 
 /// Where Dazzle's compositor listens: in the root directory.
-pub const default_socket = "/wayland-0";
+pub const default_socket = "/os/sockets/wayland-0";
 
 /// The socket path for $XDG_RUNTIME_DIR and $WAYLAND_DISPLAY: Dazzle's
-/// (/wayland-0) if neither is set (Dazzle sets neither); an absolute
+/// (/os/sockets/wayland-0) if neither is set (Dazzle sets neither); an absolute
 /// WAYLAND_DISPLAY is used as is, and otherwise it (default "wayland-0")
 /// is in XDG_RUNTIME_DIR, as for other compositors.
 pub fn socketPath(buf: []u8, runtime_dir: ?[]const u8, wayland_display: ?[]const u8) Error![]const u8 {
@@ -238,5 +238,5 @@ test "socket paths" {
     try std.testing.expectEqualStrings("/tmp/xdg/wayland-0", try socketPath(&buf, "/tmp/xdg", null));
     try std.testing.expectEqualStrings("/tmp/w", try socketPath(&buf, null, "/tmp/w"));
     try std.testing.expectError(error.NoRuntimeDir, socketPath(&buf, null, "wayland-1"));
-    try std.testing.expectEqualStrings("/wayland-0", try socketPath(&buf, null, null));
+    try std.testing.expectEqualStrings("/os/sockets/wayland-0", try socketPath(&buf, null, null));
 }

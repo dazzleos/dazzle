@@ -4,7 +4,7 @@
 //!
 //! An app is a directory /apps/<name> holding its program, also called
 //! <name>, and the files it needs (such as its font). The shell's own apps
-//! are programs beside it in /shell, and cannot be removed. Its icon is its
+//! are programs beside it in /os/shell, and cannot be removed. Its icon is its
 //! initial on a coloured square, with a dot under it while it runs.
 
 const std = @import("std");

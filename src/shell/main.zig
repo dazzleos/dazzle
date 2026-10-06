@@ -9,11 +9,11 @@
 //! that window. Clicking an app in the dock starts it, or brings its window
 //! to the front if it is running: apps run once each.
 //!
-//! Clients connect on /wayland-0 (or, run elsewhere with XDG_RUNTIME_DIR
+//! Clients connect on /os/sockets/wayland-0 (or, run elsewhere with XDG_RUNTIME_DIR
 //! set, $XDG_RUNTIME_DIR/wayland-0, as other compositors do; its clients
 //! are then told so). The shell starts no app
 //! itself, other than the programs named on its command line. It is not an
-//! app: it lives in /shell, with its font and its own apps (Settings, which
+//! app: it lives in /os/shell, with its font and its own apps (Settings, which
 //! the dock lists with the others, and Setup). On the first run (init gives
 //! it --setup) it starts the setup app with the whole screen and no dock;
 //! the dock appears once setup has finished.
@@ -72,7 +72,7 @@ fn run(init: std.process.Init.Minimal) !void {
 
     var ui_font: ?font.Font = null;
     var font_buf: [512]u8 = undefined;
-    const font_path = try sys.appFile(&font_buf, font.default_font_file);
+    const font_path = sys.fontFile(&font_buf, font.default_font_file);
     if (sys.readFileAlloc(gpa, font_path, 32 * 1024 * 1024)) |data| {
         if (font.Font.init(data)) |f| {
             ui_font = f;
@@ -496,7 +496,8 @@ fn listen(path: [:0]const u8) !linux.fd_t {
     return fd;
 }
 
-/// Starts a client program. Dazzle's apps find the shell on /wayland-0;
+/// Starts a client program. Dazzle's apps find the shell on
+/// /os/sockets/wayland-0;
 /// with a runtime directory (run elsewhere) they are told where it is.
 fn spawn(program: [*:0]const u8, runtime_dir: ?[:0]const u8) ?linux.pid_t {
     var env_buf: [160]u8 = undefined;

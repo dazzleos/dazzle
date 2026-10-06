@@ -6,8 +6,7 @@
 //! 2. waits a moment for the SD card and mounts its space for files at
 //!    /data (if setup has prepared it), and names the computer as kept
 //!    there (or "dazzle");
-//! 3. lets the Dazzle user's sockets go in / (the Wayland socket
-//!    /wayland-0, and the managers'), starts the network manager (see
+//! 3. starts the network manager (see
 //!    network.zig), which brings the wired and Wi-Fi network up in the
 //!    background and answers the settings app, and the log server (which
 //!    drops to the Dazzle user once it has bound its port); boot never
@@ -18,7 +17,7 @@
 //!    to its device nodes;
 //! 5. until setup has finished, starts the system manager (see system.zig),
 //!    which prepares the card and names the computer for the setup app;
-//! 6. starts /shell/dazzle-shell, the Wayland compositor, as the Dazzle
+//! 6. starts /os/shell/dazzle-shell, the Wayland compositor, as the Dazzle
 //!    user (with --setup until setup has finished), with its output going
 //!    to the kernel log; its dock starts the apps;
 //! 7. reaps exited processes forever (PID 1 must never exit), restarting the
@@ -39,7 +38,7 @@ const build_info = @import("build_info");
 
 const print = sys.print;
 
-const shell_path = "/shell/dazzle-shell";
+const shell_path = "/os/shell/dazzle-shell";
 
 pub fn main() void {
     if (linux.getpid() != 1) {
@@ -79,15 +78,11 @@ fn mountPseudoFilesystems() void {
     }
 }
 
-/// The root directory: the Dazzle user's sockets go in it (the shell's
-/// /wayland-0, the managers' /network and /system), so the user's group may
-/// add to it; it is sticky, so nothing of root's in it can be removed or
-/// replaced. The kernel unpacks a default initramfs of its own before ours,
-/// which makes an empty /root; nothing uses it.
+/// The kernel unpacks a default initramfs of its own before ours, which
+/// makes an empty /root; nothing uses it. (Dazzle's own files are in /os,
+/// with the Dazzle user's sockets in /os/sockets, which is the user's.)
 fn prepareRoot() void {
     _ = linux.rmdir("/root");
-    _ = linux.chown("/", 0, sys.user.gid);
-    _ = linux.fchmodat(linux.AT.FDCWD, "/", 0o1775);
 }
 
 const max_cards = 4;

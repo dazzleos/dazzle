@@ -3,7 +3,7 @@
 //! (and, later, more), a page at a time (see view.zig), while init's system
 //! manager makes the SD card's free space a place for files (see
 //! sys.system); then it tells the manager to finish, which names the
-//! computer and marks setup done, and ends. It lives in /shell with the
+//! computer and marks setup done, and ends. It lives in /os/shell with the
 //! shell: it cannot be removed.
 //!
 //!     dazzle-setup [font.ttf]
@@ -32,7 +32,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     var args = init.args.iterate();
     _ = args.skip();
     var font_buf: [512]u8 = undefined;
-    const font_path: [*:0]const u8 = args.next() orelse (sys.appFile(&font_buf, font.default_font_file) catch font.default_font_file);
+    const font_path: [*:0]const u8 = args.next() orelse sys.fontFile(&font_buf, font.default_font_file);
     run(init, font_path) catch |err| {
         print("dazzle-setup: error: {s}\n", .{@errorName(err)});
         return 1;
@@ -172,7 +172,7 @@ fn ask(request: []const u8) ?proto.Report {
 
 fn openWindow(gpa: std.mem.Allocator, init: std.process.Init.Minimal, dev: *vc4.Device) !*app.Window {
     const Environ = std.process.Environ;
-    // Dazzle's compositor listens on /wayland-0; elsewhere, where
+    // Dazzle's compositor listens on /os/sockets/wayland-0; elsewhere, where
     // WAYLAND_DISPLAY and XDG_RUNTIME_DIR say.
     var path_buf: [128]u8 = undefined;
     const path = wayland.client.socketPath(&path_buf, Environ.getPosix(init.environ, "XDG_RUNTIME_DIR"), Environ.getPosix(init.environ, "WAYLAND_DISPLAY")) catch {
