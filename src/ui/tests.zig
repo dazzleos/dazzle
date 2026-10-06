@@ -640,6 +640,58 @@ test "a lazy grid makes only the rows that show, as it scrolls" {
     try testing.expectEqual(@as(usize, 100), find(u.root.?, ui.LazyGrid).?.childCount());
 }
 
+const LazyList = struct {
+    items: *LazyItems,
+    reveal: ?usize = null,
+    pub fn build(self: *const @This(), cx: *Context) Widget {
+        const list = cx.make(ui.LazyGrid{ .count = 100, .cell = .{ .w = std.math.inf(f32), .h = 30 }, .item = .of(self.items, LazyListItems.row), .keep = self.reveal });
+        return cx.make(ui.Align{ .alignment = .top_left, .child = cx.make(ui.SizedBox{ .width = 200, .height = 300, .child = cx.make(ui.ScrollView{
+            .reveal = if (self.reveal) |r| 1000 + @as(u64, r) else null,
+            .child = list,
+        }) }) });
+    }
+};
+
+const LazyListItems = struct {
+    /// Item `i`, keyed 1000 + i for the scroll view to reveal.
+    fn row(items: *LazyItems, cx: *Context, i: usize) Widget {
+        return LazyItems.item(items, cx, i).withKey(1000 + @as(u64, i));
+    }
+};
+
+test "a lazy list's items are as wide as it, and one far down can be revealed" {
+    const u = try ui.Ui.create(testing.allocator, null);
+    defer u.destroy();
+    var items: LazyItems = .{};
+    u.frame(400, 400, 0, LazyList{ .items = &items });
+    const view = find(u.root.?, ui.ScrollView).?;
+    const list = view.child(0);
+    // One column, each row as wide as the list (beside the bar): ten rows
+    // show, and one more is made.
+    try testing.expectEqual(@as(usize, 11), list.childCount());
+    try testing.expectEqual(ui.Size{ .w = 188, .h = 30 }, list.child(3).size);
+    try testing.expectEqual(ui.Point{ 0, 90 }, list.child(3).offset);
+    try testing.expectEqual(ui.Size{ .w = 188, .h = 3000 }, list.size);
+
+    // Revealing row 80, which is not made: it is kept, so the scroll view
+    // finds it and scrolls to it, and the rows around it are made.
+    u.frame(400, 400, 1, LazyList{ .items = &items, .reveal = 80 });
+    const st = view.state(ui.ScrollView.State);
+    try testing.expectEqual(@as(f32, 81 * 30 - 300), st.offset);
+    var shows = false;
+    for (list.children.items) |ch| if (ch.widget.key == 1000 + 80) {
+        try testing.expectEqual(ui.Point{ 0, 80 * 30 }, ch.offset);
+        shows = ch.paint.valid;
+    };
+    try testing.expect(shows);
+    // Scrolled back to the top, row 80 is still made (and kept last).
+    _ = st.scrollTo(0);
+    u.frame(400, 400, 2, LazyList{ .items = &items, .reveal = 80 });
+    try testing.expectEqual(@as(usize, 12), list.childCount());
+    try testing.expectEqual(@as(?u64, 1000 + 80), list.child(11).widget.key);
+    try testing.expectEqual(ui.Point{ 0, 80 * 30 }, list.child(11).offset);
+}
+
 test "a scroll view scrolls with the wheel and its bar, and paints only what shows" {
     const u = try ui.Ui.create(testing.allocator, null);
     defer u.destroy();

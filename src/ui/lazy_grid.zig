@@ -1,5 +1,6 @@
 //! LazyGrid: a grid of many items all the same size, of which only those
-//! that show are made. Like `Grid`, as many cells go in a row as fit; but
+//! that show are made. With an infinite cell width it is a list: one
+//! column of items as wide as it. Like `Grid`, as many cells go in a row as fit; but
 //! the items are made by a function, given their index, and only for the
 //! rows in view (and a row either side) of the scroll view it is in.
 //! Because every cell is the same size, how big the grid is, and where
@@ -36,6 +37,9 @@ pub const LazyGrid = struct {
     /// Rows made beyond those in view, above and below, so a little
     /// scrolling needs nothing made.
     extra_rows: usize = 1,
+    /// An item made even when it does not show: one a scroll view is to
+    /// reveal (see `ScrollView.reveal`), say.
+    keep: ?usize = null,
 
     /// Makes item `index` (in the frame's arena, with `cx.make`).
     pub const ItemBuilder = struct {
@@ -53,33 +57,56 @@ pub const LazyGrid = struct {
     };
 
     pub const State = struct {
-        /// The items made: from `first` up to `end`.
+        /// The items made: from `first` up to `end`, and `kept` (made even
+        /// though it does not show).
         first: usize = 0,
         end: usize = 0,
+        kept: ?usize = null,
     };
 
-    /// The items made with the rest of the tree: those of the last frame.
+    /// The items made with the rest of the tree: those of the last frame
+    /// (and the item to keep).
     pub fn lazyChildren(self: *const LazyGrid, cx: *Context, n: *Node) []const Widget {
         const st = n.state(State);
         st.end = @min(st.end, self.count);
         st.first = @min(st.first, st.end);
-        return self.make(cx, st.first, st.end);
+        st.kept = self.extra(st.first, st.end);
+        return self.make(cx, st.*);
     }
 
-    fn make(self: *const LazyGrid, cx: *Context, first: usize, end: usize) []const Widget {
-        const out = cx.arena.alloc(Widget, end - first) catch return &.{};
-        for (out, first..) |*w, i| {
+    /// The item to keep, if it is not among those from `first` to `end`.
+    fn extra(self: *const LazyGrid, first: usize, end: usize) ?usize {
+        const k = self.keep orelse return null;
+        return if (k < self.count and (k < first or k >= end)) k else null;
+    }
+
+    fn make(self: *const LazyGrid, cx: *Context, st: State) []const Widget {
+        const len = st.end - st.first + @intFromBool(st.kept != null);
+        const out = cx.arena.alloc(Widget, len) catch return &.{};
+        for (out, 0..) |*w, k| {
+            const i = self.index(st, k);
             const item = self.item.f(self.item.ctx, cx, i);
             w.* = if (item.key == null) item.withKey(i) else item;
         }
         return out;
     }
 
+    /// The index of the `k`th item made.
+    fn index(_: *const LazyGrid, st: State, k: usize) usize {
+        return if (k < st.end - st.first) st.first + k else st.kept.?;
+    }
+
     fn gap(self: *const LazyGrid) f32 {
         return if (std.math.isFinite(self.spacing)) @max(self.spacing, 0) else 0;
     }
 
+    /// A list: one column, its items as wide as it.
+    fn isList(self: *const LazyGrid) bool {
+        return !std.math.isFinite(self.cell.w);
+    }
+
     fn columns(self: *const LazyGrid, width: f32) usize {
+        if (self.isList()) return 1;
         if (!std.math.isFinite(width)) return @max(self.count, 1);
         const cw = @max(self.cell.w, 0);
         return @max(1, @as(usize, @intFromFloat(@max(@floor((width + self.gap()) / (cw + self.gap())), 0))));
@@ -88,7 +115,7 @@ pub const LazyGrid = struct {
     pub fn layout(self: *const LazyGrid, n: *Node, c: Constraints) Size {
         const cols = self.columns(c.max_w);
         const rows = (self.count + cols - 1) / cols;
-        const cw = @max(self.cell.w, 0);
+        const cw = if (self.isList()) 0 else @max(self.cell.w, 0);
         const ch = @max(self.cell.h, 0);
         const used: f32 = @floatFromInt(@min(cols, self.count));
         const r: f32 = @floatFromInt(rows);
@@ -108,8 +135,9 @@ pub const LazyGrid = struct {
     /// Lays out the items made, each in its cell.
     fn place(self: *const LazyGrid, n: *Node, cols: usize) void {
         const st = n.state(State);
-        const cell: Size = .{ .w = @max(self.cell.w, 0), .h = @max(self.cell.h, 0) };
-        for (n.children.items, st.first..) |child, i| {
+        const cell: Size = .{ .w = if (self.isList()) n.size.w else @max(self.cell.w, 0), .h = @max(self.cell.h, 0) };
+        for (n.children.items, 0..) |child, k| {
+            const i = self.index(st.*, k);
             _ = child.layout(.tight(cell));
             const col: f32 = @floatFromInt(i % cols);
             const row: f32 = @floatFromInt(i / cols);
@@ -122,25 +150,24 @@ pub const LazyGrid = struct {
     pub fn realize(self: *const LazyGrid, n: *Node, visible: Rect) void {
         const cols = self.columns(n.size.w);
         const pitch = @max(self.cell.h, 0) + self.gap();
-        var first: usize = 0;
-        var end: usize = 0;
+        var want: State = .{};
         if (visible.h > 0 and visible.w > 0 and pitch > 0 and visible.y + visible.h > 0) {
             const top: usize = @intFromFloat(@max(@floor(visible.y / pitch), 0));
             const bottom: usize = @intFromFloat(@max(@ceil((visible.y + visible.h) / pitch), 0));
-            first = @min((top -| self.extra_rows) * cols, self.count);
-            end = @min((bottom + self.extra_rows) * cols, self.count);
+            want.first = @min((top -| self.extra_rows) * cols, self.count);
+            want.end = @min((bottom + self.extra_rows) * cols, self.count);
         }
+        want.kept = self.extra(want.first, want.end);
+        const len = want.end - want.first + @intFromBool(want.kept != null);
         const st = n.state(State);
-        if (first == st.first and end == st.end and n.children.items.len == end - first) return;
-        st.first = first;
-        st.end = end;
+        if (std.meta.eql(st.*, want) and n.children.items.len == len) return;
+        st.* = want;
         var cx: Context = .{ .ui = n.ui, .arena = n.ui.arena(), .node = n };
-        n.reconcile(self.make(&cx, first, end));
-        if (n.children.items.len != end - first) {
+        n.reconcile(self.make(&cx, want));
+        if (n.children.items.len != len) {
             // Out of memory: none rather than the wrong ones.
             n.reconcile(&.{});
-            st.first = 0;
-            st.end = 0;
+            st.* = .{};
         }
         self.place(n, cols);
     }
