@@ -294,7 +294,7 @@ The shell (`src/shell/`):
 | `shaders/quad.zig` | The textured quad's shader |
 | `input.zig` | USB keyboards and mice: finds `/dev/input/event*` nodes and decodes their events |
 | `cursor.zig` | The pointer's arrow, drawn into the cursor plane's buffer |
-| `screenshot.zig` | Print Screen: the screen saved as `/data/user/Screenshots/Screenshot N.png` |
+| `screenshot.zig` | Print Screen: the screen saved as `/data/user/Screenshot N.png` |
 | `png.zig` | Writing PNG images |
 | `server_test.zig` | Protocol tests on the host, described below |
 
@@ -787,8 +787,9 @@ read says so.
 ### Screenshots
 
 Print Screen saves what the screen shows (the dock and the windows; not
-the pointer) as `Screenshot 1.png`, `Screenshot 2.png` and so on in
-`/data/user/Screenshots` (the Files app shows them, under Home). The shell
+the pointer) as `Screenshot 1.png`, `Screenshot 2.png` and so on with the
+user's other files, in `/data/user` (the Files app shows them, under
+Home): no folder of their own, as the user has few files. The shell
 draws the screen again into a buffer of its own and reads it back
 (`render.Renderer.capture`), and a child process compresses and writes the
 PNG (`src/shell/screenshot.zig`), so the shell goes on drawing meanwhile.

@@ -1,6 +1,6 @@
-//! Screenshots: Print Screen saves the screen as a PNG file in the user's
-//! Screenshots folder (/data/user/Screenshots), named "Screenshot 1.png",
-//! "Screenshot 2.png" and so on.
+//! Screenshots: Print Screen saves the screen as a PNG file among the
+//! user's files (/data/user: no folder of its own, as the user has few
+//! files), named "Screenshot 1.png", "Screenshot 2.png" and so on.
 //!
 //! The pixels are read back from the GPU in the shell (see
 //! `render.Renderer.capture`); a child process compresses and writes them,
@@ -14,17 +14,14 @@ const png = @import("png.zig");
 /// Print Screen (KEY_SYSRQ, a Linux key code).
 pub const key_print = 99;
 
-/// Where screenshots go.
-pub const folder = sys.system.user_dir ++ "/Screenshots";
+/// Where screenshots go: with the user's other files.
+pub const folder = sys.system.user_dir;
 
 /// Saves `pixels` (`width` by `height`) in `dir` as the next unused
 /// "Screenshot N.png", in a child process. Takes `pixels` (allocated with
 /// `gpa`).
 pub fn save(gpa: std.mem.Allocator, dir: []const u8, pixels: []u32, width: u32, height: u32) void {
     defer gpa.free(pixels);
-    var dir_buf: [256]u8 = undefined;
-    const dir_z = std.fmt.bufPrintZ(&dir_buf, "{s}", .{dir}) catch return;
-    _ = linux.mkdir(dir_z, 0o755);
     var path_buf: [512]u8 = undefined;
     const path = nextName(&path_buf, dir) orelse {
         sys.print("dazzle-shell: no name for a screenshot in {s}\n", .{dir});
