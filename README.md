@@ -296,6 +296,7 @@ The shell (`src/shell/`):
 | `cursor.zig` | The pointer's pictures (an arrow, and arrows for resizing), drawn into the cursor plane's buffer |
 | `screenshot.zig` | Print Screen: the screen saved as `/data/user/Screenshot N.png` |
 | `png.zig` | Writing PNG images |
+| `placement.zig` | Where popups go: their positioners, and flipping, sliding or cutting them to fit the work area |
 | `keyboard.zig`, `us.xkb` | The keyboard for clients: a US XKB keymap, and the modifiers' state |
 | `server_test.zig`, `protocol_test.zig` | Protocol tests on the host, described below (`protocol_test.zig`'s run the server and clients on one thread, step by step) |
 
@@ -317,9 +318,11 @@ refused.
   and `place_below` give, and taking the pointer where they are. Their
   state is applied when they are committed, as if desynchronized.
 - **Popups:** menus and tooltips, above their parent's window, placed by
-  their positioner (its anchor rectangle, anchor, gravity and offset), and
-  slid into the work area if they would go outside it (the positioner's
-  other constraint adjustments are not done). A popup that grabs (a menu)
+  their positioner (its anchor rectangle, anchor, gravity and offset).
+  One that would go outside the work area is adjusted as its positioner
+  allows, on each axis: flipped to the other side of its anchor (if that
+  fits), then slid in, then cut to fit (`src/shell/placement.zig`). A
+  reactive one is placed again when its window moves. A popup that grabs (a menu)
   takes the keyboard, and is closed (`popup_done`, with the popups on it)
   when anything but its client's own surfaces is clicked, or its window
   goes. `reposition` moves one.

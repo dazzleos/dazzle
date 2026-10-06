@@ -43,6 +43,7 @@ const wire = wayland.wire;
 const p = wayland.protocol;
 
 const keyboard = @import("keyboard.zig");
+const placement = @import("placement.zig");
 
 const log = std.log.scoped(.shell);
 
@@ -205,18 +206,8 @@ pub const Subsurface = struct {
     pending: ?[2]i32 = null,
 };
 
-/// Where a popup goes (xdg_positioner): a rectangle of its parent to
-/// anchor it to, the point of it to anchor at, the way the popup extends
-/// from there, and an offset. Constraints are met by sliding the popup
-/// into the work area.
-pub const Positioner = struct {
-    width: i32 = 0,
-    height: i32 = 0,
-    anchor_rect: [4]i32 = .{ 0, 0, 0, 0 },
-    anchor: u32 = 0,
-    gravity: u32 = 0,
-    offset: [2]i32 = .{ 0, 0 },
-};
+/// Where a popup goes (xdg_positioner): see placement.zig.
+pub const Positioner = placement.Positioner;
 
 /// A menu, tooltip or the like (xdg_popup): a surface above its parent's
 /// window, placed by a positioner. A popup that grabs (menus do) takes
@@ -232,6 +223,9 @@ pub const Popup = struct {
     y: i32 = 0,
     width: u32 = 0,
     height: u32 = 0,
+    /// Where it was asked to go (to place it again when its parent moves,
+    /// if it is reactive).
+    positioner: Positioner = .{},
     mapped: bool = false,
     grab: bool = false,
     /// popup_done was sent: it is not shown again.
@@ -796,6 +790,7 @@ pub const Server = struct {
         t.anchor_bottom = null;
         if (t.xdg.configured) s.configure(c, t);
         s.damaged = true;
+        s.replacePopups(t);
     }
 
     /// The client says how small its window may be: a restored window
@@ -837,6 +832,7 @@ pub const Server = struct {
         t.x = nx;
         t.y = ny;
         s.damaged = true;
+        s.replacePopups(t);
     }
 
     /// A client asked to move its window with the pointer, which must be
@@ -929,6 +925,7 @@ pub const Server = struct {
         t.anchor_right = null;
         t.anchor_bottom = null;
         s.damaged = true;
+        s.replacePopups(t);
     }
 
     fn resizing(s: *const Server, t: *const Toplevel) bool {
@@ -1571,54 +1568,42 @@ pub const Server = struct {
                 const x = try r.int();
                 pos.offset = .{ x, try r.int() };
             },
-            // Constraints are met by sliding; nothing is reactive, and the
-            // parent's size is known.
-            req.set_constraint_adjustment, req.set_reactive, req.set_parent_size, req.set_parent_configure => {},
+            req.set_constraint_adjustment => pos.constraint_adjustment = try r.uint(),
+            req.set_reactive => pos.reactive = true,
+            // The parent's size and configure are known here.
+            req.set_parent_size, req.set_parent_configure => {},
             else => return error.InvalidOpcode,
         }
     }
 
-    /// Which way an anchor or gravity points, across and down: -1, 0 or 1.
-    fn direction(value: u32) [2]i32 {
-        const a = p.xdg_positioner.anchor;
-        return switch (value) {
-            a.top => .{ 0, -1 },
-            a.bottom => .{ 0, 1 },
-            a.left => .{ -1, 0 },
-            a.right => .{ 1, 0 },
-            a.top_left => .{ -1, -1 },
-            a.bottom_left => .{ -1, 1 },
-            a.top_right => .{ 1, -1 },
-            a.bottom_right => .{ 1, 1 },
-            else => .{ 0, 0 },
-        };
+    /// Places a popup as its positioner says, relative to its parent, in
+    /// the work area as far as its constraint adjustments allow.
+    fn placePopup(s: *const Server, pp: *Popup, pos: Positioner) void {
+        pp.positioner = pos;
+        const area: ?placement.Rect = if (pp.parent) |parent| if (parent.surface) |ps| if (s.surfaceOrigin(ps)) |o| .{
+            .x = s.work_area.x - o[0],
+            .y = s.work_area.y - o[1],
+            .w = @intCast(s.work_area.width),
+            .h = @intCast(s.work_area.height),
+        } else null else null else null;
+        const r = placement.place(pos, area);
+        pp.x = r.x;
+        pp.y = r.y;
+        pp.width = @intCast(r.w);
+        pp.height = @intCast(r.h);
     }
 
-    /// Places a popup as its positioner says, relative to its parent, slid
-    /// into the work area if it would go outside it.
-    fn placePopup(s: *const Server, pp: *Popup, pos: Positioner) void {
-        const rect = pos.anchor_rect;
-        const anchor = direction(pos.anchor);
-        const gravity = direction(pos.gravity);
-        const w = pos.width;
-        const h = pos.height;
-        // The anchor point on the rectangle, then the popup extending from
-        // it the way gravity says (centred on it for none).
-        const ax = rect[0] + @divTrunc(rect[2] * (anchor[0] + 1), 2);
-        const ay = rect[1] + @divTrunc(rect[3] * (anchor[1] + 1), 2);
-        var x = ax - @divTrunc(w * (1 - gravity[0]), 2) + pos.offset[0];
-        var y = ay - @divTrunc(h * (1 - gravity[1]), 2) + pos.offset[1];
-        if (pp.parent) |parent| if (parent.surface) |ps| if (s.surfaceOrigin(ps)) |o| {
-            const wa = s.work_area;
-            const right = wa.x + @as(i32, @intCast(wa.width));
-            const bottom = wa.y + @as(i32, @intCast(wa.height));
-            x = std.math.clamp(o[0] + x, wa.x, @max(right - w, wa.x)) - o[0];
-            y = std.math.clamp(o[1] + y, wa.y, @max(bottom - h, wa.y)) - o[1];
-        };
-        pp.x = x;
-        pp.y = y;
-        pp.width = @intCast(w);
-        pp.height = @intCast(h);
+    /// A window moved, or its size changed: its reactive popups are placed
+    /// again, and told if that moved them.
+    fn replacePopups(s: *Server, t: *const Toplevel) void {
+        for (s.popups.items) |pp| {
+            if (!pp.positioner.reactive or pp.done) continue;
+            const ps = pp.xdg.surface orelse continue;
+            if (s.rootToplevel(ps) != t) continue;
+            const before = .{ pp.x, pp.y, pp.width, pp.height };
+            s.placePopup(pp, pp.positioner);
+            if (!std.meta.eql(before, .{ pp.x, pp.y, pp.width, pp.height })) s.configurePopup(ps.client, pp);
+        }
     }
 
     /// Tells a popup where it is and how big.

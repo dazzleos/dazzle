@@ -370,9 +370,12 @@ test "popups go where their positioner says, take the keyboard, and close on a c
     // Not on the display directly: it is drawn on the window.
     try testing.expect(w.server.scanoutBuffer(w.server.topWindow().?) == null);
 
-    // Moved to the right edge, it slides back into the work area.
+    // Moved to the right edge, it slides back into the work area (as its
+    // positioner allows).
     m = try positioner.request(p.xdg_positioner.request.set_anchor_rect);
     m.int(780).int(30).int(10).int(10).end();
+    m = try positioner.request(p.xdg_positioner.request.set_constraint_adjustment);
+    m.uint(@import("placement.zig").adjust.slide_x).end();
     m = try popup.request(p.xdg_popup.request.reposition);
     m.uint(positioner.id).uint(7).end();
     try w.pump();
