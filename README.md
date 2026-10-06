@@ -43,6 +43,7 @@ The code is split into Zig modules, linked statically into each program:
 | `gfx` | `src/gfx/` | 2D graphics for the toolkit: anti-aliased rounded rectangles, circles, polygons and polylines, filled or stroked, and text, blended |
 | `ui` | `src/ui/` | The widget toolkit: declarative widgets with state, layout, painting and input, in Material 3's style |
 | `font` | `src/font/` | OpenType font rendering, described below |
+| `icons` | `src/icons/` | Material icons: the ones Dazzle uses (`Icon`), and a font with just those, made from the full Material Icons font by `tools/subset_icons.zig` when building (as Flutter leaves out the icons an app does not use) and built into the programs; the toolkit draws them with `ui.Icon` |
 | `wayland` | `src/wayland/` | The Wayland wire protocol (with file descriptor passing), the interfaces Dazzle uses, and a small client library |
 | `dazzle-init` | `src/init/` | The init program: mounts, the SD card's space for files (partitioning and formatting it on the first run), network, Wi-Fi, log server, device permissions, starting the shell |
 | `dazzle-shell` | `src/shell/` | The Wayland compositor and shell, described below |
@@ -426,12 +427,16 @@ The image's filesystem (an initramfs, in RAM) is kept simple:
 /os/shell/                    dazzle-shell, and its own apps (dazzle-settings
                               and dazzle-setup, which cannot be removed)
 /os/fonts/                    the font every program shares, and its licence
+                              (and the licence of the icon font, which is
+                              built into the programs)
 /os/firmware/brcm/            the Wi-Fi chips' firmware, and its licence
 /os/sockets/                  the shell's socket (wayland-0) and the network
                               and system managers' (network, system); the
                               user's
 /apps/                      the apps: dazzle-demo/ and dazzle-files/, each
-                            holding its program
+                            holding its program (and <program>.icon, the
+                            name of its icon in the dock; the shell's own
+                            apps have theirs beside them too)
 /data/                      the SD card's space for files, once setup has
                             prepared it: /data/system (the computer's name,
                             and a mark that setup has finished; root's) and

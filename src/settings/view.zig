@@ -125,7 +125,7 @@ pub const Settings = struct {
         var tabs: [std.meta.fields(Page).len]ui.Widget = undefined;
         inline for (&tabs, std.meta.fields(Page)) |*w, field| {
             const p: Page = @enumFromInt(field.value);
-            w.* = cx.make(Tab{ .label = p.label(), .selected = state.page == p, .scale = s, .on_press = pick(cx, state, p) });
+            w.* = cx.make(Tab{ .label = p.label(), .icon = p.icon(), .selected = state.page == p, .scale = s, .on_press = pick(cx, state, p) });
         }
         const sidebar = cx.make(ui.SizedBox{ .width = @round(190 * s), .child = cx.make(ui.Decorated{
             .color = t.surface_container,
@@ -464,6 +464,15 @@ pub const Page = enum {
             .system => "System",
         };
     }
+
+    pub fn icon(p: Page) ui.icons.Icon {
+        return switch (p) {
+            .wifi => .wifi,
+            .ethernet => .lan,
+            .resources => .speed,
+            .system => .info,
+        };
+    }
 };
 
 /// The page `u` (running a `Settings`) shows.
@@ -476,6 +485,7 @@ pub fn shownPage(u: *ui.Ui) Page {
 /// A tab: pressing it shows its page.
 const Tab = struct {
     label: []const u8,
+    icon: ui.icons.Icon,
     selected: bool,
     scale: f32,
     on_press: ?ui.Callback,
@@ -488,18 +498,23 @@ const Tab = struct {
         const s = self.scale;
         const t = cx.theme();
         const height = @round(48 * s);
+        const color = if (self.selected) t.on_surface else t.on_surface_variant;
         const highlight: ?gfx.Color = if (self.selected) t.secondary_container else if (state.interaction.hovered) t.on_surface.withAlpha(0.08) else null;
         return cx.make(ui.Pressable{ .on_press = self.on_press, .interaction = &state.interaction, .child = cx.make(ui.Decorated{
             .color = highlight,
             .radius = .all(height / 2),
-            .child = cx.make(ui.SizedBox{ .height = height, .child = cx.make(ui.Padding{ .padding = .symmetric(@round(20 * s), 0), .child = cx.make(ui.Row{
+            .child = cx.make(ui.SizedBox{ .height = height, .child = cx.make(ui.Padding{ .padding = .symmetric(@round(16 * s), 0), .child = cx.make(ui.Row{
                 .cross_axis_alignment = .center,
-                .children = &.{cx.make(ui.Expanded{ .child = cx.make(ui.Text{
-                    .text = self.label,
-                    .style = .{ .size = 18 * s, .color = if (self.selected) t.on_surface else t.on_surface_variant },
-                    .wrap = false,
-                    .ellipsis = true,
-                }) })},
+                .spacing = @round(12 * s),
+                .children = &.{
+                    cx.make(ui.Icon{ .icon = self.icon, .size = @round(22 * s), .color = color }),
+                    cx.make(ui.Expanded{ .child = cx.make(ui.Text{
+                        .text = self.label,
+                        .style = .{ .size = 18 * s, .color = color },
+                        .wrap = false,
+                        .ellipsis = true,
+                    }) }),
+                },
             }) }) }),
         }) });
     }
@@ -685,7 +700,7 @@ const Builder = struct {
         const t = &cx.ui.theme;
         const row = cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12 * b.s, .children = &.{
             cx.make(ui.SizedBox{ .width = 150 * b.s, .child = cx.make(ui.Row{ .spacing = 8 * b.s, .main_axis_size = .min, .cross_axis_alignment = .center, .children = &.{
-                cx.make(SignalBars{ .bars = n.bars(), .size = @round(18 * b.s) }),
+                cx.make(Signal{ .bars = n.bars(), .size = @round(20 * b.s) }),
                 cx.make(ui.Text{ .text = cx.fmt("{d} dBm", .{n.dbm()}), .style = .{ .size = 16 * b.s, .color = t.on_surface_variant }, .wrap = false }),
             } }) }),
             cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = printable(cx, n.ssid()), .style = .{ .size = 18 * b.s, .color = if (joined) t.primary else t.on_surface }, .wrap = false }) }),
@@ -711,26 +726,30 @@ const Builder = struct {
     }
 };
 
-/// Signal strength as four rising bars, `bars` of them lit.
-pub const SignalBars = struct {
+/// Signal strength (0 to 4 bars) as the Wi-Fi icon, faint, with as many
+/// of its arcs lit as the signal is strong: all three for 4 bars, two for
+/// 3, the dot for 1 or 2, none for 0.
+pub const Signal = struct {
     bars: u8,
     size: f32,
 
-    pub fn layout(self: *const SignalBars, _: *ui.Node, c: ui.Constraints) ui.Size {
-        return c.constrain(.{ .w = self.size, .h = self.size });
+    pub fn lit(bars: u8) ?ui.icons.Icon {
+        return switch (bars) {
+            0 => null,
+            1, 2 => .wifi_1_bar,
+            3 => .wifi_2_bar,
+            else => .wifi,
+        };
     }
 
-    pub fn paint(self: *const SignalBars, n: *ui.Node, p: *ui.Painter) void {
-        const t = &n.ui.theme;
-        const c = p.canvas();
-        const gap = @max(@round(n.size.w / 12), 1);
-        const w = (n.size.w - 3 * gap) / 4;
-        for (0..4) |i| {
-            const f: f32 = @floatFromInt(i);
-            const h = n.size.h * (f + 1) / 4;
-            const r: gfx.Rect = .{ .x = f * (w + gap), .y = n.size.h - h, .w = w, .h = h };
-            c.fillRoundedRect(r, .all(@min(w / 3, 2)), if (i < self.bars) t.on_surface else t.surface_container_highest);
-        }
+    pub fn build(self: *const Signal, cx: *ui.Context) ui.Widget {
+        const t = cx.theme();
+        const back = cx.make(ui.Icon{ .icon = .wifi, .size = self.size, .color = t.on_surface.withAlpha(0.25) });
+        const front = lit(self.bars) orelse return back;
+        return cx.make(ui.SizedBox{ .width = self.size, .height = self.size, .child = cx.make(ui.Overlay{ .children = &.{
+            back,
+            cx.make(ui.Icon{ .icon = front, .size = self.size, .color = t.on_surface }),
+        } }) });
     }
 };
 

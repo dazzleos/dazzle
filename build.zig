@@ -1,4 +1,5 @@
 const std = @import("std");
+const Icon = @import("src/icons/names.zig").Icon;
 
 const Modules = struct {
     sys: *std.Build.Module,
@@ -8,9 +9,36 @@ const Modules = struct {
     gfx: *std.Build.Module,
     ui: *std.Build.Module,
     font: *std.Build.Module,
+    icons: *std.Build.Module,
     wayland: *std.Build.Module,
     build_info: *std.Build.Module,
 };
+
+/// Puts `<program>.icon` in the initramfs: the name of the program's icon
+/// in the dock.
+fn addAppIcon(b: *std.Build, run: *std.Build.Step.Run, program: []const u8, icon: Icon) void {
+    const name = b.fmt("{s}.icon", .{std.fs.path.basename(program)});
+    const file = b.addWriteFiles().add(name, b.fmt("{s}\n", .{@tagName(icon)}));
+    run.addPrefixedFileArg(b.fmt("--file={s}.icon=", .{program}), file);
+}
+
+/// The icon font, cut down to Dazzle's icons, and their codepoints (see
+/// tools/subset_icons.zig).
+const IconFont = struct {
+    ttf: std.Build.LazyPath,
+    codepoints: std.Build.LazyPath,
+};
+
+fn addIconFont(b: *std.Build) IconFont {
+    const tool = hostTool(b, "subset_icons");
+    tool.root_module.addImport("font", b.createModule(.{ .root_source_file = b.path("src/font/font.zig"), .target = b.graph.host }));
+    tool.root_module.addImport("icon_names", b.createModule(.{ .root_source_file = b.path("src/icons/names.zig"), .target = b.graph.host }));
+    const run = b.addRunArtifact(tool);
+    run.addFileArg(b.path("fonts/MaterialIcons-Regular.ttf"));
+    run.addFileArg(b.path("fonts/MaterialIcons-Regular.codepoints"));
+    const ttf = run.addOutputFileArg("MaterialIcons.ttf");
+    return .{ .ttf = ttf, .codepoints = run.addOutputFileArg("icon_codepoints.zig") };
+}
 
 /// The library modules, built for one target:
 ///
@@ -22,11 +50,12 @@ const Modules = struct {
 /// * `gfx`: 2D graphics (rounded rectangles, polygons, strokes, text) on vc4
 /// * `ui`: the widget toolkit, on gfx
 /// * `font`: OpenType font rendering
+/// * `icons`: Material icons, and the font (with just those) to draw them
 /// * `wayland`: the Wayland wire protocol and a client library
 /// * `build_info`: `commit`, the source's git commit (short, with "-dirty"
 ///   when there are uncommitted changes), so a running system can be
 ///   matched to its source
-fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, shaders: []const ShaderBlob) Modules {
+fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, shaders: []const ShaderBlob, icon_font: IconFont) Modules {
     const sys, const vc4, const shader = addGpuModules(b, target, optimize);
     const wayland = b.createModule(.{
         .root_source_file = b.path("src/wayland/wayland.zig"),
@@ -38,6 +67,16 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         .target = target,
         .optimize = optimize,
     });
+    const icons = b.createModule(.{
+        .root_source_file = b.path("src/icons/icons.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "font", .module = font },
+            .{ .name = "icon_codepoints", .module = b.createModule(.{ .root_source_file = icon_font.codepoints, .target = target, .optimize = optimize }) },
+        },
+    });
+    icons.addAnonymousImport("MaterialIcons.ttf", .{ .root_source_file = icon_font.ttf });
     const gfx = b.createModule(.{
         .root_source_file = b.path("src/gfx/gfx.zig"),
         .target = target,
@@ -57,6 +96,7 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
             .{ .name = "vc4", .module = vc4 },
             .{ .name = "gfx", .module = gfx },
             .{ .name = "font", .module = font },
+            .{ .name = "icons", .module = icons },
         },
     });
     const app = b.createModule(.{
@@ -70,7 +110,7 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     });
     const info = b.addOptions();
     info.addOption([]const u8, "commit", gitCommit(b));
-    return .{ .sys = sys, .vc4 = vc4, .shader = shader, .app = app, .gfx = gfx, .ui = ui, .font = font, .wayland = wayland, .build_info = info.createModule() };
+    return .{ .sys = sys, .vc4 = vc4, .shader = shader, .app = app, .gfx = gfx, .ui = ui, .font = font, .icons = icons, .wayland = wayland, .build_info = info.createModule() };
 }
 
 /// `sys`, `vc4` and `shader`: what the GPU's users need, and what the
@@ -208,6 +248,7 @@ fn addProgramModule(b: *std.Build, path: []const u8, target: std.Build.ResolvedT
             .{ .name = "gfx", .module = m.gfx },
             .{ .name = "ui", .module = m.ui },
             .{ .name = "font", .module = m.font },
+            .{ .name = "icons", .module = m.icons },
             .{ .name = "wayland", .module = m.wayland },
             .{ .name = "build_info", .module = m.build_info },
         },
@@ -527,7 +568,8 @@ pub fn build(b: *std.Build) void {
     const test_optimize = explicit_optimize orelse .Debug;
 
     const shaders = addShaders(b);
-    const pi = addModules(b, target, optimize, shaders);
+    const icon_font = addIconFont(b);
+    const pi = addModules(b, target, optimize, shaders, icon_font);
     // init runs as root; the shell and the apps (its Wayland clients) run
     // as the unprivileged Dazzle user.
     const init_exe = b.addExecutable(.{
@@ -576,6 +618,8 @@ pub fn build(b: *std.Build) void {
     run_mkinitramfs.addArtifactArg(shell_exe);
     run_mkinitramfs.addFileArg(b.path("fonts/FiraSans-Regular.ttf"));
     run_mkinitramfs.addFileArg(b.path("fonts/OFL.txt"));
+    // The icon font is built into the programs; its licence goes with them.
+    run_mkinitramfs.addPrefixedFileArg("--file=os/fonts/MaterialIcons-LICENSE.txt=", b.path("fonts/MaterialIcons-LICENSE.txt"));
     // The Wi-Fi chips' firmware, for the kernel to load.
     run_mkinitramfs.step.dependOn(fetchWifiFirmware(b));
     for (wifi_firmware) |f| {
@@ -588,6 +632,10 @@ pub fn build(b: *std.Build) void {
     // The apps, each in /apps/<name>, listed in the shell's dock.
     run_mkinitramfs.addArtifactArg(demo_exe);
     run_mkinitramfs.addArtifactArg(files_exe);
+    // The dock's icons: a Material icon's name beside each program.
+    addAppIcon(b, run_mkinitramfs, "os/shell/dazzle-settings", .settings);
+    addAppIcon(b, run_mkinitramfs, "apps/dazzle-demo/dazzle-demo", .view_in_ar);
+    addAppIcon(b, run_mkinitramfs, "apps/dazzle-files/dazzle-files", .folder);
     const install_initramfs = b.addInstallFile(initramfs, "initramfs.cpio");
     const programs_step = b.step("programs", "Build just the programs (zig-out/bin) and zig-out/initramfs.cpio");
     for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_settings.step, &install_files.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
@@ -608,7 +656,7 @@ pub fn build(b: *std.Build) void {
 
     // Unit tests run on the build machine; they cover the parts that do not
     // need the GPU (instruction encoding, compiler, simulator, ...).
-    const host = addModules(b, b.graph.host, test_optimize, shaders);
+    const host = addModules(b, b.graph.host, test_optimize, shaders, icon_font);
     // The shader tests check programs built here, and compile them again
     // from SPIR-V as an app would.
     for (shaders) |s| {
@@ -639,6 +687,7 @@ pub fn build(b: *std.Build) void {
         host.gfx,
         host.ui,
         host.font,
+        host.icons,
         host.wayland,
         addProgramModule(b, "src/init/main.zig", b.graph.host, test_optimize, host, shaders, null),
         host_demo,

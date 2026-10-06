@@ -38,6 +38,7 @@
 //!   ConstrainedBox, Grid, Overlay, Decorated, Pressable
 //! * `scroll_view`: ScrollView
 //! * `lazy_grid`: LazyGrid, a grid that makes only the items that show
+//! * `icon`: Icon, a Material icon
 //! * `text`: Text
 //! * `material`: the theme, OutlinedButton, Spinner
 //! * `controls`: Checkbox, Radio, Switch
@@ -58,6 +59,9 @@ pub const text_field = @import("text_field.zig");
 pub const title_bar = @import("title_bar.zig");
 pub const scroll_view = @import("scroll_view.zig");
 pub const lazy_grid = @import("lazy_grid.zig");
+pub const icon = @import("icon.zig");
+/// The icons there are (`icons.Icon`), and their font.
+pub const icons = @import("icons");
 pub const keymap = @import("keymap.zig");
 pub const painter = @import("painter.zig");
 pub const damage = @import("damage.zig");
@@ -110,6 +114,7 @@ pub const TextField = text_field.TextField;
 pub const TitleBar = title_bar.TitleBar;
 pub const ScrollView = scroll_view.ScrollView;
 pub const LazyGrid = lazy_grid.LazyGrid;
+pub const Icon = icon.Icon;
 
 pub const Painter = painter.Painter;
 pub const GpuArea = painter.GpuArea;
@@ -126,6 +131,7 @@ test {
     _ = title_bar;
     _ = scroll_view;
     _ = lazy_grid;
+    _ = icon;
     _ = keymap;
     _ = painter;
     _ = damage;

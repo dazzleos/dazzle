@@ -111,9 +111,9 @@ pub const Demo = struct {
                             status[4],
                             cx.make(ui.SizedBox{ .height = 10 * s }),
                             cx.make(ui.Row{ .spacing = 8, .main_axis_size = .min, .children = &.{
-                                cx.make(ui.OutlinedButton{ .label = "Slower", .on_press = .of(state, State.slower) }),
-                                cx.make(ui.OutlinedButton{ .label = if (state.paused) "Resume" else "Pause", .on_press = .of(state, State.pause) }),
-                                cx.make(ui.OutlinedButton{ .label = "Faster", .on_press = .of(state, State.faster) }),
+                                cx.make(ui.OutlinedButton{ .label = "Slower", .icon = .fast_rewind, .on_press = .of(state, State.slower) }),
+                                cx.make(ui.OutlinedButton{ .label = if (state.paused) "Resume" else "Pause", .icon = if (state.paused) .play_arrow else .pause, .on_press = .of(state, State.pause) }),
+                                cx.make(ui.OutlinedButton{ .label = "Faster", .icon = .fast_forward, .on_press = .of(state, State.faster) }),
                                 cx.make(ui.Padding{ .padding = .{ .left = 8 }, .child = cx.make(ui.Text{ .text = speed, .style = .{ .size = 18 * s, .color = dim_color }, .wrap = false }) }),
                             } }),
                             cx.make(ui.SizedBox{ .height = 10 * s }),

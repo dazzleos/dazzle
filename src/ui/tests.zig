@@ -692,6 +692,41 @@ test "a lazy list's items are as wide as it, and one far down can be revealed" {
     try testing.expectEqual(ui.Point{ 0, 80 * 30 }, list.child(11).offset);
 }
 
+test "icons are drawn from the icon font, in their box" {
+    const fira = try font.Font.init(fira_data);
+    const u = try ui.Ui.create(testing.allocator, &fira);
+    defer u.destroy();
+    const build = struct {
+        fn f(cx: *Context) Widget {
+            return cx.make(ui.Align{ .alignment = .top_left, .child = cx.make(ui.Row{ .main_axis_size = .min, .children = &.{
+                cx.make(ui.Icon{ .icon = .folder, .size = 48, .color = red }),
+                cx.make(ui.OutlinedButton{ .label = "Up", .icon = .arrow_upward }),
+                cx.make(ui.OutlinedButton{ .icon = .close }),
+            } }) });
+        }
+    }.f;
+    u.frame(300, 100, 0, Root(build){});
+    const icon = find(u.root.?, ui.Icon).?;
+    try testing.expectEqual(ui.Size{ .w = 48, .h = 48 }, icon.size);
+    var img = try Image.init(u, 300, 100);
+    defer img.deinit();
+    // The folder fills the middle of its box, and nothing is below it.
+    try testing.expectEqual(@as(u32, 0xffff0000), img.at(24, 28));
+    try testing.expectEqual(@as(u32, 0xff000000), img.at(24, 60));
+    // A button's icon goes before its label, in the label's colour; one
+    // with only an icon is round.
+    var buttons: std.ArrayList(*Node) = .empty;
+    defer buttons.deinit(testing.allocator);
+    try findAll(u.root.?, ui.OutlinedButton, &buttons);
+    const with_label = buttons.items[0];
+    const glyph = find(with_label, ui.Icon).?;
+    const label = find(with_label, ui.Text).?;
+    try testing.expect(glyph.position()[0] < label.position()[0]);
+    try testing.expectEqual(label.widget.as(ui.Text).?.style.color.?, glyph.widget.as(ui.Icon).?.color.?);
+    try testing.expectEqual(@as(f32, 40), buttons.items[1].size.h);
+    try testing.expect(find(buttons.items[1], ui.Text) == null);
+}
+
 test "a scroll view scrolls with the wheel and its bar, and paints only what shows" {
     const u = try ui.Ui.create(testing.allocator, null);
     defer u.destroy();

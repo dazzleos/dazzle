@@ -14,6 +14,7 @@ const geometry = @import("geometry.zig");
 const widget = @import("widget.zig");
 const widgets = @import("widgets.zig");
 const painter_mod = @import("painter.zig");
+const icons = @import("icons");
 
 const Node = widget.Node;
 const Context = widget.Context;
@@ -44,7 +45,9 @@ pub const TitleBar = struct {
         var buttons: [2]Widget = undefined;
         var n: usize = 0;
         if (self.on_maximize) |f| {
-            buttons[n] = cx.make(BarButton{ .on_press = f, .size = size, .icon = if (self.maximized) .restore else .maximize });
+            // A square fills the screen; two, one behind the other, go back
+            // to half of it.
+            buttons[n] = cx.make(BarButton{ .on_press = f, .size = size, .icon = if (self.maximized) .filter_none else .crop_square });
             n += 1;
         }
         if (self.on_close) |f| {
@@ -81,13 +84,11 @@ const DragArea = struct {
     }
 };
 
-pub const Icon = enum { close, maximize, restore };
-
 /// A round button with an icon, highlighted under the pointer.
 pub const BarButton = struct {
     on_press: widget.Callback,
     size: f32,
-    icon: Icon,
+    icon: icons.Icon,
 
     pub const State = struct {
         interaction: widgets.Interaction = .{},
@@ -104,7 +105,7 @@ pub const BarButton = struct {
 };
 
 const Mark = struct {
-    icon: Icon,
+    icon: icons.Icon,
     size: f32,
     hovered: bool,
     pressed: bool,
@@ -118,24 +119,8 @@ const Mark = struct {
         const c = p.canvas();
         const mid: gfx.Point = .{ n.size.w / 2, n.size.h / 2 };
         if (self.hovered or self.pressed) c.fillCircle(mid, n.size.w / 2, t.on_surface.withAlpha(if (self.pressed) 0.16 else 0.08));
-        const arm = n.size.w * 0.17;
-        const width = @max(n.size.w / 17, 1.5);
-        const color = t.on_surface_variant;
-        switch (self.icon) {
-            .close => {
-                c.strokePolyline(&.{ .{ mid[0] - arm, mid[1] - arm }, .{ mid[0] + arm, mid[1] + arm } }, false, width, color);
-                c.strokePolyline(&.{ .{ mid[0] - arm, mid[1] + arm }, .{ mid[0] + arm, mid[1] - arm } }, false, width, color);
-            },
-            // A square: fill the screen.
-            .maximize => c.strokeRect(.{ .x = mid[0] - arm, .y = mid[1] - arm, .w = 2 * arm, .h = 2 * arm }, width, color),
-            // Two squares, one behind the other: back to half the screen.
-            .restore => {
-                const a = arm * 0.8;
-                const o = arm * 0.4;
-                c.strokePolyline(&.{ .{ mid[0] - a + o, mid[1] - a - o }, .{ mid[0] + a + o, mid[1] - a - o }, .{ mid[0] + a + o, mid[1] + a - o } }, false, width, color);
-                c.strokeRect(.{ .x = mid[0] - a - o, .y = mid[1] - a + o, .w = 2 * a, .h = 2 * a }, width, color);
-            },
-        }
+        const s = @round(n.size.w * 0.6);
+        p.icon(self.icon, @round((n.size.w - s) / 2), @round((n.size.h - s) / 2), s, t.on_surface_variant);
     }
 };
 

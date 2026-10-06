@@ -74,6 +74,13 @@ pub const Painter = struct {
         return p.canvas().drawText(&p.ui.atlas, .{ .font = f, .size = size }, x, baseline, str, color);
     }
 
+    /// Draws an icon `size` square with its top left at (`x`, `y`).
+    pub fn icon(p: *Painter, which: @import("icons").Icon, x: f32, y: f32, size: f32, color: gfx.Color) void {
+        var buf: [4]u8 = undefined;
+        // Icons fill the em square, with the baseline at the bottom.
+        _ = p.canvas().drawText(&p.ui.atlas, .{ .font = &p.ui.icon_font, .size = size }, x, y + size, @import("icons").text(which, &buf), color);
+    }
+
     /// Limits drawing to `r` (relative to the widget) until `restoreClip`
     /// with what this returns.
     pub fn clipTo(p: *Painter, r: Rect) ?Rect {

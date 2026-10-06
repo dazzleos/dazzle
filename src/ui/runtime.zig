@@ -35,6 +35,8 @@ pub const Ui = struct {
     gpa: std.mem.Allocator,
     /// Text is drawn in it; without one, text takes no space.
     font: ?*const font.Font,
+    /// Icons are drawn with it (see `Icon`).
+    icon_font: font.Font,
     theme: material.Theme = .dark,
     atlas: gfx.Atlas,
     renderer: ?gfx.Renderer = null,
@@ -74,7 +76,7 @@ pub const Ui = struct {
     pub fn create(gpa: std.mem.Allocator, f: ?*const font.Font) !*Ui {
         const ui = try gpa.create(Ui);
         errdefer gpa.destroy(ui);
-        ui.* = .{ .gpa = gpa, .font = f, .atlas = try gfx.Atlas.init(gpa), .arenas = .{ .init(gpa), .init(gpa) } };
+        ui.* = .{ .gpa = gpa, .font = f, .icon_font = try font.Font.init(@import("icons").font_data), .atlas = try gfx.Atlas.init(gpa), .arenas = .{ .init(gpa), .init(gpa) } };
         return ui;
     }
 

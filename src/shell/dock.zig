@@ -3,14 +3,17 @@
 //! is running, brings its window to the front (apps run once each).
 //!
 //! An app is a directory /apps/<name> holding its program, also called
-//! <name>, and the files it needs (such as its font). The shell's own apps
-//! are programs beside it in /os/shell, and cannot be removed. Its icon is its
-//! initial on a coloured square, with a dot under it while it runs.
+//! <name>, and the files it needs. The shell's own apps are programs beside
+//! it in /os/shell, and cannot be removed. Its icon is a Material icon
+//! (named in <program>.icon, beside the program: "folder") or, without
+//! one, its initial, on a coloured square, with a dot under it while it
+//! runs.
 
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
 const font = @import("font");
+const icons = @import("icons");
 
 pub const apps_dir = "/apps";
 
@@ -27,6 +30,8 @@ pub const App = struct {
     label: []const u8,
     /// The program: /apps/<name>/<name>.
     path: [:0]const u8,
+    /// Its icon, from <program>.icon.
+    icon: ?icons.Icon = null,
     /// Its process, while it runs.
     pid: ?linux.pid_t = null,
 
@@ -48,7 +53,7 @@ pub fn findApps(gpa: std.mem.Allocator, dir_path: []const u8, builtin: []const [
             continue;
         }
         const owned = try gpa.dupe(u8, std.fs.path.basename(p));
-        try apps.append(gpa, .{ .name = owned, .label = try label(gpa, owned), .path = path });
+        try apps.append(gpa, .{ .name = owned, .label = try label(gpa, owned), .path = path, .icon = iconOf(path) });
     }
     var path_buf: [256]u8 = undefined;
     const dir_z = try std.fmt.bufPrintZ(&path_buf, "{s}", .{dir_path});
@@ -81,9 +86,20 @@ fn addDir(gpa: std.mem.Allocator, apps: *std.ArrayList(App), dir: linux.fd_t, di
                 continue;
             }
             const owned = try gpa.dupe(u8, name);
-            try apps.append(gpa, .{ .name = owned, .label = try label(gpa, owned), .path = path });
+            try apps.append(gpa, .{ .name = owned, .label = try label(gpa, owned), .path = path, .icon = iconOf(path) });
         }
     }
+}
+
+/// The icon named in `<program>.icon`, if there is one Dazzle has.
+fn iconOf(program: []const u8) ?icons.Icon {
+    var path_buf: [300]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&path_buf, "{s}.icon", .{program}) catch return null;
+    const fd = sys.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }) catch return null;
+    defer sys.close(fd);
+    var buf: [64]u8 = undefined;
+    const n = sys.check(linux.read(fd, &buf, buf.len)) catch return null;
+    return icons.fromName(buf[0..n]);
 }
 
 /// "dazzle-demo" is shown as "Demo".
@@ -97,6 +113,7 @@ pub fn label(gpa: std.mem.Allocator, name: []const u8) ![]const u8 {
 
 pub const Dock = struct {
     font: ?font.Font,
+    icon_font: ?font.Font,
     cache: font.GlyphCache,
     pixels: []u32,
     width: u32,
@@ -111,6 +128,7 @@ pub const Dock = struct {
         const height: u32 = @intFromFloat(@round(76 * scale));
         return .{
             .font = f,
+            .icon_font = font.Font.init(icons.font_data) catch null,
             .cache = font.GlyphCache.init(gpa),
             .pixels = try gpa.alloc(u32, @as(usize, screen_width) * height),
             .width = screen_width,
@@ -150,7 +168,16 @@ pub const Dock = struct {
                 roundedRect(canvas, r.x - pad, r.y - pad, r.size + 2 * pad, r.size + 2 * pad, 14 * d.scale, hover_background);
             }
             roundedRect(canvas, r.x, r.y, r.size, r.size, 12 * d.scale, app.color());
-            if (d.font) |*f| {
+            const icon_font: ?*const font.Font = if (d.icon_font) |*f| f else null;
+            if (app.icon != null and icon_font != null) {
+                // Icons fill the em square, with the baseline at the bottom.
+                const size = @round(36 * d.scale);
+                const style: font.Style = .{ .font = icon_font.?, .size = size, .color = 0xffffffff };
+                var buf: [4]u8 = undefined;
+                const x = @round(r.x + (r.size - size) / 2);
+                const y = @round(r.y + (r.size - size) / 2);
+                _ = font.draw(canvas, &d.cache, style, x, y + size, icons.text(app.icon.?, &buf)) catch {};
+            } else if (d.font) |*f| {
                 const style: font.Style = .{ .font = f, .size = 30 * d.scale, .color = 0xffffffff };
                 const initial = app.label[0..1];
                 const baseline = r.y + r.size / 2 + style.ascent() * 0.36;
@@ -208,7 +235,7 @@ test "app labels drop the dazzle- prefix" {
 
 test "icons are in a row in the middle, and clicks find them" {
     var apps = [_]App{
-        .{ .name = "a", .label = "A", .path = "/apps/a/a" },
+        .{ .name = "a", .label = "A", .path = "/apps/a/a", .icon = .folder },
         .{ .name = "b", .label = "B", .path = "/apps/b/b" },
     };
     var d = try Dock.init(testing.allocator, null, &apps, 1920, 1080);
@@ -238,6 +265,8 @@ test "icons are in a row in the middle, and clicks find them" {
     try testing.expectEqual(@as(u32, dot_color), at(&d, r0.x + r0.size / 2, r0.y + r0.size + 6));
     try testing.expectEqual(@as(u32, background), at(&d, r1.x + r1.size / 2, r1.y + r1.size + 6));
     try testing.expectEqual(@as(u32, hover_background), at(&d, r1.x - 2, r1.y + r1.size / 2));
+    // The first app's icon is drawn in white in the middle of its square.
+    try testing.expectEqual(@as(u32, 0xffffffff), at(&d, r0.x + r0.size / 2, r0.y + r0.size / 2));
 }
 
 test "apps are the directories holding a program of the same name" {
@@ -246,7 +275,7 @@ test "apps are the directories holding a program of the same name" {
     const root = try std.fmt.bufPrintZ(&tmp_buf, "/tmp/dazzle-dock-test-{d}", .{linux.getpid()});
     defer {
         var b: [128]u8 = undefined;
-        for ([_][]const u8{ "/zeta/zeta", "/alpha/alpha", "/zeta", "/alpha", "/notes", "" }) |p| {
+        for ([_][]const u8{ "/zeta/zeta", "/alpha/alpha", "/alpha/alpha.icon", "/zeta", "/alpha", "/notes", "" }) |p| {
             const path = std.fmt.bufPrintZ(&b, "{s}{s}", .{ root, p }) catch unreachable;
             if (linux.errno(linux.unlink(path)) != .SUCCESS) _ = linux.rmdir(path);
         }
@@ -260,6 +289,12 @@ test "apps are the directories holding a program of the same name" {
     for ([_][]const u8{ "zeta", "alpha" }) |name| {
         const fd = try sys.open(try std.fmt.bufPrintZ(&b, "{s}/{s}/{s}", .{ root, name, name }), .{ .ACCMODE = .WRONLY, .CREAT = true, .CLOEXEC = true });
         _ = linux.fchmod(fd, 0o755);
+        sys.close(fd);
+    }
+    // Alpha's icon is named beside it.
+    {
+        const fd = try sys.open(try std.fmt.bufPrintZ(&b, "{s}/alpha/alpha.icon", .{root}), .{ .ACCMODE = .WRONLY, .CREAT = true, .CLOEXEC = true });
+        _ = linux.write(fd, "folder\n", 7);
         sys.close(fd);
     }
     // And a program of the shell's own (one that is not there is left out).
@@ -276,6 +311,8 @@ test "apps are the directories holding a program of the same name" {
     }
     try testing.expectEqual(@as(usize, 3), apps.len);
     try testing.expectEqualStrings("alpha", apps[0].name);
+    try testing.expectEqual(@as(?icons.Icon, .folder), apps[0].icon);
+    try testing.expectEqual(@as(?icons.Icon, null), apps[2].icon);
     try testing.expectEqualStrings("Zeta", apps[1].label);
     try testing.expectEqualStrings("zeta", apps[2].name);
     try testing.expect(std.mem.endsWith(u8, apps[1].path, "/zeta/zeta"));

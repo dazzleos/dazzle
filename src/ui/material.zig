@@ -74,6 +74,8 @@ pub const Theme = struct {
 pub const OutlinedButton = struct {
     /// The label (or give a `child` instead).
     label: []const u8 = "",
+    /// An icon before the label (or alone, without one).
+    icon: ?@import("icons").Icon = null,
     child: ?Widget = null,
     /// Without it the button is disabled.
     on_press: ?Callback = null,
@@ -84,6 +86,7 @@ pub const OutlinedButton = struct {
 
     pub const height = 40;
     pub const padding = 24;
+    pub const icon_size = 18;
 
     pub fn build(self: *const OutlinedButton, cx: *Context, state: *State) Widget {
         const t = cx.theme();
@@ -93,11 +96,15 @@ pub const OutlinedButton = struct {
         const layer: f32 = if (!enabled) 0 else if (i.pressed) 0.10 else if (i.hovered) 0.08 else 0;
         const label_color = if (enabled) t.primary else t.on_surface.withAlpha(0.38);
         const border = if (enabled) t.outline else t.on_surface.withAlpha(0.12);
-        const content = self.child orelse cx.make(text.Text{
+        const label = cx.make(text.Text{
             .text = self.label,
             .style = .{ .size = t.label_size, .color = label_color },
             .wrap = false,
         });
+        const content = self.child orelse if (self.icon) |which| blk: {
+            const glyph = cx.make(@import("icon.zig").Icon{ .icon = which, .size = icon_size, .color = label_color });
+            break :blk if (self.label.len == 0) glyph else cx.make(widgets.Row{ .spacing = 8, .main_axis_size = .min, .cross_axis_alignment = .center, .children = &.{ glyph, label } });
+        } else label;
         return cx.make(widgets.Pressable{
             .on_press = self.on_press,
             .interaction = &state.interaction,

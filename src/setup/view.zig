@@ -87,8 +87,8 @@ pub const Setup = struct {
             cx.make(ui.Text{ .text = "Welcome to Dazzle", .style = .{ .size = 40 * s, .color = t.primary } }),
             body,
             cx.make(ui.Row{ .spacing = @round(12 * s), .main_axis_alignment = .end, .children = &.{
-                if (state.page > 0) cx.make(ui.OutlinedButton{ .label = "Back", .on_press = .of(nav, Nav.back) }) else cx.make(ui.Empty{}),
-                cx.make(ui.OutlinedButton{ .label = "Next", .on_press = .of(nav, Nav.next) }),
+                if (state.page > 0) cx.make(ui.OutlinedButton{ .label = "Back", .icon = .arrow_back, .on_press = .of(nav, Nav.back) }) else cx.make(ui.Empty{}),
+                cx.make(ui.OutlinedButton{ .label = "Next", .icon = .arrow_forward, .on_press = .of(nav, Nav.next) }),
             } }),
         } });
     }
