@@ -8,7 +8,7 @@
 //!     try ui.attachGpu(dev);
 //!     // Each frame:
 //!     ui.frame(width, height, now_ns, MyApp{ .title = "Hello" });
-//!     try ui.render(&frame);
+//!     try ui.render(&frame, window.flusher());
 
 const std = @import("std");
 const gfx = @import("gfx");
@@ -206,11 +206,11 @@ pub const Ui = struct {
 
     /// Records the last frame painted into `frame` (whose previous use of
     /// the UI's buffers has finished rendering).
-    pub fn render(ui: *Ui, frame_: *vc4.render.Frame) !void {
+    pub fn render(ui: *Ui, frame_: *vc4.render.Frame, flush: ?vc4.render.Flush) !void {
         const r = if (ui.renderer) |*r| r else return error.NoGpu;
         try r.prepare(ui.canvases.items[0..ui.canvases_used]);
         for (ui.segments.items) |s| switch (s) {
-            .canvas => |c| try r.record(c, frame_),
+            .canvas => |c| try r.record(c, frame_, flush),
             .gpu => |g| if (frame_.covers(g.area.scissor orelse g.area.viewport)) try g.f(g.ctx, frame_, g.area),
         };
     }

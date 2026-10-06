@@ -52,7 +52,7 @@ pub const Renderer = struct {
     /// renderer's buffers has finished rendering).
     pub fn draw(r: *Renderer, c: *const Canvas, frame: *render.Frame) !void {
         try r.prepare(&.{c});
-        try r.record(c, frame);
+        try r.record(c, frame, null);
     }
 
     /// Makes room for the canvases a frame draws, and uploads the glyphs
@@ -91,14 +91,17 @@ pub const Renderer = struct {
 
     /// Records a canvas (one of those given to `prepare`) into `frame`.
     /// Batches outside the parts of the frame being rendered (see
-    /// `render.Frame.limitTo`) are left out.
-    pub fn record(r: *Renderer, c: *const Canvas, frame: *render.Frame) !void {
+    /// `render.Frame.limitTo`) are left out. When the frame fills up,
+    /// `flush` renders it and drawing goes on; without it, that is
+    /// `error.FrameFull`.
+    pub fn record(r: *Renderer, c: *const Canvas, frame: *render.Frame, flush: ?render.Flush) !void {
         for (c.batches.items) |*b| {
             const data = std.mem.sliceAsBytes(b.floats.items);
             if (data.len == 0) continue;
             const area = if (b.clip) |clip| b.bounds.intersect(clip) orelse continue else b.bounds;
             if (!frame.covers(scissor(area))) continue;
             const vbo = r.vbo orelse return error.NotPrepared;
+            if (flush) |fl| if (!frame.hasRoom(max_uniform_words)) try fl.flush(frame);
             const offset = r.cursor;
             if (offset + data.len > vbo.map.len) return error.NotPrepared;
             @memcpy(vbo.map[offset..][0..data.len], data);
@@ -130,6 +133,9 @@ pub const Renderer = struct {
         }
     }
 };
+
+/// More than any of the canvas shaders' draws uses.
+const max_uniform_words = 256;
 
 fn scissor(clip: canvas_mod.Rect) render.Viewport {
     const x0 = @floor(@max(clip.x, 0));

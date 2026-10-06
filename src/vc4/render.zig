@@ -134,6 +134,18 @@ pub const max_bos = 64;
 
 pub const Error = error{FrameFull};
 
+/// Renders a frame that is too full for what is still to be drawn, waiting
+/// for the GPU; drawing then goes on in it (see `Frame.again`).
+pub const Flush = struct {
+    ctx: *anyopaque,
+    run: *const fn (ctx: *anyopaque, frame: *Frame) anyerror!void,
+
+    pub fn flush(fl: Flush, frame: *Frame) !void {
+        try fl.run(fl.ctx, frame);
+        frame.again();
+    }
+};
+
 /// A frame being recorded. `submit` points into the frame's own buffers,
 /// so a Frame must not be moved between `begin` and submission. It is
 /// large; keep it in static or heap memory rather than on the stack, and
@@ -180,6 +192,18 @@ pub const Frame = struct {
         f.bin.tileBinningModeConfig(@intCast(tiles[0]), @intCast(tiles[1]));
         f.bin.startTileBinning();
         f.bin.primitiveListFormat();
+    }
+
+    /// Starts the frame again once it has been rendered, on the same
+    /// target and parts of it, keeping what it drew.
+    pub fn again(f: *Frame) void {
+        const regions = f.regions;
+        const region_count = f.region_count;
+        const nothing = f.limited_to_nothing;
+        f.begin(f.target, .keep);
+        f.regions = regions;
+        f.region_count = region_count;
+        f.limited_to_nothing = nothing;
     }
 
     fn tileCounts(f: *const Frame) [2]u16 {
@@ -524,4 +548,28 @@ test "frames limited to regions render the tiles covering them" {
     _ = f.finish();
     const all = f.submitRegion(0);
     try std.testing.expectEqual([4]u8{ 0, 0, 9, 7 }, [4]u8{ all.min_x_tile, all.min_y_tile, all.max_x_tile, all.max_y_tile });
+}
+
+test "a full frame starts again on the same parts, keeping what it drew" {
+    const layout = [_]compiler.UniformKind{.{ .user = 0 }};
+    const attrs = [_]Attribute{.{ .handle = 14, .offset = 0, .size = 8, .stride = 8, .vs_vpm_offset = 0, .cs_vpm_offset = 0 }};
+    const f = try testing.allocator.create(Frame);
+    defer testing.allocator.destroy(f);
+    f.* = .{};
+    f.begin(.{ .handle = 10, .width = 640, .height = 480 }, .{ .clear = 0xff000000 });
+    f.limitTo(&.{ .{ .x = 0, .y = 0, .width = 10, .height = 10 }, .{ .x = 600, .y = 400, .width = 40, .height = 80 } });
+    // Draw until there is no room for more.
+    var draws: usize = 0;
+    while (f.hasRoom(256)) : (draws += 1) try f.draw(testDraw(&.{}, &layout, &attrs, &.{1}));
+    try testing.expect(draws > 100);
+    _ = f.finish();
+    f.again();
+    try testing.expect(f.hasRoom(256));
+    try testing.expectEqual(@as(usize, 2), f.regionCount());
+    try testing.expect(f.covers(.{ .x = 610, .y = 410, .width = 5, .height = 5 }));
+    try testing.expect(!f.covers(.{ .x = 300, .y = 200, .width = 5, .height = 5 }));
+    try f.draw(testDraw(&.{}, &layout, &attrs, &.{1}));
+    const s = f.finish();
+    try testing.expectEqual(@as(u32, 1), s.shader_rec_count);
+    try testing.expectEqual(@as(u32, 0), s.color_read.hindex); // what was drawn is loaded
 }

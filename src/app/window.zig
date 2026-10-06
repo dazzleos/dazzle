@@ -268,6 +268,17 @@ pub const Window = struct {
         try w.gpu.vtable.run(w.gpu.ptr, frame);
     }
 
+    /// Renders a frame too full for what is still to be drawn into it (see
+    /// `vc4.render.Flush`).
+    pub fn flusher(w: *Window) vc4.render.Flush {
+        return .{ .ctx = w, .run = struct {
+            fn run(ctx: *anyopaque, frame: *vc4.render.Frame) anyerror!void {
+                const self: *Window = @ptrCast(@alignCast(ctx));
+                try self.render(frame);
+            }
+        }.run };
+    }
+
     /// How many frames ago the buffer `beginFrame` gave was last drawn: 1
     /// if in the frame before, 0 if never (its contents are unknown). Only
     /// what changed since then needs drawing into it (see
