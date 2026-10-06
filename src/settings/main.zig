@@ -126,7 +126,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             var req_buf: [256]u8 = undefined;
             if (actions.ethernet) |a| report = info.askManager(info.manager.ethernetRequest(&req_buf, a));
             if (actions.connect != null or actions.disconnect) {
-                const req = if (actions.connect) |*j| info.manager.connectRequest(&req_buf, j.ssid(), j.passphrase()) else "disconnect\n";
+                const req = if (actions.connect) |*j| info.manager.connectRequest(&req_buf, j.ssid(), j.passphrase()) else "wifi disconnect\n";
                 if (actions.connect) |*j| print("dazzle-settings: joining \"{s}\"\n", .{j.ssid()});
                 report = info.askManager(req);
             }
@@ -139,7 +139,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             // found) and while joining a network, then every few seconds.
             const busy = if (report) |r| r.scanning or r.connection.state == .connecting or r.connection.state == .authenticating or r.connection.state == .addressing else true;
             next_ask = now + @as(u64, if (busy) 1 else 5) * std.time.ns_per_s;
-            report = info.askManager("scan\n");
+            report = info.askManager("wifi scan\n");
             dirty = true;
         }
 

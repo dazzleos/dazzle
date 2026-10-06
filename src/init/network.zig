@@ -176,8 +176,9 @@ fn run() !void {
             const n = linux.read(fd, &buf, buf.len);
             if (linux.errno(n) == .SUCCESS and n > 0) if (proto.Request.parse(buf[0..n])) |req| {
                 switch (req) {
+                    .status => {},
                     .ethernet => |a| ethernet.set(a),
-                    else => w.handle(req, t),
+                    .wifi => |wr| w.handle(wr, t),
                 }
                 var report: proto.Report = .{};
                 ethernet.fill(&report);

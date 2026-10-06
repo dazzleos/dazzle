@@ -408,7 +408,7 @@ pub fn defaultGateway(routes: []const u8) ?[4]u8 {
 
 pub const manager = sys.network;
 
-/// Sends the network manager a request ("scan\n", or one from
+/// Sends the network manager a request ("wifi scan\n", or one from
 /// `manager.connectRequest` or `manager.ethernetRequest`, ...) and returns
 /// its report. Null if the manager cannot be reached.
 pub fn askManager(request: []const u8) ?manager.Report {

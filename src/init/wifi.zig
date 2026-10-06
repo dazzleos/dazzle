@@ -91,13 +91,12 @@ pub const Manager = struct {
         m.station.?.adapter.up = ipv4.bringUp(station.adapter.name());
     }
 
-    /// Handles a request (other than Ethernet's).
-    pub fn handle(m: *Manager, req: wifi.Request, now: u64) void {
+    /// Handles a Wi-Fi request.
+    pub fn handle(m: *Manager, req: wifi.WifiRequest, now: u64) void {
         switch (req) {
             .scan => m.scan(now),
             .disconnect => m.leave(true),
             .connect => |c| m.connect(c.ssid_buf[0..c.ssid_len], c.pass_buf[0..c.pass_len], now),
-            .status, .ethernet => {},
         }
     }
 

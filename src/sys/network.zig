@@ -8,30 +8,31 @@
 //! manager closes the connection. The requests are:
 //!
 //!     status
-//!     scan
-//!     connect <SSID in hex> <passphrase in hex, or - for an open network>
-//!     disconnect
 //!     ethernet dhcp
 //!     ethernet static <address>/<prefix> <gateway, or ->
+//!     wifi scan
+//!     wifi connect <SSID in hex> <passphrase in hex, or - for an open network>
+//!     wifi disconnect
 //!
 //! and the report:
 //!
 //!     ethernet eth0 static 192.168.1.50/24 192.168.1.1
-//!     adapter wlan0 b8:27:eb:01:02:03 up
-//!     scanning
-//!     connection connected none 486f6d65 192.168.1.50
-//!     network -5400 2437 wpa2 486f6d65
+//!     wifi adapter wlan0 b8:27:eb:01:02:03 up
+//!     wifi scanning
+//!     wifi connection connected none 486f6d65 192.168.1.50
+//!     wifi network -5400 2437 wpa2 486f6d65
 //!     end
 //!
-//! "status" only reports; "scan" also scans for Wi-Fi networks if the last
-//! scan is old. "ethernet" is how the wired adapter (or "-" while there is
+//! Each line after "status" and before "end" starts with what it is about:
+//! "ethernet" or "wifi". "status" only reports; "wifi scan" also scans for
+//! Wi-Fi networks if the last scan is old. "ethernet" is how the wired adapter (or "-" while there is
 //! none) gets its address: "dhcp", or "static" with the address, prefix
 //! length and gateway (or "-"); the choice is kept until the system stops.
-//! "adapter" names the Wi-Fi adapter (or "none" says there is none);
-//! "scanning" says a scan is under way; each "network" is one network: its
+//! "wifi adapter" names the Wi-Fi adapter (or "wifi none" says there is
+//! none); "wifi scanning" says a scan is under way; each "network" is one network: its
 //! signal in mBm (hundredths of dBm), the frequency in MHz of its strongest
 //! access point, its security and its SSID in hexadecimal (SSIDs are bytes,
-//! not necessarily text). "connection" is the state of joining a network:
+//! not necessarily text). "wifi connection" is the state of joining a network:
 //! the state, why it failed (or "none"), the network's SSID in hexadecimal
 //! and the address DHCP gave (or "-"). A client the manager does not serve
 //! gets "denied\n".
@@ -171,7 +172,7 @@ pub const Connection = struct {
 /// A request to join a network.
 pub fn connectRequest(buf: []u8, ssid: []const u8, passphrase: []const u8) []const u8 {
     var w: std.Io.Writer = .fixed(buf);
-    w.print("connect {x} ", .{ssid}) catch {};
+    w.print("wifi connect {x} ", .{ssid}) catch {};
     if (passphrase.len == 0) w.writeAll("-") catch {} else w.print("{x}", .{passphrase}) catch {};
     w.writeAll("\n") catch {};
     return w.buffered();
@@ -228,19 +229,22 @@ pub fn ethernetRequest(buf: []u8, a: Addressing) []const u8 {
     return w.buffered();
 }
 
-pub const Request = union(enum) {
-    status,
+/// A Wi-Fi request.
+pub const WifiRequest = union(enum) {
     scan,
     disconnect,
     connect: struct { ssid_buf: [32]u8, ssid_len: u8, pass_buf: [63]u8, pass_len: u8 },
+};
+
+pub const Request = union(enum) {
+    status,
     ethernet: Addressing,
+    wifi: WifiRequest,
 
     pub fn parse(line: []const u8) ?Request {
         var f = std.mem.tokenizeAny(u8, line, " \n");
         const kind = f.next() orelse return null;
         if (std.mem.eql(u8, kind, "status")) return .status;
-        if (std.mem.eql(u8, kind, "scan")) return .scan;
-        if (std.mem.eql(u8, kind, "disconnect")) return .disconnect;
         if (std.mem.eql(u8, kind, "ethernet")) {
             const how = f.next() orelse return null;
             if (std.mem.eql(u8, how, "dhcp")) return .{ .ethernet = .dhcp };
@@ -248,17 +252,21 @@ pub const Request = union(enum) {
             const cidr = f.next() orelse return null;
             return .{ .ethernet = .{ .static = Static.parse(cidr, f.next() orelse "-") orelse return null } };
         }
-        if (!std.mem.eql(u8, kind, "connect")) return null;
+        if (!std.mem.eql(u8, kind, "wifi")) return null;
+        const what = f.next() orelse return null;
+        if (std.mem.eql(u8, what, "scan")) return .{ .wifi = .scan };
+        if (std.mem.eql(u8, what, "disconnect")) return .{ .wifi = .disconnect };
+        if (!std.mem.eql(u8, what, "connect")) return null;
         const ssid_hex = f.next() orelse return null;
         const pass_hex = f.next() orelse return null;
-        var r: @FieldType(Request, "connect") = .{ .ssid_buf = undefined, .ssid_len = 0, .pass_buf = undefined, .pass_len = 0 };
+        var r: @FieldType(WifiRequest, "connect") = .{ .ssid_buf = undefined, .ssid_len = 0, .pass_buf = undefined, .pass_len = 0 };
         if (ssid_hex.len > 64 or ssid_hex.len % 2 != 0) return null;
         r.ssid_len = @intCast((std.fmt.hexToBytes(&r.ssid_buf, ssid_hex) catch return null).len);
         if (!std.mem.eql(u8, pass_hex, "-")) {
             if (pass_hex.len > 126 or pass_hex.len % 2 != 0) return null;
             r.pass_len = @intCast((std.fmt.hexToBytes(&r.pass_buf, pass_hex) catch return null).len);
         }
-        return .{ .connect = r };
+        return .{ .wifi = .{ .connect = r } };
     }
 };
 
@@ -337,15 +345,15 @@ pub const Report = struct {
         }
         if (r.adapter) |*a| {
             const m = a.mac;
-            w.print("adapter {s} {x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2} {s}\n", .{ a.name(), m[0], m[1], m[2], m[3], m[4], m[5], if (a.up) "up" else "down" }) catch {};
-        } else w.writeAll("none\n") catch {};
-        if (r.scanning) w.writeAll("scanning\n") catch {};
+            w.print("wifi adapter {s} {x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2} {s}\n", .{ a.name(), m[0], m[1], m[2], m[3], m[4], m[5], if (a.up) "up" else "down" }) catch {};
+        } else w.writeAll("wifi none\n") catch {};
+        if (r.scanning) w.writeAll("wifi scanning\n") catch {};
         const c = &r.connection;
-        w.print("connection {s} {s} ", .{ @tagName(c.state), @tagName(c.failure) }) catch {};
+        w.print("wifi connection {s} {s} ", .{ @tagName(c.state), @tagName(c.failure) }) catch {};
         if (c.ssid_len == 0) w.writeAll("-") catch {} else w.print("{x}", .{c.ssid()}) catch {};
         if (c.address) |a| w.print(" {d}.{d}.{d}.{d}\n", .{ a[0], a[1], a[2], a[3] }) catch {} else w.writeAll(" -\n") catch {};
         for (r.slice()) |*n| {
-            w.print("network {d} {d} {s} {x}\n", .{ n.signal_mbm, n.freq_mhz, @tagName(n.security), n.ssid() }) catch {};
+            w.print("wifi network {d} {d} {s} {x}\n", .{ n.signal_mbm, n.freq_mhz, @tagName(n.security), n.ssid() }) catch {};
         }
         w.writeAll("end\n") catch {};
         return w.buffered();
@@ -357,8 +365,12 @@ pub const Report = struct {
         var lines = std.mem.tokenizeScalar(u8, text, '\n');
         while (lines.next()) |line| {
             var f = std.mem.tokenizeScalar(u8, line, ' ');
-            const kind = f.next() orelse continue;
+            var kind = f.next() orelse continue;
             if (std.mem.eql(u8, kind, "end")) return r;
+            // Wi-Fi's lines say what about it after "wifi".
+            const is_wifi = std.mem.eql(u8, kind, "wifi");
+            if (is_wifi) kind = f.next() orelse continue;
+            if (is_wifi != !(std.mem.eql(u8, kind, "ethernet") or std.mem.eql(u8, kind, "denied"))) continue;
             if (std.mem.eql(u8, kind, "denied")) {
                 r.denied = true;
                 return r;
@@ -462,7 +474,7 @@ test "reports go through the socket as text and come back the same" {
     r.add(net("Café net", -6100, 5180, .wpa3));
     var buf: [1024]u8 = undefined;
     const text = r.write(&buf);
-    try testing.expect(std.mem.startsWith(u8, text, "ethernet - dhcp\nadapter wlan0 b8:27:eb:01:02:03 up\nscanning\nconnection idle none - -\nnetwork -5400 2437 wpa2 486f6d65\n"));
+    try testing.expect(std.mem.startsWith(u8, text, "ethernet - dhcp\nwifi adapter wlan0 b8:27:eb:01:02:03 up\nwifi scanning\nwifi connection idle none - -\nwifi network -5400 2437 wpa2 486f6d65\n"));
     const back = Report.parse(text).?;
     try testing.expectEqualStrings("wlan0", back.adapter.?.name());
     try testing.expectEqual(a.mac, back.adapter.?.mac);
@@ -471,23 +483,27 @@ test "reports go through the socket as text and come back the same" {
     try testing.expectEqualStrings("Café net", back.slice()[1].ssid());
     try testing.expectEqual(Security.wpa3, back.slice()[1].security);
 
-    try testing.expect(Report.parse("none\nnetwork -5400") == null);
+    try testing.expect(Report.parse("wifi none\nwifi network -5400") == null);
     try testing.expect(Report.parse("denied\n").?.denied);
-    try testing.expect(Report.parse("none\nend\n").?.adapter == null);
+    try testing.expect(Report.parse("wifi none\nend\n").?.adapter == null);
+    // Wi-Fi's words are only read after "wifi".
+    try testing.expect(!Report.parse("scanning\nend\n").?.scanning);
 }
 
 test "requests and the connection state go through the socket" {
     var buf: [256]u8 = undefined;
     const req = connectRequest(&buf, "Home", "correct horse");
-    try testing.expectEqualStrings("connect 486f6d65 636f727265637420686f727365\n", req);
-    const r = Request.parse(req).?.connect;
+    try testing.expectEqualStrings("wifi connect 486f6d65 636f727265637420686f727365\n", req);
+    const r = Request.parse(req).?.wifi.connect;
     try testing.expectEqualStrings("Home", r.ssid_buf[0..r.ssid_len]);
     try testing.expectEqualStrings("correct horse", r.pass_buf[0..r.pass_len]);
-    const open = Request.parse(connectRequest(&buf, "Cafe", "")).?.connect;
+    const open = Request.parse(connectRequest(&buf, "Cafe", "")).?.wifi.connect;
     try testing.expectEqual(@as(u8, 0), open.pass_len);
-    try testing.expect(Request.parse("scan\n").? == .scan);
-    try testing.expect(Request.parse("disconnect\n").? == .disconnect);
-    try testing.expect(Request.parse("connect zz -\n") == null);
+    try testing.expect(Request.parse("wifi scan\n").?.wifi == .scan);
+    try testing.expect(Request.parse("wifi disconnect\n").?.wifi == .disconnect);
+    try testing.expect(Request.parse("wifi connect zz -\n") == null);
+    try testing.expect(Request.parse("scan\n") == null);
+    try testing.expect(Request.parse("wifi\n") == null);
     try testing.expect(Request.parse("reboot\n") == null);
 
     var rep: Report = .{};
@@ -534,5 +550,5 @@ test "the wired adapter's addressing goes through the socket" {
     const back = Report.parse(text).?;
     try testing.expectEqualStrings("eth0", back.ethernet.adapter.?.name());
     try testing.expectEqual(r.ethernet.addressing.static, back.ethernet.addressing.static);
-    try testing.expect(Report.parse("ethernet - dhcp\nnone\nend\n").?.ethernet.adapter == null);
+    try testing.expect(Report.parse("ethernet - dhcp\nwifi none\nend\n").?.ethernet.adapter == null);
 }
