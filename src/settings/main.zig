@@ -161,7 +161,6 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
                 .maximized = win.maximized,
                 .bar_scale = bar_scale,
                 .scale = scale,
-                .width = @floatFromInt(width),
             });
             if (window_ui.changed()) {
                 idle = false;

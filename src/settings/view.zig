@@ -1,9 +1,10 @@
-//! The settings app's window, as widgets: cards about the system (its
-//! build, Linux and the board), Ethernet, the resources in use (with
-//! meters) and the Wi-Fi networks around, in two columns. Choosing a Wi-Fi
-//! network shows a password field (for WPA2) and a Connect button;
-//! choosing a static address for Ethernet shows fields for it. What is
-//! asked of the network manager goes to the main loop through `Actions`.
+//! The settings app's window, as widgets: pages, chosen with the tabs on
+//! the left, about the Wi-Fi networks around, Ethernet, the resources in
+//! use (with meters) and the system (its build, Linux and the board).
+//! Choosing a Wi-Fi network shows a password field (for WPA2) and a
+//! Connect button; choosing a static address for Ethernet shows fields for
+//! it. What is asked of the network manager goes to the main loop through
+//! `Actions`.
 
 const std = @import("std");
 const ui = @import("ui");
@@ -51,9 +52,6 @@ pub const Settings = struct {
     /// pixels high, and scale with it (not with the window: text stays
     /// the same size when it is restored).
     scale: f32,
-    /// The window's width: the cards are in two columns if they fit, else
-    /// one.
-    width: f32 = 1920,
     /// The title bar's buttons (close, and maximize, which shows whether
     /// the window is), pressing the bar (to move the window), and its scale
     /// (the screen's, so every app's title bar is the same).
@@ -64,6 +62,8 @@ pub const Settings = struct {
     bar_scale: f32 = 1,
 
     pub const State = struct {
+        /// The page shown.
+        page: Page = .wifi,
         /// The Wi-Fi network chosen (its SSID), and the password typed.
         selected_buf: [32]u8 = undefined,
         selected_len: u8 = 0,
@@ -115,17 +115,32 @@ pub const Settings = struct {
     pub fn build(self: *const Settings, cx: *ui.Context, state: *State) ui.Widget {
         const s = self.scale;
         const b: Builder = .{ .cx = cx, .s = s };
-        const system = self.systemCard(b);
-        const network = self.networkCard(b, state);
-        const resources = self.resourcesCard(b);
-        const wifi = self.wifiCard(b, state);
-        const two_columns = self.width >= two_column_width * s;
-        const cards = if (two_columns) cx.make(ui.Row{ .cross_axis_alignment = .start, .spacing = 20 * s, .children = &.{
-            cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 20 * s, .children = &.{ system, network } }) }),
-            cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 20 * s, .children = &.{ resources, wifi } }) }),
-        } }) else cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 20 * s, .children = &.{ system, resources, network, wifi } });
-        // What does not fit the window scrolls.
-        const content = cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(@floor(32 * s)), .child = cards }) });
+        const page = switch (state.page) {
+            .wifi => self.wifiCard(b, state),
+            .ethernet => self.networkCard(b, state),
+            .resources => self.resourcesCard(b),
+            .system => self.systemCard(b),
+        };
+        const t = cx.theme();
+        var tabs: [std.meta.fields(Page).len]ui.Widget = undefined;
+        inline for (&tabs, std.meta.fields(Page)) |*w, field| {
+            const p: Page = @enumFromInt(field.value);
+            w.* = cx.make(Tab{ .label = p.label(), .selected = state.page == p, .scale = s, .on_press = pick(cx, state, p) });
+        }
+        const sidebar = cx.make(ui.SizedBox{ .width = @round(190 * s), .child = cx.make(ui.Decorated{
+            .color = t.surface_container,
+            .child = cx.make(ui.Padding{ .padding = .all(@round(12 * s)), .child = cx.make(ui.Column{
+                .cross_axis_alignment = .stretch,
+                .spacing = @round(4 * s),
+                .children = &tabs,
+            }) }),
+        }) });
+        // A page longer than the window scrolls; another page starts at
+        // its top.
+        const content = cx.make(ui.Row{ .cross_axis_alignment = .stretch, .children = &.{
+            sidebar,
+            cx.make(ui.Expanded{ .child = cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(@floor(24 * s)), .child = page }) }).withKey(@as(u64, @intFromEnum(state.page)) + 1) }),
+        } });
         return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &.{
             cx.make(ui.TitleBar{
                 .title = "Settings",
@@ -175,13 +190,6 @@ pub const Settings = struct {
         });
     }
 
-    /// The narrowest window (at scale 1) with the cards in two columns.
-    pub const two_column_width = 1200;
-
-    /// The most networks listed (fewer while the form for joining one is
-    /// open).
-    pub const max_listed = 5;
-
     fn wifiCard(self: *const Settings, b: Builder, state: *State) ui.Widget {
         const cx = b.cx;
         const report = self.manager orelse return b.card("Wi-Fi", &.{b.item("Status", "The network manager is not running")});
@@ -200,29 +208,13 @@ pub const Settings = struct {
             if (std.mem.eql(u8, n.ssid(), sel)) break n;
         } else null else null;
         const form = chosen != null and !(conn.state.joined() and std.mem.eql(u8, conn.ssid(), chosen.?.ssid()));
-        // The form and the Disconnect button take room: fewer networks then.
-        const limit: usize = max_listed - @as(usize, if (form) 1 else 0) - @as(usize, if (connectionBusy(conn)) 1 else 0);
-        // The strongest, and the chosen one even if it is weaker.
-        var picks: [max_listed]*const info.manager.Network = undefined;
-        const shown = @min(nets.len, limit);
-        for (picks[0..shown], nets[0..shown]) |*p, *n| p.* = n;
-        if (chosen) |c| if (std.mem.indexOfScalar(*const info.manager.Network, picks[0..shown], c) == null) {
-            picks[shown - 1] = c;
-        };
-        for (picks[0..shown]) |n| {
+        for (nets) |*n| {
             const is_chosen = chosen != null and n == chosen.?;
             const joined = conn.state != .idle and conn.state != .failed and std.mem.eql(u8, conn.ssid(), n.ssid());
             rows.append(a, b.network(n, is_chosen, joined, choose(cx, state, n.ssid()))) catch {};
             if (is_chosen and form) rows.append(a, self.joinForm(b, state, n)) catch {};
         }
-        const footer = if (nets.len == 0)
-            (if (report.scanning) "Scanning…" else "No networks found")
-        else if (nets.len > shown)
-            cx.fmt("Showing {d} of {d} networks{s}", .{ shown, nets.len, if (report.scanning) ", scanning…" else "" })
-        else if (report.scanning)
-            "Scanning…"
-        else
-            "";
+        const footer = if (report.scanning) "Scanning…" else if (nets.len == 0) "No networks found" else "";
         if (footer.len > 0) rows.append(a, b.item("", footer)) catch {};
         return b.card("Wi-Fi", rows.items);
     }
@@ -422,6 +414,71 @@ const Addressing = struct {
 /// Whether a connection is being made or kept (and can be ended).
 fn connectionBusy(c: *const info.manager.Connection) bool {
     return c.state != .idle and !(c.state == .failed and c.failure != .lost);
+}
+
+/// The pages, in the order of their tabs.
+pub const Page = enum {
+    wifi,
+    ethernet,
+    resources,
+    system,
+
+    pub fn label(p: Page) []const u8 {
+        return switch (p) {
+            .wifi => "Wi-Fi",
+            .ethernet => "Ethernet",
+            .resources => "Resources",
+            .system => "System",
+        };
+    }
+};
+
+/// A tab: pressing it shows its page.
+const Tab = struct {
+    label: []const u8,
+    selected: bool,
+    scale: f32,
+    on_press: ?ui.Callback,
+
+    pub const State = struct {
+        interaction: ui.Interaction = .{},
+    };
+
+    pub fn build(self: *const Tab, cx: *ui.Context, state: *State) ui.Widget {
+        const s = self.scale;
+        const t = cx.theme();
+        const height = @round(48 * s);
+        const highlight: ?gfx.Color = if (self.selected) t.secondary_container else if (state.interaction.hovered) t.on_surface.withAlpha(0.08) else null;
+        return cx.make(ui.Pressable{ .on_press = self.on_press, .interaction = &state.interaction, .child = cx.make(ui.Decorated{
+            .color = highlight,
+            .radius = .all(height / 2),
+            .child = cx.make(ui.SizedBox{ .height = height, .child = cx.make(ui.Padding{ .padding = .symmetric(@round(20 * s), 0), .child = cx.make(ui.Row{
+                .cross_axis_alignment = .center,
+                .children = &.{cx.make(ui.Expanded{ .child = cx.make(ui.Text{
+                    .text = self.label,
+                    .style = .{ .size = 18 * s, .color = if (self.selected) t.on_surface else t.on_surface_variant },
+                    .wrap = false,
+                    .ellipsis = true,
+                }) })},
+            }) }) }),
+        }) });
+    }
+};
+
+/// Pressing a tab shows its page.
+const Pick = struct {
+    state: *Settings.State,
+    page: Page,
+
+    fn press(p: *Pick) void {
+        p.state.page = p.page;
+    }
+};
+
+fn pick(cx: *ui.Context, state: *Settings.State, page: Page) ?ui.Callback {
+    const p = cx.ui.arena().create(Pick) catch return null;
+    p.* = .{ .state = state, .page = page };
+    return .of(p, Pick.press);
 }
 
 /// Pressing a network chooses it (or, again, unchooses it).
@@ -777,15 +834,25 @@ test "everything is shown, and fits the window at the shell's sizes" {
     defer u.destroy();
     const d = sample();
     const wifi = sampleWifi();
-    // Maximized, and restored to half the size, with everything still at
-    // the whole screen's scale.
-    for (shell_sizes) |size| {
-        u.frame(size[0], size[1], 0, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .scale = scaleFor(size[2], size[3]), .width = @floatFromInt(size[0]), .bar_scale = @as(f32, @floatFromInt(size[2])) / 1920 });
-        try testing.expect(!overflows(u.root.?));
-    }
     var all: std.ArrayList(u8) = .empty;
     defer all.deinit(testing.allocator);
-    texts(u.root.?, &all);
+    // Every page, maximized and restored to half the size, with everything
+    // still at the whole screen's scale.
+    var frame_no: u64 = 0;
+    for (std.enums.values(Page)) |page| {
+        for (shell_sizes) |size| {
+            frame_no += 1;
+            u.frame(size[0], size[1], frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .scale = scaleFor(size[2], size[3]), .bar_scale = @as(f32, @floatFromInt(size[2])) / 1920 });
+            try testing.expect(!overflows(u.root.?));
+        }
+        texts(u.root.?, &all);
+        // The next page, from its tab.
+        if (@as(usize, @intFromEnum(page)) + 1 < std.enums.values(Page).len) {
+            const next: Page = @enumFromInt(@as(usize, @intFromEnum(page)) + 1);
+            click(u, up(findText(u.root.?, next.label()).?, Tab).?);
+            try testing.expectEqual(next, u.root.?.state(Settings.State).page);
+        }
+    }
     for ([_][]const u8{
         "574d538",
         "Raspberry Pi Zero W Rev 1.1",
@@ -808,7 +875,10 @@ test "everything is shown, and fits the window at the shell's sizes" {
         "Not connected: no cable",
         "192.168.1.1",
         "wlan0 (b8:27:eb:01:02:03)",
-        "Showing 5 of 11 networks, scanning…",
+        "Scanning…",
+        // Every network: the page scrolls.
+        "Further",
+        "bad?name",
         "Not connected",
         "Home",
         "WPA2 · 5 GHz",
@@ -834,12 +904,14 @@ test "without a network adapter, the network card says so" {
     defer u.destroy();
     const d = sample();
     const none: info.Network = .{};
-    u.frame(1920, 960, 0, Settings{ .commit = "x", .system = &d.sys, .usage = .{}, .network = &none, .scale = 1 });
-    var all: std.ArrayList(u8) = .empty;
-    defer all.deinit(testing.allocator);
-    texts(u.root.?, &all);
-    try testing.expect(std.mem.indexOf(u8, all.items, "No adapter: plug in a USB Ethernet adapter") != null);
-    try testing.expect(std.mem.indexOf(u8, all.items, "Measuring") != null);
+    const settings: Settings = .{ .commit = "x", .system = &d.sys, .usage = .{}, .network = &none, .scale = 1 };
+    u.frame(1920, 960, 0, settings);
+    u.root.?.state(Settings.State).page = .ethernet;
+    u.frame(1920, 960, 1, settings);
+    try testing.expect(findText(u.root.?, "No adapter: plug in a USB Ethernet adapter") != null);
+    u.root.?.state(Settings.State).page = .resources;
+    u.frame(1920, 960, 2, settings);
+    try testing.expect(findText(u.root.?, "Measuring…") != null);
 }
 
 /// The scale for a screen whose maximized windows are `width`×`height`:
@@ -900,6 +972,13 @@ fn findType(node: *ui.Node, comptime T: type) ?*ui.Node {
     return null;
 }
 
+/// The nearest node above `n` (or `n`) whose widget is a `T`.
+fn up(n: *ui.Node, comptime T: type) ?*ui.Node {
+    var at: ?*ui.Node = n;
+    while (at) |a| : (at = a.parent) if (a.widget.is(T)) return a;
+    return null;
+}
+
 fn click(u: *ui.Ui, n: *ui.Node) void {
     const at = n.position();
     const p: ui.Point = .{ at[0] + 4, at[1] + n.size.h / 2 };
@@ -925,7 +1004,7 @@ test "choosing a network, typing its password and connecting" {
     joining.connection = .{ .state = .authenticating };
     joining.connection.setSsid("Cafe");
     for ([_]*const info.manager.Report{ &wifi, &joining }) |report| for (shell_sizes) |size| {
-        u.frame(size[0], size[1], 2, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = report, .scale = scaleFor(size[2], size[3]), .width = @floatFromInt(size[0]) });
+        u.frame(size[0], size[1], 2, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = report, .scale = scaleFor(size[2], size[3]) });
         try testing.expect(!overflows(u.root.?));
     };
     u.frame(1920, 960, 3, settings);
@@ -992,6 +1071,8 @@ test "choosing a static address for Ethernet, and DHCP again" {
             uu.frame(size[0], size[1], n.*, Settings{ .commit = "x", .actions = acts, .system = &dd.sys, .usage = dd.usage, .network = &dd.net, .manager = r, .scale = scaleFor(size[0], size[1]) });
         }
     }.draw;
+    Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
+    click(u, up(findText(u.root.?, "Ethernet").?, Tab).?);
     Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
     try testing.expect(findText(u.root.?, "Addressing") != null);
     try testing.expect(findText(u.root.?, "192.168.1.42/24 (DHCP)") != null);
