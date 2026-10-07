@@ -38,10 +38,10 @@ You will also need:
 
 ## Download
 
-**[Download Dazzle (dazzle.img.xz)](https://github.com/robert-ancell/stardust/releases/latest/download/dazzle.img.xz)**
+**[Download Dazzle (dazzle.img.xz)](https://github.com/robert-ancell/dazzle/releases/latest/download/dazzle.img.xz)**
 
 This is built automatically from the latest code
-([release page](https://github.com/robert-ancell/stardust/releases/latest),
+([release page](https://github.com/robert-ancell/dazzle/releases/latest),
 with its checksum). Dazzle is a work in progress: expect things to be
 missing or to change.
 
@@ -110,7 +110,7 @@ computer's name in your router's list of devices) and open
 showing new messages as they come.
 
 Please report problems, with the log if you can, in the
-[issues](https://github.com/robert-ancell/stardust/issues).
+[issues](https://github.com/robert-ancell/dazzle/issues).
 
 ## What's missing
 
