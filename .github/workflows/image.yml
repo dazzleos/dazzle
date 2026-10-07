@@ -1,7 +1,8 @@
 # Tests and builds the SD card image and the apps' archives on every push
 # and pull request, and publishes them as the "latest" release on pushes to
 # the default branch (README.md's download link; Settings downloads the app
-# catalogue, apps.json, and apps from there). See ARCHITECTURE.md,
+# catalogue, apps.json, and apps from there, and updates: os.json and
+# dazzle-os.tar.xz). See ARCHITECTURE.md,
 # Continuous integration.
 name: Image
 
@@ -76,6 +77,9 @@ jobs:
           # The apps' archives and their catalogue, which Settings downloads
           # from beside the image.
           cp zig-out/apps/* dist/
+          # The system as an update, and its manifest, which Settings
+          # checks for newer systems.
+          cp zig-out/os/* dist/
           ls -l dist
 
       - uses: actions/upload-artifact@v4

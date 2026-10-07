@@ -15,14 +15,15 @@
 //!    user the input devices (USB keyboards and mice), now and when they
 //!    are plugged in; waits for the vc4 GPU and gives the Dazzle user access
 //!    to its device nodes;
-//! 5. until setup has finished, starts the system manager (see system.zig),
-//!    which prepares the card and names the computer for the setup app,
-//!    and makes the second OS slot (also later, if that was cut off);
+//! 5. starts the system manager (see system.zig), which prepares the card
+//!    and names the computer for the setup app, makes the second OS slot
+//!    (also later, if that was cut off), and installs updates for the
+//!    settings app;
 //! 6. starts /os/shell/dazzle-shell, the Wayland compositor, as the Dazzle
 //!    user (with --setup until setup has finished), with its output going
 //!    to the kernel log; its dock starts the apps;
 //! 7. reaps exited processes forever (PID 1 must never exit), restarting the
-//!    network and device managers if they ever stop.
+//!    network, device and system managers if they ever stop.
 //!
 //! The Dazzle user is just a user ID (see `sys.user`): there are no
 //! accounts, passwords or logins.
@@ -34,7 +35,6 @@ const logserver = @import("logserver.zig");
 const network = @import("network.zig");
 const devices = @import("devices.zig");
 const storage = @import("storage.zig");
-const slots = @import("slots.zig");
 const system = @import("system.zig");
 const build_info = @import("build_info");
 
@@ -62,11 +62,10 @@ pub fn main() void {
     // Until setup has finished, the shell runs the setup app (and nothing
     // else), and the system manager prepares the card and names the
     // computer for it. It also makes the second OS slot, if that is still
-    // to be made.
-    if (!card.setup_done or (card.card and slots.otherMissing(card.slot orelse 'a')))
-        _ = system.start(card.card, card.mounted, card.slot, card.setup_done);
+    // to be made, and later installs updates.
+    const system_pid = system.start(card.card, card.mounted, card.slot, card.setup_done);
     const shell_pid = startShell(!card.setup_done);
-    reapForever(shell_pid, network_pid, devices_pid);
+    reapForever(shell_pid, network_pid, devices_pid, system_pid, card);
 }
 
 fn mountPseudoFilesystems() void {
@@ -161,9 +160,10 @@ fn startShell(setup: bool) ?linux.pid_t {
 
 /// Waits for child processes, logging how the shell ends. Processes whose
 /// parent exits are re-parented to init, so this also collects those.
-fn reapForever(shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, first_devices_pid: ?linux.pid_t) noreturn {
+fn reapForever(shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, first_devices_pid: ?linux.pid_t, first_system_pid: ?linux.pid_t, card: storage.Boot) noreturn {
     var network_pid = first_network_pid;
     var devices_pid = first_devices_pid;
+    var system_pid = first_system_pid;
     while (true) {
         var status: u32 = 0;
         const rc = linux.wait4(-1, &status, 0, null);
@@ -187,6 +187,14 @@ fn reapForever(shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, first_d
             print("dazzle: device manager stopped (status 0x{x}); restarting it in 5 s\n", .{status});
             sys.sleepMs(5000);
             devices_pid = devices.start();
+            continue;
+        }
+        if (pid == system_pid) {
+            print("dazzle: system manager stopped (status 0x{x}); restarting it in 5 s\n", .{status});
+            sys.sleepMs(5000);
+            // What it did meanwhile (setup, say) is on the card.
+            const now = storage.state(card);
+            system_pid = system.start(now.card, now.mounted, now.slot, now.setup_done);
             continue;
         }
         if (pid != shell_pid) continue;

@@ -100,8 +100,8 @@ bootcode.bin start.elf      the firmware, which must be here: one copy
 fixup.dat LICENCE.broadcom
 config.txt                  the firmware's settings; os_prefix picks the OS slot
 slot-a/                     OS slot A: a whole system (zImage, the boards'
-                            device trees, initramfs.cpio, and cmdline.txt,
-                            with dazzle.slot=a)
+                            device trees and overlays/, initramfs.cpio,
+                            version, and cmdline.txt, with dazzle.slot=a)
 slot-b/                     OS slot B: the same, with dazzle.slot=b; made on
                             the card on the first start
 apps/                       the apps the image comes with, one copy for
@@ -109,8 +109,9 @@ apps/                       the apps the image comes with, one copy for
 ```
 
 Everything but the firmware, the apps and `/data` has two copies, so that
-an update (to come) can write the slot not in use and switch `os_prefix`
-to it, keeping the other to fall back to. Slot A starts. The firmware
+an update can write the slot not in use and switch `os_prefix` to it,
+keeping the other to fall back to (see Updating the system). Slot A
+starts. The firmware
 loads the slot's kernel, device tree and initramfs into memory; init
 mounts the partition, read-only, at `/boot`; the rest of the card is
 `/data` (below). The apps are the user's, in `/data/apps`, shown at
@@ -150,7 +151,8 @@ download link points to (`releases/latest/download/dazzle.img.xz`), with a
 SHA-256 sum beside it, and with it the apps: each app's archive
 (`<name>.tar.xz`) and the catalogue describing them (`apps.json`), which
 the settings app downloads from there (`zig-out/apps`; see Installing
-apps).
+apps), and the system as an update (`dazzle-os.tar.xz`, with `os.json`
+describing it; `zig-out/os`; see Updating the system).
 
 Building the kernel is most of a first build, so CI caches what it can
 reuse: Zig (keyed on `scripts/zig`), the Linux source (keyed on
@@ -718,8 +720,9 @@ partitions mounted on it) is kept simple:
 /data/                      the SD card's space for files, once setup has
                             prepared it: /data/system (the computer's name,
                             and a mark that setup has finished; root's),
-                            /data/user (the user's) and /data/apps (the
-                            apps, the user's too)
+                            /data/user (the user's), /data/apps (the
+                            apps, the user's too) and /data/update (where
+                            Settings downloads updates; the user's)
 /dev /proc /sys             mounted by init, for Linux
 ```
 
@@ -885,10 +888,10 @@ Click the gear in the dock (Settings is one of the shell's own apps, in
 `/os/shell`). Its window has five pages, chosen with the tabs on the left, with the figures that
 change read again every second (`src/settings/info.zig`):
 
-- **System:** the build (git commit), Linux's version, how long the system
-  has been up, the board (from the device tree, which also tells the chip,
-  CPU and GPU), the hostname, and the board's serial number when the
-  firmware gives it.
+- **System:** the build (git commit, and when it was committed), updates
+  (below), Linux's version, how long the system has been up, the board
+  (from the device tree, which also tells the chip, CPU and GPU), the
+  hostname, and the board's serial number when the firmware gives it.
 - **Resources:** how busy the CPU is, the SoC's temperature, memory, the
   GPU's memory (the CMA pool all GPU buffers come from: the V3D has no
   MMU), and storage: a bar of what the system, the apps and the user's
@@ -1030,6 +1033,71 @@ certificates are valid only for a while, so until the clock is set
 downloads say so. SNTP is not authenticated, so the clock is as
 trustworthy as the network; the archives' checksums come from the
 catalogue, fetched over HTTPS.
+
+### Updating the system
+
+Each OS slot has a `version` file: when its source was committed (seconds
+since 1970) and the commit, as `1791331200 de14aa2`. Newer systems have
+later times. The build writes it in slot A, and also packs the slot's
+files (all but `cmdline.txt`, which says which slot it is) as an update:
+`dazzle-os.tar.xz`, a tar archive of the folder `os` compressed with xz,
+and `os.json` describing it (`tools/mkos.zig`; `zig-out/os`):
+
+```json
+{
+  "version": "de14aa2",
+  "time": 1791331200,
+  "file": "dazzle-os.tar.xz",
+  "size": 4093012,
+  "sha256": "<the archive's SHA-256, in hex>"
+}
+```
+
+CI publishes them beside the image, and the settings app gets them from
+there, as it does apps (`src/settings/update.zig`):
+
+- **Checking:** when the System page is first shown (and with Check
+  again), it downloads `os.json` to `/data/update` (the user's, made by
+  init once `/data` is there). An update is offered when it was committed
+  after the running system (the build's own `commit_time`) and is in
+  neither slot: the system manager says what each holds, so one already
+  installed is not offered again.
+- **Downloading:** Download fetches the archive to `/data/update`, checks
+  its size and SHA-256 against `os.json`, and asks the system manager to
+  install it, giving it the SHA-256 (`update <sha256>`; see
+  `sys.system`).
+- **Installing** (`src/init/update.zig`): the manager does it in a child
+  process, so it goes on answering. The child reads the archive into
+  memory and checks its SHA-256 again (the file is the user's: it is
+  checked as it is used), makes the boot partition writable, and unpacks
+  it into `slot-<x>.new/`, `<x>` being the slot not running. It accepts
+  only the folder's plain files and folders, needs a kernel, an initramfs
+  and a version, and gives the slot the running slot's command line with
+  `dazzle.slot=<x>`. Then the slot that was there (the system before the
+  running one) is deleted, `slot-<x>.new/` becomes `slot-<x>/`, and
+  `config.txt` is rewritten (as `config.txt.new`, then renamed) with
+  `os_prefix=slot-<x>/`, so the firmware starts it next time. The archive
+  is then deleted. Until `config.txt` changes, the running system is what
+  starts, so a power cut part way leaves the card as it was, at worst
+  without the other slot (made again by the next update, or by the
+  copier).
+- **Restarting:** once the manager says the next start is the other slot,
+  Updates offers Restart, which asks the manager to restart (`restart`).
+  It keeps `CAP_SYS_BOOT` for this, flushes what is written, and restarts
+  through the SoC's watchdog (`CONFIG_BCM2835_WDT`, the board's restart
+  handler).
+
+The system manager now runs for as long as the system does (init starts
+it at boot, and again if it stops), answering the setup app (`status`,
+`prepare`, `finish`) and the settings app (`status`, `update`, `restart`),
+each only its own requests. Its report says which slot is running, which
+starts next and what each holds.
+
+The previous system stays in the other slot until the next update, but
+nothing switches back to it by itself yet: if an update does not start,
+`os_prefix` in `config.txt` can be changed back by hand on another
+computer. Updates are as trustworthy as the HTTPS server they come from:
+they are not signed.
 
 ### The Files app
 
@@ -1248,6 +1316,10 @@ GPU or display).
   addressing chosen in Settings in `/data`; a way to shut down cleanly.
 - Apps: updating installed ones (the catalogue's `version`), signing the
   catalogue, and apps from more than one place.
+- Updates: signing them; going back to the other slot from Settings; and
+  falling back by itself when an updated system does not start (the
+  firmware's `tryboot` is only on the Pi 4 and 5, so this needs another
+  way: a count of starts kept on the boot partition, say).
 - The shell: `wl_output`, more than one visible window, blending for
   translucent windows, pointer acceleration, keymaps other than US,
   multi-finger gestures, and kinetic scrolling.

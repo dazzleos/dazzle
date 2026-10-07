@@ -47,6 +47,7 @@ pub fn start() ?linux.pid_t {
         print("dazzle: network: cannot drop privileges ({s})\n", .{@errorName(err)});
         linux.exit(1);
     };
+    sys.ignoreBrokenPipes();
     run() catch |err| print("dazzle: network: {s}\n", .{@errorName(err)});
     linux.exit(1);
 }

@@ -149,30 +149,10 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     }
 }
 
-/// Sends the system manager a request and returns its report; null if it
-/// cannot be reached.
+/// Sends the system manager a request (preparing the card can take it a
+/// moment to answer).
 fn ask(request: []const u8) ?proto.Report {
-    const path = proto.socket_path;
-    const fd: linux.fd_t = @intCast(sys.check(linux.socket(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0)) catch return null);
-    defer sys.close(fd);
-    var addr: linux.sockaddr.un = .{ .path = @splat(0) };
-    @memcpy(addr.path[0..path.len], path);
-    _ = sys.check(linux.connect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.un))) catch return null;
-    _ = sys.check(linux.write(fd, request.ptr, request.len)) catch return null;
-    // Preparing the card can take the manager a moment to answer.
-    var buf: [512]u8 = undefined;
-    var len: usize = 0;
-    const deadline = sys.nowNs() + 5 * std.time.ns_per_s;
-    while (len < buf.len) {
-        const now = sys.nowNs();
-        if (now >= deadline) return null;
-        var pfd = [_]linux.pollfd{.{ .fd = fd, .events = linux.POLL.IN, .revents = 0 }};
-        if (linux.poll(&pfd, 1, @intCast((deadline - now) / std.time.ns_per_ms + 1)) == 0) return null;
-        const n = sys.check(linux.read(fd, buf[len..].ptr, buf.len - len)) catch return null;
-        if (n == 0) break;
-        len += n;
-    }
-    return proto.Report.parse(buf[0..len]);
+    return proto.ask(request, 5000);
 }
 
 fn openWindow(gpa: std.mem.Allocator, init: std.process.Init.Minimal, dev: *vc4.Device) !*app.Window {

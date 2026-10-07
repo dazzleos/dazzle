@@ -1,14 +1,16 @@
 //! The system manager: on the first run, while the setup app runs, it
-//! prepares the SD card's free space for files and names the computer.
+//! prepares the SD card's free space for files and names the computer;
+//! later it installs updates of the system for the settings app.
 //!
-//! Init forks it until setup has finished, and while an OS slot is to be
-//! made (below). It runs as the Dazzle user,
-//! keeping only the capabilities this needs: writing the card, mounting it
-//! and setting the hostname (CAP_SYS_ADMIN), writing the card's device and
-//! the root-owned /data (CAP_DAC_OVERRIDE), and giving /data/system to root
-//! (CAP_CHOWN). It listens on /os/sockets/system (see `sys.system` for
-//! the protocol) and answers only the setup app: the program the
-//! connecting process runs must be /os/shell/dazzle-setup.
+//! Init forks it at boot (and again if it stops). It runs as the Dazzle
+//! user, keeping only the capabilities this needs: writing the card,
+//! mounting it and setting the hostname (CAP_SYS_ADMIN), writing the card's
+//! device, the root-owned /data and the boot partition (CAP_DAC_OVERRIDE),
+//! giving /data/system to root (CAP_CHOWN), and restarting the computer
+//! (CAP_SYS_BOOT). It listens on /os/sockets/system (see `sys.system` for
+//! the protocol) and answers only the setup and settings apps, each only
+//! what is theirs to ask: the program the connecting process runs must be
+//! /os/shell/dazzle-setup or /os/shell/dazzle-settings.
 //!
 //! Preparing (asked for when setup starts, so it goes on while the user
 //! fills in the pages): a partition after the system's to the end of the
@@ -20,8 +22,13 @@
 //!
 //! Meanwhile, from the start, it copies the running OS slot to the other
 //! (slots.zig), the image having only one, a slice at a time like
-//! formatting; it ends once that is done too. (If setup has finished, as
-//! when the power went before the copy did, it only copies.)
+//! formatting. (If setup has finished, as when the power went before the
+//! copy did, it only copies.)
+//!
+//! Updating (update.zig): Settings downloads an update and asks for it to
+//! be installed; a child process unpacks it into the OS slot not running
+//! and has the firmware start that slot next time. Settings then offers to
+//! restart, which the manager does.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -30,6 +37,7 @@ const storage = @import("storage.zig");
 const mkfs = @import("mkfs.zig");
 const slots = @import("slots.zig");
 const apps = @import("apps.zig");
+const update = @import("update.zig");
 
 const proto = sys.system;
 const print = sys.print;
@@ -51,11 +59,13 @@ pub fn start(card: bool, mounted: bool, slot: ?u8, setup_done: bool) ?linux.pid_
             return null;
         },
     }
-    sys.dropPrivilegesKeeping(&.{ .sys_admin, .dac_override, .chown }) catch |err| {
+    sys.dropPrivilegesKeeping(&.{ .sys_admin, .dac_override, .chown, .sys_boot }) catch |err| {
         print("dazzle: system: cannot drop privileges ({s})\n", .{@errorName(err)});
         linux.exit(1);
     };
-    var m: Manager = .{ .report = .{ .storage = if (mounted) .ready else if (card) .unprepared else .none }, .finished = setup_done };
+    sys.ignoreBrokenPipes();
+    var m: Manager = .{ .report = .{ .storage = if (mounted) .ready else if (card) .unprepared else .none, .slot = if (card) slot orelse 'a' else null }, .finished = setup_done };
+    m.readSlots();
     var uts: linux.utsname = undefined;
     if (linux.errno(linux.uname(&uts)) == .SUCCESS) m.report.hostname = proto.Hostname.parse(std.mem.sliceTo(&uts.nodename, 0)) orelse .{};
     if (card) m.copier = slots.Copier.start(slot orelse 'a') catch |err| blk: {
@@ -63,7 +73,7 @@ pub fn start(card: bool, mounted: bool, slot: ?u8, setup_done: bool) ?linux.pid_
         break :blk null;
     };
     m.run() catch |err| print("dazzle: system: {s}\n", .{@errorName(err)});
-    linux.exit(if (m.finished) 0 else 1);
+    linux.exit(1);
 }
 
 const Manager = struct {
@@ -73,7 +83,19 @@ const Manager = struct {
     fd: ?linux.fd_t = null,
     /// Copying the OS slot.
     copier: ?slots.Copier = null,
+    /// Installing an update.
+    installer: ?update.Installer = null,
+    /// Setup has finished.
     finished: bool = false,
+    /// Settings asked to restart (once it has its answer).
+    restart: bool = false,
+
+    /// What the slots hold, and which starts next.
+    fn readSlots(m: *Manager) void {
+        if (m.report.slot == null) return;
+        m.report.next = slots.next();
+        for (&m.report.versions, "ab") |*v, s| v.* = slots.version(s);
+    }
 
     fn run(m: *Manager) !void {
         const path = proto.socket_path;
@@ -82,48 +104,58 @@ const Manager = struct {
             sys.close(listener);
             _ = linux.unlink(path);
         }
-        var clients: [max_clients]?linux.fd_t = @splat(null);
-        while (!m.finished or m.copier != null) {
+        const Conn = struct { fd: linux.fd_t, who: proto.Client };
+        var clients: [max_clients]?Conn = @splat(null);
+        while (true) {
             // While formatting or copying, only look at the socket between
             // slices.
             const busy = m.formatter != null or m.copier != null;
             if (m.formatter != null) m.format();
             if (m.copier != null) m.copySlot();
+            if (m.installer) |*i| if (i.finished()) |how| {
+                m.installer = null;
+                m.report.update = if (how == .none) .ready else .failed;
+                m.report.update_failure = how;
+                m.readSlots();
+            };
 
             var fds: [1 + max_clients]linux.pollfd = undefined;
             fds[0] = .{ .fd = listener, .events = linux.POLL.IN, .revents = 0 };
-            for (clients, fds[1..]) |c, *f| f.* = .{ .fd = c orelse -1, .events = linux.POLL.IN, .revents = 0 };
+            for (clients, fds[1..]) |c, *f| f.* = .{ .fd = if (c) |conn| conn.fd else -1, .events = linux.POLL.IN, .revents = 0 };
             _ = linux.poll(&fds, fds.len, if (busy) 0 else 1000);
             if (fds[0].revents != 0) {
                 const rc = linux.accept4(listener, null, null, linux.SOCK.CLOEXEC);
                 if (linux.errno(rc) == .SUCCESS) {
                     const fd: linux.fd_t = @intCast(rc);
-                    if (!allowed(fd)) {
-                        _ = linux.write(fd, "denied\n", 7);
-                        sys.close(fd);
-                    } else for (&clients) |*c| {
+                    if (client(fd)) |who| for (&clients) |*c| {
                         if (c.* == null) {
-                            c.* = fd;
+                            c.* = .{ .fd = fd, .who = who };
                             break;
                         }
-                    } else sys.close(fd);
+                    } else sys.close(fd) else {
+                        _ = linux.write(fd, "denied\n", 7);
+                        sys.close(fd);
+                    }
                 }
             }
             for (&clients, fds[1..]) |*c, f| {
-                const fd = c.* orelse continue;
+                const conn = c.* orelse continue;
                 if (f.revents == 0) continue;
                 var buf: [256]u8 = undefined;
-                const n = linux.read(fd, &buf, buf.len);
+                const n = linux.read(conn.fd, &buf, buf.len);
                 if (linux.errno(n) == .SUCCESS and n > 0) if (proto.Request.parse(buf[0..n])) |req| {
-                    m.handle(req);
-                    var out: [256]u8 = undefined;
-                    const text = m.report.write(&out);
-                    _ = linux.write(fd, text.ptr, text.len);
+                    if (req.allowedFor(conn.who)) {
+                        m.handle(req);
+                        var out: [512]u8 = undefined;
+                        const text = m.report.write(&out);
+                        _ = linux.write(conn.fd, text.ptr, text.len);
+                    } else _ = linux.write(conn.fd, "denied\n", 7);
                 };
                 // One request per connection.
-                sys.close(fd);
+                sys.close(conn.fd);
                 c.* = null;
             }
+            if (m.restart) restart();
         }
     }
 
@@ -135,7 +167,28 @@ const Manager = struct {
                 else => {},
             },
             .finish => |h| m.finish(h),
+            .update => |sha256| m.startUpdate(sha256),
+            .restart => m.restart = true,
         }
+    }
+
+    /// Starts installing the update Settings downloaded.
+    fn startUpdate(m: *Manager, sha256: [64]u8) void {
+        if (m.installer != null) return;
+        const running = m.report.slot orelse return m.updateFailed(.busy);
+        // Not while the other slot is being made.
+        if (m.copier != null) return m.updateFailed(.busy);
+        m.installer = update.Installer.start(sha256, running) catch |err| {
+            print("dazzle: system: cannot start installing the update: {s}\n", .{@errorName(err)});
+            return m.updateFailed(.io);
+        };
+        m.report.update = .installing;
+        m.report.update_failure = .none;
+    }
+
+    fn updateFailed(m: *Manager, why: proto.UpdateFailure) void {
+        m.report.update = .failed;
+        m.report.update_failure = why;
     }
 
     fn fail(m: *Manager, why: proto.Failure, err: anyerror) void {
@@ -201,6 +254,7 @@ const Manager = struct {
         _ = linux.mkdir(proto.config_dir, 0o755);
         _ = linux.chown(proto.config_dir, 0, 0);
         _ = linux.mkdir(proto.user_dir, 0o700);
+        _ = linux.mkdir(proto.update_dir, 0o755);
         // The apps go there too, where Settings installs them.
         apps.useInstalled();
         m.report.storage = .ready;
@@ -219,6 +273,7 @@ const Manager = struct {
             };
             if (done) {
                 m.copier = null;
+                m.readSlots();
                 return;
             }
         }
@@ -270,19 +325,30 @@ fn random(buf: []u8) void {
     }
 }
 
-/// Whether the process at the other end of `fd` runs the setup app.
-fn allowed(fd: linux.fd_t) bool {
+/// Restarts the computer: what is written goes to the card first.
+fn restart() noreturn {
+    print("dazzle: system: restarting\n", .{});
+    linux.sync();
+    _ = linux.reboot(.MAGIC1, .MAGIC2, .RESTART, null);
+    print("dazzle: system: cannot restart\n", .{});
+    linux.exit(1);
+}
+
+/// Which app the process at the other end of `fd` runs, if it is one the
+/// manager serves.
+fn client(fd: linux.fd_t) ?proto.Client {
     const Ucred = extern struct { pid: i32, uid: u32, gid: u32 };
     var cred: Ucred = undefined;
     var len: linux.socklen_t = @sizeOf(Ucred);
-    if (linux.errno(linux.getsockopt(fd, linux.SOL.SOCKET, linux.SO.PEERCRED, @ptrCast(&cred), &len)) != .SUCCESS) return false;
+    if (linux.errno(linux.getsockopt(fd, linux.SOL.SOCKET, linux.SO.PEERCRED, @ptrCast(&cred), &len)) != .SUCCESS) return null;
     var path_buf: [32]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "/proc/{d}/exe", .{cred.pid}) catch return false;
+    const path = std.fmt.bufPrintZ(&path_buf, "/proc/{d}/exe", .{cred.pid}) catch return null;
     var exe: [256]u8 = undefined;
-    const n = sys.check(linux.readlink(path.ptr, &exe, exe.len)) catch return false;
-    const ok = std.mem.eql(u8, exe[0..n], proto.allowed_program);
-    if (!ok) print("dazzle: system: refused {s} (pid {d})\n", .{ exe[0..n], cred.pid });
-    return ok;
+    const n = sys.check(linux.readlink(path.ptr, &exe, exe.len)) catch return null;
+    if (std.mem.eql(u8, exe[0..n], proto.setup_program)) return .setup;
+    if (std.mem.eql(u8, exe[0..n], proto.settings_program)) return .settings;
+    print("dazzle: system: refused {s} (pid {d})\n", .{ exe[0..n], cred.pid });
+    return null;
 }
 
 /// The listening socket, replacing a stale one; only the user can connect.
@@ -304,5 +370,5 @@ test "a process running another program is refused" {
     try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &pair));
     defer sys.close(pair[0]);
     defer sys.close(pair[1]);
-    try std.testing.expect(!allowed(pair[0]));
+    try std.testing.expect(client(pair[0]) == null);
 }

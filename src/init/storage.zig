@@ -80,12 +80,24 @@ pub fn boot() Boot {
     if (!b.mounted) return b;
     // The apps: those installed, on /data.
     apps.useInstalled();
+    // Where Settings downloads updates.
+    if (linux.errno(linux.mkdir(proto.update_dir, 0o755)) == .SUCCESS) _ = linux.chown(proto.update_dir, sys.user.uid, sys.user.gid);
     b.setup_done = exists(proto.setup_done_file);
     var buf: [80]u8 = undefined;
     if (sys.readFile(proto.hostname_file, &buf)) |text| {
         if (proto.Hostname.parse(std.mem.trim(u8, text, " \n"))) |h| b.hostname = h;
     }
     return b;
+}
+
+/// What `b` found at boot, as it is now (the system manager may have
+/// prepared the card and finished setup since).
+pub fn state(b: Boot) Boot {
+    var now = b;
+    // /data, once mounted, has the user's files in it.
+    now.mounted = b.mounted or exists(proto.user_dir);
+    now.setup_done = b.setup_done or exists(proto.setup_done_file);
+    return now;
 }
 
 /// The slot in a kernel command line's dazzle.slot=<a|b>.

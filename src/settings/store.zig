@@ -28,7 +28,7 @@ const catalogue_file = apps_dir ++ "/.catalogue.json";
 const ca_file = "/os/certs/ca-certificates.pem";
 
 /// The most an archive or the catalogue may be.
-const max_download = 64 * 1024 * 1024;
+pub const max_download = 64 * 1024 * 1024;
 
 pub const App = struct {
     name: []const u8,
@@ -76,11 +76,7 @@ pub fn writable(dir: [*:0]const u8) bool {
 /// Checks a downloaded archive against the catalogue.
 pub fn verify(archive: []const u8, app: App) !void {
     if (archive.len != app.size) return error.WrongSize;
-    var digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(archive, &digest, .{});
-    var hex: [64]u8 = undefined;
-    _ = std.fmt.bufPrint(&hex, "{x}", .{&digest}) catch unreachable;
-    if (!std.ascii.eqlIgnoreCase(&hex, app.sha256)) return error.WrongChecksum;
+    if (!sys.archive.sha256Is(archive, app.sha256)) return error.WrongChecksum;
 }
 
 /// Unpacks `archive` (xz-compressed tar) into `dir` as app `name`,
@@ -92,53 +88,18 @@ pub fn unpack(gpa: std.mem.Allocator, archive: []const u8, dir: []const u8, name
     sys.files.removeTree(staging);
     _ = try sys.check(linux.mkdir(staging, 0o755));
     defer sys.files.removeTree(staging);
-
-    // Decompressed in memory: apps are small.
-    var input: std.Io.Reader = .fixed(archive);
-    var xz = try std.compress.xz.Decompress.init(&input, gpa, &.{});
-    defer xz.deinit();
-    var tar: std.Io.Writer.Allocating = .init(gpa);
-    defer tar.deinit();
-    _ = xz.reader.streamRemaining(&tar.writer) catch return error.BadArchive;
-    if (tar.written().len > max_download) return error.BadArchive;
-
-    var tar_reader: std.Io.Reader = .fixed(tar.written());
-    var file_name_buf: [256]u8 = undefined;
-    var link_name_buf: [256]u8 = undefined;
-    var it: std.tar.Iterator = .init(&tar_reader, .{ .file_name_buffer = &file_name_buf, .link_name_buffer = &link_name_buf });
-    while (it.next() catch return error.BadArchive) |f| {
-        const rel = std.mem.trimEnd(u8, f.name, "/");
-        // Only the app's own folder, and nothing outside it.
-        if (!(std.mem.eql(u8, rel, name) or (std.mem.startsWith(u8, rel, name) and rel.len > name.len and rel[name.len] == '/'))) return error.BadArchive;
-        var parts = std.mem.splitScalar(u8, rel, '/');
-        while (parts.next()) |p| if (p.len == 0 or std.mem.eql(u8, p, ".") or std.mem.eql(u8, p, "..")) return error.BadArchive;
-        var path_buf: [512]u8 = undefined;
-        const path = try std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ staging, rel });
-        switch (f.kind) {
-            .directory => _ = sys.check(linux.mkdir(path, 0o755)) catch |err| if (err != error.Unexpected) return err,
-            .file => {
-                const fd = try sys.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true });
-                defer sys.close(fd);
-                _ = linux.fchmod(fd, if (f.mode & 0o100 != 0) 0o755 else 0o644);
-                var w_buf: [4096]u8 = undefined;
-                var fw: FdWriter = .{ .fd = fd, .interface = .{ .vtable = &.{ .drain = FdWriter.drain }, .buffer = &w_buf } };
-                it.streamRemaining(f, &fw.interface) catch return error.BadArchive;
-                fw.interface.flush() catch return error.BadArchive;
-                _ = linux.fsync(fd);
-            },
-            // No links: an app is plain files.
-            else => return error.BadArchive,
-        }
-    }
+    var new_buf: [512]u8 = undefined;
+    const new = try std.fmt.bufPrintZ(&new_buf, "{s}/{s}", .{ staging, name });
+    _ = try sys.check(linux.mkdir(new, 0o755));
+    // Only the app's own folder.
+    try sys.archive.extract(gpa, archive, name, new);
     if (!isInstalled(staging, name)) return error.BadArchive;
 
     // Into place: an installed copy out of the way first.
     var app_buf: [256]u8 = undefined;
     var old_buf: [256]u8 = undefined;
-    var new_buf: [512]u8 = undefined;
     const app_path = try std.fmt.bufPrintZ(&app_buf, "{s}/{s}", .{ dir, name });
     const old = try std.fmt.bufPrintZ(&old_buf, "{s}/.old-{s}", .{ dir, name });
-    const new = try std.fmt.bufPrintZ(&new_buf, "{s}/{s}", .{ staging, name });
     sys.files.removeTree(old);
     const replacing = linux.errno(linux.access(app_path, linux.F_OK)) == .SUCCESS;
     if (replacing) _ = try sys.check(linux.rename(app_path, old));
@@ -162,34 +123,10 @@ pub fn remove(dir: []const u8, name: []const u8) !void {
     sys.files.removeTree(gone);
 }
 
-/// A writer to a file descriptor, for the archive's files.
-const FdWriter = struct {
-    fd: linux.fd_t,
-    interface: std.Io.Writer,
-
-    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-        const self: *FdWriter = @fieldParentPtr("interface", w);
-        try writeAll(self.fd, w.buffered());
-        w.end = 0;
-        var n: usize = 0;
-        for (data[0 .. data.len - 1]) |d| {
-            try writeAll(self.fd, d);
-            n += d.len;
-        }
-        for (0..splat) |_| try writeAll(self.fd, data[data.len - 1]);
-        return n + data[data.len - 1].len * splat;
-    }
-
-    fn writeAll(fd: linux.fd_t, bytes: []const u8) std.Io.Writer.Error!void {
-        var at: usize = 0;
-        while (at < bytes.len) at += sys.check(linux.write(fd, bytes[at..].ptr, bytes.len - at)) catch return error.WriteFailed;
-    }
-};
-
 // --- Downloading, in a child process ---------------------------------------------
 
 /// Downloads `url` over HTTPS.
-fn download(gpa: std.mem.Allocator, url: []const u8) ![]u8 {
+pub fn download(gpa: std.mem.Allocator, url: []const u8) ![]u8 {
     var threaded: std.Io.Threaded = .init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -212,7 +149,7 @@ fn download(gpa: std.mem.Allocator, url: []const u8) ![]u8 {
 }
 
 pub const Job = struct {
-    pub const Kind = enum { catalogue, install };
+    pub const Kind = enum { catalogue, install, os_check, os_download };
 
     kind: Kind,
     pid: linux.pid_t,
@@ -228,9 +165,9 @@ pub const Job = struct {
         return j.name_buf[0..j.name_len];
     }
 
-    /// Starts downloading the catalogue (`app` null) or installing `app`,
-    /// from `base_url`.
-    pub fn start(gpa: std.mem.Allocator, base_url: []const u8, app: ?App) !Job {
+    /// Starts `work(args...)` in a child process: `name` is what it is
+    /// working on (an app's name, or "").
+    pub fn spawn(kind: Kind, job_name: []const u8, comptime work: anytype, args: anytype) !Job {
         var fds: [2]linux.fd_t = undefined;
         _ = try sys.check(linux.pipe2(&fds, .{ .CLOEXEC = true }));
         const rc = linux.fork();
@@ -244,20 +181,17 @@ pub const Job = struct {
         }
         if (rc == 0) {
             sys.close(fds[0]);
-            const outcome = if (app) |a| childInstall(gpa, base_url, a) else childCatalogue(gpa, base_url);
-            if (outcome) |_| {} else |err| {
+            @call(.auto, work, args) catch |err| {
                 const why = describe(err);
                 _ = linux.write(fds[1], why.ptr, why.len);
-                sys.print("dazzle-settings: {s}: {s}\n", .{ if (app) |a| a.name else "apps.json", @errorName(err) });
-            }
+                sys.print("dazzle-settings: {s} {s}: {s}\n", .{ @tagName(kind), job_name, @errorName(err) });
+            };
             linux.exit(0);
         }
         sys.close(fds[1]);
-        var j: Job = .{ .kind = if (app == null) .catalogue else .install, .pid = @intCast(rc), .started = sys.nowNs(), .result = fds[0] };
-        if (app) |a| {
-            j.name_len = @min(a.name.len, j.name_buf.len);
-            @memcpy(j.name_buf[0..j.name_len], a.name[0..j.name_len]);
-        }
+        var j: Job = .{ .kind = kind, .pid = @intCast(rc), .started = sys.nowNs(), .result = fds[0] };
+        j.name_len = @min(job_name.len, j.name_buf.len);
+        @memcpy(j.name_buf[0..j.name_len], job_name[0..j.name_len]);
         return j;
     }
 
@@ -300,11 +234,13 @@ fn childInstall(gpa: std.mem.Allocator, base_url: []const u8, app: App) !void {
 }
 
 /// Why a job failed, for people.
-fn describe(err: anyerror) []const u8 {
+pub fn describe(err: anyerror) []const u8 {
     return switch (err) {
         error.ClockNotSet => "the clock is not set yet (it is set once the network is up)",
         error.WrongSize, error.WrongChecksum => "the download was not what the catalogue said",
-        error.BadArchive, error.BadName => "the app's archive was not right",
+        error.BadArchive, error.BadName => "the archive was not right",
+        error.NoUpdateDir => "updates can be installed once setup has finished",
+        error.InstallFailed => "the system could not install it",
         error.BadCatalogue => "the list of apps was not right",
         error.HttpError => "the server did not have it",
         error.UnknownHostName, error.NameServerFailure, error.HostLacksNetworkAddresses => "the server could not be found (is the network up?)",
@@ -365,7 +301,7 @@ pub const Store = struct {
     pub fn refresh(s: *Store, again: bool) void {
         if (s.job != null or (s.asked and !again) or !writable(apps_dir)) return;
         s.asked = true;
-        s.job = Job.start(s.gpa, s.base_url, null) catch |err| {
+        s.job = Job.spawn(.catalogue, "", childCatalogue, .{ s.gpa, s.base_url }) catch |err| {
             s.setMessage("Cannot get the list of apps: {s}", .{@errorName(err)});
             return;
         };
@@ -379,7 +315,7 @@ pub const Store = struct {
             return;
         }
         for (s.apps()) |a| if (std.mem.eql(u8, a.name, name)) {
-            s.job = Job.start(s.gpa, s.base_url, a) catch |err| {
+            s.job = Job.spawn(.install, a.name, childInstall, .{ s.gpa, s.base_url, a }) catch |err| {
                 s.setMessage("Cannot install {s}: {s}", .{ a.title, @errorName(err) });
                 return;
             };
@@ -416,6 +352,7 @@ pub const Store = struct {
         switch (kind) {
             .catalogue => if (outcome) |why| s.setMessage("Cannot get the list of apps: {s}", .{why}) else s.loadCatalogue(),
             .install => if (outcome) |why| s.setMessage("Cannot install {s}: {s}", .{ s.title(name), why }) else s.setMessage("Installed {s}: it is in the dock", .{s.title(name)}),
+            .os_check, .os_download => {},
         }
         return true;
     }

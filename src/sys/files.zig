@@ -52,28 +52,32 @@ pub fn writeNew(path: [:0]const u8, data: []const u8) sys.Error!void {
 
 /// Removes a directory and what is in it, if it is there.
 pub fn removeTree(path: [:0]const u8) void {
-    const dir = sys.open(path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }) catch {
-        _ = linux.unlink(path);
-        return;
-    };
-    var buf: [2048]u8 align(8) = undefined;
-    while (true) {
-        const n = sys.check(linux.getdents64(dir, &buf, buf.len)) catch break;
-        if (n == 0) break;
-        var at: usize = 0;
-        while (at < n) {
-            const reclen = std.mem.readInt(u16, buf[at + 16 ..][0..2], .little);
-            const kind = buf[at + 18];
-            const name = std.mem.sliceTo(buf[at + 19 .. at + reclen], 0);
-            at += reclen;
-            if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
-            var child_buf: [512]u8 = undefined;
-            const child = std.fmt.bufPrintZ(&child_buf, "{s}/{s}", .{ path, name }) catch continue;
-            if (kind == 4) removeTree(child) else _ = linux.unlink(child);
+    // Removing entries while reading a directory can skip some (on FAT,
+    // say): another pass takes those.
+    for (0..8) |_| {
+        const dir = sys.open(path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }) catch {
+            _ = linux.unlink(path);
+            return;
+        };
+        var buf: [2048]u8 align(8) = undefined;
+        while (true) {
+            const n = sys.check(linux.getdents64(dir, &buf, buf.len)) catch break;
+            if (n == 0) break;
+            var at: usize = 0;
+            while (at < n) {
+                const reclen = std.mem.readInt(u16, buf[at + 16 ..][0..2], .little);
+                const kind = buf[at + 18];
+                const name = std.mem.sliceTo(buf[at + 19 .. at + reclen], 0);
+                at += reclen;
+                if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+                var child_buf: [512]u8 = undefined;
+                const child = std.fmt.bufPrintZ(&child_buf, "{s}/{s}", .{ path, name }) catch continue;
+                if (kind == 4) removeTree(child) else _ = linux.unlink(child);
+            }
         }
+        sys.close(dir);
+        if (linux.errno(linux.rmdir(path)) != .NOTEMPTY) return;
     }
-    sys.close(dir);
-    _ = linux.rmdir(path);
 }
 
 const testing = std.testing;

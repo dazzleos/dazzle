@@ -8,7 +8,9 @@
 //! that change are read again every second (see info.zig); the window is built with the
 //! `ui` toolkit (see view.zig), and only what changed is drawn again.
 //! Apps are installed and removed on the Apps page (see store.zig): the
-//! list of them is downloaded when the page is first shown.
+//! list of them is downloaded when the page is first shown. Updates of the
+//! system are checked for when the System page is first shown, and
+//! downloaded and installed from there (see update.zig).
 //!
 //!     dazzle-settings [font.ttf]
 //!
@@ -26,6 +28,7 @@ const build_info = @import("build_info");
 const info = @import("info.zig");
 const view = @import("view.zig");
 const store = @import("store.zig");
+const update = @import("update.zig");
 
 const print = sys.print;
 
@@ -87,6 +90,11 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     var apps: store.Store = .init(gpa, build_info.apps_url);
     var installed: [64]bool = undefined;
     var apps_writable = store.writable(store.apps_dir);
+    // Updates of the system, and which system this is.
+    var updater: update.Updater = .init(gpa, build_info.apps_url, sys.system.Version.init(build_info.commit_time, build_info.commit) orelse .{});
+    var date_buf: [32]u8 = undefined;
+    var build_buf: [64]u8 = undefined;
+    const build = std.fmt.bufPrint(&build_buf, "{s} ({s})", .{ build_info.commit, update.formatDate(&date_buf, build_info.commit_time) }) catch build_info.commit;
     var controls: app.Controls = .{ .win = win };
     win.setMinSize(view.min_size[0], view.min_size[1]);
 
@@ -152,6 +160,21 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             apps.refresh(false);
             dirty = true;
         }
+        // Updates: checked for when the System page is first shown.
+        if (!suspended and updater.poll(now)) dirty = true;
+        if (actions.check_update or actions.download_update or actions.restart) {
+            if (actions.check_update) updater.check(true);
+            if (actions.download_update) updater.download();
+            if (actions.restart) updater.restart();
+            actions.check_update = false;
+            actions.download_update = false;
+            actions.restart = false;
+            dirty = true;
+        }
+        if (view.shownPage(window_ui) == .system and !updater.asked) {
+            updater.check(false);
+            dirty = true;
+        }
         if (actions.connect != null or actions.disconnect or actions.ethernet != null) {
             var req_buf: [256]u8 = undefined;
             if (actions.ethernet) |a| report = info.askManager(info.manager.ethernetRequest(&req_buf, a));
@@ -183,9 +206,10 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         if (!suspended and (dirty or window_ui.needs_frame)) {
             dirty = false;
             const catalogue = apps.apps()[0..@min(apps.apps().len, installed.len)];
+            var available_buf: [64]u8 = undefined;
             for (catalogue, installed[0..catalogue.len]) |a, *i| i.* = store.isInstalled(store.apps_dir, a.name);
             window_ui.frame(width, height, now, view.Settings{
-                .commit = build_info.commit,
+                .commit = build,
                 .system = &system,
                 .usage = usage,
                 .network = &network,
@@ -198,6 +222,11 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
                     .message = apps.message(),
                     .writable = apps_writable,
                     .source = build_info.apps_url,
+                },
+                .update = .{
+                    .status = updater.status(),
+                    .available = if (updater.available()) |m| std.fmt.bufPrint(&available_buf, "{s} ({s})", .{ m.version, update.formatDate(&date_buf, m.time) }) catch m.version else "",
+                    .message = updater.message(),
                 },
                 .on_close = .of(&controls, app.Controls.close),
                 .on_maximize = .of(&controls, app.Controls.toggleMaximized),
@@ -243,4 +272,5 @@ test {
     _ = info;
     _ = view;
     _ = @import("store.zig");
+    _ = @import("update.zig");
 }

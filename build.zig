@@ -126,7 +126,9 @@ fn addIconFont(b: *std.Build) IconFont {
 /// * `wayland`: the Wayland wire protocol and a client library
 /// * `build_info`: `commit`, the source's git commit (short, with "-dirty"
 ///   when there are uncommitted changes), so a running system can be
-///   matched to its source; and `apps_url`, where apps are downloaded from
+///   matched to its source; `commit_time`, when it was committed (newer
+///   systems have later times: see Settings' updates); and `apps_url`,
+///   where apps and updates are downloaded from
 fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, shaders: []const ShaderBlob, icon_font: IconFont) Modules {
     const sys, const vc4, const shader = addGpuModules(b, target, optimize);
     const wayland = b.createModule(.{
@@ -182,6 +184,7 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     });
     const info = b.addOptions();
     info.addOption([]const u8, "commit", gitCommit(b));
+    info.addOption(u64, "commit_time", gitCommitTime(b));
     info.addOption([]const u8, "apps_url", appsUrl(b));
     return .{ .sys = sys, .vc4 = vc4, .shader = shader, .app = app, .gfx = gfx, .ui = ui, .font = font, .icons = icons, .wayland = wayland, .build_info = info.createModule() };
 }
@@ -316,6 +319,15 @@ fn gitCommit(b: *std.Build) []const u8 {
     const hash = std.mem.trim(u8, out, " \n");
     const status = b.runAllowFail(&.{ "git", "-C", root, "status", "--porcelain", "--untracked-files=no" }, &code, .ignore) catch "";
     return if (std.mem.trim(u8, status, " \n").len > 0) b.fmt("{s}-dirty", .{hash}) else hash;
+}
+
+/// When the checked-out commit was made, in seconds since 1970 (0 if
+/// unknown).
+fn gitCommitTime(b: *std.Build) u64 {
+    const root = b.build_root.path orelse ".";
+    var code: u8 = 0;
+    const out = b.runAllowFail(&.{ "git", "-C", root, "log", "-1", "--format=%ct" }, &code, .ignore) catch return 0;
+    return std.fmt.parseInt(u64, std.mem.trim(u8, out, " \n"), 10) catch 0;
 }
 
 /// A program's root module. `single_threaded` and stripping are set for the
@@ -611,9 +623,33 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath, apps: 
         .{ "overlays/imx219.dtbo", kernel.overlay(b, b.path("boot/overlays/imx219.dts"), "imx219") },
         .{ "overlays/ov5647.dtbo", kernel.overlay(b, b.path("boot/overlays/ov5647.dts"), "ov5647") },
         .{ "initramfs.cpio", initramfs },
-        .{ "cmdline.txt", b.addWriteFiles().add("cmdline.txt", b.fmt("{s} dazzle.slot=a\n", .{cmdline})) },
+        // What system the slot holds (sys.system.Version).
+        .{ "version", b.addWriteFiles().add("version", b.fmt("{d} {s}\n", .{ gitCommitTime(b), gitCommit(b) })) },
     };
     for (files) |f| boot_files.append(b.allocator, .{ b.fmt("slot-a/{s}", .{f[0]}), f[1] }) catch @panic("OOM");
+    boot_files.append(b.allocator, .{ "slot-a/cmdline.txt", b.addWriteFiles().add("cmdline.txt", b.fmt("{s} dazzle.slot=a\n", .{cmdline})) }) catch @panic("OOM");
+    // The same files as an update (zig-out/os: the archive and its
+    // manifest, published beside the image; see tools/mkos.zig).
+    const os_step = b.step("os", "Build the system as an update (zig-out/os)");
+    {
+        const xz = requireTools(b, &.{"xz:xz-utils"});
+        const pack = b.addRunArtifact(hostTool(b, "mkos"));
+        pack.addArg("pack");
+        const tar = pack.addOutputFileArg("dazzle-os.tar");
+        for (files) |f| pack.addPrefixedFileArg(b.fmt("{s}=", .{f[0]}), f[1]);
+        pack.step.dependOn(kernel.step);
+        const compress = b.addSystemCommand(&.{ "xz", "-9", "-c" });
+        compress.step.dependOn(&xz.step);
+        compress.addFileArg(tar);
+        const archive = compress.captureStdOut(.{ .basename = "dazzle-os.tar.xz" });
+        const manifest = b.addRunArtifact(hostTool(b, "mkos"));
+        manifest.addArg("manifest");
+        const json = manifest.addOutputFileArg("os.json");
+        manifest.addArgs(&.{ gitCommit(b), b.fmt("{d}", .{gitCommitTime(b)}) });
+        manifest.addFileArg(archive);
+        os_step.dependOn(&b.addInstallFile(archive, "os/dazzle-os.tar.xz").step);
+        os_step.dependOn(&b.addInstallFile(json, "os/os.json").step);
+    }
     // One copy of the apps.
     boot_files.appendSlice(b.allocator, apps) catch @panic("OOM");
 
@@ -631,6 +667,7 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath, apps: 
         image_step.dependOn(&install.step);
     }
     image_step.dependOn(&b.addInstallFile(img, "dazzle.img").step);
+    image_step.dependOn(os_step);
     return image_step;
 }
 
@@ -876,6 +913,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(t).step);
     }
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hostTool(b, "mkimage").root_module })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hostTool(b, "mkos").root_module })).step);
 
     const shaders_step = b.step("shaders", "Compile the shader programs (zig-out/shaders)");
     for (shaders) |s| shaders_step.dependOn(&b.addInstallFile(s.program, b.fmt("shaders/{s}.shader", .{s.name})).step);

@@ -14,11 +14,13 @@ const linux = std.os.linux;
 pub const network = @import("network.zig");
 pub const system = @import("system.zig");
 pub const files = @import("files.zig");
+pub const archive = @import("archive.zig");
 
 test {
     _ = network;
     _ = system;
     _ = files;
+    _ = archive;
 }
 
 pub const Error = error{
@@ -166,8 +168,16 @@ pub const Capability = enum(u5) {
     net_admin = 12,
     net_raw = 13,
     sys_admin = 21,
+    sys_boot = 22,
     sys_time = 25,
 };
+
+/// For a server: a client that hangs up before it has its answer must not
+/// stop the server (writing to its socket then raises SIGPIPE, which would).
+pub fn ignoreBrokenPipes() void {
+    const ignore: linux.Sigaction = .{ .handler = .{ .handler = linux.SIG.IGN }, .mask = linux.sigemptyset(), .flags = 0 };
+    _ = linux.sigaction(.PIPE, &ignore, null);
+}
 
 /// Like `dropPrivileges`, but keeps the given capabilities and no others.
 pub fn dropPrivilegesKeeping(caps: []const Capability) Error!void {

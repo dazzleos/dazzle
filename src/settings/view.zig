@@ -13,6 +13,7 @@ const ui = @import("ui");
 const gfx = @import("gfx");
 const info = @import("info.zig");
 const store = @import("store.zig");
+const update = @import("update.zig");
 
 /// The storage bar's colours (the system's is the theme's primary).
 pub const apps_color = gfx.Color.argb(0xff4fd8c4);
@@ -29,6 +30,22 @@ pub const Actions = struct {
     install: ?AppName = null,
     remove: ?AppName = null,
     refresh_apps: bool = false,
+    /// Updates: check for one, download the one offered, restart into it.
+    check_update: bool = false,
+    download_update: bool = false,
+    restart: bool = false,
+
+    fn checkUpdate(a: *Actions) void {
+        a.check_update = true;
+    }
+
+    fn downloadUpdate(a: *Actions) void {
+        a.download_update = true;
+    }
+
+    fn restartNow(a: *Actions) void {
+        a.restart = true;
+    }
 
     pub const AppName = struct {
         buf: [48]u8 = undefined,
@@ -86,6 +103,15 @@ pub const Apps = struct {
     source: []const u8 = "",
 };
 
+/// What the System page shows of updates.
+pub const Update = struct {
+    status: update.Status = .unavailable,
+    /// The system offered: "0123abc (8 October 2026)".
+    available: []const u8 = "",
+    /// What went wrong last.
+    message: []const u8 = "",
+};
+
 pub const Settings = struct {
     commit: []const u8,
     /// Where the window's requests go (none in tests that do not look).
@@ -97,6 +123,7 @@ pub const Settings = struct {
     manager: ?*const info.manager.Report = null,
     /// The apps that can be installed, and how installing goes.
     apps: Apps = .{},
+    update: Update = .{},
     /// The title bar's buttons (close, and maximize, which shows whether
     /// the window is), and pressing the bar (to move the window).
     on_close: ?ui.Callback = null,
@@ -253,6 +280,7 @@ pub const Settings = struct {
         const a = cx.ui.arena();
         rows.appendSlice(a, &.{
             b.item("Build", self.commit),
+            self.updateRow(b),
             b.item("Linux", orUnknown(sys.kernel.slice())),
             b.item("Up for", cx.fmt("{s}", .{info.formatDuration(&dur, self.usage.uptime_s)})),
             b.item("Board", orUnknown(sys.model.slice())),
@@ -260,6 +288,37 @@ pub const Settings = struct {
         }) catch {};
         if (sys.serial.len > 0) rows.append(a, b.item("Serial", sys.serial.slice())) catch {};
         return b.card("System", rows.items);
+    }
+
+    /// Updates: how they stand, and what can be done about them.
+    fn updateRow(self: *const Settings, b: Builder) ui.Widget {
+        const cx = b.cx;
+        const u = &self.update;
+        const Button = struct { label: []const u8, icon: ui.icons.Icon, flag: enum { check, download, restart } };
+        const text: []const u8, const button: ?Button, const busy = switch (u.status) {
+            .unavailable => .{ "Updates can be installed once setup has finished", null, false },
+            .unknown => .{ if (u.message.len > 0) u.message else "Not checked yet", Button{ .label = "Check now", .icon = .refresh, .flag = .check }, false },
+            .checking => .{ "Checking for updates…", null, true },
+            .available => .{ cx.fmt("Dazzle {s} is available", .{u.available}), Button{ .label = "Download", .icon = .download, .flag = .download }, false },
+            .downloading => .{ "Downloading the update…", null, true },
+            .installing => .{ "Installing the update…", null, true },
+            .ready => .{ "The update is installed: restart to use it", Button{ .label = "Restart", .icon = .restart_alt, .flag = .restart }, false },
+            .current => .{ if (u.message.len > 0) u.message else "Up to date", Button{ .label = "Check again", .icon = .refresh, .flag = .check }, false },
+        };
+        const end: ui.Widget = if (busy) cx.make(ui.Spinner{ .size = 28 }) else if (button) |btn| cx.make(ui.OutlinedButton{
+            .label = btn.label,
+            .icon = btn.icon,
+            .on_press = if (self.actions) |acts| switch (btn.flag) {
+                .check => .of(acts, Actions.checkUpdate),
+                .download => .of(acts, Actions.downloadUpdate),
+                .restart => .of(acts, Actions.restartNow),
+            } else null,
+        }) else cx.make(ui.Empty{});
+        return cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
+            b.label("Updates"),
+            cx.make(ui.Expanded{ .child = b.value(text) }),
+            end,
+        } });
     }
 
     fn resourcesCard(self: *const Settings, b: Builder) ui.Widget {
@@ -1345,4 +1404,45 @@ test "installing and removing apps, and getting their list again" {
     settings.apps = .{};
     u.frame(1920, 960, 4, settings);
     try testing.expect(findText(u.root.?, "No list of apps yet: is the network up?") != null);
+}
+
+test "updates: offered, downloaded, installed, then a restart" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    const d = sample();
+    var actions: Actions = .{};
+    var settings: Settings = .{ .commit = "de14aa2 (7 October 2026)", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .update = .{ .status = .available, .available = "0123abc (8 October 2026)" } };
+    u.frame(1920, 960, 0, settings);
+    u.root.?.state(Settings.State).page = .system;
+    u.frame(1920, 960, 1, settings);
+    try testing.expect(findText(u.root.?, "Dazzle 0123abc (8 October 2026) is available") != null);
+    click(u, up(findText(u.root.?, "Download").?, ui.OutlinedButton).?);
+    try testing.expect(actions.download_update);
+
+    // Under way: no buttons.
+    for ([_]update.Status{ .checking, .downloading, .installing }) |s| {
+        settings.update = .{ .status = s };
+        u.frame(1920, 960, 2, settings);
+        try testing.expect(up(findText(u.root.?, "Updates").?, ui.Row) != null);
+        try testing.expect(findText(u.root.?, "Download") == null and findText(u.root.?, "Restart") == null);
+    }
+    settings.update = .{ .status = .ready };
+    u.frame(1920, 960, 3, settings);
+    try testing.expect(findText(u.root.?, "The update is installed: restart to use it") != null);
+    click(u, up(findText(u.root.?, "Restart").?, ui.OutlinedButton).?);
+    try testing.expect(actions.restart);
+
+    settings.update = .{ .status = .current };
+    u.frame(1920, 960, 4, settings);
+    try testing.expect(findText(u.root.?, "Up to date") != null);
+    click(u, up(findText(u.root.?, "Check again").?, ui.OutlinedButton).?);
+    try testing.expect(actions.check_update);
+
+    settings.update = .{ .status = .unknown, .message = "Cannot check for updates: the server could not be reached (is the network up?)" };
+    u.frame(1920, 960, 5, settings);
+    try testing.expect(findText(u.root.?, "Cannot check for updates: the server could not be reached (is the network up?)") != null);
+    settings.update = .{};
+    u.frame(1920, 960, 6, settings);
+    try testing.expect(findText(u.root.?, "Updates can be installed once setup has finished") != null);
 }
