@@ -30,6 +30,8 @@ pub const Icon = enum {
     schedule,
     grid_view,
     view_list,
+    create_new_folder,
+    warning,
     // Settings.
     settings,
     wifi,

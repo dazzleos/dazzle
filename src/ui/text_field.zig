@@ -43,6 +43,9 @@ pub const TextField = struct {
     on_changed: ?widget.ValueCallback([]const u8) = null,
     /// Enter was pressed.
     on_submit: ?widget.Callback = null,
+    /// Take the keyboard when it first appears (as a field to fill in that
+    /// has just been asked for does).
+    autofocus: bool = false,
 
     pub const capacity = 128;
 
@@ -64,6 +67,8 @@ pub const TextField = struct {
         /// there is one.
         anchor: ?usize = null,
         focused: bool = false,
+        /// It has taken the keyboard by itself (`autofocus`), once.
+        autofocused: bool = false,
         hovered: bool = false,
         /// Selecting by dragging.
         dragging: bool = false,
@@ -225,7 +230,11 @@ pub const TextField = struct {
     pub fn layout(self: *const TextField, n: *Node, c: Constraints) Size {
         const s = self.fontStyle(n);
         const h: f32 = if (s) |st| @max(height, @ceil(st.lineHeight() + 20)) else height;
-        _ = self.remember(n);
+        const st = self.remember(n);
+        if (self.autofocus and !st.autofocused) {
+            st.autofocused = true;
+            n.ui.focus(n);
+        }
         return c.constrain(.{ .w = self.width, .h = h });
     }
 
@@ -656,4 +665,38 @@ test "a paste for a widget that has gone goes nowhere" {
     try testing.expect(u.paste == null);
     // The text comes after all: nothing is done with it.
     board.sink.?.f(board.sink.?.ctx, "late");
+}
+
+test "a field asked for takes the keyboard by itself, once" {
+    const Ui = @import("runtime.zig").Ui;
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    var text: [64]u8 = undefined;
+    var len: usize = 0;
+    const Sink = struct {
+        text: *[64]u8,
+        len: *usize,
+        fn changed(s: *const @This(), t: []const u8) void {
+            @memcpy(s.text[0..t.len], t);
+            s.len.* = t.len;
+        }
+    };
+    const sink: Sink = .{ .text = &text, .len = &len };
+    const App = struct {
+        sink: *const Sink,
+        pub fn build(self: *const @This(), cx: *widget.Context) widget.Widget {
+            return cx.make(Padding{ .padding = .all(20), .child = cx.make(TextField{ .autofocus = true, .on_changed = .of(self.sink, Sink.changed) }) });
+        }
+    };
+    u.frame(400, 200, 0, App{ .sink = &sink });
+    try testing.expect(u.focused != null);
+    // Typing goes into it, without a click.
+    u.keyEvent(30, true); // A
+    u.keyEvent(30, false);
+    try testing.expectEqualStrings("a", text[0..len]);
+    // Given up, it does not take the keyboard back.
+    u.focus(null);
+    u.frame(400, 200, 1, App{ .sink = &sink });
+    try testing.expect(u.focused == null);
 }
