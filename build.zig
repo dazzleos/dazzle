@@ -474,26 +474,29 @@ fn fetchWifiFirmware(b: *std.Build) *std.Build.Step {
     }.url);
 }
 
-/// The OS slots on the card: each holds a whole copy of the system (the
-/// kernel, its device trees, the initramfs with everything in /os, and the
-/// kernel's command line), and config.txt's os_prefix says which one the
-/// firmware starts. An update (later) writes the other and switches to it;
-/// if a slot's kernel or device tree is missing, the firmware ignores the
-/// prefix.
-const slots = [_][]const u8{ "a", "b" };
-
-/// The boot partition's size, in MiB, unless -Dimage-size says otherwise:
-/// room for each slot to grow several times over (they hold about 6 MB
-/// each now), as the partition cannot grow once /data follows it.
-const default_image_mib = 128;
+/// Where the boot partition ends on the card, in MiB, once init has grown it
+/// on the first start: room for both slots to grow several times over
+/// (each holds about 5 MB now), as it cannot grow once /data follows it.
+/// The image itself is just big enough for its files (slot B is made on
+/// the card), laid out so that growing only changes the partition's size.
+const boot_partition_mib = 128;
 
 /// The SD card image (zig-out/dazzle.img), and its files in zig-out/boot
 /// for copying onto a card by hand. One FAT partition holds, at its root,
 /// the firmware's own files and config.txt (which must be there, so there
-/// is one copy); the two OS slots, slot-a/ and slot-b/; and the apps, one
-/// copy, in apps/ (init mounts the partition and shows them at /apps).
+/// is one copy); the OS slots; and the apps, one copy, in apps/ (init
+/// mounts the partition and shows them at /apps).
+///
+/// An OS slot holds a whole copy of the system (the kernel, its device
+/// trees, the initramfs with everything in /os, and the kernel's command
+/// line), and config.txt's os_prefix says which one the firmware starts.
+/// The image has slot A, slot-a/; on the first start the system copies it
+/// to slot B, slot-b/. An update (later) writes the slot not in use and
+/// switches to it. (If a slot's kernel or device tree is missing, the
+/// firmware ignores the prefix.)
+///
 /// /data is the partition the system makes in the rest of the card on the
-/// first boot.
+/// first start, after growing this one.
 fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath, apps: []const CardFile) *std.Build.Step {
     const dir = b.pathFromRoot("build/firmware");
     // Download what is missing, then check everything.
@@ -513,20 +516,19 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath, apps: 
         .{ "LICENCE.broadcom", .{ .cwd_relative = b.pathJoin(&.{ dir, "LICENCE.broadcom" }) } },
         .{ "config.txt", b.path("boot/config.txt") },
     }) catch @panic("OOM");
-    // Each slot: a whole system. Its command line says which it is.
+    // Slot A: a whole system. Its command line says which slot it is. The
+    // system makes slot B, a copy, on the card on the first start.
     const cmdline = std.mem.trimEnd(u8, std.Io.Dir.cwd().readFileAlloc(b.graph.io, b.pathFromRoot("boot/cmdline.txt"), b.allocator, .limited(4096)) catch @panic("cannot read boot/cmdline.txt"), "\n");
-    for (slots) |slot| {
-        const files = [_]CardFile{
-            .{ "zImage", kernel.file(b, "arch/arm/boot/zImage") },
-            .{ "bcm2835-rpi-zero.dtb", kernel.file(b, "arch/arm/boot/dts/broadcom/bcm2835-rpi-zero.dtb") },
-            .{ "bcm2835-rpi-zero-w.dtb", kernel.file(b, "arch/arm/boot/dts/broadcom/bcm2835-rpi-zero-w.dtb") },
-            // Mainline's, with the Wi-Fi chip's power added (see the source).
-            .{ "bcm2837-rpi-3-a-plus.dtb", kernel.deviceTree(b, b.path("boot/bcm2837-rpi-3-a-plus.dts"), "bcm2837-rpi-3-a-plus") },
-            .{ "initramfs.cpio", initramfs },
-            .{ "cmdline.txt", b.addWriteFiles().add("cmdline.txt", b.fmt("{s} dazzle.slot={s}\n", .{ cmdline, slot })) },
-        };
-        for (files) |f| boot_files.append(b.allocator, .{ b.fmt("slot-{s}/{s}", .{ slot, f[0] }), f[1] }) catch @panic("OOM");
-    }
+    const files = [_]CardFile{
+        .{ "zImage", kernel.file(b, "arch/arm/boot/zImage") },
+        .{ "bcm2835-rpi-zero.dtb", kernel.file(b, "arch/arm/boot/dts/broadcom/bcm2835-rpi-zero.dtb") },
+        .{ "bcm2835-rpi-zero-w.dtb", kernel.file(b, "arch/arm/boot/dts/broadcom/bcm2835-rpi-zero-w.dtb") },
+        // Mainline's, with the Wi-Fi chip's power added (see the source).
+        .{ "bcm2837-rpi-3-a-plus.dtb", kernel.deviceTree(b, b.path("boot/bcm2837-rpi-3-a-plus.dts"), "bcm2837-rpi-3-a-plus") },
+        .{ "initramfs.cpio", initramfs },
+        .{ "cmdline.txt", b.addWriteFiles().add("cmdline.txt", b.fmt("{s} dazzle.slot=a\n", .{cmdline})) },
+    };
+    for (files) |f| boot_files.append(b.allocator, .{ b.fmt("slot-a/{s}", .{f[0]}), f[1] }) catch @panic("OOM");
     // One copy of the apps.
     boot_files.appendSlice(b.allocator, apps) catch @panic("OOM");
 
@@ -534,8 +536,8 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath, apps: 
     mkimage.step.dependOn(verify_step);
     mkimage.step.dependOn(kernel.step);
     const img = mkimage.addOutputFileArg("dazzle.img");
-    const mib = b.option(u32, "image-size", b.fmt("SD image size in MiB (default {d})", .{default_image_mib})) orelse default_image_mib;
-    mkimage.addArg(b.fmt("{d}", .{mib}));
+    mkimage.addArg(if (b.option(u32, "image-size", "SD image size in MiB (default: just big enough)")) |mib| b.fmt("{d}", .{mib}) else "auto");
+    mkimage.addArg(b.fmt("--grow-to={d}", .{boot_partition_mib}));
     const image_step = b.step("image", "Build everything into an SD card image: zig-out/dazzle.img (and its files in zig-out/boot)");
     for (boot_files.items) |f| {
         mkimage.addPrefixedFileArg(b.fmt("{s}=", .{f[0]}), f[1]);

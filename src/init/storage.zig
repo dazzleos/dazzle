@@ -4,6 +4,13 @@
 //! which); and the apps, one copy whatever the slot, in apps/. Init mounts
 //! it, read-only, at /boot and shows its apps at /apps (`mountBoot`).
 //!
+//! The image is just big enough for its files, but laid out for a bigger
+//! partition (mkimage's --grow-to): on the first start, before anything
+//! follows it on the card, init grows it to that (`growBoot`), changing
+//! only its length in the partition table and its boot sector. That makes
+//! room for the second OS slot (system.zig copies the first there) and
+//! for updates.
+//!
 //! The rest of the card is free, for files;
 //! on the first run the system manager (system.zig) gives it a partition
 //! of its own (`planPartition`, `addPartition`) and a filesystem
@@ -24,6 +31,9 @@ pub const boot_partition = "/dev/mmcblk0p1";
 pub const data_partition = "/dev/mmcblk0p2";
 pub const boot_dir = "/boot";
 const apps_dir = "/apps";
+/// FAT has no owners or permissions: everything is root's, and anyone's to
+/// read (and run).
+pub const boot_options = "fmask=0022,dmask=0022";
 
 const sector = 512;
 /// Partitions start on 4 MiB boundaries (SD cards' erase blocks).
@@ -62,6 +72,7 @@ pub fn boot() Boot {
         return b;
     }
     // The partitions' device nodes come with the card's.
+    growBoot();
     mountBoot();
     if (!exists(data_partition) or !hasFilesystem(data_partition)) return b;
     b.mounted = mountData();
@@ -84,14 +95,116 @@ pub fn parseSlot(cmdline: []const u8) ?u8 {
     return null;
 }
 
+/// Grows the boot partition, if it can grow (`planBootGrowth`). The table
+/// first: if the power goes before the boot sector is written, the
+/// filesystem is only smaller than its partition, and grows next time.
+fn growBoot() void {
+    const disk = sys.open(card, .{ .ACCMODE = .RDWR, .CLOEXEC = true }) catch return;
+    defer sys.close(disk);
+    var mbr: [sector]u8 = undefined;
+    var bs: [sector]u8 = undefined;
+    if ((sys.check(linux.pread(disk, &mbr, sector, 0)) catch 0) != sector) return;
+    const start: u64 = std.mem.readInt(u32, mbr[446 + 8 ..][0..4], .little);
+    if ((sys.check(linux.pread(disk, &bs, sector, @intCast(start * sector))) catch 0) != sector) return;
+    const sectors = diskSectors(disk) catch return;
+    const new_len = planBootGrowth(&mbr, &bs, sectors) orelse return;
+    std.mem.writeInt(u32, mbr[446 + 12 ..][0..4], new_len, .little);
+    setFatSectors(&bs, new_len);
+    const ok = blk: {
+        if ((sys.check(linux.pwrite(disk, &mbr, sector, 0)) catch 0) != sector) break :blk false;
+        _ = linux.fsync(disk);
+        if ((sys.check(linux.pwrite(disk, &bs, sector, @intCast(start * sector))) catch 0) != sector) break :blk false;
+        _ = linux.fsync(disk);
+        break :blk true;
+    };
+    if (!ok) {
+        print("dazzle: cannot grow {s}\n", .{boot_partition});
+        return;
+    }
+    resizePartition(disk, .{ .entry = 0, .start = @intCast(start), .sectors = new_len }) catch |err|
+        print("dazzle: cannot resize {s}: {s}\n", .{ boot_partition, @errorName(err) });
+    print("dazzle: grew {s} to {d} MiB\n", .{ boot_partition, new_len / 2048 });
+}
+
+/// The length the boot partition (the first, FAT16) can grow to, in
+/// sectors, if it can grow: when it is the only partition, and the card
+/// has room for it and for files after it. It grows as far as its FATs
+/// can count clusters (mkimage made them big enough), and ends on a 4 MiB
+/// boundary.
+pub fn planBootGrowth(mbr: *const [sector]u8, bs: *const [sector]u8, disk_sectors: u64) ?u32 {
+    if (mbr[510] != 0x55 or mbr[511] != 0xaa) return null;
+    if (!isFat16Type(mbr[446 + 4])) return null;
+    for (1..4) |i| {
+        const e = mbr[446 + i * 16 ..][0..16];
+        if (e[4] != 0 and std.mem.readInt(u32, e[12..16], .little) != 0) return null;
+    }
+    const start: u64 = std.mem.readInt(u32, mbr[446 + 8 ..][0..4], .little);
+    const len: u64 = std.mem.readInt(u32, mbr[446 + 12 ..][0..4], .little);
+    const f = FatGeometry.read(bs) orelse return null;
+    if (f.sectors > len) return null;
+    // As many clusters as the FATs count (two reserved entries), and
+    // FAT16 allows.
+    const clusters = @min(@as(u64, f.fat_sectors) * sector / 2 - 2, 65524);
+    const end = std.mem.alignBackward(u64, start + f.dataStart() + clusters * f.sectors_per_cluster, align_sectors);
+    if (end <= start + f.sectors) return null;
+    if (end + min_sectors > disk_sectors) return null;
+    return @intCast(end - start);
+}
+
+fn isFat16Type(kind: u8) bool {
+    return kind == 0x04 or kind == 0x06 or kind == 0x0e;
+}
+
+/// What growing a FAT16 filesystem needs from its boot sector.
+const FatGeometry = struct {
+    sectors_per_cluster: u32,
+    reserved: u32,
+    fats: u32,
+    root_sectors: u32,
+    fat_sectors: u32,
+    sectors: u32,
+
+    fn read(bs: *const [sector]u8) ?FatGeometry {
+        if (bs[510] != 0x55 or bs[511] != 0xaa) return null;
+        if (std.mem.readInt(u16, bs[11..13], .little) != sector) return null;
+        if (!std.mem.eql(u8, bs[54..62], "FAT16   ")) return null;
+        const g: FatGeometry = .{
+            .sectors_per_cluster = bs[13],
+            .reserved = std.mem.readInt(u16, bs[14..16], .little),
+            .fats = bs[16],
+            .root_sectors = @as(u32, std.mem.readInt(u16, bs[17..19], .little)) * 32 / sector,
+            .fat_sectors = std.mem.readInt(u16, bs[22..24], .little),
+            .sectors = switch (std.mem.readInt(u16, bs[19..21], .little)) {
+                0 => std.mem.readInt(u32, bs[32..36], .little),
+                else => |n| n,
+            },
+        };
+        if (g.sectors_per_cluster == 0 or g.fats == 0 or g.fat_sectors == 0) return null;
+        return g;
+    }
+
+    fn dataStart(g: FatGeometry) u32 {
+        return g.reserved + g.fats * g.fat_sectors + g.root_sectors;
+    }
+};
+
+/// Sets a FAT boot sector's count of sectors.
+fn setFatSectors(bs: *[sector]u8, sectors: u32) void {
+    if (sectors < 65536) {
+        std.mem.writeInt(u16, bs[19..21], @intCast(sectors), .little);
+        std.mem.writeInt(u32, bs[32..36], 0, .little);
+    } else {
+        std.mem.writeInt(u16, bs[19..21], 0, .little);
+        std.mem.writeInt(u32, bs[32..36], sectors, .little);
+    }
+}
+
 /// Mounts the boot partition, read-only, at /boot, and its apps at /apps.
-/// Its files are root's and anyone's to read (and run): FAT has no owners
-/// or permissions.
 fn mountBoot() void {
     _ = linux.mkdir(boot_dir, 0o755);
     _ = linux.mkdir(apps_dir, 0o755);
     const flags = linux.MS.RDONLY | linux.MS.NODEV | linux.MS.NOSUID;
-    _ = sys.check(linux.mount(boot_partition, boot_dir, "vfat", flags, @intFromPtr("fmask=0022,dmask=0022"))) catch |err| {
+    _ = sys.check(linux.mount(boot_partition, boot_dir, "vfat", flags, @intFromPtr(boot_options))) catch |err| {
         print("dazzle: cannot mount {s} at {s}: {s}\n", .{ boot_partition, boot_dir, @errorName(err) });
         return;
     };
@@ -186,6 +299,16 @@ pub fn diskSectors(fd: linux.fd_t) sys.Error!u64 {
 /// Has the kernel read the partition table again (so the new partition's
 /// device appears), or else adds the partition itself.
 pub fn announcePartition(fd: linux.fd_t, plan: Plan) sys.Error!void {
+    return changePartition(fd, plan, 1); // BLKPG_ADD_PARTITION
+}
+
+/// Has the kernel read the partition table again, or else tells it a
+/// partition's new size.
+fn resizePartition(fd: linux.fd_t, plan: Plan) sys.Error!void {
+    return changePartition(fd, plan, 3); // BLKPG_RESIZE_PARTITION
+}
+
+fn changePartition(fd: linux.fd_t, plan: Plan, op: c_int) sys.Error!void {
     const blkrrpart = linux.IOCTL.IO(0x12, 95);
     if (linux.errno(linux.ioctl(fd, blkrrpart, 0)) == .SUCCESS) return;
     const BlkpgPartition = extern struct {
@@ -197,7 +320,7 @@ pub fn announcePartition(fd: linux.fd_t, plan: Plan) sys.Error!void {
     };
     const BlkpgArg = extern struct { op: c_int, flags: c_int = 0, datalen: c_int, data: *anyopaque };
     var part: BlkpgPartition = .{ .start = @as(i64, plan.start) * sector, .length = @as(i64, plan.sectors) * sector, .pno = @as(c_int, plan.entry) + 1 };
-    var arg: BlkpgArg = .{ .op = 1, .datalen = @sizeOf(BlkpgPartition), .data = &part }; // BLKPG_ADD_PARTITION
+    var arg: BlkpgArg = .{ .op = op, .datalen = @sizeOf(BlkpgPartition), .data = &part };
     _ = try sys.check(linux.ioctl(fd, linux.IOCTL.IO(0x12, 105), @intFromPtr(&arg))); // BLKPG
 }
 
@@ -256,4 +379,53 @@ test "the OS slot is on the kernel's command line" {
     try std.testing.expectEqual(@as(?u8, 'a'), parseSlot("dazzle.slot=a"));
     try std.testing.expectEqual(@as(?u8, null), parseSlot("loglevel=6 dazzle.slot=c"));
     try std.testing.expectEqual(@as(?u8, null), parseSlot("loglevel=6"));
+}
+
+/// A FAT16 boot sector laid out as mkimage lays out one to grow to 128 MiB
+/// (2 KiB clusters, 254 sectors of FAT each), `sectors` long.
+fn growableBootSector(sectors: u32) [sector]u8 {
+    var bs: [sector]u8 = @splat(0);
+    std.mem.writeInt(u16, bs[11..13], sector, .little);
+    bs[13] = 4;
+    std.mem.writeInt(u16, bs[14..16], 1, .little);
+    bs[16] = 2;
+    std.mem.writeInt(u16, bs[17..19], 512, .little);
+    std.mem.writeInt(u16, bs[22..24], 254, .little);
+    setFatSectors(&bs, sectors);
+    @memcpy(bs[54..62], "FAT16   ");
+    bs[510] = 0x55;
+    bs[511] = 0xaa;
+    return bs;
+}
+
+test "the boot partition grows as far as its FATs reach, once, before /data" {
+    const disk: u64 = 16_000_000_000 / sector;
+    var mbr = imageMbr();
+    mbr[446 + 4] = 0x0e;
+    // A 10 MiB image.
+    std.mem.writeInt(u32, mbr[446 + 12 ..][0..4], 9 * 2048, .little);
+    var bs = growableBootSector(9 * 2048);
+    // 254 sectors of FAT count 65022 clusters of 4 sectors, after 541 of
+    // the rest: up to 2048 + 260629, ending on the boundary before.
+    const len = planBootGrowth(&mbr, &bs, disk).?;
+    try testing.expectEqual(@as(u32, 128 * 2048 - 2048), len);
+    // Grown: no further.
+    std.mem.writeInt(u32, mbr[446 + 12 ..][0..4], len, .little);
+    setFatSectors(&bs, len);
+    try testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, bs[19..21], .little));
+    try testing.expectEqual(@as(?u32, null), planBootGrowth(&mbr, &bs, disk));
+    // Only the table written (the power went): the filesystem still grows.
+    var half = growableBootSector(9 * 2048);
+    try testing.expectEqual(@as(?u32, len), planBootGrowth(&mbr, &half, disk));
+    // Not once /data is there, nor on a card with no room for it after.
+    var data = imageMbr();
+    data[446 + 4] = 0x0e;
+    std.mem.writeInt(u32, data[446 + 12 ..][0..4], 9 * 2048, .little);
+    addPartition(&data, try planPartition(&data, disk));
+    try testing.expectEqual(@as(?u32, null), planBootGrowth(&data, &half, disk));
+    try testing.expectEqual(@as(?u32, null), planBootGrowth(&mbr, &half, 160 * 2048));
+    // Not FAT16.
+    var other = half;
+    @memcpy(other[54..62], "FAT32   ");
+    try testing.expectEqual(@as(?u32, null), planBootGrowth(&mbr, &other, disk));
 }

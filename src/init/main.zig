@@ -16,7 +16,8 @@
 //!    are plugged in; waits for the vc4 GPU and gives the Dazzle user access
 //!    to its device nodes;
 //! 5. until setup has finished, starts the system manager (see system.zig),
-//!    which prepares the card and names the computer for the setup app;
+//!    which prepares the card and names the computer for the setup app,
+//!    and makes the second OS slot (also later, if that was cut off);
 //! 6. starts /os/shell/dazzle-shell, the Wayland compositor, as the Dazzle
 //!    user (with --setup until setup has finished), with its output going
 //!    to the kernel log; its dock starts the apps;
@@ -33,6 +34,7 @@ const logserver = @import("logserver.zig");
 const network = @import("network.zig");
 const devices = @import("devices.zig");
 const storage = @import("storage.zig");
+const slots = @import("slots.zig");
 const system = @import("system.zig");
 const build_info = @import("build_info");
 
@@ -59,8 +61,10 @@ pub fn main() void {
     grantGpuAccess();
     // Until setup has finished, the shell runs the setup app (and nothing
     // else), and the system manager prepares the card and names the
-    // computer for it.
-    if (!card.setup_done) _ = system.start(card.card, card.mounted);
+    // computer for it. It also makes the second OS slot, if that is still
+    // to be made.
+    if (!card.setup_done or (card.card and slots.otherMissing(card.slot orelse 'a')))
+        _ = system.start(card.card, card.mounted, card.slot, card.setup_done);
     const shell_pid = startShell(!card.setup_done);
     reapForever(shell_pid, network_pid, devices_pid);
 }
@@ -204,4 +208,5 @@ test {
     _ = @import("mkfs.zig");
     _ = @import("storage.zig");
     _ = @import("system.zig");
+    _ = @import("slots.zig");
 }

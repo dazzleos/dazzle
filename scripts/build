@@ -26,6 +26,7 @@ pinned() {
 	sed -n "s/^const $1 = \"\(.*\)\";.*/\1/p" build.zig
 }
 linux_version=$(pinned linux_version)
+boot_mib=$(sed -n 's/^const boot_partition_mib = \([0-9]*\);.*/\1/p' build.zig)
 firmware_tag=$(pinned firmware_tag)
 commit=$(git describe --always --dirty 2>/dev/null || echo unknown)
 
@@ -79,9 +80,10 @@ echo "Its boot partition (FAT) holds:"
 echo "  - the firmware and config.txt (which picks the OS slot)"
 echo "  - OS slot A, slot-a/, the one that starts: the kernel, device trees and"
 echo "    initramfs ($(mib "$slot_bytes"))"
-echo "  - OS slot B, slot-b/: a copy of slot A, for updates to replace"
-echo "  - the apps, apps/, shared by both slots ($(mib "$apps_bytes")): $apps"
-echo "On the first start, the rest of the card becomes /data, for files."
+echo "  - the apps, apps/, shared by the OS slots ($(mib "$apps_bytes")): $apps"
+echo "On the first start, the system grows the partition to end at $boot_mib MiB and"
+echo "copies slot A to slot B, slot-b/ (for updates to replace), while setup runs;"
+echo "the rest of the card becomes /data, for files."
 echo "(The same files are in zig-out/boot/, to copy onto a card by hand.)"
 echo
 echo "${bold}To write it to an SD card${plain} (everything on the card is replaced):"

@@ -1,7 +1,8 @@
 //! The system manager: on the first run, while the setup app runs, it
 //! prepares the SD card's free space for files and names the computer.
 //!
-//! Init forks it only until setup has finished. It runs as the Dazzle user,
+//! Init forks it until setup has finished, and while an OS slot is to be
+//! made (below). It runs as the Dazzle user,
 //! keeping only the capabilities this needs: writing the card, mounting it
 //! and setting the hostname (CAP_SYS_ADMIN), writing the card's device and
 //! the root-owned /data (CAP_DAC_OVERRIDE), and giving /data/system to root
@@ -16,12 +17,18 @@
 //! got (mkfs.zig), then mounted at /data with /data/system and /data/user
 //! in it. Finishing sets the hostname, keeps it in /data/system with a
 //! mark that setup has finished, and ends the manager.
+//!
+//! Meanwhile, from the start, it copies the running OS slot to the other
+//! (slots.zig), the image having only one, a slice at a time like
+//! formatting; it ends once that is done too. (If setup has finished, as
+//! when the power went before the copy did, it only copies.)
 
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
 const storage = @import("storage.zig");
 const mkfs = @import("mkfs.zig");
+const slots = @import("slots.zig");
 
 const proto = sys.system;
 const print = sys.print;
@@ -30,10 +37,11 @@ const max_clients = 4;
 /// How long formatting works before looking at the socket again.
 const slice_ns = 50 * std.time.ns_per_ms;
 
-/// Forks the manager. `card` says whether there is an SD card, and
-/// `mounted` whether /data is already there (prepared on an earlier run
-/// that did not finish setting up).
-pub fn start(card: bool, mounted: bool) ?linux.pid_t {
+/// Forks the manager. `card` says whether there is an SD card, `mounted`
+/// whether /data is already there (prepared on an earlier run that did not
+/// finish setting up), `slot` which OS slot is running, and `setup_done`
+/// whether setup has finished.
+pub fn start(card: bool, mounted: bool, slot: ?u8, setup_done: bool) ?linux.pid_t {
     const rc = linux.fork();
     switch (linux.errno(rc)) {
         .SUCCESS => if (rc != 0) return @intCast(rc),
@@ -46,9 +54,13 @@ pub fn start(card: bool, mounted: bool) ?linux.pid_t {
         print("dazzle: system: cannot drop privileges ({s})\n", .{@errorName(err)});
         linux.exit(1);
     };
-    var m: Manager = .{ .report = .{ .storage = if (mounted) .ready else if (card) .unprepared else .none } };
+    var m: Manager = .{ .report = .{ .storage = if (mounted) .ready else if (card) .unprepared else .none }, .finished = setup_done };
     var uts: linux.utsname = undefined;
     if (linux.errno(linux.uname(&uts)) == .SUCCESS) m.report.hostname = proto.Hostname.parse(std.mem.sliceTo(&uts.nodename, 0)) orelse .{};
+    if (card) m.copier = slots.Copier.start(slot orelse 'a') catch |err| blk: {
+        print("dazzle: system: cannot copy the OS slot: {s}\n", .{@errorName(err)});
+        break :blk null;
+    };
     m.run() catch |err| print("dazzle: system: {s}\n", .{@errorName(err)});
     linux.exit(if (m.finished) 0 else 1);
 }
@@ -58,6 +70,8 @@ const Manager = struct {
     /// Formatting, and the partition's device.
     formatter: ?mkfs.Formatter = null,
     fd: ?linux.fd_t = null,
+    /// Copying the OS slot.
+    copier: ?slots.Copier = null,
     finished: bool = false,
 
     fn run(m: *Manager) !void {
@@ -68,10 +82,12 @@ const Manager = struct {
             _ = linux.unlink(path);
         }
         var clients: [max_clients]?linux.fd_t = @splat(null);
-        while (!m.finished) {
-            // While formatting, only look at the socket between slices.
-            const busy = m.formatter != null;
-            if (busy) m.format();
+        while (!m.finished or m.copier != null) {
+            // While formatting or copying, only look at the socket between
+            // slices.
+            const busy = m.formatter != null or m.copier != null;
+            if (m.formatter != null) m.format();
+            if (m.copier != null) m.copySlot();
 
             var fds: [1 + max_clients]linux.pollfd = undefined;
             fds[0] = .{ .fd = listener, .events = linux.POLL.IN, .revents = 0 };
@@ -185,6 +201,24 @@ const Manager = struct {
         _ = linux.chown(proto.config_dir, 0, 0);
         _ = linux.mkdir(proto.user_dir, 0o700);
         m.report.storage = .ready;
+    }
+
+    /// Copies the OS slot for a slice of time.
+    fn copySlot(m: *Manager) void {
+        const c = &(m.copier orelse return);
+        const until = sys.nowNs() + slice_ns;
+        while (sys.nowNs() < until) {
+            const done = c.step() catch |err| {
+                print("dazzle: system: cannot copy the OS slot: {s}\n", .{@errorName(err)});
+                c.deinit();
+                m.copier = null;
+                return;
+            };
+            if (done) {
+                m.copier = null;
+                return;
+            }
+        }
     }
 
     fn stopFormatting(m: *Manager) void {

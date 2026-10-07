@@ -471,9 +471,10 @@ passwords or logins.
   (`/proc/<pid>/exe`, from the socket's peer credentials). Init restarts it
   if it ever stops.
 - The system manager runs only on the first run, while the setup app
-  does, as the user keeping three capabilities: `CAP_SYS_ADMIN` (writing
-  the card's partition table, mounting and setting the hostname),
-  `CAP_DAC_OVERRIDE` (the card's device node and the root-owned `/data`)
+  does (and until it has made OS slot B), as the user keeping three capabilities: `CAP_SYS_ADMIN` (writing
+  the card's partition table, mounting, making the boot partition
+  writable and setting the hostname), `CAP_DAC_OVERRIDE` (the card's
+  device node, the root-owned `/data`, and the boot partition's files)
   and `CAP_CHOWN` (giving `/data/system` to root). Its socket,
   `/os/sockets/system`, answers only `/os/shell/dazzle-setup`.
 - The device manager runs as the user, keeping only `CAP_CHOWN`. Input
@@ -589,9 +590,9 @@ scripts/zig build qemu              # boot in QEMU as a Zero (-Dqemu-board=pi3a+
 
 Options: `-Dlinux=path/to/linux` uses an existing kernel tree,
 `-Dcross-compile=arm-linux-gnueabihf-` builds the kernel with GCC instead of
-LLVM, `-Dimage-size=<MiB>` sets the image size (128 MiB by default: the
-partition table's first MiB, then a FAT16 boot partition with room for
-the OS slots to grow, as it cannot grow once `/data` follows it) and
+LLVM, `-Dimage-size=<MiB>` sets the image size (by default it is just big
+enough for its files, with a quarter to spare: about 12 MiB, a FAT16 boot
+partition after the partition table's first MiB) and
 `-Dhttp-port=<port>` the host port for QEMU's log server (default 8080).
 
 The image's boot partition:
@@ -603,17 +604,28 @@ config.txt                  the firmware's settings; os_prefix picks the OS slot
 slot-a/                     OS slot A: a whole system (zImage, the boards'
                             device trees, initramfs.cpio, and cmdline.txt,
                             with dazzle.slot=a)
-slot-b/                     OS slot B: the same, with dazzle.slot=b
+slot-b/                     OS slot B: the same, with dazzle.slot=b; made on
+                            the card on the first start
 apps/                       the apps, one copy for both slots (/apps)
 ```
 
 Everything but the firmware, the apps and `/data` has two copies, so that
 an update (to come) can write the slot not in use and switch `os_prefix`
-to it, keeping the other to fall back to. Both slots hold the same build
-for now, and slot A starts. The firmware loads the slot's kernel, device
-tree and initramfs into memory; init mounts the partition, read-only, at
-`/boot`, and shows its `apps/` at `/apps`; the rest of the card is `/data`
-(below).
+to it, keeping the other to fall back to. Slot A starts. The firmware
+loads the slot's kernel, device tree and initramfs into memory; init
+mounts the partition, read-only, at `/boot`, and shows its `apps/` at
+`/apps`; the rest of the card is `/data` (below).
+
+The image holds slot A only, to stay small, but its partition is laid out
+(`mkimage --grow-to`) for one ending at 128 MiB: its clusters, FATs and
+root directory are sized for that. On the first start, init grows it
+before mounting it (`src/init/storage.zig`), changing only its length in
+the partition table and its boot sector, as nothing follows it yet; then,
+while setup runs, the system manager copies slot A to `slot-b/` a slice
+at a time (`src/init/slots.zig`), writing `slot-b.new/` and renaming it
+when it is whole (and starting again on the next start if it was cut
+off, even once setup has finished). The partition has room for both slots to grow several times over,
+as it cannot grow once `/data` follows it.
 
 The kernel comes from `make tinyconfig` plus `kernel/dazzle.config`. The
 build fails if any requested option is dropped because a dependency is
@@ -642,8 +654,8 @@ The first time it starts, the screen shows the setup app
 (`/os/shell/dazzle-setup`) and no dock. It asks for the computer's name, filled
 in with a random two words (like `awesome-elephant`), on pages with Next
 buttons (more pages, such as the language, keyboard and network, are to
-come). Meanwhile init's system manager (`src/init/system.zig`) makes the
-rest of the card a place for files: it adds a partition from the end of the
+come). Meanwhile init's system manager (`src/init/system.zig`) makes OS slot B
+(above) and the rest of the card a place for files: it adds a partition from the end of the
 system's (rounded up to 4 MiB) to the end of the card (`src/init/storage.zig`),
 gives it an empty filesystem (`src/init/mkfs.zig`: ext2's layout with a
 journal, which the kernel's ext4 driver mounts; written a few block groups

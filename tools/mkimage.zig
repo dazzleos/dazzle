@@ -4,16 +4,21 @@
 //! devices or filesystem tools needed, and the output is the same for the
 //! same inputs.
 //!
-//! Usage: mkimage <output.img> <size in MiB, or "auto"> <name>=<file> ...
+//! Usage: mkimage <output.img> <size in MiB, or "auto"> [--grow-to=<MiB>] <name>=<file> ...
 //!
 //! The partition starts at 1 MiB and fills the rest of the image. "auto"
 //! makes the image just big enough for the files, with some room to spare
-//! (a quarter more, and at least 1 MiB), in whole MiB; nothing on the
-//! device writes to it, and the rest of the card is for files (/data). The
-//! Pi's boot ROM and firmware read FAT16, which suits a partition this
-//! small (FAT32 needs at least 65525 clusters, 32 MiB of 512-byte ones).
-//! Clusters are one 512-byte sector, or as many as keep the partition
-//! within FAT16's 65524 clusters.
+//! (a quarter more, and at least 1 MiB), in whole MiB. The Pi's boot ROM
+//! and firmware read FAT16, which suits a partition this small (FAT32
+//! needs at least 65525 clusters, 32 MiB of 512-byte ones). Clusters are
+//! one 512-byte sector, or as many as keep the partition within FAT16's
+//! 65524 clusters.
+//!
+//! --grow-to makes a partition that can grow on the card to end at that
+//! many MiB, by changing only its length in the partition table and its
+//! boot sector (init does, on the first start): its clusters, FATs and
+//! root directory are sized for the bigger partition, so the image stays
+//! small and nothing in it moves.
 
 const std = @import("std");
 
@@ -33,20 +38,24 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
     if (args.len < 3) {
-        std.debug.print("usage: mkimage <output.img> <size in MiB, or auto> <name>=<file> ...\n", .{});
+        std.debug.print("usage: mkimage <output.img> <size in MiB, or auto> [--grow-to=<MiB>] <name>=<file> ...\n", .{});
         std.process.exit(2);
     }
-    const size_mib: ?u32 = if (std.mem.eql(u8, args[2], "auto")) null else try std.fmt.parseInt(u32, args[2], 10);
+    var size: Size = .{ .mib = if (std.mem.eql(u8, args[2], "auto")) null else try std.fmt.parseInt(u32, args[2], 10) };
     const cwd = std.Io.Dir.cwd();
     var files: std.ArrayList(File) = .empty;
     for (args[3..]) |spec| {
+        if (std.mem.startsWith(u8, spec, "--grow-to=")) {
+            size.grow_mib = try std.fmt.parseInt(u32, spec["--grow-to=".len..], 10);
+            continue;
+        }
         const eq = std.mem.indexOfScalar(u8, spec, '=') orelse return error.BadArgument;
         try files.append(arena, .{
             .name = spec[0..eq],
             .data = try cwd.readFileAlloc(init.io, spec[eq + 1 ..], arena, .limited(256 << 20)),
         });
     }
-    const image = try build(arena, size_mib, files.items);
+    const image = try build(arena, size, files.items);
     const out = try cwd.createFile(init.io, args[1], .{});
     defer out.close(init.io);
     try out.writeStreamingAll(init.io, image);
@@ -194,6 +203,18 @@ const Layout = struct {
         return error.ImageTooBig;
     }
 
+    /// A partition of `part_sectors` laid out as one of `grow_sectors` is,
+    /// so that it can grow to that.
+    fn growable(part_sectors: u32, grow_sectors: u32, root_entries: u32) !Layout {
+        var l = try plan(grow_sectors, root_entries);
+        if (part_sectors > grow_sectors) return error.ImageBiggerThanGrowth;
+        if (part_sectors <= l.dataStart()) return error.ImageTooSmall;
+        l.clusters = (part_sectors - l.dataStart()) / l.sectors_per_cluster;
+        // Fewer would make it FAT12.
+        if (l.clusters < min_clusters) return error.ImageTooSmall;
+        return l;
+    }
+
     fn dataStart(l: Layout) u32 {
         return reserved_sectors + num_fats * l.fat_sectors + l.root_sectors;
     }
@@ -202,6 +223,20 @@ const Layout = struct {
         return l.sectors_per_cluster * sector;
     }
 };
+
+/// The image's size: in MiB, or (null) just big enough; and, if it is
+/// to grow on the card, where its partition is to end.
+pub const Size = struct { mib: ?u32 = null, grow_mib: ?u32 = null };
+
+/// The size, in MiB, of an image just big enough for `root`'s files (with
+/// some room to spare), laid out for a partition to grow to `grow`.
+fn autoSizeGrowable(root: *const Node, grow: Layout) u32 {
+    const data = root.dataSize(grow.clusterBytes());
+    const room = @max(data / 4, 1 << 20);
+    const clusters = @max(std.math.divCeil(u64, data + room, grow.clusterBytes()) catch unreachable, min_clusters + 16);
+    const total = part_start + grow.dataStart() + clusters * grow.sectors_per_cluster;
+    return @intCast(std.math.divCeil(u64, total, 2048) catch unreachable);
+}
 
 /// The size, in MiB, of an image just big enough for `root`'s files (with
 /// some room to spare).
@@ -215,17 +250,21 @@ fn autoSize(root: *const Node, root_entries: u32) u32 {
     return @intCast(std.math.divCeil(u64, total, 2048) catch unreachable);
 }
 
-/// The image, `size_mib` big or (null) just big enough. Files are named by
-/// their paths: "slot-a/zImage" is in the directory "slot-a".
-pub fn build(gpa: std.mem.Allocator, size_mib: ?u32, files: []const File) ![]u8 {
+/// The image, as big as `size` says. Files are named by their paths:
+/// "slot-a/zImage" is in the directory "slot-a".
+pub fn build(gpa: std.mem.Allocator, size: Size, files: []const File) ![]u8 {
     const root = try Node.tree(gpa, files);
     try root.makeEntries(gpa, true);
     const root_entries = root.rootEntries();
-    const mib = size_mib orelse autoSize(root, root_entries);
+    const grow: ?Layout = if (size.grow_mib) |g| blk: {
+        if (g * 2048 <= part_start) return error.ImageTooSmall;
+        break :blk try Layout.plan(g * 2048 - part_start, root_entries);
+    } else null;
+    const mib = size.mib orelse if (grow) |g| autoSizeGrowable(root, g) else autoSize(root, root_entries);
     const total_sectors = mib * 2048;
     if (total_sectors <= part_start) return error.ImageTooSmall;
     const part_sectors = total_sectors - part_start;
-    const l = try Layout.plan(part_sectors, root_entries);
+    const l = if (size.grow_mib) |g| try Layout.growable(part_sectors, g * 2048 - part_start, root_entries) else try Layout.plan(part_sectors, root_entries);
     if (root.dataSize(l.clusterBytes()) > @as(u64, l.clusters) * l.clusterBytes()) return error.ImageFull;
 
     const image = try gpa.alloc(u8, @as(usize, total_sectors) * sector);
@@ -245,11 +284,12 @@ pub fn build(gpa: std.mem.Allocator, size_mib: ?u32, files: []const File) ![]u8 
     image[511] = 0xaa;
 
     // --- Clusters: each file's and subdirectory's, contiguously ---
-    const fat = try gpa.alloc(u16, l.clusters + 2);
+    // The whole FAT, free past the partition's clusters (room to grow).
+    const fat = try gpa.alloc(u16, l.fat_sectors * sector / 2);
     @memset(fat, 0);
     fat[0] = 0xfff8;
     fat[1] = 0xffff;
-    var alloc: Allocation = .{ .fat = fat, .cluster_bytes = l.clusterBytes() };
+    var alloc: Allocation = .{ .fat = fat, .end = l.clusters + 2, .cluster_bytes = l.clusterBytes() };
     try alloc.place(root);
     // Then what each holds, now that every first cluster is known.
     alloc.fill(root, 0);
@@ -291,6 +331,8 @@ pub fn build(gpa: std.mem.Allocator, size_mib: ?u32, files: []const File) ![]u8 
 /// Gives each file and subdirectory its clusters, in order.
 const Allocation = struct {
     fat: []u16,
+    /// Past the last cluster.
+    end: u32,
     cluster_bytes: u32,
     next: u32 = 2,
 
@@ -300,7 +342,7 @@ const Allocation = struct {
             // A directory has a cluster even if it were empty.
             const n: u32 = @intCast(@max(std.math.divCeil(usize, len, a.cluster_bytes) catch unreachable, @as(usize, if (c.isDir()) 1 else 0)));
             if (n > 0) {
-                if (a.next + n > a.fat.len) return error.ImageFull;
+                if (a.next + n > a.end) return error.ImageFull;
                 c.first_cluster = a.next;
                 for (0..n) |k| {
                     const cl = a.next + @as(u32, @intCast(k));
@@ -421,7 +463,7 @@ test "an image has a valid partition and boot sector, and is as big as it needs"
     };
     // Small files: FAT16's least clusters (2 MiB of them), and the 1 MiB
     // before the partition.
-    const img = try build(arena.allocator(), null, &files);
+    const img = try build(arena.allocator(), .{}, &files);
     try std.testing.expectEqual(@as(usize, 4 << 20), img.len);
     try std.testing.expectEqual(@as(u8, 0x0e), img[446 + 4]);
     const part = img[part_start * sector ..];
@@ -429,13 +471,13 @@ test "an image has a valid partition and boot sector, and is as big as it needs"
     try std.testing.expectEqual(@as(u8, 1), part[13]);
     // 9 MB of files: a quarter more, in whole MiB.
     const big = try arena.allocator().alloc(u8, 9_000_000);
-    const sized = try build(arena.allocator(), null, &.{.{ .name = "initramfs.cpio", .data = big }});
+    const sized = try build(arena.allocator(), .{}, &.{.{ .name = "initramfs.cpio", .data = big }});
     try std.testing.expectEqual(@as(usize, 12 << 20), sized.len);
     // A size given, too big for 512-byte clusters: bigger clusters.
-    const fixed = try build(arena.allocator(), 64, &files);
+    const fixed = try build(arena.allocator(), .{ .mib = 64 }, &files);
     try std.testing.expectEqual(@as(usize, 64 << 20), fixed.len);
     try std.testing.expectEqual(@as(u8, 2), fixed[part_start * sector + 13]);
-    try std.testing.expectError(error.ImageTooSmall, build(arena.allocator(), 2, &files));
+    try std.testing.expectError(error.ImageTooSmall, build(arena.allocator(), .{ .mib = 2 }, &files));
 }
 
 test "files in directories, nested" {
@@ -449,7 +491,7 @@ test "files in directories, nested" {
         .{ .name = "apps/dazzle-demo/dazzle-demo", .data = "demo" },
         .{ .name = "apps/dazzle-demo/NOTICES", .data = "notices" },
     };
-    const img = try build(arena.allocator(), null, &files);
+    const img = try build(arena.allocator(), .{}, &files);
     const part = img[part_start * sector ..];
     const fat_sectors = std.mem.readInt(u16, part[22..24], .little);
     const root_entries = std.mem.readInt(u16, part[17..19], .little);
@@ -500,3 +542,31 @@ const Fs = struct {
         return f.part[f.data_at + (c - 2) * f.spc * sector ..][0 .. f.spc * sector];
     }
 };
+
+test "an image that can grow: small, laid out for the bigger partition" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const files = [_]File{
+        .{ .name = "config.txt", .data = "os_prefix=slot-a/\n" },
+        .{ .name = "slot-a/zImage", .data = "kernel" },
+    };
+    const img = try build(arena.allocator(), .{ .grow_mib = 128 }, &files);
+    const part = img[part_start * sector ..];
+    const big = try Layout.plan(128 * 2048 - part_start, 512);
+    // The bigger partition's clusters (2 KiB) and FATs...
+    try std.testing.expectEqual(@as(u8, 4), part[13]);
+    try std.testing.expectEqual(big.fat_sectors, std.mem.readInt(u16, part[22..24], .little));
+    // ...in an image just big enough for FAT16's least clusters of them.
+    try std.testing.expectEqual(@as(usize, 10 << 20), img.len);
+    const part_sectors = std.mem.readInt(u32, img[446 + 12 ..][0..4], .little);
+    try std.testing.expectEqual(@as(u32, 10 * 2048 - part_start), part_sectors);
+    try std.testing.expectEqual(part_sectors, std.mem.readInt(u16, part[19..21], .little));
+    // Clusters past the partition's are free.
+    const fat_at = reserved_sectors * sector;
+    const clusters = (part_sectors - big.dataStart()) / 4;
+    try std.testing.expect(clusters >= min_clusters);
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, part[fat_at + (clusters + 2) * 2 ..][0..2], .little));
+    // Not bigger than it is to grow to.
+    try std.testing.expectError(error.ImageBiggerThanGrowth, build(arena.allocator(), .{ .mib = 200, .grow_mib = 128 }, &files));
+}
