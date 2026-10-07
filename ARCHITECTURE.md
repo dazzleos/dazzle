@@ -162,10 +162,32 @@ and the GPU's constraints. A simulator of the QPUs and the texture unit
 runs the shaders in the host tests.
 
 Each app renders its window with the GPU into buffers it shares with the
-shell (as dma-bufs), in the GPU's tiled layout, usually as 16-bit colour
-to save memory. The shell draws the windows as textures into the screen's
-buffer and shows it with kernel mode setting, flipping between two
-buffers at vertical blank. Apps and the shell redraw only what changed.
+shell (as dma-bufs), in the GPU's tiled layout, in 16-bit BGR565 colour
+unless it asks for 32 bits (see Memory). The shell draws the windows as
+textures into the screen's buffer and shows it with kernel mode setting,
+flipping between two buffers at vertical blank. Apps and the shell redraw
+only what changed.
+
+## Memory
+
+The GPU has no MMU, so every buffer it uses (the screen, the windows,
+textures, the glyph atlases) must be one piece of physical memory, from
+the kernel's contiguous memory allocator (CMA). The device trees reserve
+64 MB for it, too little for the shell and a few apps, so `cmdline.txt`
+sets `cma=128M`. That leaves about 380 MB for everything else on the
+512 MB boards, but only about 128 MB on the 256 MB Pi 1 A and A+. The
+system itself is in memory too: the initramfs is about 5 MB.
+
+Graphics memory is saved where it can be:
+
+- Windows are BGR565, 16 bits a pixel: half the memory of 32-bit colour,
+  and half the memory bandwidth to draw them. A full-screen window at
+  1920×1080 takes 4 MB a buffer instead of 8 MB. The screen itself stays
+  32-bit, as everything is composited into it.
+- Text is drawn from a glyph atlas of 8-bit coverage, a quarter of the
+  memory of 32-bit colour.
+- An app whose window is covered gives back its spare buffers, and one
+  that cannot get another buffer makes do with those it has.
 
 ## The toolkit
 
