@@ -35,3 +35,12 @@ Dazzle to your microSD card:
 3. Under **Choose Storage**, pick your microSD card.
 4. Click **Next**. When asked about OS customisation, choose **No**: Dazzle
    asks for its own settings when it starts.
+
+## Special Thanks
+
+Dazzle is built on the foundations of these great projects:
+
+- Linux
+- [Raspberry Pi](https://www.raspberrypi.com/)
+- [Zig](https://ziglang.org/)
+- [Material Design](https://m3.material.io/)
