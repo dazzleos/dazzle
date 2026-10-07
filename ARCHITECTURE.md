@@ -216,7 +216,7 @@ The `vc4` module:
 | `qpu_schedule.zig` | Instruction scheduler: latency-aware reordering and add/mul pairing |
 | `render.zig` | Records a frame: any number of draw calls into one render target, as one job |
 | `texture.zig` | Texture tiling (T and LT layouts, for 32- and 16-bit pixels) and texture unit configuration |
-| `format.zig` | The pixel formats (XRGB8888, ARGB8888 and RGB565): their sizes, codes, and how the tile buffer stores them and the texture unit reads them |
+| `format.zig` | The pixel formats (XRGB8888, ARGB8888, RGB565, and A8 for textures): their sizes, codes, and how the tile buffer stores them and the texture unit reads them |
 | `display.zig` | Double-buffered scanout with page flips at vertical blank, and showing other buffers on the display's planes |
 | `drm.zig` | DRM core and KMS (mode setting, page flip, cursor) ioctls |
 | `kms.zig` | Atomic mode setting: the primary and an overlay plane, set in one commit per frame |
@@ -230,7 +230,7 @@ The `gfx` module draws 2D shapes, the toolkit's foundation:
 | File | Contents |
 |---|---|
 | `canvas.zig` | `Canvas`: records shapes and text (on the CPU) into batches of vertices: rectangles with per-corner radii, circles, polygons and polylines, filled or stroked, and lines of text, with an origin and a clip rectangle |
-| `atlas.zig` | `Atlas`: glyphs rasterized by the font renderer, packed into one texture, and the text runs laid out recently |
+| `atlas.zig` | `Atlas`: glyphs rasterized by the font renderer, packed into one 8-bit (A8) texture of their coverage, and the text runs laid out recently |
 | `geometry.zig` | Polygon triangulation (ear clipping, concave polygons included) and stroke strips with mitred joins, with anti-aliasing fringes |
 | `shaders/` | The 2D shaders (`shape.zig`, `solid.zig`, also built without blending as `opaque`, and `text.zig`) |
 | `shaders.zig` | The 2D shader programs, as the build compiled them, and their vertex layouts |
@@ -262,7 +262,10 @@ from the atlas, in the text's colour, blended like the shapes. Glyphs are
 placed to a quarter of a pixel (each quarter rasterized once), and match
 the font renderer's own drawing to within one level per channel. Text
 laid out once (character map lookups and kerning, the costly part) is
-kept while it is drawn each frame.
+kept while it is drawn each frame. The atlas holds only coverage, one
+byte a texel (an A8 texture, the texture unit's ALPHA type, which gives
+it as alpha): 512 KB of GPU memory per app (and as much for its copy on
+the CPU) rather than 2 MB at 32 bits.
 
 The `ui` module (`src/ui/`) is the widget toolkit. Like Flutter, it is
 declarative: an app describes its window as a tree of widgets, made again
@@ -1073,7 +1076,10 @@ RGB565 windows (the default) have not been tried on hardware yet: the
 simulator and the kernel's checks agree with them, but the texture unit's
 order for RGB565 texels comes from Mesa's driver. If restored windows
 show red and blue swapped while maximized ones are right, that order is
-the other way round (`Format.textureSwapsRedBlue`).
+the other way round (`Format.textureSwapsRedBlue`). Nor has the A8 glyph
+atlas: the simulator gives its texels as alpha, as Mesa's driver says the
+ALPHA type does (its A8 swizzle is 000W); if text disappears on the Pi,
+that is the place to look.
 
 The Pi 3 A+ has not been tried on hardware yet: in QEMU its kernel boots
 on the Cortex-A53, and init, the log server and networking work.

@@ -65,6 +65,7 @@ fn shmCode(f: vc4.Format) u32 {
         .argb8888 => p.wl_shm.format.argb8888,
         .xrgb8888 => p.wl_shm.format.xrgb8888,
         .rgb565 => p.wl_shm.format.rgb565,
+        .a8 => unreachable, // textures only
     };
 }
 
@@ -2491,7 +2492,9 @@ pub const Server = struct {
                 pr.used = true;
                 const fd = pr.fd orelse return c.postError(m.object, E.incomplete, "no planes", .{});
                 pr.fd = null;
-                const format = vc4.Format.fromFourcc(code);
+                const format = for (buffer_formats) |f| {
+                    if (f.fourcc() == code) break f;
+                } else null;
                 if (format == null or pr.modifier != p.modifier.broadcom_vc4_t_tiled) {
                     _ = linux.close(fd);
                     return c.postError(m.object, E.invalid_format, "only T-tiled XRGB8888, ARGB8888 and RGB565 are supported", .{});

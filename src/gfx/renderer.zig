@@ -107,7 +107,7 @@ pub const Renderer = struct {
     fn upload(r: *Renderer, a: *atlas_mod.Atlas) !void {
         const w = atlas_mod.width;
         const h = atlas_mod.height;
-        if (r.atlas_bo == null) r.atlas_bo = try r.dev.createBo(vc4.texture.imageSize(w, h));
+        if (r.atlas_bo == null) r.atlas_bo = try r.dev.createBo(vc4.texture.imageSizeOf(.a8, w, h));
         // Another atlas (or the first): all of it.
         if (r.atlas != a) {
             r.atlas = a;
@@ -115,9 +115,10 @@ pub const Renderer = struct {
         }
         const d = a.dirty orelse return;
         // Whole micro-tiles' rows, so uploads stay aligned.
-        const y0: u32 = d.y0 / 4 * 4;
-        const y1: u32 = @min(std.mem.alignForward(u32, d.y1, 4), h);
-        vc4.texture.uploadRect(r.atlas_bo.?.map, w, h, .{ .x = 0, .y = y0, .width = w, .height = y1 - y0 }, a.pixels[y0 * w .. y1 * w], w);
+        const uh = vc4.Format.a8.utileHeight();
+        const y0: u32 = d.y0 / uh * uh;
+        const y1: u32 = @min(std.mem.alignForward(u32, d.y1, uh), h);
+        vc4.texture.uploadRectOf(.a8, r.atlas_bo.?.map, w, h, .{ .x = 0, .y = y0, .width = w, .height = y1 - y0 }, a.pixels[y0 * w .. y1 * w], w);
         a.dirty = null;
     }
 
@@ -149,6 +150,7 @@ pub const Renderer = struct {
                 .text => .{
                     .handle = (r.atlas_bo orelse return error.NotPrepared).handle,
                     .config = .{
+                        .type = vc4.Format.a8.textureType(),
                         .width = atlas_mod.width,
                         .height = atlas_mod.height,
                         .mag_filter = .nearest,

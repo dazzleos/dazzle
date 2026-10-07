@@ -424,17 +424,19 @@ fn write(s: *State, r: *Result, env: Env, waddr: u6, file: File, value: Vec, con
     }
 }
 
-/// Nearest-neighbour sampling of an RGBA8888 or RGB565 texture, with
-/// repeat or clamp wrapping. A 32-bit texel comes back as it is in memory;
-/// an RGB565 one with red in the low byte, then green and blue (each
-/// widened to 8 bits), and opaque: the order Mesa's vc4 driver expects
-/// (its B5G6R5 swizzle is XYZ1).
+/// Nearest-neighbour sampling of an RGBA8888, RGB565 or ALPHA texture,
+/// with repeat or clamp wrapping. A 32-bit texel comes back as it is in
+/// memory; an RGB565 one with red in the low byte, then green and blue
+/// (each widened to 8 bits), and opaque: the order Mesa's vc4 driver
+/// expects (its B5G6R5 swizzle is XYZ1); an ALPHA one in the top byte,
+/// with the rest 0 (its A8 swizzle is 000W).
 fn sample(memory: []const u8, p0: u32, p1: u32, s: f32, t: f32) Error!u32 {
     const p = texture.decodeConfig(p0, p1);
     if (p.mag_filter != .nearest or p.min_filter != .nearest) return error.Unsupported;
     const cpp: u32 = switch (p.type) {
         .rgba8888 => 4,
         .rgb565 => 2,
+        .alpha => 1,
         else => return error.Unsupported,
     };
     const x = try wrap(s, p.width, p.wrap_s);
@@ -442,6 +444,7 @@ fn sample(memory: []const u8, p0: u32, p1: u32, s: f32, t: f32) Error!u32 {
     const offset = p.offset + referenceTexelOffsetOf(cpp, p.width, p.height, x, y);
     if (offset + cpp > memory.len) return error.Unsupported;
     if (cpp == 4) return std.mem.readInt(u32, memory[offset..][0..4], .little);
+    if (cpp == 1) return @as(u32, memory[offset]) << 24;
     const argb = pixel.fromRgb565(std.mem.readInt(u16, memory[offset..][0..2], .little));
     // 0xffRRGGBB to bytes R, G, B, A.
     return 0xff000000 | (argb & 0xff) << 16 | (argb & 0xff00) | ((argb >> 16) & 0xff);
@@ -462,13 +465,13 @@ pub fn referenceTexelOffset(width: u32, height: u32, x: u32, y: u32) u32 {
     return referenceTexelOffsetOf(4, width, height, x, y);
 }
 
-/// Byte offset of texel (x, y) in a texture of `cpp` bytes per pixel (4
-/// or 2), written directly from the layout description in the VideoCore
+/// Byte offset of texel (x, y) in a texture of `cpp` bytes per pixel (4,
+/// 2 or 1), written directly from the layout description in the VideoCore
 /// IV reference guide (section 4) as an independent check on
 /// vc4/texture.zig:
 ///
 /// * Micro-tiles ("utiles") are 64 bytes: 4x4 pixels of 32 bits, 8x4 of
-///   16, in raster order.
+///   16, 8x8 of 8, in raster order.
 /// * Small images (LT, at most 4 utiles across or down) are a raster-order
 ///   grid of utiles.
 /// * T images are 4 KB tiles of 8x8 utiles in rows, alternate rows running
@@ -478,8 +481,8 @@ pub fn referenceTexelOffset(width: u32, height: u32, x: u32, y: u32) u32 {
 ///   top-left, where "bottom" is the lower address (y = 0). Sub-tiles are
 ///   4x4 raster-order grids of utiles.
 pub fn referenceTexelOffsetOf(cpp: u32, width: u32, height: u32, x: u32, y: u32) u32 {
-    const uw = 64 / 4 / cpp;
-    const uh = 4;
+    const uw: u32 = if (cpp == 4) 4 else 8;
+    const uh: u32 = if (cpp == 1) 8 else 4;
     const in_utile = ((y % uh) * uw + (x % uw)) * cpp;
     if (width <= 4 * uw or height <= 4 * uh) {
         const utiles_per_row = (width + uw - 1) / uw;

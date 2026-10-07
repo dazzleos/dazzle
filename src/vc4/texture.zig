@@ -1,12 +1,12 @@
 //! Texture memory layout and texture unit configuration for the V3D.
 //!
 //! The texture unit reads textures in one of two tiled layouts, made of
-//! 64-byte micro-tiles (4x4 pixels of 32 bits, 8x4 of 16):
+//! 64-byte micro-tiles (4x4 pixels of 32 bits, 8x4 of 16, 8x8 of 8):
 //!
 //! * LT ("linear tile") for small images (either dimension at most 4
 //!   micro-tiles): a raster-order grid of micro-tiles.
 //! * T for everything else: 4 KB tiles of 8x8 micro-tiles (32x32 pixels of
-//!   32 bits, 64x32 of 16), each made of four 1 KB sub-tiles of 4x4
+//!   32 bits, 64x32 of 16, 64x64 of 8), each made of four 1 KB sub-tiles of 4x4
 //!   micro-tiles, with tile rows alternating direction and sub-tile order
 //!   depending on the row.
 //!
@@ -246,7 +246,7 @@ test "config round trip" {
 test "layout matches the reference description" {
     const sim = @import("qpu_sim.zig");
     const sizes = [_][2]u32{ .{ 16, 16 }, .{ 8, 64 }, .{ 32, 64 }, .{ 64, 64 }, .{ 128, 96 }, .{ 96, 128 }, .{ 256, 256 } };
-    for ([_]Format{ .xrgb8888, .rgb565 }) |format| for (sizes) |sz| {
+    for ([_]Format{ .xrgb8888, .rgb565, .a8 }) |format| for (sizes) |sz| {
         var y: u32 = 0;
         while (y < sz[1]) : (y += 1) {
             var x: u32 = 0;
@@ -279,6 +279,17 @@ test "every texel lands in a distinct slot inside the image" {
         try testing.expect(!seen[off / 4]);
         seen[off / 4] = true;
     };
+}
+
+test "8-bit images: 8x8 micro-tiles, 64x64 tiles, sized as the kernel checks" {
+    try testing.expect(isLtOf(.a8, 100, 32));
+    try testing.expect(!isLtOf(.a8, 100, 40));
+    // The glyph atlas: a quarter of its 32-bit size.
+    try testing.expectEqual(@as(u32, 1024 * 512), imageSizeOf(.a8, 1024, 512));
+    try testing.expectEqual(@as(u32, 128 * 64), imageSizeOf(.a8, 100, 50));
+    // A micro-tile's rows are 8 bytes.
+    try testing.expectEqual(@as(u32, 7), texelOffsetOf(.a8, 100, 50, 7, 0));
+    try testing.expectEqual(@as(u32, 8), texelOffsetOf(.a8, 100, 50, 0, 1));
 }
 
 test "uploadRectOf writes 16-bit pixels where texelOffsetOf says" {

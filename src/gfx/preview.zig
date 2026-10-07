@@ -149,10 +149,12 @@ const Texture = struct {
 
     fn uniforms(t: *Texture, atlas: *const atlas_mod.Atlas, fs: *const vc4.compiler.Compiled, buf: []u32) ![]const u32 {
         if (t.memory.len == 0) {
-            t.memory = try std.heap.page_allocator.alloc(u8, vc4.texture.imageSize(atlas_mod.width, atlas_mod.height));
-            vc4.texture.upload(t.memory, atlas.pixels, atlas_mod.width, atlas_mod.height);
+            const w = atlas_mod.width;
+            const h = atlas_mod.height;
+            t.memory = try std.heap.page_allocator.alloc(u8, vc4.texture.imageSizeOf(.a8, w, h));
+            vc4.texture.uploadRectOf(.a8, t.memory, w, h, .{ .x = 0, .y = 0, .width = w, .height = h }, atlas.pixels, w);
         }
-        const cfg: vc4.texture.Config = .{ .width = atlas_mod.width, .height = atlas_mod.height, .mag_filter = .nearest, .min_filter = .nearest, .wrap_s = .clamp, .wrap_t = .clamp };
+        const cfg: vc4.texture.Config = .{ .type = vc4.Format.a8.textureType(), .width = atlas_mod.width, .height = atlas_mod.height, .mag_filter = .nearest, .min_filter = .nearest, .wrap_s = .clamp, .wrap_t = .clamp };
         return textureUniforms(cfg, fs, buf);
     }
 };

@@ -7,6 +7,9 @@
 //! changes how the tile buffer is stored to memory (and loaded back). So
 //! the same shaders render into any of them.
 //!
+//! A8 is for textures only (the tile buffer cannot store it): one byte of
+//! coverage per pixel, a quarter of a 32-bit texture, for the glyph atlas.
+//!
 //! RGB565 halves a buffer's memory (and the memory bandwidth to draw,
 //! composite and show it), at the cost of 5 or 6 bits per channel and no
 //! alpha: right for opaque windows of flat colours (Dazzle's toolkit), less
@@ -25,11 +28,15 @@ pub const Format = enum {
     /// 16 bits: blue in the low 5, green in the middle 6, red in the top 5
     /// (DRM_FORMAT_RGB565; the GPU's tile buffer calls it BGR565).
     rgb565,
+    /// 8 bits of alpha (or coverage); textures only. The texture unit
+    /// returns it as alpha, with black for the colour.
+    a8,
 
     pub fn bytesPerPixel(f: Format) u32 {
         return switch (f) {
             .xrgb8888, .argb8888 => 4,
             .rgb565 => 2,
+            .a8 => 1,
         };
     }
 
@@ -39,6 +46,7 @@ pub const Format = enum {
             .xrgb8888 => code("XR24"),
             .argb8888 => code("AR24"),
             .rgb565 => code("RG16"),
+            .a8 => code("R8  "),
         };
     }
 
@@ -55,6 +63,7 @@ pub const Format = enum {
         return switch (f) {
             .xrgb8888, .argb8888 => .rgba8888,
             .rgb565 => .rgb565,
+            .a8 => .alpha,
         };
     }
 
@@ -75,6 +84,7 @@ pub const Format = enum {
         return switch (f) {
             .xrgb8888, .argb8888 => cl.render_config_format_rgba8888,
             .rgb565 => cl.render_config_format_bgr565,
+            .a8 => unreachable, // not a render target
         };
     }
 
@@ -82,17 +92,23 @@ pub const Format = enum {
         return switch (f) {
             .xrgb8888, .argb8888 => cl.loadstore_format_rgba8888,
             .rgb565 => cl.loadstore_format_bgr565,
+            .a8 => unreachable, // not a render target
         };
     }
 
-    /// A micro-tile, the 64 bytes the tiled layouts are made of: 4x4
-    /// pixels of 32 bits, 8x4 of 16.
-    pub fn utileWidth(f: Format) u32 {
-        return 64 / 4 / f.bytesPerPixel();
+    /// Whether the GPU can render into it.
+    pub fn renderable(f: Format) bool {
+        return f != .a8;
     }
 
-    pub fn utileHeight(_: Format) u32 {
-        return 4;
+    /// A micro-tile, the 64 bytes the tiled layouts are made of: 4x4
+    /// pixels of 32 bits, 8x4 of 16, 8x8 of 8.
+    pub fn utileWidth(f: Format) u32 {
+        return if (f.bytesPerPixel() == 4) 4 else 8;
+    }
+
+    pub fn utileHeight(f: Format) u32 {
+        return if (f.bytesPerPixel() == 1) 8 else 4;
     }
 };
 
@@ -124,6 +140,7 @@ test "formats' codes and sizes" {
     try testing.expectEqual(@as(?Format, null), Format.fromFourcc(code("NV12")));
     try testing.expectEqual(@as(u32, 8), Format.rgb565.utileWidth());
     try testing.expectEqual(@as(u32, 4), Format.xrgb8888.utileWidth());
+    try testing.expectEqual(@as(u32, 8), Format.a8.utileHeight());
 }
 
 test "RGB565 conversions" {

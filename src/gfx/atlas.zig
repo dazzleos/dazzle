@@ -2,8 +2,9 @@
 //! font renderer) into one texture, packed in rows ("shelves"), and kept
 //! there while they fit. The renderer uploads the parts that changed.
 //!
-//! Each texel's alpha is the glyph's coverage (its colour is white), so
-//! the text shader takes the colour from the vertices.
+//! Each texel is the glyph's coverage, one byte: the texture is A8 (vc4's
+//! ALPHA type, a quarter of the memory of 32-bit texels), and the text
+//! shader takes the colour from the vertices.
 
 const std = @import("std");
 const font = @import("font");
@@ -36,8 +37,8 @@ pub const Rect = struct { x0: u32, y0: u32, x1: u32, y1: u32 };
 
 pub const Atlas = struct {
     gpa: std.mem.Allocator,
-    /// 0xAARRGGBB texels, rows of `width`.
-    pixels: []u32,
+    /// Coverage, rows of `width`.
+    pixels: []u8,
     map: std.AutoHashMapUnmanaged(Key, Entry) = .empty,
     shelf_x: u32 = 0,
     shelf_y: u32 = 0,
@@ -51,8 +52,8 @@ pub const Atlas = struct {
     runs: font.RunCache,
 
     pub fn init(gpa: std.mem.Allocator) !Atlas {
-        const pixels = try gpa.alloc(u32, width * height);
-        @memset(pixels, 0x00ffffff);
+        const pixels = try gpa.alloc(u8, width * height);
+        @memset(pixels, 0);
         return .{ .gpa = gpa, .pixels = pixels, .runs = .init(gpa) };
     }
 
@@ -67,7 +68,7 @@ pub const Atlas = struct {
         a.runs.sweep();
         if (!a.full) return;
         a.map.clearRetainingCapacity();
-        @memset(a.pixels, 0x00ffffff);
+        @memset(a.pixels, 0);
         a.shelf_x = 0;
         a.shelf_y = 0;
         a.shelf_h = 0;
@@ -101,8 +102,7 @@ pub const Atlas = struct {
             e.w = @intCast(b.width);
             e.h = @intCast(b.height);
             for (0..b.height) |row| {
-                const dst = a.pixels[(a.shelf_y + row) * width + a.shelf_x ..][0..b.width];
-                for (dst, b.mask[row * b.width ..][0..b.width]) |*d, m| d.* = @as(u32, m) << 24 | 0xffffff;
+                @memcpy(a.pixels[(a.shelf_y + row) * width + a.shelf_x ..][0..b.width], b.mask[row * b.width ..][0..b.width]);
             }
             a.markDirty(.{ .x0 = a.shelf_x, .y0 = a.shelf_y, .x1 = a.shelf_x + b.width, .y1 = a.shelf_y + b.height });
             a.shelf_x += w;
@@ -131,10 +131,10 @@ test "glyphs are packed once, and a full atlas starts again" {
     const e = a.glyph(&f, f.glyphIndex('A'), 32, 0).?;
     try testing.expect(e.w > 10 and e.h > 10);
     try testing.expectEqual(e, a.glyph(&f, f.glyphIndex('A'), 32, 0).?);
-    // Ink is in the alpha.
+    // Its coverage is there.
     var ink: u32 = 0;
     for (0..e.h) |y| for (0..e.w) |x| {
-        ink += a.pixels[(e.y + y) * width + e.x + x] >> 24;
+        ink += a.pixels[(e.y + y) * width + e.x + x];
     };
     try testing.expect(ink > 255 * 50);
     try testing.expect(a.dirty != null);
