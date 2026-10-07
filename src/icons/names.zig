@@ -26,6 +26,10 @@ pub const Icon = enum {
     link,
     link_off,
     lock,
+    sort_by_alpha,
+    schedule,
+    grid_view,
+    view_list,
     // Settings.
     settings,
     wifi,
