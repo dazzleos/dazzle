@@ -327,15 +327,14 @@ fn gitCommitTime(b: *std.Build) u64 {
     return std.fmt.parseInt(u64, std.mem.trim(u8, out, " \n"), 10) catch 0;
 }
 
-/// A program's root module. `single_threaded` and stripping are set for the
-/// Pi builds and left at their defaults for host tests.
-fn addProgramModule(b: *std.Build, path: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, m: Modules, shaders: []const ShaderBlob, single_threaded: ?bool) *std.Build.Module {
+/// A program's root module. The Pi builds (`pi_build`) are stripped (unless
+/// built for debugging); host tests keep their symbols.
+fn addProgramModule(b: *std.Build, path: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, m: Modules, shaders: []const ShaderBlob, pi_build: bool) *std.Build.Module {
     const module = b.createModule(.{
         .root_source_file = b.path(path),
         .target = target,
         .optimize = optimize,
-        .single_threaded = single_threaded,
-        .strip = if (single_threaded != null) optimize != .Debug else null,
+        .strip = if (pi_build) optimize != .Debug else null,
         .imports = &.{
             .{ .name = "sys", .module = m.sys },
             .{ .name = "vc4", .module = m.vc4 },
@@ -962,15 +961,15 @@ pub fn build(b: *std.Build) void {
     for ([_]*std.Build.Module{ host.font, host.gfx, host.ui }) |m| m.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const test_step = b.step("test", "Run unit tests on the host");
     // The demo's layout is tested with its real font.
-    const host_demo = addProgramModule(b, "src/apps/demo/main.zig", b.graph.host, test_optimize, host, shaders, null);
+    const host_demo = addProgramModule(b, "src/apps/demo/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_demo.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
-    const host_settings = addProgramModule(b, "src/apps/settings/main.zig", b.graph.host, test_optimize, host, shaders, null);
+    const host_settings = addProgramModule(b, "src/apps/settings/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_settings.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
-    const host_files = addProgramModule(b, "src/apps/files/main.zig", b.graph.host, test_optimize, host, shaders, null);
+    const host_files = addProgramModule(b, "src/apps/files/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_files.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
-    const host_camera = addProgramModule(b, "src/apps/camera/main.zig", b.graph.host, test_optimize, host, shaders, null);
+    const host_camera = addProgramModule(b, "src/apps/camera/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_camera.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
-    const host_setup = addProgramModule(b, "src/apps/setup/main.zig", b.graph.host, test_optimize, host, shaders, null);
+    const host_setup = addProgramModule(b, "src/apps/setup/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_setup.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     for ([_]*std.Build.Module{
         host.sys,
@@ -983,13 +982,13 @@ pub fn build(b: *std.Build) void {
         host.icons,
         host.wayland,
         host.store,
-        addProgramModule(b, "src/init/main.zig", b.graph.host, test_optimize, host, shaders, null),
+        addProgramModule(b, "src/init/main.zig", b.graph.host, test_optimize, host, shaders, false),
         host_demo,
         host_settings,
         host_files,
         host_camera,
         host_setup,
-        addProgramModule(b, "src/shell/main.zig", b.graph.host, test_optimize, host, shaders, null),
+        addProgramModule(b, "src/shell/main.zig", b.graph.host, test_optimize, host, shaders, false),
     }) |m| {
         const t = b.addTest(.{ .root_module = m });
         test_step.dependOn(&b.addRunArtifact(t).step);

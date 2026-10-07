@@ -101,7 +101,7 @@ test "names are numbered, after those already there" {
         _ = linux.unlink(p);
     };
     try writeNew(names[0], "png");
-    try testing.expectError(error.Unexpected, writeNew(names[0], "again"));
+    try testing.expectError(error.Exists, writeNew(names[0], "again"));
     for (names[1..]) |p| try writeNew(p, "");
     try testing.expect(std.mem.endsWith(u8, numberedName(&buf, dir, "Screenshot", "png").?, "/Screenshot 3.png"));
     try testing.expect(std.mem.endsWith(u8, numberedName(&buf, dir, "Photo", "png").?, "/Photo 2.png"));

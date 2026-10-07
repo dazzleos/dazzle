@@ -65,10 +65,8 @@ const Viewer = struct {
     image: ?gfx.Image = null,
     /// Take a photo of the next frame.
     shoot: bool = false,
-    /// The child process saving a photo, and the photo's name.
-    saving: ?linux.pid_t = null,
-    saving_name: [64]u8 = undefined,
-    saving_name_len: usize = 0,
+    /// The photo being saved, on a thread.
+    saving: ?*Saving = null,
     /// Under the picture (`status`).
     status_buf: [128]u8 = undefined,
     status_len: usize = 0,
@@ -119,12 +117,14 @@ const Viewer = struct {
             latest = f;
         }
         const f = latest orelse return false;
-        defer v.cam.release(f);
+        // A frame being saved as a photo is kept until it has been.
+        var keep = false;
+        defer if (!keep) v.cam.release(f);
         const raw: isp.Raw = .{ .data = f.data, .width = v.cam.width, .height = v.cam.height, .stride = v.cam.stride, .bayer = v.cam.format.bayer, .bits = v.cam.format.bits };
         if (f.data.len < @as(usize, raw.stride) * raw.height) return false;
         if (v.shoot) {
             v.shoot = false;
-            v.savePhoto(raw);
+            keep = v.savePhoto(raw, f);
         }
 
         const size = isp.previewSize(raw.width, raw.height, @max(max_width, 16), @max(max_height, 16));
@@ -152,53 +152,76 @@ const Viewer = struct {
         if (v.saving == null) v.shoot = true;
     }
 
-    /// Saves `raw` as the next "Photo N.png", in a child process.
-    fn savePhoto(v: *Viewer, raw: isp.Raw) void {
-        var path_buf: [512]u8 = undefined;
-        const path = sys.files.numberedName(&path_buf, sys.system.user_dir, "Photo", "png") orelse {
+    /// Saves `raw` (the frame `f`, which is kept until it has been) as
+    /// the next "Photo N.png", on a thread. Returns whether it is being.
+    fn savePhoto(v: *Viewer, raw: isp.Raw, f: capture.Frame) bool {
+        const s = v.gpa.create(Saving) catch {
+            v.setStatus("Cannot save a photo", .{});
+            return false;
+        };
+        s.* = .{ .gpa = v.gpa, .raw = raw, .frame = f, .tables = v.tables, .thread = undefined };
+        const path = sys.files.numberedName(&s.path_buf, sys.system.user_dir, "Photo", "png") orelse {
+            v.gpa.destroy(s);
             v.setStatus("Cannot save a photo here", .{});
-            return;
+            return false;
         };
-        const rc = linux.fork();
-        switch (linux.errno(rc)) {
-            .SUCCESS => if (rc != 0) {
-                v.saving = @intCast(rc);
-                v.saving_name_len = @min(std.fs.path.basename(path).len, v.saving_name.len);
-                @memcpy(v.saving_name[0..v.saving_name_len], std.fs.path.basename(path)[0..v.saving_name_len]);
-                v.setStatus("Saving {s}…", .{v.saving_name[0..v.saving_name_len]});
-                return;
-            },
-            else => {
-                v.setStatus("Cannot save a photo", .{});
-                return;
-            },
-        }
-        // The child: develop the frame (the buffer stays mapped in it),
-        // compress, write, and go.
-        const pixels = v.gpa.alloc(u32, @as(usize, raw.width) * raw.height) catch linux.exit(1);
-        isp.develop(raw, &v.tables, pixels);
-        const data = gfx.png.encode(v.gpa, pixels, raw.width, raw.height) catch linux.exit(1);
-        sys.files.writeNew(path, data) catch |err| {
-            print("dazzle-camera: cannot write {s}: {s}\n", .{ path, @errorName(err) });
-            linux.exit(1);
+        s.path_len = path.len;
+        s.thread = std.Thread.spawn(.{ .stack_size = 256 * 1024 }, Saving.run, .{s}) catch {
+            v.gpa.destroy(s);
+            v.setStatus("Cannot save a photo", .{});
+            return false;
         };
-        print("dazzle-camera: saved {s}\n", .{path});
-        linux.exit(0);
+        v.saving = s;
+        v.setStatus("Saving {s}…", .{s.name()});
+        return true;
     }
 
     /// Whether the photo being saved has been (or failed).
     fn checkSaving(v: *Viewer) bool {
-        const pid = v.saving orelse return false;
-        var wstatus: u32 = 0;
-        const rc = linux.wait4(pid, &wstatus, linux.W.NOHANG, null);
-        if (linux.errno(rc) != .SUCCESS or rc == 0) return false;
+        const s = v.saving orelse return false;
+        if (!s.done.load(.acquire)) return false;
+        s.thread.join();
+        v.cam.release(s.frame);
         v.saving = null;
-        const name = v.saving_name[0..v.saving_name_len];
-        if (linux.W.IFEXITED(wstatus) and linux.W.EXITSTATUS(wstatus) == 0)
-            v.setStatus("Saved {s} with your files", .{name})
-        else
-            v.setStatus("{s} could not be saved", .{name});
+        if (s.ok) v.setStatus("Saved {s} with your files", .{s.name()}) else v.setStatus("{s} could not be saved", .{s.name()});
+        v.gpa.destroy(s);
         return true;
+    }
+};
+
+/// A photo being saved: developed from the raw frame, compressed and
+/// written, on a thread.
+const Saving = struct {
+    gpa: std.mem.Allocator,
+    raw: isp.Raw,
+    frame: capture.Frame,
+    /// The colour tables as they were (the viewer's change with each frame).
+    tables: isp.Tables,
+    path_buf: [512]u8 = undefined,
+    path_len: usize = 0,
+    thread: std.Thread,
+    done: std.atomic.Value(bool) = .init(false),
+    /// Whether it was saved (read once `done`).
+    ok: bool = false,
+
+    fn name(s: *const Saving) []const u8 {
+        return std.fs.path.basename(s.path_buf[0..s.path_len]);
+    }
+
+    fn run(s: *Saving) void {
+        defer s.done.store(true, .release);
+        const path = s.path_buf[0..s.path_len :0];
+        const pixels = s.gpa.alloc(u32, @as(usize, s.raw.width) * s.raw.height) catch return;
+        defer s.gpa.free(pixels);
+        isp.develop(s.raw, &s.tables, pixels);
+        const data = gfx.png.encode(s.gpa, pixels, s.raw.width, s.raw.height) catch return;
+        defer s.gpa.free(data);
+        sys.files.writeNew(path, data) catch |err| {
+            print("dazzle-camera: cannot write {s}: {s}\n", .{ path, @errorName(err) });
+            return;
+        };
+        print("dazzle-camera: saved {s}\n", .{path});
+        s.ok = true;
     }
 };
 
@@ -248,7 +271,11 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             if (err == error.ServerError) print("dazzle-camera: compositor error: {s}\n", .{win.conn.errorMessage()});
             return err;
         };
-        if (win.closed or controls.quit) return;
+        if (win.closed or controls.quit) {
+            // A photo being saved is finished first.
+            if (viewer) |*v| if (v.saving) |sv| sv.thread.join();
+            return;
+        }
         if (try win.applyConfigure()) |size| {
             width = size[0];
             height = size[1];

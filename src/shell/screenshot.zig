@@ -3,8 +3,8 @@
 //! files), named "Screenshot 1.png", "Screenshot 2.png" and so on.
 //!
 //! The pixels are read back from the GPU in the shell (see
-//! `render.Renderer.capture`); a child process compresses and writes them,
-//! so the shell goes on drawing meanwhile.
+//! `render.Renderer.capture`); a thread compresses and writes them, so the
+//! shell goes on drawing meanwhile.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -18,42 +18,38 @@ pub const key_print = 99;
 pub const folder = sys.system.user_dir;
 
 /// Saves `pixels` (`width` by `height`) in `dir` as the next unused
-/// "Screenshot N.png", in a child process. Takes `pixels` (allocated with
-/// `gpa`).
+/// "Screenshot N.png", on a thread. Takes `pixels` (allocated with `gpa`,
+/// which must be thread-safe).
 pub fn save(gpa: std.mem.Allocator, dir: []const u8, pixels: []u32, width: u32, height: u32) void {
-    defer gpa.free(pixels);
-    var path_buf: [512]u8 = undefined;
-    const path = nextName(&path_buf, dir) orelse {
-        sys.print("dazzle-shell: no name for a screenshot in {s}\n", .{dir});
+    const t = std.Thread.spawn(.{ .stack_size = 256 * 1024 }, saveNow, .{ gpa, dir, pixels, width, height }) catch |err| {
+        sys.print("dazzle-shell: cannot save a screenshot ({s})\n", .{@errorName(err)});
+        gpa.free(pixels);
         return;
     };
-    const rc = linux.fork();
-    switch (linux.errno(rc)) {
-        .SUCCESS => if (rc != 0) {
-            sys.print("dazzle-shell: saving a screenshot as {s}\n", .{path});
-            return;
-        },
-        else => |e| {
-            sys.print("dazzle-shell: cannot save a screenshot ({s})\n", .{@tagName(e)});
-            return;
-        },
-    }
-    // The child: encode, write, and go.
-    const ok = write(gpa, path, pixels, width, height);
-    if (ok) sys.print("dazzle-shell: saved {s}\n", .{path});
-    linux.exit(if (ok) 0 else 1);
+    t.detach();
 }
 
-fn write(gpa: std.mem.Allocator, path: [:0]const u8, pixels: []const u32, width: u32, height: u32) bool {
+fn saveNow(gpa: std.mem.Allocator, dir: []const u8, pixels: []u32, width: u32, height: u32) void {
+    defer gpa.free(pixels);
     const data = png.encode(gpa, pixels, width, height) catch |err| {
         sys.print("dazzle-shell: cannot make a screenshot: {s}\n", .{@errorName(err)});
-        return false;
+        return;
     };
-    sys.files.writeNew(path, data) catch |err| {
-        sys.print("dazzle-shell: cannot write {s}: {s}\n", .{ path, @errorName(err) });
-        return false;
-    };
-    return true;
+    defer gpa.free(data);
+    // Another screenshot may be saved at the same time: if it takes the
+    // name, the next one.
+    for (0..8) |_| {
+        var path_buf: [512]u8 = undefined;
+        const path = nextName(&path_buf, dir) orelse break;
+        sys.files.writeNew(path, data) catch |err| {
+            if (err == error.Exists) continue;
+            sys.print("dazzle-shell: cannot write {s}: {s}\n", .{ path, @errorName(err) });
+            return;
+        };
+        sys.print("dazzle-shell: saved {s}\n", .{path});
+        return;
+    }
+    sys.print("dazzle-shell: no name for a screenshot in {s}\n", .{dir});
 }
 
 /// "<dir>/Screenshot N.png" for the first N not taken.

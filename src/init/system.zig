@@ -14,15 +14,13 @@
 //!
 //! Preparing (asked for when setup starts, so it goes on while the user
 //! fills in the pages): a partition after the system's to the end of the
-//! card (storage.zig), an empty filesystem on it, written a few block
-//! groups at a time between requests so the app can show how far it has
-//! got (mkfs.zig), then mounted at /data with /data/system and /data/user
+//! card (storage.zig), an empty filesystem on it, written on a thread while
+//! the manager answers the app (which shows how far it has got; mkfs.zig), then mounted at /data with /data/system and /data/user
 //! in it. Finishing sets the hostname, keeps it in /data/system with a
 //! mark that setup has finished, and ends the manager.
 //!
 //! Meanwhile, from the start, it copies the running OS slot to the other
-//! (slots.zig), the image having only one, a slice at a time like
-//! formatting. (If setup has finished, as when the power went before the
+//! (slots.zig), the image having only one, on another thread. (If setup has finished, as when the power went before the
 //! copy did, it only copies.)
 //!
 //! Updating (update.zig): Settings downloads an update and asks for it to
@@ -43,8 +41,20 @@ const proto = sys.system;
 const print = sys.print;
 
 const max_clients = 4;
-/// How long formatting works before looking at the socket again.
-const slice_ns = 50 * std.time.ns_per_ms;
+/// Work on a thread of its own (formatting, or copying the OS slot), so
+/// the manager answers meanwhile.
+const Work = struct {
+    thread: std.Thread,
+    done: std.atomic.Value(bool) = .init(false),
+    /// How far it has got, in percent.
+    percent: std.atomic.Value(u32) = .init(0),
+    /// Why it failed (read once it is done).
+    err: ?anyerror = null,
+
+    fn finished(w: *const Work) bool {
+        return w.done.load(.acquire);
+    }
+};
 
 /// Forks the manager. `card` says whether there is an SD card, `mounted`
 /// whether /data is already there (prepared on an earlier run that did not
@@ -77,17 +87,20 @@ pub fn start(card: bool, mounted: bool, slot: ?u8, setup_done: bool) ?linux.pid_
         print("dazzle: system: cannot copy the OS slot: {s}\n", .{@errorName(err)});
         break :blk null;
     };
+    if (m.copier != null) m.startCopying();
     m.run() catch |err| print("dazzle: system: {s}\n", .{@errorName(err)});
     linux.exit(1);
 }
 
 const Manager = struct {
     report: proto.Report,
-    /// Formatting, and the partition's device.
+    /// Formatting (on `formatting`'s thread), and the partition's device.
     formatter: ?mkfs.Formatter = null,
+    formatting: ?Work = null,
     fd: ?linux.fd_t = null,
-    /// Copying the OS slot.
+    /// Copying the OS slot (on `copying`'s thread).
     copier: ?slots.Copier = null,
+    copying: ?Work = null,
     /// Installing an update.
     installer: ?update.Installer = null,
     /// Setup has finished.
@@ -117,11 +130,10 @@ const Manager = struct {
         const Conn = struct { fd: linux.fd_t, who: proto.Client };
         var clients: [max_clients]?Conn = @splat(null);
         while (true) {
-            // While formatting or copying, only look at the socket between
-            // slices.
-            const busy = m.formatter != null or m.copier != null;
-            if (m.formatter != null) m.format();
-            if (m.copier != null) m.copySlot();
+            // While formatting or copying, see how it goes now and then.
+            const busy = m.formatting != null or m.copying != null;
+            if (m.formatting != null) m.checkFormatting();
+            if (m.copying != null) m.checkCopying();
             if (m.installer) |*i| if (i.finished()) |how| {
                 m.installer = null;
                 m.report.update = if (how == .none) .ready else .failed;
@@ -132,7 +144,7 @@ const Manager = struct {
             var fds: [1 + max_clients]linux.pollfd = undefined;
             fds[0] = .{ .fd = listener, .events = linux.POLL.IN, .revents = 0 };
             for (clients, fds[1..]) |c, *f| f.* = .{ .fd = if (c) |conn| conn.fd else -1, .events = linux.POLL.IN, .revents = 0 };
-            _ = linux.poll(&fds, fds.len, if (busy) 0 else 1000);
+            _ = linux.poll(&fds, fds.len, if (busy) 100 else 1000);
             if (fds[0].revents != 0) {
                 const rc = linux.accept4(listener, null, null, linux.SOCK.CLOEXEC);
                 if (linux.errno(rc) == .SUCCESS) {
@@ -245,18 +257,58 @@ const Manager = struct {
         m.fd = fd;
         m.report.storage = .preparing;
         m.report.progress = 0;
+        m.formatting = .{ .thread = undefined };
+        m.formatting.?.thread = std.Thread.spawn(.{ .stack_size = 256 * 1024 }, formatAll, .{m}) catch |err| {
+            m.formatting = null;
+            return m.fail(.io, err);
+        };
     }
 
-    /// Formats for a slice of time; mounts the filesystem once it is done.
-    fn format(m: *Manager) void {
-        const f = &(m.formatter orelse return);
-        const until = sys.nowNs() + slice_ns;
-        while (sys.nowNs() < until) {
-            const done = f.step() catch |err| return m.fail(.io, err);
-            if (done) break;
+    /// The formatting thread.
+    fn formatAll(m: *Manager) void {
+        const w = &m.formatting.?;
+        defer w.done.store(true, .release);
+        const f = &m.formatter.?;
+        while (true) {
+            const done = f.step() catch |err| {
+                w.err = err;
+                return;
+            };
+            w.percent.store(@intFromFloat(@min(f.progress() * 100, 100)), .monotonic);
+            if (done) return;
         }
-        m.report.progress = @intFromFloat(@min(f.progress() * 100, 100));
-        if (!f.done) return;
+    }
+
+    /// The copying thread.
+    fn copyAll(m: *Manager) void {
+        const w = &m.copying.?;
+        defer w.done.store(true, .release);
+        m.copier.?.run() catch |err| {
+            w.err = err;
+        };
+    }
+
+    fn startCopying(m: *Manager) void {
+        m.copying = .{ .thread = undefined };
+        m.copying.?.thread = std.Thread.spawn(.{ .stack_size = 256 * 1024 }, copyAll, .{m}) catch |err| {
+            print("dazzle: system: cannot copy the OS slot: {s}\n", .{@errorName(err)});
+            m.copying = null;
+            m.copier.?.deinit();
+            m.copier = null;
+            return;
+        };
+    }
+
+    /// How formatting goes; once it is done, mounts the filesystem.
+    fn checkFormatting(m: *Manager) void {
+        const w = &(m.formatting orelse return);
+        m.report.progress = @intCast(w.percent.load(.monotonic));
+        if (!w.finished()) return;
+        w.thread.join();
+        const err = w.err;
+        m.formatting = null;
+        if (err) |e| return m.fail(.io, e);
+        const f = &m.formatter.?;
         print("dazzle: system: formatted {s} ({d} MiB)\n", .{ storage.data_partition, @as(u64, f.layout.blocks) * mkfs.block_size >> 20 });
         m.stopFormatting();
         if (!storage.mountData()) return m.fail(.mount, error.MountFailed);
@@ -269,23 +321,15 @@ const Manager = struct {
         m.report.storage = .ready;
     }
 
-    /// Copies the OS slot for a slice of time.
-    fn copySlot(m: *Manager) void {
-        const c = &(m.copier orelse return);
-        const until = sys.nowNs() + slice_ns;
-        while (sys.nowNs() < until) {
-            const done = c.step() catch |err| {
-                print("dazzle: system: cannot copy the OS slot: {s}\n", .{@errorName(err)});
-                c.deinit();
-                m.copier = null;
-                return;
-            };
-            if (done) {
-                m.copier = null;
-                m.readSlots();
-                return;
-            }
-        }
+    /// Whether the OS slot has been copied.
+    fn checkCopying(m: *Manager) void {
+        const w = &(m.copying orelse return);
+        if (!w.finished()) return;
+        w.thread.join();
+        if (w.err) |err| print("dazzle: system: cannot copy the OS slot: {s}\n", .{@errorName(err)});
+        m.copying = null;
+        m.copier = null;
+        m.readSlots();
     }
 
     fn stopFormatting(m: *Manager) void {

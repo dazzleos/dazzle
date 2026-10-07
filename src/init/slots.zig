@@ -1,7 +1,6 @@
 //! The OS slots on the boot partition (see storage.zig): the image has
 //! slot A only, and on the first start the system manager copies the
-//! running slot to the other, a little at a time while setup runs
-//! (`Copier`). The copy is written as slot-<x>.new/ and renamed when it is
+//! running slot to the other, on a thread while setup runs (`Copier`). The copy is written as slot-<x>.new/ and renamed when it is
 //! whole, so a slot that is there is complete. Its cmdline.txt says which
 //! slot it is, and its version file what system it holds (see
 //! `sys.system.Version`). Updates (update.zig) are written to the slot not
@@ -20,7 +19,7 @@ const config_file = storage.boot_dir ++ "/config.txt";
 
 const max_files = 64;
 const max_name = 64;
-/// How much a step copies.
+/// How much is read at a time.
 const chunk = 256 * 1024;
 
 /// A slot's directory: /boot/slot-<slot><suffix>.
@@ -50,10 +49,6 @@ pub const Copier = struct {
     names: [max_files][max_name]u8 = undefined,
     lens: [max_files]usize = undefined,
     count: usize = 0,
-    /// The file being copied, and where.
-    index: usize = 0,
-    src: ?linux.fd_t = null,
-    dst: ?linux.fd_t = null,
 
     /// Starts copying the running slot to the other, if the other is not
     /// there; null if there is nothing to do.
@@ -114,54 +109,13 @@ pub const Copier = struct {
         return c.names[i][0..c.lens[i]];
     }
 
-    /// Copies a little more. Returns whether the copy is done (and in
-    /// place).
-    pub fn step(c: *Copier) !bool {
-        var from_buf: [96]u8 = undefined;
-        var to_buf: [96]u8 = undefined;
-        var path_buf: [192]u8 = undefined;
-        const from_dir = slotPath(&from_buf, c.from, "");
-        const to_dir = slotPath(&to_buf, c.to, ".new");
-        if (c.src == null) {
-            if (c.index == c.count) return try c.finish();
-            const n = c.fileName(c.index);
-            // A file in a folder: the folder first.
-            if (std.mem.lastIndexOfScalar(u8, n, '/')) |slash| {
-                const sub = filePath(&path_buf, to_dir, n[0..slash]) orelse return error.NameTooLong;
-                switch (linux.errno(linux.mkdir(sub, 0o755))) {
-                    .SUCCESS, .EXIST => {},
-                    else => |e| return sys.errorFromErrno(e),
-                }
-            }
-            c.src = try sys.open(filePath(&path_buf, from_dir, n) orelse return error.NameTooLong, .{ .ACCMODE = .RDONLY, .CLOEXEC = true });
-            c.dst = try sys.open(filePath(&path_buf, to_dir, n) orelse return error.NameTooLong, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true });
-            // The command line says which slot it is.
-            if (std.mem.eql(u8, n, "cmdline.txt")) {
-                var text: [1024]u8 = undefined;
-                var out: [1024 + 16]u8 = undefined;
-                const len = try sys.check(linux.read(c.src.?, &text, text.len));
-                try writeAll(c.dst.?, retarget(text[0..len], c.to, &out));
-                return try c.next();
-            }
-        }
-        const data = struct {
-            var buf: [chunk]u8 = undefined;
-        };
-        const len = try sys.check(linux.read(c.src.?, &data.buf, chunk));
-        if (len == 0) return try c.next();
-        try writeAll(c.dst.?, data.buf[0..len]);
-        return false;
-    }
-
-    /// The file is copied: on to the next.
-    fn next(c: *Copier) !bool {
-        _ = try sys.check(linux.fsync(c.dst.?));
-        c.closeFiles();
-        c.index += 1;
-        return false;
-    }
-
-    fn finish(c: *Copier) !bool {
+    /// Copies the files, and puts the copy in place (the boot partition
+    /// is read-only again after, whatever happens).
+    pub fn run(c: *Copier) !void {
+        defer remount(true) catch {};
+        const buf = try std.heap.page_allocator.alloc(u8, chunk);
+        defer std.heap.page_allocator.free(buf);
+        for (0..c.count) |i| try c.copyFile(c.fileName(i), buf);
         var new_buf: [96]u8 = undefined;
         var to_buf: [96]u8 = undefined;
         _ = try sys.check(linux.rename(slotPath(&new_buf, c.to, ".new"), slotPath(&to_buf, c.to, "")));
@@ -169,21 +123,44 @@ pub const Copier = struct {
             _ = linux.fsync(dir);
             sys.close(dir);
         } else |_| {}
-        try remount(true);
         print("dazzle: system: made OS slot {c}\n", .{std.ascii.toUpper(c.to)});
-        return true;
     }
 
-    fn closeFiles(c: *Copier) void {
-        if (c.src) |fd| sys.close(fd);
-        if (c.dst) |fd| sys.close(fd);
-        c.src = null;
-        c.dst = null;
+    /// Copies the file `name` (a path in the slot) to the copy.
+    fn copyFile(c: *Copier, name: []const u8, buf: []u8) !void {
+        var from_buf: [96]u8 = undefined;
+        var to_buf: [96]u8 = undefined;
+        var path_buf: [192]u8 = undefined;
+        const from_dir = slotPath(&from_buf, c.from, "");
+        const to_dir = slotPath(&to_buf, c.to, ".new");
+        // A file in a folder: the folder first.
+        if (std.mem.lastIndexOfScalar(u8, name, '/')) |slash| {
+            const sub = filePath(&path_buf, to_dir, name[0..slash]) orelse return error.NameTooLong;
+            switch (linux.errno(linux.mkdir(sub, 0o755))) {
+                .SUCCESS, .EXIST => {},
+                else => |e| return sys.errorFromErrno(e),
+            }
+        }
+        const src = try sys.open(filePath(&path_buf, from_dir, name) orelse return error.NameTooLong, .{ .ACCMODE = .RDONLY, .CLOEXEC = true });
+        defer sys.close(src);
+        const dst = try sys.open(filePath(&path_buf, to_dir, name) orelse return error.NameTooLong, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true });
+        defer sys.close(dst);
+        if (std.mem.eql(u8, name, "cmdline.txt")) {
+            // The command line says which slot it is.
+            var text: [1024]u8 = undefined;
+            var out: [1024 + 16]u8 = undefined;
+            const len = try sys.check(linux.read(src, &text, text.len));
+            try writeAll(dst, retarget(text[0..len], c.to, &out));
+        } else while (true) {
+            const len = try sys.check(linux.read(src, buf.ptr, buf.len));
+            if (len == 0) break;
+            try writeAll(dst, buf[0..len]);
+        }
+        _ = try sys.check(linux.fsync(dst));
     }
 
-    /// Stops (the copy failed): the boot partition is read-only again.
-    pub fn deinit(c: *Copier) void {
-        c.closeFiles();
+    /// Gives up before `run` (the boot partition is read-only again).
+    pub fn deinit(_: *Copier) void {
         remount(true) catch {};
     }
 };

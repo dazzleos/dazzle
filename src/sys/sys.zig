@@ -34,6 +34,8 @@ pub const Error = error{
     OutOfMemory,
     Busy,
     TimedOut,
+    /// Something of that name is there already.
+    Exists,
     Unexpected,
 };
 
@@ -46,6 +48,7 @@ pub fn errorFromErrno(e: linux.E) Error {
         .NOMEM, .NOSPC => error.OutOfMemory,
         .BUSY => error.Busy,
         .TIME, .TIMEDOUT => error.TimedOut,
+        .EXIST => error.Exists,
         else => error.Unexpected,
     };
 }
