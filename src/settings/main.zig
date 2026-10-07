@@ -27,7 +27,7 @@ const wayland = @import("wayland");
 const build_info = @import("build_info");
 const info = @import("info.zig");
 const view = @import("view.zig");
-const store = @import("store.zig");
+const store = @import("store");
 const update = @import("update.zig");
 
 const print = sys.print;
@@ -268,6 +268,5 @@ fn openWindow(gpa: std.mem.Allocator, init: std.process.Init.Minimal, dev: *vc4.
 test {
     _ = info;
     _ = view;
-    _ = @import("store.zig");
     _ = @import("update.zig");
 }

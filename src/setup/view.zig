@@ -1,22 +1,29 @@
 //! The setup app's window, as widgets: a page at a time, each with a Next
-//! button (and Back after the first), filling the screen. The pages:
+//! button (Finish on the last, and Back after the first), filling the
+//! screen. The pages:
 //!
 //! * the computer's name, filled in with a random one;
+//! * the apps to install (the image has none), from the catalogue, all
+//!   chosen to begin with;
 //!
 //! then finishing: if the SD card is still being prepared, a spinner says
 //! how far it has got (it started when setup did); if it could not be, why
-//! (and Continue). What the window asks of the system manager goes to the
-//! main loop through `Actions`.
+//! (and Continue); then the apps chosen are installed, one at a time. What
+//! the window asks for goes to the main loop through `Actions`.
 
 const std = @import("std");
 const ui = @import("ui");
 const sys = @import("sys");
+const store = @import("store");
 
 const proto = sys.system;
 
 /// The pages, in order. More (language, keyboard, network) can follow.
-pub const Page = enum { hostname };
-pub const pages = [_]Page{.hostname};
+pub const Page = enum { hostname, apps };
+pub const pages = [_]Page{ .hostname, .apps };
+
+/// The most apps that can be chosen (the catalogue's first).
+pub const max_apps = 64;
 
 /// What the window asks for; the main loop does it.
 pub const Actions = struct {
@@ -24,6 +31,22 @@ pub const Actions = struct {
     finish: ?proto.Hostname = null,
     /// Finish even though the card could not be prepared.
     without_storage: bool = false,
+    /// The apps to install: bit i for the catalogue's app i.
+    apps: u64 = 0,
+};
+
+/// What the apps page shows.
+pub const Apps = struct {
+    /// The catalogue's apps.
+    list: []const store.App = &.{},
+    /// Getting the catalogue.
+    loading: bool = false,
+    /// Why it could not be got.
+    message: []const u8 = "",
+    /// Installing: which app (its title), and how far through.
+    installing: ?[]const u8 = null,
+    done: usize = 0,
+    total: usize = 0,
 };
 
 /// Everything is the same size in pixels, whatever the window's: the card
@@ -33,6 +56,7 @@ pub const Setup = struct {
     suggestion: []const u8,
     /// What the system manager last said; null if it could not be asked.
     report: ?*const proto.Report = null,
+    apps: Apps = .{},
     actions: ?*Actions = null,
 
     pub const State = struct {
@@ -42,6 +66,12 @@ pub const Setup = struct {
         name_buf: [63]u8 = undefined,
         name_len: u8 = 0,
         name_invalid: bool = false,
+        /// The apps not chosen: bit i for the catalogue's app i.
+        skipped: u64 = 0,
+
+        fn chosen(st: *const State, i: usize) bool {
+            return i < max_apps and st.skipped & (@as(u64, 1) << @intCast(i)) == 0;
+        }
 
         fn name(st: *const State) []const u8 {
             return st.name_buf[0..st.name_len];
@@ -76,13 +106,15 @@ pub const Setup = struct {
         const t = cx.theme();
         const body = switch (pages[state.page]) {
             .hostname => self.hostnamePage(cx, state, nav),
+            .apps => self.appsPage(cx, state),
         };
+        const last = state.page + 1 == pages.len;
         return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 24, .children = &.{
             cx.make(ui.Text{ .text = "Welcome to Dazzle", .style = .{ .size = 40, .color = t.primary } }),
             body,
             cx.make(ui.Row{ .spacing = 12, .main_axis_alignment = .end, .children = &.{
                 if (state.page > 0) cx.make(ui.OutlinedButton{ .label = "Back", .icon = .arrow_back, .on_press = .of(nav, Nav.back) }) else cx.make(ui.Empty{}),
-                cx.make(ui.OutlinedButton{ .label = "Next", .icon = .arrow_forward, .on_press = .of(nav, Nav.next) }),
+                cx.make(ui.OutlinedButton{ .label = if (last) "Finish" else "Next", .icon = if (last) .check else .arrow_forward, .on_press = .of(nav, Nav.next) }),
             } }),
         } });
     }
@@ -110,8 +142,45 @@ pub const Setup = struct {
         } });
     }
 
+    fn appsPage(self: *const Setup, cx: *ui.Context, state: *State) ui.Widget {
+        const t = cx.theme();
+        const a = cx.ui.arena();
+        var rows: std.ArrayList(ui.Widget) = .empty;
+        rows.appendSlice(a, &.{
+            cx.make(ui.Text{ .text = "Choose your apps", .style = .{ .size = 28 } }),
+            cx.make(ui.Text{
+                .text = "They are installed when you finish. You can add or remove apps later in Settings.",
+                .style = .{ .size = 18, .color = t.on_surface_variant },
+            }),
+        }) catch {};
+        const apps = &self.apps;
+        if (apps.list.len == 0) {
+            const why = if (apps.loading or apps.message.len == 0)
+                "Getting the list of apps…"
+            else
+                cx.fmt("The list of apps could not be got: {s}. You can install apps later in Settings.", .{apps.message});
+            rows.append(a, cx.make(ui.Row{ .spacing = 12, .cross_axis_alignment = .center, .children = &.{
+                if (apps.loading or apps.message.len == 0) cx.make(ui.Spinner{ .size = 24 }) else cx.make(ui.Empty{}),
+                cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = why, .style = .{ .size = 18, .color = t.on_surface_variant } }) }),
+            } })) catch {};
+        }
+        for (apps.list[0..@min(apps.list.len, max_apps)], 0..) |app, i| {
+            const toggle = a.create(Toggle) catch break;
+            toggle.* = .{ .state = state, .index = @intCast(i) };
+            rows.append(a, cx.make(ui.Row{ .spacing = 16, .cross_axis_alignment = .center, .children = &.{
+                cx.make(ui.Checkbox{ .value = state.chosen(i), .on_changed = .of(toggle, Toggle.set) }),
+                cx.make(ui.Icon{ .icon = ui.icons.fromName(app.icon) orelse .apps, .size = 32, .color = t.on_surface_variant }),
+                cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 2, .children = &.{
+                    cx.make(ui.Text{ .text = app.title, .style = .{ .size = 20 }, .wrap = false, .ellipsis = true }),
+                    cx.make(ui.Text{ .text = app.description, .style = .{ .size = 16, .color = t.on_surface_variant } }),
+                } }) }),
+            } })) catch {};
+        }
+        return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 12, .children = rows.items });
+    }
+
     /// After the last page: waiting for the card, or why it could not be
-    /// prepared.
+    /// prepared; then installing the apps.
     fn finishing(self: *const Setup, cx: *ui.Context, nav: *Nav) ui.Widget {
         const t = cx.theme();
         const r = self.report;
@@ -125,6 +194,13 @@ pub const Setup = struct {
                 cx.make(ui.Row{ .main_axis_alignment = .end, .children = &.{
                     cx.make(ui.OutlinedButton{ .label = "Continue", .on_press = .of(nav, Nav.continueWithout) }),
                 } }),
+            } });
+        }
+        if (self.apps.installing) |title| {
+            return cx.make(ui.Column{ .main_axis_size = .min, .spacing = 20, .children = &.{
+                cx.make(ui.Spinner{ .size = 64 }),
+                cx.make(ui.Text{ .text = cx.fmt("Installing {s}", .{title}), .style = .{ .size = 24 } }),
+                cx.make(ui.Text{ .text = cx.fmt("{d} of {d}", .{ self.apps.done + 1, self.apps.total }), .style = .{ .size = 18, .color = t.on_surface_variant } }),
             } });
         }
         const progress = if (r) |rep| (if (rep.storage == .preparing) cx.fmt("{d}%", .{rep.progress}) else "") else "";
@@ -148,13 +224,17 @@ const Nav = struct {
                 st.name_invalid = true;
                 return;
             },
+            .apps => {},
         }
         if (st.page + 1 < pages.len) {
             st.page += 1;
             return;
         }
         st.finishing = true;
-        if (n.actions) |a| a.finish = proto.Hostname.parse(st.name());
+        if (n.actions) |a| {
+            a.finish = proto.Hostname.parse(st.name());
+            a.apps = ~st.skipped;
+        }
     }
 
     fn back(n: *Nav) void {
@@ -163,6 +243,17 @@ const Nav = struct {
 
     fn continueWithout(n: *Nav) void {
         if (n.actions) |a| a.without_storage = true;
+    }
+};
+
+/// A checkbox on the apps page.
+const Toggle = struct {
+    state: *Setup.State,
+    index: u6,
+
+    fn set(t: *Toggle, on: bool) void {
+        const bit = @as(u64, 1) << t.index;
+        if (on) t.state.skipped &= ~bit else t.state.skipped |= bit;
     }
 };
 
@@ -226,9 +317,15 @@ test "naming the computer, then waiting for the card" {
     try testing.expect(st.name_invalid and !st.finishing);
     try testing.expect(actions.finish == null);
 
-    // A good one: finishing, with a spinner while the card is prepared.
+    // A good one: the apps (the list still coming), then finishing, with a
+    // spinner while the card is prepared.
     st.setName("my-pi");
     click(u, findText(u.root.?, "Next").?);
+    Draw(u, &report, &actions, &now, .{ 1920, 1080 });
+    try testing.expect(findText(u.root.?, "Choose your apps") != null);
+    try testing.expect(findText(u.root.?, "Getting the list of apps…") != null);
+    try testing.expect(actions.finish == null);
+    click(u, findText(u.root.?, "Finish").?);
     Draw(u, &report, &actions, &now, .{ 1920, 1080 });
     try testing.expectEqualStrings("my-pi", actions.finish.?.slice());
     try testing.expect(findType(u.root.?, ui.Spinner) != null);
@@ -241,4 +338,48 @@ test "naming the computer, then waiting for the card" {
     try testing.expect(findType(u.root.?, ui.Spinner) == null);
     click(u, findText(u.root.?, "Continue").?);
     try testing.expect(actions.without_storage);
+}
+
+test "choosing apps, then installing them" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    var actions: Actions = .{};
+    const report: proto.Report = .{ .storage = .ready };
+    const list = [_]store.App{
+        .{ .name = "dazzle-demo", .title = "Demo", .description = "A spinning 3D shape", .icon = "view_in_ar", .file = "dazzle-demo.tar.xz", .size = 1, .sha256 = "" },
+        .{ .name = "dazzle-files", .title = "Files", .description = "Browse your files", .icon = "folder", .file = "dazzle-files.tar.xz", .size = 1, .sha256 = "" },
+        .{ .name = "dazzle-camera", .title = "Camera", .description = "Take photos", .icon = "photo_camera", .file = "dazzle-camera.tar.xz", .size = 1, .sha256 = "" },
+    };
+    var setup: Setup = .{ .suggestion = "my-pi", .report = &report, .actions = &actions, .apps = .{ .list = &list } };
+    u.frame(1280, 720, 0, setup);
+    u.root.?.state(Setup.State).page = 1;
+    u.frame(1280, 720, 1, setup);
+    try testing.expect(!overflows(u.root.?));
+    try testing.expect(findText(u.root.?, "Browse your files") != null);
+    // All chosen to begin with: Files is left out.
+    click(u, findType(up(findText(u.root.?, "Files").?, ui.Row).?, ui.Checkbox).?);
+    u.frame(1280, 720, 2, setup);
+    click(u, findText(u.root.?, "Finish").?);
+    try testing.expect(actions.apps & 0b111 == 0b101);
+
+    // Installing: which, and how far.
+    setup.apps.installing = "Camera";
+    setup.apps.done = 1;
+    setup.apps.total = 2;
+    u.frame(1280, 720, 3, setup);
+    try testing.expect(findText(u.root.?, "Installing Camera") != null);
+    try testing.expect(findText(u.root.?, "2 of 2") != null);
+
+    // No list: why, and that it can wait.
+    u.root.?.state(Setup.State).finishing = false;
+    setup.apps = .{ .message = "the server could not be reached (is the network up?)" };
+    u.frame(1280, 720, 4, setup);
+    try testing.expect(findText(u.root.?, "The list of apps could not be got: the server could not be reached (is the network up?). You can install apps later in Settings.") != null);
+}
+
+fn up(n: *ui.Node, comptime T: type) ?*ui.Node {
+    var at: ?*ui.Node = n;
+    while (at) |a| : (at = a.parent) if (a.widget.is(T)) return a;
+    return null;
 }

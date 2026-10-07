@@ -12,6 +12,7 @@ const Modules = struct {
     icons: *std.Build.Module,
     wayland: *std.Build.Module,
     build_info: *std.Build.Module,
+    store: *std.Build.Module,
 };
 
 /// Puts `<program>.icon` in the initramfs: the name of the program's icon
@@ -43,18 +44,6 @@ fn noticesFile(b: *std.Build, what: []const u8, sections: []const []const u8) st
 /// A file on the SD card's boot partition: its path there, and where it
 /// comes from.
 const CardFile = struct { []const u8, std.Build.LazyPath };
-
-/// An app's files in /apps/<name> on the card: the program, the name of
-/// its icon, and the notices for what is built into it (apps are
-/// independent of the system).
-fn appFiles(b: *std.Build, exe: *std.Build.Step.Compile, icon: Icon, what: []const u8) [3]CardFile {
-    const dir = b.fmt("apps/{s}", .{exe.name});
-    return .{
-        .{ b.fmt("{s}/{s}", .{ dir, exe.name }), exe.getEmittedBin() },
-        .{ b.fmt("{s}/{s}.icon", .{ dir, exe.name }), iconFile(b, exe.name, icon) },
-        .{ b.fmt("{s}/NOTICES", .{dir}), noticesFile(b, what, &.{"MaterialIcons"}) },
-    };
-}
 
 /// An app: its program, its icon in the dock, and what the catalogue says
 /// of it.
@@ -124,6 +113,8 @@ fn addIconFont(b: *std.Build) IconFont {
 /// * `font`: OpenType font rendering
 /// * `icons`: Material icons, and the font (with just those) to draw them
 /// * `wayland`: the Wayland wire protocol and a client library
+/// * `store`: installing and removing apps (the catalogue, downloads,
+///   archives), for the settings and setup apps
 /// * `build_info`: `commit`, the source's git commit (short, with "-dirty"
 ///   when there are uncommitted changes), so a running system can be
 ///   matched to its source; `commit_time`, when it was committed (newer
@@ -186,7 +177,13 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     info.addOption([]const u8, "commit", gitCommit(b));
     info.addOption(u64, "commit_time", gitCommitTime(b));
     info.addOption([]const u8, "apps_url", appsUrl(b));
-    return .{ .sys = sys, .vc4 = vc4, .shader = shader, .app = app, .gfx = gfx, .ui = ui, .font = font, .icons = icons, .wayland = wayland, .build_info = info.createModule() };
+    const store = b.createModule(.{
+        .root_source_file = b.path("src/store/store.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "sys", .module = sys }},
+    });
+    return .{ .sys = sys, .vc4 = vc4, .shader = shader, .app = app, .gfx = gfx, .ui = ui, .font = font, .icons = icons, .wayland = wayland, .build_info = info.createModule(), .store = store };
 }
 
 /// `sys`, `vc4` and `shader`: what the GPU's users need, and what the
@@ -350,6 +347,7 @@ fn addProgramModule(b: *std.Build, path: []const u8, target: std.Build.ResolvedT
             .{ .name = "icons", .module = m.icons },
             .{ .name = "wayland", .module = m.wayland },
             .{ .name = "build_info", .module = m.build_info },
+            .{ .name = "store", .module = m.store },
         },
     });
     // src/<owner>/main.zig embeds its shader programs.
@@ -576,20 +574,20 @@ const boot_partition_mib = 128;
 /// The SD card image (zig-out/dazzle.img), and its files in zig-out/boot
 /// for copying onto a card by hand. One FAT partition holds, at its root,
 /// the firmware's own files and config.txt (which must be there, so there
-/// is one copy); the OS slots; and the apps, one copy, in apps/ (init
-/// mounts the partition and shows them at /apps).
+/// is one copy); and the OS slots. There are no apps: they are installed
+/// in setup (or later from Settings) from their archives (zig-out/apps).
 ///
 /// An OS slot holds a whole copy of the system (the kernel, its device
 /// trees, the initramfs with everything in /os, and the kernel's command
 /// line), and config.txt's os_prefix says which one the firmware starts.
 /// The image has slot A, slot-a/; on the first start the system copies it
-/// to slot B, slot-b/. An update (later) writes the slot not in use and
-/// switches to it. (If a slot's kernel or device tree is missing, the
-/// firmware ignores the prefix.)
+/// to slot B, slot-b/. An update writes the slot not in use and switches
+/// to it. (If a slot's kernel or device tree is missing, the firmware
+/// ignores the prefix.)
 ///
 /// /data is the partition the system makes in the rest of the card on the
 /// first start, after growing this one.
-fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath, apps: []const CardFile) *std.Build.Step {
+fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.Build.Step {
     const dir = b.pathFromRoot("build/firmware");
     // Download what is missing, then check everything.
     const verify_step = fetchPinned(b, dir, firmware, struct {
@@ -650,8 +648,6 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath, apps: 
         os_step.dependOn(&b.addInstallFile(archive, "os/dazzle-os.tar.xz").step);
         os_step.dependOn(&b.addInstallFile(json, "os/os.json").step);
     }
-    // One copy of the apps.
-    boot_files.appendSlice(b.allocator, apps) catch @panic("OOM");
 
     const mkimage = b.addRunArtifact(hostTool(b, "mkimage"));
     mkimage.step.dependOn(verify_step);
@@ -828,21 +824,19 @@ pub fn build(b: *std.Build) void {
     run_mkinitramfs.addPrefixedArtifactArg("--shell=", setup_exe);
     // The dock's icons: a Material icon's name beside each program.
     addAppIcon(b, run_mkinitramfs, "os/shell/dazzle-settings", .settings);
-    // The certificates of the authorities HTTPS trusts, for Settings to
-    // download apps.
+    // The certificates of the authorities HTTPS trusts, for setup and
+    // Settings to download apps and updates.
     run_mkinitramfs.step.dependOn(fetchCaCertificates(b));
     run_mkinitramfs.addArg(b.fmt("--file=os/certs/ca-certificates.pem={s}", .{b.pathJoin(&.{ b.pathFromRoot("build/firmware/certs"), ca_certificates[0].name })}));
-    // The apps, each in /apps/<name> and listed in the shell's dock, are not
-    // part of the system: the image has them on the card's boot partition,
-    // once (not in each OS slot), and each is also an archive to download
-    // and install from Settings (zig-out/apps/, with the catalogue).
+    // The apps, each in /data/apps/<name> and listed in the shell's dock,
+    // are not part of the system or the image: each is an archive to
+    // download and install, in setup or from Settings (zig-out/apps/, with
+    // the catalogue).
     const apps = [_]App{
         .{ .exe = demo_exe, .icon = .view_in_ar, .title = "Demo", .description = "A spinning 3D shape that shows off the graphics, with controls to play with" },
         .{ .exe = files_exe, .icon = .folder, .title = "Files", .description = "Browse your files, and look inside them: text, pictures and fonts" },
         .{ .exe = camera_exe, .icon = .photo_camera, .title = "Camera", .description = "See what a Raspberry Pi Camera Module sees, and take photos" },
     };
-    var app_files: std.ArrayList(CardFile) = .empty;
-    for (apps) |a| app_files.appendSlice(b.allocator, &appFiles(b, a.exe, a.icon, b.fmt("the {s} app", .{a.title}))) catch @panic("OOM");
     const apps_step = b.step("apps", "Build the apps' archives and their catalogue (zig-out/apps)");
     apps_step.dependOn(addAppArchives(b, &apps));
     b.getInstallStep().dependOn(apps_step);
@@ -861,7 +855,7 @@ pub fn build(b: *std.Build) void {
     kernel_step.dependOn(kernel.step);
 
     // `zig build` builds everything, including the SD card image.
-    b.getInstallStep().dependOn(addImage(b, kernel, initramfs, app_files.items));
+    b.getInstallStep().dependOn(addImage(b, kernel, initramfs));
     addQemu(b, kernel, initramfs);
 
     // Unit tests run on the build machine; they cover the parts that do not
@@ -901,6 +895,7 @@ pub fn build(b: *std.Build) void {
         host.font,
         host.icons,
         host.wayland,
+        host.store,
         addProgramModule(b, "src/init/main.zig", b.graph.host, test_optimize, host, shaders, null),
         host_demo,
         host_settings,

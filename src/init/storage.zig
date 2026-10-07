@@ -1,8 +1,9 @@
 //! The SD card. Its first partition (FAT) is the boot partition: the
 //! firmware, config.txt, and two OS slots (slot-a/, slot-b/), each a whole
 //! system that the firmware loads into memory (config.txt's os_prefix says
-//! which); and the apps, one copy whatever the slot, in apps/. Init mounts
-//! it, read-only, at /boot and shows its apps at /apps (`mountBoot`).
+//! which). Init mounts it, read-only, at /boot (`mountBoot`). The apps are
+//! not there: they are installed (in setup, or later from Settings) in
+//! /data/apps.
 //!
 //! The image is just big enough for its files, but laid out for a bigger
 //! partition (mkimage's --grow-to): on the first start, before anything
@@ -23,7 +24,6 @@ const linux = std.os.linux;
 const sys = @import("sys");
 
 const proto = sys.system;
-const apps = @import("apps.zig");
 const trial = @import("trial.zig");
 const print = sys.print;
 
@@ -32,7 +32,6 @@ pub const card = "/dev/mmcblk0";
 pub const boot_partition = "/dev/mmcblk0p1";
 pub const data_partition = "/dev/mmcblk0p2";
 pub const boot_dir = "/boot";
-const apps_dir = "/apps";
 /// FAT has no owners or permissions: everything is root's, and anyone's to
 /// read (and run).
 pub const boot_options = "fmask=0022,dmask=0022";
@@ -83,10 +82,7 @@ pub fn boot() Boot {
     if (!exists(data_partition) or !hasFilesystem(data_partition)) return b;
     b.mounted = mountData();
     if (!b.mounted) return b;
-    // The apps: those installed, on /data.
-    apps.useInstalled();
-    // Where Settings downloads updates.
-    if (linux.errno(linux.mkdir(proto.update_dir, 0o755)) == .SUCCESS) _ = linux.chown(proto.update_dir, sys.user.uid, sys.user.gid);
+    makeUserDirs();
     b.setup_done = exists(proto.setup_done_file);
     var buf: [80]u8 = undefined;
     if (sys.readFile(proto.hostname_file, &buf)) |text| {
@@ -219,20 +215,25 @@ fn setFatSectors(bs: *[sector]u8, sectors: u32) void {
     }
 }
 
-/// Mounts the boot partition, read-only, at /boot, and its apps at /apps.
+/// The user's folders on /data (the apps, and where updates are
+/// downloaded), if they are not there. Init calls it as root, the system
+/// manager as the user: either way they are the user's.
+pub fn makeUserDirs() void {
+    for ([_][:0]const u8{ proto.apps_dir, proto.update_dir }) |dir| {
+        if (linux.errno(linux.mkdir(dir, 0o755)) != .SUCCESS) continue;
+        if (linux.getuid() == 0) _ = linux.chown(dir, sys.user.uid, sys.user.gid);
+    }
+}
+
+/// Mounts the boot partition, read-only, at /boot.
 fn mountBoot() void {
     _ = linux.mkdir(boot_dir, 0o755);
-    _ = linux.mkdir(apps_dir, 0o755);
     const flags = linux.MS.RDONLY | linux.MS.NODEV | linux.MS.NOSUID;
     _ = sys.check(linux.mount(boot_partition, boot_dir, "vfat", flags, @intFromPtr(boot_options))) catch |err| {
         print("dazzle: cannot mount {s} at {s}: {s}\n", .{ boot_partition, boot_dir, @errorName(err) });
         return;
     };
-    _ = sys.check(linux.mount(boot_dir ++ apps_dir, apps_dir, null, linux.MS.BIND, 0)) catch |err| {
-        print("dazzle: cannot mount {s} at {s}: {s}\n", .{ boot_dir ++ apps_dir, apps_dir, @errorName(err) });
-        return;
-    };
-    print("dazzle: mounted {s} at {s}, its apps at {s}\n", .{ boot_partition, boot_dir, apps_dir });
+    print("dazzle: mounted {s} at {s}\n", .{ boot_partition, boot_dir });
 }
 
 /// Mounts the partition for files at /data. Returns whether it is.

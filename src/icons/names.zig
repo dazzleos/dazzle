@@ -17,7 +17,7 @@ pub const Icon = enum {
     chevron_right,
     expand_more,
     // Files.
-    home,
+    person,
     folder,
     description,
     terminal,

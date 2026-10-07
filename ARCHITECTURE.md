@@ -104,8 +104,6 @@ slot-a/                     OS slot A: a whole system (zImage, the boards'
                             version, and cmdline.txt, with dazzle.slot=a)
 slot-b/                     OS slot B: the same, with dazzle.slot=b; made on
                             the card on the first start
-apps/                       the apps the image comes with, one copy for
-                            both slots (copied to /data/apps)
 ```
 
 Everything but the firmware, the apps and `/data` has two copies, so that
@@ -114,9 +112,8 @@ keeping the other to fall back to (see Updating the system). Slot A
 starts. The firmware
 loads the slot's kernel, device tree and initramfs into memory; init
 mounts the partition, read-only, at `/boot`; the rest of the card is
-`/data` (below). The apps are the user's, in `/data/apps`, shown at
-`/apps` (see Installing apps, below); until setup has made `/data`, `/apps`
-shows the boot partition's `apps/`.
+`/data` (below). There are no apps in the image: they are installed, in
+setup and from Settings, in `/data/apps` (see Installing apps, below).
 
 The image holds slot A only, to stay small, but its partition is laid out
 (`mkimage --grow-to`) for one ending at 128 MiB: its clusters, FATs and
@@ -187,9 +184,8 @@ is not kept: everything else builds from scratch in about half a minute.
   so this checks the kernel, init, privileges and networking only. To
   try the SD card, give QEMU a copy of the image grown to a power of two
   (`truncate -s 512M card.img`) after `--`: `-drive
-  file=card.img,if=sd,format=raw`; init then mounts `/boot` and `/apps`,
-  and `/data` if setup has prepared it (without a card there are no apps,
-  which QEMU could not draw anyway). The log
+  file=card.img,if=sd,format=raw`; init then mounts `/boot`, and `/data`
+  if setup has prepared it (QEMU cannot draw the apps anyway). The log
   ends with `dazzle-shell: error: NoVc4Device` and `dazzle: shell exited
   with status 1`.
 
@@ -208,7 +204,7 @@ The code is split into Zig modules, linked statically into each program:
 | `font` | `src/font/` | OpenType font rendering, described below |
 | `icons` | `src/icons/` | Material icons: the ones Dazzle uses (`Icon`), and a font with just those, made from the full Material Icons font by `tools/subset_icons.zig` when building (as Flutter leaves out the icons an app does not use) and built into the programs; the toolkit draws them with `ui.Icon` |
 | `wayland` | `src/wayland/` | The Wayland wire protocol (with file descriptor passing), the interfaces Dazzle uses, and a small client library |
-| `dazzle-init` | `src/init/` | The init program: mounts (the SD card's boot partition, its apps at `/apps`), the SD card's space for files (partitioning and formatting it on the first run), network, Wi-Fi, log server, device permissions, starting the shell |
+| `dazzle-init` | `src/init/` | The init program: mounts (the SD card's boot partition), the SD card's space for files (partitioning and formatting it on the first run), network, Wi-Fi, log server, device permissions, starting the shell |
 | `dazzle-shell` | `src/shell/` | The Wayland compositor and shell, described below |
 | `dazzle-demo` | `src/demo/` | The demo, a native app |
 | `dazzle-setup` | `src/setup/` | The setup app, on the first run only: names the computer while the SD card is prepared |
@@ -469,7 +465,7 @@ The shell (`src/shell/`):
 | `main.zig` | Opens the GPU and display, listens on `/os/sockets/wayland-0`, and runs the event loop: read input (clicks on the dock start or raise apps), dispatch clients, then composite a frame when something changed |
 | `server.zig` | The Wayland server: clients, objects and requests, frame callbacks and buffer releases, window stacking, maximizing and moving, pointer and keyboard focus |
 | `render.zig` | Compositing with the `vc4` API: textured quads for the panels (the dock) and the windows, and the cursor plane |
-| `dock.zig` | The dock: finds the apps in `/apps`, draws their icons, and finds the one clicked |
+| `dock.zig` | The dock: finds the apps in `/data/apps`, draws their icons, and finds the one clicked |
 | `shaders/quad.zig` | The textured quad's shader |
 | `input.zig` | USB keyboards, mice and touchscreens: finds `/dev/input/event*` nodes and decodes their events (a touchscreen's multitouch slots, or a single touch, as touches going down, moving and coming up) |
 | `cursor.zig` | The pointer's pictures (an arrow, and arrows for resizing), drawn into the cursor plane's buffer |
@@ -560,13 +556,13 @@ refused.
   cannot get another buffer makes do with those it has, or waits for
   memory to be freed. The screen stays 32-bit: everything is composited
   into it, and screenshots are taken from it.
-- **Apps:** each directory in `/apps` holding a program of the same name
-  (`/apps/<name>/<name>`) is an app, with an icon in the dock: its initial
+- **Apps:** each directory in `/data/apps` holding a program of the same
+  name (`/data/apps/<name>/<name>`) is an app, with an icon in the dock: its initial
   on a coloured square, with a dot under it while it runs. Apps run once
   each: the shell knows each client's process (from its socket), and
   clicking a running app raises its window. Nothing starts until it is
   clicked, other than programs named on the shell's command line. The
-  dock follows `/apps` as apps are installed and removed (see Installing
+  dock follows `/data/apps` as apps are installed and removed (see Installing
   apps).
 - **Buffer sharing:** clients render with the GPU straight into buffers
   they share with the shell as dma-bufs, so nothing is copied. The GPU's
@@ -703,26 +699,24 @@ partitions mounted on it) is kept simple:
                               and system managers' (network, system); the
                               user's
 /boot/                      the card's boot partition, read-only: the
-                            firmware, config.txt, the OS slots and the apps
+                            firmware, config.txt and the OS slots
 /os/certs/                    the certificate authorities HTTPS trusts
                               (Mozilla's, from certifi; pinned by checksum)
 /etc/resolv.conf            the name servers, written by the network
                             manager (the user's)
-/apps/                      the apps (/data/apps, the user's; before setup,
-                            the boot partition's apps/): dazzle-demo/,
-                            dazzle-files/ and dazzle-camera/ to begin with,
-                            each holding its program (and
+/data/                      the SD card's space for files, once setup has
+                            prepared it: /data/system (the computer's name,
+                            and a mark that setup has finished; root's),
+                            /data/user (the user's files), /data/apps
+                            and /data/update (below; the user's too)
+/data/apps/                 the apps installed (none in the image): each
+                            in its folder, holding its program (and
                             <program>.icon, the name of its icon in the
                             dock; the shell's own apps have theirs beside
                             them too) and NOTICES, the third-party software
                             built into it and its licences (apps are
                             independent of the system)
-/data/                      the SD card's space for files, once setup has
-                            prepared it: /data/system (the computer's name,
-                            and a mark that setup has finished; root's),
-                            /data/user (the user's), /data/apps (the
-                            apps, the user's too) and /data/update (where
-                            Settings downloads updates; the user's)
+/data/update/               where Settings downloads updates
 /dev /proc /sys             mounted by init, for Linux
 ```
 
@@ -744,9 +738,9 @@ what happens underneath. The same card works in every board.
 
 The first time it starts, the screen shows the setup app
 (`/os/shell/dazzle-setup`) and no dock. It asks for the computer's name, filled
-in with a random two words (like `awesome-elephant`), on pages with Next
-buttons (more pages, such as the language, keyboard and network, are to
-come). Meanwhile init's system manager (`src/init/system.zig`) makes OS slot B
+in with a random two words (like `awesome-elephant`), then which apps to
+install (see Installing apps), on pages with Next buttons (more pages,
+such as the language, keyboard and network, are to come). Meanwhile init's system manager (`src/init/system.zig`) makes OS slot B
 (above) and the rest of the card a place for files: it adds a partition from the end of the
 system's (rounded up to 4 MiB) to the end of the card (`src/init/storage.zig`),
 gives it an empty filesystem (`src/init/mkfs.zig`: ext2's layout with a
@@ -795,11 +789,11 @@ Dazzle 6ec3896 system log. /follow shows new messages as they arrive.
 [    4.740312] dazzle: started /os/shell/dazzle-shell (pid 24) as uid 1000
 [    4.741008] dazzle: opened /dev/dri/card0 (vc4)
 [    4.772511] dazzle-shell: build 6ec3896, display <width>x<height>
-[    4.772610] dazzle-shell: app Demo (/apps/dazzle-demo/dazzle-demo)
+[    4.772610] dazzle-shell: app Demo (/data/apps/dazzle-demo/dazzle-demo)
 [    4.772702] dazzle-shell: listening on /os/sockets/wayland-0
 [    4.773120] dazzle-shell: input: /dev/input/event0: Logitech USB Optical Mouse
 [    4.791240] dazzle-shell: cursor shown
-[    7.312913] dazzle-shell: started /apps/dazzle-demo/dazzle-demo (pid 25)
+[    7.312913] dazzle-shell: started /data/apps/dazzle-demo/dazzle-demo (pid 25)
 [    7.330100] dazzle-shell: client connected
 [    4.802114] dazzle: drawing with the vc4 API, window <width>x<height>
 [    9.840211] dazzle: 60.0 fps, GPU <t> ms, CPU <t> ms per frame
@@ -895,10 +889,10 @@ change read again every second (`src/settings/info.zig`):
 - **Resources:** how busy the CPU is, the SoC's temperature, memory, the
   GPU's memory (the CMA pool all GPU buffers come from: the V3D has no
   MMU), and storage: a bar of what the system, the apps and the user's
-  files take, with a key that ends with the free space. The system and
-  apps run from memory (the firmware loads them at boot); the user's
-  share and the free space are the SD card's space for files (`/data`),
-  once setup has prepared it, or else the memory available. The
+  files take, with a key that ends with the free space. The system runs
+  from memory (the firmware loads it at boot); the apps (`/data/apps`),
+  the user's share and the free space are the SD card's space for files
+  (`/data`), or, without it, the memory available. The
   meters turn red above 90%.
 - **Ethernet:** each wired adapter's link (and speed), its address
   (and whether it came from DHCP or is static), traffic and MAC
@@ -963,7 +957,7 @@ Pi 3 B+'s does (there is no Bluetooth driver here to disturb).
 
 ### Installing apps
 
-An app is its folder in `/apps` (`/apps/<name>/<name>`, its program, with
+An app is its folder in `/data/apps` (`/data/apps/<name>/<name>`, its program, with
 `<name>.icon` and its `NOTICES`). The build packs each of its apps
 (`build.zig`'s `apps`) as that folder in a tar file (`tools/mkapp.zig`:
 the program 0755, everything else 0644), compressed with xz, and writes the
@@ -992,27 +986,32 @@ unless built with `-Dapps-url=<url>` (`build_info.apps_url`; an `http://`
 URL, such as a local `python3 -m http.server` in `zig-out/apps`, works for
 trying it out).
 
-The apps are the user's, so the settings app installs and removes them
-itself, without privileges (`src/settings/store.zig`):
+The image has no apps. The apps are the user's, so the setup and settings
+apps install them, and Settings removes them, without privileges (the
+`store` module, `src/store/store.zig`, which both use):
 
-- **Where they live:** the first time `/data` is there (on the first start,
-  once setup has made it), init copies the boot partition's `apps/` to
-  `/data/apps` (written as `apps.new`, then renamed), owned by the user,
-  and on every start bind-mounts it at `/apps` (`src/init/apps.zig`).
-  Before that, `/apps` is the boot partition's, read-only; the settings
-  app does not run then (no app does until setup has finished), so it
-  takes `/apps` and `/data/update` to be there.
-- **The catalogue** is downloaded when the Apps page is first shown (and
-  with Refresh), and kept as `/apps/.catalogue.json`, so the page lists the
+- **Where they live:** `/data/apps`, made (the user's) with `/data` when
+  setup prepares the card, and by init at each start if it is missing.
+  No app but setup runs before then, so the others take it to be there.
+- **In setup:** its last page lists the catalogue's apps, all chosen to
+  begin with (the catalogue is downloaded once `/data` is there, and again
+  every 10 seconds until it comes, as the network may come up later).
+  Finish installs those chosen, one at a time, showing which, then
+  finishes setup. Without a network the list does not come, and setup
+  finishes without apps: they can be installed from Settings. (Setup has
+  no network page yet: Ethernet is configured by itself, Wi-Fi only from
+  Settings.)
+- **The catalogue** is downloaded when Settings' Apps page is first shown
+  (and with Refresh), and kept as `/data/apps/.catalogue.json`, so the page lists the
   apps without a network. A catalogue that does not parse, or names an
   app that is not a plain folder name (lower-case letters, digits and
   dashes), is refused.
 - **Installing** downloads the archive and checks its size and SHA-256
-  against the catalogue, then unpacks it into `/apps/.install-<name>`,
+  against the catalogue, then unpacks it into `/data/apps/.install-<name>`,
   accepting only plain files and folders inside `<name>/` (no links, no
   `..`), and renames the app's folder into place, moving an installed copy
   out of the way first.
-- **Removing** renames the folder to `/apps/.remove-<name>`, then deletes
+- **Removing** renames the folder to `/data/apps/.remove-<name>`, then deletes
   it.
 - Downloads run in a child process (forked), which reports back through a
   pipe, so the window goes on meanwhile, one at a time; one that takes
@@ -1020,7 +1019,7 @@ itself, without privileges (`src/settings/store.zig`):
   TLS 1.2/1.3, trusting the authorities in `/os/certs/ca-certificates.pem`
   (Mozilla's list, as certifi publishes it; the build pins its version and
   checksum).
-- The dock follows `/apps`: the shell looks at its modification time every
+- The dock follows `/data/apps`: the shell looks at its modification time every
   second and lists the apps again when it changes, so an app shows up, or
   goes, as it is installed or removed.
 
@@ -1125,10 +1124,11 @@ they are not signed.
 
 ### The Files app
 
-Click the folder in the dock. It shows the user's files: `/data`, the SD card's
-space for them (Home, at the top of the tree), and nothing above it. The
-System files switch at the bottom left shows the whole filesystem instead
-(the tree then starts at `/`); turned off again, it goes back home. The
+Click the folder in the dock. It shows the user's files: `/data/user`, on
+the SD card (User files, at the top of the tree), and nothing above it.
+The System files switch at the bottom left shows the whole filesystem
+instead (the tree then starts at `/`); turned off again, it goes back to
+the user's files. The
 tree of folders is on the left, and the open folder on the right as a grid
 of icons (folders, files, programs, devices; links get a badge in one
 corner, and folders that cannot be changed a lock in the other), with its
@@ -1156,7 +1156,7 @@ read says so.
 Print Screen saves what the screen shows (the dock and the windows; not
 the pointer) as `Screenshot 1.png`, `Screenshot 2.png` and so on with the
 user's other files, in `/data/user` (the Files app shows them, under
-Home): no folder of their own, as the user has few files. The shell
+User files): no folder of their own, as the user has few files. The shell
 draws the screen again into a buffer of its own and reads it back
 (`render.Renderer.capture`), and a child process compresses and writes the
 PNG (`src/shell/screenshot.zig`), so the shell goes on drawing meanwhile.

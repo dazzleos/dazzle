@@ -9,7 +9,9 @@ with the Pi's own graphics chip, so windows move and animate smoothly at
 the screen's full refresh rate.
 
 It has a simple desktop: a dock along the bottom of the screen with your
-apps, and windows you can move, resize, maximize and close. It comes with:
+apps, and windows you can move, resize, maximize and close. Settings is
+built in; you choose the other apps when you set Dazzle up (and can add or
+remove them later):
 
 - **Settings:** see what the Pi is doing (CPU, memory, temperature,
   storage), connect to wired and Wi-Fi networks, and install and remove
@@ -76,7 +78,12 @@ Put the card in the Pi, connect the screen, keyboard and mouse, then plug
 in the power. After a few seconds Dazzle asks for a name for your
 computer, with a random one filled in (like `awesome-elephant`) that you
 can keep or change. While you do, it gets the rest of the card ready for
-your files. Then the desktop appears.
+your files. Then it offers the apps you can install, all chosen to begin
+with: untick any you do not want and click Finish. They are downloaded
+and installed, so this needs a network (plug in Ethernet before you
+start; Wi-Fi can only be joined from Settings for now, so without
+Ethernet you install apps from there once the desktop is up). Then the
+desktop appears.
 
 From then on, Dazzle starts straight to the desktop.
 
@@ -87,8 +94,7 @@ From then on, Dazzle starts straight to the desktop.
 - **Installing apps:** with a network connected, open Settings and choose
   Apps. It lists the apps you can install, from the same place as the
   Dazzle download: click Install to add one to the dock, or Remove to take
-  it away (Files, Camera and Demo can be removed too, and installed again
-  later). Refresh gets the latest list.
+  it away. Refresh gets the latest list.
 - **Windows:** drag a window by its title bar, and resize it from its
   edges. The buttons in the title bar maximize and close it.
 - **Touchscreens:** tap to click, drag to scroll, and press and hold for
@@ -101,7 +107,8 @@ From then on, Dazzle starts straight to the desktop.
 - **Photos:** open the Camera app and click Take photo. Photos are saved
   with your files as `Photo 1.png`, `Photo 2.png` and so on. The camera is
   new and not yet tried on real hardware.
-- **Your files** are kept on the microSD card, in Home in the Files app.
+- **Your files** are kept on the microSD card, in User files in the Files
+  app.
 - **Turning off:** unplug the power. Your files are kept safe even then.
 - **Updating Dazzle:** with a network connected, open Settings and choose
   System. When a newer Dazzle is available, Updates says so: click

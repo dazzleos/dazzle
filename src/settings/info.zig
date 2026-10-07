@@ -140,10 +140,10 @@ pub const Usage = struct {
 /// from the SD card at boot, so its files take memory and the free space is
 /// the memory available.
 pub const Storage = struct {
-    /// Bytes of files: the system's (init and the shell), the apps' (in
-    /// /apps) and the user's (what is used of the SD card's space for
-    /// files, /data, once setup has prepared it); and what is free (there,
-    /// or else of the memory the system runs in).
+    /// Bytes of files: the system's (init and the shell, in memory), the
+    /// apps' (in /data/apps) and the user's (the rest of what is used of
+    /// the SD card's space for files, /data); and what is free (there, or,
+    /// without it, of the memory the system runs in).
     system: u64 = 0,
     apps: u64 = 0,
     user: u64 = 0,
@@ -226,14 +226,15 @@ pub const UsageMonitor = struct {
             var all: Tally = .{};
             all.add("/", 0);
             var apps: Tally = .{};
-            apps.add("/apps", 1);
-            m.storage = .{ .system = all.bytes -| apps.bytes, .apps = apps.bytes };
+            apps.add(sys.system.apps_dir, 1);
+            m.storage = .{ .system = all.bytes, .apps = apps.bytes };
         }
         u.storage = m.storage;
         u.storage.free = u.mem_available;
-        // The card's space for files, once it is there (an ext4 mount).
+        // The card's space for files (an ext4 mount): the apps are there
+        // too, so the user's are what is left of what is used.
         if (sys.diskSpace(sys.system.data_dir)) |d| if (d.kind == 0xef53) {
-            u.storage.user = d.total -| d.free;
+            u.storage.user = (d.total -| d.free) -| u.storage.apps;
             u.storage.free = d.free;
         };
         return u;

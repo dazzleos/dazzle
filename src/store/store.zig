@@ -1,29 +1,31 @@
-//! Installing and removing apps (Settings' Apps page).
+//! Installing and removing apps: for the setup app (choosing apps, its last
+//! page) and Settings' Apps page.
 //!
 //! The catalogue of apps that can be installed (apps.json; see
 //! tools/mkcatalogue.zig) and their archives are published where the
 //! image is (`build_info.apps_url`). An app's archive is its folder, as in
-//! /apps, as a tar file compressed with xz.
+//! /data/apps, as a tar file compressed with xz.
 //!
 //! * Downloading (the catalogue, or an app) is done over HTTPS by a child
 //!   process (`Job`), so the window goes on meanwhile. It trusts the
 //!   authorities in /os/certs (Mozilla's), and needs the clock set (the
 //!   network manager sets it).
 //! * Installing checks the archive's size and SHA-256 against the
-//!   catalogue, unpacks it into a hidden folder in /apps (only the app's
-//!   own folder, no links), and renames it into place: replacing an
+//!   catalogue, unpacks it into a hidden folder in /data/apps (only the
+//!   app's own folder, no links), and renames it into place: replacing an
 //!   installed copy, if there is one.
 //! * Removing renames the app's folder out of sight, then deletes it.
 //!
-//! /apps is /data/apps, the user's (init/apps.zig), so Settings needs no
-//! privileges for this. The catalogue last downloaded is kept there as
-//! .catalogue.json, to list the apps without a network.
+//! /data/apps is the user's (made with /data, when setup prepares the
+//! card), so the apps need no privileges for this. The catalogue last
+//! downloaded is kept there as .catalogue.json, to list the apps without a
+//! network.
 
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
 
-pub const apps_dir = "/apps";
+pub const apps_dir = sys.system.apps_dir;
 const catalogue_file = apps_dir ++ "/.catalogue.json";
 const ca_file = "/os/certs/ca-certificates.pem";
 

@@ -262,6 +262,5 @@ test {
     _ = @import("storage.zig");
     _ = @import("system.zig");
     _ = @import("slots.zig");
-    _ = @import("apps.zig");
     _ = @import("trial.zig");
 }

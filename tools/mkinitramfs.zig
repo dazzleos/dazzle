@@ -2,9 +2,8 @@
 //! the init program mounts over, a /dev/console node (the kernel opens it
 //! for PID 1's stdio before devtmpfs is mounted), the init binary, the
 //! shell, and the font every program shares: one OS slot's system. The
-//! apps are not in it: there is one copy of them on the card's boot
-//! partition, whatever the slot, which init copies to /data/apps (where
-//! more are installed) and shows at /apps.
+//! apps are not in it: they are installed in /data/apps (in setup, or
+//! from Settings).
 //! Dazzle's own files are in /os; everything is owned by root, but for
 //! /os/sockets (the Dazzle user's, for its programs' sockets):
 //!
@@ -20,7 +19,7 @@
 //!     /os/sockets/                              (empty)
 //!     /etc/resolv.conf                          (empty; the user's: the
 //!                                               network manager writes it)
-//!     /dev, /proc, /sys, /data, /boot, /apps    mount points
+//!     /dev, /proc, /sys, /data, /boot           mount points
 //!
 //! The shell's own apps (dazzle-settings, dazzle-setup), which cannot be
 //! removed, go beside it: --shell=<binary>. Other files are given as
@@ -116,7 +115,6 @@ pub fn main(init: std.process.Init) !void {
         .{ .name = "etc", .mode = S_IFDIR | 0o755 },
         .{ .name = "etc/resolv.conf", .mode = S_IFREG | 0o644, .uid = user_id, .gid = user_id, .data = "" },
         .{ .name = "boot", .mode = S_IFDIR | 0o755 },
-        .{ .name = "apps", .mode = S_IFDIR | 0o755 },
     });
     for (args[6..]) |path| {
         // Another file: --file=<path in the archive>=<file>, its

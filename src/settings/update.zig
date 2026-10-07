@@ -18,7 +18,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
-const store = @import("store.zig");
+const store = @import("store");
 
 const proto = sys.system;
 

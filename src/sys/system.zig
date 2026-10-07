@@ -58,6 +58,9 @@ pub const hostname_file = "/data/system/hostname";
 pub const setup_done_file = "/data/system/setup-done";
 /// The user's files.
 pub const user_dir = "/data/user";
+/// The apps installed, each in its own folder: /data/apps/<name>/<name> is
+/// its program (the user's).
+pub const apps_dir = data_dir ++ "/apps";
 /// Where Settings downloads updates (the user's).
 pub const update_dir = "/data/update";
 /// An update: the files of an OS slot, as a tar archive of the folder "os",

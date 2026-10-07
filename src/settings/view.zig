@@ -12,7 +12,7 @@ const std = @import("std");
 const ui = @import("ui");
 const gfx = @import("gfx");
 const info = @import("info.zig");
-const store = @import("store.zig");
+const store = @import("store");
 const update = @import("update.zig");
 
 /// The storage bar's colours (the system's is the theme's primary).

@@ -1,17 +1,17 @@
-//! The dock along the bottom of the screen: an icon for each app in /apps,
+//! The dock along the bottom of the screen: an icon for each app in /data/apps,
 //! and for the shell's own (Settings). Clicking one starts the app or, if it
 //! is running, brings its window to the front (apps run once each).
 //!
-//! An app is a directory /apps/<name> holding its program, also called
+//! An app is a directory /data/apps/<name> holding its program, also called
 //! <name>, and the files it needs. The shell's own apps are programs beside
 //! it in /os/shell, and cannot be removed. Its icon is a Material icon
 //! (named in <program>.icon, beside the program: "folder") or, without
 //! one, its initial, on a coloured square, with a dot under it while it
 //! runs.
 //!
-//! Apps come and go (Settings installs and removes them; /apps is mounted
-//! over once the card is ready): `Watch` notices /apps changing, and
-//! `rescan` lists the apps again, keeping running ones' processes.
+//! Apps come and go (setup and Settings install them, and Settings removes
+//! them): `Watch` notices /data/apps changing, and `rescan` lists the apps
+//! again, keeping running ones' processes.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -19,7 +19,7 @@ const sys = @import("sys");
 const font = @import("font");
 const icons = @import("icons");
 
-pub const apps_dir = "/apps";
+pub const apps_dir = sys.system.apps_dir;
 
 const background = 0xff1c2a4a;
 const hover_background = 0xff2c3e66;
@@ -32,7 +32,7 @@ pub const App = struct {
     name: []const u8,
     /// The name shown: without a "dazzle-" prefix, capitalised.
     label: []const u8,
-    /// The program: /apps/<name>/<name>.
+    /// The program: /data/apps/<name>/<name>.
     path: [:0]const u8,
     /// Its icon, from <program>.icon.
     icon: ?icons.Icon = null,

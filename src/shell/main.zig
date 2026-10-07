@@ -1,7 +1,7 @@
 //! dazzle-shell: a minimal Wayland compositor and shell.
 //!
 //! It owns the display (as the DRM master) and draws with the low-level vc4
-//! API: a dock along the bottom with an icon for each app in /apps (see
+//! API: a dock along the bottom with an icon for each app in /data/apps (see
 //! dock.zig), and the front window, maximized above it. Apps draw their own
 //! title bars (with the toolkit's TitleBar), so with no app open the screen
 //! shows just the dock. USB mice move a cursor
@@ -80,7 +80,7 @@ fn run(init: std.process.Init.Minimal) !void {
         } else |err| print("dazzle-shell: font: {s}\n", .{@errorName(err)});
     } else |err| print("dazzle-shell: cannot read {s}: {s}\n", .{ font_path, @errorName(err) });
 
-    // The shell's own apps are beside it; the others are in /apps.
+    // The shell's own apps are beside it; the others are in /data/apps.
     var settings_buf: [512]u8 = undefined;
     const settings_path = try sys.appFile(&settings_buf, "dazzle-settings");
     const builtin_apps = [_][]const u8{settings_path};
