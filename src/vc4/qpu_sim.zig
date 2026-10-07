@@ -11,6 +11,7 @@
 const std = @import("std");
 const qpu = @import("qpu.zig");
 const texture = @import("texture.zig");
+const pixel = @import("format.zig");
 
 pub const lanes = 16;
 pub const Vec = [lanes]u32;
@@ -423,16 +424,27 @@ fn write(s: *State, r: *Result, env: Env, waddr: u6, file: File, value: Vec, con
     }
 }
 
-/// Nearest-neighbour sampling of an RGBA8888 texture, with repeat or
-/// clamp wrapping.
+/// Nearest-neighbour sampling of an RGBA8888 or RGB565 texture, with
+/// repeat or clamp wrapping. A 32-bit texel comes back as it is in memory;
+/// an RGB565 one with red in the low byte, then green and blue (each
+/// widened to 8 bits), and opaque: the order Mesa's vc4 driver expects
+/// (its B5G6R5 swizzle is XYZ1).
 fn sample(memory: []const u8, p0: u32, p1: u32, s: f32, t: f32) Error!u32 {
     const p = texture.decodeConfig(p0, p1);
-    if (p.type != .rgba8888 or p.mag_filter != .nearest or p.min_filter != .nearest) return error.Unsupported;
+    if (p.mag_filter != .nearest or p.min_filter != .nearest) return error.Unsupported;
+    const cpp: u32 = switch (p.type) {
+        .rgba8888 => 4,
+        .rgb565 => 2,
+        else => return error.Unsupported,
+    };
     const x = try wrap(s, p.width, p.wrap_s);
     const y = try wrap(t, p.height, p.wrap_t);
-    const offset = p.offset + referenceTexelOffset(p.width, p.height, x, y);
-    if (offset + 4 > memory.len) return error.Unsupported;
-    return std.mem.readInt(u32, memory[offset..][0..4], .little);
+    const offset = p.offset + referenceTexelOffsetOf(cpp, p.width, p.height, x, y);
+    if (offset + cpp > memory.len) return error.Unsupported;
+    if (cpp == 4) return std.mem.readInt(u32, memory[offset..][0..4], .little);
+    const argb = pixel.fromRgb565(std.mem.readInt(u16, memory[offset..][0..2], .little));
+    // 0xffRRGGBB to bytes R, G, B, A.
+    return 0xff000000 | (argb & 0xff) << 16 | (argb & 0xff00) | ((argb >> 16) & 0xff);
 }
 
 fn wrap(coord: f32, size: u32, mode: texture.Wrap) Error!u32 {
@@ -445,33 +457,44 @@ fn wrap(coord: f32, size: u32, mode: texture.Wrap) Error!u32 {
     };
 }
 
-/// Byte offset of texel (x, y) in a 32-bit-per-pixel texture, written
-/// directly from the layout description in the VideoCore IV reference
-/// guide (section 4) as an independent check on vc4/texture.zig:
-///
-/// * Micro-tiles ("utiles") are 4x4 pixels, 64 bytes, pixels in raster
-///   order.
-/// * Small images (LT) are a raster-order grid of utiles.
-/// * T images are 4 KB tiles of 32x32 pixels in rows, alternate rows
-///   running right to left. Each tile is four 1 KB sub-tiles of 16x16
-///   pixels: in even tile rows they are stored bottom-left, top-left,
-///   top-right, bottom-right; in odd rows top-right, bottom-right,
-///   bottom-left, top-left, where "bottom" is the lower address (y = 0).
-///   Sub-tiles are 4x4 raster-order grids of utiles.
+/// Byte offset of texel (x, y) in a 32-bit-per-pixel texture.
 pub fn referenceTexelOffset(width: u32, height: u32, x: u32, y: u32) u32 {
-    const in_utile = ((y % 4) * 4 + (x % 4)) * 4;
-    if (width <= 16 or height <= 16) {
-        const utiles_per_row = (width + 3) / 4;
-        return ((y / 4) * utiles_per_row + x / 4) * 64 + in_utile;
+    return referenceTexelOffsetOf(4, width, height, x, y);
+}
+
+/// Byte offset of texel (x, y) in a texture of `cpp` bytes per pixel (4
+/// or 2), written directly from the layout description in the VideoCore
+/// IV reference guide (section 4) as an independent check on
+/// vc4/texture.zig:
+///
+/// * Micro-tiles ("utiles") are 64 bytes: 4x4 pixels of 32 bits, 8x4 of
+///   16, in raster order.
+/// * Small images (LT, at most 4 utiles across or down) are a raster-order
+///   grid of utiles.
+/// * T images are 4 KB tiles of 8x8 utiles in rows, alternate rows running
+///   right to left. Each tile is four 1 KB sub-tiles of 4x4 utiles: in
+///   even tile rows they are stored bottom-left, top-left, top-right,
+///   bottom-right; in odd rows top-right, bottom-right, bottom-left,
+///   top-left, where "bottom" is the lower address (y = 0). Sub-tiles are
+///   4x4 raster-order grids of utiles.
+pub fn referenceTexelOffsetOf(cpp: u32, width: u32, height: u32, x: u32, y: u32) u32 {
+    const uw = 64 / 4 / cpp;
+    const uh = 4;
+    const in_utile = ((y % uh) * uw + (x % uw)) * cpp;
+    if (width <= 4 * uw or height <= 4 * uh) {
+        const utiles_per_row = (width + uw - 1) / uw;
+        return ((y / uh) * utiles_per_row + x / uw) * 64 + in_utile;
     }
-    const tiles_per_row = (width + 31) / 32;
-    const tile_row = y / 32;
-    const tile_col = if (tile_row % 2 == 0) x / 32 else tiles_per_row - 1 - x / 32;
+    const tile_w = 8 * uw;
+    const tile_h = 8 * uh;
+    const tiles_per_row = (width + tile_w - 1) / tile_w;
+    const tile_row = y / tile_h;
+    const tile_col = if (tile_row % 2 == 0) x / tile_w else tiles_per_row - 1 - x / tile_w;
     const tile_base = (tile_row * tiles_per_row + tile_col) * 4096;
 
     // Sub-tile position in the tile: (column, row) with row 0 = bottom.
-    const sub_col = (x / 16) % 2;
-    const sub_row = (y / 16) % 2;
+    const sub_col = (x / (4 * uw)) % 2;
+    const sub_row = (y / (4 * uh)) % 2;
     const Pos = struct { col: u32, row: u32 };
     const even = [4]Pos{ .{ .col = 0, .row = 0 }, .{ .col = 0, .row = 1 }, .{ .col = 1, .row = 1 }, .{ .col = 1, .row = 0 } };
     const odd = [4]Pos{ .{ .col = 1, .row = 1 }, .{ .col = 1, .row = 0 }, .{ .col = 0, .row = 0 }, .{ .col = 0, .row = 1 } };
@@ -480,7 +503,7 @@ pub fn referenceTexelOffset(width: u32, height: u32, x: u32, y: u32) u32 {
     for (order, 0..) |pos, i| {
         if (pos.col == sub_col and pos.row == sub_row) sub_index = @intCast(i);
     }
-    const utile_in_sub = ((y / 4) % 4) * 4 + (x / 4) % 4;
+    const utile_in_sub = ((y / uh) % 4) * 4 + (x / uw) % 4;
     return tile_base + sub_index * 1024 + utile_in_sub * 64 + in_utile;
 }
 

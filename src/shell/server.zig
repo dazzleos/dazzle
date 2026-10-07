@@ -2,9 +2,9 @@
 //!
 //! Supported globals: wl_compositor (surfaces; regions are accepted and
 //! ignored), wl_subcompositor (subsurfaces, drawn above their parent),
-//! wl_shm (ARGB8888 and XRGB8888, copied to the GPU at commit),
-//! zwp_linux_dmabuf_v1 (buffers in the VideoCore IV's T-tiled layout, used
-//! by the GPU directly), xdg_wm_base (toplevel windows, and popups above
+//! wl_shm (ARGB8888, XRGB8888 and RGB565, copied to the GPU at commit),
+//! zwp_linux_dmabuf_v1 (buffers in the VideoCore IV's T-tiled layout, in
+//! the same formats, used by the GPU directly), xdg_wm_base (toplevel windows, and popups above
 //! them: see `Popup`), wl_output (the screen), wl_seat (a pointer, and a
 //! keyboard with a US XKB keymap: see keyboard.zig), wp_cursor_shape_manager_v1
 //! (the pointer's picture, by name) and wl_data_device_manager (copy and
@@ -39,6 +39,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const wayland = @import("wayland");
+const vc4 = @import("vc4");
 const wire = wayland.wire;
 const p = wayland.protocol;
 
@@ -52,7 +53,25 @@ pub const Texture = struct {
     handle: u32,
     width: u32,
     height: u32,
+    format: vc4.Format = .xrgb8888,
 };
+
+/// The formats clients' buffers can be in, and wl_shm's codes for them
+/// (dma-bufs use their DRM codes).
+const buffer_formats = [_]vc4.Format{ .argb8888, .xrgb8888, .rgb565 };
+
+fn shmCode(f: vc4.Format) u32 {
+    return switch (f) {
+        .argb8888 => p.wl_shm.format.argb8888,
+        .xrgb8888 => p.wl_shm.format.xrgb8888,
+        .rgb565 => p.wl_shm.format.rgb565,
+    };
+}
+
+fn fromShmCode(code: u32) ?vc4.Format {
+    for (buffer_formats) |f| if (shmCode(f) == code) return f;
+    return null;
+}
 
 pub const Backend = struct {
     ptr: *anyopaque,
@@ -60,10 +79,10 @@ pub const Backend = struct {
 
     pub const VTable = struct {
         /// Imports a T-tiled dma-buf as a texture. Takes ownership of `fd`.
-        importDmabuf: *const fn (ptr: *anyopaque, fd: linux.fd_t, width: u32, height: u32) anyerror!Texture,
-        /// Copies 32-bit pixels into a texture, reusing `existing` if it has
-        /// the same size.
-        uploadPixels: *const fn (ptr: *anyopaque, existing: ?Texture, pixels: []const u8, width: u32, height: u32, stride: u32) anyerror!Texture,
+        importDmabuf: *const fn (ptr: *anyopaque, fd: linux.fd_t, width: u32, height: u32, format: vc4.Format) anyerror!Texture,
+        /// Copies pixels (rows `stride` bytes apart) into a texture, reusing
+        /// `existing` if it has the same size and format.
+        uploadPixels: *const fn (ptr: *anyopaque, existing: ?Texture, pixels: []const u8, width: u32, height: u32, stride: u32, format: vc4.Format) anyerror!Texture,
         destroyTexture: *const fn (ptr: *anyopaque, t: Texture) void,
     };
 };
@@ -187,7 +206,7 @@ pub const Buffer = struct {
     /// Set for dmabuf buffers.
     dmabuf: ?Texture = null,
     /// Set for shm buffers.
-    shm: ?struct { pool: *ShmPool, offset: u32, stride: u32 } = null,
+    shm: ?struct { pool: *ShmPool, offset: u32, stride: u32, format: vc4.Format } = null,
     /// Surfaces showing it, and the display while it scans it out (dmabuf
     /// buffers only). It is released to the client when this drops to 0.
     uses: u32 = 0,
@@ -1125,14 +1144,15 @@ pub const Server = struct {
                     const width = try r.int();
                     const height = try r.int();
                     const stride = try r.int();
-                    const format = try r.uint();
-                    if (format != p.wl_shm.format.argb8888 and format != p.wl_shm.format.xrgb8888)
-                        return c.postError(m.object, p.wl_shm.err.invalid_format, "unsupported format {d}", .{format});
-                    if (offset < 0 or width <= 0 or height <= 0 or width > 2048 or height > 2048 or stride < width * 4 or @mod(stride, 4) != 0 or
+                    const code = try r.uint();
+                    const format = fromShmCode(code) orelse
+                        return c.postError(m.object, p.wl_shm.err.invalid_format, "unsupported format {d}", .{code});
+                    const bpp: i32 = @intCast(format.bytesPerPixel());
+                    if (offset < 0 or width <= 0 or height <= 0 or width > 2048 or height > 2048 or stride < width * bpp or @mod(stride, bpp) != 0 or
                         @as(u64, @intCast(offset)) + @as(u64, @intCast(stride)) * @as(u64, @intCast(height)) > pool.map.len)
                         return c.postError(m.object, p.wl_shm.err.invalid_stride, "buffer outside the pool", .{});
                     const b = try s.gpa.create(Buffer);
-                    b.* = .{ .client = c, .id = id, .width = @intCast(width), .height = @intCast(height), .shm = .{ .pool = pool, .offset = @intCast(offset), .stride = @intCast(stride) } };
+                    b.* = .{ .client = c, .id = id, .width = @intCast(width), .height = @intCast(height), .shm = .{ .pool = pool, .offset = @intCast(offset), .stride = @intCast(stride), .format = format } };
                     pool.refs += 1;
                     c.addObject(id, .{ .buffer = b }) catch |e| {
                         s.freeBuffer(b);
@@ -1471,23 +1491,23 @@ pub const Server = struct {
             1 => try c.addObject(id, .compositor),
             2 => {
                 try c.addObject(id, .shm);
-                for ([_]u32{ p.wl_shm.format.argb8888, p.wl_shm.format.xrgb8888 }) |f| if (c.send(id, p.wl_shm.event.format)) |m0| {
+                for (buffer_formats) |f| if (c.send(id, p.wl_shm.event.format)) |m0| {
                     var e = m0;
-                    e.uint(f).end();
+                    e.uint(shmCode(f)).end();
                 };
             },
             3 => try c.addObject(id, .{ .wm_base = version }),
             4 => {
                 try c.addObject(id, .dmabuf);
                 const mod = p.modifier.broadcom_vc4_t_tiled;
-                for ([_]u32{ p.fourcc.xrgb8888, p.fourcc.argb8888 }) |f| {
+                for (buffer_formats) |f| {
                     if (c.send(id, p.zwp_linux_dmabuf_v1.event.format)) |m0| {
                         var e = m0;
-                        e.uint(f).end();
+                        e.uint(f.fourcc()).end();
                     }
                     if (c.send(id, p.zwp_linux_dmabuf_v1.event.modifier)) |m0| {
                         var e = m0;
-                        e.uint(f).uint(@truncate(mod >> 32)).uint(@truncate(mod)).end();
+                        e.uint(f.fourcc()).uint(@truncate(mod >> 32)).uint(@truncate(mod)).end();
                     }
                 }
             },
@@ -2297,7 +2317,7 @@ pub const Server = struct {
                 if (nb.shm) |shm| {
                     // Copy the pixels now, so the buffer can be released.
                     const pixels = shm.pool.map[shm.offset..][0 .. shm.stride * nb.height];
-                    const t = try s.backend.vtable.uploadPixels(s.backend.ptr, surf.copy, pixels, nb.width, nb.height, shm.stride);
+                    const t = try s.backend.vtable.uploadPixels(s.backend.ptr, surf.copy, pixels, nb.width, nb.height, shm.stride, shm.format);
                     if (surf.copy) |old| if (old.handle != t.handle) s.backend.vtable.destroyTexture(s.backend.ptr, old);
                     surf.copy = t;
                     s.setBuffer(surf, null);
@@ -2465,21 +2485,22 @@ pub const Server = struct {
                 const id = if (immediate) try r.uint() else 0;
                 const width = try r.int();
                 const height = try r.int();
-                const format = try r.uint();
+                const code = try r.uint();
                 _ = try r.uint(); // flags
                 if (pr.used) return c.postError(m.object, E.already_used, "params already used", .{});
                 pr.used = true;
                 const fd = pr.fd orelse return c.postError(m.object, E.incomplete, "no planes", .{});
                 pr.fd = null;
-                if (format != p.fourcc.xrgb8888 and format != p.fourcc.argb8888 or pr.modifier != p.modifier.broadcom_vc4_t_tiled) {
+                const format = vc4.Format.fromFourcc(code);
+                if (format == null or pr.modifier != p.modifier.broadcom_vc4_t_tiled) {
                     _ = linux.close(fd);
-                    return c.postError(m.object, E.invalid_format, "only T-tiled XRGB8888 and ARGB8888 are supported", .{});
+                    return c.postError(m.object, E.invalid_format, "only T-tiled XRGB8888, ARGB8888 and RGB565 are supported", .{});
                 }
                 if (width <= 0 or height <= 0 or width > 2048 or height > 2048) {
                     _ = linux.close(fd);
                     return c.postError(m.object, E.invalid_dimensions, "invalid size {d}x{d}", .{ width, height });
                 }
-                const t = s.backend.vtable.importDmabuf(s.backend.ptr, fd, @intCast(width), @intCast(height)) catch |err| {
+                const t = s.backend.vtable.importDmabuf(s.backend.ptr, fd, @intCast(width), @intCast(height), format.?) catch |err| {
                     log.warn("dmabuf import failed: {s}", .{@errorName(err)});
                     if (immediate) return c.postError(m.object, E.invalid_wl_buffer, "import failed", .{});
                     if (c.send(m.object, p.zwp_linux_buffer_params_v1.event.failed)) |m0| {

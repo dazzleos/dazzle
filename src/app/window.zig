@@ -20,6 +20,13 @@
 //! small it may be with `setMinSize`, and draws at whatever size it is
 //! given at or above that.
 //!
+//! Buffers are RGB565 by default, half the memory of 32-bit ones (a
+//! full-screen window's three buffers at 1920x1080 take 12 MB rather than
+//! 24): Dazzle's apps draw opaque windows of flat colours, which 16 bits
+//! show well. An app that needs more (smooth gradients, say) asks for
+//! 32-bit buffers with `setFormat`. If the shell does not take RGB565
+//! buffers, they are 32-bit.
+//!
 //! While another window covers it, the shell says the window is
 //! `suspended` and holds its frame callbacks: the app should not draw
 //! (nothing would be seen), and the window frees the buffers it is not
@@ -124,11 +131,18 @@ const Buffer = struct {
     proxy: client.Proxy,
     width: u32,
     height: u32,
+    format: vc4.Format,
     /// Committed and not yet released by the compositor.
     busy: bool = false,
 
     fn target(b: *const Buffer) vc4.render.Target {
-        return .{ .handle = b.bo.handle, .width = @intCast(b.width), .height = @intCast(b.height), .tiling = vc4.render.Target.textureTiling(b.width, b.height) };
+        return .{
+            .handle = b.bo.handle,
+            .width = @intCast(b.width),
+            .height = @intCast(b.height),
+            .tiling = vc4.render.Target.textureTiling(b.format, b.width, b.height),
+            .format = b.format,
+        };
     }
 };
 
@@ -139,7 +153,10 @@ pub const Window = struct {
     globals: client.Globals = .{},
     wm_base: client.Proxy = undefined,
     dmabuf: client.Proxy = undefined,
-    t_tiled: bool = false,
+    /// The formats the shell takes T-tiled buffers in.
+    tiled_formats: std.EnumSet(vc4.Format) = .{},
+    /// The format the app would like its buffers in (`setFormat`).
+    wanted_format: vc4.Format = .rgb565,
     surface: client.Proxy = undefined,
     xdg_surface: client.Proxy = undefined,
     toplevel: client.Proxy = undefined,
@@ -226,7 +243,7 @@ pub const Window = struct {
         m = try w.surface.request(p.wl_surface.request.commit);
         m.end();
         while (w.pending_serial == null) try conn.dispatch();
-        if (!w.t_tiled) return error.NoTiledBuffers;
+        if (!w.tiled_formats.contains(.xrgb8888)) return error.NoTiledBuffers;
         _ = try w.applyConfigure();
         return w;
     }
@@ -446,6 +463,18 @@ pub const Window = struct {
 
     // --- Buffers ----------------------------------------------------------------
 
+    /// Asks for buffers in `format` from the next frame on (RGB565 unless
+    /// asked otherwise).
+    pub fn setFormat(w: *Window, wanted: vc4.Format) void {
+        w.wanted_format = wanted;
+    }
+
+    /// The format new buffers are made in: the one wanted, if the shell
+    /// takes it.
+    pub fn bufferFormat(w: *const Window) vc4.Format {
+        return if (w.tiled_formats.contains(w.wanted_format)) w.wanted_format else .xrgb8888;
+    }
+
     fn pickBack(w: *Window) !usize {
         var out_of_memory_waits: u32 = 0;
         while (true) {
@@ -456,7 +485,7 @@ pub const Window = struct {
             for (&w.buffers, 0..) |*slot, i| {
                 if (slot.*) |*b| {
                     if (b.busy) continue;
-                    if (b.width == w.width and b.height == w.height) return i;
+                    if (b.width == w.width and b.height == w.height and b.format == w.bufferFormat()) return i;
                     stale = i;
                 } else empty = i;
             }
@@ -500,7 +529,8 @@ pub const Window = struct {
 
     fn allocBuffer(w: *Window, slot: usize) !Buffer {
         const gpu = w.gpu;
-        const bo = try gpu.vtable.createBo(gpu.ptr, vc4.texture.imageSize(w.width, w.height));
+        const format = w.bufferFormat();
+        const bo = try gpu.vtable.createBo(gpu.ptr, vc4.texture.imageSizeOf(format, w.width, w.height));
         errdefer gpu.vtable.destroyBo(gpu.ptr, bo);
         const fd = try gpu.vtable.exportBo(gpu.ptr, bo.handle);
         const params = try w.conn.newObject(null);
@@ -508,13 +538,13 @@ pub const Window = struct {
         m.uint(params.id).end();
         const mod = p.modifier.broadcom_vc4_t_tiled;
         m = try params.request(p.zwp_linux_buffer_params_v1.request.add);
-        m.fd(fd).uint(0).uint(0).uint(w.width * 4).uint(@truncate(mod >> 32)).uint(@truncate(mod)).end();
+        m.fd(fd).uint(0).uint(0).uint(vc4.texture.tiledPitch(format, w.width, w.height)).uint(@truncate(mod >> 32)).uint(@truncate(mod)).end();
         const proxy = try w.conn.newObject(.{ .ptr = &w.buffers[slot], .handler = bufferEvent });
         m = try params.request(p.zwp_linux_buffer_params_v1.request.create_immed);
-        m.uint(proxy.id).int(@intCast(w.width)).int(@intCast(w.height)).uint(p.fourcc.xrgb8888).uint(0).end();
+        m.uint(proxy.id).int(@intCast(w.width)).int(@intCast(w.height)).uint(format.fourcc()).uint(0).end();
         m = try params.request(p.zwp_linux_buffer_params_v1.request.destroy);
         m.end();
-        return .{ .bo = bo, .proxy = proxy, .width = w.width, .height = w.height };
+        return .{ .bo = bo, .proxy = proxy, .width = w.width, .height = w.height, .format = format };
     }
 
     fn freeBuffer(w: *Window, b: *Buffer, slot: *?Buffer) void {
@@ -542,10 +572,11 @@ pub const Window = struct {
     fn dmabufEvent(ptr: ?*anyopaque, _: *client.Display, _: u32, opcode: u16, r: *wire.Reader) void {
         const w: *Window = @ptrCast(@alignCast(ptr.?));
         if (opcode != p.zwp_linux_dmabuf_v1.event.modifier) return;
-        const format = r.uint() catch return;
+        const code = r.uint() catch return;
         const hi = r.uint() catch return;
         const lo = r.uint() catch return;
-        if (format == p.fourcc.xrgb8888 and (@as(u64, hi) << 32 | lo) == p.modifier.broadcom_vc4_t_tiled) w.t_tiled = true;
+        if ((@as(u64, hi) << 32 | lo) != p.modifier.broadcom_vc4_t_tiled) return;
+        if (vc4.Format.fromFourcc(code)) |f| w.tiled_formats.insert(f);
     }
 
     // --- Shell and input --------------------------------------------------------

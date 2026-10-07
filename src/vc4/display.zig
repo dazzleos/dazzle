@@ -8,6 +8,7 @@ const drm = @import("drm.zig");
 const render = @import("render.zig");
 const vc4 = @import("device.zig");
 const kms_mod = @import("kms.zig");
+const Format = @import("format.zig").Format;
 
 pub const Buffer = struct {
     bo: vc4.Bo,
@@ -19,6 +20,7 @@ pub const Display = struct {
     output: drm.Output,
     width: u16,
     height: u16,
+    format: Format,
     buffers: [2]Buffer,
     /// Atomic mode setting, when the driver supports it: needed to show
     /// other buffers (`queueLayers`). Otherwise the legacy calls are used.
@@ -32,11 +34,13 @@ pub const Display = struct {
     /// What the queued frame shows: one of `buffers`, or null for layers.
     pending_buffer: ?u1 = null,
 
-    pub fn init(dev: vc4.Device, output: drm.Output) !Display {
+    /// Two linear buffers of the display's size, in `format`.
+    pub fn init(dev: vc4.Device, output: drm.Output, format: Format) !Display {
         const width = output.mode.hdisplay;
         const height = output.mode.vdisplay;
-        const pitch = render.Target.pitch(width);
+        const pitch = render.Target.pitch(format, width);
         var d: Display = .{
+            .format = format,
             .fd = dev.fd,
             .output = output,
             .width = width,
@@ -47,7 +51,7 @@ pub const Display = struct {
         for (&d.buffers) |*b| {
             const bo = try dev.createBo(pitch * height);
             errdefer dev.destroyBo(bo);
-            const fb_id = try drm.addFramebuffer(dev.fd, bo.handle, width, height, pitch, drm.format_xrgb8888);
+            const fb_id = try drm.addFramebuffer(dev.fd, bo.handle, width, height, pitch, format.fourcc());
             b.* = .{ .bo = bo, .fb_id = fb_id };
         }
         return d;
@@ -64,7 +68,7 @@ pub const Display = struct {
 
     /// The back buffer as a render target.
     pub fn backTarget(d: *const Display) render.Target {
-        return .{ .handle = d.back().bo.handle, .width = d.width, .height = d.height };
+        return .{ .handle = d.back().bo.handle, .width = d.width, .height = d.height, .format = d.format };
     }
 
     /// Shows the back buffer and waits until it is on the screen, which

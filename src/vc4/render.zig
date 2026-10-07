@@ -9,6 +9,7 @@ const std = @import("std");
 const cl = @import("cl.zig");
 const compiler = @import("compiler.zig");
 const texture = @import("texture.zig");
+const Format = @import("format.zig").Format;
 const device = @import("device.zig");
 
 pub const ShaderBinding = struct {
@@ -96,8 +97,10 @@ pub const Draw = struct {
     texture: ?Texture = null,
 };
 
-/// A B8G8R8A8 colour buffer. Depth lives only in the tile buffer: it is
-/// cleared to `clear_z` at the start of each tile and never stored.
+/// A colour buffer: the tile buffer is stored to it (and, to keep what
+/// it had, loaded from it) in its format. Depth lives only in the tile
+/// buffer: it is cleared to `clear_z` at the start of each tile and never
+/// stored.
 pub const Target = struct {
     handle: u32,
     width: u16,
@@ -106,16 +109,17 @@ pub const Target = struct {
     /// texture unit reads (see texture.zig), so the result can be sampled
     /// as a texture of the same size.
     tiling: cl.Tiling = .linear,
+    format: Format = .xrgb8888,
 
     /// The tiled layout the texture unit expects for an image of this size.
-    pub fn textureTiling(width: u32, height: u32) cl.Tiling {
-        return if (texture.isLt(width, height)) .lt else .t;
+    pub fn textureTiling(format: Format, width: u32, height: u32) cl.Tiling {
+        return if (texture.isLtOf(format, width, height)) .lt else .t;
     }
 
     /// Byte stride the hardware uses for linear render targets: the width
-    /// rounded up to a 4-pixel micro-tile.
-    pub fn pitch(width: u16) u32 {
-        return std.mem.alignForward(u32, width, 4) * 4;
+    /// rounded up to a micro-tile.
+    pub fn pitch(format: Format, width: u16) u32 {
+        return std.mem.alignForward(u32, width, format.utileWidth()) * format.bytesPerPixel();
     }
 
     pub fn fullViewport(t: Target) Viewport {
@@ -421,7 +425,7 @@ pub const Frame = struct {
             .max_y_tile = @intCast(tiles[1] - 1),
             .color_write = .{
                 .hindex = 0,
-                .bits = cl.renderConfigBits(f.target.tiling, cl.render_config_format_rgba8888),
+                .bits = cl.renderConfigBits(f.target.tiling, f.target.format.renderConfigFormat()),
             },
             // The clear values are always loaded so depth starts cleared;
             // keeping the colour loads it back from the target.
@@ -443,7 +447,7 @@ pub const Frame = struct {
         if (f.load == .keep) {
             f.submit.color_read = .{
                 .hindex = 0,
-                .bits = cl.loadStoreBits(f.target.tiling, .color, cl.loadstore_format_rgba8888),
+                .bits = cl.loadStoreBits(f.target.tiling, .color, f.target.format.loadStoreFormat()),
             };
         }
         return f.submitRegion(0);

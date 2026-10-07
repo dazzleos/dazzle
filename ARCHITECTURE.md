@@ -215,7 +215,8 @@ The `vc4` module:
 | `compiler.zig` | Shader compiler: SSA builder, register allocation and QPU code generation, with threaded fragment shaders |
 | `qpu_schedule.zig` | Instruction scheduler: latency-aware reordering and add/mul pairing |
 | `render.zig` | Records a frame: any number of draw calls into one render target, as one job |
-| `texture.zig` | Texture tiling (T and LT layouts) and texture unit configuration |
+| `texture.zig` | Texture tiling (T and LT layouts, for 32- and 16-bit pixels) and texture unit configuration |
+| `format.zig` | The pixel formats (XRGB8888, ARGB8888 and RGB565): their sizes, codes, and how the tile buffer stores them and the texture unit reads them |
 | `display.zig` | Double-buffered scanout with page flips at vertical blank, and showing other buffers on the display's planes |
 | `drm.zig` | DRM core and KMS (mode setting, page flip, cursor) ioctls |
 | `kms.zig` | Atomic mode setting: the primary and an overlay plane, set in one commit per frame |
@@ -376,6 +377,16 @@ frame and hands it to the shell once the previous one is on the screen, so
 at most one frame is queued. It also delivers the seat's pointer and
 keyboard events.
 
+A window's buffers are RGB565 unless the app asks for 32 bits
+(`setFormat`): half the memory, and half the memory traffic to draw,
+composite and show them. Everything is drawn in the tile buffer in 32-bit
+colour, as before, so the shaders do not change; only how the tile buffer
+is stored to the buffer (and loaded back, when part of a frame is redrawn)
+does. It is stored without dithering, so pixels loaded and stored again
+stay as they were. Dazzle's apps draw opaque windows of flat colours,
+which 16 bits show with little loss (gradients band a little); the demo
+has a switch to compare the two.
+
 The `shader` module (`src/shader/`) runs shaders written in Zig. A shader
 program is a Zig file with a vertex and a fragment entry point; it imports
 `gpu` (`gpu.zig`) for its inputs, outputs, uniforms and texture:
@@ -456,8 +467,9 @@ The shell (`src/shell/`):
 | `keyboard.zig`, `us.xkb` | The keyboard for clients: a US XKB keymap, and the modifiers' state |
 | `server_test.zig`, `protocol_test.zig` | Protocol tests on the host, described below (`protocol_test.zig`'s run the server and clients on one thread, step by step) |
 
-The server offers `wl_compositor`, `wl_subcompositor`, `wl_shm` (ARGB8888
-and XRGB8888, copied to a texture at commit), `zwp_linux_dmabuf_v1`,
+The server offers `wl_compositor`, `wl_subcompositor`, `wl_shm` (ARGB8888,
+XRGB8888 and RGB565, copied to a texture at commit), `zwp_linux_dmabuf_v1`
+(T-tiled buffers in the same formats),
 `xdg_wm_base` (toplevels and popups), `wl_output`, `wl_seat` (a pointer and
 a keyboard), `wl_data_device_manager` (copy and paste) and
 `wp_cursor_shape_manager_v1` (the pointer's picture, by name): what common
@@ -530,10 +542,12 @@ refused.
   app in front has the GPU memory; raised, they draw again.
 - **GPU memory:** every buffer the GPU touches comes from the kernel's CMA
   pool (the V3D has no MMU). At 1080p the shell's two screen buffers take
-  17 MB and each window up to three 7 MB buffers, more than the device
-  tree's 64 MB pool leaves once the kernel's binner memory is taken, so
-  `cmdline.txt` sets `cma=128M`. An app that cannot get another buffer
-  makes do with those it has, or waits for memory to be freed.
+  17 MB and each window up to three 4 MB buffers (RGB565; 8 MB at 32
+  bits), more than the device tree's 64 MB pool leaves once the kernel's
+  binner memory is taken, so `cmdline.txt` sets `cma=128M`. An app that
+  cannot get another buffer makes do with those it has, or waits for
+  memory to be freed. The screen stays 32-bit: everything is composited
+  into it, and screenshots are taken from it.
 - **Apps:** each directory in `/apps` holding a program of the same name
   (`/apps/<name>/<name>`) is an app, with an icon in the dock: its initial
   on a coloured square, with a dot under it while it runs. Apps run once
@@ -546,8 +560,14 @@ refused.
   its T-tiled layout, and the shell draws their buffers as textures. That
   layout is announced with the `BROADCOM_VC4_T_TILED` modifier, as Mesa's
   vc4 driver also does.
+- **Pixel formats:** windows' buffers are RGB565 or 32-bit (above). The
+  texture unit returns an RGB565 texel's red first but a 32-bit one's blue
+  first (the order the tile buffer wants), so RGB565 windows are drawn
+  with a second quad shader that swaps them back (`quad_rgb565.zig`; the
+  simulator samples RGB565 the way Mesa's vc4 driver says the hardware
+  does).
 - **Direct scanout:** the display hardware can scan out T-tiled buffers
-  and stack several planes. When the top window is maximized and its
+  (32-bit and RGB565) and stack several planes. When the top window is maximized and its
   buffer is exactly the work area's size, the shell puts it on the
   display's primary plane as it is, and the dock on an overlay plane, with
   one atomic commit. Nothing is composited, which saves the GPU a
@@ -999,9 +1019,11 @@ The key does not reach the app with the keyboard.
 5. **Submission.** `DRM_IOCTL_VC4_SUBMIT_CL` submits the job. The kernel
    validates it, generates the rendering control list that clears and
    stores each tile (or only those in the job's tile range, when the frame
-   is limited to what changed), and runs it on the V3D. The shell renders straight into
+   is limited to what changed), and runs it on the V3D. The tile buffer is
+   stored in the target's format: 32-bit, or RGB565. The shell renders straight into
    a linear XRGB8888 scanout buffer; Wayland clients render into T-tiled
-   buffers the shell then draws as textures. Depth stays in the on-chip tile
+   (RGB565, unless they ask for 32 bits) buffers the shell then draws as
+   textures. Depth stays in the on-chip tile
    buffer.
 6. **Display.** `display.zig` alternates between two such buffers, flipping
    at vertical blank so animation is tear-free and paced to the refresh
@@ -1014,9 +1036,9 @@ The key does not reach the app with the keyboard.
   checked against the hand-written shaders that are known to work on the
   hardware. The tests then check that compiled shaders compute the same
   results, or the results computed on the CPU.
-- `vc4/texture.zig`'s tiling is cross-checked against a separate
-  implementation of the reference guide's layout description in the
-  simulator.
+- `vc4/texture.zig`'s tiling, for 32- and 16-bit pixels, is cross-checked
+  against a separate implementation of the reference guide's layout
+  description in the simulator.
 - The shader programs the build compiles are run in the simulator and
   checked against the same maths done on the CPU, and `gfx.preview` draws
   canvases through the real 2D shaders for its pixel tests.
@@ -1046,6 +1068,12 @@ shell showed the demo's buffers directly on the display (no compositing)
 at a steady 60 frames per second, with mouse input working. The demo's
 `vc4` frames pass a userspace build of the kernel's job and shader
 validators; the native version still needs confirming on a Pi.
+
+RGB565 windows (the default) have not been tried on hardware yet: the
+simulator and the kernel's checks agree with them, but the texture unit's
+order for RGB565 texels comes from Mesa's driver. If restored windows
+show red and blue swapped while maximized ones are right, that order is
+the other way round (`Format.textureSwapsRedBlue`).
 
 The Pi 3 A+ has not been tried on hardware yet: in QEMU its kernel boots
 on the Cortex-A53, and init, the log server and networking work.

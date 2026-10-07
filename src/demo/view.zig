@@ -47,6 +47,9 @@ pub const Demo = struct {
         last_ns: ?u64 = null,
         speed: f32 = 1,
         paused: bool = false,
+        /// The window's buffers are RGB565, half the memory of 32-bit ones
+        /// (main.zig asks for them).
+        colour_16: bool = true,
 
         fn slower(s: *State) void {
             s.speed = @max(s.speed / 2, 0.125);
@@ -67,6 +70,9 @@ pub const Demo = struct {
         }
         fn setTexturing(s: *State, on: bool) void {
             s.look.texturing = on;
+        }
+        fn setColour16(s: *State, on: bool) void {
+            s.colour_16 = on;
         }
     };
 
@@ -125,6 +131,7 @@ pub const Demo = struct {
                             cx.make(ui.SizedBox{ .height = 4 }),
                             cx.make(ui.Switch{ .value = state.look.lighting, .on_changed = .of(state, State.setLighting), .label = "Lighting" }),
                             cx.make(ui.Switch{ .value = state.look.texturing, .on_changed = .of(state, State.setTexturing), .label = "Texture" }),
+                            cx.make(ui.Switch{ .value = state.colour_16, .on_changed = .of(state, State.setColour16), .label = "16-bit colour" }),
                         },
                     }) }) }),
                 },
@@ -317,11 +324,11 @@ test "the radio buttons choose the solid, and the switches its look" {
     var n: usize = 0;
     Collect.all(u.root.?, ui.Radio(Shape), &radios, &n);
     try testing.expectEqual(@as(usize, 5), n);
-    var switches: [2]*ui.Node = undefined;
+    var switches: [3]*ui.Node = undefined;
     n = 0;
     Collect.all(u.root.?, ui.Switch, &switches, &n);
-    try testing.expectEqual(@as(usize, 2), n);
-    for ([_]*ui.Node{ radios[4], switches[0], switches[1], switches[1] }) |w| {
+    try testing.expectEqual(@as(usize, 3), n);
+    for ([_]*ui.Node{ radios[4], switches[0], switches[1], switches[1], switches[2] }) |w| {
         const at = w.position();
         const p: ui.Point = .{ at[0] + 10, at[1] + 20 };
         u.pointerMotion(p);
@@ -333,6 +340,7 @@ test "the radio buttons choose the solid, and the switches its look" {
     try testing.expectEqual(Shape.icosahedron, st.shape);
     try testing.expect(!st.look.lighting);
     try testing.expect(st.look.texturing);
+    try testing.expect(!st.colour_16);
 }
 
 test "while paused and still, frames change nothing and none are asked for" {

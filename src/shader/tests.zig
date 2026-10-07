@@ -11,6 +11,7 @@ const Program = program_mod.Program;
 const compiler = vc4.compiler;
 const sim = vc4.qpu_sim;
 const texture = vc4.texture;
+const pixel = vc4.format;
 const testing = std.testing;
 
 const programs = [_]struct { name: []const u8, program: []const u8, spirv: []const u8 }{
@@ -20,6 +21,7 @@ const programs = [_]struct { name: []const u8, program: []const u8, spirv: []con
     .{ .name = "text", .program = @embedFile("text.shader"), .spirv = @embedFile("text.spv") },
     .{ .name = "polyhedron", .program = @embedFile("polyhedron.shader"), .spirv = @embedFile("polyhedron.spv") },
     .{ .name = "quad", .program = @embedFile("quad.shader"), .spirv = @embedFile("quad.spv") },
+    .{ .name = "quad_rgb565", .program = @embedFile("quad_rgb565.shader"), .spirv = @embedFile("quad_rgb565.spv") },
 };
 
 fn load(comptime name: []const u8) !Program {
@@ -232,6 +234,28 @@ test "the shell's textured quads copy texels exactly" {
         const r = try sim.run(p.fs.code(), .{ .uniforms = stream, .varyings = &varyings, .texture_memory = &tex.memory });
         try testing.expect(r.tlb_z == null);
         for (0..sim.lanes) |i| try testing.expectEqual(tex.at(i), r.tlb_color.?[i]);
+    }
+}
+
+test "the shell's RGB565 quads give the tile buffer each texel's colour, blue first" {
+    const w = 64;
+    const h = 64;
+    var pixels: [w * h]u16 = undefined;
+    for (&pixels, 0..) |*px, i| px.* = @truncate(i *% 2654435761 >> 7);
+    var memory: [texture.imageSizeOf(.rgb565, w, h)]u8 = undefined;
+    texture.uploadRectOf(.rgb565, &memory, w, h, .{ .x = 0, .y = 0, .width = w, .height = h }, std.mem.sliceAsBytes(&pixels), w * 2);
+    const cfg: texture.Config = .{ .type = .rgb565, .width = w, .height = h, .mag_filter = .nearest, .min_filter = .nearest };
+    const p = try load("quad_rgb565");
+    var buf: [8]u32 = undefined;
+    const stream = uniformStream(&buf, &p.fs, &.{}, .{ texture.p0(cfg), texture.p1(cfg) });
+    const varyings = [_]sim.Vec{ lane(TestTexture.u[0], TestTexture.u[1]), lane(TestTexture.v[0], TestTexture.v[1]) };
+    const r = try sim.run(p.fs.code(), .{ .uniforms = stream, .varyings = &varyings, .texture_memory = &memory });
+    for (0..sim.lanes) |i| {
+        // What a 32-bit target holds for it: 0xffRRGGBB, blue in the low
+        // byte, which the tile buffer stores back as the same RGB565 pixel.
+        const texel = pixels[(10 + 2 * i) * w + 3 * i];
+        try testing.expectEqual(pixel.fromRgb565(texel), r.tlb_color.?[i]);
+        try testing.expectEqual(texel, pixel.toRgb565(r.tlb_color.?[i]));
     }
 }
 

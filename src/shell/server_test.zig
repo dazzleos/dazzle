@@ -22,23 +22,23 @@ const FakeRenderer = struct {
         return .{ .ptr = r, .vtable = &.{ .importDmabuf = importDmabuf, .uploadPixels = uploadPixels, .destroyTexture = destroyTexture } };
     }
 
-    fn importDmabuf(ptr: *anyopaque, fd: linux.fd_t, w: u32, h: u32) anyerror!server_mod.Texture {
+    fn importDmabuf(ptr: *anyopaque, fd: linux.fd_t, w: u32, h: u32, format: vc4.Format) anyerror!server_mod.Texture {
         const r: *FakeRenderer = @ptrCast(@alignCast(ptr));
         _ = linux.close(fd);
         r.next += 1;
         _ = r.live.fetchAdd(1, .monotonic);
-        return .{ .handle = r.next, .width = w, .height = h };
+        return .{ .handle = r.next, .width = w, .height = h, .format = format };
     }
 
-    fn uploadPixels(ptr: *anyopaque, existing: ?server_mod.Texture, pixels: []const u8, w: u32, h: u32, stride: u32) anyerror!server_mod.Texture {
+    fn uploadPixels(ptr: *anyopaque, existing: ?server_mod.Texture, pixels: []const u8, w: u32, h: u32, stride: u32, format: vc4.Format) anyerror!server_mod.Texture {
         const r: *FakeRenderer = @ptrCast(@alignCast(ptr));
         _ = stride;
         _ = r.uploads.fetchAdd(1, .monotonic);
         r.last_pixel.store(std.mem.readInt(u32, pixels[0..4], .little), .monotonic);
-        if (existing) |e| if (e.width == w and e.height == h) return e;
+        if (existing) |e| if (e.width == w and e.height == h and e.format == format) return e;
         r.next += 1;
         _ = r.live.fetchAdd(1, .monotonic);
-        return .{ .handle = r.next, .width = w, .height = h };
+        return .{ .handle = r.next, .width = w, .height = h, .format = format };
     }
 
     fn destroyTexture(ptr: *anyopaque, _: server_mod.Texture) void {
@@ -255,7 +255,8 @@ test "a client maps a window, gets frame callbacks and buffer releases" {
     const shm = (try globals.bind(registry, p.wl_shm.name, 1, .{ .ptr = &state, .handler = State.shmEvent })).?;
     try d.roundtrip();
     try testing.expect(state.t_tiled);
-    try testing.expectEqual(@as(u32, 2), state.shm_formats);
+    // ARGB8888, XRGB8888 and RGB565.
+    try testing.expectEqual(@as(u32, 3), state.shm_formats);
 
     // A toplevel: the first commit gets the configure.
     const surface = try d.newObject(null);
@@ -392,6 +393,8 @@ test "app windows render, present through the compositor and resize" {
     // Frames render into T-tiled buffers the compositor can sample.
     try testing.expectEqual(@as(u32, 6), fake.frames);
     try testing.expectEqual(vc4.cl.Tiling.t, fake.last_target.?.tiling);
+    // RGB565, unless the app asks for 32 bits.
+    try testing.expectEqual(vc4.Format.rgb565, fake.last_target.?.format);
     while (win.frame_pending) try d.dispatch();
     try testing.expectEqual(@as(u32, 320), st.last_width.load(.monotonic));
     try testing.expect(st.titles_seen.load(.monotonic) > 0);
@@ -408,6 +411,16 @@ test "app windows render, present through the compositor and resize" {
     try testing.expectEqual(@as(u32, 160), st.last_width.load(.monotonic));
     try testing.expectEqual(@as(u16, 100), fake.last_target.?.height);
     // The window never holds more than three buffers.
+    try testing.expect(fake.live_bos <= 3);
+
+    // Asking for 32-bit buffers replaces them.
+    win.setFormat(.xrgb8888);
+    for (0..4) |_| {
+        test_frame.begin(try win.beginFrame(), .{ .clear = 0xff000000 });
+        try win.present(&test_frame);
+    }
+    while (win.frame_pending) try d.dispatch();
+    try testing.expectEqual(vc4.Format.xrgb8888, fake.last_target.?.format);
     try testing.expect(fake.live_bos <= 3);
 
     win.close();

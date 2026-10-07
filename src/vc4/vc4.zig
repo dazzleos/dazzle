@@ -8,6 +8,7 @@
 //! * `compiler`: build shaders as SSA values and compile them to QPU code
 //! * `render`: assemble a draw job (control list, shader record, uniforms)
 //! * `texture`: texture memory layout and sampler configuration
+//! * `format`: the pixel formats (32-bit XRGB and ARGB, 16-bit RGB565)
 //! * `display`: double-buffered scanout with page flips
 //! * `drm`: mode setting and other DRM core ioctls
 //! * `kms`: atomic mode setting, showing buffers on the display's planes
@@ -20,6 +21,7 @@ pub const device = @import("device.zig");
 pub const compiler = @import("compiler.zig");
 pub const render = @import("render.zig");
 pub const texture = @import("texture.zig");
+pub const format = @import("format.zig");
 pub const display = @import("display.zig");
 pub const drm = @import("drm.zig");
 pub const kms = @import("kms.zig");
@@ -32,6 +34,7 @@ pub const qpu_sim = @import("qpu_sim.zig");
 pub const reference_shaders = @import("reference_shaders.zig");
 
 pub const Device = device.Device;
+pub const Format = format.Format;
 pub const Bo = device.Bo;
 pub const SubmitCl = device.SubmitCl;
 
@@ -40,6 +43,7 @@ test {
     _ = compiler;
     _ = render;
     _ = texture;
+    _ = format;
     _ = display;
     _ = drm;
     _ = kms;

@@ -1,12 +1,16 @@
 //! Texture memory layout and texture unit configuration for the V3D.
 //!
-//! The texture unit reads 32-bit RGBA textures in one of two tiled layouts:
+//! The texture unit reads textures in one of two tiled layouts, made of
+//! 64-byte micro-tiles (4x4 pixels of 32 bits, 8x4 of 16):
 //!
 //! * LT ("linear tile") for small images (either dimension at most 4
-//!   micro-tiles): a raster-order grid of 4x4-pixel, 64-byte micro-tiles.
-//! * T for everything else: 4 KB tiles of 32x32 pixels, each made of four
-//!   1 KB sub-tiles of 4x4 micro-tiles, with tile rows alternating
-//!   direction and sub-tile order depending on the row.
+//!   micro-tiles): a raster-order grid of micro-tiles.
+//! * T for everything else: 4 KB tiles of 8x8 micro-tiles (32x32 pixels of
+//!   32 bits, 64x32 of 16), each made of four 1 KB sub-tiles of 4x4
+//!   micro-tiles, with tile rows alternating direction and sub-tile order
+//!   depending on the row.
+//!
+//! The functions without a format are for 32-bit images.
 //!
 //! The kernel decides which layout the hardware uses from the size alone
 //! (vc4_validate.c, size_is_lt) and checks that the buffer is big enough,
@@ -16,6 +20,7 @@
 //! Reference: Mesa src/gallium/drivers/vc4/vc4_tiling.c.
 
 const std = @import("std");
+const Format = @import("format.zig").Format;
 
 pub const Type = enum(u5) {
     rgba8888 = 0,
@@ -98,22 +103,40 @@ pub fn decodeConfig(param0: u32, param1: u32) Config {
     };
 }
 
-const cpp = 4;
-const utile_w = 4;
-const utile_h = 4;
-
-/// Whether the hardware treats an image of this size as LT rather than T.
+/// Whether the hardware treats a 32-bit image of this size as LT rather
+/// than T.
 pub fn isLt(width: u32, height: u32) bool {
-    return width <= 4 * utile_w or height <= 4 * utile_h;
+    return isLtOf(.xrgb8888, width, height);
+}
+
+pub fn isLtOf(format: Format, width: u32, height: u32) bool {
+    return width <= 4 * format.utileWidth() or height <= 4 * format.utileHeight();
 }
 
 /// Bytes needed for a 32-bit-per-pixel image, padded the way the kernel's
 /// vc4_check_tex_size() expects.
 pub fn imageSize(width: u32, height: u32) u32 {
-    if (isLt(width, height)) {
-        return std.mem.alignForward(u32, width, utile_w) * std.mem.alignForward(u32, height, utile_h) * cpp;
+    return imageSizeOf(.xrgb8888, width, height);
+}
+
+pub fn imageSizeOf(format: Format, width: u32, height: u32) u32 {
+    const uw = format.utileWidth();
+    const uh = format.utileHeight();
+    const cpp = format.bytesPerPixel();
+    if (isLtOf(format, width, height)) {
+        return std.mem.alignForward(u32, width, uw) * std.mem.alignForward(u32, height, uh) * cpp;
     }
-    return std.mem.alignForward(u32, width, 8 * utile_w) * std.mem.alignForward(u32, height, 8 * utile_h) * cpp;
+    return std.mem.alignForward(u32, width, 8 * uw) * std.mem.alignForward(u32, height, 8 * uh) * cpp;
+}
+
+/// Bytes from one row of pixels to the next in a tiled image, as DRM
+/// framebuffers and dma-bufs give it: the width padded to whole tiles
+/// (micro-tiles for LT), times the bytes per pixel. For T images that is
+/// 128 bytes per tile across, whatever the format.
+pub fn tiledPitch(format: Format, width: u32, height: u32) u32 {
+    const uw = format.utileWidth();
+    const align_w = if (isLtOf(format, width, height)) uw else 8 * uw;
+    return std.mem.alignForward(u32, width, align_w) * format.bytesPerPixel();
 }
 
 /// Byte offset of the 1 KB sub-tile containing micro-tile (utile_x,
@@ -135,14 +158,21 @@ fn tSubtileOffset(utile_x: u32, utile_y: u32, utile_stride: u32) u32 {
 
 /// Byte offset of pixel (x, y) in a tiled 32-bit image.
 pub fn texelOffset(width: u32, height: u32, x: u32, y: u32) u32 {
-    const in_utile = ((y % utile_h) * utile_w + x % utile_w) * cpp;
-    if (isLt(width, height)) {
-        const row_stride = std.mem.alignForward(u32, width, utile_w) * cpp;
-        return (y - y % utile_h) * row_stride + (x / utile_w) * 64 + in_utile;
+    return texelOffsetOf(.xrgb8888, width, height, x, y);
+}
+
+pub fn texelOffsetOf(format: Format, width: u32, height: u32, x: u32, y: u32) u32 {
+    const uw = format.utileWidth();
+    const uh = format.utileHeight();
+    const cpp = format.bytesPerPixel();
+    const in_utile = ((y % uh) * uw + x % uw) * cpp;
+    if (isLtOf(format, width, height)) {
+        const row_stride = std.mem.alignForward(u32, width, uw) * cpp;
+        return (y - y % uh) * row_stride + (x / uw) * 64 + in_utile;
     }
-    const utile_stride = std.mem.alignForward(u32, width, 8 * utile_w) / utile_w;
-    const utile_x = x / utile_w;
-    const utile_y = y / utile_h;
+    const utile_stride = std.mem.alignForward(u32, width, 8 * uw) / uw;
+    const utile_x = x / uw;
+    const utile_y = y / uh;
     // Within a sub-tile, micro-tiles are a 4x4 raster-order grid.
     const in_subtile = ((utile_y % 4) * 4 + utile_x % 4) * 64;
     return tSubtileOffset(utile_x & ~@as(u32, 3), utile_y & ~@as(u32, 3), utile_stride) + in_subtile + in_utile;
@@ -156,34 +186,42 @@ pub fn upload(dst: []u8, pixels: []const u32, width: u32, height: u32) void {
 
 pub const Rect = struct { x: u32, y: u32, width: u32, height: u32 };
 
-/// Writes pixels into a rectangle of a tiled image. `pixels` holds the
-/// rectangle's rows, `stride` pixels apart.
+/// Writes 32-bit pixels into a rectangle of a tiled image. `pixels` holds
+/// the rectangle's rows, `stride` pixels apart.
+pub fn uploadRect(dst: []u8, width: u32, height: u32, rect: Rect, pixels: []align(1) const u32, stride: u32) void {
+    uploadRectOf(.xrgb8888, dst, width, height, rect, std.mem.sliceAsBytes(pixels), stride * 4);
+}
+
+/// Writes pixels of `format` into a rectangle of a tiled image. `src`
+/// holds the rectangle's rows, `stride` bytes apart.
 ///
-/// Images are written a micro-tile at a time: its 4 rows of 4 pixels are 64
+/// Images are written a micro-tile at a time: its 4 rows are 64
 /// contiguous bytes, so each row is one 16-byte copy and the tiled address
 /// is worked out once per micro-tile. That keeps uploads fast, and writes
 /// to GPU buffers (mapped write-combined) whole cache lines at a time.
-pub fn uploadRect(dst: []u8, width: u32, height: u32, rect: Rect, pixels: []align(1) const u32, stride: u32) void {
-    std.debug.assert(dst.len >= imageSize(width, height));
+pub fn uploadRectOf(format: Format, dst: []u8, width: u32, height: u32, rect: Rect, src: []const u8, stride: u32) void {
+    std.debug.assert(dst.len >= imageSizeOf(format, width, height));
     std.debug.assert(rect.x + rect.width <= width and rect.y + rect.height <= height);
     if (rect.width == 0 or rect.height == 0) return;
-    const src = std.mem.sliceAsBytes(pixels);
+    const uw = format.utileWidth();
+    const uh = format.utileHeight();
+    const cpp = format.bytesPerPixel();
     const x_end = rect.x + rect.width;
     const y_end = rect.y + rect.height;
-    var uy = rect.y / utile_h;
-    while (uy * utile_h < y_end) : (uy += 1) {
-        var ux = rect.x / utile_w;
-        while (ux * utile_w < x_end) : (ux += 1) {
-            const base = texelOffset(width, height, ux * utile_w, uy * utile_h);
+    var uy = rect.y / uh;
+    while (uy * uh < y_end) : (uy += 1) {
+        var ux = rect.x / uw;
+        while (ux * uw < x_end) : (ux += 1) {
+            const base = texelOffsetOf(format, width, height, ux * uw, uy * uh);
             // The part of this micro-tile inside the rectangle.
-            const x0 = @max(ux * utile_w, rect.x);
-            const x1 = @min(ux * utile_w + utile_w, x_end);
-            const y0 = @max(uy * utile_h, rect.y);
-            const y1 = @min(uy * utile_h + utile_h, y_end);
+            const x0 = @max(ux * uw, rect.x);
+            const x1 = @min(ux * uw + uw, x_end);
+            const y0 = @max(uy * uh, rect.y);
+            const y1 = @min(uy * uh + uh, y_end);
             const n = (x1 - x0) * cpp;
             for (y0..y1) |y| {
-                const d = base + ((@as(u32, @intCast(y)) % utile_h) * utile_w + x0 % utile_w) * cpp;
-                const sidx = ((@as(u32, @intCast(y)) - rect.y) * stride + (x0 - rect.x)) * cpp;
+                const d = base + ((@as(u32, @intCast(y)) % uh) * uw + x0 % uw) * cpp;
+                const sidx = (@as(u32, @intCast(y)) - rect.y) * stride + (x0 - rect.x) * cpp;
                 @memcpy(dst[d..][0..n], src[sidx..][0..n]);
             }
         }
@@ -207,16 +245,28 @@ test "config round trip" {
 
 test "layout matches the reference description" {
     const sim = @import("qpu_sim.zig");
-    const sizes = [_][2]u32{ .{ 16, 16 }, .{ 8, 64 }, .{ 64, 64 }, .{ 128, 96 }, .{ 96, 128 }, .{ 256, 256 } };
-    for (sizes) |sz| {
+    const sizes = [_][2]u32{ .{ 16, 16 }, .{ 8, 64 }, .{ 32, 64 }, .{ 64, 64 }, .{ 128, 96 }, .{ 96, 128 }, .{ 256, 256 } };
+    for ([_]Format{ .xrgb8888, .rgb565 }) |format| for (sizes) |sz| {
         var y: u32 = 0;
         while (y < sz[1]) : (y += 1) {
             var x: u32 = 0;
             while (x < sz[0]) : (x += 1) {
-                try testing.expectEqual(sim.referenceTexelOffset(sz[0], sz[1], x, y), texelOffset(sz[0], sz[1], x, y));
+                try testing.expectEqual(sim.referenceTexelOffsetOf(format.bytesPerPixel(), sz[0], sz[1], x, y), texelOffsetOf(format, sz[0], sz[1], x, y));
             }
         }
-    }
+    };
+}
+
+test "16-bit images: 8x4 micro-tiles, 64x32 tiles, sized as the kernel checks" {
+    // LT up to 32 wide (4 micro-tiles of 8) or 16 high.
+    try testing.expect(isLtOf(.rgb565, 32, 100));
+    try testing.expect(!isLtOf(.rgb565, 40, 100));
+    // vc4_check_tex_size: T rounds to 64x32 pixels, LT to 8x4.
+    try testing.expectEqual(@as(u32, 128 * 64 * 2), imageSizeOf(.rgb565, 100, 50));
+    try testing.expectEqual(@as(u32, 16 * 100 * 2), imageSizeOf(.rgb565, 13, 100));
+    // A micro-tile's rows are 16 bytes: 8 pixels.
+    try testing.expectEqual(@as(u32, 14), texelOffsetOf(.rgb565, 100, 50, 7, 0));
+    try testing.expectEqual(@as(u32, 16), texelOffsetOf(.rgb565, 100, 50, 0, 1));
 }
 
 test "every texel lands in a distinct slot inside the image" {
@@ -228,6 +278,26 @@ test "every texel lands in a distinct slot inside the image" {
         try testing.expect(off % 4 == 0 and off / 4 < seen.len);
         try testing.expect(!seen[off / 4]);
         seen[off / 4] = true;
+    };
+}
+
+test "uploadRectOf writes 16-bit pixels where texelOffsetOf says" {
+    const gpa = std.testing.allocator;
+    const w = 100;
+    const h = 37;
+    const pixels = try gpa.alloc(u16, w * h);
+    defer gpa.free(pixels);
+    for (pixels, 0..) |*px, i| px.* = @truncate(i * 40503);
+    const a = try gpa.alloc(u8, imageSizeOf(.rgb565, w, h));
+    defer gpa.free(a);
+    @memset(a, 0);
+    const r: Rect = .{ .x = 3, .y = 2, .width = w - 5, .height = h - 3 };
+    uploadRectOf(.rgb565, a, w, h, r, std.mem.sliceAsBytes(pixels), w * 2);
+    for (0..h) |y| for (0..w) |x| {
+        const off = texelOffsetOf(.rgb565, w, h, @intCast(x), @intCast(y));
+        const inside = x >= r.x and x < r.x + r.width and y >= r.y and y < r.y + r.height;
+        const want: u16 = if (inside) pixels[(y - r.y) * w + (x - r.x)] else 0;
+        try testing.expectEqual(want, std.mem.readInt(u16, a[off..][0..2], .little));
     };
 }
 

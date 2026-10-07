@@ -4,6 +4,7 @@
 //! clients handle the events, in turn, so every step is deterministic.
 
 const std = @import("std");
+const vc4 = @import("vc4");
 const linux = std.os.linux;
 const wayland = @import("wayland");
 const server_mod = @import("server.zig");
@@ -22,18 +23,18 @@ const FakeRenderer = struct {
         return .{ .ptr = r, .vtable = &.{ .importDmabuf = importDmabuf, .uploadPixels = uploadPixels, .destroyTexture = destroyTexture } };
     }
 
-    fn importDmabuf(ptr: *anyopaque, fd: linux.fd_t, w: u32, h: u32) anyerror!server_mod.Texture {
+    fn importDmabuf(ptr: *anyopaque, fd: linux.fd_t, w: u32, h: u32, format: vc4.Format) anyerror!server_mod.Texture {
         const r: *FakeRenderer = @ptrCast(@alignCast(ptr));
         _ = linux.close(fd);
         r.next += 1;
-        return .{ .handle = r.next, .width = w, .height = h };
+        return .{ .handle = r.next, .width = w, .height = h, .format = format };
     }
 
-    fn uploadPixels(ptr: *anyopaque, existing: ?server_mod.Texture, _: []const u8, w: u32, h: u32, _: u32) anyerror!server_mod.Texture {
+    fn uploadPixels(ptr: *anyopaque, existing: ?server_mod.Texture, _: []const u8, w: u32, h: u32, _: u32, format: vc4.Format) anyerror!server_mod.Texture {
         const r: *FakeRenderer = @ptrCast(@alignCast(ptr));
-        if (existing) |e| if (e.width == w and e.height == h) return e;
+        if (existing) |e| if (e.width == w and e.height == h and e.format == format) return e;
         r.next += 1;
-        return .{ .handle = r.next, .width = w, .height = h };
+        return .{ .handle = r.next, .width = w, .height = h, .format = format };
     }
 
     fn destroyTexture(_: *anyopaque, _: server_mod.Texture) void {}

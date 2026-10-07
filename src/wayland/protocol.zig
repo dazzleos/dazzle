@@ -105,6 +105,8 @@ pub const wl_shm = struct {
     pub const format = struct {
         pub const argb8888 = 0;
         pub const xrgb8888 = 1;
+        /// Other formats are their DRM fourcc codes.
+        pub const rgb565 = fourcc.rgb565;
     };
     pub const err = struct {
         pub const invalid_format = 0;
@@ -370,6 +372,7 @@ pub const fourcc = struct {
     }
     pub const xrgb8888 = code("XR24");
     pub const argb8888 = code("AR24");
+    pub const rgb565 = code("RG16");
 };
 
 /// DRM format modifiers (drm_fourcc.h).

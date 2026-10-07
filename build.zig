@@ -190,6 +190,7 @@ const shader_programs = [_]struct { source: []const u8, name: ?[]const u8 = null
     .{ .source = "src/gfx/shaders/image.zig", .owner = .gfx, .args = &.{"--blend=source-over"} },
     .{ .source = "src/demo/shaders/polyhedron.zig", .owner = .demo, .args = &.{"--depth-test"} },
     .{ .source = "src/shell/shaders/quad.zig", .owner = .shell, .args = &.{} },
+    .{ .source = "src/shell/shaders/quad_rgb565.zig", .owner = .shell, .args = &.{} },
 };
 
 /// Shaders the shader tests compile from SPIR-V themselves, embedded as

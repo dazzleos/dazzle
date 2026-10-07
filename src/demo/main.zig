@@ -1,7 +1,8 @@
 //! The Dazzle demo: a spinning Platonic solid, with rendering statistics
 //! in the top left corner, written in Fira Sans (its own copy, next to the
 //! executable), buttons that change the solid's speed, radio buttons to
-//! choose the solid and switches for its lighting and texture. Clicks draw
+//! choose the solid and switches for its lighting and texture, and for
+//! drawing in 16-bit colour (RGB565, the default) or 32-bit. Clicks draw
 //! expanding, fading rings behind the solid.
 //!
 //! It is a native Dazzle app: a window on dazzle-shell (see the `app`
@@ -169,7 +170,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         // The statistics change twice a second.
         if (frame_start >= next_update) {
             next_update = frame_start + std.time.ns_per_s / 2;
-            status = statusLines(&status_bufs, shown, width, height, input, health);
+            status = statusLines(&status_bufs, shown, width, height, win.bufferFormat(), input, health);
             dirty = true;
         }
 
@@ -185,6 +186,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
                 .on_drag = .of(&controls, app.Controls.drag),
                 .maximized = win.maximized,
             });
+            // The buffers' format, as the switch says (new buffers take it).
+            if (window_ui.root) |root| win.setFormat(if (root.state(view.Demo.State).colour_16) .rgb565 else .xrgb8888);
             if (window_ui.changed()) {
                 idle = false;
                 // Only what changed since the buffer was last drawn is drawn
@@ -304,10 +307,10 @@ fn temperatureText(buf: []u8, t: ?f32) []const u8 {
 }
 
 /// The panel's lines of statistics.
-fn statusLines(bufs: *[view.lines][96]u8, s: Stats.Summary, width: u32, height: u32, input: InputStatus, health: sysinfo.Sample) [view.lines][]const u8 {
+fn statusLines(bufs: *[view.lines][96]u8, s: Stats.Summary, width: u32, height: u32, format: vc4.Format, input: InputStatus, health: sysinfo.Sample) [view.lines][]const u8 {
     var out: [view.lines][]const u8 = undefined;
     out[0] = std.fmt.bufPrint(&bufs[0], "{d:.1} fps  ·  {d}×{d}  ·  {d:.0}% redrawn", .{ s.fps, width, height, s.redrawn }) catch "";
-    out[1] = std.fmt.bufPrint(&bufs[1], "GPU {d:.2} ms per frame", .{s.gpu_ms}) catch "";
+    out[1] = std.fmt.bufPrint(&bufs[1], "GPU {d:.2} ms per frame  ·  {d}-bit colour", .{ s.gpu_ms, format.bytesPerPixel() * 8 }) catch "";
     out[2] = std.fmt.bufPrint(&bufs[2], "CPU {d:.2} ms per frame", .{s.cpu_ms}) catch "";
     var key_buf: [16]u8 = undefined;
     const key = if (input.key) |k| keyName(&key_buf, k) else "none";
@@ -329,9 +332,9 @@ test {
 
 test "status lines" {
     var bufs: [view.lines][96]u8 = undefined;
-    const lines = statusLines(&bufs, .{ .fps = 59.94, .cpu_ms = 0.42, .gpu_ms = 6.5, .redrawn = 21.3 }, 1920, 1080, .{ .pointer = .{ 12.25, 400 }, .key = 30 }, .{ .temperature = 61.6, .speed = 99.6, .total_busy = 45 });
+    const lines = statusLines(&bufs, .{ .fps = 59.94, .cpu_ms = 0.42, .gpu_ms = 6.5, .redrawn = 21.3 }, 1920, 1080, .rgb565, .{ .pointer = .{ 12.25, 400 }, .key = 30 }, .{ .temperature = 61.6, .speed = 99.6, .total_busy = 45 });
     try std.testing.expectEqualStrings("59.9 fps  ·  1920×1080  ·  21% redrawn", lines[0]);
-    try std.testing.expectEqualStrings("GPU 6.50 ms per frame", lines[1]);
+    try std.testing.expectEqualStrings("GPU 6.50 ms per frame  ·  16-bit colour", lines[1]);
     try std.testing.expectEqualStrings("Pointer 12, 400  ·  last key A", lines[3]);
     try std.testing.expectEqualStrings("62 °C  ·  CPU speed 100%  ·  busy 45%", lines[4]);
     var buf: [16]u8 = undefined;
