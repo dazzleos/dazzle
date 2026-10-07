@@ -32,6 +32,8 @@ pub const Icon = enum {
     view_list,
     create_new_folder,
     warning,
+    usb,
+    eject,
     // Settings.
     settings,
     wifi,

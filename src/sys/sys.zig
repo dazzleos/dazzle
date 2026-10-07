@@ -6,6 +6,7 @@
 //!
 //! * `network`: the network manager's protocol, shared by init and settings
 //! * `system`: the system manager's protocol, shared by init and setup
+//! * `media`: the media manager's protocol, shared by init and files
 //! * `files`: saving the user's files (numbered names, new files)
 
 const std = @import("std");
@@ -13,12 +14,14 @@ const linux = std.os.linux;
 
 pub const network = @import("network.zig");
 pub const system = @import("system.zig");
+pub const media = @import("media.zig");
 pub const files = @import("files.zig");
 pub const archive = @import("archive.zig");
 
 test {
     _ = network;
     _ = system;
+    _ = media;
     _ = files;
     _ = archive;
 }
@@ -164,6 +167,7 @@ pub fn dropPrivileges() Error!void {
 pub const Capability = enum(u5) {
     chown = 0,
     dac_override = 1,
+    dac_read_search = 2,
     net_bind_service = 10,
     net_admin = 12,
     net_raw = 13,

@@ -15,15 +15,18 @@
 //!    user the input devices (USB keyboards and mice), now and when they
 //!    are plugged in; waits for the vc4 GPU and gives the Dazzle user access
 //!    to its device nodes;
-//! 5. starts the system manager (see system.zig), which prepares the card
+//! 5. starts the media manager (see media.zig), which mounts USB drives
+//!    in /media as they are plugged in, and unmounts them when they are
+//!    ejected;
+//! 6. starts the system manager (see system.zig), which prepares the card
 //!    and names the computer for the setup app, makes the second OS slot
 //!    (also later, if that was cut off), and installs updates for the
 //!    settings app;
-//! 6. starts /os/shell/dazzle-shell, the Wayland compositor, as the Dazzle
+//! 7. starts /os/shell/dazzle-shell, the Wayland compositor, as the Dazzle
 //!    user (with --setup until setup has finished), with its output going
 //!    to the kernel log; its dock starts the apps;
-//! 7. reaps exited processes forever (PID 1 must never exit), restarting the
-//!    network, device and system managers if they ever stop; and, when this
+//! 8. reaps exited processes forever (PID 1 must never exit), restarting the
+//!    network, device, media and system managers if they ever stop; and, when this
 //!    start tries an update, keeps it once the shell has run for a minute,
 //!    or restarts into the system before if the shell stops first (see
 //!    trial.zig).
@@ -37,6 +40,7 @@ const sys = @import("sys");
 const logserver = @import("logserver.zig");
 const network = @import("network.zig");
 const devices = @import("devices.zig");
+const media = @import("media.zig");
 const storage = @import("storage.zig");
 const system = @import("system.zig");
 const trial = @import("trial.zig");
@@ -63,6 +67,7 @@ pub fn main() void {
     logserver.start();
     const devices_pid = devices.start();
     grantGpuAccess();
+    const media_pid = media.start();
     // Until setup has finished, the shell runs the setup app (and nothing
     // else), and the system manager prepares the card and names the
     // computer for it. It also makes the second OS slot, if that is still
@@ -77,7 +82,7 @@ pub fn main() void {
         t.watchdog = trial.Watchdog.start();
         t.timer = startTimer(trial.healthy_ns);
     }
-    reapForever(shell_pid, network_pid, devices_pid, system_pid, card, &t);
+    reapForever(shell_pid, network_pid, devices_pid, media_pid, system_pid, card, &t);
 }
 
 fn mountPseudoFilesystems() void {
@@ -190,9 +195,10 @@ fn startTimer(ns: u64) ?linux.pid_t {
 
 /// Waits for child processes, logging how the shell ends. Processes whose
 /// parent exits are re-parented to init, so this also collects those.
-fn reapForever(shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, first_devices_pid: ?linux.pid_t, first_system_pid: ?linux.pid_t, card: storage.Boot, t: *Trying) noreturn {
+fn reapForever(shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, first_devices_pid: ?linux.pid_t, first_media_pid: ?linux.pid_t, first_system_pid: ?linux.pid_t, card: storage.Boot, t: *Trying) noreturn {
     var network_pid = first_network_pid;
     var devices_pid = first_devices_pid;
+    var media_pid = first_media_pid;
     var system_pid = first_system_pid;
     while (true) {
         var status: u32 = 0;
@@ -217,6 +223,12 @@ fn reapForever(shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, first_d
             print("dazzle: device manager stopped (status 0x{x}); restarting it in 5 s\n", .{status});
             sys.sleepMs(5000);
             devices_pid = devices.start();
+            continue;
+        }
+        if (pid == media_pid) {
+            print("dazzle: media manager stopped (status 0x{x}); restarting it in 5 s\n", .{status});
+            sys.sleepMs(5000);
+            media_pid = media.start();
             continue;
         }
         if (pid == system_pid) {
@@ -256,6 +268,8 @@ test {
     _ = @import("dhcp.zig");
     _ = @import("netconf.zig");
     _ = @import("devices.zig");
+    _ = @import("media.zig");
+    _ = @import("volume.zig");
     _ = @import("nl80211.zig");
     _ = @import("supplicant.zig");
     _ = @import("mkfs.zig");

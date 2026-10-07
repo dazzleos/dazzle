@@ -21,9 +21,10 @@ programs make Linux system calls directly.
   user the GPU, and starts the shell. It also runs a few small managers,
   each a child process keeping only the privileges it needs: the network
   (Ethernet, Wi-Fi, DHCP, DNS servers and the clock), devices (giving the
-  user input and camera devices as they appear) and the system (setting up
-  the card, the OS slots, updates and restarting), and a log server that
-  shows the system's log over HTTP.
+  user input and camera devices as they appear), media (mounting USB
+  drives as they are plugged in, and ejecting them) and the system
+  (setting up the card, the OS slots, updates and restarting), and a log
+  server that shows the system's log over HTTP.
 - **Shell** (`src/shell/`). The desktop: a Wayland compositor that owns the
   display and the input devices, draws the apps' windows, and has a dock of
   the apps along the bottom of the screen. Apps are Wayland clients that
@@ -58,9 +59,10 @@ Dazzle has one user, and no accounts, passwords or logins. Init runs as
 root; everything else runs as the Dazzle user (uid 1000), the shell and
 the apps included. Init's managers start as root and drop to the Dazzle
 user, keeping only the capabilities their work needs (configuring the
-network, mounting and writing the card, restarting), and answer only the
-programs entitled to ask (by the program's path, from the socket's peer
-credentials).
+network, mounting the card and USB drives, writing the card,
+restarting). Their sockets are the user's alone, and the network and
+system managers answer only the programs entitled to ask (by the
+program's path, from the socket's peer credentials).
 
 ## The filesystem
 
@@ -79,6 +81,7 @@ root filesystem. The card's partitions are mounted on it:
   user/       the user's files
   apps/       the apps installed, each in apps/<name>/<name>
   update/     where updates are downloaded
+/media/       the USB drives plugged in, each in a folder named by its label
 /dev /proc /sys
 ```
 
