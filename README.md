@@ -10,14 +10,16 @@ Zero.
 
 You will need a Raspberry Pi computer, i.e. one of:
 - Raspberry Pi Zero 1-2
-- Raspberry Pi 1-5
-- Raspberry Pi 400/500
+- Raspberry Pi 1-3
+
+(Raspberry Pi 4 and 5 is not supported at this time).
 
 You will also need:
 
 - a microSD card (256 MB or bigger; everything on it is erased),
 - a screen with HDMI (with a mini-HDMI adapter for the Zero),
 - a USB keyboard and mouse, or a USB touchscreen
+- for the Zero a micro-USB OTG adapter and a USB hub,
 - optionally, a USB Ethernet adapter,
 - optionally, a Raspberry Pi Camera Module v1 or v2
 
