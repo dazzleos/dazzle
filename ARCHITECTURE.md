@@ -999,8 +999,9 @@ itself, without privileges (`src/settings/store.zig`):
   once setup has made it), init copies the boot partition's `apps/` to
   `/data/apps` (written as `apps.new`, then renamed), owned by the user,
   and on every start bind-mounts it at `/apps` (`src/init/apps.zig`).
-  Before that, `/apps` is the boot partition's, read-only, and nothing can
-  be installed.
+  Before that, `/apps` is the boot partition's, read-only; the settings
+  app does not run then (no app does until setup has finished), so it
+  takes `/apps` and `/data/update` to be there.
 - **The catalogue** is downloaded when the Apps page is first shown (and
   with Refresh), and kept as `/apps/.catalogue.json`, so the page lists the
   apps without a network. A catalogue that does not parse, or names an
@@ -1093,9 +1094,32 @@ it at boot, and again if it stops), answering the setup app (`status`,
 each only its own requests. Its report says which slot is running, which
 starts next and what each holds.
 
-The previous system stays in the other slot until the next update, but
-nothing switches back to it by itself yet: if an update does not start,
-`os_prefix` in `config.txt` can be changed back by hand on another
+**Going back** (`src/init/trial.zig`): the Zero's and the 3 A+'s firmware
+cannot start a slot just once (`tryboot` is only on the Pi 4 and 5), so
+init tries an update itself:
+
+1. Installing writes `/boot/trial`, `<x> pending`, before switching
+   `os_prefix` to the updated slot `<x>`.
+2. The updated system's init, first thing after mounting `/boot`, marks
+   it `<x> started` and switches `os_prefix` back to the other slot: if
+   this start fails (it stops, hangs, or the power goes), the next start
+   is the system before. Meanwhile a child of init feeds the SoC's
+   watchdog (`/dev/watchdog`, 15 s), so a system that hangs restarts by
+   itself. The system manager reports the running slot as next, so
+   Settings does not offer to restart.
+3. Once the shell has run for a minute, the update has worked:
+   `os_prefix` names it again, the trial is removed and the watchdog
+   stopped. If the shell stops before then, init restarts the Pi, into the
+   system before.
+4. That system's init finds a trial `started` for the other slot: the
+   update did not work. The trial becomes `/boot/trial-failed`, which the
+   system manager reports (`update failed did_not_start`) and Settings
+   shows; the next install removes it. The failed system stays in its
+   slot, so it is not offered again; a newer one is. (A trial still
+   `pending` means the power went while installing: it is removed.)
+
+A kernel that does not get as far as init is not caught (`os_prefix`
+still names its slot); then it can be changed back by hand on another
 computer. Updates are as trustworthy as the HTTPS server they come from:
 they are not signed.
 
@@ -1317,9 +1341,8 @@ GPU or display).
 - Apps: updating installed ones (the catalogue's `version`), signing the
   catalogue, and apps from more than one place.
 - Updates: signing them; going back to the other slot from Settings; and
-  falling back by itself when an updated system does not start (the
-  firmware's `tryboot` is only on the Pi 4 and 5, so this needs another
-  way: a count of starts kept on the boot partition, say).
+  catching a kernel that does not reach init (the firmware's `tryboot`
+  on the Pi 4 and 5).
 - The shell: `wl_output`, more than one visible window, blending for
   translucent windows, pointer acceleration, keymaps other than US,
   multi-finger gestures, and kinetic scrolling.

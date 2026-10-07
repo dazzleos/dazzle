@@ -97,15 +97,13 @@ pub const Apps = struct {
     busy: ?[]const u8 = null,
     /// What happened last.
     message: []const u8 = "",
-    /// Whether apps can be installed yet (not before setup).
-    writable: bool = true,
     /// Where they come from.
     source: []const u8 = "",
 };
 
 /// What the System page shows of updates.
 pub const Update = struct {
-    status: update.Status = .unavailable,
+    status: update.Status = .unknown,
     /// The system offered: "0123abc (8 October 2026)".
     available: []const u8 = "",
     /// What went wrong last.
@@ -235,18 +233,17 @@ pub const Settings = struct {
         const a = cx.ui.arena();
         const busy = apps.busy != null;
         // The list's state, and getting it again.
-        const status = if (apps.busy) |name| (if (name.len == 0) "Getting the list of apps…" else "Installing…") else if (apps.list.len == 0 and !apps.writable) "Apps can be installed once setup has finished" else if (apps.list.len == 0) "No list of apps yet: is the network up?" else cx.fmt("{d} apps", .{apps.list.len});
+        const status = if (apps.busy) |name| (if (name.len == 0) "Getting the list of apps…" else "Installing…") else if (apps.list.len == 0) "No list of apps yet: is the network up?" else cx.fmt("{d} apps", .{apps.list.len});
         rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
             b.label("Catalogue"),
             cx.make(ui.Expanded{ .child = b.value(status) }),
             cx.make(ui.OutlinedButton{ .label = "Refresh", .icon = .refresh, .on_press = if (self.actions != null and !busy) .of(appAct(cx, self.actions.?, state, ""), AppAct.refresh) else null }),
         } })) catch {};
         if (apps.message.len > 0) rows.append(a, b.item("", apps.message)) catch {};
-        if (!apps.writable and apps.list.len > 0) rows.append(a, b.item("", "Apps can be installed once setup has finished")) catch {};
         for (apps.list, 0..) |app, i| {
             const installed = i < apps.installed.len and apps.installed[i];
             const this_busy = if (apps.busy) |n| std.mem.eql(u8, n, app.name) else false;
-            const enabled = self.actions != null and !busy and (installed or apps.writable);
+            const enabled = self.actions != null and !busy;
             const x = if (self.actions) |acts| appAct(cx, acts, state, app.name) else null;
             const button: ui.Widget = if (this_busy)
                 cx.make(ui.Spinner{ .size = 28 })
@@ -296,7 +293,6 @@ pub const Settings = struct {
         const u = &self.update;
         const Button = struct { label: []const u8, icon: ui.icons.Icon, flag: enum { check, download, restart } };
         const text: []const u8, const button: ?Button, const busy = switch (u.status) {
-            .unavailable => .{ "Updates can be installed once setup has finished", null, false },
             .unknown => .{ if (u.message.len > 0) u.message else "Not checked yet", Button{ .label = "Check now", .icon = .refresh, .flag = .check }, false },
             .checking => .{ "Checking for updates…", null, true },
             .available => .{ cx.fmt("Dazzle {s} is available", .{u.available}), Button{ .label = "Download", .icon = .download, .flag = .download }, false },
@@ -1392,14 +1388,6 @@ test "installing and removing apps, and getting their list again" {
     click(u, up(findText(u.root.?, "Remove").?, ui.OutlinedButton).?);
     try testing.expect(actions.remove == null);
 
-    // Before setup: nothing can be installed, and it says why.
-    settings.apps = sample_apps;
-    settings.apps.writable = false;
-    u.frame(1920, 960, 3, settings);
-    try testing.expect(findText(u.root.?, "Apps can be installed once setup has finished") != null);
-    click(u, up(findText(u.root.?, "Install").?, ui.OutlinedButton).?);
-    try testing.expect(actions.install == null);
-
     // No list yet.
     settings.apps = .{};
     u.frame(1920, 960, 4, settings);
@@ -1444,5 +1432,5 @@ test "updates: offered, downloaded, installed, then a restart" {
     try testing.expect(findText(u.root.?, "Cannot check for updates: the server could not be reached (is the network up?)") != null);
     settings.update = .{};
     u.frame(1920, 960, 6, settings);
-    try testing.expect(findText(u.root.?, "Updates can be installed once setup has finished") != null);
+    try testing.expect(findText(u.root.?, "Not checked yet") != null);
 }

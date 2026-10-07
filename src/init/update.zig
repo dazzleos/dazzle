@@ -11,8 +11,9 @@
 //!    that slot's; it must have a kernel, an initramfs and a version.
 //! 3. The slot that was there (the system before the running one) goes,
 //!    and slot-<x>.new/ becomes slot-<x>/.
-//! 4. config.txt's os_prefix is changed to it, so the firmware starts it
-//!    next time.
+//! 4. It is marked to be tried (trial.zig), and config.txt's os_prefix is
+//!    changed to it, so the firmware starts it next time; if it does not
+//!    work there, the system goes back to the running one.
 //!
 //! Until step 4 the running system is what starts; a power cut leaves at
 //! worst an unfinished slot-<x>.new/ or no slot <x>, which the next update
@@ -23,6 +24,7 @@ const linux = std.os.linux;
 const sys = @import("sys");
 const storage = @import("storage.zig");
 const slots = @import("slots.zig");
+const trial = @import("trial.zig");
 
 const proto = sys.system;
 const print = sys.print;
@@ -89,6 +91,8 @@ fn install(gpa: std.mem.Allocator, sha256: []const u8, running: u8) !void {
 
     try slots.remount(false);
     defer slots.remount(true) catch {};
+    // An earlier update that did not work is forgotten.
+    _ = linux.unlink(trial.failed_marker);
     var new_buf: [96]u8 = undefined;
     var slot_buf: [96]u8 = undefined;
     var from_buf: [96]u8 = undefined;
@@ -119,9 +123,10 @@ fn install(gpa: std.mem.Allocator, sha256: []const u8, running: u8) !void {
         _ = try sys.check(linux.fsync(fd));
     }
 
-    // Into place, then started next time.
+    // Into place, then tried next time.
     sys.files.removeTree(slot);
     _ = try sys.check(linux.rename(new, slot));
+    try trial.write(.{ .slot = to, .state = .pending });
     try slots.startNext(to);
     _ = linux.unlink(proto.update_archive);
     print("dazzle: system: OS slot {c} has the update; it starts next time\n", .{std.ascii.toUpper(to)});

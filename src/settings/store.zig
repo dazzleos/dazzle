@@ -67,12 +67,6 @@ pub fn isInstalled(dir: []const u8, name: []const u8) bool {
     return linux.errno(linux.access(path, linux.X_OK)) == .SUCCESS;
 }
 
-/// Whether apps can be installed in `dir` (not before setup has made the
-/// card's space for files: /apps is then the image's, read-only).
-pub fn writable(dir: [*:0]const u8) bool {
-    return linux.errno(linux.access(dir, linux.W_OK)) == .SUCCESS;
-}
-
 /// Checks a downloaded archive against the catalogue.
 pub fn verify(archive: []const u8, app: App) !void {
     if (archive.len != app.size) return error.WrongSize;
@@ -239,7 +233,6 @@ pub fn describe(err: anyerror) []const u8 {
         error.ClockNotSet => "the clock is not set yet (it is set once the network is up)",
         error.WrongSize, error.WrongChecksum => "the download was not what the catalogue said",
         error.BadArchive, error.BadName => "the archive was not right",
-        error.NoUpdateDir => "updates can be installed once setup has finished",
         error.InstallFailed => "the system could not install it",
         error.BadCatalogue => "the list of apps was not right",
         error.HttpError => "the server did not have it",
@@ -296,10 +289,9 @@ pub const Store = struct {
         return j.name();
     }
 
-    /// Downloads the catalogue again (once a session, unless asked). Not
-    /// before setup: it is kept with the apps.
+    /// Downloads the catalogue again (once a session, unless asked).
     pub fn refresh(s: *Store, again: bool) void {
-        if (s.job != null or (s.asked and !again) or !writable(apps_dir)) return;
+        if (s.job != null or (s.asked and !again)) return;
         s.asked = true;
         s.job = Job.spawn(.catalogue, "", childCatalogue, .{ s.gpa, s.base_url }) catch |err| {
             s.setMessage("Cannot get the list of apps: {s}", .{@errorName(err)});
@@ -310,10 +302,6 @@ pub const Store = struct {
 
     pub fn install(s: *Store, name: []const u8) void {
         if (s.job != null) return;
-        if (!writable(apps_dir)) {
-            s.setMessage("Apps can be installed once setup has prepared the card", .{});
-            return;
-        }
         for (s.apps()) |a| if (std.mem.eql(u8, a.name, name)) {
             s.job = Job.spawn(.install, a.name, childInstall, .{ s.gpa, s.base_url, a }) catch |err| {
                 s.setMessage("Cannot install {s}: {s}", .{ a.title, @errorName(err) });

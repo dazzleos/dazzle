@@ -38,6 +38,7 @@ const mkfs = @import("mkfs.zig");
 const slots = @import("slots.zig");
 const apps = @import("apps.zig");
 const update = @import("update.zig");
+const trial = @import("trial.zig");
 
 const proto = sys.system;
 const print = sys.print;
@@ -66,6 +67,11 @@ pub fn start(card: bool, mounted: bool, slot: ?u8, setup_done: bool) ?linux.pid_
     sys.ignoreBrokenPipes();
     var m: Manager = .{ .report = .{ .storage = if (mounted) .ready else if (card) .unprepared else .none, .slot = if (card) slot orelse 'a' else null }, .finished = setup_done };
     m.readSlots();
+    // The last update did not work (and the system before is running).
+    if (storage.exists(trial.failed_marker)) {
+        m.report.update = .failed;
+        m.report.update_failure = .did_not_start;
+    }
     var uts: linux.utsname = undefined;
     if (linux.errno(linux.uname(&uts)) == .SUCCESS) m.report.hostname = proto.Hostname.parse(std.mem.sliceTo(&uts.nodename, 0)) orelse .{};
     if (card) m.copier = slots.Copier.start(slot orelse 'a') catch |err| blk: {
@@ -92,8 +98,13 @@ const Manager = struct {
 
     /// What the slots hold, and which starts next.
     fn readSlots(m: *Manager) void {
-        if (m.report.slot == null) return;
+        const running = m.report.slot orelse return;
         m.report.next = slots.next();
+        // While an update is tried, os_prefix names the system before it
+        // (in case it does not work), but this one is what is installed.
+        if (trial.read()) |t| if (t.slot == running and t.state == .started) {
+            m.report.next = running;
+        };
         for (&m.report.versions, "ab") |*v, s| v.* = slots.version(s);
     }
 

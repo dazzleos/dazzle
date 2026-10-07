@@ -23,7 +23,10 @@
 //!    user (with --setup until setup has finished), with its output going
 //!    to the kernel log; its dock starts the apps;
 //! 7. reaps exited processes forever (PID 1 must never exit), restarting the
-//!    network, device and system managers if they ever stop.
+//!    network, device and system managers if they ever stop; and, when this
+//!    start tries an update, keeps it once the shell has run for a minute,
+//!    or restarts into the system before if the shell stops first (see
+//!    trial.zig).
 //!
 //! The Dazzle user is just a user ID (see `sys.user`): there are no
 //! accounts, passwords or logins.
@@ -36,6 +39,7 @@ const network = @import("network.zig");
 const devices = @import("devices.zig");
 const storage = @import("storage.zig");
 const system = @import("system.zig");
+const trial = @import("trial.zig");
 const build_info = @import("build_info");
 
 const print = sys.print;
@@ -65,7 +69,15 @@ pub fn main() void {
     // to be made, and later installs updates.
     const system_pid = system.start(card.card, card.mounted, card.slot, card.setup_done);
     const shell_pid = startShell(!card.setup_done);
-    reapForever(shell_pid, network_pid, devices_pid, system_pid, card);
+    // Trying an update: the watchdog runs until it has worked, which is
+    // when the shell has run for a while (the timer, a child process that
+    // ends then).
+    var t: Trying = .{};
+    if (card.trial == .trying) {
+        t.watchdog = trial.Watchdog.start();
+        t.timer = startTimer(trial.healthy_ns);
+    }
+    reapForever(shell_pid, network_pid, devices_pid, system_pid, card, &t);
 }
 
 fn mountPseudoFilesystems() void {
@@ -158,9 +170,27 @@ fn startShell(setup: bool) ?linux.pid_t {
     linux.exit(127);
 }
 
+/// An update being tried.
+const Trying = struct {
+    watchdog: ?trial.Watchdog = null,
+    /// Ends when the update has run long enough.
+    timer: ?linux.pid_t = null,
+};
+
+/// A child process that does nothing for `ns`.
+fn startTimer(ns: u64) ?linux.pid_t {
+    const rc = linux.fork();
+    if (linux.errno(rc) != .SUCCESS) return null;
+    if (rc == 0) {
+        sys.sleepMs(@intCast(ns / std.time.ns_per_ms));
+        linux.exit(0);
+    }
+    return @intCast(rc);
+}
+
 /// Waits for child processes, logging how the shell ends. Processes whose
 /// parent exits are re-parented to init, so this also collects those.
-fn reapForever(shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, first_devices_pid: ?linux.pid_t, first_system_pid: ?linux.pid_t, card: storage.Boot) noreturn {
+fn reapForever(shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, first_devices_pid: ?linux.pid_t, first_system_pid: ?linux.pid_t, card: storage.Boot, t: *Trying) noreturn {
     var network_pid = first_network_pid;
     var devices_pid = first_devices_pid;
     var system_pid = first_system_pid;
@@ -197,11 +227,25 @@ fn reapForever(shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, first_d
             system_pid = system.start(now.card, now.mounted, now.slot, now.setup_done);
             continue;
         }
+        if (t.timer != null and pid == t.timer.?) {
+            // The shell has run all this while: the update works.
+            t.timer = null;
+            trial.commit(card.slot orelse 'a');
+            if (t.watchdog) |w| w.end();
+            t.watchdog = null;
+            continue;
+        }
         if (pid != shell_pid) continue;
         if (linux.W.IFEXITED(status)) {
             print("dazzle: shell exited with status {d}\n", .{linux.W.EXITSTATUS(status)});
         } else if (linux.W.IFSIGNALED(status)) {
             print("dazzle: shell killed by signal {d}\n", .{linux.W.TERMSIG(status)});
+        }
+        // The update does not work: back to the system before (which the
+        // next start already is).
+        if (t.timer != null) {
+            print("dazzle: the update did not work\n", .{});
+            trial.restart();
         }
     }
 }
@@ -219,4 +263,5 @@ test {
     _ = @import("system.zig");
     _ = @import("slots.zig");
     _ = @import("apps.zig");
+    _ = @import("trial.zig");
 }

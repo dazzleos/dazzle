@@ -126,10 +126,13 @@ computer's name in your router's list of devices) and open
 `http://<address>/` on another computer. `http://<address>/follow` keeps
 showing new messages as they come.
 
-If Dazzle does not start after an update, put the card in another
-computer, open `config.txt` on it, and change `os_prefix=slot-b/` to
-`os_prefix=slot-a/` (or the other way round) to start the previous Dazzle
-again.
+If an update does not work (the desktop does not appear within a minute,
+or the Pi stops responding), Dazzle goes back to the version before it by
+itself: the Pi restarts into it, or starts it the next time you plug it
+in, and Settings says the update did not work. If Dazzle does not start at
+all after an update, put the card in another computer, open `config.txt`
+on it, and change `os_prefix=slot-b/` to `os_prefix=slot-a/` (or the
+other way round) to start the previous Dazzle again.
 
 Please report problems, with the log if you can, in the
 [issues](https://github.com/robert-ancell/dazzle/issues).
@@ -138,8 +141,7 @@ Please report problems, with the log if you can, in the
 
 Dazzle is young. Some of what it cannot do yet:
 
-- update installed apps, or go back to the previous Dazzle after an
-  update (both are planned),
+- update installed apps (planned),
 - remember Wi-Fi networks after a restart, or join WPA3-only networks,
 - keyboard layouts other than US, and typing letters outside English,
 - Bluetooth and sound,

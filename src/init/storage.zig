@@ -24,6 +24,7 @@ const sys = @import("sys");
 
 const proto = sys.system;
 const apps = @import("apps.zig");
+const trial = @import("trial.zig");
 const print = sys.print;
 
 /// The card (on the SDHOST controller), and the partition for files.
@@ -55,6 +56,8 @@ pub const Boot = struct {
     mounted: bool = false,
     setup_done: bool = false,
     hostname: proto.Hostname = proto.Hostname.parse("dazzle").?,
+    /// Whether this start tries an update (see trial.zig).
+    trial: trial.Outcome = .none,
 };
 
 /// Waits for the card (it is found a moment after boot) and mounts its
@@ -75,6 +78,8 @@ pub fn boot() Boot {
     // The partitions' device nodes come with the card's.
     growBoot();
     mountBoot();
+    // First, before anything can fail: an update being tried.
+    b.trial = trial.atBoot(b.slot);
     if (!exists(data_partition) or !hasFilesystem(data_partition)) return b;
     b.mounted = mountData();
     if (!b.mounted) return b;

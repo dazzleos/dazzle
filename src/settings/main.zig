@@ -89,7 +89,6 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     // The apps that can be installed, and which are.
     var apps: store.Store = .init(gpa, build_info.apps_url);
     var installed: [64]bool = undefined;
-    var apps_writable = store.writable(store.apps_dir);
     // Updates of the system, and which system this is.
     var updater: update.Updater = .init(gpa, build_info.apps_url, sys.system.Version.init(build_info.commit_time, build_info.commit) orelse .{});
     var date_buf: [32]u8 = undefined;
@@ -141,7 +140,6 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             next_update = now + std.time.ns_per_s;
             usage = monitor.read(now);
             network = info.Network.read();
-            apps_writable = store.writable(store.apps_dir);
             dirty = true;
         }
         // Installing, or getting the list of apps.
@@ -220,7 +218,6 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
                     .installed = installed[0..catalogue.len],
                     .busy = apps.busy(),
                     .message = apps.message(),
-                    .writable = apps_writable,
                     .source = build_info.apps_url,
                 },
                 .update = .{

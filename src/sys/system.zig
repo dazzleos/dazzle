@@ -33,7 +33,8 @@
 //! one the firmware starts next time (config.txt's os_prefix), and
 //! "version" what each slot holds ("-": nothing, or not known). "update"
 //! is how installing an update goes: "none", "installing", "ready" (the
-//! next start runs it) or "failed" with why. A client the manager does not
+//! next start runs it) or "failed" with why ("did_not_start" when it was
+//! installed but did not work, and the system before is running again). A client the manager does not
 //! serve, or a request it does not serve that client, gets "denied\n".
 
 const std = @import("std");
@@ -168,6 +169,9 @@ pub const UpdateFailure = enum {
     archive,
     /// Reading or writing the card failed.
     io,
+    /// It was installed, but did not start properly: the system before it
+    /// is running again.
+    did_not_start,
 
     pub fn label(f: UpdateFailure) []const u8 {
         return switch (f) {
@@ -175,6 +179,7 @@ pub const UpdateFailure = enum {
             .busy => "the system cannot be updated yet",
             .archive => "the download was not right",
             .io => "the card could not be written",
+            .did_not_start => "it did not start properly, so this version is running again",
         };
     }
 };

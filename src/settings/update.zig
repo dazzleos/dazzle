@@ -46,8 +46,6 @@ pub const Manifest = struct {
 
 /// What the System page shows of updates.
 pub const Status = enum {
-    /// Not before setup (nowhere to download to), or without a card.
-    unavailable,
     /// Not checked yet, or the check failed (see the message).
     unknown,
     checking,
@@ -120,16 +118,14 @@ pub const Updater = struct {
             if (rep.update == .installing) return .installing;
             // The firmware starts the other slot next time.
             if (rep.slot != null and rep.next != null and rep.slot.? != rep.next.?) return .ready;
-            if (rep.slot == null) return .unavailable;
         }
-        if (!store.writable(proto.update_dir)) return .unavailable;
         if (u.available() != null) return .available;
         return if (u.manifest != null and u.message_len == 0) .current else .unknown;
     }
 
     /// Downloads os.json again (once a session, unless asked).
     pub fn check(u: *Updater, again: bool) void {
-        if (u.job != null or (u.asked and !again) or !store.writable(proto.update_dir)) return;
+        if (u.job != null or (u.asked and !again)) return;
         u.asked = true;
         u.job = store.Job.spawn(.os_check, "", childCheck, .{ u.gpa, u.base_url }) catch |err| {
             u.setMessage("Cannot check for updates: {s}", .{@errorName(err)});
@@ -207,7 +203,7 @@ fn childDownload(gpa: std.mem.Allocator, base_url: []const u8, m: Manifest) !voi
     if (!sys.archive.sha256Is(archive, m.sha256)) return error.WrongChecksum;
     const tmp = proto.update_archive ++ ".new";
     _ = linux.unlink(tmp);
-    sys.files.writeNew(tmp, archive) catch |err| return if (err == error.NotFound) error.NoUpdateDir else err;
+    try sys.files.writeNew(tmp, archive);
     _ = try sys.check(linux.rename(tmp, proto.update_archive));
     var request: [80]u8 = undefined;
     // The manager answers between slices of other work (making the other
