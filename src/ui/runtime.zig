@@ -32,6 +32,7 @@ const Theme = @import("theme.zig").Theme;
 const damage_mod = @import("damage.zig");
 const keymap = @import("keymap.zig");
 const menu_mod = @import("menu.zig");
+const drag_mod = @import("drag.zig");
 
 const Point = geometry.Point;
 const Size = geometry.Size;
@@ -120,6 +121,11 @@ pub const Ui = struct {
     /// takes it away if it goes). Its nodes are made at the next frame.
     menu: ?struct { items: []menu_mod.Item, at: Point, owner: *Node } = null,
     menu_root: ?*Node = null,
+    /// What is being dragged, if anything (see drag.zig), and the chip
+    /// that follows the pointer.
+    drag: ?drag_mod.Drag = null,
+    drag_root: ?*Node = null,
+    drag_scratch: std.ArrayList(*Node) = .empty,
     /// A touch held down on a widget, which becomes a long press
     /// (`Event.context`) if it stays there: where it went down, and when
     /// the first frame after saw it.
@@ -150,7 +156,10 @@ pub const Ui = struct {
 
     pub fn destroy(ui: *Ui) void {
         ui.closeMenu();
+        ui.endDrag(false);
         if (ui.menu_root) |m| m.destroy();
+        if (ui.drag_root) |d| d.destroy();
+        ui.drag_scratch.deinit(ui.gpa);
         if (ui.root) |r| r.destroy();
         ui.local_clipboard.deinit(ui.gpa);
         ui.hovered.deinit(ui.gpa);
@@ -199,8 +208,10 @@ pub const Ui = struct {
         _ = r.layout(.tight(window));
         r.offset = .{ 0, 0 };
         const m = ui.buildMenu(window);
-        ui.paint(r, m, width, height);
+        const d = ui.buildDrag(window);
+        ui.paint(r, d, m, width, height);
         ui.damage.sweep(r);
+        if (d) |n| ui.damage.sweep(n);
         if (m) |n| ui.damage.sweep(n);
         // The layout may have moved things under the pointer.
         if (ui.pointer) |p| ui.updateHover(p);
@@ -226,7 +237,28 @@ pub const Ui = struct {
         return n;
     }
 
-    fn paint(ui: *Ui, r: *Node, menu: ?*Node, width: u32, height: u32) void {
+    /// The chip following the pointer while something is dragged, laid
+    /// out beside the pointer (in the window); none if nothing is.
+    fn buildDrag(ui: *Ui, window: Size) ?*Node {
+        const d = ui.drag orelse {
+            if (ui.drag_root) |n| n.destroy();
+            ui.drag_root = null;
+            return null;
+        };
+        var cx: Context = .{ .ui = ui, .arena = ui.arena(), .node = undefined };
+        const w = cx.make(drag_mod.Chip{ .label = d.label, .icon = d.icon });
+        if (ui.drag_root == null) ui.drag_root = Node.create(ui, w);
+        const n = ui.drag_root orelse return null;
+        n.build(w);
+        const size = n.layout(.{ .max_w = window.w, .max_h = window.h });
+        n.offset = .{
+            std.math.clamp(d.pos[0] + 12, 0, @max(0, window.w - size.w)),
+            std.math.clamp(d.pos[1] + 16, 0, @max(0, window.h - size.h)),
+        };
+        return n;
+    }
+
+    fn paint(ui: *Ui, r: *Node, drag: ?*Node, menu: ?*Node, width: u32, height: u32) void {
         ui.atlas.beginFrame();
         ui.canvases_used = 0;
         ui.segments.clearRetainingCapacity();
@@ -234,6 +266,7 @@ pub const Ui = struct {
         ui.paint_order = 0;
         var p: Painter = .{ .ui = ui, .node = r };
         p.paintNode(r);
+        if (drag) |d| p.paintNode(d);
         // The menu above everything.
         if (menu) |m| p.paintNode(m);
     }
@@ -255,6 +288,41 @@ pub const Ui = struct {
         ui.gpa.free(menu.items);
         ui.menu = null;
         ui.needs_frame = true;
+    }
+
+    // --- Dragging -----------------------------------------------------------------
+
+    /// Starts dragging (from a `Draggable`); the label is copied.
+    pub fn startDrag(ui: *Ui, d: drag_mod.Drag) void {
+        ui.endDrag(false);
+        var drag = d;
+        drag.label = ui.gpa.dupe(u8, d.label) catch return;
+        drag.target = null;
+        ui.drag = drag;
+        ui.moveDrag(d.pos);
+    }
+
+    /// What is dragged is at `pos` (in the window) now.
+    pub fn moveDrag(ui: *Ui, pos: Point) void {
+        const d = &(ui.drag orelse return);
+        d.pos = pos;
+        ui.drag_scratch.clearRetainingCapacity();
+        if (ui.root) |r| _ = r.hitTest(pos, &ui.drag_scratch);
+        d.target = drag_mod.targetIn(ui.drag_scratch.items, d.data);
+        ui.needs_frame = true;
+    }
+
+    /// Stops dragging: dropped on the target under the pointer (if
+    /// `drop`, and there is one), or not.
+    pub fn endDrag(ui: *Ui, drop: bool) void {
+        const d = ui.drag orelse return;
+        ui.drag = null;
+        ui.gpa.free(d.label);
+        ui.needs_frame = true;
+        if (!drop) return;
+        const target = d.target orelse return;
+        const t = target.widget.as(drag_mod.DropTarget) orelse return;
+        if (t.on_drop) |f| f.call(d.data);
     }
 
     // --- Copy and paste -----------------------------------------------------------
@@ -628,6 +696,9 @@ pub const Ui = struct {
     /// Drops references to a node being freed.
     pub fn forget(ui: *Ui, n: *Node) void {
         if (ui.menu) |m| if (m.owner == n) ui.closeMenu();
+        if (ui.drag) |*d| {
+            if (d.source == n) ui.endDrag(false) else if (d.target == n) d.target = null;
+        }
         if (ui.paste) |p| if (p.owner == n) {
             ui.paste = null;
         };

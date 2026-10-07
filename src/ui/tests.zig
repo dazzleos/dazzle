@@ -922,3 +922,73 @@ test "a tap presses a button; a touch that moves over a list scrolls it, pressin
     try testing.expectEqual(@as(u32, 2), Count.presses);
     try testing.expect(u.captured == null);
 }
+
+const DragTest = struct {
+    dropped: *?usize,
+    clicked: *u32,
+
+    fn drop(self: *const DragTest, data: usize) void {
+        self.dropped.* = data;
+    }
+
+    fn pressed(self: *const DragTest) void {
+        self.clicked.* += 1;
+    }
+
+    fn odd(_: ?*const anyopaque, data: usize) bool {
+        return data % 2 == 1;
+    }
+
+    pub fn build(self: *const DragTest, cx: *Context) Widget {
+        const box = cx.make(ui.SizedBox{ .width = 80, .height = 80 });
+        return cx.make(ui.Row{ .children = &.{
+            cx.make(ui.Draggable{ .data = 7, .label = "seven", .on_press = .of(self, pressed), .child = box }),
+            cx.make(ui.Draggable{ .data = 8, .label = "eight", .child = box }),
+            cx.make(ui.DropTarget{ .on_drop = .of(self, drop), .accepts = odd, .child = box }),
+        } });
+    }
+};
+
+test "dragging onto a target that takes it drops it there; a click is still a click" {
+    const fira = try font.Font.init(fira_data);
+    const u = try ui.Ui.create(testing.allocator, &fira);
+    defer u.destroy();
+    var dropped: ?usize = null;
+    var clicked: u32 = 0;
+    const w: DragTest = .{ .dropped = &dropped, .clicked = &clicked };
+    u.frame(300, 100, 0, w);
+    // Pressed and let go without moving: clicked.
+    u.pointerMotion(.{ 40, 40 });
+    u.pointerButton(.{ 40, 40 }, ui.btn_left, true);
+    u.pointerMotion(.{ 43, 42 });
+    u.pointerButton(.{ 43, 42 }, ui.btn_left, false);
+    try testing.expectEqual(@as(u32, 1), clicked);
+    try testing.expect(u.drag == null);
+
+    // Dragged to the target: the chip follows, the target lights up, and
+    // it gets 7 (no click).
+    u.pointerButton(.{ 40, 40 }, ui.btn_left, true);
+    u.pointerMotion(.{ 120, 40 });
+    try testing.expectEqualStrings("seven", u.drag.?.label);
+    try testing.expect(u.drag.?.target == null);
+    u.pointerMotion(.{ 200, 40 });
+    try testing.expect(u.drag.?.target.?.widget.is(ui.DropTarget));
+    u.frame(300, 100, 1, w);
+    try testing.expect(u.drag_root != null);
+    try testing.expectEqualStrings("seven", find(u.drag_root.?, ui.Text).?.widget.as(ui.Text).?.text);
+    u.pointerButton(.{ 200, 40 }, ui.btn_left, false);
+    try testing.expectEqual(@as(?usize, 7), dropped);
+    try testing.expectEqual(@as(u32, 1), clicked);
+    try testing.expect(u.drag == null);
+    u.frame(300, 100, 2, w);
+    try testing.expect(u.drag_root == null);
+
+    // 8 is not taken: no target, nothing dropped.
+    dropped = null;
+    u.pointerMotion(.{ 120, 40 });
+    u.pointerButton(.{ 120, 40 }, ui.btn_left, true);
+    u.pointerMotion(.{ 200, 40 });
+    try testing.expect(u.drag.?.target == null);
+    u.pointerButton(.{ 200, 40 }, ui.btn_left, false);
+    try testing.expect(dropped == null);
+}

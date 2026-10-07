@@ -211,5 +211,5 @@ It has the basic widgets (rows, columns, grids, padding, alignment,
 scrolling, lists that make only the items that show), text with its own
 OpenType renderer and a glyph atlas on the GPU, Material icons, images,
 and controls in Material 3's style: buttons, checkboxes, radio buttons,
-switches, text fields with selection and copy and paste, menus and the
-title bar each window draws.
+switches, text fields with selection and copy and paste, menus, dragging
+and dropping, and the title bar each window draws.

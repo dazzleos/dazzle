@@ -33,6 +33,7 @@ pub const Icon = enum {
     create_new_folder,
     warning,
     usb,
+    content_paste,
     eject,
     // Settings.
     settings,
