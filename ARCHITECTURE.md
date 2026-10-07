@@ -206,6 +206,7 @@ The code is split into Zig modules, linked statically into each program:
 | `dazzle-setup` | `src/setup/` | The setup app, on the first run only: names the computer while the SD card is prepared |
 | `dazzle-settings` | `src/settings/` | The settings app: the build, the hardware, what is in use and the network |
 | `dazzle-files` | `src/files/` | The Files app: a tree of folders and a grid of what is in the open one |
+| `dazzle-camera` | `src/camera/` | The Camera app: the Camera Module's frames, made pictures of on the CPU, and photos |
 
 The `vc4` module:
 
@@ -656,9 +657,10 @@ passwords or logins.
   and `CAP_CHOWN` (giving `/data/system` to root). Its socket,
   `/os/sockets/system`, answers only `/os/shell/dazzle-setup`.
 - The device manager runs as the user, keeping only `CAP_CHOWN`. Input
-  device nodes are created owned by root, so it gives each one to the user
-  (at start, then on each uevent that adds one), and the shell can read
-  them. Init restarts it if it ever stops.
+  device nodes, and the camera's (`/dev/videoN`, `/dev/v4l-subdevN`,
+  `/dev/mediaN`), are created owned by root, so it gives each one to the
+  user (at start, then on each uevent that adds one), and the shell and
+  the Camera app can use them. Init restarts it if it ever stops.
 - The log server binds port 80 as root, then drops to the same user. Reading
   `/dev/kmsg` needs no privileges.
 - Init logs how the shell exits, and the shell logs how its clients exit.
@@ -978,6 +980,52 @@ draws the screen again into a buffer of its own and reads it back
 (`render.Renderer.capture`), and a child process compresses and writes the
 PNG (`src/shell/screenshot.zig`), so the shell goes on drawing meanwhile.
 The key does not reach the app with the keyboard.
+
+### The Camera app
+
+The Camera app (`src/camera/`) shows what a Raspberry Pi Camera Module
+sees: v1 (OmniVision OV5647) or v2 (Sony IMX219), on the CSI connector.
+
+- **Hardware.** The sensor is controlled over I2C and sends raw frames
+  over CSI-2 to the Unicam receiver, which writes them to memory; the
+  kernel's drivers (`kernel/dazzle.config`) make them V4L2 devices. Which
+  sensor is there cannot be found out by Linux, so the firmware's
+  `camera_auto_detect` (in `config.txt`) does: it applies that sensor's
+  device tree overlay (`boot/overlays/`, built into each slot's
+  `overlays/`). The board device trees (`boot/*.dts`) describe the
+  connector's wiring, which differs between the boards, in
+  `boot/rpi-camera.dtsi`: the I2C pins (GPIO 28/29 on the Zeros, 44/45 on
+  the 3 A+) and the camera's power line (GPIO 41 on the Zero, 44 on the
+  Zero W, the firmware's GPIO expander's line 5 on the 3 A+), taken from
+  the Raspberry Pi kernel's. The overlays add the sensor (its clock: 24
+  MHz for the IMX219, 25 for the OV5647) and turn Unicam's port 1 on.
+- **Capture** (`capture.zig`, with the V4L2 structures and ioctls in
+  `v4l2.zig`, checked against the kernel's headers for 32-bit ARM and for
+  the host): it finds Unicam's video device and the two sub-devices by
+  name, flips the sensor for its rotation (the modules are mounted upside
+  down), picks the binned full-view mode (1640x1232 on the IMX219,
+  1296x972 on the OV5647) and 8-bit samples if the sensor has them (else
+  10-bit packed, of which it uses the top 8 bits), sets the format on the
+  sensor, Unicam and the video device (they must agree), and streams into
+  four buffers mapped into the app.
+- **Making pictures** (`isp.zig`): there is no image processor in
+  mainline for these boards, so the app does on the CPU what one would.
+  Per colour, one 256-entry table takes off the black level (64 of 1023),
+  applies the white balance gain and the sRGB gamma. The preview makes a
+  pixel of each 2x2 Bayer block (every nth, to fit the window) and
+  gathers each colour's mean: the white balance is the grey world (the
+  picture's average is grey, eased in over frames). Exposure
+  (`exposure.zig`) aims the green mean at mid grey, changing the exposure
+  time and then the analogue gain a little every few frames, on the
+  IMX219; the OV5647's own automatic exposure and white balance are
+  turned on instead.
+- **Photos** are the next frame demosaiced at its full size (bilinear),
+  compressed and written as the next `Photo N.png` in `/data/user` by a
+  child process, so the preview goes on meanwhile.
+
+None of this has been tried on hardware yet. If the camera is not found,
+the kernel log says whether the sensor probed (`imx219` or `ov5647`) and
+whether Unicam found it.
 
 ## How a frame is drawn
 

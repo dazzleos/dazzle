@@ -649,7 +649,6 @@ test {
     _ = @import("cursor.zig");
     _ = @import("dock.zig");
     _ = @import("screenshot.zig");
-    _ = @import("png.zig");
     _ = @import("keyboard.zig");
     _ = @import("protocol_test.zig");
     _ = @import("placement.zig");

@@ -336,14 +336,27 @@ const Kernel = struct {
     /// (preprocessed, then compiled by the kernel's dtc), so it can include
     /// one of the kernel's: `#include "arm/broadcom/<board>.dts"`.
     fn deviceTree(k: Kernel, b: *std.Build, dts: std.Build.LazyPath, name: []const u8) std.Build.LazyPath {
+        return k.compileDts(b, dts, b.fmt("{s}.dtb", .{name}));
+    }
+
+    /// A device tree overlay of our own, for the firmware to apply
+    /// (`dtoverlay=<name>`, or camera_auto_detect).
+    fn overlay(k: Kernel, b: *std.Build, dts: std.Build.LazyPath, name: []const u8) std.Build.LazyPath {
+        return k.compileDts(b, dts, b.fmt("{s}.dtbo", .{name}));
+    }
+
+    fn compileDts(k: Kernel, b: *std.Build, dts: std.Build.LazyPath, out_name: []const u8) std.Build.LazyPath {
+        const name = std.fs.path.stem(out_name);
         const includes = b.pathJoin(&.{ k.src, "scripts/dtc/include-prefixes" });
         const cpp = b.addSystemCommand(&.{ b.graph.zig_exe, "cc", "-E", "-nostdinc", "-I", includes, "-undef", "-D__DTS__", "-x", "assembler-with-cpp", "-o" });
         const pre = cpp.addOutputFileArg(b.fmt("{s}.dts", .{name}));
         cpp.addFileArg(dts);
+        // What our device trees include, so a change to it builds them again.
+        cpp.addFileInput(b.path("boot/rpi-camera.dtsi"));
         cpp.step.dependOn(k.step);
         const dtc = b.addSystemCommand(&.{b.pathJoin(&.{ k.out, "scripts/dtc/dtc" })});
         dtc.addArgs(&.{ "-q", "-b", "0", b.fmt("-i{s}", .{includes}), "-@", "-o" });
-        const out = dtc.addOutputFileArg(b.fmt("{s}.dtb", .{name}));
+        const out = dtc.addOutputFileArg(out_name);
         dtc.addFileArg(pre);
         return out;
     }
@@ -522,10 +535,15 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath, apps: 
     const cmdline = std.mem.trimEnd(u8, std.Io.Dir.cwd().readFileAlloc(b.graph.io, b.pathFromRoot("boot/cmdline.txt"), b.allocator, .limited(4096)) catch @panic("cannot read boot/cmdline.txt"), "\n");
     const files = [_]CardFile{
         .{ "zImage", kernel.file(b, "arch/arm/boot/zImage") },
-        .{ "bcm2835-rpi-zero.dtb", kernel.file(b, "arch/arm/boot/dts/broadcom/bcm2835-rpi-zero.dtb") },
-        .{ "bcm2835-rpi-zero-w.dtb", kernel.file(b, "arch/arm/boot/dts/broadcom/bcm2835-rpi-zero-w.dtb") },
-        // Mainline's, with the Wi-Fi chip's power added (see the source).
+        // Mainline's, with the camera connector's wiring (and the 3 A+'s
+        // Wi-Fi chip's power) added: see the sources.
+        .{ "bcm2835-rpi-zero.dtb", kernel.deviceTree(b, b.path("boot/bcm2835-rpi-zero.dts"), "bcm2835-rpi-zero") },
+        .{ "bcm2835-rpi-zero-w.dtb", kernel.deviceTree(b, b.path("boot/bcm2835-rpi-zero-w.dts"), "bcm2835-rpi-zero-w") },
         .{ "bcm2837-rpi-3-a-plus.dtb", kernel.deviceTree(b, b.path("boot/bcm2837-rpi-3-a-plus.dts"), "bcm2837-rpi-3-a-plus") },
+        // The cameras, which the firmware applies to them when it finds
+        // one (camera_auto_detect).
+        .{ "overlays/imx219.dtbo", kernel.overlay(b, b.path("boot/overlays/imx219.dts"), "imx219") },
+        .{ "overlays/ov5647.dtbo", kernel.overlay(b, b.path("boot/overlays/ov5647.dts"), "ov5647") },
         .{ "initramfs.cpio", initramfs },
         .{ "cmdline.txt", b.addWriteFiles().add("cmdline.txt", b.fmt("{s} dazzle.slot=a\n", .{cmdline})) },
     };
@@ -662,6 +680,11 @@ pub fn build(b: *std.Build) void {
         .root_module = addProgramModule(b, "src/files/main.zig", target, optimize, pi, shaders, true),
     });
     const install_files = b.addInstallArtifact(files_exe, .{});
+    const camera_exe = b.addExecutable(.{
+        .name = "dazzle-camera",
+        .root_module = addProgramModule(b, "src/camera/main.zig", target, optimize, pi, shaders, true),
+    });
+    const install_camera = b.addInstallArtifact(camera_exe, .{});
     const setup_exe = b.addExecutable(.{
         .name = "dazzle-setup",
         .root_module = addProgramModule(b, "src/setup/main.zig", target, optimize, pi, shaders, true),
@@ -705,10 +728,11 @@ pub fn build(b: *std.Build) void {
     // The apps, each in /apps/<name> and listed in the shell's dock, are not
     // part of the system: they are on the card's boot partition, once (not
     // in each OS slot).
-    const app_files = appFiles(b, demo_exe, .view_in_ar, "the Demo app") ++ appFiles(b, files_exe, .folder, "the Files app");
+    const app_files = appFiles(b, demo_exe, .view_in_ar, "the Demo app") ++ appFiles(b, files_exe, .folder, "the Files app") ++
+        appFiles(b, camera_exe, .photo_camera, "the Camera app");
     const install_initramfs = b.addInstallFile(initramfs, "initramfs.cpio");
     const programs_step = b.step("programs", "Build just the programs (zig-out/bin) and zig-out/initramfs.cpio");
-    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_settings.step, &install_files.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
+    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_settings.step, &install_files.step, &install_camera.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
         programs_step.dependOn(st);
         b.getInstallStep().dependOn(st);
     }
@@ -747,6 +771,8 @@ pub fn build(b: *std.Build) void {
     host_settings.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_files = addProgramModule(b, "src/files/main.zig", b.graph.host, test_optimize, host, shaders, null);
     host_files.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
+    const host_camera = addProgramModule(b, "src/camera/main.zig", b.graph.host, test_optimize, host, shaders, null);
+    host_camera.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_setup = addProgramModule(b, "src/setup/main.zig", b.graph.host, test_optimize, host, shaders, null);
     host_setup.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     for ([_]*std.Build.Module{
@@ -763,6 +789,7 @@ pub fn build(b: *std.Build) void {
         host_demo,
         host_settings,
         host_files,
+        host_camera,
         host_setup,
         addProgramModule(b, "src/shell/main.zig", b.graph.host, test_optimize, host, shaders, null),
     }) |m| {

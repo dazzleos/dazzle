@@ -196,6 +196,9 @@ pub const Window = struct {
     touch: ?client.Proxy = null,
     /// The system's clipboard (for the toolkit's `Ui.clipboard`).
     clipboard: Clipboard,
+    /// A file of the app's that `wait` also wakes for when it can be
+    /// read (a camera's frames, say).
+    wake_fd: ?linux.fd_t = null,
     pointer: ?client.Proxy = null,
     keyboard: ?client.Proxy = null,
     pointer_pos: [2]f32 = .{ 0, 0 },
@@ -336,18 +339,21 @@ pub const Window = struct {
     /// nothing to draw.
     pub fn wait(w: *Window, timeout_ns: u64) !void {
         const timeout_ms: u64 = std.math.divCeil(u64, timeout_ns, std.time.ns_per_ms) catch 0;
-        const paste_fd = w.clipboard.pasteFd() orelse
+        const paste_fd = w.clipboard.pasteFd();
+        if (paste_fd == null and w.wake_fd == null)
             return w.conn.dispatchTimeout(@intCast(@min(timeout_ms, std.math.maxInt(i32))));
         // A paste under way: its pipe is waited on too (no longer than
-        // until it gives up).
+        // until it gives up); and the app's own file, if it has one.
         try w.conn.flush();
         if (try w.conn.dispatchPending() == 0) {
             const ms = @min(timeout_ms, w.clipboard.pasteTimeoutMs() orelse timeout_ms, std.math.maxInt(i32));
-            var fds = [_]linux.pollfd{
-                .{ .fd = w.conn.conn.fd, .events = linux.POLL.IN, .revents = 0 },
-                .{ .fd = paste_fd, .events = linux.POLL.IN, .revents = 0 },
+            var fds: [3]linux.pollfd = undefined;
+            var n: usize = 0;
+            for ([_]?linux.fd_t{ w.conn.conn.fd, paste_fd, w.wake_fd }) |fd| if (fd) |f| {
+                fds[n] = .{ .fd = f, .events = linux.POLL.IN, .revents = 0 };
+                n += 1;
             };
-            _ = linux.poll(&fds, fds.len, @intCast(ms));
+            _ = linux.poll(&fds, n, @intCast(ms));
             _ = try w.conn.dispatchPending();
         }
         w.clipboard.service();

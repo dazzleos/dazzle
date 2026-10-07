@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
-// The Pi 3 A+, as mainline describes it, plus control of the Wi-Fi chip's
-// power. WL_REG_ON and BT_REG_ON share one line on the firmware's GPIO
+// The Pi 3 A+, as mainline describes it, plus its camera connector's
+// wiring (below) and control of the Wi-Fi chip's power. WL_REG_ON and BT_REG_ON share one line on the firmware's GPIO
 // expander, so mainline gives it to neither driver and leaves it as the
 // firmware set it: off, so the chip never appears on the SDIO bus. There
 // is no Bluetooth driver here to disturb, so the Wi-Fi power sequence
@@ -10,3 +10,9 @@
 &wifi_pwrseq {
 	reset-gpios = <&expgpio 1 GPIO_ACTIVE_LOW>;
 };
+
+// The camera connector's wiring (rpi-camera.dtsi): I2C on GPIO 44/45, power
+// on the firmware's GPIO expander, line 5.
+#define CAM_I2C_PINS &i2c0_gpio44
+#define CAM_POWER_GPIO <&expgpio 5 GPIO_ACTIVE_HIGH>
+#include "rpi-camera.dtsi"

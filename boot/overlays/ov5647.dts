@@ -1,0 +1,54 @@
+// SPDX-License-Identifier: GPL-2.0
+// Camera Module v1 (OmniVision OV5647), on the wiring the board's device
+// tree describes (rpi-camera.dtsi). The firmware applies this overlay when
+// it finds the camera (camera_auto_detect in config.txt). The module has
+// its own 25 MHz oscillator.
+/dts-v1/;
+/plugin/;
+
+&{/} {
+	cam_clk: camera-clock {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <25000000>;
+	};
+};
+
+&i2c0 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	camera@36 {
+		compatible = "ovti,ov5647";
+		reg = <0x36>;
+		clocks = <&cam_clk>;
+		avdd-supply = <&cam_reg>;
+		dovdd-supply = <&cam_dummy_reg>;
+		dvdd-supply = <&cam_dummy_reg>;
+		rotation = <0>;
+		orientation = <2>; // external
+
+		port {
+			cam_endpoint: endpoint {
+				remote-endpoint = <&csi_ep>;
+				clock-lanes = <0>;
+				data-lanes = <1 2>;
+				clock-noncontinuous;
+				link-frequencies = /bits/ 64 <297000000>;
+			};
+		};
+	};
+};
+
+&csi1 {
+	status = "okay";
+
+	port {
+		csi_ep: endpoint {
+			remote-endpoint = <&cam_endpoint>;
+			clock-lanes = <0>;
+			data-lanes = <1 2>;
+			clock-noncontinuous;
+		};
+	};
+};

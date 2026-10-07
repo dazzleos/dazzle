@@ -15,6 +15,8 @@ apps, and windows you can move, resize, maximize and close. It comes with:
   storage), and connect to wired and Wi-Fi networks.
 - **Files:** browse your files, and look inside them: text, pictures and
   fonts.
+- **Camera:** see what a Raspberry Pi Camera Module sees, and take
+  photos.
 - **Demo:** a spinning 3D shape showing off the graphics, with controls to
   play with.
 
@@ -34,7 +36,9 @@ You will also need:
   its USB port through a micro-USB OTG adapter, with a hub for more than
   one),
 - optionally, for a network on the Zero (which has no Wi-Fi), a USB
-  Ethernet adapter.
+  Ethernet adapter,
+- optionally, a Raspberry Pi Camera Module v1 or v2 (the Zero needs its
+  narrower camera cable). Connect it while the Pi is off.
 
 ## Download
 
@@ -88,6 +92,9 @@ From then on, Dazzle starts straight to the desktop.
   another. Right-clicking a text box shows a menu with these too.
 - **Screenshots:** press Print Screen. The picture is saved with your files
   as `Screenshot 1.png`, `Screenshot 2.png` and so on.
+- **Photos:** open the Camera app and click Take photo. Photos are saved
+  with your files as `Photo 1.png`, `Photo 2.png` and so on. The camera is
+  new and not yet tried on real hardware.
 - **Your files** are kept on the microSD card, in Home in the Files app.
 - **Turning off:** unplug the power. Your files are kept safe even then.
 

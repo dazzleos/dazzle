@@ -1,11 +1,14 @@
-//! The device manager: hands input devices to the Dazzle user.
+//! The device manager: hands input devices and the camera to the Dazzle
+//! user.
 //!
 //! The kernel creates /dev/input/eventN (one per keyboard, mouse or other
 //! input device) owned by root, so the unprivileged shell could not read
-//! them. Init forks this process, which drops to the user keeping only
-//! CAP_CHOWN, gives the user every event node there already is, and then
-//! does the same for each one plugged in later, as the kernel announces it
-//! with a uevent.
+//! them; likewise the camera's nodes (/dev/videoN, /dev/v4l-subdevN,
+//! /dev/mediaN), which the Camera app uses. Init forks this process, which
+//! drops to the user keeping only CAP_CHOWN, gives the user every such
+//! node there already is, and then does the same for each one that comes
+//! later (plugged in, or probed late), as the kernel announces it with a
+//! uevent.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -39,25 +42,29 @@ fn run() !void {
     _ = try sys.check(linux.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.nl)));
 
     var name_buf: [32]u8 = undefined;
-    for (0..max_scanned) |n| {
-        const name = std.fmt.bufPrint(&name_buf, "input/event{d}", .{n}) catch continue;
+    for (user_devices) |prefix| for (0..max_scanned) |n| {
+        const name = std.fmt.bufPrint(&name_buf, "{s}{d}", .{ prefix, n }) catch continue;
         grant(name, false);
-    }
+    };
 
     var buf: [4096]u8 = undefined;
     while (true) {
         const rc = linux.recvfrom(fd, &buf, buf.len, 0, null, null);
         if (linux.errno(rc) != .SUCCESS) continue;
-        if (inputDevice(buf[0..rc])) |name| grant(name, true);
+        if (userDevice(buf[0..rc])) |name| grant(name, true);
     }
 }
 
-/// Event nodes looked for at start; the kernel numbers them from 0.
+/// Nodes of each kind looked for at start; the kernel numbers them from 0.
 const max_scanned = 32;
 
-/// The device node (relative to /dev) a uevent adds, if it is an input
-/// event node.
-fn inputDevice(msg: []const u8) ?[]const u8 {
+/// The device nodes the user gets (relative to /dev, without their
+/// numbers): input events, and the camera's.
+const user_devices = [_][]const u8{ "input/event", "video", "v4l-subdev", "media" };
+
+/// The device node (relative to /dev) a uevent adds, if it is one the
+/// user gets.
+fn userDevice(msg: []const u8) ?[]const u8 {
     var action: []const u8 = "";
     var devname: []const u8 = "";
     var fields = std.mem.splitScalar(u8, msg, 0);
@@ -65,8 +72,11 @@ fn inputDevice(msg: []const u8) ?[]const u8 {
         if (std.mem.startsWith(u8, field, "ACTION=")) action = field["ACTION=".len..];
         if (std.mem.startsWith(u8, field, "DEVNAME=")) devname = field["DEVNAME=".len..];
     }
-    if (!std.mem.eql(u8, action, "add") or !std.mem.startsWith(u8, devname, "input/event")) return null;
-    return devname;
+    if (!std.mem.eql(u8, action, "add")) return null;
+    for (user_devices) |prefix| {
+        if (devname.len > prefix.len and std.mem.startsWith(u8, devname, prefix) and std.ascii.isDigit(devname[prefix.len])) return devname;
+    }
+    return null;
 }
 
 /// Gives the user the device node /dev/`name`.
@@ -87,13 +97,25 @@ fn grant(name: []const u8, log: bool) void {
     if (log) print("dazzle: devices: {s} is the user's\n", .{path});
 }
 
+test "the camera's uevents" {
+    const video = "add@/devices/platform/soc/20801000.csi/video4linux/video0\x00ACTION=add\x00SUBSYSTEM=video4linux\x00DEVNAME=video0\x00SEQNUM=900\x00";
+    try std.testing.expectEqualStrings("video0", userDevice(video).?);
+    const subdev = "add@/devices/x\x00ACTION=add\x00DEVNAME=v4l-subdev1\x00";
+    try std.testing.expectEqualStrings("v4l-subdev1", userDevice(subdev).?);
+    const media = "add@/devices/x\x00ACTION=add\x00DEVNAME=media0\x00";
+    try std.testing.expectEqualStrings("media0", userDevice(media).?);
+    // Not "videofoo", nor others.
+    try std.testing.expect(userDevice("add@/x\x00ACTION=add\x00DEVNAME=videofoo\x00") == null);
+    try std.testing.expect(userDevice("add@/x\x00ACTION=add\x00DEVNAME=mmcblk0\x00") == null);
+}
+
 test "input uevents" {
     const add = "add@/devices/platform/soc/20980000.usb/usb1/1-1/1-1:1.0/0003:046D:C077.0001/input/input0/event0\x00ACTION=add\x00DEVPATH=/devices/x/input/input0/event0\x00SUBSYSTEM=input\x00MAJOR=13\x00MINOR=64\x00DEVNAME=input/event0\x00SEQNUM=812\x00";
-    try std.testing.expectEqualStrings("input/event0", inputDevice(add).?);
+    try std.testing.expectEqualStrings("input/event0", userDevice(add).?);
     const parent = "add@/devices/x/input/input0\x00ACTION=add\x00SUBSYSTEM=input\x00PRODUCT=3/46d/c077/111\x00";
-    try std.testing.expect(inputDevice(parent) == null);
+    try std.testing.expect(userDevice(parent) == null);
     const remove = "remove@/devices/x/event0\x00ACTION=remove\x00DEVNAME=input/event0\x00";
-    try std.testing.expect(inputDevice(remove) == null);
+    try std.testing.expect(userDevice(remove) == null);
     const drm = "add@/devices/x\x00ACTION=add\x00DEVNAME=dri/card0\x00";
-    try std.testing.expect(inputDevice(drm) == null);
+    try std.testing.expect(userDevice(drm) == null);
 }

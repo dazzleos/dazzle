@@ -1,6 +1,6 @@
-//! Writing PNG images: 8-bit RGB (screenshots are opaque), each row
-//! filtered by its difference from the pixel before (which suits what is
-//! on a screen) and compressed with deflate at its fastest.
+//! Writing PNG images: 8-bit RGB (screenshots and photos are opaque),
+//! each row filtered by its difference from the pixel before (which suits
+//! what is on a screen) and compressed with deflate at its fastest.
 
 const std = @import("std");
 

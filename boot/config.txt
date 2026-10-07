@@ -23,6 +23,15 @@ device_tree=bcm2835-rpi-zero-w.dtb
 device_tree=bcm2837-rpi-3-a-plus.dtb
 
 [all]
+# The camera: the firmware finds which Camera Module is on the connector
+# and applies its overlay from the slot's overlays/ (imx219 or ov5647, see
+# boot/overlays/). To choose one by hand instead, set camera_auto_detect=0
+# and add dtoverlay=imx219 (or ov5647).
+camera_auto_detect=1
+# The firmware would otherwise look for the official touchscreen on the
+# I2C pins the camera uses (on the Pi 3 A+), which Linux drives.
+disable_touchscreen=1
+
 # Serial console on GPIO 14 (TX) / 15 (RX), 115200 8N1. On the Zero W and
 # Pi 3 A+ this is the mini UART, which needs a fixed core clock.
 enable_uart=1

@@ -21,6 +21,7 @@ pub const shaders = @import("shaders.zig");
 pub const canvas = @import("canvas.zig");
 pub const renderer = @import("renderer.zig");
 pub const preview = @import("preview.zig");
+pub const png = @import("png.zig");
 
 pub const Canvas = canvas.Canvas;
 pub const Image = canvas.Image;
@@ -38,5 +39,6 @@ test {
     _ = shaders;
     _ = canvas;
     _ = renderer;
+    _ = png;
     _ = preview;
 }

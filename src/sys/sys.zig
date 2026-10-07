@@ -6,16 +6,19 @@
 //!
 //! * `network`: the network manager's protocol, shared by init and settings
 //! * `system`: the system manager's protocol, shared by init and setup
+//! * `files`: saving the user's files (numbered names, new files)
 
 const std = @import("std");
 const linux = std.os.linux;
 
 pub const network = @import("network.zig");
 pub const system = @import("system.zig");
+pub const files = @import("files.zig");
 
 test {
     _ = network;
     _ = system;
+    _ = files;
 }
 
 pub const Error = error{

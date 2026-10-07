@@ -40,4 +40,7 @@ pub const Icon = enum {
     fast_forward,
     pause,
     play_arrow,
+    // The camera.
+    photo_camera,
+    no_photography,
 };
