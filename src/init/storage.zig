@@ -23,6 +23,7 @@ const linux = std.os.linux;
 const sys = @import("sys");
 
 const proto = sys.system;
+const apps = @import("apps.zig");
 const print = sys.print;
 
 /// The card (on the SDHOST controller), and the partition for files.
@@ -77,6 +78,8 @@ pub fn boot() Boot {
     if (!exists(data_partition) or !hasFilesystem(data_partition)) return b;
     b.mounted = mountData();
     if (!b.mounted) return b;
+    // The apps: those installed, on /data.
+    apps.useInstalled();
     b.setup_done = exists(proto.setup_done_file);
     var buf: [80]u8 = undefined;
     if (sys.readFile(proto.hostname_file, &buf)) |text| {

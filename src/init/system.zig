@@ -29,6 +29,7 @@ const sys = @import("sys");
 const storage = @import("storage.zig");
 const mkfs = @import("mkfs.zig");
 const slots = @import("slots.zig");
+const apps = @import("apps.zig");
 
 const proto = sys.system;
 const print = sys.print;
@@ -200,6 +201,8 @@ const Manager = struct {
         _ = linux.mkdir(proto.config_dir, 0o755);
         _ = linux.chown(proto.config_dir, 0, 0);
         _ = linux.mkdir(proto.user_dir, 0o700);
+        // The apps go there too, where Settings installs them.
+        apps.useInstalled();
         m.report.storage = .ready;
     }
 

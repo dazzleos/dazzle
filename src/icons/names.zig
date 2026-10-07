@@ -40,6 +40,11 @@ pub const Icon = enum {
     fast_forward,
     pause,
     play_arrow,
+    // Settings' apps.
+    apps,
+    download,
+    delete,
+    refresh,
     // The camera.
     photo_camera,
     no_photography,

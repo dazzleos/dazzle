@@ -83,7 +83,11 @@ fn run(init: std.process.Init.Minimal) !void {
     // The shell's own apps are beside it; the others are in /apps.
     var settings_buf: [512]u8 = undefined;
     const settings_path = try sys.appFile(&settings_buf, "dazzle-settings");
-    const apps = try dock_mod.findApps(gpa, dock_mod.apps_dir, &.{settings_path});
+    const builtin_apps = [_][]const u8{settings_path};
+    var apps = try dock_mod.findApps(gpa, dock_mod.apps_dir, &builtin_apps);
+    // Apps installed or removed (from Settings) come and go from the dock.
+    var apps_watch: dock_mod.Watch = .{ .path = dock_mod.apps_dir };
+    _ = apps_watch.changed();
     for (apps) |app| print("dazzle-shell: app {s} ({s})\n", .{ app.label, app.path });
     var dock = try dock_mod.Dock.init(gpa, ui_font, apps, renderer.width, renderer.height);
     const dock_y: u32 = renderer.height - dock.height;
@@ -309,6 +313,19 @@ fn run(init: std.process.Init.Minimal) !void {
             next_tick = start + ((t_now - start) / std.time.ns_per_s + 1) * std.time.ns_per_s;
             // Keyboards and mice plugged in since.
             devices.scan();
+            if (apps_watch.changed()) {
+                if (dock_mod.rescan(gpa, apps, dock_mod.apps_dir, &builtin_apps)) |new| {
+                    apps = new;
+                    dock.apps = new;
+                    dock.hover = null;
+                    print("dazzle-shell: {d} apps\n", .{new.len});
+                    if (dock_shown) {
+                        dock.draw();
+                        renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+                        panels_damaged = true;
+                    }
+                } else |err| print("dazzle-shell: cannot list the apps: {s}\n", .{@errorName(err)});
+            }
         }
 
         // Draw while the previous frame is on the screen; it is shown at

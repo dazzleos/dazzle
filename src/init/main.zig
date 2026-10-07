@@ -202,6 +202,7 @@ test {
     _ = @import("logserver.zig");
     _ = @import("network.zig");
     _ = @import("dhcp.zig");
+    _ = @import("netconf.zig");
     _ = @import("devices.zig");
     _ = @import("nl80211.zig");
     _ = @import("supplicant.zig");
@@ -209,4 +210,5 @@ test {
     _ = @import("storage.zig");
     _ = @import("system.zig");
     _ = @import("slots.zig");
+    _ = @import("apps.zig");
 }

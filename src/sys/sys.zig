@@ -166,6 +166,7 @@ pub const Capability = enum(u5) {
     net_admin = 12,
     net_raw = 13,
     sys_admin = 21,
+    sys_time = 25,
 };
 
 /// Like `dropPrivileges`, but keeps the given capabilities and no others.

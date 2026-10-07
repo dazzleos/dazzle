@@ -8,6 +8,10 @@
 //! (named in <program>.icon, beside the program: "folder") or, without
 //! one, its initial, on a coloured square, with a dot under it while it
 //! runs.
+//!
+//! Apps come and go (Settings installs and removes them; /apps is mounted
+//! over once the card is ready): `Watch` notices /apps changing, and
+//! `rescan` lists the apps again, keeping running ones' processes.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -68,6 +72,48 @@ pub fn findApps(gpa: std.mem.Allocator, dir_path: []const u8, builtin: []const [
     }.lessThan);
     return apps.toOwnedSlice(gpa);
 }
+
+/// Frees what `findApps` made.
+pub fn freeApps(gpa: std.mem.Allocator, apps: []App) void {
+    for (apps) |app| {
+        gpa.free(app.name);
+        gpa.free(app.label);
+        gpa.free(app.path);
+    }
+    gpa.free(apps);
+}
+
+/// The apps again (as `findApps`), with the processes of those of `old`
+/// still there; frees `old`.
+pub fn rescan(gpa: std.mem.Allocator, old: []App, dir_path: []const u8, builtin: []const []const u8) ![]App {
+    const new = try findApps(gpa, dir_path, builtin);
+    for (new) |*app| for (old) |o| {
+        if (std.mem.eql(u8, app.name, o.name)) app.pid = o.pid;
+    };
+    freeApps(gpa, old);
+    return new;
+}
+
+/// Notices a directory changing: an entry added, removed or renamed (its
+/// time of change), or another directory mounted over it.
+pub const Watch = struct {
+    path: [*:0]const u8,
+    stamp: ?[5]u64 = null,
+
+    /// Whether it changed since the last call (not on the first).
+    pub fn changed(w: *Watch) bool {
+        var stx: linux.Statx = undefined;
+        const mask: linux.STATX = .{ .INO = true, .MTIME = true };
+        const now: ?[5]u64 = if (linux.errno(linux.statx(linux.AT.FDCWD, w.path, 0, mask, &stx)) == .SUCCESS)
+            .{ stx.dev_major, stx.dev_minor, stx.ino, @bitCast(stx.mtime.sec), stx.mtime.nsec }
+        else
+            null;
+        defer w.stamp = now;
+        const before = w.stamp orelse return false;
+        const after = now orelse return true;
+        return !std.mem.eql(u64, &before, &after);
+    }
+};
 
 fn addDir(gpa: std.mem.Allocator, apps: *std.ArrayList(App), dir: linux.fd_t, dir_path: []const u8) !void {
     var buf: [2048]u8 align(8) = undefined;
@@ -222,6 +268,26 @@ fn roundedRect(c: font.Canvas, x: f32, y: f32, w: f32, h: f32, radius: f32, colo
 }
 
 const testing = std.testing;
+
+test "a watched directory changes when an entry comes or goes" {
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "/tmp/dazzle-watch-test-{d}", .{linux.getpid()});
+    _ = linux.mkdir(path, 0o755);
+    defer _ = linux.rmdir(path);
+    var w: Watch = .{ .path = path };
+    try testing.expect(!w.changed());
+    try testing.expect(!w.changed());
+    var sub_buf: [80]u8 = undefined;
+    const sub = try std.fmt.bufPrintZ(&sub_buf, "{s}/app", .{path});
+    // Times of change are in the kernel's clock ticks: a few ms apart.
+    sys.sleepMs(20);
+    _ = linux.mkdir(sub, 0o755);
+    try testing.expect(w.changed());
+    try testing.expect(!w.changed());
+    sys.sleepMs(20);
+    _ = linux.rmdir(sub);
+    try testing.expect(w.changed());
+}
 
 test "app labels drop the dazzle- prefix" {
     const a = testing.allocator;

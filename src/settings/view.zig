@@ -3,13 +3,16 @@
 //! use (with meters) and the system (its build, Linux and the board).
 //! Choosing a Wi-Fi network shows a password field (for WPA2) and a
 //! Connect button; choosing a static address for Ethernet shows fields for
-//! it. What is asked of the network manager goes to the main loop through
-//! `Actions`.
+//! it. The Apps page lists the apps that can be installed (from the
+//! catalogue; see store.zig), with Install or Remove beside each. What is
+//! asked of the network manager, and of the store, goes to the main loop
+//! through `Actions`.
 
 const std = @import("std");
 const ui = @import("ui");
 const gfx = @import("gfx");
 const info = @import("info.zig");
+const store = @import("store.zig");
 
 /// The storage bar's colours (the system's is the theme's primary).
 pub const apps_color = gfx.Color.argb(0xff4fd8c4);
@@ -22,6 +25,25 @@ pub const Actions = struct {
     disconnect: bool = false,
     /// How the wired adapter gets its address.
     ethernet: ?info.manager.Addressing = null,
+    /// The app to install, or remove; whether to get the list of apps again.
+    install: ?AppName = null,
+    remove: ?AppName = null,
+    refresh_apps: bool = false,
+
+    pub const AppName = struct {
+        buf: [48]u8 = undefined,
+        len: u8 = 0,
+
+        pub fn init(name: []const u8) AppName {
+            var n: AppName = .{ .len = @intCast(@min(name.len, 48)) };
+            @memcpy(n.buf[0..n.len], name[0..n.len]);
+            return n;
+        }
+
+        pub fn slice(n: *const AppName) []const u8 {
+            return n.buf[0..n.len];
+        }
+    };
 
     pub const Join = struct {
         ssid_buf: [32]u8 = undefined,
@@ -48,6 +70,22 @@ pub const min_size = [2]u32{ 720, 440 };
 /// The widest a page is.
 const max_page_width = 960;
 
+/// What the Apps page shows.
+pub const Apps = struct {
+    /// The catalogue's apps, and whether each is installed.
+    list: []const store.App = &.{},
+    installed: []const bool = &.{},
+    /// The app being installed ("" for the list itself); null if nothing
+    /// is under way.
+    busy: ?[]const u8 = null,
+    /// What happened last.
+    message: []const u8 = "",
+    /// Whether apps can be installed yet (not before setup).
+    writable: bool = true,
+    /// Where they come from.
+    source: []const u8 = "",
+};
+
 pub const Settings = struct {
     commit: []const u8,
     /// Where the window's requests go (none in tests that do not look).
@@ -57,6 +95,8 @@ pub const Settings = struct {
     network: *const info.Network,
     /// What the network manager last said; null if it could not be asked.
     manager: ?*const info.manager.Report = null,
+    /// The apps that can be installed, and how installing goes.
+    apps: Apps = .{},
     /// The title bar's buttons (close, and maximize, which shows whether
     /// the window is), and pressing the bar (to move the window).
     on_close: ?ui.Callback = null,
@@ -122,6 +162,7 @@ pub const Settings = struct {
             .ethernet => self.networkCard(b, state),
             .resources => self.resourcesCard(b),
             .system => self.systemCard(b),
+            .apps => self.appsCard(b, state),
         };
         const t = cx.theme();
         var tabs: [std.meta.fields(Page).len]ui.Widget = undefined;
@@ -157,6 +198,51 @@ pub const Settings = struct {
             }),
             cx.make(ui.Expanded{ .child = content }),
         } });
+    }
+
+    fn appsCard(self: *const Settings, b: Builder, state: *State) ui.Widget {
+        const cx = b.cx;
+        const t = &cx.ui.theme;
+        const apps = &self.apps;
+        var rows: std.ArrayList(ui.Widget) = .empty;
+        const a = cx.ui.arena();
+        const busy = apps.busy != null;
+        // The list's state, and getting it again.
+        const status = if (apps.busy) |name| (if (name.len == 0) "Getting the list of apps…" else "Installing…") else if (apps.list.len == 0 and !apps.writable) "Apps can be installed once setup has finished" else if (apps.list.len == 0) "No list of apps yet: is the network up?" else cx.fmt("{d} apps", .{apps.list.len});
+        rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
+            b.label("Catalogue"),
+            cx.make(ui.Expanded{ .child = b.value(status) }),
+            cx.make(ui.OutlinedButton{ .label = "Refresh", .icon = .refresh, .on_press = if (self.actions != null and !busy) .of(appAct(cx, self.actions.?, state, ""), AppAct.refresh) else null }),
+        } })) catch {};
+        if (apps.message.len > 0) rows.append(a, b.item("", apps.message)) catch {};
+        if (!apps.writable and apps.list.len > 0) rows.append(a, b.item("", "Apps can be installed once setup has finished")) catch {};
+        for (apps.list, 0..) |app, i| {
+            const installed = i < apps.installed.len and apps.installed[i];
+            const this_busy = if (apps.busy) |n| std.mem.eql(u8, n, app.name) else false;
+            const enabled = self.actions != null and !busy and (installed or apps.writable);
+            const x = if (self.actions) |acts| appAct(cx, acts, state, app.name) else null;
+            const button: ui.Widget = if (this_busy)
+                cx.make(ui.Spinner{ .size = 28 })
+            else if (installed)
+                cx.make(ui.OutlinedButton{ .label = "Remove", .icon = .delete, .on_press = if (enabled) .of(x.?, AppAct.remove) else null })
+            else
+                cx.make(ui.OutlinedButton{ .label = "Install", .icon = .download, .on_press = if (enabled) .of(x.?, AppAct.install) else null });
+            var size_buf: [32]u8 = undefined;
+            const detail = if (app.description.len > 0)
+                cx.fmt("{s} · {s}", .{ app.description, info.formatBytes(&size_buf, app.size) })
+            else
+                cx.fmt("{s}", .{info.formatBytes(&size_buf, app.size)});
+            rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = &.{
+                cx.make(ui.Icon{ .icon = ui.icons.fromName(app.icon) orelse .apps, .size = 32, .color = t.on_surface_variant }),
+                cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 2, .children = &.{
+                    cx.make(ui.Text{ .text = app.title, .style = .{ .size = 18, .color = t.on_surface }, .wrap = false, .ellipsis = true }),
+                    cx.make(ui.Text{ .text = detail, .style = .{ .size = 15, .color = t.on_surface_variant } }),
+                } }) }),
+                button,
+            } })) catch {};
+        }
+        if (apps.source.len > 0) rows.append(a, cx.make(ui.Text{ .text = cx.fmt("From {s}", .{apps.source}), .style = .{ .size = 14, .color = t.on_surface_variant } })) catch {};
+        return b.card("Apps", rows.items);
     }
 
     fn systemCard(self: *const Settings, b: Builder) ui.Widget {
@@ -458,6 +544,7 @@ pub const Page = enum {
     wifi,
     ethernet,
     resources,
+    apps,
     system,
 
     pub fn label(p: Page) []const u8 {
@@ -465,6 +552,7 @@ pub const Page = enum {
             .wifi => "Wi-Fi",
             .ethernet => "Ethernet",
             .resources => "Resources",
+            .apps => "Apps",
             .system => "System",
         };
     }
@@ -474,6 +562,7 @@ pub const Page = enum {
             .wifi => .wifi,
             .ethernet => .lan,
             .resources => .speed,
+            .apps => .apps,
             .system => .info,
         };
     }
@@ -587,6 +676,31 @@ const Act = struct {
         x.actions.disconnect = true;
     }
 };
+
+/// Install, Remove and Refresh on the Apps page: requests for the main
+/// loop.
+const AppAct = struct {
+    actions: *Actions,
+    name: Actions.AppName,
+
+    fn install(x: *AppAct) void {
+        x.actions.install = x.name;
+    }
+
+    fn remove(x: *AppAct) void {
+        x.actions.remove = x.name;
+    }
+
+    fn refresh(x: *AppAct) void {
+        x.actions.refresh_apps = true;
+    }
+};
+
+fn appAct(cx: *ui.Context, actions: *Actions, _: *Settings.State, name: []const u8) *AppAct {
+    const x = cx.ui.arena().create(AppAct) catch unreachable;
+    x.* = .{ .actions = actions, .name = .init(name) };
+    return x;
+}
 
 fn act(cx: *ui.Context, actions: *Actions, state: *Settings.State, ssid: []const u8) *Act {
     const x = cx.ui.arena().create(Act) catch unreachable;
@@ -821,6 +935,12 @@ pub const Meter = struct {
 const testing = std.testing;
 const font = @import("font");
 
+const sample_app_list = [_]store.App{
+    .{ .name = "dazzle-demo", .title = "Demo", .description = "Spinning shapes, on the GPU", .icon = "view_in_ar", .file = "dazzle-demo.tar.xz", .size = 40 << 10, .sha256 = "" },
+    .{ .name = "dazzle-files", .title = "Files", .description = "Your files", .icon = "folder", .file = "dazzle-files.tar.xz", .size = 50 << 10, .sha256 = "" },
+};
+const sample_apps: Apps = .{ .list = &sample_app_list, .installed = &.{ true, false }, .source = "https://example.com/apps" };
+
 fn sample() struct { sys: info.System, net: info.Network, usage: info.Usage } {
     const sys: info.System = .{ .model = .of("Raspberry Pi Zero W Rev 1.1"), .cores = 1, .serial = .of("a1b2c3d4"), .kernel = .of("6.12.0 (armv6l)"), .hostname = .of("dazzle") };
     var net: info.Network = .{ .gateway = .{ 192, 168, 1, 1 } };
@@ -902,13 +1022,13 @@ test "everything is shown, and fits from the smallest window to the biggest" {
     for (std.enums.values(Page)) |page| {
         for (test_sizes) |size| {
             frame_no += 1;
-            u.frame(size[0], size[1], frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi });
+            u.frame(size[0], size[1], frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps });
             try testing.expect(!overflows(u.root.?));
         }
         // What shows maximized (in a smaller window, rows of the lists
         // further down are not made).
         frame_no += 1;
-        u.frame(1920, 1036, frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi });
+        u.frame(1920, 1036, frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps });
         texts(u.root.?, &all);
         // The next page, from its tab.
         if (@as(usize, @intFromEnum(page)) + 1 < std.enums.values(Page).len) {
@@ -949,6 +1069,11 @@ test "everything is shown, and fits from the smallest window to the biggest" {
         "-48 dBm",
         "Open · 2.4 GHz",
         "Enterprise · 2.4 GHz",
+        // The apps.
+        "Spinning shapes, on the GPU",
+        "Install",
+        "Remove",
+        "From https://example.com/apps",
     }) |want| {
         if (std.mem.indexOf(u8, all.items, want) == null) {
             std.debug.print("missing \"{s}\" in:\n{s}\n", .{ want, all.items });
@@ -957,8 +1082,8 @@ test "everything is shown, and fits from the smallest window to the biggest" {
     }
     // In a small window, only the networks that show are made.
     u.root.?.state(Settings.State).page = .wifi;
-    u.frame(min_size[0], min_size[1], frame_no + 1, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi });
-    u.frame(min_size[0], min_size[1], frame_no + 2, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi });
+    u.frame(min_size[0], min_size[1], frame_no + 1, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps });
+    u.frame(min_size[0], min_size[1], frame_no + 2, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps });
     try testing.expect(findText(u.root.?, "Home") != null);
     try testing.expect(findText(u.root.?, "bad?name") == null);
     // The build is in the system card, not beside the title; the hardware
@@ -1179,4 +1304,45 @@ test "choosing a static address for Ethernet, and DHCP again" {
     report.ethernet.addressing = .dhcp;
     Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
     try testing.expect(findType(u.root.?, ui.TextField) == null);
+}
+
+test "installing and removing apps, and getting their list again" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    const d = sample();
+    var actions: Actions = .{};
+    var settings: Settings = .{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .apps = sample_apps };
+    u.frame(1920, 960, 0, settings);
+    u.root.?.state(Settings.State).page = .apps;
+    u.frame(1920, 960, 1, settings);
+    click(u, up(findText(u.root.?, "Install").?, ui.OutlinedButton).?);
+    try testing.expectEqualStrings("dazzle-files", actions.install.?.slice());
+    click(u, up(findText(u.root.?, "Remove").?, ui.OutlinedButton).?);
+    try testing.expectEqualStrings("dazzle-demo", actions.remove.?.slice());
+    click(u, up(findText(u.root.?, "Refresh").?, ui.OutlinedButton).?);
+    try testing.expect(actions.refresh_apps);
+
+    // While one installs: a spinner in its place, and nothing else can be
+    // pressed.
+    actions = .{};
+    settings.apps.busy = "dazzle-files";
+    u.frame(1920, 960, 2, settings);
+    try testing.expect(findText(u.root.?, "Install") == null);
+    try testing.expect(findText(u.root.?, "Installing…") != null);
+    click(u, up(findText(u.root.?, "Remove").?, ui.OutlinedButton).?);
+    try testing.expect(actions.remove == null);
+
+    // Before setup: nothing can be installed, and it says why.
+    settings.apps = sample_apps;
+    settings.apps.writable = false;
+    u.frame(1920, 960, 3, settings);
+    try testing.expect(findText(u.root.?, "Apps can be installed once setup has finished") != null);
+    click(u, up(findText(u.root.?, "Install").?, ui.OutlinedButton).?);
+    try testing.expect(actions.install == null);
+
+    // No list yet.
+    settings.apps = .{};
+    u.frame(1920, 960, 4, settings);
+    try testing.expect(findText(u.root.?, "No list of apps yet: is the network up?") != null);
 }

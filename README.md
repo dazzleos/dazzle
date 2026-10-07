@@ -12,7 +12,8 @@ It has a simple desktop: a dock along the bottom of the screen with your
 apps, and windows you can move, resize, maximize and close. It comes with:
 
 - **Settings:** see what the Pi is doing (CPU, memory, temperature,
-  storage), and connect to wired and Wi-Fi networks.
+  storage), connect to wired and Wi-Fi networks, and install and remove
+  apps.
 - **Files:** browse your files, and look inside them: text, pictures and
   fonts.
 - **Camera:** see what a Raspberry Pi Camera Module sees, and take
@@ -83,6 +84,11 @@ From then on, Dazzle starts straight to the desktop.
 
 - **Apps:** click an icon in the dock to open the app, or to bring its
   window to the front if it is already open.
+- **Installing apps:** with a network connected, open Settings and choose
+  Apps. It lists the apps you can install, from the same place as the
+  Dazzle download: click Install to add one to the dock, or Remove to take
+  it away (Files, Camera and Demo can be removed too, and installed again
+  later). Refresh gets the latest list.
 - **Windows:** drag a window by its title bar, and resize it from its
   edges. The buttons in the title bar maximize and close it.
 - **Touchscreens:** tap to click, drag to scroll, and press and hold for
@@ -123,7 +129,7 @@ Please report problems, with the log if you can, in the
 
 Dazzle is young. Some of what it cannot do yet:
 
-- install more apps, or update itself (both are planned),
+- update itself, or update installed apps (both are planned),
 - remember Wi-Fi networks after a restart, or join WPA3-only networks,
 - keyboard layouts other than US, and typing letters outside English,
 - Bluetooth and sound,

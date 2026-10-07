@@ -56,6 +56,44 @@ fn appFiles(b: *std.Build, exe: *std.Build.Step.Compile, icon: Icon, what: []con
     };
 }
 
+/// An app: its program, its icon in the dock, and what the catalogue says
+/// of it.
+const App = struct {
+    exe: *std.Build.Step.Compile,
+    icon: Icon,
+    title: []const u8,
+    description: []const u8,
+};
+
+/// Each app as an archive to download (zig-out/apps/<name>.tar.xz: its
+/// folder, as in /apps), and the catalogue of them (zig-out/apps/apps.json;
+/// see tools/mkcatalogue.zig), published beside the image.
+fn addAppArchives(b: *std.Build, apps: []const App) *std.Build.Step {
+    const step = b.step("app-archives", "The apps' archives (zig-out/apps)");
+    const xz = requireTools(b, &.{"xz:xz-utils"});
+    const catalogue = b.addRunArtifact(hostTool(b, "mkcatalogue"));
+    const json = catalogue.addOutputFileArg("apps.json");
+    catalogue.addArg(gitCommit(b));
+    for (apps) |a| {
+        const name = a.exe.name;
+        const pack = b.addRunArtifact(hostTool(b, "mkapp"));
+        const tar = pack.addOutputFileArg(b.fmt("{s}.tar", .{name}));
+        pack.addArg(name);
+        pack.addArtifactArg(a.exe);
+        pack.addPrefixedFileArg(b.fmt("{s}.icon=", .{name}), iconFile(b, name, a.icon));
+        pack.addPrefixedFileArg("NOTICES=", noticesFile(b, b.fmt("the {s} app", .{a.title}), &.{"MaterialIcons"}));
+        const compress = b.addSystemCommand(&.{ "xz", "-9", "-c" });
+        compress.step.dependOn(&xz.step);
+        compress.addFileArg(tar);
+        const archive = compress.captureStdOut(.{ .basename = b.fmt("{s}.tar.xz", .{name}) });
+        step.dependOn(&b.addInstallFile(archive, b.fmt("apps/{s}.tar.xz", .{name})).step);
+        catalogue.addArgs(&.{ name, a.title, a.description, @tagName(a.icon) });
+        catalogue.addFileArg(archive);
+    }
+    step.dependOn(&b.addInstallFile(json, "apps/apps.json").step);
+    return step;
+}
+
 /// The icon font, cut down to Dazzle's icons, and their codepoints (see
 /// tools/subset_icons.zig).
 const IconFont = struct {
@@ -88,7 +126,7 @@ fn addIconFont(b: *std.Build) IconFont {
 /// * `wayland`: the Wayland wire protocol and a client library
 /// * `build_info`: `commit`, the source's git commit (short, with "-dirty"
 ///   when there are uncommitted changes), so a running system can be
-///   matched to its source
+///   matched to its source; and `apps_url`, where apps are downloaded from
 fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, shaders: []const ShaderBlob, icon_font: IconFont) Modules {
     const sys, const vc4, const shader = addGpuModules(b, target, optimize);
     const wayland = b.createModule(.{
@@ -144,6 +182,7 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     });
     const info = b.addOptions();
     info.addOption([]const u8, "commit", gitCommit(b));
+    info.addOption([]const u8, "apps_url", appsUrl(b));
     return .{ .sys = sys, .vc4 = vc4, .shader = shader, .app = app, .gfx = gfx, .ui = ui, .font = font, .icons = icons, .wayland = wayland, .build_info = info.createModule() };
 }
 
@@ -254,6 +293,18 @@ fn addShaderImports(m: *std.Build.Module, shaders: []const ShaderBlob, owner: Sh
     for (shaders) |s| if (s.owner == owner) {
         m.addAnonymousImport(b.fmt("{s}.shader", .{s.name}), .{ .root_source_file = s.program });
     };
+}
+
+/// Where Settings downloads the app catalogue and the apps from: where
+/// the image is published (CI's "latest" release).
+fn appsUrl(b: *std.Build) []const u8 {
+    const State = struct {
+        var url: ?[]const u8 = null;
+    };
+    if (State.url) |u| return u;
+    State.url = b.option([]const u8, "apps-url", "Where Settings downloads apps and their catalogue (apps.json) from") orelse
+        "https://github.com/robert-ancell/dazzle/releases/latest/download";
+    return State.url.?;
 }
 
 /// The short hash of the checked-out commit, "-dirty" if tracked files
@@ -478,6 +529,21 @@ fn fetchPinned(b: *std.Build, dir: []const u8, files: anytype, comptime url_of: 
     verify.has_side_effects = true;
     if (fetch) |f| verify.step.dependOn(f);
     return &verify.step;
+}
+
+/// The certificates of the authorities HTTPS trusts: Mozilla's, as the
+/// certifi project publishes them (PEM), pinned by its release and checksum.
+const ca_certificates_tag = "2025.11.12";
+const ca_certificates = [_]struct { name: []const u8, sha256: []const u8 }{
+    .{ .name = "cacert.pem", .sha256 = "a1ad5d643e21c43b5bed74c7e0891dcdb58f6af51c8ace1e4f020d654aa52a16" },
+};
+
+fn fetchCaCertificates(b: *std.Build) *std.Build.Step {
+    return fetchPinned(b, b.pathFromRoot("build/firmware/certs"), ca_certificates, struct {
+        fn url(bb: *std.Build, f: @TypeOf(ca_certificates[0])) []const u8 {
+            return bb.fmt("https://raw.githubusercontent.com/certifi/python-certifi/{s}/certifi/{s}", .{ ca_certificates_tag, f.name });
+        }
+    }.url);
 }
 
 fn fetchWifiFirmware(b: *std.Build) *std.Build.Step {
@@ -725,11 +791,24 @@ pub fn build(b: *std.Build) void {
     run_mkinitramfs.addPrefixedArtifactArg("--shell=", setup_exe);
     // The dock's icons: a Material icon's name beside each program.
     addAppIcon(b, run_mkinitramfs, "os/shell/dazzle-settings", .settings);
+    // The certificates of the authorities HTTPS trusts, for Settings to
+    // download apps.
+    run_mkinitramfs.step.dependOn(fetchCaCertificates(b));
+    run_mkinitramfs.addArg(b.fmt("--file=os/certs/ca-certificates.pem={s}", .{b.pathJoin(&.{ b.pathFromRoot("build/firmware/certs"), ca_certificates[0].name })}));
     // The apps, each in /apps/<name> and listed in the shell's dock, are not
-    // part of the system: they are on the card's boot partition, once (not
-    // in each OS slot).
-    const app_files = appFiles(b, demo_exe, .view_in_ar, "the Demo app") ++ appFiles(b, files_exe, .folder, "the Files app") ++
-        appFiles(b, camera_exe, .photo_camera, "the Camera app");
+    // part of the system: the image has them on the card's boot partition,
+    // once (not in each OS slot), and each is also an archive to download
+    // and install from Settings (zig-out/apps/, with the catalogue).
+    const apps = [_]App{
+        .{ .exe = demo_exe, .icon = .view_in_ar, .title = "Demo", .description = "A spinning 3D shape that shows off the graphics, with controls to play with" },
+        .{ .exe = files_exe, .icon = .folder, .title = "Files", .description = "Browse your files, and look inside them: text, pictures and fonts" },
+        .{ .exe = camera_exe, .icon = .photo_camera, .title = "Camera", .description = "See what a Raspberry Pi Camera Module sees, and take photos" },
+    };
+    var app_files: std.ArrayList(CardFile) = .empty;
+    for (apps) |a| app_files.appendSlice(b.allocator, &appFiles(b, a.exe, a.icon, b.fmt("the {s} app", .{a.title}))) catch @panic("OOM");
+    const apps_step = b.step("apps", "Build the apps' archives and their catalogue (zig-out/apps)");
+    apps_step.dependOn(addAppArchives(b, &apps));
+    b.getInstallStep().dependOn(apps_step);
     const install_initramfs = b.addInstallFile(initramfs, "initramfs.cpio");
     const programs_step = b.step("programs", "Build just the programs (zig-out/bin) and zig-out/initramfs.cpio");
     for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_settings.step, &install_files.step, &install_camera.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
@@ -745,7 +824,7 @@ pub fn build(b: *std.Build) void {
     kernel_step.dependOn(kernel.step);
 
     // `zig build` builds everything, including the SD card image.
-    b.getInstallStep().dependOn(addImage(b, kernel, initramfs, &app_files));
+    b.getInstallStep().dependOn(addImage(b, kernel, initramfs, app_files.items));
     addQemu(b, kernel, initramfs);
 
     // Unit tests run on the build machine; they cover the parts that do not

@@ -104,15 +104,18 @@ slot-a/                     OS slot A: a whole system (zImage, the boards'
                             with dazzle.slot=a)
 slot-b/                     OS slot B: the same, with dazzle.slot=b; made on
                             the card on the first start
-apps/                       the apps, one copy for both slots (/apps)
+apps/                       the apps the image comes with, one copy for
+                            both slots (copied to /data/apps)
 ```
 
 Everything but the firmware, the apps and `/data` has two copies, so that
 an update (to come) can write the slot not in use and switch `os_prefix`
 to it, keeping the other to fall back to. Slot A starts. The firmware
 loads the slot's kernel, device tree and initramfs into memory; init
-mounts the partition, read-only, at `/boot`, and shows its `apps/` at
-`/apps`; the rest of the card is `/data` (below).
+mounts the partition, read-only, at `/boot`; the rest of the card is
+`/data` (below). The apps are the user's, in `/data/apps`, shown at
+`/apps` (see Installing apps, below); until setup has made `/data`, `/apps`
+shows the boot partition's `apps/`.
 
 The image holds slot A only, to stay small, but its partition is laid out
 (`mkimage --grow-to`) for one ending at 128 MiB: its clusters, FATs and
@@ -144,7 +147,10 @@ host tests (`scripts/zig build test`), then the image (`scripts/build`),
 compressed with xz and kept as the run's artifact. On a push to the default
 branch it also replaces the `latest` release's image, which README.md's
 download link points to (`releases/latest/download/dazzle.img.xz`), with a
-SHA-256 sum beside it.
+SHA-256 sum beside it, and with it the apps: each app's archive
+(`<name>.tar.xz`) and the catalogue describing them (`apps.json`), which
+the settings app downloads from there (`zig-out/apps`; see Installing
+apps).
 
 Building the kernel is most of a first build, so CI caches what it can
 reuse: Zig (keyed on `scripts/zig`), the Linux source (keyed on
@@ -557,7 +563,9 @@ refused.
   on a coloured square, with a dot under it while it runs. Apps run once
   each: the shell knows each client's process (from its socket), and
   clicking a running app raises its window. Nothing starts until it is
-  clicked, other than programs named on the shell's command line.
+  clicked, other than programs named on the shell's command line. The
+  dock follows `/apps` as apps are installed and removed (see Installing
+  apps).
 - **Buffer sharing:** clients render with the GPU straight into buffers
   they share with the shell as dma-bufs, so nothing is copied. The GPU's
   texture unit cannot read ordinary (linear) images, so clients render in
@@ -694,9 +702,14 @@ partitions mounted on it) is kept simple:
                               user's
 /boot/                      the card's boot partition, read-only: the
                             firmware, config.txt, the OS slots and the apps
-/apps/                      the apps (the boot partition's apps/, the same
-                            whatever the slot): dazzle-demo/ and
-                            dazzle-files/, each holding its program (and
+/os/certs/                    the certificate authorities HTTPS trusts
+                              (Mozilla's, from certifi; pinned by checksum)
+/etc/resolv.conf            the name servers, written by the network
+                            manager (the user's)
+/apps/                      the apps (/data/apps, the user's; before setup,
+                            the boot partition's apps/): dazzle-demo/,
+                            dazzle-files/ and dazzle-camera/ to begin with,
+                            each holding its program (and
                             <program>.icon, the name of its icon in the
                             dock; the shell's own apps have theirs beside
                             them too) and NOTICES, the third-party software
@@ -704,8 +717,9 @@ partitions mounted on it) is kept simple:
                             independent of the system)
 /data/                      the SD card's space for files, once setup has
                             prepared it: /data/system (the computer's name,
-                            and a mark that setup has finished; root's) and
-                            /data/user (the user's)
+                            and a mark that setup has finished; root's),
+                            /data/user (the user's) and /data/apps (the
+                            apps, the user's too)
 /dev /proc /sys             mounted by init, for Linux
 ```
 
@@ -868,7 +882,7 @@ a program keeping one core busy shows 25%.
 ### The settings app
 
 Click the gear in the dock (Settings is one of the shell's own apps, in
-`/os/shell`). Its window has four pages, chosen with the tabs on the left, with the figures that
+`/os/shell`). Its window has five pages, chosen with the tabs on the left, with the figures that
 change read again every second (`src/settings/info.zig`):
 
 - **System:** the build (git commit), Linux's version, how long the system
@@ -898,6 +912,8 @@ change read again every second (`src/settings/info.zig`):
   the address DHCP gave) and says why if it fails (a wrong password, out of
   range, refused, no answer, or a security not supported yet); Disconnect
   ends it.
+- **Apps:** the apps that can be installed, each with its icon, title,
+  description, size, and Install or Remove (below).
 
 Everything but Wi-Fi and Ethernet's addressing comes from files any user
 can read (`/proc`, `/sys`), so it runs unprivileged like the other apps.
@@ -941,6 +957,79 @@ GPIO expander with Bluetooth's. Mainline's device tree gives that line to
 neither driver, and the firmware leaves it off, so the chip never shows up.
 `boot/bcm2837-rpi-3-a-plus.dts` gives it to the Wi-Fi power sequence, as the
 Pi 3 B+'s does (there is no Bluetooth driver here to disturb).
+
+### Installing apps
+
+An app is its folder in `/apps` (`/apps/<name>/<name>`, its program, with
+`<name>.icon` and its `NOTICES`). The build packs each of its apps
+(`build.zig`'s `apps`) as that folder in a tar file (`tools/mkapp.zig`:
+the program 0755, everything else 0644), compressed with xz, and writes the
+catalogue, `apps.json` (`tools/mkcatalogue.zig`), all in `zig-out/apps`:
+
+```json
+{
+  "version": "<commit>",
+  "apps": [
+    {
+      "name": "dazzle-demo",
+      "title": "Demo",
+      "description": "A spinning 3D shape that shows off the graphics, with controls to play with",
+      "icon": "view_in_ar",
+      "file": "dazzle-demo.tar.xz",
+      "size": 92624,
+      "sha256": "<the archive's SHA-256, in hex>"
+    }
+  ]
+}
+```
+
+CI publishes them beside the image, and the settings app gets them from
+there: `https://github.com/robert-ancell/dazzle/releases/latest/download/`
+unless built with `-Dapps-url=<url>` (`build_info.apps_url`; an `http://`
+URL, such as a local `python3 -m http.server` in `zig-out/apps`, works for
+trying it out).
+
+The apps are the user's, so the settings app installs and removes them
+itself, without privileges (`src/settings/store.zig`):
+
+- **Where they live:** the first time `/data` is there (on the first start,
+  once setup has made it), init copies the boot partition's `apps/` to
+  `/data/apps` (written as `apps.new`, then renamed), owned by the user,
+  and on every start bind-mounts it at `/apps` (`src/init/apps.zig`).
+  Before that, `/apps` is the boot partition's, read-only, and nothing can
+  be installed.
+- **The catalogue** is downloaded when the Apps page is first shown (and
+  with Refresh), and kept as `/apps/.catalogue.json`, so the page lists the
+  apps without a network. A catalogue that does not parse, or names an
+  app that is not a plain folder name (lower-case letters, digits and
+  dashes), is refused.
+- **Installing** downloads the archive and checks its size and SHA-256
+  against the catalogue, then unpacks it into `/apps/.install-<name>`,
+  accepting only plain files and folders inside `<name>/` (no links, no
+  `..`), and renames the app's folder into place, moving an installed copy
+  out of the way first.
+- **Removing** renames the folder to `/apps/.remove-<name>`, then deletes
+  it.
+- Downloads run in a child process (forked), which reports back through a
+  pipe, so the window goes on meanwhile, one at a time; one that takes
+  more than 10 minutes is stopped. HTTPS is Zig's `std.http.Client` with
+  TLS 1.2/1.3, trusting the authorities in `/os/certs/ca-certificates.pem`
+  (Mozilla's list, as certifi publishes it; the build pins its version and
+  checksum).
+- The dock follows `/apps`: the shell looks at its modification time every
+  second and lists the apps again when it changes, so an app shows up, or
+  goes, as it is installed or removed.
+
+Names and the time, which HTTPS needs, come from the network manager
+(`src/init/netconf.zig`): when an interface gets an address it writes the
+name servers DHCP gave (or else the gateway) to `/etc/resolv.conf`, where
+Zig's resolver looks, and sets the clock once by SNTP from DHCP's time
+servers (option 42), or else `pool.ntp.org`, looked up with a small DNS
+client of its own. The Pi has no clock that keeps time while it is off, and
+certificates are valid only for a while, so until the clock is set
+downloads say so. SNTP is not authenticated, so the clock is as
+trustworthy as the network; the archives' checksums come from the
+catalogue, fetched over HTTPS.
 
 ### The Files app
 
@@ -1157,6 +1246,8 @@ GPU or display).
   and turning a passphrase into a key without holding up the manager.
 - Setup: more pages (language, keyboard, network); keeping the Ethernet
   addressing chosen in Settings in `/data`; a way to shut down cleanly.
+- Apps: updating installed ones (the catalogue's `version`), signing the
+  catalogue, and apps from more than one place.
 - The shell: `wl_output`, more than one visible window, blending for
   translucent windows, pointer acceleration, keymaps other than US,
   multi-finger gestures, and kinetic scrolling.

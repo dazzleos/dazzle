@@ -34,6 +34,7 @@ const Option = struct {
     const router = 3;
     const dns = 6;
     const hostname = 12;
+    const ntp = 42;
     const requested_ip = 50;
     const lease_time = 51;
     const message_type = 53;
@@ -88,7 +89,7 @@ pub fn build(buf: *[max_message_size]u8, r: Request) []const u8 {
     if (r.server_id) |ip| put(buf, &at, Option.server_id, &ip);
     if (r.hostname.len > 0) put(buf, &at, Option.hostname, r.hostname[0..@min(r.hostname.len, 63)]);
     put(buf, &at, Option.parameter_list, &.{
-        Option.subnet_mask, Option.router, Option.dns, Option.lease_time, Option.server_id, Option.renewal_time, Option.rebinding_time,
+        Option.subnet_mask, Option.router, Option.dns, Option.ntp, Option.lease_time, Option.server_id, Option.renewal_time, Option.rebinding_time,
     });
     buf[at] = Option.end;
     at += 1;
@@ -102,6 +103,9 @@ pub const Reply = struct {
     server_id: ?Ip4 = null,
     subnet_mask: ?Ip4 = null,
     router: ?Ip4 = null,
+    /// Name servers, and time servers (the first few of each).
+    dns: Servers = .{},
+    ntp: Servers = .{},
     /// Seconds; null means the server did not say.
     lease_time: ?u32 = null,
     renewal_time: ?u32 = null,
@@ -149,6 +153,8 @@ pub fn parse(msg: []const u8, mac: Mac) ?Reply {
             Option.router => if (len >= 4) {
                 r.router = data[0..4].*;
             },
+            Option.dns => r.dns = .parse(data),
+            Option.ntp => r.ntp = .parse(data),
             Option.lease_time => if (len == 4) {
                 r.lease_time = std.mem.readInt(u32, data[0..4], .big);
             },
@@ -164,11 +170,30 @@ pub fn parse(msg: []const u8, mac: Mac) ?Reply {
     return if (have_type) r else null;
 }
 
-/// The address, mask and gateway granted by an ACK, and when to renew.
+/// Up to three servers' addresses, from an option listing them.
+pub const Servers = struct {
+    list: [3]Ip4 = undefined,
+    len: usize = 0,
+
+    fn parse(data: []const u8) Servers {
+        var s: Servers = .{};
+        while (s.len < s.list.len and (s.len + 1) * 4 <= data.len) : (s.len += 1) s.list[s.len] = data[s.len * 4 ..][0..4].*;
+        return s;
+    }
+
+    pub fn slice(s: *const Servers) []const Ip4 {
+        return s.list[0..s.len];
+    }
+};
+
+/// The address, mask and gateway granted by an ACK (with the name and
+/// time servers), and when to renew.
 pub const Lease = struct {
     address: Ip4,
     prefix: u6,
     gateway: ?Ip4,
+    dns: Servers,
+    ntp: Servers,
     server: Ip4,
     /// Seconds from when the lease was granted.
     renew_after: u32,
@@ -183,6 +208,8 @@ pub const Lease = struct {
             .address = ack.yiaddr,
             .prefix = if (ack.subnet_mask) |m| prefixLength(m) else defaultPrefix(ack.yiaddr),
             .gateway = ack.router,
+            .dns = ack.dns,
+            .ntp = ack.ntp,
             .server = ack.server_id orelse server,
             .renew_after = @min(ack.renewal_time orelse length / 2, length),
             .rebind_after = @min(ack.rebinding_time orelse length / 8 * 7, length),
@@ -262,7 +289,10 @@ test "parse an ack" {
         3,  8, 10,  0,   2,   2,
         10, 0, 2,   3,   51,  4,
         0,  1, 81,  128, 54,  4,
-        10, 0, 2,   2,
+        10, 0, 2,   2,   6,   8,
+        10, 0, 2,   3,   1,   1,
+        1,  1, 42,  4,   10,  0,
+        2,  4,
     });
     const r = parse(msg, test_mac).?;
     try testing.expectEqual(MessageType.ack, r.type);
@@ -275,6 +305,8 @@ test "parse an ack" {
     try testing.expectEqual(@as(u32, 43200), lease.renew_after);
     try testing.expectEqual(@as(u32, 75600), lease.rebind_after);
     try testing.expectEqual(Ip4{ 10, 0, 2, 2 }, lease.server);
+    try testing.expectEqualSlices(Ip4, &.{ .{ 10, 0, 2, 3 }, .{ 1, 1, 1, 1 } }, lease.dns.slice());
+    try testing.expectEqualSlices(Ip4, &.{.{ 10, 0, 2, 4 }}, lease.ntp.slice());
 }
 
 test "replies for other clients or malformed ones are ignored" {

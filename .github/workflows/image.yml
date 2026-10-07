@@ -1,6 +1,8 @@
-# Tests and builds the SD card image on every push and pull request, and
-# publishes it as the "latest" release on pushes to the default branch
-# (README.md's download link). See ARCHITECTURE.md, Continuous integration.
+# Tests and builds the SD card image and the apps' archives on every push
+# and pull request, and publishes them as the "latest" release on pushes to
+# the default branch (README.md's download link; Settings downloads the app
+# catalogue, apps.json, and apps from there). See ARCHITECTURE.md,
+# Continuous integration.
 name: Image
 
 on:
@@ -71,6 +73,9 @@ jobs:
           mkdir dist
           xz -T0 -9 -c zig-out/dazzle.img > dist/dazzle.img.xz
           (cd dist && sha256sum dazzle.img.xz > dazzle.img.xz.sha256)
+          # The apps' archives and their catalogue, which Settings downloads
+          # from beside the image.
+          cp zig-out/apps/* dist/
           ls -l dist
 
       - uses: actions/upload-artifact@v4
@@ -108,6 +113,6 @@ jobs:
           (Choose OS, then Use Custom); see the [README](https://github.com/$GH_REPO#installing).
           NOTES
           gh release delete latest --cleanup-tag --yes || true
-          gh release create latest dist/dazzle.img.xz dist/dazzle.img.xz.sha256 \
+          gh release create latest dist/* \
             --target "$GITHUB_SHA" --title "Dazzle (latest build, $short)" \
             --notes-file notes.md --latest

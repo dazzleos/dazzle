@@ -7,6 +7,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
 const dhcp = @import("dhcp.zig");
+const netconf = @import("netconf.zig");
 
 const Ip4 = dhcp.Ip4;
 const print = sys.print;
@@ -222,6 +223,7 @@ pub fn setStatic(name: []const u8, address: Ip4, prefix: u6, gateway: ?Ip4) Erro
     defer sys.close(ctl);
     try configure(ctl, &ifc, address, prefix, gateway);
     logAddress(&ifc, address, prefix, gateway, "static");
+    netconf.online(&.{}, &.{}, gateway);
 }
 
 /// Removes the address of the interface called `name`.
@@ -334,6 +336,7 @@ fn dhcpSession(ctl: linux.fd_t, ifc: *const Interface, previous: *?Ip4) Error!vo
             if (!configured or previous.* == null or !std.mem.eql(u8, &previous.*.?, &lease.address)) {
                 var how_buf: [48]u8 = undefined;
                 logAddress(ifc, lease.address, lease.prefix, lease.gateway, std.fmt.bufPrint(&how_buf, "DHCP, lease {d} s", .{lease.expires_after}) catch "DHCP");
+                netconf.online(lease.dns.slice(), lease.ntp.slice(), lease.gateway);
             }
             configured = true;
             previous.* = lease.address;

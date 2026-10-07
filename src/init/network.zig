@@ -42,7 +42,8 @@ pub fn start() ?linux.pid_t {
             return null;
         },
     }
-    sys.dropPrivilegesKeeping(&.{ .net_admin, .net_raw, .net_bind_service }) catch |err| {
+    // And setting the clock, from the network's time (netconf.zig).
+    sys.dropPrivilegesKeeping(&.{ .net_admin, .net_raw, .net_bind_service, .sys_time }) catch |err| {
         print("dazzle: network: cannot drop privileges ({s})\n", .{@errorName(err)});
         linux.exit(1);
     };

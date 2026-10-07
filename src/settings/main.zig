@@ -7,6 +7,8 @@
 //! manager, which answers no other program (see sys.network). The figures
 //! that change are read again every second (see info.zig); the window is built with the
 //! `ui` toolkit (see view.zig), and only what changed is drawn again.
+//! Apps are installed and removed on the Apps page (see store.zig): the
+//! list of them is downloaded when the page is first shown.
 //!
 //!     dazzle-settings [font.ttf]
 //!
@@ -23,6 +25,7 @@ const wayland = @import("wayland");
 const build_info = @import("build_info");
 const info = @import("info.zig");
 const view = @import("view.zig");
+const store = @import("store.zig");
 
 const print = sys.print;
 
@@ -80,6 +83,10 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     // Ethernet address).
     var actions: view.Actions = .{};
     // What the title bar's buttons do, and how small the window may be.
+    // The apps that can be installed, and which are.
+    var apps: store.Store = .init(gpa, build_info.apps_url);
+    var installed: [64]bool = undefined;
+    var apps_writable = store.writable(store.apps_dir);
     var controls: app.Controls = .{ .win = win };
     win.setMinSize(view.min_size[0], view.min_size[1]);
 
@@ -126,6 +133,23 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             next_update = now + std.time.ns_per_s;
             usage = monitor.read(now);
             network = info.Network.read();
+            apps_writable = store.writable(store.apps_dir);
+            dirty = true;
+        }
+        // Installing, or getting the list of apps.
+        if (apps.poll()) dirty = true;
+        if (actions.install != null or actions.remove != null or actions.refresh_apps) {
+            if (actions.install) |*n| apps.install(n.slice());
+            if (actions.remove) |*n| apps.uninstall(n.slice());
+            if (actions.refresh_apps) apps.refresh(true);
+            actions.install = null;
+            actions.remove = null;
+            actions.refresh_apps = false;
+            dirty = true;
+        }
+        // The list is got when the page is first shown.
+        if (view.shownPage(window_ui) == .apps and !apps.asked) {
+            apps.refresh(false);
             dirty = true;
         }
         if (actions.connect != null or actions.disconnect or actions.ethernet != null) {
@@ -158,6 +182,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         idle = true;
         if (!suspended and (dirty or window_ui.needs_frame)) {
             dirty = false;
+            const catalogue = apps.apps()[0..@min(apps.apps().len, installed.len)];
+            for (catalogue, installed[0..catalogue.len]) |a, *i| i.* = store.isInstalled(store.apps_dir, a.name);
             window_ui.frame(width, height, now, view.Settings{
                 .commit = build_info.commit,
                 .system = &system,
@@ -165,6 +191,14 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
                 .network = &network,
                 .manager = if (report) |*r| r else null,
                 .actions = &actions,
+                .apps = .{
+                    .list = catalogue,
+                    .installed = installed[0..catalogue.len],
+                    .busy = apps.busy(),
+                    .message = apps.message(),
+                    .writable = apps_writable,
+                    .source = build_info.apps_url,
+                },
                 .on_close = .of(&controls, app.Controls.close),
                 .on_maximize = .of(&controls, app.Controls.toggleMaximized),
                 .on_drag = .of(&controls, app.Controls.drag),
@@ -208,4 +242,5 @@ fn openWindow(gpa: std.mem.Allocator, init: std.process.Init.Minimal, dev: *vc4.
 test {
     _ = info;
     _ = view;
+    _ = @import("store.zig");
 }
