@@ -18,7 +18,7 @@ const proto = sys.system;
 
 const config_file = storage.boot_dir ++ "/config.txt";
 
-const max_files = 16;
+const max_files = 64;
 const max_name = 64;
 /// How much a step copies.
 const chunk = 256 * 1024;

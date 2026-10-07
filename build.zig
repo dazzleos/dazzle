@@ -383,71 +383,84 @@ fn exists(b: *std.Build, path: []const u8) bool {
     return true;
 }
 
-const linux_version = "v7.2";
+/// The Raspberry Pi kernel: the tip of its default branch (a long-term
+/// kernel, with upstream's stable fixes merged in), fetched again at every
+/// build so the system always has the latest fixes.
+const linux_repo = "https://github.com/raspberrypi/linux.git";
+
+/// The device trees the firmware loads (it picks one by the board, and the
+/// slot's kernel.img or kernel7.img by its CPU). The Pi 1 A and A+, and the
+/// Pi 3 A+, use the B's, B+'s and 3 B+'s.
+const device_trees = [_][]const u8{
+    "bcm2708-rpi-b.dtb",
+    "bcm2708-rpi-b-rev1.dtb",
+    "bcm2708-rpi-b-plus.dtb",
+    "bcm2708-rpi-cm.dtb",
+    "bcm2708-rpi-zero.dtb",
+    "bcm2708-rpi-zero-w.dtb",
+    "bcm2709-rpi-2-b.dtb",
+    "bcm2709-rpi-cm2.dtb",
+    "bcm2710-rpi-2-b.dtb",
+    "bcm2710-rpi-3-b.dtb",
+    "bcm2710-rpi-3-b-plus.dtb",
+    "bcm2710-rpi-cm0.dtb",
+    "bcm2710-rpi-cm3.dtb",
+    "bcm2710-rpi-zero-2.dtb",
+    "bcm2710-rpi-zero-2-w.dtb",
+};
+
+/// The device tree overlays the firmware may apply: the display driver
+/// (config.txt's dtoverlay=vc4-kms-v3d) and the cameras (camera_auto_detect
+/// picks one). overlay_map.dtb tells the firmware which overlays suit
+/// which board.
+const overlays = [_][]const u8{ "vc4-kms-v3d.dtbo", "imx219.dtbo", "ov5647.dtbo", "overlay_map.dtb" };
 
 const Kernel = struct {
-    /// The last step of the kernel build.
+    /// The last step of the kernel builds.
     step: *std.Build.Step,
-    /// Where make puts its output (O=).
-    out: []const u8,
+    /// Where make puts the ARMv6 and ARMv7 kernels (O=).
+    v6: []const u8,
+    v7: []const u8,
     /// The source tree.
     src: []const u8,
 
-    /// Builds a device tree of our own the way the kernel builds its own
-    /// (preprocessed, then compiled by the kernel's dtc), so it can include
-    /// one of the kernel's: `#include "arm/broadcom/<board>.dts"`.
-    fn deviceTree(k: Kernel, b: *std.Build, dts: std.Build.LazyPath, name: []const u8) std.Build.LazyPath {
-        return k.compileDts(b, dts, b.fmt("{s}.dtb", .{name}));
+    /// kernel.img: ARMv6, for the Pi 1, Zero and Zero W.
+    fn armv6(k: Kernel, b: *std.Build) std.Build.LazyPath {
+        return .{ .cwd_relative = b.pathJoin(&.{ k.v6, "arch/arm/boot/zImage" }) };
     }
 
-    /// A device tree overlay of our own, for the firmware to apply
-    /// (`dtoverlay=<name>`, or camera_auto_detect).
-    fn overlay(k: Kernel, b: *std.Build, dts: std.Build.LazyPath, name: []const u8) std.Build.LazyPath {
-        return k.compileDts(b, dts, b.fmt("{s}.dtbo", .{name}));
+    /// kernel7.img: ARMv7, with SMP, for the Pi 2, 3 and Zero 2 W.
+    fn armv7(k: Kernel, b: *std.Build) std.Build.LazyPath {
+        return .{ .cwd_relative = b.pathJoin(&.{ k.v7, "arch/arm/boot/zImage" }) };
     }
 
-    fn compileDts(k: Kernel, b: *std.Build, dts: std.Build.LazyPath, out_name: []const u8) std.Build.LazyPath {
-        const name = std.fs.path.stem(out_name);
-        const includes = b.pathJoin(&.{ k.src, "scripts/dtc/include-prefixes" });
-        const cpp = b.addSystemCommand(&.{ b.graph.zig_exe, "cc", "-E", "-nostdinc", "-I", includes, "-undef", "-D__DTS__", "-x", "assembler-with-cpp", "-o" });
-        const pre = cpp.addOutputFileArg(b.fmt("{s}.dts", .{name}));
-        cpp.addFileArg(dts);
-        // What our device trees include, so a change to it builds them again.
-        cpp.addFileInput(b.path("boot/rpi-camera.dtsi"));
-        cpp.step.dependOn(k.step);
-        const dtc = b.addSystemCommand(&.{b.pathJoin(&.{ k.out, "scripts/dtc/dtc" })});
-        dtc.addArgs(&.{ "-q", "-b", "0", b.fmt("-i{s}", .{includes}), "-@", "-o" });
-        const out = dtc.addOutputFileArg(out_name);
-        dtc.addFileArg(pre);
-        return out;
+    fn deviceTree(k: Kernel, b: *std.Build, name: []const u8) std.Build.LazyPath {
+        return .{ .cwd_relative = b.pathJoin(&.{ k.v7, "arch/arm/boot/dts/broadcom", name }) };
     }
 
-    fn file(k: Kernel, b: *std.Build, sub_path: []const u8) std.Build.LazyPath {
-        return .{ .cwd_relative = b.pathJoin(&.{ k.out, sub_path }) };
+    fn overlay(k: Kernel, b: *std.Build, name: []const u8) std.Build.LazyPath {
+        return .{ .cwd_relative = b.pathJoin(&.{ k.v7, "arch/arm/boot/dts/overlays", name }) };
     }
 };
 
-/// Linux, built with make (as the kernel must be): tinyconfig, plus the
-/// options in kernel/dazzle.config, checked to have all taken effect.
-/// make does its own incremental building, so this runs every time and is
-/// quick when nothing changed.
+/// Linux, built with make (as the kernel must be) with GCC, as Raspberry Pi
+/// build it: twice, as they do, ARMv6 (kernel.img) and ARMv7 with SMP
+/// (kernel7.img), each tinyconfig plus the options in kernel/dazzle.config
+/// and kernel/armv6.config or kernel/armv7.config, checked to have all
+/// taken effect. make does its own incremental building, so this runs every
+/// time and is quick when nothing changed.
 fn addKernel(b: *std.Build) Kernel {
-    const linux_dir = b.option([]const u8, "linux", "Linux source tree (default: build/linux, cloned at " ++ linux_version ++ " if missing)") orelse
-        b.pathFromRoot("build/linux");
-    const cross = b.option([]const u8, "cross-compile", "Build the kernel with this GCC cross compiler prefix (e.g. arm-linux-gnueabihf-) instead of LLVM");
+    const own_tree = b.option([]const u8, "linux", "Linux source tree to build, as it is (default: build/linux-rpi, the Raspberry Pi kernel's default branch, fetched again at every build)");
+    const offline = b.option(bool, "offline", "Do not fetch the latest Raspberry Pi kernel (build what build/linux-rpi has)") orelse false;
+    const linux_dir = own_tree orelse b.pathFromRoot("build/linux-rpi");
+    const cross = b.option([]const u8, "cross-compile", "The GCC cross compiler prefix for the kernel (default: arm-linux-gnueabihf-)") orelse "arm-linux-gnueabihf-";
     const out = b.pathFromRoot("build/kernel");
     const jobs = std.Thread.getCpuCount() catch 4;
 
     var tools: std.ArrayList([]const u8) = .empty;
-    tools.appendSlice(b.allocator, &.{ "make:make", "flex:flex", "bison:bison", "bc:bc" }) catch @panic("OOM");
-    const clone = !exists(b, linux_dir);
-    if (clone) tools.append(b.allocator, "git:git") catch @panic("OOM");
-    if (cross) |prefix| {
-        tools.append(b.allocator, b.fmt("{s}gcc:gcc-arm-linux-gnueabihf", .{prefix})) catch @panic("OOM");
-        tools.append(b.allocator, b.fmt("{s}ld:binutils-arm-linux-gnueabihf", .{prefix})) catch @panic("OOM");
-    } else {
-        tools.appendSlice(b.allocator, &.{ "clang:clang", "ld.lld:lld", "llvm-ar:llvm", "llvm-nm:llvm", "llvm-objcopy:llvm", "llvm-objdump:llvm", "llvm-readelf:llvm", "llvm-strip:llvm" }) catch @panic("OOM");
-    }
+    tools.appendSlice(b.allocator, &.{ "make:make", "flex:flex", "bison:bison", "bc:bc", "git:git" }) catch @panic("OOM");
+    tools.append(b.allocator, b.fmt("{s}gcc:gcc-arm-linux-gnueabihf", .{cross})) catch @panic("OOM");
+    tools.append(b.allocator, b.fmt("{s}ld:binutils-arm-linux-gnueabihf", .{cross})) catch @panic("OOM");
     var last: *std.Build.Step = &requireTools(b, tools.items).step;
 
     const Chain = struct {
@@ -457,13 +470,18 @@ fn addKernel(b: *std.Build) Kernel {
             prev.* = &run.step;
         }
     };
-    if (clone) Chain.add(&last, b.addSystemCommand(&.{ "git", "clone", "--depth", "1", "--branch", linux_version, "https://github.com/torvalds/linux.git", linux_dir }));
-    Chain.add(&last, b.addSystemCommand(&.{ "mkdir", "-p", out }));
+    // The source: the tip of the default branch, cloned or brought up to
+    // date (just that commit, without history).
+    if (own_tree == null) {
+        if (!exists(b, linux_dir)) {
+            Chain.add(&last, b.addSystemCommand(&.{ "git", "clone", "--depth", "1", linux_repo, linux_dir }));
+        } else if (!offline) {
+            Chain.add(&last, b.addSystemCommand(&.{ "git", "-C", linux_dir, "fetch", "--depth", "1", "origin", "HEAD" }));
+            Chain.add(&last, b.addSystemCommand(&.{ "git", "-C", linux_dir, "reset", "-q", "--hard", "FETCH_HEAD" }));
+        }
+    }
 
-    const toolchain: []const []const u8 = if (cross) |prefix|
-        &.{ "ARCH=arm", b.fmt("CROSS_COMPILE={s}", .{prefix}) }
-    else
-        &.{ "ARCH=arm", "LLVM=1" };
+    const toolchain: []const []const u8 = &.{ "ARCH=arm", b.fmt("CROSS_COMPILE={s}", .{cross}) };
     const make = struct {
         fn cmd(bb: *std.Build, dir: []const u8, o: []const u8, tc: []const []const u8, targets: []const []const u8) *std.Build.Step.Run {
             const run = bb.addSystemCommand(&.{ "make", "-s", "-C", dir, bb.fmt("O={s}", .{o}) });
@@ -472,22 +490,37 @@ fn addKernel(b: *std.Build) Kernel {
             return run;
         }
     }.cmd;
-    Chain.add(&last, make(b, linux_dir, out, toolchain, &.{"tinyconfig"}));
-    const merge = b.addSystemCommand(&.{ b.pathJoin(&.{ linux_dir, "scripts/kconfig/merge_config.sh" }), "-m", "-O", out, b.pathJoin(&.{ out, ".config" }) });
-    merge.addFileArg(b.path("kernel/dazzle.config"));
-    // It lists every option it changes; show that only if it fails.
-    merge.expectExitCode(0);
-    Chain.add(&last, merge);
-    Chain.add(&last, make(b, linux_dir, out, toolchain, &.{"olddefconfig"}));
-    const check_config = b.addRunArtifact(hostTool(b, "check"));
-    check_config.addArg("config");
-    check_config.addFileArg(b.path("kernel/dazzle.config"));
-    check_config.addArg(b.pathJoin(&.{ out, ".config" }));
-    Chain.add(&last, check_config);
-    Chain.add(&last, make(b, linux_dir, out, toolchain, &.{
-        b.fmt("-j{d}", .{jobs}), "zImage", "broadcom/bcm2835-rpi-zero.dtb", "broadcom/bcm2835-rpi-zero-w.dtb", "broadcom/bcm2837-rpi-3-a-plus.dtb",
-    }));
-    return .{ .step = last, .out = out, .src = linux_dir };
+    var dirs: [2][]const u8 = undefined;
+    for ([_][]const u8{ "armv6", "armv7" }, &dirs) |arch, *dir| {
+        const o = b.pathJoin(&.{ out, arch });
+        dir.* = o;
+        const fragment = b.path(b.fmt("kernel/{s}.config", .{arch}));
+        Chain.add(&last, b.addSystemCommand(&.{ "mkdir", "-p", o }));
+        Chain.add(&last, make(b, linux_dir, o, toolchain, &.{"tinyconfig"}));
+        const merge = b.addSystemCommand(&.{ b.pathJoin(&.{ linux_dir, "scripts/kconfig/merge_config.sh" }), "-m", "-O", o, b.pathJoin(&.{ o, ".config" }) });
+        merge.addFileArg(b.path("kernel/dazzle.config"));
+        merge.addFileArg(fragment);
+        // It lists every option it changes; show that only if it fails.
+        merge.expectExitCode(0);
+        Chain.add(&last, merge);
+        Chain.add(&last, make(b, linux_dir, o, toolchain, &.{"olddefconfig"}));
+        for ([_]std.Build.LazyPath{ b.path("kernel/dazzle.config"), fragment }) |wanted| {
+            const check_config = b.addRunArtifact(hostTool(b, "check"));
+            check_config.addArg("config");
+            check_config.addFileArg(wanted);
+            check_config.addArg(b.pathJoin(&.{ o, ".config" }));
+            Chain.add(&last, check_config);
+        }
+        var targets: std.ArrayList([]const u8) = .empty;
+        targets.appendSlice(b.allocator, &.{ b.fmt("-j{d}", .{jobs}), "zImage" }) catch @panic("OOM");
+        // The device trees and overlays once, with the ARMv7 kernel.
+        if (std.mem.eql(u8, arch, "armv7")) {
+            for (device_trees) |d| targets.append(b.allocator, b.fmt("broadcom/{s}", .{d})) catch @panic("OOM");
+            for (overlays) |d| targets.append(b.allocator, b.fmt("overlays/{s}", .{d})) catch @panic("OOM");
+        }
+        Chain.add(&last, make(b, linux_dir, o, toolchain, targets.items));
+    }
+    return .{ .step = last, .v6 = dirs[0], .v7 = dirs[1], .src = linux_dir };
 }
 
 /// Raspberry Pi firmware (the GPU's boot loader), pinned by checksum.
@@ -503,18 +536,25 @@ const firmware = [_]struct { name: []const u8, sha256: []const u8 }{
 /// /os/firmware/brcm (it asks for "brcm/<name>", and cmdline.txt's
 /// firmware_class.path=/os/firmware has the kernel look from there, not
 /// /lib/firmware), from Raspberry Pi OS's firmware-nonfree (pinned by
-/// commit and checksum), named for each board's device tree so the driver
-/// finds it. The licence (firmware/LICENCE.cypress) goes with it.
+/// commit and checksum), by the chip's name: the driver asks for the
+/// board's own first, then these. The licence (firmware/LICENCE.cypress)
+/// goes with it.
 const wifi_firmware_commit = "3bab0f823f5b53150b76aab77093adef6655b920";
 const wifi_firmware = [_]struct { name: []const u8, source: []const u8, sha256: []const u8 }{
-    // Pi Zero W: CYW43430.
-    .{ .name = "brcmfmac43430-sdio.raspberrypi,model-zero-w.bin", .source = "cypress/cyfmac43430-sdio.bin", .sha256 = "0717f8e798f3962230e76e9d840385ba127a38d31d6a55acd5c97cf53e4acc9d" },
-    .{ .name = "brcmfmac43430-sdio.raspberrypi,model-zero-w.txt", .source = "brcm/brcmfmac43430-sdio.txt", .sha256 = "fc3949a4c32f07c18308e7e145c7615be314158e7d714a80e04e4791f16495f9" },
-    .{ .name = "brcmfmac43430-sdio.raspberrypi,model-zero-w.clm_blob", .source = "cypress/cyfmac43430-sdio.clm_blob", .sha256 = "3376b9c9b32d16bf762e21c7fafb665365070ae240d092498d0d1987c22022aa" },
-    // Pi 3 A+: CYW43455.
-    .{ .name = "brcmfmac43455-sdio.raspberrypi,3-model-a-plus.bin", .source = "cypress/cyfmac43455-sdio-standard.bin", .sha256 = "d608f866582519c0a28d86db43040f4f1b98dd1d153e72e9752586546b4a36c3" },
-    .{ .name = "brcmfmac43455-sdio.raspberrypi,3-model-a-plus.txt", .source = "brcm/brcmfmac43455-sdio.txt", .sha256 = "ca709be81a78bdb6932936374f39943acbd7af07fae6151011127599a3ce9e3d" },
-    .{ .name = "brcmfmac43455-sdio.raspberrypi,3-model-a-plus.clm_blob", .source = "cypress/cyfmac43455-sdio.clm_blob", .sha256 = "9823842cae9fb9a5dd1e5fb31f595516ec7deee341354bef30bb3026eee29cc1" },
+    // CYW43430: the Zero W and the Pi 3 B.
+    .{ .name = "brcmfmac43430-sdio.bin", .source = "cypress/cyfmac43430-sdio.bin", .sha256 = "0717f8e798f3962230e76e9d840385ba127a38d31d6a55acd5c97cf53e4acc9d" },
+    .{ .name = "brcmfmac43430-sdio.txt", .source = "brcm/brcmfmac43430-sdio.txt", .sha256 = "fc3949a4c32f07c18308e7e145c7615be314158e7d714a80e04e4791f16495f9" },
+    .{ .name = "brcmfmac43430-sdio.clm_blob", .source = "cypress/cyfmac43430-sdio.clm_blob", .sha256 = "3376b9c9b32d16bf762e21c7fafb665365070ae240d092498d0d1987c22022aa" },
+    // CYW43455: the Pi 3 B+ and 3 A+.
+    .{ .name = "brcmfmac43455-sdio.bin", .source = "cypress/cyfmac43455-sdio-standard.bin", .sha256 = "d608f866582519c0a28d86db43040f4f1b98dd1d153e72e9752586546b4a36c3" },
+    .{ .name = "brcmfmac43455-sdio.txt", .source = "brcm/brcmfmac43455-sdio.txt", .sha256 = "ca709be81a78bdb6932936374f39943acbd7af07fae6151011127599a3ce9e3d" },
+    .{ .name = "brcmfmac43455-sdio.clm_blob", .source = "cypress/cyfmac43455-sdio.clm_blob", .sha256 = "9823842cae9fb9a5dd1e5fb31f595516ec7deee341354bef30bb3026eee29cc1" },
+    // CYW43436 (and the earlier 43436s): the Zero 2 W.
+    .{ .name = "brcmfmac43436-sdio.bin", .source = "brcm/brcmfmac43436-sdio.bin", .sha256 = "510a7dd1e056199b309425548ee0bd846993a1837ac7fa1e4d3e641f05a1327a" },
+    .{ .name = "brcmfmac43436-sdio.txt", .source = "brcm/brcmfmac43436-sdio.txt", .sha256 = "4cda90facd8844cff60d80b34b24ecbae76adb9a62508a109461b8bf42b478d1" },
+    .{ .name = "brcmfmac43436-sdio.clm_blob", .source = "brcm/brcmfmac43436-sdio.clm_blob", .sha256 = "fce7cbb62ffa6a5a65ca97b13f6fbf28d06c02d986c2072d65bf72164755fc34" },
+    .{ .name = "brcmfmac43436s-sdio.bin", .source = "brcm/brcmfmac43436s-sdio.bin", .sha256 = "68b9bcc9855d91733cd44c21de4cb507c91b0d32d838c0696def5eb96c99e2de" },
+    .{ .name = "brcmfmac43436s-sdio.txt", .source = "brcm/brcmfmac43436s-sdio.txt", .sha256 = "37a8b85a5a9742761101b764a07bc4d0c8b09f2e180eaea3b503a834277ad595" },
 };
 
 /// Downloads the files of `dir` that are missing from `url_of(name)`,
@@ -609,22 +649,40 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.B
     // Slot A: a whole system. Its command line says which slot it is. The
     // system makes slot B, a copy, on the card on the first start.
     const cmdline = std.mem.trimEnd(u8, std.Io.Dir.cwd().readFileAlloc(b.graph.io, b.pathFromRoot("boot/cmdline.txt"), b.allocator, .limited(4096)) catch @panic("cannot read boot/cmdline.txt"), "\n");
-    const files = [_]CardFile{
-        .{ "zImage", kernel.file(b, "arch/arm/boot/zImage") },
-        // Mainline's, with the camera connector's wiring (and the 3 A+'s
-        // Wi-Fi chip's power) added: see the sources.
-        .{ "bcm2835-rpi-zero.dtb", kernel.deviceTree(b, b.path("boot/bcm2835-rpi-zero.dts"), "bcm2835-rpi-zero") },
-        .{ "bcm2835-rpi-zero-w.dtb", kernel.deviceTree(b, b.path("boot/bcm2835-rpi-zero-w.dts"), "bcm2835-rpi-zero-w") },
-        .{ "bcm2837-rpi-3-a-plus.dtb", kernel.deviceTree(b, b.path("boot/bcm2837-rpi-3-a-plus.dts"), "bcm2837-rpi-3-a-plus") },
-        // The cameras, which the firmware applies to them when it finds
-        // one (camera_auto_detect).
-        .{ "overlays/imx219.dtbo", kernel.overlay(b, b.path("boot/overlays/imx219.dts"), "imx219") },
-        .{ "overlays/ov5647.dtbo", kernel.overlay(b, b.path("boot/overlays/ov5647.dts"), "ov5647") },
+    // What system this is: Dazzle's commit and the kernel's, and the later
+    // of the times they were made (so a build with a newer kernel is a
+    // newer system, offered as an update even without a change to Dazzle).
+    // A kernel tree without git history counts as Dazzle's commit alone.
+    const version_cmd = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        \\k=$(git -C "$1" log -1 --format="%ct %h" 2>/dev/null) || { echo "$2 $3"; exit; }
+        \\t=${k% *}; [ "$t" -gt "$2" ] || t=$2
+        \\echo "$t $3-${k#* }"
+        ,
+        "version",
+        kernel.src,
+        b.fmt("{d}", .{gitCommitTime(b)}),
+        gitCommit(b),
+    });
+    version_cmd.step.dependOn(kernel.step);
+    version_cmd.has_side_effects = true;
+    const version = version_cmd.captureStdOut(.{ .basename = "version" });
+    var files: std.ArrayList(CardFile) = .empty;
+    files.appendSlice(b.allocator, &.{
+        // The firmware starts kernel.img on the ARMv6 boards and kernel7.img
+        // on the ARMv7 ones.
+        .{ "kernel.img", kernel.armv6(b) },
+        .{ "kernel7.img", kernel.armv7(b) },
         .{ "initramfs.cpio", initramfs },
         // What system the slot holds (sys.system.Version).
-        .{ "version", b.addWriteFiles().add("version", b.fmt("{d} {s}\n", .{ gitCommitTime(b), gitCommit(b) })) },
-    };
-    for (files) |f| boot_files.append(b.allocator, .{ b.fmt("slot-a/{s}", .{f[0]}), f[1] }) catch @panic("OOM");
+        .{ "version", version },
+    }) catch @panic("OOM");
+    // Every board's device tree, and the overlays (the display driver, and
+    // the cameras, applied when the firmware finds one).
+    for (device_trees) |d| files.append(b.allocator, .{ d, kernel.deviceTree(b, d) }) catch @panic("OOM");
+    for (overlays) |d| files.append(b.allocator, .{ b.fmt("overlays/{s}", .{d}), kernel.overlay(b, d) }) catch @panic("OOM");
+    for (files.items) |f| boot_files.append(b.allocator, .{ b.fmt("slot-a/{s}", .{f[0]}), f[1] }) catch @panic("OOM");
     boot_files.append(b.allocator, .{ "slot-a/cmdline.txt", b.addWriteFiles().add("cmdline.txt", b.fmt("{s} dazzle.slot=a\n", .{cmdline})) }) catch @panic("OOM");
     // The same files as an update (zig-out/os: the archive and its
     // manifest, published beside the image; see tools/mkos.zig).
@@ -634,7 +692,7 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.B
         const pack = b.addRunArtifact(hostTool(b, "mkos"));
         pack.addArg("pack");
         const tar = pack.addOutputFileArg("dazzle-os.tar");
-        for (files) |f| pack.addPrefixedFileArg(b.fmt("{s}=", .{f[0]}), f[1]);
+        for (files.items) |f| pack.addPrefixedFileArg(b.fmt("{s}=", .{f[0]}), f[1]);
         pack.step.dependOn(kernel.step);
         const compress = b.addSystemCommand(&.{ "xz", "-9", "-c" });
         compress.step.dependOn(&xz.step);
@@ -643,7 +701,7 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.B
         const manifest = b.addRunArtifact(hostTool(b, "mkos"));
         manifest.addArg("manifest");
         const json = manifest.addOutputFileArg("os.json");
-        manifest.addArgs(&.{ gitCommit(b), b.fmt("{d}", .{gitCommitTime(b)}) });
+        manifest.addFileArg(version);
         manifest.addFileArg(archive);
         os_step.dependOn(&b.addInstallFile(archive, "os/dazzle-os.tar.xz").step);
         os_step.dependOn(&b.addInstallFile(json, "os/os.json").step);
@@ -670,27 +728,54 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.B
 /// The boards Dazzle runs on, as QEMU emulates them.
 const QemuBoard = enum {
     zero,
+    @"pi1a+",
+    pi2b,
+    pi3b,
     @"pi3a+",
 
+    /// QEMU's machine.
+    fn machine(q: QemuBoard) []const u8 {
+        return switch (q) {
+            .zero => "raspi0",
+            .@"pi1a+" => "raspi1ap",
+            .pi2b => "raspi2b",
+            .pi3b => "raspi3b",
+            .@"pi3a+" => "raspi3ap",
+        };
+    }
+
+    /// The device tree the firmware would load.
     fn dtb(q: QemuBoard) []const u8 {
         return switch (q) {
-            .zero => "bcm2835-rpi-zero.dtb",
-            .@"pi3a+" => "bcm2837-rpi-3-a-plus.dtb",
+            .zero => "bcm2708-rpi-zero.dtb",
+            .@"pi1a+" => "bcm2708-rpi-b-plus.dtb",
+            .pi2b => "bcm2709-rpi-2-b.dtb",
+            .pi3b => "bcm2710-rpi-3-b.dtb",
+            .@"pi3a+" => "bcm2710-rpi-3-b-plus.dtb",
         };
+    }
+
+    fn armv7(q: QemuBoard) bool {
+        return q == .pi2b or q == .pi3b or q == .@"pi3a+";
+    }
+
+    /// QEMU starts its Pi 3s in AArch64.
+    fn aarch64(q: QemuBoard) bool {
+        return q == .pi3b or q == .@"pi3a+";
     }
 };
 
-/// Boots the kernel and initramfs in QEMU's raspi0 machine (or raspi3ap,
-/// with -Dqemu-board=pi3a+), with the log server on http://localhost:8080
-/// (-Dhttp-port to change).
+/// Boots the kernel and initramfs in one of QEMU's Raspberry Pi machines
+/// (-Dqemu-board, the Zero's by default), with the log server on
+/// http://localhost:8080 (-Dhttp-port to change).
 fn addQemu(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) void {
-    const board = b.option(QemuBoard, "qemu-board", "The board QEMU emulates: zero (default) or pi3a+") orelse .zero;
-    const program = if (board == .zero) "qemu-system-arm" else "qemu-system-aarch64";
+    const board = b.option(QemuBoard, "qemu-board", "The board QEMU emulates: zero (default), pi1a+, pi2b, pi3b or pi3a+") orelse .zero;
+    const program = if (board.aarch64()) "qemu-system-aarch64" else "qemu-system-arm";
     const tools = requireTools(b, &.{ b.fmt("{s}:{s}", .{ program, program }), "fdtput:device-tree-compiler" });
     // QEMU lacks the power management block the watchdog driver waits for.
     const dtb = b.pathFromRoot(b.fmt("build/qemu-{s}", .{board.dtb()}));
     const copy = b.addSystemCommand(&.{"cp"});
-    copy.addFileArg(kernel.file(b, b.fmt("arch/arm/boot/dts/broadcom/{s}", .{board.dtb()})));
+    copy.addFileArg(kernel.deviceTree(b, board.dtb()));
     copy.addArg(dtb);
     copy.step.dependOn(kernel.step);
     copy.step.dependOn(&tools.step);
@@ -698,21 +783,23 @@ fn addQemu(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) void {
     const patch = b.addSystemCommand(&.{ "fdtput", "-t", "s", dtb, "/soc/watchdog@7e100000", "status", "disabled" });
     patch.step.dependOn(&copy.step);
     patch.has_side_effects = true;
+    // QEMU's USB controller works with mainline's driver (dwc2), not the
+    // Raspberry Pi kernel's own (dwc_otg), as `dtoverlay=dwc2` chooses.
+    const usb = b.addSystemCommand(&.{ "fdtput", "-t", "s", dtb, "/soc/usb@7e980000", "compatible", "brcm,bcm2835-usb" });
+    usb.step.dependOn(&patch.step);
+    usb.has_side_effects = true;
     const port = b.option(u16, "http-port", "Host port for the HTTP log server when running in QEMU (default 8080)") orelse 8080;
-    const qemu = b.addSystemCommand(&.{ program, "-M", if (board == .zero) "raspi0" else "raspi3ap", "-kernel" });
-    const zimage = kernel.file(b, "arch/arm/boot/zImage");
-    switch (board) {
-        .zero => qemu.addFileArg(zimage),
-        // QEMU starts the Pi 3 in AArch64: a stub switches to AArch32 for
-        // the 32-bit kernel. (QEMU's spin loop for the other cores is
-        // AArch64 too, so the kernel brings up only the first.)
-        .@"pi3a+" => {
-            const stub = b.addRunArtifact(hostTool(b, "aarch32boot"));
-            stub.addFileArg(zimage);
-            stub.step.dependOn(kernel.step);
-            qemu.addFileArg(stub.addOutputFileArg("zImage-aarch64"));
-        },
-    }
+    const qemu = b.addSystemCommand(&.{ program, "-M", board.machine(), "-kernel" });
+    const zimage = if (board.armv7()) kernel.armv7(b) else kernel.armv6(b);
+    if (board.aarch64()) {
+        // A stub switches to AArch32 for the 32-bit kernel. (QEMU's spin
+        // loop for the other cores is AArch64 too, so the kernel brings up
+        // only the first.)
+        const stub = b.addRunArtifact(hostTool(b, "aarch32boot"));
+        stub.addFileArg(zimage);
+        stub.step.dependOn(kernel.step);
+        qemu.addFileArg(stub.addOutputFileArg("zImage-aarch64"));
+    } else qemu.addFileArg(zimage);
     qemu.addArgs(&.{ "-dtb", dtb, "-initrd" });
     qemu.addFileArg(initramfs);
     qemu.addArgs(&.{
@@ -721,14 +808,14 @@ fn addQemu(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) void {
         "-netdev",  b.fmt("user,id=net0,hostfwd=tcp:127.0.0.1:{d}-:80", .{port}),
         "-display", "none",
     });
-    // The console: the PL011 on the Zero, the mini UART (the second serial
-    // port) on the Pi 3 A+.
-    if (board == .zero) qemu.addArgs(&.{ "-serial", "mon:stdio" }) else qemu.addArgs(&.{ "-serial", "null", "-serial", "mon:stdio" });
+    // The console: the PL011, the first serial port; on the Pi 3s the mini
+    // UART, the second (the PL011 is the Bluetooth chip's there).
+    if (board.aarch64()) qemu.addArgs(&.{ "-serial", "null", "-serial", "mon:stdio" }) else qemu.addArgs(&.{ "-serial", "mon:stdio" });
     if (b.args) |args| qemu.addArgs(args);
-    qemu.step.dependOn(&patch.step);
+    qemu.step.dependOn(&usb.step);
     qemu.stdio = .inherit;
     qemu.has_side_effects = true;
-    const step = b.step("qemu", "Boot the kernel and initramfs in QEMU (-Dqemu-board=pi3a+ for the Pi 3 A+; arguments after -- go to QEMU)");
+    const step = b.step("qemu", "Boot the kernel and initramfs in QEMU (-Dqemu-board for another board; arguments after -- go to QEMU)");
     step.dependOn(&qemu.step);
 }
 

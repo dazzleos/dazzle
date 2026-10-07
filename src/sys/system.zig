@@ -130,11 +130,12 @@ pub const Request = union(enum) {
 pub const Client = enum { setup, settings };
 
 /// What an OS slot holds: when its source was committed (seconds since
-/// 1970: newer systems have later times) and the commit. The build writes
-/// it in the slot, as "version": "<time> <commit>\n".
+/// 1970: newer systems have later times) and the commit (Dazzle's and the
+/// kernel's, "<commit>-<kernel commit>"). The build writes it in the slot,
+/// as "version": "<time> <commit>\n".
 pub const Version = struct {
     time: u64 = 0,
-    commit_buf: [24]u8 = undefined,
+    commit_buf: [40]u8 = undefined,
     commit_len: u8 = 0,
 
     pub const file_name = "version";
@@ -150,7 +151,7 @@ pub const Version = struct {
     }
 
     pub fn init(time: u64, hash: []const u8) ?Version {
-        if (hash.len == 0 or hash.len > 24) return null;
+        if (hash.len == 0 or hash.len > 40) return null;
         for (hash) |c| if (!(std.ascii.isAlphanumeric(c) or c == '-')) return null;
         var v: Version = .{ .time = time, .commit_len = @intCast(hash.len) };
         @memcpy(v.commit_buf[0..hash.len], hash);

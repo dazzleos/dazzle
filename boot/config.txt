@@ -6,34 +6,26 @@
 # there. (An update writes the other slot, then switches this.)
 os_prefix=slot-a/
 
-# Mainline kernel and device tree; the firmware's default names are for the
-# Raspberry Pi kernel fork. [pi0] also matches the Zero W, so it comes first.
-kernel=zImage
+# The firmware picks the kernel (kernel.img on the ARMv6 boards: the Pi 1,
+# Zero and Zero W; kernel7.img on the others), and the board's device tree,
+# from the slot by itself. Both are the Raspberry Pi kernel's.
 initramfs initramfs.cpio followkernel
 
-[pi0]
-device_tree=bcm2835-rpi-zero.dtb
+# The kernel's vc4 driver drives the display and the GPU (it is off in the
+# device trees until this overlay turns it on).
+dtoverlay=vc4-kms-v3d
 
-[pi0w]
-device_tree=bcm2835-rpi-zero-w.dtb
-
-# Pi 3 A+ (and, wrongly, the 3 B+, which is not supported). The firmware
-# boots it in 32-bit mode, as Dazzle's kernel needs.
-[pi3+]
-device_tree=bcm2837-rpi-3-a-plus.dtb
-
-[all]
 # The camera: the firmware finds which Camera Module is on the connector
-# and applies its overlay from the slot's overlays/ (imx219 or ov5647, see
-# boot/overlays/). To choose one by hand instead, set camera_auto_detect=0
-# and add dtoverlay=imx219 (or ov5647).
+# and applies its overlay from the slot's overlays/ (imx219 or ov5647, the
+# Raspberry Pi kernel's). To choose one by hand instead, set
+# camera_auto_detect=0 and add dtoverlay=imx219 (or ov5647).
 camera_auto_detect=1
 # The firmware would otherwise look for the official touchscreen on the
-# I2C pins the camera uses (on the Pi 3 A+), which Linux drives.
+# I2C pins the camera uses (on some boards), which Linux drives.
 disable_touchscreen=1
 
-# Serial console on GPIO 14 (TX) / 15 (RX), 115200 8N1. On the Zero W and
-# Pi 3 A+ this is the mini UART, which needs a fixed core clock.
+# Serial console on GPIO 14 (TX) / 15 (RX), 115200 8N1. On the boards with
+# Bluetooth this is the mini UART, which needs a fixed core clock.
 enable_uart=1
 
 # Run the CPU and GPU at full speed all the time. Without this the firmware

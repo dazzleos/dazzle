@@ -1,9 +1,10 @@
 # Tests and builds the SD card image and the apps' archives on every push
-# and pull request, and publishes them as the "latest" release on pushes to
-# the default branch (README.md's download link; Settings downloads the app
-# catalogue, apps.json, and apps from there, and updates: os.json and
-# dazzle-os.tar.xz). See ARCHITECTURE.md,
-# Continuous integration.
+# and pull request. On pushes to the default branch, and every day, it
+# publishes them as the "latest" release: README.md's download link, and
+# where Settings downloads the app catalogue (apps.json), the apps and
+# updates (os.json and dazzle-os.tar.xz). A build always takes the
+# Raspberry Pi kernel's latest commit, so the daily one brings installed
+# systems its latest fixes. See ARCHITECTURE.md, Continuous integration.
 name: Image
 
 on:
@@ -11,6 +12,9 @@ on:
     branches: ['**']
   pull_request:
   workflow_dispatch:
+  # Every day, for the kernel's latest fixes.
+  schedule:
+    - cron: '17 3 * * *'
 
 permissions:
   contents: read
@@ -28,14 +32,16 @@ jobs:
       - name: Install the kernel's build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang lld llvm flex bison bc
+          sudo apt-get install -y --no-install-recommends gcc-arm-linux-gnueabihf flex bison bc
 
-      - name: Read the pinned Linux version
+      # The kernel is the Raspberry Pi kernel's latest commit (its default
+      # branch), which the build fetches.
+      - name: Find the latest Raspberry Pi kernel
         id: pins
-        run: echo "linux=$(sed -n 's/^const linux_version = "\(.*\)";.*/\1/p' build.zig)" >> "$GITHUB_OUTPUT"
+        run: echo "linux=$(git ls-remote https://github.com/raspberrypi/linux.git HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
 
       # The kernel is most of a build: keep its source and its build
-      # directory, so make only rebuilds what changed.
+      # directory, so a new commit only fetches and rebuilds what changed.
       - name: Cache Zig
         uses: actions/cache@v4
         with:
@@ -44,14 +50,15 @@ jobs:
       - name: Cache the Linux source
         uses: actions/cache@v4
         with:
-          path: build/linux
-          key: linux-source-${{ steps.pins.outputs.linux }}
+          path: build/linux-rpi
+          key: linux-rpi-source-${{ steps.pins.outputs.linux }}
+          restore-keys: linux-rpi-source-
       - name: Cache the kernel build
         uses: actions/cache@v4
         with:
           path: build/kernel
-          key: kernel-${{ runner.os }}-${{ steps.pins.outputs.linux }}-${{ hashFiles('kernel/dazzle.config', 'boot/*.dts') }}
-          restore-keys: kernel-${{ runner.os }}-${{ steps.pins.outputs.linux }}-
+          key: kernel-rpi-${{ runner.os }}-${{ steps.pins.outputs.linux }}-${{ hashFiles('kernel/*.config') }}
+          restore-keys: kernel-rpi-${{ runner.os }}-
       - name: Cache the firmware
         uses: actions/cache@v4
         with:
@@ -64,10 +71,6 @@ jobs:
 
       - name: Build the image
         run: scripts/build
-
-      # Only the source is needed again, not its history (a smaller cache).
-      - name: Drop the Linux source's git history
-        run: rm -rf build/linux/.git
 
       - name: Compress the image
         run: |
@@ -90,7 +93,7 @@ jobs:
 
   publish:
     needs: build
-    if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
+    if: (github.event_name == 'push' && github.ref_name == github.event.repository.default_branch) || github.event_name == 'schedule'
     runs-on: ubuntu-24.04
     permissions:
       contents: write

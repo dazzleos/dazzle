@@ -7,15 +7,17 @@
 //! its size and SHA-256; the system manager installs it (src/init/update.zig).
 //!
 //!     {
-//!       "version": "<the commit it was built from>",
-//!       "time": <when that was committed, in seconds since 1970>,
+//!       "version": "<Dazzle's commit>-<the kernel's commit>",
+//!       "time": <the later of when they were made, in seconds since 1970>,
 //!       "file": "dazzle-os.tar.xz",
 //!       "size": 4123456,
 //!       "sha256": "<64 hex digits>"
 //!     }
 //!
 //! Usage: mkos pack <output.tar> [<name in the slot>=<file>]...
-//!        mkos manifest <os.json> <version> <time> <archive>
+//!        mkos manifest <os.json> <version file> <archive>
+//!
+//! The version file is the slot's ("<time> <version>").
 
 const std = @import("std");
 const mkapp = @import("mkapp.zig");
@@ -46,18 +48,21 @@ pub fn main(init: std.process.Init) !void {
             });
         }
         try writeFile(init.io, args[2], try pack(arena, files.items));
-    } else if (args.len == 6 and std.mem.eql(u8, args[1], "manifest")) {
-        const archive = try cwd.readFileAlloc(init.io, args[5], arena, .limited(256 << 20));
+    } else if (args.len == 5 and std.mem.eql(u8, args[1], "manifest")) {
+        const archive = try cwd.readFileAlloc(init.io, args[4], arena, .limited(256 << 20));
+        const version = try cwd.readFileAlloc(init.io, args[3], arena, .limited(256));
+        var fields = std.mem.tokenizeAny(u8, version, " \n");
+        const time = try std.fmt.parseInt(u64, fields.next() orelse return error.BadVersion, 10);
         const m: Manifest = .{
-            .version = args[3],
-            .time = try std.fmt.parseInt(u64, args[4], 10),
+            .version = fields.next() orelse return error.BadVersion,
+            .time = time,
             .file = archive_name,
             .size = archive.len,
             .sha256 = try mkcatalogue.hexSha256(arena, archive),
         };
         try writeFile(init.io, args[2], try std.fmt.allocPrint(arena, "{f}\n", .{std.json.fmt(m, .{ .whitespace = .indent_2 })}));
     } else {
-        std.debug.print("usage: mkos pack <output.tar> [<name in the slot>=<file>]...\n       mkos manifest <os.json> <version> <time> <archive>\n", .{});
+        std.debug.print("usage: mkos pack <output.tar> [<name in the slot>=<file>]...\n       mkos manifest <os.json> <version file> <archive>\n", .{});
         std.process.exit(2);
     }
 }

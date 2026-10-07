@@ -1,8 +1,0 @@
-// SPDX-License-Identifier: GPL-2.0
-// The Pi Zero W, as mainline describes it, plus its camera connector's
-// wiring (rpi-camera.dtsi): I2C on GPIO 28/29, power on GPIO 44.
-#include "arm/broadcom/bcm2835-rpi-zero-w.dts"
-
-#define CAM_I2C_PINS &i2c0_gpio28
-#define CAM_POWER_GPIO <&gpio 44 GPIO_ACTIVE_HIGH>
-#include "rpi-camera.dtsi"

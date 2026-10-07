@@ -4,9 +4,10 @@ How Dazzle is made, for working on it: how to build it, what is in it and
 how it works. [README.md](README.md) is about using it.
 
 Dazzle is an ultra-light operating system for the Raspberry Pi, written in
-Zig on top of a minimal mainline Linux kernel. It runs on the Raspberry Pi
-Zero / Zero W (BCM2835) and the Raspberry Pi 3 A+ (BCM2837), from the same
-SD card image. It is named after dazzle camouflage's zig-zags, and written
+Zig on top of a minimal build of the Raspberry Pi Linux kernel. It runs on
+the Raspberry Pi 1, 2 and 3 boards, the Zero, Zero W and Zero 2 W, and the
+Compute Modules 1 to 3 (BCM2835, BCM2836 and BCM2837), from the same SD
+card image. It is named after dazzle camouflage's zig-zags, and written
 in Zig.
 
 Dazzle is its own stack. Everything draws with **`vc4`**, a low-level
@@ -41,12 +42,12 @@ API may follow.
 - Zig 0.16.0. `scripts/zig` downloads it into `build/zig/` on first use
   (checked against the SHA-256 in ziglang.org's release index) unless a
   `zig` 0.16.0 is already on your PATH, so installing Zig is optional.
-- To build the kernel: `make`, `flex`, `bison`, `bc`, `git`, and either
-  LLVM 17 or newer (used by default; `sudo apt install clang lld llvm`) or
-  an ARM GCC cross compiler (`-Dcross-compile=arm-linux-gnueabihf-`).
+- To build the kernel: `make`, `flex`, `bison`, `bc`, `git`, and the ARM
+  GCC cross compiler (`sudo apt install gcc-arm-linux-gnueabihf`), as the
+  Raspberry Pi kernel is built.
 - To fetch the Raspberry Pi firmware: `curl`.
-- Optional, for the QEMU boot test: `qemu-system-arm` (for the Zero) or
-  `qemu-system-aarch64` (for the Pi 3 A+), and `fdtput` (`sudo apt install
+- Optional, for the QEMU boot test: `qemu-system-arm` (for the Zero, Pi 1
+  and Pi 2) or `qemu-system-aarch64` (for the Pi 3s), and `fdtput` (`sudo apt install
   qemu-system-arm device-tree-compiler`; on Ubuntu releases with a hardware
   enablement stack the QEMU package is `qemu-system-arm-hwe`).
 
@@ -67,8 +68,11 @@ saying what is in the image and how to write it to a card. It takes the
 same options as `zig build` (`scripts/build --release=fast`); `scripts/zig
 build` alone does the same build without the words.
 
-That builds the programs and the initramfs. It clones Linux v7.2 into
-`build/linux` on first use, and builds the kernel in `build/kernel` with
+That builds the programs and the initramfs. It clones the Raspberry Pi
+kernel (the tip of its default branch) into `build/linux-rpi` on first
+use, and brings it up to that branch's latest commit at every build
+(`-Doffline=true` builds what is there), so the system always has the
+latest kernel fixes; then it builds the kernels in `build/kernel` with
 `make`. It downloads the firmware into `build/firmware`, checked against
 pinned SHA-256 digests. Then it writes the image. Each part is redone only
 when needed: a rebuild with nothing changed takes about 20 seconds (most of
@@ -83,13 +87,14 @@ scripts/zig build test              # host unit tests
 scripts/zig build programs          # just the programs and zig-out/initramfs.cpio
 scripts/zig build shaders           # just the shader programs (zig-out/shaders)
 scripts/zig build kernel            # just the kernel
-scripts/zig build qemu              # boot in QEMU as a Zero (-Dqemu-board=pi3a+ for the Pi 3 A+; arguments after -- go to QEMU)
+scripts/zig build qemu              # boot in QEMU as a Zero (-Dqemu-board=pi1a+, pi2b, pi3b or pi3a+ for others; arguments after -- go to QEMU)
 ```
 
-Options: `-Dlinux=path/to/linux` uses an existing kernel tree,
-`-Dcross-compile=arm-linux-gnueabihf-` builds the kernel with GCC instead of
-LLVM, `-Dimage-size=<MiB>` sets the image size (by default it is just big
-enough for its files, with a quarter to spare: about 12 MiB, a FAT16 boot
+Options: `-Dlinux=path/to/linux` builds an existing kernel tree as it is,
+`-Doffline=true` builds `build/linux-rpi` without fetching,
+`-Dcross-compile=<prefix>` names another GCC cross compiler,
+`-Dimage-size=<MiB>` sets the image size (by default it is just big
+enough for its files, with a quarter to spare: about 18 MiB, a FAT16 boot
 partition after the partition table's first MiB) and
 `-Dhttp-port=<port>` the host port for QEMU's log server (default 8080).
 
@@ -99,9 +104,10 @@ The image's boot partition:
 bootcode.bin start.elf      the firmware, which must be here: one copy
 fixup.dat LICENCE.broadcom
 config.txt                  the firmware's settings; os_prefix picks the OS slot
-slot-a/                     OS slot A: a whole system (zImage, the boards'
-                            device trees and overlays/, initramfs.cpio,
-                            version, and cmdline.txt, with dazzle.slot=a)
+slot-a/                     OS slot A: a whole system (kernel.img and
+                            kernel7.img, the boards' device trees and
+                            overlays/, initramfs.cpio, version, and
+                            cmdline.txt, with dazzle.slot=a)
 slot-b/                     OS slot B: the same, with dazzle.slot=b; made on
                             the card on the first start
 ```
@@ -126,24 +132,35 @@ when it is whole (and starting again on the next start if it was cut
 off, even once setup has finished). The partition has room for both slots to grow several times over,
 as it cannot grow once `/data` follows it.
 
-The kernel comes from `make tinyconfig` plus `kernel/dazzle.config`. The
-build fails if any requested option is dropped because a dependency is
-missing. The result is a zImage of about 2 MB that includes the vc4 DRM
-driver, networking and the USB Ethernet drivers.
+The kernel is the Raspberry Pi kernel (github.com/raspberrypi/linux), the
+latest commit of its default branch: a long-term kernel (6.18 now) into
+which Raspberry Pi merge upstream's stable fixes, with their drivers and
+device trees for every board. It is built as Raspberry Pi build it, with
+GCC, twice: `kernel.img`, ARMv6 without SMP (the Pi 1, Zero and Zero W's
+ARM1176), and `kernel7.img`, ARMv7 with SMP (the Pi 2's Cortex-A7, and the
+Cortex-A53 of the Pi 3s and Zero 2 W, which the firmware starts in
+AArch32). Each is `make tinyconfig` plus `kernel/dazzle.config` and
+`kernel/armv6.config` or `kernel/armv7.config`; the build fails if any
+requested option is dropped because a dependency is missing. Each is a
+zImage of about 2 MB with the vc4 DRM driver, networking, Wi-Fi, the USB
+Ethernet drivers and the camera's. The programs are ARMv6 code, which the
+ARMv7 cores run as it is.
 
-One 32-bit kernel serves both boards: it is built for ARMv6 (the Zero's
-ARM1176) and ARMv7 (the Pi 3 A+'s Cortex-A53, which the firmware starts
-in AArch32), with SMP for the A+'s four cores (on the Zero's single core
-the SMP-only instructions are patched out at boot). The programs are
-ARMv6 code, which the A53 runs as it is. The firmware picks each board's
-device tree (`config.txt`).
+The firmware picks the kernel by the CPU and the device tree by the board
+(their names are the Raspberry Pi kernel's: `bcm2708-rpi-zero-w.dtb`,
+`bcm2710-rpi-3-b-plus.dtb` and so on; the Pi 1 A, A+ and the Pi 3 A+ use
+the B's, B+'s and 3 B+'s), with no board-specific `config.txt`.
+`dtoverlay=vc4-kms-v3d` turns the vc4 display driver on, as on Raspberry
+Pi OS. The USB controller is driven by the Raspberry Pi kernel's own
+driver (`dwc_otg`), as its device trees expect (mainline's `dwc2` is
+there too, for `dtoverlay=dwc2`; QEMU's USB works only with that).
 
 ### Continuous integration
 
-`.github/workflows/image.yml` runs on every push and pull request: the
-host tests (`scripts/zig build test`), then the image (`scripts/build`),
-compressed with xz and kept as the run's artifact. On a push to the default
-branch it also replaces the `latest` release's image, which README.md's
+`.github/workflows/image.yml` runs on every push and pull request, and
+every day: the host tests (`scripts/zig build test`), then the image
+(`scripts/build`), compressed with xz and kept as the run's artifact. On a
+push to the default branch, and every day, it also replaces the `latest` release's image, which README.md's
 download link points to (`releases/latest/download/dazzle.img.xz`), with a
 SHA-256 sum beside it, and with it the apps: each app's archive
 (`<name>.tar.xz`) and the catalogue describing them (`apps.json`), which
@@ -151,13 +168,18 @@ the settings app downloads from there (`zig-out/apps`; see Installing
 apps), and the system as an update (`dazzle-os.tar.xz`, with `os.json`
 describing it; `zig-out/os`; see Updating the system).
 
+As each build takes the kernel's latest commit, the daily one gives
+installed systems its latest fixes: the system's version is Dazzle's
+commit and the kernel's, made at the later of their times (see Updating
+the system), so Settings offers it as an update.
+
 Building the kernel is most of a first build, so CI caches what it can
-reuse: Zig (keyed on `scripts/zig`), the Linux source (keyed on
-`linux_version`, without its `.git`), the kernel's build directory
-`build/kernel` (keyed on the version, `kernel/dazzle.config` and the device
-tree sources; a change starts from the last one, and `make` rebuilds only
-what changed) and the firmware downloads. With those, a build with the
-kernel unchanged runs `make` only to find nothing to do. Zig's own cache
+reuse: Zig (keyed on `scripts/zig`), the Linux source (keyed on the
+kernel's latest commit, starting from the last one, so only what changed
+is fetched), the kernel's build directory `build/kernel` (keyed on that
+commit and the config fragments, starting from the last one, so `make`
+rebuilds only what changed) and the firmware downloads. With those, a
+build with the kernel unchanged runs `make` only to find nothing to do. Zig's own cache
 is not kept: everything else builds from scratch in about half a minute.
 
 ### Faster development loops
@@ -174,8 +196,12 @@ is not kept: everything else builds from scratch in about half a minute.
   path as its argument). Press Ctrl+C to stop.
   Iterating on GPU code this way avoids rebuilding the SD card.
 - **QEMU:** `scripts/zig build qemu` boots the kernel and initramfs in QEMU's
-  `raspi0` machine with an emulated USB network card; `-Dqemu-board=pi3a+`
-  uses its `raspi3ap` machine instead. QEMU starts its Pi 3 in 64-bit mode
+  `raspi0` machine with an emulated USB network card; `-Dqemu-board=pi1a+`,
+  `pi2b`, `pi3b` or `pi3a+` uses its `raspi1ap`, `raspi2b`, `raspi3b` or
+  `raspi3ap` machine instead, with that board's kernel and device tree
+  (the 3 A+ as the 3 B+'s). QEMU's copy of the device tree has its USB
+  controller driven by `dwc2`, which QEMU's emulation works with, rather
+  than `dwc_otg`. QEMU starts its Pi 3s in 64-bit mode
   (the real firmware starts a 32-bit kernel in 32-bit mode), so a small
   stub (`tools/aarch32boot.zig`) switches to 32-bit mode first; QEMU's
   other cores wait in a 64-bit loop the kernel cannot use, so it runs on
@@ -678,10 +704,9 @@ process has every privilege.
 Also: `build.zig` (the whole build, see below), `tools/` (host tools the
 build runs: `mkinitramfs.zig` packs the initramfs, `mkimage.zig` writes the
 SD card image, `check.zig` checks for build tools, the kernel
-configuration and firmware checksums), `kernel/dazzle.config` (kernel
-config fragment applied on top of `tinyconfig`), `boot/` (firmware
-`config.txt`, kernel `cmdline.txt`, and the Pi 3 A+'s device tree:
-mainline's, built by the kernel's `dtc` with one change, below), `scripts/zig` (downloads Zig) and `scripts/build` (the build, with what it makes and how to flash it).
+configuration and firmware checksums), `kernel/` (the kernel's config
+fragments, applied on top of `tinyconfig`), `boot/` (firmware
+`config.txt` and kernel `cmdline.txt`), `scripts/zig` (downloads Zig) and `scripts/build` (the build, with what it makes and how to flash it).
 
 The system's filesystem (the OS slot's initramfs, in RAM, with the card's
 partitions mounted on it) is kept simple:
@@ -868,10 +893,8 @@ everything but the text is drawn and the log says why.
 The serial console on GPIO 14 (TX) and 15 (RX), 115200 baud, still works and
 shows the same messages. It is the fallback if the network does not come up.
 
-The firmware picks the Zero, Zero W or Pi 3 A+ device tree in
-`config.txt`. Other boards are not supported yet: the Pi 3 B and B+ and
-the Zero 2 W have the same SoC as the 3 A+ and would mostly need their
-device trees; the Pi 4 and 5 have different GPUs.
+The firmware picks the kernel and the board's device tree itself. The Pi 4
+and 5 are not supported: they have different GPUs.
 
 On the Pi 3 A+ the CPU figures in the demo are shares of all four cores, so
 a program keeping one core busy shows 25%.
@@ -949,11 +972,10 @@ nl80211 over generic netlink (`src/init/nl80211.zig`). There is no
 regulatory database, so the kernel keeps to the world regulatory domain
 and logs that `regulatory.db` is missing.
 
-On the 3 A+, the chip's power (WL_REG_ON) shares a line on the firmware's
-GPIO expander with Bluetooth's. Mainline's device tree gives that line to
-neither driver, and the firmware leaves it off, so the chip never shows up.
-`boot/bcm2837-rpi-3-a-plus.dts` gives it to the Wi-Fi power sequence, as the
-Pi 3 B+'s does (there is no Bluetooth driver here to disturb).
+The chips are the Zero W's and the Pi 3 B's CYW43430, the Pi 3 B+'s and 3
+A+'s CYW43455, and the Zero 2 W's CYW43436 (or, on early boards, 43436s);
+the firmware for each is named for the chip, which the driver falls back
+to after the board's own name.
 
 ### Installing apps
 
@@ -1172,14 +1194,11 @@ sees: v1 (OmniVision OV5647) or v2 (Sony IMX219), on the CSI connector.
   kernel's drivers (`kernel/dazzle.config`) make them V4L2 devices. Which
   sensor is there cannot be found out by Linux, so the firmware's
   `camera_auto_detect` (in `config.txt`) does: it applies that sensor's
-  device tree overlay (`boot/overlays/`, built into each slot's
-  `overlays/`). The board device trees (`boot/*.dts`) describe the
-  connector's wiring, which differs between the boards, in
-  `boot/rpi-camera.dtsi`: the I2C pins (GPIO 28/29 on the Zeros, 44/45 on
-  the 3 A+) and the camera's power line (GPIO 41 on the Zero, 44 on the
-  Zero W, the firmware's GPIO expander's line 5 on the 3 A+), taken from
-  the Raspberry Pi kernel's. The overlays add the sensor (its clock: 24
-  MHz for the IMX219, 25 for the OV5647) and turn Unicam's port 1 on.
+  device tree overlay (the Raspberry Pi kernel's, in each slot's
+  `overlays/`). The boards' device trees describe the connector's wiring,
+  which differs between them (the I2C pins and the camera's power line),
+  and the overlays add the sensor and turn Unicam's port on. The capture
+  uses mainline's Unicam driver, which the Raspberry Pi kernel has too.
 - **Capture** (`capture.zig`, with the V4L2 structures and ioctls in
   `v4l2.zig`, checked against the kernel's headers for 32-bit ARM and for
   the host): it finds Unicam's video device and the two sub-devices by
@@ -1189,8 +1208,9 @@ sees: v1 (OmniVision OV5647) or v2 (Sony IMX219), on the CSI connector.
   10-bit packed, of which it uses the top 8 bits), sets the format on the
   sensor, Unicam and the video device (they must agree), and streams into
   four buffers mapped into the app.
-- **Making pictures** (`isp.zig`): there is no image processor in
-  mainline for these boards, so the app does on the CPU what one would.
+- **Making pictures** (`isp.zig`): the boards' image processor is reached
+  only through the firmware (the Raspberry Pi kernel's VCHIQ drivers,
+  which Dazzle does not build), so the app does on the CPU what it would.
   Per colour, one 256-entry table takes off the black level (64 of 1023),
   applies the white balance gain and the sRGB gamma. The preview makes a
   pixel of each 2x2 Bayer block (every nth, to fit the window) and
@@ -1316,8 +1336,8 @@ The other Pi 1, 2 and 3 models and the Zero 2 W are meant to work as well
 trees, is a bug to fix. The Pi 4 and 5 have a different GPU and are not
 supported.
 
-In QEMU, as a Zero and as a Pi 3 A+, the kernel boots and init's network
-manager gets an address by DHCP over an emulated USB network card. That holds whether the card is there at
+In QEMU, as a Zero, a Pi 1 A+ (B+), a Pi 2 B, a Pi 3 B and a Pi 3 A+ (3
+B+), the kernel boots and init's network manager gets an address by DHCP over an emulated USB network card. That holds whether the card is there at
 boot or added later. The lease renews, and
 the log server streams the log (QEMU cannot emulate the
 GPU or display).

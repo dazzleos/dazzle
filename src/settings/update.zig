@@ -108,7 +108,11 @@ pub const Updater = struct {
     /// The system that can be downloaded, if it is offered.
     pub fn available(u: *const Updater) ?*const Manifest {
         const m = if (u.manifest) |*p| &p.value else return null;
-        return if (offered(m, u.running, if (u.report) |*r| r else null)) m else null;
+        const report = if (u.report) |*r| r else null;
+        // The running slot's version (with its kernel's commit and time), as
+        // the system manager says; else the one this was built with.
+        const running = if (report) |r| (if (r.slot) |s| (if (r.version(s)) |v| v.* else u.running) else u.running) else u.running;
+        return if (offered(m, running, report)) m else null;
     }
 
     pub fn status(u: *const Updater) Status {
