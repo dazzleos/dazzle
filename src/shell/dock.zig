@@ -294,6 +294,7 @@ test "apps are the directories holding a program of the same name" {
     // Alpha's icon is named beside it.
     {
         const fd = try sys.open(try std.fmt.bufPrintZ(&b, "{s}/alpha/alpha.icon", .{root}), .{ .ACCMODE = .WRONLY, .CREAT = true, .CLOEXEC = true });
+        _ = linux.fchmod(fd, 0o644);
         _ = linux.write(fd, "folder\n", 7);
         sys.close(fd);
     }
