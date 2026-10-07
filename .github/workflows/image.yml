@@ -1,0 +1,113 @@
+# Tests and builds the SD card image on every push and pull request, and
+# publishes it as the "latest" release on pushes to the default branch
+# (README.md's download link). See ARCHITECTURE.md, Continuous integration.
+name: Image
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the kernel's build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang lld llvm flex bison bc
+
+      - name: Read the pinned Linux version
+        id: pins
+        run: echo "linux=$(sed -n 's/^const linux_version = "\(.*\)";.*/\1/p' build.zig)" >> "$GITHUB_OUTPUT"
+
+      # The kernel is most of a build: keep its source and its build
+      # directory, so make only rebuilds what changed.
+      - name: Cache Zig
+        uses: actions/cache@v4
+        with:
+          path: build/zig
+          key: zig-${{ runner.os }}-${{ hashFiles('scripts/zig') }}
+      - name: Cache the Linux source
+        uses: actions/cache@v4
+        with:
+          path: build/linux
+          key: linux-source-${{ steps.pins.outputs.linux }}
+      - name: Cache the kernel build
+        uses: actions/cache@v4
+        with:
+          path: build/kernel
+          key: kernel-${{ runner.os }}-${{ steps.pins.outputs.linux }}-${{ hashFiles('kernel/dazzle.config', 'boot/*.dts') }}
+          restore-keys: kernel-${{ runner.os }}-${{ steps.pins.outputs.linux }}-
+      - name: Cache the firmware
+        uses: actions/cache@v4
+        with:
+          path: build/firmware
+          key: firmware-${{ hashFiles('build.zig') }}
+          restore-keys: firmware-
+
+      - name: Test
+        run: scripts/zig build test --summary new
+
+      - name: Build the image
+        run: scripts/build
+
+      # Only the source is needed again, not its history (a smaller cache).
+      - name: Drop the Linux source's git history
+        run: rm -rf build/linux/.git
+
+      - name: Compress the image
+        run: |
+          mkdir dist
+          xz -T0 -9 -c zig-out/dazzle.img > dist/dazzle.img.xz
+          (cd dist && sha256sum dazzle.img.xz > dazzle.img.xz.sha256)
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dazzle-image
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    concurrency:
+      group: publish
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dazzle-image
+          path: dist
+
+      # One release, "latest", replaced by each build: its download link
+      # stays the same.
+      - name: Replace the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          short=$(echo "$GITHUB_SHA" | cut -c1-7)
+          cat > notes.md <<NOTES
+          The latest build of Dazzle, from commit $short ($(date -u +%Y-%m-%d)).
+
+          Write \`dazzle.img.xz\` to a microSD card with Raspberry Pi Imager
+          (Choose OS, then Use Custom); see the [README](https://github.com/$GH_REPO#installing).
+          NOTES
+          gh release delete latest --cleanup-tag --yes || true
+          gh release create latest dist/dazzle.img.xz dist/dazzle.img.xz.sha256 \
+            --target "$GITHUB_SHA" --title "Dazzle (latest build, $short)" \
+            --notes-file notes.md --latest

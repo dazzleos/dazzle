@@ -56,7 +56,7 @@ rm -rf zig-out/boot
 if ! scripts/zig build "$@"; then
 	echo
 	echo "${red}${bold}The build failed${plain} (the error is above). The build names any tools"
-	echo "to install; README.md's Requirements lists them all."
+	echo "to install; ARCHITECTURE.md's Requirements lists them all."
 	exit 1
 fi
 
