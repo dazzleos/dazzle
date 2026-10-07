@@ -264,7 +264,7 @@ pub const Tally = struct {
                 const name = std.mem.sliceTo(buf[at + 19 .. at + reclen], 0);
                 at += reclen;
                 if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
-                if (depth == 0 and (std.mem.eql(u8, name, "proc") or std.mem.eql(u8, name, "sys") or std.mem.eql(u8, name, "dev") or std.mem.eql(u8, name, "data"))) continue;
+                if (depth == 0 and (std.mem.eql(u8, name, "proc") or std.mem.eql(u8, name, "sys") or std.mem.eql(u8, name, "dev") or std.mem.eql(u8, name, "data") or std.mem.eql(u8, name, "boot"))) continue;
                 var child_buf: [512]u8 = undefined;
                 const sep: []const u8 = if (std.mem.endsWith(u8, path, "/")) "" else "/";
                 const child = std.fmt.bufPrintZ(&child_buf, "{s}{s}{s}", .{ path, sep, name }) catch continue;

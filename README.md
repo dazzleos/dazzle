@@ -45,7 +45,7 @@ The code is split into Zig modules, linked statically into each program:
 | `font` | `src/font/` | OpenType font rendering, described below |
 | `icons` | `src/icons/` | Material icons: the ones Dazzle uses (`Icon`), and a font with just those, made from the full Material Icons font by `tools/subset_icons.zig` when building (as Flutter leaves out the icons an app does not use) and built into the programs; the toolkit draws them with `ui.Icon` |
 | `wayland` | `src/wayland/` | The Wayland wire protocol (with file descriptor passing), the interfaces Dazzle uses, and a small client library |
-| `dazzle-init` | `src/init/` | The init program: mounts, the SD card's space for files (partitioning and formatting it on the first run), network, Wi-Fi, log server, device permissions, starting the shell |
+| `dazzle-init` | `src/init/` | The init program: mounts (the SD card's boot partition, its apps at `/apps`), the SD card's space for files (partitioning and formatting it on the first run), network, Wi-Fi, log server, device permissions, starting the shell |
 | `dazzle-shell` | `src/shell/` | The Wayland compositor and shell, described below |
 | `dazzle-demo` | `src/demo/` | The demo, a native app |
 | `dazzle-setup` | `src/setup/` | The setup app, on the first run only: names the computer while the SD card is prepared |
@@ -494,9 +494,10 @@ SD card image, `check.zig` checks for build tools, the kernel
 configuration and firmware checksums), `kernel/dazzle.config` (kernel
 config fragment applied on top of `tinyconfig`), `boot/` (firmware
 `config.txt`, kernel `cmdline.txt`, and the Pi 3 A+'s device tree:
-mainline's, built by the kernel's `dtc` with one change, below) and `scripts/zig` (downloads Zig).
+mainline's, built by the kernel's `dtc` with one change, below), `scripts/zig` (downloads Zig) and `scripts/build` (the build, with what it makes and how to flash it).
 
-The image's filesystem (an initramfs, in RAM) is kept simple:
+The system's filesystem (the OS slot's initramfs, in RAM, with the card's
+partitions mounted on it) is kept simple:
 
 ```
 /os/                        Dazzle itself:
@@ -510,12 +511,16 @@ The image's filesystem (an initramfs, in RAM) is kept simple:
 /os/sockets/                  the shell's socket (wayland-0) and the network
                               and system managers' (network, system); the
                               user's
-/apps/                      the apps: dazzle-demo/ and dazzle-files/, each
-                            holding its program (and <program>.icon, the
-                            name of its icon in the dock; the shell's own
-                            apps have theirs beside them too) and NOTICES,
-                            the third-party software built into it and its
-                            licences (apps are independent of the system)
+/boot/                      the card's boot partition, read-only: the
+                            firmware, config.txt, the OS slots and the apps
+/apps/                      the apps (the boot partition's apps/, the same
+                            whatever the slot): dazzle-demo/ and
+                            dazzle-files/, each holding its program (and
+                            <program>.icon, the name of its icon in the
+                            dock; the shell's own apps have theirs beside
+                            them too) and NOTICES, the third-party software
+                            built into it and its licences (apps are
+                            independent of the system)
 /data/                      the SD card's space for files, once setup has
                             prepared it: /data/system (the computer's name,
                             and a mark that setup has finished; root's) and
@@ -555,8 +560,13 @@ filesystem tools (or root) are needed.
 One command builds everything into an SD card image:
 
 ```sh
-scripts/zig build    # zig-out/dazzle.img, and its files in zig-out/boot/
+scripts/build    # zig-out/dazzle.img, and its files in zig-out/boot/
 ```
+
+It says what it will build, shows Zig's progress as it does, and ends by
+saying what is in the image and how to write it to a card. It takes the
+same options as `zig build` (`scripts/build --release=fast`); `scripts/zig
+build` alone does the same build without the words.
 
 That builds the programs and the initramfs. It clones Linux v7.2 into
 `build/linux` on first use, and builds the kernel in `build/kernel` with
@@ -579,10 +589,31 @@ scripts/zig build qemu              # boot in QEMU as a Zero (-Dqemu-board=pi3a+
 
 Options: `-Dlinux=path/to/linux` uses an existing kernel tree,
 `-Dcross-compile=arm-linux-gnueabihf-` builds the kernel with GCC instead of
-LLVM, `-Dimage-size=<MiB>` sets the image size (by default it is just big
-enough for its files, with a quarter to spare: about 12 MiB, a FAT16 boot
-partition after the partition table's first MiB) and
+LLVM, `-Dimage-size=<MiB>` sets the image size (128 MiB by default: the
+partition table's first MiB, then a FAT16 boot partition with room for
+the OS slots to grow, as it cannot grow once `/data` follows it) and
 `-Dhttp-port=<port>` the host port for QEMU's log server (default 8080).
+
+The image's boot partition:
+
+```
+bootcode.bin start.elf      the firmware, which must be here: one copy
+fixup.dat LICENCE.broadcom
+config.txt                  the firmware's settings; os_prefix picks the OS slot
+slot-a/                     OS slot A: a whole system (zImage, the boards'
+                            device trees, initramfs.cpio, and cmdline.txt,
+                            with dazzle.slot=a)
+slot-b/                     OS slot B: the same, with dazzle.slot=b
+apps/                       the apps, one copy for both slots (/apps)
+```
+
+Everything but the firmware, the apps and `/data` has two copies, so that
+an update (to come) can write the slot not in use and switch `os_prefix`
+to it, keeping the other to fall back to. Both slots hold the same build
+for now, and slot A starts. The firmware loads the slot's kernel, device
+tree and initramfs into memory; init mounts the partition, read-only, at
+`/boot`, and shows its `apps/` at `/apps`; the rest of the card is `/data`
+(below).
 
 The kernel comes from `make tinyconfig` plus `kernel/dazzle.config`. The
 build fails if any requested option is dropped because a dependency is
@@ -598,8 +629,12 @@ device tree (`config.txt`).
 
 ## Running on a Pi Zero or Pi 3 A+
 
-Write `zig-out/dazzle.img` to an SD card (`dd`, or Raspberry Pi Imager's
-"Use custom" option). The same card works in either board.
+Write `zig-out/dazzle.img` to an SD card. `scripts/build` ends by saying how:
+with [Raspberry Pi Imager](https://www.raspberrypi.com/software/) (Choose
+OS, then "Use Custom", and pick the image; decline its OS customisation),
+or with `sudo dd if=zig-out/dazzle.img of=/dev/sdX bs=4M conv=fsync
+status=progress`, where `/dev/sdX` is the card. The same card works in
+every board.
 
 ### The first run
 
@@ -883,8 +918,9 @@ The key does not reach the app with the keyboard.
   so this checks the kernel, init, privileges and networking only. To
   try the SD card, give QEMU a copy of the image grown to a power of two
   (`truncate -s 512M card.img`) after `--`: `-drive
-  file=card.img,if=sd,format=raw`; init then mounts `/data` if setup has
-  prepared it. The log
+  file=card.img,if=sd,format=raw`; init then mounts `/boot` and `/apps`,
+  and `/data` if setup has prepared it (without a card there are no apps,
+  which QEMU could not draw anyway). The log
   ends with `dazzle-shell: error: NoVc4Device` and `dazzle: shell exited
   with status 1`.
 

@@ -1,7 +1,8 @@
 //! Builds the SD card image: an MBR partition table with one bootable FAT16
-//! partition holding the given files in its root directory, with long
-//! (VFAT) file names. No root, loop devices or filesystem tools needed, and
-//! the output is the same for the same inputs.
+//! partition holding the given files, named by their paths in it (in
+//! directories: "slot-a/zImage"), with long (VFAT) file names. No root, loop
+//! devices or filesystem tools needed, and the output is the same for the
+//! same inputs.
 //!
 //! Usage: mkimage <output.img> <size in MiB, or "auto"> <name>=<file> ...
 //!
@@ -59,41 +60,108 @@ fn put32(b: []u8, at: usize, v: u32) void {
     std.mem.writeInt(u32, b[at..][0..4], v, .little);
 }
 
-/// The root directory's entries: the volume label, and each file's long
-/// name parts and 8.3 entry.
-const Directory = struct {
+/// A file or directory in the partition.
+const Node = struct {
+    name: []const u8,
+    /// A file's contents; null for a directory.
+    data: ?[]const u8 = null,
+    children: std.ArrayList(*Node) = .empty,
+    /// A directory's entries: the volume label (the root's), or "." and
+    /// ".." (a subdirectory's), then each child's long name parts and 8.3
+    /// entry.
     entries: std.ArrayList([32]u8) = .empty,
-    /// Where each file's 8.3 entry is.
-    file_entry: []usize,
+    /// Where each child's 8.3 entry is.
+    child_entry: std.ArrayList(usize) = .empty,
+    first_cluster: u32 = 0,
 
-    fn make(gpa: std.mem.Allocator, files: []const File) !Directory {
-        var d: Directory = .{ .file_entry = try gpa.alloc(usize, files.len) };
-        var label: [32]u8 = @splat(0);
-        @memcpy(label[0..11], "DAZZLE     ");
-        label[11] = 0x08; // volume label
-        try d.entries.append(gpa, label);
+    fn isDir(n: *const Node) bool {
+        return n.data == null;
+    }
+
+    /// The directory `path` names under `n`, made if it is not there.
+    fn dir(n: *Node, gpa: std.mem.Allocator, path: []const u8) !*Node {
+        var at = n;
+        var it = std.mem.tokenizeScalar(u8, path, '/');
+        while (it.next()) |part| at = for (at.children.items) |c| {
+            if (c.isDir() and std.mem.eql(u8, c.name, part)) break c;
+        } else blk: {
+            const c = try gpa.create(Node);
+            c.* = .{ .name = part };
+            try at.children.append(gpa, c);
+            break :blk c;
+        };
+        return at;
+    }
+
+    /// The tree of `files` (named by their paths).
+    fn tree(gpa: std.mem.Allocator, files: []const File) !*Node {
+        const root = try gpa.create(Node);
+        root.* = .{ .name = "" };
+        for (files) |f| {
+            const slash = std.mem.lastIndexOfScalar(u8, f.name, '/');
+            const parent = if (slash) |s| try root.dir(gpa, f.name[0..s]) else root;
+            const leaf = if (slash) |s| f.name[s + 1 ..] else f.name;
+            const c = try gpa.create(Node);
+            c.* = .{ .name = leaf, .data = f.data };
+            try parent.children.append(gpa, c);
+        }
+        return root;
+    }
+
+    /// Makes this directory's entries (and its subdirectories').
+    fn makeEntries(n: *Node, gpa: std.mem.Allocator, root: bool) !void {
+        if (root) {
+            var label: [32]u8 = @splat(0);
+            @memcpy(label[0..11], "DAZZLE     ");
+            label[11] = 0x08; // volume label
+            try n.entries.append(gpa, label);
+        } else for ([_][]const u8{ ".          ", "..         " }) |dots| {
+            var e: [32]u8 = @splat(0);
+            @memcpy(e[0..11], dots);
+            e[11] = 0x10;
+            put16(&e, 16, fat_date);
+            put16(&e, 18, fat_date);
+            put16(&e, 24, fat_date);
+            try n.entries.append(gpa, e);
+        }
         var shorts: std.ArrayList([11]u8) = .empty;
-        for (files, 0..) |f, i| {
-            const short = shortName(f.name, shorts.items);
+        for (n.children.items) |c| {
+            const short = shortName(c.name, shorts.items);
             try shorts.append(gpa, short);
-            try appendLongName(gpa, &d.entries, f.name, short);
-            d.file_entry[i] = d.entries.items.len;
+            try appendLongName(gpa, &n.entries, c.name, short);
+            try n.child_entry.append(gpa, n.entries.items.len);
             var e: [32]u8 = @splat(0);
             @memcpy(e[0..11], &short);
-            e[11] = 0x20; // archive
+            e[11] = if (c.isDir()) 0x10 else 0x20; // directory, or archive
             put16(&e, 16, fat_date); // created
             put16(&e, 18, fat_date); // accessed
             put16(&e, 24, fat_date); // written
-            put32(&e, 28, @intCast(f.data.len));
-            try d.entries.append(gpa, e);
+            if (c.data) |d| put32(&e, 28, @intCast(d.len));
+            try n.entries.append(gpa, e);
+            if (c.isDir()) try c.makeEntries(gpa, false);
         }
-        return d;
     }
 
     /// Root directory entries: room for these (at least the usual 512),
     /// filling whole sectors.
-    fn rootEntries(d: *const Directory) u32 {
-        return @intCast(@max(512, std.mem.alignForward(usize, d.entries.items.len, sector / 32)));
+    fn rootEntries(n: *const Node) u32 {
+        return @intCast(@max(512, std.mem.alignForward(usize, n.entries.items.len, sector / 32)));
+    }
+
+    /// What this node's clusters hold: a file's contents, or a
+    /// subdirectory's entries.
+    fn bytes(n: *const Node) []const u8 {
+        return n.data orelse std.mem.sliceAsBytes(n.entries.items);
+    }
+
+    /// Every file's and subdirectory's size, rounded up to `unit`.
+    fn dataSize(n: *const Node, unit: u64) u64 {
+        var total: u64 = 0;
+        for (n.children.items) |c| {
+            total += std.mem.alignForward(u64, @max(c.bytes().len, @as(usize, if (c.isDir()) 1 else 0)), unit);
+            if (c.isDir()) total += c.dataSize(unit);
+        }
+        return total;
     }
 };
 
@@ -135,11 +203,10 @@ const Layout = struct {
     }
 };
 
-/// The size, in MiB, of an image just big enough for `files` (with some
-/// room to spare).
-fn autoSize(files: []const File, root_entries: u32) u32 {
-    var data: u64 = 0;
-    for (files) |f| data += std.mem.alignForward(u64, f.data.len, sector);
+/// The size, in MiB, of an image just big enough for `root`'s files (with
+/// some room to spare).
+fn autoSize(root: *const Node, root_entries: u32) u32 {
+    const data = root.dataSize(sector);
     const room = @max(data / 4, 1 << 20);
     // At least FAT16's least clusters.
     const data_sectors = @max((data + room) / sector, min_clusters + 16);
@@ -148,15 +215,18 @@ fn autoSize(files: []const File, root_entries: u32) u32 {
     return @intCast(std.math.divCeil(u64, total, 2048) catch unreachable);
 }
 
-/// The image, `size_mib` big or (null) just big enough.
+/// The image, `size_mib` big or (null) just big enough. Files are named by
+/// their paths: "slot-a/zImage" is in the directory "slot-a".
 pub fn build(gpa: std.mem.Allocator, size_mib: ?u32, files: []const File) ![]u8 {
-    var dir = try Directory.make(gpa, files);
-    const root_entries = dir.rootEntries();
-    const mib = size_mib orelse autoSize(files, root_entries);
+    const root = try Node.tree(gpa, files);
+    try root.makeEntries(gpa, true);
+    const root_entries = root.rootEntries();
+    const mib = size_mib orelse autoSize(root, root_entries);
     const total_sectors = mib * 2048;
     if (total_sectors <= part_start) return error.ImageTooSmall;
     const part_sectors = total_sectors - part_start;
     const l = try Layout.plan(part_sectors, root_entries);
+    if (root.dataSize(l.clusterBytes()) > @as(u64, l.clusters) * l.clusterBytes()) return error.ImageFull;
 
     const image = try gpa.alloc(u8, @as(usize, total_sectors) * sector);
     @memset(image, 0);
@@ -174,27 +244,16 @@ pub fn build(gpa: std.mem.Allocator, size_mib: ?u32, files: []const File) ![]u8 
     image[510] = 0x55;
     image[511] = 0xaa;
 
-    // --- Clusters: each file's, contiguously ---
+    // --- Clusters: each file's and subdirectory's, contiguously ---
     const fat = try gpa.alloc(u16, l.clusters + 2);
     @memset(fat, 0);
     fat[0] = 0xfff8;
     fat[1] = 0xffff;
-    var next: u32 = 2;
-    const cluster_bytes = l.clusterBytes();
-    for (files, 0..) |f, i| {
-        const n: u32 = @intCast(std.math.divCeil(usize, f.data.len, cluster_bytes) catch unreachable);
-        if (n == 0) continue;
-        if (next + n > fat.len) return error.ImageFull;
-        const first = next;
-        for (0..n) |k| {
-            const c = first + @as(u32, @intCast(k));
-            fat[c] = if (k + 1 == n) 0xffff else @intCast(c + 1);
-        }
-        next += n;
-        put16(&dir.entries.items[dir.file_entry[i]], 26, @intCast(first));
-        const at = (@as(usize, l.dataStart()) + (first - 2) * l.sectors_per_cluster) * sector;
-        @memcpy(part[at..][0..f.data.len], f.data);
-    }
+    var alloc: Allocation = .{ .fat = fat, .cluster_bytes = l.clusterBytes() };
+    try alloc.place(root);
+    // Then what each holds, now that every first cluster is known.
+    alloc.fill(root, 0);
+    for (root.children.items) |c| writeTree(part, l, c);
 
     // --- FATs, and the root directory after them ---
     for (0..num_fats) |k| {
@@ -202,7 +261,7 @@ pub fn build(gpa: std.mem.Allocator, size_mib: ?u32, files: []const File) ![]u8 
         for (fat, 0..) |v, c| put16(part, at + c * 2, v);
     }
     const root_at = (reserved_sectors + num_fats * l.fat_sectors) * sector;
-    @memcpy(part[root_at..][0 .. dir.entries.items.len * 32], std.mem.sliceAsBytes(dir.entries.items));
+    @memcpy(part[root_at..][0 .. root.entries.items.len * 32], std.mem.sliceAsBytes(root.entries.items));
 
     // --- Boot sector ---
     const bs = part[0..sector];
@@ -227,6 +286,55 @@ pub fn build(gpa: std.mem.Allocator, size_mib: ?u32, files: []const File) ![]u8 
     bs[510] = 0x55;
     bs[511] = 0xaa;
     return image;
+}
+
+/// Gives each file and subdirectory its clusters, in order.
+const Allocation = struct {
+    fat: []u16,
+    cluster_bytes: u32,
+    next: u32 = 2,
+
+    fn place(a: *Allocation, dir: *Node) !void {
+        for (dir.children.items) |c| {
+            const len = c.bytes().len;
+            // A directory has a cluster even if it were empty.
+            const n: u32 = @intCast(@max(std.math.divCeil(usize, len, a.cluster_bytes) catch unreachable, @as(usize, if (c.isDir()) 1 else 0)));
+            if (n > 0) {
+                if (a.next + n > a.fat.len) return error.ImageFull;
+                c.first_cluster = a.next;
+                for (0..n) |k| {
+                    const cl = a.next + @as(u32, @intCast(k));
+                    a.fat[cl] = if (k + 1 == n) 0xffff else @intCast(cl + 1);
+                }
+                a.next += n;
+            }
+            if (c.isDir()) try a.place(c);
+        }
+    }
+
+    /// Puts the first clusters in the entries: each child's, and a
+    /// subdirectory's own (".") and its parent's ("..", 0 for the root).
+    fn fill(a: *Allocation, dir: *Node, parent_cluster: u32) void {
+        if (dir.first_cluster != 0) {
+            put16(&dir.entries.items[0], 26, @intCast(dir.first_cluster));
+            put16(&dir.entries.items[1], 26, @intCast(parent_cluster));
+        }
+        for (dir.children.items, dir.child_entry.items) |c, at| {
+            put16(&dir.entries.items[at], 26, @intCast(c.first_cluster));
+            if (c.isDir()) a.fill(c, dir.first_cluster);
+        }
+    }
+};
+
+/// Writes a file's contents, or a subdirectory's entries (and what is in
+/// it), into its clusters.
+fn writeTree(part: []u8, l: Layout, n: *const Node) void {
+    const b = n.bytes();
+    if (n.first_cluster != 0) {
+        const at = (@as(usize, l.dataStart()) + (n.first_cluster - 2) * l.sectors_per_cluster) * sector;
+        @memcpy(part[at..][0..b.len], b);
+    }
+    if (n.isDir()) for (n.children.items) |c| writeTree(part, l, c);
 }
 
 /// An 8.3 name: the name itself in capitals if it fits, otherwise the first
@@ -329,3 +437,66 @@ test "an image has a valid partition and boot sector, and is as big as it needs"
     try std.testing.expectEqual(@as(u8, 2), fixed[part_start * sector + 13]);
     try std.testing.expectError(error.ImageTooSmall, build(arena.allocator(), 2, &files));
 }
+
+test "files in directories, nested" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const files = [_]File{
+        .{ .name = "config.txt", .data = "os_prefix=slot-a/\n" },
+        .{ .name = "slot-a/zImage", .data = "kernel a" },
+        .{ .name = "slot-b/zImage", .data = "kernel b" },
+        .{ .name = "apps/dazzle-demo/dazzle-demo", .data = "demo" },
+        .{ .name = "apps/dazzle-demo/NOTICES", .data = "notices" },
+    };
+    const img = try build(arena.allocator(), null, &files);
+    const part = img[part_start * sector ..];
+    const fat_sectors = std.mem.readInt(u16, part[22..24], .little);
+    const root_entries = std.mem.readInt(u16, part[17..19], .little);
+    const root_at = (reserved_sectors + num_fats * @as(usize, fat_sectors)) * sector;
+    const fs: Fs = .{ .part = part, .data_at = root_at + @as(usize, root_entries) * 32, .spc = part[13] };
+    const root = part[root_at..fs.data_at];
+    // slot-b/zImage: a directory in the root, a file in it.
+    const slot_b = Fs.find(root, "SLOT-B     ").?;
+    try std.testing.expectEqual(@as(u8, 0x10), slot_b[11]);
+    const in_b = fs.cluster(slot_b);
+    // ".", then "..", then the file (its long name, then its 8.3 entry).
+    try std.testing.expectEqualStrings(".          ", in_b[0..11]);
+    try std.testing.expectEqual(std.mem.readInt(u16, slot_b[26..28], .little), std.mem.readInt(u16, in_b[26..28], .little));
+    try std.testing.expectEqualStrings("..         ", in_b[32..43]);
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, in_b[32 + 26 ..][0..2], .little));
+    const kernel = Fs.find(in_b, "ZIMAGE     ").?;
+    try std.testing.expectEqual(@as(u32, 8), std.mem.readInt(u32, kernel[28..32], .little));
+    try std.testing.expectEqualStrings("kernel b", fs.cluster(kernel)[0..8]);
+    // Nested: apps/dazzle-demo/NOTICES, whose ".." is apps.
+    const apps = Fs.find(root, "APPS       ").?;
+    const demo_dir = Fs.find(fs.cluster(apps), "DAZZLE~1   ").?;
+    const in_demo = fs.cluster(demo_dir);
+    try std.testing.expectEqual(std.mem.readInt(u16, apps[26..28], .little), std.mem.readInt(u16, in_demo[32 + 26 ..][0..2], .little));
+    try std.testing.expectEqualStrings("notices", fs.cluster(Fs.find(in_demo, "NOTICES    ").?)[0..7]);
+    try std.testing.expectEqualStrings("demo", fs.cluster(Fs.find(in_demo, "DAZZLE~1   ").?)[0..4]);
+}
+
+/// Reading an image back, for the tests.
+const Fs = struct {
+    part: []const u8,
+    data_at: usize,
+    spc: usize,
+
+    /// The 8.3 entry named `short` in a directory's entries.
+    fn find(entries: []const u8, short: []const u8) ?[]const u8 {
+        var i: usize = 0;
+        while (i + 32 <= entries.len) : (i += 32) {
+            const e = entries[i..][0..32];
+            if (e[0] == 0) return null;
+            if (e[11] != 0x0f and std.mem.eql(u8, e[0..11], short)) return e;
+        }
+        return null;
+    }
+
+    /// The first cluster of what an entry names.
+    fn cluster(f: Fs, e: []const u8) []const u8 {
+        const c = std.mem.readInt(u16, e[26..28], .little);
+        return f.part[f.data_at + (c - 2) * f.spc * sector ..][0 .. f.spc * sector];
+    }
+};

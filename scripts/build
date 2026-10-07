@@ -1,0 +1,96 @@
+#!/bin/sh
+# Build Dazzle's SD card image, saying what it does first and, at the end,
+# what was made and how to put it on a card.
+#
+# Usage: scripts/build [zig build options]    e.g. scripts/build --release=fast
+#
+# This is `scripts/zig build` (see build.zig) with a word before and after;
+# for its other steps (test, qemu, ...), use scripts/zig build <step>.
+set -eu
+
+for arg in "$@"; do
+	case $arg in
+	-*) ;;
+	*)
+		echo "scripts/build builds the image; for the step '$arg', run scripts/zig build $arg" >&2
+		exit 2
+		;;
+	esac
+done
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+cd "$ROOT"
+
+# What the build pins, from build.zig.
+pinned() {
+	sed -n "s/^const $1 = \"\(.*\)\";.*/\1/p" build.zig
+}
+linux_version=$(pinned linux_version)
+firmware_tag=$(pinned firmware_tag)
+commit=$(git describe --always --dirty 2>/dev/null || echo unknown)
+
+if [ -t 1 ]; then
+	bold=$(printf '\033[1m')
+	red=$(printf '\033[31m')
+	plain=$(printf '\033[0m')
+else
+	bold= red= plain=
+fi
+
+echo "${bold}Building Dazzle${plain} ($commit), an SD card image for the Raspberry Pi"
+echo "Zero, Zero W and 3 A+:"
+echo "  - the programs (init, the shell and its apps, the demo and Files)"
+echo "  - Linux $linux_version, built from tinyconfig plus kernel/dazzle.config"
+echo "  - the Raspberry Pi firmware $firmware_tag, checked against pinned digests"
+echo "  - the image, zig-out/dazzle.img"
+if [ ! -f build/kernel/.config ]; then
+	echo "The first build clones Linux into build/linux and builds the whole kernel:"
+	echo "that takes a few minutes. Builds after only redo what changed."
+fi
+echo
+
+# The files beside the image are what this build wrote, no more.
+rm -rf zig-out/boot
+
+if ! scripts/zig build "$@"; then
+	echo
+	echo "${red}${bold}The build failed${plain} (the error is above). The build names any tools"
+	echo "to install; README.md's Requirements lists them all."
+	exit 1
+fi
+
+image=zig-out/dazzle.img
+
+# Sizes in MiB, to one place.
+mib() {
+	awk "BEGIN { printf \"%.1f MiB\", $1 / 1048576 }"
+}
+bytes() {
+	find "$@" -type f -exec cat {} + | wc -c
+}
+image_bytes=$(wc -c <"$image")
+slot_bytes=$(bytes zig-out/boot/slot-a)
+apps_bytes=$(bytes zig-out/boot/apps)
+apps=$(echo $(ls zig-out/boot/apps))
+
+echo
+echo "${bold}Built $image${plain} ($(mib "$image_bytes")), for any of the boards."
+echo "Its boot partition (FAT) holds:"
+echo "  - the firmware and config.txt (which picks the OS slot)"
+echo "  - OS slot A, slot-a/, the one that starts: the kernel, device trees and"
+echo "    initramfs ($(mib "$slot_bytes"))"
+echo "  - OS slot B, slot-b/: a copy of slot A, for updates to replace"
+echo "  - the apps, apps/, shared by both slots ($(mib "$apps_bytes")): $apps"
+echo "On the first start, the rest of the card becomes /data, for files."
+echo "(The same files are in zig-out/boot/, to copy onto a card by hand.)"
+echo
+echo "${bold}To write it to an SD card${plain} (everything on the card is replaced):"
+echo "  With Raspberry Pi Imager (https://www.raspberrypi.com/software/):"
+echo "    1. Choose Device: your board (or No filtering)."
+echo "    2. Choose OS: Use Custom (at the bottom), and pick $ROOT/$image"
+echo "    3. Choose Storage: the SD card."
+echo "    4. Next; decline the OS customisation (Dazzle asks for its own settings),"
+echo "       and confirm."
+echo "  Or with dd, where /dev/sdX is the card (check with lsblk first):"
+echo "    sudo dd if=$image of=/dev/sdX bs=4M conv=fsync status=progress"
+echo "Then put the card in the Pi, connect HDMI, a keyboard and a mouse, and power it on."

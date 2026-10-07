@@ -1,6 +1,11 @@
 # Raspberry Pi firmware configuration for Dazzle.
 # https://www.raspberrypi.com/documentation/computers/config_txt.html
 
+# The system is in one of two OS slots, slot-a/ and slot-b/: the firmware
+# looks for the kernel, the initramfs, cmdline.txt and the device trees
+# there. (An update writes the other slot, then switches this.)
+os_prefix=slot-a/
+
 # Mainline kernel and device tree; the firmware's default names are for the
 # Raspberry Pi kernel fork. [pi0] also matches the Zero W, so it comes first.
 kernel=zImage

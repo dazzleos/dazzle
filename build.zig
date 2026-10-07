@@ -17,19 +17,43 @@ const Modules = struct {
 /// Puts `<program>.icon` in the initramfs: the name of the program's icon
 /// in the dock.
 fn addAppIcon(b: *std.Build, run: *std.Build.Step.Run, program: []const u8, icon: Icon) void {
+    run.addPrefixedFileArg(b.fmt("--file={s}.icon=", .{program}), iconFile(b, program, icon));
+}
+
+/// The file naming a program's icon (its `<program>.icon`).
+fn iconFile(b: *std.Build, program: []const u8, icon: Icon) std.Build.LazyPath {
     const name = b.fmt("{s}.icon", .{std.fs.path.basename(program)});
-    const file = b.addWriteFiles().add(name, b.fmt("{s}\n", .{@tagName(icon)}));
-    run.addPrefixedFileArg(b.fmt("--file={s}.icon=", .{program}), file);
+    return b.addWriteFiles().add(name, b.fmt("{s}\n", .{@tagName(icon)}));
 }
 
 /// Puts a NOTICES file at `dest` in the initramfs: the third-party
 /// software built into `what`, from its sections in notices/ (by name).
 fn addNotices(b: *std.Build, run: *std.Build.Step.Run, dest: []const u8, what: []const u8, sections: []const []const u8) void {
+    run.addPrefixedFileArg(b.fmt("--file={s}=", .{dest}), noticesFile(b, what, sections));
+}
+
+fn noticesFile(b: *std.Build, what: []const u8, sections: []const []const u8) std.Build.LazyPath {
     const make = b.addRunArtifact(hostTool(b, "notices"));
     const out = make.addOutputFileArg("NOTICES");
     make.addArg(what);
     for (sections) |s| make.addFileArg(b.path(b.fmt("notices/{s}.txt", .{s})));
-    run.addPrefixedFileArg(b.fmt("--file={s}=", .{dest}), out);
+    return out;
+}
+
+/// A file on the SD card's boot partition: its path there, and where it
+/// comes from.
+const CardFile = struct { []const u8, std.Build.LazyPath };
+
+/// An app's files in /apps/<name> on the card: the program, the name of
+/// its icon, and the notices for what is built into it (apps are
+/// independent of the system).
+fn appFiles(b: *std.Build, exe: *std.Build.Step.Compile, icon: Icon, what: []const u8) [3]CardFile {
+    const dir = b.fmt("apps/{s}", .{exe.name});
+    return .{
+        .{ b.fmt("{s}/{s}", .{ dir, exe.name }), exe.getEmittedBin() },
+        .{ b.fmt("{s}/{s}.icon", .{ dir, exe.name }), iconFile(b, exe.name, icon) },
+        .{ b.fmt("{s}/NOTICES", .{dir}), noticesFile(b, what, &.{"MaterialIcons"}) },
+    };
 }
 
 /// The icon font, cut down to Dazzle's icons, and their codepoints (see
@@ -450,9 +474,27 @@ fn fetchWifiFirmware(b: *std.Build) *std.Build.Step {
     }.url);
 }
 
+/// The OS slots on the card: each holds a whole copy of the system (the
+/// kernel, its device trees, the initramfs with everything in /os, and the
+/// kernel's command line), and config.txt's os_prefix says which one the
+/// firmware starts. An update (later) writes the other and switches to it;
+/// if a slot's kernel or device tree is missing, the firmware ignores the
+/// prefix.
+const slots = [_][]const u8{ "a", "b" };
+
+/// The boot partition's size, in MiB, unless -Dimage-size says otherwise:
+/// room for each slot to grow several times over (they hold about 6 MB
+/// each now), as the partition cannot grow once /data follows it.
+const default_image_mib = 128;
+
 /// The SD card image (zig-out/dazzle.img), and its files in zig-out/boot
-/// for copying onto a card by hand.
-fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.Build.Step {
+/// for copying onto a card by hand. One FAT partition holds, at its root,
+/// the firmware's own files and config.txt (which must be there, so there
+/// is one copy); the two OS slots, slot-a/ and slot-b/; and the apps, one
+/// copy, in apps/ (init mounts the partition and shows them at /apps).
+/// /data is the partition the system makes in the rest of the card on the
+/// first boot.
+fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath, apps: []const CardFile) *std.Build.Step {
     const dir = b.pathFromRoot("build/firmware");
     // Download what is missing, then check everything.
     const verify_step = fetchPinned(b, dir, firmware, struct {
@@ -461,27 +503,41 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.B
         }
     }.url);
 
-    const boot_files = [_]struct { []const u8, std.Build.LazyPath }{
+    // Shared: the firmware (the boot ROM and the first stage load these
+    // from the root), and config.txt, which picks the slot.
+    var boot_files: std.ArrayList(CardFile) = .empty;
+    boot_files.appendSlice(b.allocator, &.{
         .{ "bootcode.bin", .{ .cwd_relative = b.pathJoin(&.{ dir, "bootcode.bin" }) } },
         .{ "start.elf", .{ .cwd_relative = b.pathJoin(&.{ dir, "start.elf" }) } },
         .{ "fixup.dat", .{ .cwd_relative = b.pathJoin(&.{ dir, "fixup.dat" }) } },
         .{ "LICENCE.broadcom", .{ .cwd_relative = b.pathJoin(&.{ dir, "LICENCE.broadcom" }) } },
-        .{ "zImage", kernel.file(b, "arch/arm/boot/zImage") },
-        .{ "bcm2835-rpi-zero.dtb", kernel.file(b, "arch/arm/boot/dts/broadcom/bcm2835-rpi-zero.dtb") },
-        .{ "bcm2835-rpi-zero-w.dtb", kernel.file(b, "arch/arm/boot/dts/broadcom/bcm2835-rpi-zero-w.dtb") },
-        // Mainline's, with the Wi-Fi chip's power added (see the source).
-        .{ "bcm2837-rpi-3-a-plus.dtb", kernel.deviceTree(b, b.path("boot/bcm2837-rpi-3-a-plus.dts"), "bcm2837-rpi-3-a-plus") },
-        .{ "initramfs.cpio", initramfs },
         .{ "config.txt", b.path("boot/config.txt") },
-        .{ "cmdline.txt", b.path("boot/cmdline.txt") },
-    };
+    }) catch @panic("OOM");
+    // Each slot: a whole system. Its command line says which it is.
+    const cmdline = std.mem.trimEnd(u8, std.Io.Dir.cwd().readFileAlloc(b.graph.io, b.pathFromRoot("boot/cmdline.txt"), b.allocator, .limited(4096)) catch @panic("cannot read boot/cmdline.txt"), "\n");
+    for (slots) |slot| {
+        const files = [_]CardFile{
+            .{ "zImage", kernel.file(b, "arch/arm/boot/zImage") },
+            .{ "bcm2835-rpi-zero.dtb", kernel.file(b, "arch/arm/boot/dts/broadcom/bcm2835-rpi-zero.dtb") },
+            .{ "bcm2835-rpi-zero-w.dtb", kernel.file(b, "arch/arm/boot/dts/broadcom/bcm2835-rpi-zero-w.dtb") },
+            // Mainline's, with the Wi-Fi chip's power added (see the source).
+            .{ "bcm2837-rpi-3-a-plus.dtb", kernel.deviceTree(b, b.path("boot/bcm2837-rpi-3-a-plus.dts"), "bcm2837-rpi-3-a-plus") },
+            .{ "initramfs.cpio", initramfs },
+            .{ "cmdline.txt", b.addWriteFiles().add("cmdline.txt", b.fmt("{s} dazzle.slot={s}\n", .{ cmdline, slot })) },
+        };
+        for (files) |f| boot_files.append(b.allocator, .{ b.fmt("slot-{s}/{s}", .{ slot, f[0] }), f[1] }) catch @panic("OOM");
+    }
+    // One copy of the apps.
+    boot_files.appendSlice(b.allocator, apps) catch @panic("OOM");
+
     const mkimage = b.addRunArtifact(hostTool(b, "mkimage"));
     mkimage.step.dependOn(verify_step);
     mkimage.step.dependOn(kernel.step);
     const img = mkimage.addOutputFileArg("dazzle.img");
-    mkimage.addArg(if (b.option(u32, "image-size", "SD image size in MiB (default: just big enough)")) |mib| b.fmt("{d}", .{mib}) else "auto");
+    const mib = b.option(u32, "image-size", b.fmt("SD image size in MiB (default {d})", .{default_image_mib})) orelse default_image_mib;
+    mkimage.addArg(b.fmt("{d}", .{mib}));
     const image_step = b.step("image", "Build everything into an SD card image: zig-out/dazzle.img (and its files in zig-out/boot)");
-    for (boot_files) |f| {
+    for (boot_files.items) |f| {
         mkimage.addPrefixedFileArg(b.fmt("{s}=", .{f[0]}), f[1]);
         const install = b.addInstallFile(f[1], b.fmt("boot/{s}", .{f[0]}));
         install.step.dependOn(&mkimage.step);
@@ -641,17 +697,12 @@ pub fn build(b: *std.Build) void {
     // The shell's own apps, beside it in /shell (they cannot be removed).
     run_mkinitramfs.addPrefixedArtifactArg("--shell=", settings_exe);
     run_mkinitramfs.addPrefixedArtifactArg("--shell=", setup_exe);
-    // The apps, each in /apps/<name>, listed in the shell's dock.
-    run_mkinitramfs.addArtifactArg(demo_exe);
-    run_mkinitramfs.addArtifactArg(files_exe);
     // The dock's icons: a Material icon's name beside each program.
     addAppIcon(b, run_mkinitramfs, "os/shell/dazzle-settings", .settings);
-    addAppIcon(b, run_mkinitramfs, "apps/dazzle-demo/dazzle-demo", .view_in_ar);
-    addAppIcon(b, run_mkinitramfs, "apps/dazzle-files/dazzle-files", .folder);
-    // The apps are independent of the system: each has the notices for
-    // what is built into it beside it.
-    addNotices(b, run_mkinitramfs, "apps/dazzle-demo/NOTICES", "the Demo app", &.{"MaterialIcons"});
-    addNotices(b, run_mkinitramfs, "apps/dazzle-files/NOTICES", "the Files app", &.{"MaterialIcons"});
+    // The apps, each in /apps/<name> and listed in the shell's dock, are not
+    // part of the system: they are on the card's boot partition, once (not
+    // in each OS slot).
+    const app_files = appFiles(b, demo_exe, .view_in_ar, "the Demo app") ++ appFiles(b, files_exe, .folder, "the Files app");
     const install_initramfs = b.addInstallFile(initramfs, "initramfs.cpio");
     const programs_step = b.step("programs", "Build just the programs (zig-out/bin) and zig-out/initramfs.cpio");
     for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_settings.step, &install_files.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
@@ -667,7 +718,7 @@ pub fn build(b: *std.Build) void {
     kernel_step.dependOn(kernel.step);
 
     // `zig build` builds everything, including the SD card image.
-    b.getInstallStep().dependOn(addImage(b, kernel, initramfs));
+    b.getInstallStep().dependOn(addImage(b, kernel, initramfs, &app_files));
     addQemu(b, kernel, initramfs);
 
     // Unit tests run on the build machine; they cover the parts that do not

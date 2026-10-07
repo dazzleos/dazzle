@@ -1,5 +1,10 @@
-//! The SD card's free space, for files. The firmware loads the system from
-//! the card's FAT partition into memory, and the rest of the card is free;
+//! The SD card. Its first partition (FAT) is the boot partition: the
+//! firmware, config.txt, and two OS slots (slot-a/, slot-b/), each a whole
+//! system that the firmware loads into memory (config.txt's os_prefix says
+//! which); and the apps, one copy whatever the slot, in apps/. Init mounts
+//! it, read-only, at /boot and shows its apps at /apps (`mountBoot`).
+//!
+//! The rest of the card is free, for files;
 //! on the first run the system manager (system.zig) gives it a partition
 //! of its own (`planPartition`, `addPartition`) and a filesystem
 //! (mkfs.zig), and init mounts that at /data at every boot after
@@ -15,7 +20,10 @@ const print = sys.print;
 
 /// The card (on the SDHOST controller), and the partition for files.
 pub const card = "/dev/mmcblk0";
+pub const boot_partition = "/dev/mmcblk0p1";
 pub const data_partition = "/dev/mmcblk0p2";
+pub const boot_dir = "/boot";
+const apps_dir = "/apps";
 
 const sector = 512;
 /// Partitions start on 4 MiB boundaries (SD cards' erase blocks).
@@ -29,6 +37,9 @@ pub const Error = error{ TooSmall, NoRoom, NotMbr } || sys.Error;
 /// What init finds at boot.
 pub const Boot = struct {
     card: bool = false,
+    /// The OS slot the system was started from ('a' or 'b'), from the
+    /// kernel's command line.
+    slot: ?u8 = null,
     /// /data is mounted.
     mounted: bool = false,
     setup_done: bool = false,
@@ -39,6 +50,9 @@ pub const Boot = struct {
 /// filesystem, if it has one; then reads the settings kept there.
 pub fn boot() Boot {
     var b: Boot = .{};
+    var cmdline: [1024]u8 = undefined;
+    if (sys.readFile("/proc/cmdline", &cmdline)) |text| b.slot = parseSlot(text);
+    if (b.slot) |s| print("dazzle: started from OS slot {c}\n", .{std.ascii.toUpper(s)});
     _ = linux.mkdir(proto.data_dir, 0o755);
     var waited: u32 = 0;
     while (!exists(card) and waited < 3000) : (waited += 100) sys.sleepMs(100);
@@ -47,7 +61,8 @@ pub fn boot() Boot {
         print("dazzle: no SD card found: files will not be kept\n", .{});
         return b;
     }
-    // The partition's device node comes with the card's.
+    // The partitions' device nodes come with the card's.
+    mountBoot();
     if (!exists(data_partition) or !hasFilesystem(data_partition)) return b;
     b.mounted = mountData();
     if (!b.mounted) return b;
@@ -57,6 +72,34 @@ pub fn boot() Boot {
         if (proto.Hostname.parse(std.mem.trim(u8, text, " \n"))) |h| b.hostname = h;
     }
     return b;
+}
+
+/// The slot in a kernel command line's dazzle.slot=<a|b>.
+pub fn parseSlot(cmdline: []const u8) ?u8 {
+    var it = std.mem.tokenizeAny(u8, cmdline, " \n");
+    while (it.next()) |arg| {
+        const value = if (std.mem.startsWith(u8, arg, "dazzle.slot=")) arg["dazzle.slot=".len..] else continue;
+        if (value.len == 1 and (value[0] == 'a' or value[0] == 'b')) return value[0];
+    }
+    return null;
+}
+
+/// Mounts the boot partition, read-only, at /boot, and its apps at /apps.
+/// Its files are root's and anyone's to read (and run): FAT has no owners
+/// or permissions.
+fn mountBoot() void {
+    _ = linux.mkdir(boot_dir, 0o755);
+    _ = linux.mkdir(apps_dir, 0o755);
+    const flags = linux.MS.RDONLY | linux.MS.NODEV | linux.MS.NOSUID;
+    _ = sys.check(linux.mount(boot_partition, boot_dir, "vfat", flags, @intFromPtr("fmask=0022,dmask=0022"))) catch |err| {
+        print("dazzle: cannot mount {s} at {s}: {s}\n", .{ boot_partition, boot_dir, @errorName(err) });
+        return;
+    };
+    _ = sys.check(linux.mount(boot_dir ++ apps_dir, apps_dir, null, linux.MS.BIND, 0)) catch |err| {
+        print("dazzle: cannot mount {s} at {s}: {s}\n", .{ boot_dir ++ apps_dir, apps_dir, @errorName(err) });
+        return;
+    };
+    print("dazzle: mounted {s} at {s}, its apps at {s}\n", .{ boot_partition, boot_dir, apps_dir });
 }
 
 /// Mounts the partition for files at /data. Returns whether it is.
@@ -206,4 +249,11 @@ test "the partition for files goes after the system's, to the end of the card" {
         std.mem.writeInt(u32, full[446 + i * 16 + 12 ..][0..4], 1000, .little);
     }
     try testing.expectError(error.NoRoom, planPartition(&full, disk));
+}
+
+test "the OS slot is on the kernel's command line" {
+    try std.testing.expectEqual(@as(?u8, 'b'), parseSlot("loglevel=6 dazzle.slot=b rdinit=/os/init\n"));
+    try std.testing.expectEqual(@as(?u8, 'a'), parseSlot("dazzle.slot=a"));
+    try std.testing.expectEqual(@as(?u8, null), parseSlot("loglevel=6 dazzle.slot=c"));
+    try std.testing.expectEqual(@as(?u8, null), parseSlot("loglevel=6"));
 }

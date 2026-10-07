@@ -1,8 +1,9 @@
 //! Builds the initramfs: a "newc" cpio archive containing the directories
 //! the init program mounts over, a /dev/console node (the kernel opens it
 //! for PID 1's stdio before devtmpfs is mounted), the init binary, the
-//! shell, the font every program shares, and the apps (which the shell's
-//! dock lists), each in a directory of its own.
+//! shell, and the font every program shares: one OS slot's system. The
+//! apps are not in it: there is one copy of them on the card's boot
+//! partition, whatever the slot, which init shows at /apps.
 //! Dazzle's own files are in /os; everything is owned by root, but for
 //! /os/sockets (the Dazzle user's, for its programs' sockets):
 //!
@@ -14,15 +15,13 @@
 //!     /os/firmware/brcm/...                     the Wi-Fi chips' firmware
 //!                                               (firmware_class.path=/os/firmware)
 //!     /os/sockets/                              (empty)
-//!     /apps/<app>/<app>                         for each app binary
-//!     /dev, /proc, /sys, /data                  mount points
+//!     /dev, /proc, /sys, /data, /boot, /apps    mount points
 //!
-//! An app is named after its binary (dazzle-demo, dazzle-files). The
-//! shell's own apps (dazzle-settings, dazzle-setup), which cannot be
+//! The shell's own apps (dazzle-settings, dazzle-setup), which cannot be
 //! removed, go beside it: --shell=<binary>. Other files are given as
 //! --file=<path in the archive>=<file>.
 //!
-//! Usage: mkinitramfs <output.cpio> <init-binary> <shell-binary> <font> <font-license> [<app-binary> | --shell=<binary> | --file=<path>=<file>]...
+//! Usage: mkinitramfs <output.cpio> <init-binary> <shell-binary> <font> <font-license> [--shell=<binary> | --file=<path>=<file>]...
 
 const std = @import("std");
 
@@ -77,7 +76,7 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len < 6) {
-        std.debug.print("usage: {s} <output.cpio> <init-binary> <shell-binary> <font> <font-license> [<app-binary> | --shell=<binary> | --file=<path>=<file>]...\n", .{args[0]});
+        std.debug.print("usage: {s} <output.cpio> <init-binary> <shell-binary> <font> <font-license> [--shell=<binary> | --file=<path>=<file>]...\n", .{args[0]});
         std.process.exit(2);
     }
     const arena = init.arena.allocator();
@@ -107,6 +106,7 @@ pub fn main(init: std.process.Init) !void {
         .{ .name = "os/fonts/FiraSans-Regular.ttf", .mode = S_IFREG | 0o644, .data = font },
         .{ .name = "os/fonts/FiraSans-OFL.txt", .mode = S_IFREG | 0o644, .data = font_license },
         .{ .name = "os/sockets", .mode = S_IFDIR | 0o700, .uid = user_id, .gid = user_id },
+        .{ .name = "boot", .mode = S_IFDIR | 0o755 },
         .{ .name = "apps", .mode = S_IFDIR | 0o755 },
     });
     for (args[6..]) |path| {
@@ -134,12 +134,8 @@ pub fn main(init: std.process.Init) !void {
             try entries.append(arena, .{ .name = try std.fmt.allocPrint(arena, "os/shell/{s}", .{std.fs.path.basename(bin_path)}), .mode = S_IFREG | 0o755, .data = bin });
             continue;
         }
-        const name = std.fs.path.basename(path);
-        const bin = try cwd.readFileAlloc(io, path, arena, .limited(64 * 1024 * 1024));
-        try entries.appendSlice(arena, &.{
-            .{ .name = try std.fmt.allocPrint(arena, "apps/{s}", .{name}), .mode = S_IFDIR | 0o755 },
-            .{ .name = try std.fmt.allocPrint(arena, "apps/{s}/{s}", .{ name, name }), .mode = S_IFREG | 0o755, .data = bin },
-        });
+        std.debug.print("mkinitramfs: unknown argument {s}\n", .{path});
+        return error.BadArgument;
     }
     try entries.append(arena, .{ .name = "TRAILER!!!", .mode = 0 });
 
