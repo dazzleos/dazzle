@@ -12,7 +12,7 @@ You will need a Raspberry Pi computer, i.e. one of:
 - Raspberry Pi Zero 1-2
 - Raspberry Pi 1-3
 
-(Raspberry Pi 4 and 5 is not supported at this time).
+(Raspberry Pi 4 and 5 are not supported at this time).
 
 You will also need:
 
