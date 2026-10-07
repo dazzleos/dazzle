@@ -41,6 +41,7 @@ pub const Icon = enum {
     lan,
     speed,
     info,
+    developer_board,
     wifi_1_bar,
     wifi_2_bar,
     // The demo.

@@ -269,4 +269,5 @@ test {
     _ = info;
     _ = view;
     _ = @import("update.zig");
+    _ = @import("board.zig");
 }

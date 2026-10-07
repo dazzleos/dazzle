@@ -1,6 +1,7 @@
 //! The settings app's window, as widgets: pages, chosen with the tabs on
 //! the left, about the Wi-Fi networks around, Ethernet, the resources in
-//! use (with meters) and the system (its build, Linux and the board).
+//! use (with meters), the board (drawn: picking a part says what it is;
+//! see board.zig) and the system (its build, Linux and the board).
 //! Choosing a Wi-Fi network shows a password field (for WPA2) and a
 //! Connect button; choosing a static address for Ethernet shows fields for
 //! it. The Apps page lists the apps that can be installed (from the
@@ -14,6 +15,8 @@ const gfx = @import("gfx");
 const info = @import("info.zig");
 const store = @import("store");
 const update = @import("update.zig");
+const board = @import("board.zig");
+const BoardView = @import("board_view.zig").BoardView;
 
 /// The storage bar's colours (the system's is the theme's primary).
 pub const apps_color = gfx.Color.argb(0xff4fd8c4);
@@ -132,6 +135,9 @@ pub const Settings = struct {
     pub const State = struct {
         /// The page shown.
         page: Page = .wifi,
+        /// The part of the board picked (an index into its parts), if one
+        /// is.
+        board_part: ?usize = null,
         /// The Wi-Fi network chosen (its SSID), and the password typed.
         selected_buf: [32]u8 = undefined,
         selected_len: u8 = 0,
@@ -186,6 +192,7 @@ pub const Settings = struct {
             .wifi => self.wifiCard(b, state),
             .ethernet => self.networkCard(b, state),
             .resources => self.resourcesCard(b),
+            .board => self.boardCard(b, state),
             .system => self.systemCard(b),
             .apps => self.appsCard(b, state),
         };
@@ -334,6 +341,45 @@ pub const Settings = struct {
             b.meter("GPU memory", gpu, fraction(u.gpuUsed(), u.gpu_total)),
             b.storage(u.storage),
         });
+    }
+
+    /// The board, drawn, and about the part picked on it.
+    fn boardCard(self: *const Settings, b: Builder, state: *State) ui.Widget {
+        const cx = b.cx;
+        const t = cx.theme();
+        const model = self.system.model.slice();
+        const drawing = board.forModel(model) orelse return b.card("Board", &.{
+            b.item("Board", orUnknown(model)),
+            b.value("There is no drawing of this board"),
+        });
+        // The processor, until something else is picked.
+        const picked = state.board_part orelse for (drawing.parts, 0..) |part, i| {
+            if (part.kind == .soc or part.kind == .soc_with_ram) break i;
+        } else 0;
+        const part = &drawing.parts[@min(picked, drawing.parts.len - 1)];
+        const about = board.describe(part);
+        var rows: std.ArrayList(ui.Widget) = .empty;
+        const a = cx.ui.arena();
+        rows.appendSlice(a, &.{
+            b.value(orUnknown(model)),
+            cx.make(ui.Padding{ .padding = .symmetric(0, 8), .child = cx.make(BoardView{ .board = drawing, .selected = picked, .on_select = partPicker(state) }) }),
+            cx.make(ui.Text{ .text = if (part.chip.len > 0) cx.fmt("{s}: {s}", .{ about.title, part.chip }) else about.title, .style = .{ .size = 20, .color = t.on_surface } }),
+            cx.make(ui.Text{ .text = cx.fmt("{s}{s}", .{ about.about, if (part.underside) " (underneath the board)" else "" }), .style = .{ .size = 16, .color = t.on_surface_variant } }),
+        }) catch {};
+        // What it is doing now, where that is known.
+        const u = self.usage;
+        var b1: [32]u8 = undefined;
+        var b2: [32]u8 = undefined;
+        const now: ?[]const u8 = switch (part.kind) {
+            .soc => if (u.cpu_busy) |busy| (if (u.temperature) |c| cx.fmt("{d:.0}% busy, at {d:.1} °C", .{ busy, c }) else cx.fmt("{d:.0}% busy", .{busy})) else null,
+            .soc_with_ram => if (u.cpu_busy) |busy| cx.fmt("{d:.0}% busy; {s} of {s} of memory in use", .{ busy, info.formatBytes(&b1, u.memUsed()), info.formatBytes(&b2, u.mem_total) }) else null,
+            .ram => cx.fmt("{s} of {s} in use", .{ info.formatBytes(&b1, u.memUsed()), info.formatBytes(&b2, u.mem_total) }),
+            .micro_sd, .sd, .emmc => if (u.storage.user + u.storage.apps > 0) cx.fmt("{s} of your files and {s} of apps", .{ info.formatBytes(&b1, u.storage.user), info.formatBytes(&b2, u.storage.apps) }) else null,
+            else => null,
+        };
+        if (now) |text| rows.append(a, b.item("Now", text)) catch {};
+        rows.append(a, cx.make(ui.Text{ .text = "Pick a part to see what it is", .style = .{ .size = 14, .color = t.on_surface_variant } })) catch {};
+        return b.card("Board", rows.items);
     }
 
     fn wifiCard(self: *const Settings, b: Builder, state: *State) ui.Widget {
@@ -599,6 +645,7 @@ pub const Page = enum {
     wifi,
     ethernet,
     resources,
+    board,
     apps,
     system,
 
@@ -607,6 +654,7 @@ pub const Page = enum {
             .wifi => "Wi-Fi",
             .ethernet => "Ethernet",
             .resources => "Resources",
+            .board => "Board",
             .apps => "Apps",
             .system => "System",
         };
@@ -617,6 +665,7 @@ pub const Page = enum {
             .wifi => .wifi,
             .ethernet => .lan,
             .resources => .speed,
+            .board => .developer_board,
             .apps => .apps,
             .system => .info,
         };
@@ -665,6 +714,15 @@ const Tab = struct {
         }) });
     }
 };
+
+/// Picking a part of the board.
+fn partPicker(state: *Settings.State) ?ui.ValueCallback(usize) {
+    return .of(state, struct {
+        fn set(st: *Settings.State, i: usize) void {
+            st.board_part = i;
+        }
+    }.set);
+}
 
 /// Pressing a tab shows its page.
 const Pick = struct {
@@ -1433,4 +1491,52 @@ test "updates: offered, downloaded, installed, then a restart" {
     settings.update = .{};
     u.frame(1920, 960, 6, settings);
     try testing.expect(findText(u.root.?, "Not checked yet") != null);
+}
+
+test "the board, drawn: picking a part says what it is" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    var d = sample();
+    const wifi = sampleWifi();
+    d.sys.model = .of("Raspberry Pi 3 Model B Plus Rev 1.3");
+    var n: u64 = 0;
+    const draw = struct {
+        fn frame(uu: *ui.Ui, dd: anytype, w: *const info.manager.Report, nn: *u64, size: [2]u32) void {
+            nn.* += 1;
+            uu.frame(size[0], size[1], nn.*, Settings{ .commit = "574d538", .system = &dd.sys, .usage = dd.usage, .network = &dd.net, .manager = w, .apps = sample_apps });
+        }
+    }.frame;
+    draw(u, &d, &wifi, &n, .{ 1600, 900 });
+    u.root.?.state(Settings.State).page = .board;
+    draw(u, &d, &wifi, &n, .{ 1600, 900 });
+    // The processor to begin with.
+    try testing.expect(findText(u.root.?, "Processor and graphics: BCM2837B0") != null);
+    try testing.expect(findText(u.root.?, "23% busy, at 48.3 °C") != null);
+
+    // Clicking the Ethernet port.
+    const view = findType(u.root.?, BoardView).?;
+    const drawing = board.forModel("Raspberry Pi 3 Model B Plus Rev 1.3").?;
+    const r = drawing.bounds();
+    const scale = @min(view.size.w / r.w, view.size.h / r.h);
+    const origin = view.position();
+    const x0 = origin[0] + (view.size.w - r.w * scale) / 2 - r.x * scale;
+    const y0 = origin[1] + (view.size.h - r.h * scale) / 2 - r.y * scale;
+    const p: ui.Point = .{ x0 + 76 * scale, y0 + 45 * scale };
+    u.pointerMotion(p);
+    u.pointerButton(p, ui.btn_left, true);
+    u.pointerButton(p, ui.btn_left, false);
+    draw(u, &d, &wifi, &n, .{ 1600, 900 });
+    try testing.expect(findText(u.root.?, "Ethernet") != null);
+    try testing.expect(findText(u.root.?, "The wired network") != null);
+
+    // Every board fits, at every size.
+    for ([_][]const u8{ "Raspberry Pi Model B Rev 2", "Raspberry Pi Zero 2 W Rev 1.0", "Raspberry Pi Compute Module 3 Rev 1.0", "Something else" }) |model| {
+        d.sys.model = .of(model);
+        for (test_sizes) |size| {
+            draw(u, &d, &wifi, &n, size);
+            try testing.expect(!overflows(u.root.?));
+        }
+    }
+    try testing.expect(findText(u.root.?, "There is no drawing of this board") != null);
 }
