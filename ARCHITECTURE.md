@@ -1310,8 +1310,11 @@ atlas: the simulator gives its texels as alpha, as Mesa's driver says the
 ALPHA type does (its A8 swizzle is 000W); if text disappears on the Pi,
 that is the place to look.
 
-The Pi 3 A+ has not been tried on hardware yet: in QEMU its kernel boots
-on the Cortex-A53, and init, the log server and networking work.
+Dazzle runs on the Pi 3 A+ too (its kernel on the Cortex-A53, in AArch32).
+The other Pi 1, 2 and 3 models and the Zero 2 W are meant to work as well
+(they have the same GPU); what they still need, such as their device
+trees, is a bug to fix. The Pi 4 and 5 have a different GPU and are not
+supported.
 
 In QEMU, as a Zero and as a Pi 3 A+, the kernel boots and init's network
 manager gets an address by DHCP over an emulated USB network card. That holds whether the card is there at
