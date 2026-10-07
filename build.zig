@@ -227,7 +227,7 @@ const shader_programs = [_]struct { source: []const u8, name: ?[]const u8 = null
     .{ .source = "src/gfx/shaders/solid.zig", .name = "opaque", .owner = .gfx, .args = &.{"--blend=none"} },
     .{ .source = "src/gfx/shaders/text.zig", .owner = .gfx, .args = &.{"--blend=source-over"} },
     .{ .source = "src/gfx/shaders/image.zig", .owner = .gfx, .args = &.{"--blend=source-over"} },
-    .{ .source = "src/demo/shaders/polyhedron.zig", .owner = .demo, .args = &.{"--depth-test"} },
+    .{ .source = "src/apps/demo/shaders/polyhedron.zig", .owner = .demo, .args = &.{"--depth-test"} },
     .{ .source = "src/shell/shaders/quad.zig", .owner = .shell, .args = &.{} },
     .{ .source = "src/shell/shaders/quad_rgb565.zig", .owner = .shell, .args = &.{} },
 };
@@ -853,27 +853,27 @@ pub fn build(b: *std.Build) void {
     const install_init = b.addInstallArtifact(init_exe, .{});
     const demo_exe = b.addExecutable(.{
         .name = "dazzle-demo",
-        .root_module = addProgramModule(b, "src/demo/main.zig", target, optimize, pi, shaders, true),
+        .root_module = addProgramModule(b, "src/apps/demo/main.zig", target, optimize, pi, shaders, true),
     });
     const install_demo = b.addInstallArtifact(demo_exe, .{});
     const settings_exe = b.addExecutable(.{
         .name = "dazzle-settings",
-        .root_module = addProgramModule(b, "src/settings/main.zig", target, optimize, pi, shaders, true),
+        .root_module = addProgramModule(b, "src/apps/settings/main.zig", target, optimize, pi, shaders, true),
     });
     const install_settings = b.addInstallArtifact(settings_exe, .{});
     const files_exe = b.addExecutable(.{
         .name = "dazzle-files",
-        .root_module = addProgramModule(b, "src/files/main.zig", target, optimize, pi, shaders, true),
+        .root_module = addProgramModule(b, "src/apps/files/main.zig", target, optimize, pi, shaders, true),
     });
     const install_files = b.addInstallArtifact(files_exe, .{});
     const camera_exe = b.addExecutable(.{
         .name = "dazzle-camera",
-        .root_module = addProgramModule(b, "src/camera/main.zig", target, optimize, pi, shaders, true),
+        .root_module = addProgramModule(b, "src/apps/camera/main.zig", target, optimize, pi, shaders, true),
     });
     const install_camera = b.addInstallArtifact(camera_exe, .{});
     const setup_exe = b.addExecutable(.{
         .name = "dazzle-setup",
-        .root_module = addProgramModule(b, "src/setup/main.zig", target, optimize, pi, shaders, true),
+        .root_module = addProgramModule(b, "src/apps/setup/main.zig", target, optimize, pi, shaders, true),
     });
     const install_setup = b.addInstallArtifact(setup_exe, .{});
     const shell_exe = b.addExecutable(.{
@@ -962,15 +962,15 @@ pub fn build(b: *std.Build) void {
     for ([_]*std.Build.Module{ host.font, host.gfx, host.ui }) |m| m.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const test_step = b.step("test", "Run unit tests on the host");
     // The demo's layout is tested with its real font.
-    const host_demo = addProgramModule(b, "src/demo/main.zig", b.graph.host, test_optimize, host, shaders, null);
+    const host_demo = addProgramModule(b, "src/apps/demo/main.zig", b.graph.host, test_optimize, host, shaders, null);
     host_demo.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
-    const host_settings = addProgramModule(b, "src/settings/main.zig", b.graph.host, test_optimize, host, shaders, null);
+    const host_settings = addProgramModule(b, "src/apps/settings/main.zig", b.graph.host, test_optimize, host, shaders, null);
     host_settings.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
-    const host_files = addProgramModule(b, "src/files/main.zig", b.graph.host, test_optimize, host, shaders, null);
+    const host_files = addProgramModule(b, "src/apps/files/main.zig", b.graph.host, test_optimize, host, shaders, null);
     host_files.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
-    const host_camera = addProgramModule(b, "src/camera/main.zig", b.graph.host, test_optimize, host, shaders, null);
+    const host_camera = addProgramModule(b, "src/apps/camera/main.zig", b.graph.host, test_optimize, host, shaders, null);
     host_camera.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
-    const host_setup = addProgramModule(b, "src/setup/main.zig", b.graph.host, test_optimize, host, shaders, null);
+    const host_setup = addProgramModule(b, "src/apps/setup/main.zig", b.graph.host, test_optimize, host, shaders, null);
     host_setup.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     for ([_]*std.Build.Module{
         host.sys,

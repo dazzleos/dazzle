@@ -4,7 +4,7 @@
 # where Settings downloads the app catalogue (apps.json), the apps and
 # updates (os.json and dazzle-os.tar.xz). A build always takes the
 # Raspberry Pi kernel's latest commit, so the daily one brings installed
-# systems its latest fixes. See ARCHITECTURE.md, Continuous integration.
+# systems its latest fixes. See ARCHITECTURE.md, Updates.
 name: Image
 
 on:
