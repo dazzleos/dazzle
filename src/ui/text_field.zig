@@ -568,29 +568,40 @@ test "selecting, copying, cutting and pasting, with keys and the menu" {
     u.keyEvent(keymap.escape, true);
     try testing.expect(u.menu == null);
 
-    // Holding the left button down shows it too, once it has been held
-    // for a while; the release is not a click.
+    // Holding the left button down does not show it (the right button
+    // does)...
     u.pointerMotion(.{ 60, rows[0] });
     u.pointerButton(.{ 60, rows[0] }, btn_left, true);
+    for (0..40) |_| T.frame(u, &sinks, &now);
+    try testing.expect(u.menu == null);
+    u.pointerButton(.{ 60, rows[0] }, btn_left, false);
+    // ...but holding a touch does, once it has been held for a while; it
+    // coming up is not a tap.
+    u.touchDown(1, .{ 60, rows[0] });
     T.frame(u, &sinks, &now);
     try testing.expect(u.needs_frame);
     for (0..40) |_| T.frame(u, &sinks, &now);
     try testing.expect(u.menu != null);
-    u.pointerButton(.{ 60, rows[0] }, btn_left, false);
+    u.touchUp(1);
     T.frame(u, &sinks, &now);
     try testing.expect(u.menu_root != null);
-    // Select all, from the menu.
-    T.click(u, T.middle(T.findText(u.menu_root.?, "Select all").?), btn_left);
+    // Select all, tapped in the menu.
+    const item = T.middle(T.findText(u.menu_root.?, "Select all").?);
+    u.touchDown(2, item);
+    u.touchUp(2);
+    try testing.expect(u.menu == null);
     try testing.expectEqual([2]usize{ 0, 11 }, T.field(u, 0).selection().?);
-    // A hold that moves is a drag, not a long press.
+    // A touch that moves (with nothing to scroll) drags: it selects, and
+    // shows no menu.
     T.frame(u, &sinks, &now);
-    u.pointerMotion(.{ 60, rows[0] });
-    u.pointerButton(.{ 60, rows[0] }, btn_left, true);
+    u.touchDown(3, .{ 34, rows[0] });
     T.frame(u, &sinks, &now);
-    u.pointerMotion(.{ 120, rows[0] });
+    u.touchMotion(3, .{ 120, rows[0] });
     for (0..40) |_| T.frame(u, &sinks, &now);
     try testing.expect(u.menu == null);
-    u.pointerButton(.{ 120, rows[0] }, btn_left, false);
+    u.touchUp(3);
+    try testing.expectEqual(@as(usize, 0), T.field(u, 0).selection().?[0]);
+    try testing.expect(T.field(u, 0).selection().?[1] > 2);
 }
 
 test "without the system's clipboard, text is copied within the app" {

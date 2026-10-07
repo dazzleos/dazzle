@@ -91,6 +91,14 @@ pub const InputEvent = union(enum) {
     /// The pointer left the window (or the shell took it, to move the
     /// window).
     leave,
+    /// A touch went down at a position (`id` is the touch's while it
+    /// lasts), moved, or came up.
+    touch_down: struct { id: i32, pos: [2]f32 },
+    touch_motion: struct { id: i32, pos: [2]f32 },
+    touch_up: i32,
+    /// The window's touches are the shell's now (it moves the window, say):
+    /// forget them, without acting on them.
+    touch_cancel,
 };
 
 /// Used when the compositor leaves the size to us.
@@ -168,6 +176,7 @@ pub const Window = struct {
     frames: u64 = 0,
 
     seat: ?client.Proxy = null,
+    touch: ?client.Proxy = null,
     /// The system's clipboard (for the toolkit's `Ui.clipboard`).
     clipboard: Clipboard,
     pointer: ?client.Proxy = null,
@@ -547,6 +556,13 @@ pub const Window = struct {
             w.input[w.input_len - 1] = e;
             return;
         }
+        if (e == .touch_motion and w.input_len > 0) switch (w.input[w.input_len - 1]) {
+            .touch_motion => |last| if (last.id == e.touch_motion.id) {
+                w.input[w.input_len - 1] = e;
+                return;
+            },
+            else => {},
+        };
         if (w.input_len == w.input.len) return;
         w.input[w.input_len] = e;
         w.input_len += 1;
@@ -567,6 +583,12 @@ pub const Window = struct {
                 m.uint(device.id).uint(pointer.id).end();
                 w.cursor_device = device;
             }
+        }
+        if (caps & p.wl_seat.capability.touch != 0 and w.touch == null) {
+            const touch = d.newObject(.{ .ptr = w, .handler = touchEvent }) catch return;
+            var m = w.seat.?.request(p.wl_seat.request.get_touch) catch return;
+            m.uint(touch.id).end();
+            w.touch = touch;
         }
         if (caps & p.wl_seat.capability.keyboard != 0 and w.keyboard == null) {
             const keyboard = d.newObject(.{ .ptr = w, .handler = keyboardEvent }) catch return;
@@ -627,6 +649,43 @@ pub const Window = struct {
                 w.cursor_edges = null;
                 w.pushInput(.leave);
             },
+            else => {},
+        }
+    }
+
+    fn touchEvent(ptr: ?*anyopaque, _: *client.Display, _: u32, opcode: u16, r: *wire.Reader) void {
+        const w: *Window = @ptrCast(@alignCast(ptr.?));
+        switch (opcode) {
+            p.wl_touch.event.down => {
+                const serial = r.uint() catch return;
+                _ = r.uint() catch return; // time
+                _ = r.uint() catch return; // surface: the window's
+                const id: i32 = @bitCast(r.uint() catch return);
+                const pos: [2]f32 = .{ @floatCast(r.fixed() catch return), @floatCast(r.fixed() catch return) };
+                // A touch can move (the title bar) or copy, as a press can.
+                w.press_serial = serial;
+                w.clipboard.serial = serial;
+                // On an edge, it resizes the window, as a press does.
+                const edges = w.edgesAt(pos);
+                if (edges != 0) if (w.seat) |seat| {
+                    var m = w.toplevel.request(p.xdg_toplevel.request.resize) catch return;
+                    m.uint(seat.id).uint(serial).uint(edges).end();
+                    return;
+                };
+                w.pushInput(.{ .touch_down = .{ .id = id, .pos = pos } });
+            },
+            p.wl_touch.event.motion => {
+                _ = r.uint() catch return; // time
+                const id: i32 = @bitCast(r.uint() catch return);
+                const pos: [2]f32 = .{ @floatCast(r.fixed() catch return), @floatCast(r.fixed() catch return) };
+                w.pushInput(.{ .touch_motion = .{ .id = id, .pos = pos } });
+            },
+            p.wl_touch.event.up => {
+                _ = r.uint() catch return; // serial
+                _ = r.uint() catch return; // time
+                w.pushInput(.{ .touch_up = @bitCast(r.uint() catch return) });
+            },
+            p.wl_touch.event.cancel => w.pushInput(.touch_cancel),
             else => {},
         }
     }

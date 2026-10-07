@@ -1,16 +1,21 @@
-//! USB keyboards and mice, read from their evdev nodes (/dev/input/eventN).
+//! USB keyboards, mice and touchscreens, read from their evdev nodes
+//! (/dev/input/eventN).
 //!
 //! Init's device manager gives the Dazzle user each node as it appears;
 //! the shell looks for new ones once a second, so devices can be plugged
 //! in at any time. Relative motion moves the pointer, the wheel scrolls,
 //! mouse buttons are pointer buttons and every other key is a keyboard
-//! key, as a Linux key code.
+//! key, as a Linux key code. A device with absolute positions is a
+//! touchscreen (`Touch`): its touches go down, move and come up, each at a
+//! place on the screen from 0 to 1 across and down.
 
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
 
 const print = sys.print;
+
+pub const TouchKind = enum { down, motion, up };
 
 pub const Event = union(enum) {
     /// Relative pointer motion.
@@ -22,6 +27,9 @@ pub const Event = union(enum) {
     axis: struct { axis: u32, value: f64 },
     /// A Linux key code (KEY_A, ...).
     key: struct { code: u32, pressed: bool },
+    /// A touch on a touchscreen: `id` is the touch's while it lasts, and
+    /// `x`, `y` where it is, from 0 to 1 across and down the screen.
+    touch: struct { kind: TouchKind, id: i32, x: f64 = 0, y: f64 = 0 },
     /// The end of a group of events that happened together.
     frame,
 };
@@ -38,6 +46,14 @@ const RawEvent = extern struct {
 const ev_syn = 0x00;
 const ev_key = 0x01;
 const ev_rel = 0x02;
+const ev_abs = 0x03;
+const abs_x = 0x00;
+const abs_y = 0x01;
+const abs_mt_slot = 0x2f;
+const abs_mt_position_x = 0x35;
+const abs_mt_position_y = 0x36;
+const abs_mt_tracking_id = 0x39;
+const btn_touch = 0x14a;
 const syn_report = 0;
 const rel_x = 0x00;
 const rel_y = 0x01;
@@ -73,6 +89,131 @@ pub fn decode(ev_type: u16, code: u16, value: i32) ?Event {
     return null;
 }
 
+/// A touchscreen's touches, followed through its events: those that
+/// track several (multitouch's slots, each touch with a tracking ID), or
+/// one (BTN_TOUCH with ABS_X and ABS_Y). What changed is reported at each
+/// SYN_REPORT, then a frame.
+pub const Touch = struct {
+    /// The range of positions across and down.
+    range: [2][2]i32,
+    multitouch: bool,
+    slot: usize = 0,
+    slots: [max_touches]Slot = @splat(.{}),
+
+    pub const max_touches = 10;
+
+    const Slot = struct {
+        /// The touch's ID while one is down (-1 when none is).
+        id: i32 = -1,
+        x: i32 = 0,
+        y: i32 = 0,
+        /// The ID reported down (-1 if none), for a touch that came up
+        /// to be reported up with it.
+        reported: i32 = -1,
+        moved: bool = false,
+    };
+
+    /// Takes one raw event; at a SYN_REPORT, adds what changed to `out`
+    /// (from `n`), and returns how many it holds now.
+    pub fn feed(t: *Touch, ev_type: u16, code: u16, value: i32, out: []Event, n_in: usize) usize {
+        var n = n_in;
+        switch (ev_type) {
+            ev_abs => if (t.multitouch) switch (code) {
+                abs_mt_slot => t.slot = @intCast(std.math.clamp(value, 0, max_touches - 1)),
+                abs_mt_tracking_id => t.slots[t.slot].id = value,
+                abs_mt_position_x => {
+                    t.slots[t.slot].x = value;
+                    t.slots[t.slot].moved = true;
+                },
+                abs_mt_position_y => {
+                    t.slots[t.slot].y = value;
+                    t.slots[t.slot].moved = true;
+                },
+                else => {},
+            } else switch (code) {
+                abs_x => {
+                    t.slots[0].x = value;
+                    t.slots[0].moved = true;
+                },
+                abs_y => {
+                    t.slots[0].y = value;
+                    t.slots[0].moved = true;
+                },
+                else => {},
+            },
+            ev_key => if (!t.multitouch and code == btn_touch) {
+                t.slots[0].id = if (value != 0) 0 else -1;
+            },
+            ev_syn => if (code == syn_report) {
+                const before = n;
+                for (&t.slots) |*sl| {
+                    if (n + 2 > out.len) break;
+                    // Up (or replaced by another touch).
+                    if (sl.reported != -1 and sl.reported != sl.id) {
+                        out[n] = .{ .touch = .{ .kind = .up, .id = sl.reported } };
+                        n += 1;
+                        sl.reported = -1;
+                    }
+                    if (sl.id == -1) {
+                        sl.moved = false;
+                        continue;
+                    }
+                    const x = t.scale(sl.x, 0);
+                    const y = t.scale(sl.y, 1);
+                    if (sl.reported == -1) {
+                        out[n] = .{ .touch = .{ .kind = .down, .id = sl.id, .x = x, .y = y } };
+                        n += 1;
+                        sl.reported = sl.id;
+                    } else if (sl.moved) {
+                        out[n] = .{ .touch = .{ .kind = .motion, .id = sl.id, .x = x, .y = y } };
+                        n += 1;
+                    }
+                    sl.moved = false;
+                }
+                if (n > before and n < out.len) {
+                    out[n] = .frame;
+                    n += 1;
+                }
+            },
+            else => {},
+        }
+        return n;
+    }
+
+    /// A position as 0 to 1 across its range.
+    fn scale(t: *const Touch, v: i32, axis: usize) f64 {
+        const r = t.range[axis];
+        if (r[1] <= r[0]) return 0;
+        return std.math.clamp(@as(f64, @floatFromInt(v - r[0])) / @as(f64, @floatFromInt(r[1] - r[0])), 0, 1);
+    }
+};
+
+/// linux/input.h's struct input_absinfo.
+const AbsInfo = extern struct { value: i32, minimum: i32, maximum: i32, fuzz: i32, flat: i32, resolution: i32 };
+
+/// The touchscreen a device is, if it is one: it reports absolute
+/// positions (multitouch's, or a single touch's).
+fn probeTouch(fd: linux.fd_t) ?Touch {
+    var abs_bits: [8]u8 = @splat(0);
+    const eviocgbit_abs = linux.IOCTL.IOR('E', 0x20 + ev_abs, [8]u8);
+    if (linux.errno(linux.ioctl(fd, eviocgbit_abs, @intFromPtr(&abs_bits))) != .SUCCESS) return null;
+    const has = struct {
+        fn f(bits: []const u8, bit: u16) bool {
+            return bits[bit / 8] & (@as(u8, 1) << @intCast(bit % 8)) != 0;
+        }
+    }.f;
+    const multitouch = has(&abs_bits, abs_mt_position_x) and has(&abs_bits, abs_mt_position_y);
+    if (!multitouch and !(has(&abs_bits, abs_x) and has(&abs_bits, abs_y))) return null;
+    var t: Touch = .{ .range = undefined, .multitouch = multitouch };
+    const axes = if (multitouch) [2]u16{ abs_mt_position_x, abs_mt_position_y } else [2]u16{ abs_x, abs_y };
+    for (axes, 0..) |a, i| {
+        var info: AbsInfo = undefined;
+        if (linux.errno(linux.ioctl(fd, linux.IOCTL.IOR('E', @intCast(0x40 + a), AbsInfo), @intFromPtr(&info))) != .SUCCESS) return null;
+        t.range[i] = .{ info.minimum, info.maximum };
+    }
+    return t;
+}
+
 pub const max_devices = 32;
 
 /// N for a device node named "eventN" (N below `max_devices`).
@@ -87,6 +228,8 @@ pub const Devices = struct {
     fds: [max_devices]?linux.fd_t = @splat(null),
     /// Whether each has sent events yet (logged once, for diagnosis).
     active: [max_devices]bool = @splat(false),
+    /// The touchscreens' touches.
+    touch: [max_devices]?Touch = @splat(null),
 
     /// Opens event nodes that are not open yet.
     pub fn scan(d: *Devices) void {
@@ -118,7 +261,8 @@ pub const Devices = struct {
         d.active[n] = false;
         var name: [64]u8 = @splat(0);
         _ = linux.ioctl(fd, linux.IOCTL.IOR('E', 0x06, [64]u8), @intFromPtr(&name));
-        print("dazzle-shell: input: {s}: {s}\n", .{ path, std.mem.sliceTo(&name, 0) });
+        d.touch[n] = probeTouch(fd);
+        print("dazzle-shell: input: {s}: {s}{s}\n", .{ path, std.mem.sliceTo(&name, 0), if (d.touch[n] != null) " (touchscreen)" else "" });
     }
 
     /// Adds the open devices to `fds`; returns how many.
@@ -151,12 +295,21 @@ pub const Devices = struct {
                 return out[0..0];
             },
         }
-        for (&d.fds, 0..) |slot, i| if (slot == fd and !d.active[i]) {
-            d.active[i] = true;
-            print("dazzle-shell: input: first events from /dev/input/event{d}\n", .{i});
+        var touch: ?*Touch = null;
+        for (&d.fds, 0..) |slot, i| if (slot == fd) {
+            if (d.touch[i]) |*t| touch = t;
+            if (!d.active[i]) {
+                d.active[i] = true;
+                print("dazzle-shell: input: first events from /dev/input/event{d}\n", .{i});
+            }
         };
         for (raw[0 .. rc / @sizeOf(RawEvent)]) |r| {
             if (n == out.len) break;
+            // A touchscreen's events are its touches.
+            if (touch) |t| {
+                n = t.feed(r.type, r.code, r.value, out, n);
+                continue;
+            }
             if (decode(r.type, r.code, r.value)) |e| {
                 out[n] = e;
                 n += 1;
@@ -182,4 +335,40 @@ test "decode" {
     try std.testing.expectEqual(@as(?Event, null), decode(ev_key, 30, 2));
     try std.testing.expectEqual(Event.frame, decode(ev_syn, syn_report, 0).?);
     try std.testing.expectEqual(@as(?Event, null), decode(0x04, 0, 0)); // EV_MSC
+}
+
+test "multitouch: touches go down, move and come up, from 0 to 1" {
+    var t: Touch = .{ .range = .{ .{ 0, 1000 }, .{ 0, 500 } }, .multitouch = true };
+    var out: [8]Event = undefined;
+    var n: usize = 0;
+    // A touch in slot 0 at 250,250.
+    for ([_][3]i32{ .{ ev_abs, abs_mt_slot, 0 }, .{ ev_abs, abs_mt_tracking_id, 7 }, .{ ev_abs, abs_mt_position_x, 250 }, .{ ev_abs, abs_mt_position_y, 250 }, .{ ev_syn, syn_report, 0 } }) |e| n = t.feed(@intCast(e[0]), @intCast(e[1]), e[2], &out, n);
+    try std.testing.expectEqual(@as(usize, 2), n);
+    try std.testing.expectEqual(Event{ .touch = .{ .kind = .down, .id = 7, .x = 0.25, .y = 0.5 } }, out[0]);
+    try std.testing.expectEqual(Event.frame, out[1]);
+    // A second finger, and the first moving.
+    n = 0;
+    for ([_][3]i32{ .{ ev_abs, abs_mt_slot, 1 }, .{ ev_abs, abs_mt_tracking_id, 8 }, .{ ev_abs, abs_mt_position_x, 1000 }, .{ ev_abs, abs_mt_position_y, 0 }, .{ ev_abs, abs_mt_slot, 0 }, .{ ev_abs, abs_mt_position_x, 500 }, .{ ev_syn, syn_report, 0 } }) |e| n = t.feed(@intCast(e[0]), @intCast(e[1]), e[2], &out, n);
+    try std.testing.expectEqual(@as(usize, 3), n);
+    try std.testing.expectEqual(Event{ .touch = .{ .kind = .motion, .id = 7, .x = 0.5, .y = 0.5 } }, out[0]);
+    try std.testing.expectEqual(Event{ .touch = .{ .kind = .down, .id = 8, .x = 1, .y = 0 } }, out[1]);
+    // Both up.
+    n = 0;
+    for ([_][3]i32{ .{ ev_abs, abs_mt_tracking_id, -1 }, .{ ev_abs, abs_mt_slot, 1 }, .{ ev_abs, abs_mt_tracking_id, -1 }, .{ ev_syn, syn_report, 0 } }) |e| n = t.feed(@intCast(e[0]), @intCast(e[1]), e[2], &out, n);
+    try std.testing.expectEqual(@as(usize, 3), n);
+    try std.testing.expectEqual(Event{ .touch = .{ .kind = .up, .id = 7 } }, out[0]);
+    try std.testing.expectEqual(Event{ .touch = .{ .kind = .up, .id = 8 } }, out[1]);
+    // Nothing changed: nothing, not even a frame.
+    try std.testing.expectEqual(@as(usize, 0), t.feed(ev_syn, syn_report, 0, &out, 0));
+}
+
+test "single touch: BTN_TOUCH with ABS_X and ABS_Y" {
+    var t: Touch = .{ .range = .{ .{ 100, 300 }, .{ 100, 300 } }, .multitouch = false };
+    var out: [8]Event = undefined;
+    var n: usize = 0;
+    for ([_][3]i32{ .{ ev_key, btn_touch, 1 }, .{ ev_abs, abs_x, 200 }, .{ ev_abs, abs_y, 100 }, .{ ev_syn, syn_report, 0 } }) |e| n = t.feed(@intCast(e[0]), @intCast(e[1]), e[2], &out, n);
+    try std.testing.expectEqual(Event{ .touch = .{ .kind = .down, .id = 0, .x = 0.5, .y = 0 } }, out[0]);
+    n = 0;
+    for ([_][3]i32{ .{ ev_key, btn_touch, 0 }, .{ ev_syn, syn_report, 0 } }) |e| n = t.feed(@intCast(e[0]), @intCast(e[1]), e[2], &out, n);
+    try std.testing.expectEqual(Event{ .touch = .{ .kind = .up, .id = 0 } }, out[0]);
 }

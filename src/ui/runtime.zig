@@ -3,9 +3,15 @@
 //! size, and paints it; `render` then records it into a vc4 frame.
 //! Pointer events go to the widgets under the pointer, and keys to the
 //! widget with the keyboard (`focus`). A menu (`openMenu`) is shown above
-//! everything and gets the pointer first; the right button, or the left
-//! held down without moving (`long_press_ns`), asks the widget under the
-//! pointer for one (`Event.context`). Text is copied and pasted through
+//! everything and gets the pointer first; the right button, or a touch held
+//! without moving (`long_press_ns`), asks the widget under it for one
+//! (`Event.context`).
+//!
+//! A touch (one at a time) acts as the left button: a tap clicks. One
+//! that moves pans: whatever can scroll under it follows it, and nothing is
+//! clicked; if nothing can, it drags as the pointer would.
+//!
+//! Text is copied and pasted through
 //! `clipboard` (the system's, which the app gives), or within the app if
 //! there is none.
 //!
@@ -114,10 +120,14 @@ pub const Ui = struct {
     /// takes it away if it goes). Its nodes are made at the next frame.
     menu: ?struct { items: []menu_mod.Item, at: Point, owner: *Node } = null,
     menu_root: ?*Node = null,
-    /// A left button held down on a widget, which becomes a long press
+    /// A touch held down on a widget, which becomes a long press
     /// (`Event.context`) if it stays there: where it went down, and when
     /// the first frame after saw it.
     hold: ?struct { node: *Node, pos: Point, since: ?u64 = null } = null,
+    /// The touch followed (others are ignored): its ID, where it went down
+    /// and last was, whether it has moved, and whether it pans (scrolling
+    /// what is under it) or drags (as the pointer would).
+    touch: ?struct { id: i32, start: Point, last: Point, moved: bool = false, panning: bool = false } = null,
     /// The release of a press that became a long press is not sent.
     swallow_release: bool = false,
     /// The window's size at the last frame.
@@ -276,10 +286,10 @@ pub const Ui = struct {
 
     // --- Long presses ---------------------------------------------------------------
 
-    /// How long the left button is held down without moving for a menu.
+    /// How long a touch is held down without moving for a menu.
     pub const long_press_ns = 500 * std.time.ns_per_ms;
-    /// How far it may move meanwhile.
-    pub const long_press_slop = 8;
+    /// How far a touch may move and still be a tap (or a long press).
+    pub const touch_slop = 8;
 
     /// A hold that has lasted becomes a long press: the widget is asked for
     /// a menu, and if it shows one, the press is its (the release is not
@@ -393,9 +403,6 @@ pub const Ui = struct {
 
     pub fn pointerMotion(ui: *Ui, pos: Point) void {
         ui.pointer = pos;
-        if (ui.hold) |h| if (@abs(pos[0] - h.pos[0]) > long_press_slop or @abs(pos[1] - h.pos[1]) > long_press_slop) {
-            ui.hold = null;
-        };
         ui.updateHover(pos);
         for (ui.hovered.items) |n| _ = send(n, .{ .motion = local(n, pos) });
         if (ui.captured) |n| if (std.mem.indexOfScalar(*Node, ui.hovered.items, n) == null) {
@@ -422,7 +429,6 @@ pub const Ui = struct {
             if (button == widget.btn_right) for (ui.hovered.items) |n| if (send(n, .{ .context = local(n, pos) })) return;
             for (ui.hovered.items) |n| if (send(n, .{ .press = .{ .pos = local(n, pos), .button = button } })) {
                 ui.captured = n;
-                if (button == widget.btn_left) ui.hold = .{ .node = n, .pos = pos };
                 return;
             };
         } else if (ui.swallow_release) {
@@ -434,6 +440,88 @@ pub const Ui = struct {
             const inside = std.mem.indexOfScalar(*Node, ui.hovered.items, n) != null;
             _ = send(n, .{ .release = .{ .pos = local(n, pos), .button = button, .inside = inside } });
         }
+    }
+
+    // --- Touch ----------------------------------------------------------------------
+
+    /// A touch went down at `pos`: it presses there, as the left button
+    /// does (and, held there, becomes a long press). Only one touch is
+    /// followed at a time.
+    pub fn touchDown(ui: *Ui, id: i32, pos: Point) void {
+        if (ui.touch != null) return;
+        ui.touch = .{ .id = id, .start = pos, .last = pos };
+        ui.pointerButton(pos, widget.btn_left, true);
+        if (ui.captured) |n| ui.hold = .{ .node = n, .pos = pos };
+    }
+
+    /// The touch moved to `pos`. Once it has gone further than
+    /// `touch_slop`, it pans what can scroll under where it went down, if
+    /// anything can (the press is then cancelled: nothing is clicked), or
+    /// else drags.
+    pub fn touchMotion(ui: *Ui, id: i32, pos: Point) void {
+        const t = &(ui.touch orelse return);
+        if (t.id != id) return;
+        // A long press showed a menu: the touch is done with.
+        if (ui.swallow_release) return;
+        if (!t.moved and @abs(pos[0] - t.start[0]) <= touch_slop and @abs(pos[1] - t.start[1]) <= touch_slop) return;
+        const first = !t.moved;
+        t.moved = true;
+        ui.hold = null;
+        const dx = t.last[0] - pos[0];
+        const dy = t.last[1] - pos[1];
+        t.last = pos;
+        if (t.panning) {
+            _ = ui.pan(t.start, dx, dy);
+            return;
+        }
+        if (first and ui.pan(t.start, dx, dy)) {
+            t.panning = true;
+            ui.cancelPress();
+            return;
+        }
+        ui.pointerMotion(pos);
+    }
+
+    /// The touch came up: a tap (or the end of a drag) releases where it
+    /// last was, as the left button does.
+    pub fn touchUp(ui: *Ui, id: i32) void {
+        const t = ui.touch orelse return;
+        if (t.id != id) return;
+        if (!t.panning) ui.pointerButton(t.last, widget.btn_left, false);
+        ui.touch = null;
+        ui.hold = null;
+        ui.swallow_release = false;
+        // A touch hovers over nothing once it is up.
+        ui.pointerLeave();
+    }
+
+    /// The touches are not the window's any more (the shell moves it,
+    /// say): what they pressed is let go without a click.
+    pub fn touchCancel(ui: *Ui) void {
+        ui.cancelPress();
+        ui.touch = null;
+        ui.hold = null;
+        ui.swallow_release = false;
+        ui.pointerLeave();
+    }
+
+    /// Scrolls what can scroll under `at` by (`dx`, `dy`). Returns whether
+    /// anything did.
+    fn pan(ui: *Ui, at: Point, dx: f32, dy: f32) bool {
+        ui.updateHover(at);
+        for (ui.hovered.items) |n| if (send(n, .{ .scroll = .{ .pos = local(n, at), .dx = dx, .dy = dy, .touch = true } })) {
+            ui.needs_frame = true;
+            return true;
+        };
+        return false;
+    }
+
+    /// Lets go of what was pressed, without a click.
+    fn cancelPress(ui: *Ui) void {
+        const n = ui.captured orelse return;
+        ui.captured = null;
+        _ = send(n, .{ .release = .{ .pos = .{ -1, -1 }, .button = widget.btn_left, .inside = false } });
+        ui.needs_frame = true;
     }
 
     /// The wheel turned (`dy` pixels down, `dx` right): the deepest widget

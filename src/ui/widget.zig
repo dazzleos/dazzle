@@ -82,7 +82,9 @@ pub const Event = union(enum) {
     /// The wheel turned over it: by `dy` pixels down (and `dx` right).
     /// Returning true says it scrolled; otherwise it goes to the widgets
     /// around it.
-    scroll: struct { pos: Point, dx: f32, dy: f32 },
+    /// `touch`: a finger moved it (by exactly that much: a pan), rather
+    /// than a wheel (whose notches may scroll further).
+    scroll: struct { pos: Point, dx: f32, dy: f32, touch: bool = false },
     /// It got the keyboard (`Ui.focus`), or lost it.
     focus,
     blur,

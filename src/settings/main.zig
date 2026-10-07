@@ -115,6 +115,10 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             .key => |k| window_ui.keyEvent(k.code, k.pressed),
             .scroll => |sc| window_ui.pointerScroll(sc.pos, sc.dx, sc.dy),
             .leave => window_ui.pointerLeave(),
+            .touch_down => |t| window_ui.touchDown(t.id, t.pos),
+            .touch_motion => |t| window_ui.touchMotion(t.id, t.pos),
+            .touch_up => |id| window_ui.touchUp(id),
+            .touch_cancel => window_ui.touchCancel(),
         };
 
         // The figures change every second.

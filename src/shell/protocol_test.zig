@@ -575,3 +575,63 @@ test "text copied in one client is pasted in another" {
     try w.pump();
     try testing.expect(b.heard.selection == null);
 }
+
+test "touches go to the surface they went down on, and can move its window" {
+    var w: World = .{};
+    w.init();
+    defer w.deinit();
+    const a = try w.connect();
+    const compositor = try a.bind(p.wl_compositor.name, 4, null);
+    const wm_base = try a.bind(p.xdg_wm_base.name, 6, null);
+    const shm = try a.bind(p.wl_shm.name, 1, null);
+    var seat_heard: Heard = .{};
+    const seat = try a.bind(p.wl_seat.name, 5, seat_heard.listener());
+    var touch_heard: Heard = .{};
+    const touch = try a.d.newObject(touch_heard.listener());
+    var m = try seat.request(p.wl_seat.request.get_touch);
+    m.uint(touch.id).end();
+    var win: Window = .{ .surface = undefined, .xdg = undefined, .toplevel = undefined };
+    try win.open(a, compositor, wm_base, shm, null);
+    try testing.expect(seat_heard.args[0] & p.wl_seat.capability.touch != 0);
+
+    // Down at 100,140 on the screen: 100,100 in the window (at 0,40).
+    w.server.touchDown(1, 3, 100, 140);
+    w.server.touchFrame();
+    try w.pump();
+    try testing.expectEqual(@as(u32, 1), touch_heard.counts[p.wl_touch.event.down]);
+    try testing.expectEqual(p.wl_touch.event.frame, touch_heard.last_opcode);
+    w.server.touchMotion(2, 3, 110, 150);
+    try w.pump();
+    try testing.expectEqualSlices(i64, &.{ 2, 3, 110 * 256, 110 * 256 }, touch_heard.args[0..4]);
+    w.server.touchUp(3, 3);
+    w.server.touchFrame();
+    try w.pump();
+    try testing.expectEqual(@as(u32, 1), touch_heard.counts[p.wl_touch.event.up]);
+
+    // Restored (to 400x280 at 200,180), the window moves with a touch on
+    // it once the client asks, which is told the touch is not its own any
+    // more.
+    m = try win.toplevel.request(p.xdg_toplevel.request.unset_maximized);
+    m.end();
+    try w.pump();
+    w.server.touchDown(4, 5, 250, 200);
+    try w.pump();
+    const serial: u32 = @intCast(touch_heard.args[0]);
+    m = try win.toplevel.request(p.xdg_toplevel.request.move);
+    m.uint(seat.id).uint(serial).end();
+    try w.pump();
+    try testing.expectEqual(@as(u32, 1), touch_heard.counts[p.wl_touch.event.cancel]);
+    const moves_before = touch_heard.counts[p.wl_touch.event.motion];
+    w.server.touchMotion(5, 5, 300, 260);
+    // The pointer does not move it meanwhile.
+    w.server.pointerMotion(5, 10, 500);
+    try w.pump();
+    const t = w.server.topWindow().?;
+    try testing.expectEqual(@as(i32, 250), t.x);
+    try testing.expectEqual(@as(i32, 240), t.y);
+    try testing.expectEqual(moves_before, touch_heard.counts[p.wl_touch.event.motion]);
+    w.server.touchUp(6, 5);
+    try w.pump();
+    try testing.expect(w.server.grab == null);
+    try testing.expectEqual(@as(u32, 1), touch_heard.counts[p.wl_touch.event.up]);
+}

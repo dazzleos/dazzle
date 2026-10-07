@@ -115,6 +115,7 @@ const Object = union(enum) {
     seat: u32,
     pointer: u32,
     keyboard: u32,
+    touch: u32,
     cursor_shape_manager,
     cursor_shape_device,
     data_device_manager,
@@ -387,6 +388,13 @@ pub const Server = struct {
     /// The pointer's picture the client under it chose (an arrow until it
     /// does).
     client_cursor: Cursor = .arrow,
+    /// The touches down, and the serial of the last to go down (for a
+    /// client to move or resize its window with it).
+    touches: [10]?TouchPoint = @splat(null),
+    touch_serial: u32 = 0,
+    touch_serial_id: i32 = -1,
+    /// Clients sent touch events since the last touch frame.
+    touch_frame_clients: [4]?*Client = @splat(null),
     /// What the clipboard holds (from the client that last copied), and
     /// the offers of it made to clients.
     selection: ?*DataSource = null,
@@ -398,7 +406,13 @@ pub const Server = struct {
     /// The keyboard's modifiers.
     modifiers: keyboard.Modifiers = .{},
 
-    const Grab = struct { t: *Toplevel, dx: f64, dy: f64, resize: ?Resize = null };
+    /// A move or resize: by the pointer, or by a touch (`touch`: its ID).
+    const Grab = struct { t: *Toplevel, dx: f64, dy: f64, resize: ?Resize = null, touch: ?i32 = null };
+
+    /// A touch on a surface: its events go to the surface it went down on
+    /// (null once that has gone, or the touch is the shell's, moving a
+    /// window).
+    pub const TouchPoint = struct { id: i32, surface: ?*Surface, x: f64, y: f64 };
 
     /// A resize: the edges dragged (xdg_toplevel.resize_edge's bits), and
     /// where the pointer and the window were when it started.
@@ -489,6 +503,9 @@ pub const Server = struct {
     pub fn removeClient(s: *Server, c: *Client) void {
         // Nothing more is sent to it (nor made for it).
         c.dead = true;
+        for (&s.touch_frame_clients) |*slot| if (slot.* == c) {
+            slot.* = null;
+        };
         // Objects refer to each other, so they go in order: what surfaces
         // show, toplevels, xdg_surfaces, surfaces, then the rest, and
         // buffers last.
@@ -564,6 +581,9 @@ pub const Server = struct {
         // The client knows it destroyed the surface; no leave events.
         if (s.pointer_focus == surf) s.pointer_focus = null;
         if (s.keyboard_focus == surf) s.keyboard_focus = null;
+        for (&s.touches) |*slot| if (slot.*) |*tp| if (tp.surface == surf) {
+            tp.surface = null;
+        };
         s.setBuffer(surf, null);
         if (surf.copy) |t| s.backend.vtable.destroyTexture(s.backend.ptr, t);
         // Frame callbacks of a destroyed surface never fire.
@@ -838,40 +858,61 @@ pub const Server = struct {
     /// A client asked to move its window with the pointer, which must be
     /// holding a button pressed on it (`serial` being the press's).
     fn startMove(s: *Server, t: *Toplevel, serial: u32) void {
-        if (!s.clientGrabAllowed(t, serial)) return;
+        const by = s.clientGrabAllowed(t, serial) orelse return;
         s.settle(t, true);
-        s.grab = .{ .t = t, .dx = s.pointer_x - @as(f64, @floatFromInt(t.x)), .dy = s.pointer_y - @as(f64, @floatFromInt(t.y)) };
-        s.takePointer();
+        s.grab = .{ .t = t, .dx = by.x - @as(f64, @floatFromInt(t.x)), .dy = by.y - @as(f64, @floatFromInt(t.y)), .touch = by.touch };
+        s.takeInput(by.touch);
     }
 
     /// A client asked to resize its window by `edges` with the pointer, as
     /// for `startMove`.
     fn clientResize(s: *Server, t: *Toplevel, serial: u32, edges: u32) void {
-        if (!s.clientGrabAllowed(t, serial)) return;
+        const by = s.clientGrabAllowed(t, serial) orelse return;
         const valid = edges != 0 and edges & (edge_top | edge_bottom) != edge_top | edge_bottom and edges & (edge_left | edge_right) != edge_left | edge_right;
         if (!valid or edges > 15) return;
-        s.startResize(t, edges);
+        s.startResize(t, edges, by);
     }
 
-    fn clientGrabAllowed(s: *const Server, t: *const Toplevel, serial: u32) bool {
-        if (t.maximized or !t.shown() or s.grab != null) return false;
-        if (s.buttons_down == 0 or serial != s.press_serial) return false;
-        const surf = s.pointer_focus orelse return false;
-        return t.xdg.surface == surf;
+    /// What drives a move or resize: the pointer, or a touch.
+    const GrabBy = struct { x: f64, y: f64, touch: ?i32 = null };
+
+    /// Whether a client may move or resize its window from the input with
+    /// `serial`: a button press it is still holding on the window, or a
+    /// touch still down on it; and from where.
+    fn clientGrabAllowed(s: *const Server, t: *const Toplevel, serial: u32) ?GrabBy {
+        if (t.maximized or !t.shown() or s.grab != null) return null;
+        const surf = t.xdg.surface orelse return null;
+        if (s.buttons_down > 0 and serial == s.press_serial and s.pointer_focus == surf) return .{ .x = s.pointer_x, .y = s.pointer_y };
+        if (serial == s.touch_serial) if (s.touchPoint(s.touch_serial_id)) |tp| if (tp.surface == surf) return .{ .x = tp.x, .y = tp.y, .touch = tp.id };
+        return null;
     }
 
-    /// Resizes `t` by its `edges` as the pointer moves, until the buttons
-    /// are released.
-    fn startResize(s: *Server, t: *Toplevel, edges: u32) void {
+    /// Resizes `t` by its `edges` as the pointer (or touch) moves, until
+    /// the buttons are released (or the touch comes up).
+    fn startResize(s: *Server, t: *Toplevel, edges: u32, by: GrabBy) void {
         s.settle(t, true);
         const size = s.configuredSize(t);
-        s.grab = .{ .t = t, .dx = 0, .dy = 0, .resize = .{
+        s.grab = .{ .t = t, .dx = 0, .dy = 0, .touch = by.touch, .resize = .{
             .edges = edges,
-            .x = s.pointer_x,
-            .y = s.pointer_y,
+            .x = by.x,
+            .y = by.y,
             .rect = .{ .x = t.x, .y = t.y, .width = size[0], .height = size[1] },
         } };
-        s.takePointer();
+        s.takeInput(by.touch);
+    }
+
+    /// The input driving a move or resize is the shell's until it ends:
+    /// the pointer leaves the window it is over, or the touch's client is
+    /// told its touches are cancelled.
+    fn takeInput(s: *Server, touch: ?i32) void {
+        const id = touch orelse return s.takePointer();
+        const tp = s.touchPoint(id) orelse return;
+        const surf = tp.surface orelse return;
+        broadcast(surf.client, .touch, p.wl_touch.event.cancel, 1, .{});
+        // None of the client's touches go to it any more.
+        for (&s.touches) |*slot| if (slot.*) |*other| if (other.surface) |os| if (os.client == surf.client) {
+            other.surface = null;
+        };
     }
 
     /// The pointer is the shell's (for a move or resize) until the buttons
@@ -1330,6 +1371,7 @@ pub const Server = struct {
             .seat => |version| try s.seatRequest(c, version, m, r),
             // The cursor is the shell's own.
             .pointer => if (m.opcode == p.wl_pointer.request.release) c.deleteId(m.object),
+            .touch => if (m.opcode == p.wl_touch.request.release) c.deleteId(m.object),
             .keyboard => if (m.opcode == p.wl_keyboard.request.release) c.deleteId(m.object),
             .data_device_manager => switch (m.opcode) {
                 p.wl_data_device_manager.request.create_data_source => {
@@ -1453,7 +1495,7 @@ pub const Server = struct {
                 try c.addObject(id, .{ .seat = version });
                 if (c.send(id, p.wl_seat.event.capabilities)) |m0| {
                     var e = m0;
-                    e.uint(p.wl_seat.capability.pointer | p.wl_seat.capability.keyboard).end();
+                    e.uint(p.wl_seat.capability.pointer | p.wl_seat.capability.keyboard | p.wl_seat.capability.touch).end();
                 }
                 if (version >= 2) if (c.send(id, p.wl_seat.event.name)) |m0| {
                     var e = m0;
@@ -1535,7 +1577,7 @@ pub const Server = struct {
                 if (version >= 4) sendTo(c, id, p.wl_keyboard.event.repeat_info, .{ @as(i32, 25), @as(i32, 600) });
                 if (s.keyboard_focus) |surf| if (surf.client == c) s.sendKeyboardEnter(c, id, surf);
             },
-            p.wl_seat.request.get_touch => return c.postError(m.object, p.wl_display.err.invalid_method, "no touch screen", .{}),
+            p.wl_seat.request.get_touch => try c.addObject(try r.uint(), .{ .touch = version }),
             p.wl_seat.request.release => c.deleteId(m.object),
             else => return error.InvalidOpcode,
         }
@@ -1897,6 +1939,99 @@ pub const Server = struct {
         } else _ = linux.close(fd);
     }
 
+    // --- Touch ------------------------------------------------------------------
+
+    fn touchPoint(s: *const Server, id: i32) ?TouchPoint {
+        for (s.touches) |slot| if (slot) |tp| if (tp.id == id) return tp;
+        return null;
+    }
+
+    fn touchSlot(s: *Server, id: i32) ?*TouchPoint {
+        for (&s.touches) |*slot| if (slot.*) |*tp| if (tp.id == id) return tp;
+        return null;
+    }
+
+    /// A move or resize follows the pointer or touch to (`x`, `y`).
+    fn grabTo(s: *Server, g: Grab, x: f64, y: f64) void {
+        if (g.resize) |r| return s.resizeTo(g.t, r, x, y);
+        s.moveWindow(g.t, x - g.dx, y - g.dy);
+    }
+
+    /// A touch went down at (`x`, `y`) on the screen: on the surface there,
+    /// whose window comes to the top (and it closes another client's menus,
+    /// as a click does). Finish a group of touch events with `touchFrame`.
+    pub fn touchDown(s: *Server, time_ms: u32, id: i32, x: f64, y: f64) void {
+        const free = for (&s.touches) |*slot| {
+            if (slot.* == null) break slot;
+        } else return;
+        const surf = s.surfaceAt(x, y);
+        const owner: ?*Client = if (surf) |sf| sf.client else null;
+        for (s.popups.items) |pp| if (pp.grab) if (pp.xdg.surface) |ps| if (ps.client != owner) {
+            s.dismissGrabs();
+            break;
+        };
+        if (surf) |sf| if (s.rootToplevel(sf)) |t| if (t != s.topWindow()) {
+            s.raiseToplevel(t);
+            s.updateFocus();
+        };
+        free.* = .{ .id = id, .surface = surf, .x = x, .y = y };
+        const sf = surf orelse return;
+        const serial = s.nextSerial();
+        s.touch_serial = serial;
+        s.touch_serial_id = id;
+        const local = s.localTo(sf, x, y);
+        broadcast(sf.client, .touch, p.wl_touch.event.down, 1, .{ serial, time_ms, sf.id, @as(u32, @bitCast(id)), local[0], local[1] });
+        s.touchedClient(sf.client);
+    }
+
+    pub fn touchMotion(s: *Server, time_ms: u32, id: i32, x: f64, y: f64) void {
+        const tp = s.touchSlot(id) orelse return;
+        tp.x = x;
+        tp.y = y;
+        if (s.grab) |g| if (g.touch == id) return s.grabTo(g, x, y);
+        const sf = tp.surface orelse return;
+        const local = s.localTo(sf, x, y);
+        broadcast(sf.client, .touch, p.wl_touch.event.motion, 1, .{ time_ms, @as(u32, @bitCast(id)), local[0], local[1] });
+        s.touchedClient(sf.client);
+    }
+
+    pub fn touchUp(s: *Server, time_ms: u32, id: i32) void {
+        const tp = s.touchSlot(id) orelse return;
+        const surf = tp.surface;
+        for (&s.touches) |*slot| if (slot.*) |*x| if (x == tp) {
+            slot.* = null;
+            break;
+        };
+        if (s.grab) |g| if (g.touch == id) return s.endGrab();
+        const sf = surf orelse return;
+        broadcast(sf.client, .touch, p.wl_touch.event.up, 1, .{ s.nextSerial(), time_ms, @as(u32, @bitCast(id)) });
+        s.touchedClient(sf.client);
+    }
+
+    /// Ends a group of touch events, for the clients they went to.
+    pub fn touchFrame(s: *Server) void {
+        for (&s.touch_frame_clients) |*slot| if (slot.*) |c| {
+            broadcast(c, .touch, p.wl_touch.event.frame, 1, .{});
+            slot.* = null;
+        };
+    }
+
+    fn touchedClient(s: *Server, c: *Client) void {
+        for (&s.touch_frame_clients) |*slot| {
+            if (slot.* == c) return;
+            if (slot.* == null) {
+                slot.* = c;
+                return;
+            }
+        }
+    }
+
+    /// (`x`, `y`) on the screen, relative to a surface.
+    fn localTo(s: *const Server, surf: *const Surface, x: f64, y: f64) [2]f64 {
+        const o = s.surfaceOrigin(surf) orelse return .{ x, y };
+        return .{ x - @as(f64, @floatFromInt(o[0])), y - @as(f64, @floatFromInt(o[1])) };
+    }
+
     // --- Input ----------------------------------------------------------------
 
     /// Moves the pointer to (`x`, `y`) on the screen. Finish a batch of
@@ -1905,8 +2040,9 @@ pub const Server = struct {
         s.pointer_x = x;
         s.pointer_y = y;
         if (s.grab) |g| {
-            if (g.resize) |r| return s.resizeTo(g.t, r, x, y);
-            return s.moveWindow(g.t, x - g.dx, y - g.dy);
+            // A touch moves this window, not the pointer.
+            if (g.touch != null) return;
+            return s.grabTo(g, x, y);
         }
         // Entering a surface carries the position.
         if (s.updatePointerFocus()) return;
@@ -1922,10 +2058,10 @@ pub const Server = struct {
         } else if (s.buttons_down > 0) {
             s.buttons_down -= 1;
         }
-        if (s.grab != null) {
+        if (s.grab) |g| {
             // The move ends when the buttons are released, which are not
-            // passed on.
-            if (s.buttons_down == 0) s.endGrab();
+            // passed on (a touch's ends when it comes up).
+            if (s.buttons_down == 0 and g.touch == null) s.endGrab();
             return;
         }
         if (pressed) {
@@ -2033,10 +2169,13 @@ pub const Server = struct {
 
     /// The surface under the pointer, if any: the top window there.
     fn surfaceUnderPointer(s: *Server) ?*Surface {
+        return s.surfaceAt(s.pointer_x, s.pointer_y);
+    }
+
+    /// The surface at (`x`, `y`) on the screen, if any: the top one there.
+    fn surfaceAt(s: *Server, x: f64, y: f64) ?*Surface {
         // Only what is in the work area can be seen.
         const wa = s.work_area;
-        const x = s.pointer_x;
-        const y = s.pointer_y;
         if (x < @as(f64, @floatFromInt(wa.x)) or y < @as(f64, @floatFromInt(wa.y)) or
             x >= @as(f64, @floatFromInt(wa.x + @as(i32, @intCast(wa.width)))) or
             y >= @as(f64, @floatFromInt(wa.y + @as(i32, @intCast(wa.height))))) return null;

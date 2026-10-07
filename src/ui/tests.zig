@@ -869,3 +869,56 @@ test "a scroll view scrolls to the widget it is told to reveal, once" {
     u.frame(400, 400, 3, Reveal{ .target = 2 });
     try testing.expectEqual(@as(f32, 100), st.offset);
 }
+
+test "a tap presses a button; a touch that moves over a list scrolls it, pressing nothing" {
+    const u = try ui.Ui.create(testing.allocator, null);
+    defer u.destroy();
+    const Count = struct {
+        var presses: u32 = 0;
+        fn press(_: *u8) void {
+            presses += 1;
+        }
+    };
+    Count.presses = 0;
+    var dummy: u8 = 0;
+    const App = struct {
+        dummy: *u8,
+        pub fn build(self: *const @This(), cx: *Context) Widget {
+            var rows: [20]Widget = undefined;
+            for (&rows) |*r| r.* = cx.make(ui.Pressable{ .on_press = .of(self.dummy, Count.press), .child = cx.make(ui.SizedBox{ .height = 50 }) });
+            return cx.make(ui.Align{ .alignment = .top_left, .child = cx.make(ui.SizedBox{ .width = 200, .height = 300, .child = cx.make(ui.ScrollView{
+                .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &rows }),
+            }) }) });
+        }
+    };
+    u.frame(400, 400, 0, App{ .dummy = &dummy });
+    const st = find(u.root.?, ui.ScrollView).?.state(ui.ScrollView.State);
+    // A tap: a press.
+    u.touchDown(1, .{ 100, 100 });
+    u.touchUp(1);
+    try testing.expectEqual(@as(u32, 1), Count.presses);
+    // A touch that wobbles less than the slop is still a tap.
+    u.touchDown(2, .{ 100, 100 });
+    u.touchMotion(2, .{ 103, 104 });
+    u.touchUp(2);
+    try testing.expectEqual(@as(u32, 2), Count.presses);
+    // Up the list by 60: the list follows it, by as much, and the row it
+    // went down on is not pressed.
+    u.frame(400, 400, 1, App{ .dummy = &dummy });
+    u.touchDown(3, .{ 100, 200 });
+    u.touchMotion(3, .{ 100, 170 });
+    u.touchMotion(3, .{ 100, 140 });
+    u.touchUp(3);
+    try testing.expectEqual(@as(f32, 60), st.offset);
+    try testing.expectEqual(@as(u32, 2), Count.presses);
+    // Nothing is hovered once it is up.
+    try testing.expectEqual(@as(usize, 0), u.hovered.items.len);
+    // A second finger while one is down is ignored; a cancelled touch
+    // presses nothing.
+    u.touchDown(4, .{ 100, 100 });
+    u.touchDown(5, .{ 100, 150 });
+    u.touchUp(5);
+    u.touchCancel();
+    try testing.expectEqual(@as(u32, 2), Count.presses);
+    try testing.expect(u.captured == null);
+}

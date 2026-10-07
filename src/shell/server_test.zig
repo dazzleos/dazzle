@@ -57,6 +57,9 @@ const ServerThread = struct {
     last_width: std.atomic.Value(u32) = .init(0),
     /// Set by the test to have the server thread feed it input events.
     send_input: std.atomic.Value(bool) = .init(false),
+    /// Set by the test to have it feed a touch: down at 30,50 (in the
+    /// window at 0,40), moved to 60,80, and up.
+    send_touch: std.atomic.Value(bool) = .init(false),
     /// Set by the test to have the server thread hold the top window's
     /// buffer as the display would when showing it directly, or drop it.
     hold_top: std.atomic.Value(bool) = .init(false),
@@ -93,6 +96,16 @@ const ServerThread = struct {
                 srv.pointerFrame();
                 srv.keyboardKey(5, 30, true); // KEY_A
                 srv.keyboardKey(6, 30, false);
+                srv.flushClients();
+            }
+            if (st.send_touch.swap(false, .monotonic)) {
+                const srv = &st.server;
+                srv.touchDown(1, 9, 30, 50);
+                srv.touchFrame();
+                srv.touchMotion(2, 9, 60, 80);
+                srv.touchFrame();
+                srv.touchUp(3, 9);
+                srv.touchFrame();
                 srv.flushClients();
             }
             if (st.server.damaged) {
@@ -511,7 +524,7 @@ test "the shown window gets the pointer and keyboard" {
     m = try seat.request(p.wl_seat.request.get_keyboard);
     m.uint(keyboard.id).end();
     try d.roundtrip();
-    try testing.expectEqual(@as(u32, p.wl_seat.capability.pointer | p.wl_seat.capability.keyboard), input.capabilities);
+    try testing.expectEqual(@as(u32, p.wl_seat.capability.pointer | p.wl_seat.capability.keyboard | p.wl_seat.capability.touch), input.capabilities);
     // An XKB keymap, in a file the client can read; keys repeat.
     try testing.expectEqual(@as(?u32, p.wl_keyboard.keymap_format.xkb_v1), input.keymap_format);
     try testing.expectEqual(@as(u32, @import("keyboard.zig").keymap.len), input.keymap_size);
@@ -1143,5 +1156,40 @@ test "text copied in one app window is pasted in another, through the shell" {
 
     first.close();
     second.close();
+    thread.join();
+}
+
+test "an app window's touches come as its input" {
+    var pair: [2]linux.fd_t = undefined;
+    try testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &pair));
+    var renderer: FakeRenderer = .{};
+    const st = try testing.allocator.create(ServerThread);
+    defer testing.allocator.destroy(st);
+    st.* = .{ .server = .init(testing.allocator, renderer.backend(), .{ .x = 0, .y = 40, .width = 320, .height = 200 }), .fd = pair[0] };
+    defer st.server.deinit();
+    const thread = try std.Thread.spawn(.{}, ServerThread.run, .{st});
+
+    var fake: FakeGpu = .{};
+    const win = try app.Window.openOn(testing.allocator, fake.gpu(), try client.Display.fromFd(testing.allocator, pair[1]), "Touched");
+    test_frame.begin(try win.beginFrame(), .{ .clear = 0xff000000 });
+    try win.present(&test_frame);
+    while (win.frame_pending) try win.conn.dispatch();
+    try testing.expect(win.touch != null);
+    st.send_touch.store(true, .monotonic);
+    var got: [8]app.InputEvent = undefined;
+    var n: usize = 0;
+    for (0..200) |_| {
+        try win.wait(5 * std.time.ns_per_ms);
+        for (win.takeInput()) |e| if (n < got.len) {
+            got[n] = e;
+            n += 1;
+        };
+        if (n >= 3) break;
+    }
+    try testing.expectEqual(@as(usize, 3), n);
+    try testing.expectEqual(app.InputEvent{ .touch_down = .{ .id = 9, .pos = .{ 30, 10 } } }, got[0]);
+    try testing.expectEqual(app.InputEvent{ .touch_motion = .{ .id = 9, .pos = .{ 60, 40 } } }, got[1]);
+    try testing.expectEqual(app.InputEvent{ .touch_up = 9 }, got[2]);
+    win.close();
     thread.join();
 }

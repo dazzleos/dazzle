@@ -400,6 +400,27 @@ pub const wl_seat = struct {
     };
 };
 
+/// A touchscreen's touches, each with an ID while it lasts.
+pub const wl_touch = struct {
+    pub const name = "wl_touch";
+    pub const request = struct {
+        /// Since version 3.
+        pub const release = 0;
+    };
+    pub const event = struct {
+        /// serial, time, surface, id, x, y: on the surface.
+        pub const down = 0;
+        /// serial, time, id.
+        pub const up = 1;
+        /// time, id, x, y.
+        pub const motion = 2;
+        pub const frame = 3;
+        /// The touches are the compositor's now (it moves a window, say):
+        /// forget them.
+        pub const cancel = 4;
+    };
+};
+
 pub const wl_pointer = struct {
     pub const name = "wl_pointer";
     pub const request = struct {

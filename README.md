@@ -16,8 +16,8 @@ On top of it is **dazzle-shell**, a minimal Wayland compositor. Init (PID 1, the
 privileges) starts the shell as an unprivileged user. Its dock along the
 bottom of the screen has an icon for each app; clicking one starts the app
 as a Wayland client, or brings its window to the front if it is already
-running. USB mice and keyboards work: the shell shows a cursor and passes
-input to the window. The demo, a native app built
+running. USB mice, keyboards and touchscreens work: the shell shows a
+cursor and passes input to the window. The demo, a native app built
 with Dazzle's widget toolkit, shows a spinning, depth-tested Platonic
 solid, with Material 3 buttons to change its speed, radio buttons to
 choose the solid and switches to turn its lighting and texture on and
@@ -169,14 +169,14 @@ with the problem marked.
 | `outlined_button.zig` | `OutlinedButton`, made of a `Pressable`, `Decorated`, `ConstrainedBox`, `Padding` and `Center`, with a label, an icon or both |
 | `spinner.zig` | `Spinner`: Material's indeterminate circular progress indicator |
 | `checkbox.zig`, `radio.zig`, `switch.zig` | Material 3's selection controls: `Checkbox`, `Radio` (generic over the value it selects) and `Switch` (its handle slides), each with an optional label that presses it too; `control.zig` has what they share |
-| `text_field.zig` | `TextField`: a line of text to type (Material's outlined field), optionally shown as dots for passwords; clicking it gives it the keyboard. Text is selected by dragging, or with Shift and the arrow keys, Home and End (Ctrl+A: all); Ctrl+X, Ctrl+C and Ctrl+V cut, copy and paste, and so does the menu the right button (or holding the left down) shows. A password cannot be cut or copied |
-| `menu.zig` | `Menu`: Material's menu of actions, which `Ui.openMenu` shows above everything at a point (down and right of it, flipped up or left where there is no room, and kept in the window); pressing an item closes it and does the action, and pressing elsewhere or Escape closes it. The runtime asks the widget under the pointer for one (`Event.context`) when the right button is pressed, or the left is held for half a second without moving |
+| `text_field.zig` | `TextField`: a line of text to type (Material's outlined field), optionally shown as dots for passwords; clicking it gives it the keyboard. Text is selected by dragging, or with Shift and the arrow keys, Home and End (Ctrl+A: all); Ctrl+X, Ctrl+C and Ctrl+V cut, copy and paste, and so does the menu the right button (or holding a touch down) shows. A password cannot be cut or copied |
+| `menu.zig` | `Menu`: Material's menu of actions, which `Ui.openMenu` shows above everything at a point (down and right of it, flipped up or left where there is no room, and kept in the window); pressing an item closes it and does the action, and pressing elsewhere or Escape closes it. The runtime asks the widget under the pointer for one (`Event.context`) when the right button is pressed, or a touch is held for half a second without moving |
 | `title_bar.zig` | `TitleBar`: the bar apps draw across the top of their window, with their name, maximize and close buttons, and dragging it to move the window (the shell draws none) |
 | `bar_button.zig` | `BarButton`: the title bar's round icon buttons |
 | `keymap.zig` | Linux key codes to characters, for a US keyboard (the shell sends key codes without a keymap) |
 | `painter.zig` | Painting: canvas layers and GPU draws in order, clipping (nothing outside the clip is painted), and the overflow stripes |
 | `damage.zig` | What changed between frames: each node's drawing fingerprinted and compared, kept as a few rectangles, with a history for buffers of any age |
-| `runtime.zig` | `Ui`: builds, lays out and paints each frame, records it into a `vc4` frame (or draws it on the CPU, for tests), and sends pointer events (and the wheel) to the widgets under the pointer |
+| `runtime.zig` | `Ui`: builds, lays out and paints each frame, records it into a `vc4` frame (or draws it on the CPU, for tests), and sends pointer events (and the wheel) to the widgets under the pointer. A touch (one at a time) acts as the left button: a tap clicks; held, it asks for a menu; moved, it pans what can scroll under it (following the finger exactly, and pressing nothing), or else drags |
 | `tests.zig` | Tests: overflow, nonsense layouts, state and keys, buttons, overlays, GPU draws' order, rows and columns, controls, damage, grids and scrolling |
 
 `Overlay` stacks layers, each filling it, and the topmost layer with
@@ -293,7 +293,7 @@ The shell (`src/shell/`):
 | `render.zig` | Compositing with the `vc4` API: textured quads for the panels (the dock) and the windows, and the cursor plane |
 | `dock.zig` | The dock: finds the apps in `/apps`, draws their icons, and finds the one clicked |
 | `shaders/quad.zig` | The textured quad's shader |
-| `input.zig` | USB keyboards and mice: finds `/dev/input/event*` nodes and decodes their events |
+| `input.zig` | USB keyboards, mice and touchscreens: finds `/dev/input/event*` nodes and decodes their events (a touchscreen's multitouch slots, or a single touch, as touches going down, moving and coming up) |
 | `cursor.zig` | The pointer's pictures (an arrow, and arrows for resizing), drawn into the cursor plane's buffer |
 | `screenshot.zig` | Print Screen: the screen saved as `/data/user/Screenshot N.png` |
 | `png.zig` | Writing PNG images |
@@ -420,6 +420,14 @@ refused.
   (`wp_cursor_shape_v1`: an arrow, or the resize arrows, drawn by the
   shell); their own images (`set_cursor`) are ignored.
   Devices plugged in later are found within a second.
+- **Touch:** a device with absolute positions is a touchscreen (one that
+  tracks several touches, or one). Its touches go to the surface they went
+  down on (`wl_touch`), in its coordinates; going down, a touch brings its
+  window to the top and closes another client's menus, as a click does. A
+  client can move or resize its window with a touch still down (its
+  `move` or `resize` with the touch's serial): the touch is then the
+  shell's, and the client is told its touches are cancelled. Touches on
+  the dock are the shell's: a tap there is a click.
 
 The demo program (`src/demo/`):
 
@@ -1000,5 +1008,5 @@ GPU or display).
 - Setup: more pages (language, keyboard, network); keeping the Ethernet
   addressing chosen in Settings in `/data`; a way to shut down cleanly.
 - The shell: `wl_output`, more than one visible window, blending for
-  translucent windows, pointer acceleration, keymaps (XKB) and key repeat,
-  and touch screens.
+  translucent windows, pointer acceleration, keymaps other than US,
+  multi-finger gestures, and kinetic scrolling.

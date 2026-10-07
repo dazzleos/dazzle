@@ -134,7 +134,8 @@ pub const ScrollView = struct {
             .enter => s.hovered = true,
             .leave => s.hovered = false,
             .scroll => |sc| {
-                if (!s.scrollTo(s.offset + sc.dy * self.wheel_factor)) return false;
+                // The content follows a finger; a wheel's notches go further.
+                if (!s.scrollTo(s.offset + sc.dy * (if (sc.touch) 1 else self.wheel_factor))) return false;
                 n.ui.needs_frame = true;
                 return true;
             },

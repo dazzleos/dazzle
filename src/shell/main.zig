@@ -149,6 +149,8 @@ fn run(init: std.process.Init.Minimal) !void {
     var panels_damaged = true;
     // Print Screen was pressed: the screen is saved once input is handled.
     var screenshot_wanted = false;
+    // Touches that went down on the dock (the shell's, not a window's).
+    var dock_touches: TouchSet = .{};
     // When a client last had a frame for the screen.
     var client_frame_ns: u64 = 0;
     watchChildren();
@@ -212,11 +214,32 @@ fn run(init: std.process.Init.Minimal) !void {
                     if (e.key.pressed) screenshot_wanted = true;
                     continue;
                 }
+                // Touches go to the window they go down on, but those on
+                // the dock are the shell's (a tap there is a click).
+                var dock_tap: ?[2]f64 = null;
+                if (e == .touch) {
+                    const t = e.touch;
+                    const x = t.x * @as(f64, @floatFromInt(renderer.width - 1));
+                    const y = t.y * @as(f64, @floatFromInt(renderer.height - 1));
+                    const on_dock = dock_shown and y >= @as(f64, @floatFromInt(dock_y));
+                    switch (t.kind) {
+                        .down => if (on_dock) {
+                            dock_touches.set(t.id);
+                            dock_tap = .{ x, y };
+                        } else server.touchDown(time_ms, t.id, x, y),
+                        .motion => if (!dock_touches.has(t.id)) server.touchMotion(time_ms, t.id, x, y),
+                        .up => if (!dock_touches.unset(t.id)) server.touchUp(time_ms, t.id),
+                    }
+                    if (dock_tap == null) continue;
+                }
                 // Buttons over the dock are the shell's.
-                if (dock_shown and e == .button and pointer.y >= @as(f64, @floatFromInt(dock_y))) {
-                    pointer.flushMotion(&server, time_ms);
-                    if (!e.button.pressed or e.button.code != btn_left) continue;
-                    const i = dock.hit(pointer.x, pointer.y - @as(f64, @floatFromInt(dock_y))) orelse continue;
+                if (dock_tap != null or (dock_shown and e == .button and pointer.y >= @as(f64, @floatFromInt(dock_y)))) {
+                    if (dock_tap == null) {
+                        pointer.flushMotion(&server, time_ms);
+                        if (!e.button.pressed or e.button.code != btn_left) continue;
+                    }
+                    const at = dock_tap orelse [2]f64{ pointer.x, pointer.y };
+                    const i = dock.hit(at[0], at[1] - @as(f64, @floatFromInt(dock_y))) orelse continue;
                     const app = &apps[i];
                     if (app.pid) |pid| {
                         if (!server.raise(pid)) print("dazzle-shell: {s} has no window yet\n", .{app.label});
@@ -229,6 +252,7 @@ fn run(init: std.process.Init.Minimal) !void {
                     continue;
                 }
                 pointer.handle(&server, time_ms, e);
+                if (e == .frame) server.touchFrame();
             }
             if (pointer.moved) {
                 pointer.moved = false;
@@ -489,6 +513,8 @@ const Pointer = struct {
                 ptr.in_frame = true;
             },
             .key => |k| server.keyboardKey(time_ms, k.code, k.pressed),
+            // Touches are handled before.
+            .touch => {},
             .frame => {
                 ptr.flushMotion(server, time_ms);
                 if (ptr.in_frame) server.pointerFrame();
@@ -503,6 +529,32 @@ const Pointer = struct {
         ptr.pending_motion = false;
         server.pointerMotion(time_ms, ptr.x, ptr.y);
         ptr.in_frame = true;
+    }
+};
+
+/// A few touch IDs.
+const TouchSet = struct {
+    ids: [10]?i32 = @splat(null),
+
+    fn set(t: *TouchSet, id: i32) void {
+        for (&t.ids) |*slot| if (slot.* == null) {
+            slot.* = id;
+            return;
+        };
+    }
+
+    fn has(t: *const TouchSet, id: i32) bool {
+        for (t.ids) |slot| if (slot == id) return true;
+        return false;
+    }
+
+    /// Removes `id`; returns whether it was there.
+    fn unset(t: *TouchSet, id: i32) bool {
+        for (&t.ids) |*slot| if (slot.* == id) {
+            slot.* = null;
+            return true;
+        };
+        return false;
     }
 };
 
