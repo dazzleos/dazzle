@@ -5,8 +5,8 @@
 //!
 //! Text is selected by dragging over it, or with Shift and the arrow keys,
 //! Home or End (Ctrl+A: all of it). Ctrl+X cuts the selection, Ctrl+C
-//! copies it and Ctrl+V pastes over it (through the UI's clipboard: see
-//! `Ui.copyText`); the right button, or holding the left down, shows a
+//! copies it and Ctrl+V pastes over it, when the text comes (through the
+//! UI's clipboard: see `Ui.copyText` and `Ui.pasteText`); the right button, or holding the left down, shows a
 //! menu with the same (`Ui.openMenu`). An obscured field's text cannot be
 //! cut or copied.
 
@@ -67,8 +67,10 @@ pub const TextField = struct {
         hovered: bool = false,
         /// Selecting by dragging.
         dragging: bool = false,
-        /// What the menu's actions need, from the widget as last seen.
+        /// What the menu's actions (and pasting) need, from the widget as
+        /// last seen.
         ui: ?*@import("runtime.zig").Ui = null,
+        node: ?*Node = null,
         max_len: usize = capacity,
         obscure: bool = false,
         on_changed: ?widget.ValueCallback([]const u8) = null,
@@ -144,10 +146,13 @@ pub const TextField = struct {
             if (s.deleteSelection()) s.notifyChanged();
         }
 
-        /// Pastes the clipboard's text over the selection.
+        /// Pastes the clipboard's text over the selection, when it comes.
         pub fn paste(s: *State) void {
             const u = s.ui orelse return;
-            const t = u.pasteText(u.arena()) orelse return;
+            u.pasteText(s.node orelse return, .of(s, State.pasted));
+        }
+
+        fn pasted(s: *State, t: []const u8) void {
             if (s.insert(t, s.max_len)) s.notifyChanged();
         }
 
@@ -166,11 +171,8 @@ pub const TextField = struct {
                         s.copy();
                         return s.deleteSelection();
                     },
-                    keymap.key_v => {
-                        const u = s.ui orelse return false;
-                        const t = u.pasteText(u.arena()) orelse return false;
-                        return s.insert(t, max);
-                    },
+                    // The text comes later (see `pasted`).
+                    keymap.key_v => s.paste(),
                     else => {},
                 }
                 return false;
@@ -213,6 +215,7 @@ pub const TextField = struct {
     fn remember(self: *const TextField, n: *Node) *State {
         const st = n.state(State);
         st.ui = n.ui;
+        st.node = n;
         st.max_len = self.max_len;
         st.obscure = self.obscure;
         st.on_changed = self.on_changed;
@@ -423,13 +426,19 @@ test "selecting, copying, cutting and pasting, with keys and the menu" {
     const Board = struct {
         text: [64]u8 = undefined,
         len: usize = 0,
+        /// Pastes hold until `deliver` (as text from another app would).
+        sink: ?@import("runtime.zig").Clipboard.Sink = null,
         pub fn copy(b: *@This(), t: []const u8) void {
             @memcpy(b.text[0..t.len], t);
             b.len = t.len;
         }
-        pub fn paste(b: *@This(), a: std.mem.Allocator) ?[]const u8 {
-            if (b.len == 0) return null;
-            return a.dupe(u8, b.text[0..b.len]) catch null;
+        pub fn paste(b: *@This(), sink: @import("runtime.zig").Clipboard.Sink) void {
+            b.sink = sink;
+        }
+        fn deliver(b: *@This()) void {
+            const sink = b.sink orelse return;
+            b.sink = null;
+            sink.f(sink.ctx, if (b.len == 0) null else b.text[0..b.len]);
         }
     };
     var board: Board = .{};
@@ -500,6 +509,10 @@ test "selecting, copying, cutting and pasting, with keys and the menu" {
     try testing.expectEqualStrings("hello world", board.text[0..board.len]);
     T.click(u, .{ 60, rows[1] }, btn_left);
     T.keys(u, true, false, &.{keymap.key_v});
+    // The text comes later (from another app, say): then it is pasted.
+    try testing.expectEqual(@as(usize, 0), T.field(u, 1).len);
+    board.deliver();
+    try testing.expect(u.needs_frame);
     try testing.expectEqualStrings("hello world", sinks[1].text[0..sinks[1].len]);
     // Shift and Left select the last five characters; Ctrl+X cuts them.
     T.keys(u, false, true, &.{ keymap.left, keymap.left, keymap.left, keymap.left, keymap.left });
@@ -538,6 +551,7 @@ test "selecting, copying, cutting and pasting, with keys and the menu" {
     try testing.expect(T.findText(m, "Copy") != null and T.findText(m, "Ctrl+V") != null);
     try testing.expect(!m.overflow.any());
     T.click(u, T.middle(T.findText(m, "Paste").?), btn_left);
+    board.deliver();
     try testing.expect(u.menu == null);
     T.frame(u, &sinks, &now);
     try testing.expect(u.menu_root == null);
@@ -583,9 +597,52 @@ test "without the system's clipboard, text is copied within the app" {
     const Ui = @import("runtime.zig").Ui;
     const u = try Ui.create(testing.allocator, null);
     defer u.destroy();
-    try testing.expect(u.pasteText(testing.allocator) == null);
+    const Got = struct {
+        text: [8]u8 = undefined,
+        len: ?usize = null,
+        fn got(g: *@This(), t: []const u8) void {
+            @memcpy(g.text[0..t.len], t);
+            g.len = t.len;
+        }
+    };
+    const App = struct {
+        pub fn build(_: *const @This(), cx: *widget.Context) widget.Widget {
+            return cx.make(TextField{});
+        }
+    };
+    u.frame(200, 100, 0, App{});
+    var g: Got = .{};
+    // Nothing copied: nothing comes.
+    u.pasteText(u.root.?, .of(&g, Got.got));
+    try testing.expect(g.len == null);
     u.copyText("abc");
-    const t = u.pasteText(testing.allocator).?;
-    defer testing.allocator.free(t);
-    try testing.expectEqualStrings("abc", t);
+    u.pasteText(u.root.?, .of(&g, Got.got));
+    try testing.expectEqualStrings("abc", g.text[0..g.len.?]);
+}
+
+test "a paste for a widget that has gone goes nowhere" {
+    const Ui = @import("runtime.zig").Ui;
+    const u = try Ui.create(testing.allocator, null);
+    defer u.destroy();
+    const Never = struct {
+        sink: ?@import("runtime.zig").Clipboard.Sink = null,
+        pub fn copy(_: *@This(), _: []const u8) void {}
+        pub fn paste(n: *@This(), sink: @import("runtime.zig").Clipboard.Sink) void {
+            n.sink = sink;
+        }
+    };
+    var board: Never = .{};
+    u.clipboard = .of(&board);
+    const App = struct {
+        field: bool,
+        pub fn build(self: *const @This(), cx: *widget.Context) widget.Widget {
+            return if (self.field) cx.make(TextField{}) else cx.make(Padding{ .padding = .all(1) });
+        }
+    };
+    u.frame(200, 100, 0, App{ .field = true });
+    u.root.?.children.items[0].state(TextField.State).paste();
+    u.frame(200, 100, 1, App{ .field = false });
+    try testing.expect(u.paste == null);
+    // The text comes after all: nothing is done with it.
+    board.sink.?.f(board.sink.?.ctx, "late");
 }

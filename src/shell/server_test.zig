@@ -1073,10 +1073,27 @@ test "text copied in one app window is pasted in another, through the shell" {
     try show(first);
     first.clipboard.copy("hello from the first");
     try first.conn.roundtrip();
-    // Its own copy pastes without the shell.
-    const own = first.clipboard.paste(testing.allocator).?;
-    defer testing.allocator.free(own);
-    try testing.expectEqualStrings("hello from the first", own);
+    // Pasted text goes to a sink, when it comes.
+    const Got = struct {
+        text: [64]u8 = undefined,
+        len: ?usize = null,
+        fn sink(g: *@This()) app.clipboard.Sink {
+            return .{ .ctx = g, .f = got };
+        }
+        fn got(ctx: *anyopaque, t: ?[]const u8) void {
+            const g: *@This() = @ptrCast(@alignCast(ctx));
+            const text = t orelse "(none)";
+            @memcpy(g.text[0..text.len], text);
+            g.len = text.len;
+        }
+        fn slice(g: *const @This()) ?[]const u8 {
+            return g.text[0 .. g.len orelse return null];
+        }
+    };
+    // Its own copy pastes at once, without the shell.
+    var own: Got = .{};
+    first.clipboard.paste(own.sink());
+    try testing.expectEqualStrings("hello from the first", own.slice().?);
 
     // The second window opens on top, with the keyboard, and is told what
     // the clipboard holds.
@@ -1087,24 +1104,20 @@ test "text copied in one app window is pasted in another, through the shell" {
         try second.conn.dispatchTimeout(10);
     }
     try testing.expect(second.clipboard.offer_mime != null);
-    // Pasting waits for the first window to write the text, which it does
-    // as it handles its events (here, on this thread, while the second
-    // waits on another).
-    const Paste = struct {
-        win: *app.Window,
-        result: ?[]const u8 = null,
-        done: std.atomic.Value(bool) = .init(false),
-        fn run(pp: *@This()) void {
-            pp.result = pp.win.clipboard.paste(testing.allocator);
-            pp.done.store(true, .monotonic);
-        }
-    };
-    var paste: Paste = .{ .win = second };
-    const paster = try std.Thread.spawn(.{}, Paste.run, .{&paste});
-    while (!paste.done.load(.monotonic)) try first.conn.dispatchTimeout(10);
-    paster.join();
-    defer if (paste.result) |r| testing.allocator.free(r);
-    try testing.expectEqualStrings("hello from the first", paste.result.?);
+    // Pasting returns at once; the text comes once the first window has
+    // written it (as it handles its events), and the second's event loop
+    // reads it.
+    var pasted: Got = .{};
+    second.clipboard.paste(pasted.sink());
+    try testing.expect(pasted.len == null);
+    try testing.expect(second.clipboard.pasteFd() != null);
+    for (0..200) |_| {
+        if (pasted.len != null) break;
+        try first.wait(5 * std.time.ns_per_ms);
+        try second.wait(5 * std.time.ns_per_ms);
+    }
+    try testing.expectEqualStrings("hello from the first", pasted.slice().?);
+    try testing.expect(second.clipboard.pasteFd() == null);
 
     // The second copies: the first's copy is cancelled (its next paste
     // asks the shell), and the second pastes its own.
@@ -1115,9 +1128,18 @@ test "text copied in one app window is pasted in another, through the shell" {
         try first.conn.dispatchTimeout(10);
     }
     try testing.expect(first.clipboard.source == null);
-    const again = second.clipboard.paste(testing.allocator).?;
-    defer testing.allocator.free(again);
-    try testing.expectEqualStrings("now the second", again);
+    var again: Got = .{};
+    second.clipboard.paste(again.sink());
+    try testing.expectEqualStrings("now the second", again.slice().?);
+
+    // A copy that never comes: the paste gives up, with nothing.
+    second.clipboard.source = null;
+    var never: Got = .{};
+    second.clipboard.paste(never.sink());
+    second.clipboard.pending.?.deadline_ms = 0;
+    second.clipboard.service();
+    try testing.expectEqualStrings("(none)", never.slice().?);
+    second.clipboard.source = null;
 
     first.close();
     second.close();

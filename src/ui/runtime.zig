@@ -38,14 +38,22 @@ const Painter = painter_mod.Painter;
 const Segment = painter_mod.Segment;
 
 /// The system's clipboard, for text: `Clipboard.of(&app_clipboard)`, for
-/// a type with `copy(self, text)` and `paste(self, allocator) ?[]u8`.
+/// a type with `copy(self, text)` and `paste(self, sink)`. Pasting may take
+/// a while (the text comes from another app): the text goes to the sink
+/// when it has come, `sink.f(sink.ctx, text)` (null if there is none),
+/// perhaps before `paste` returns.
 pub const Clipboard = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
 
+    pub const Sink = struct {
+        ctx: *anyopaque,
+        f: *const fn (ctx: *anyopaque, text: ?[]const u8) void,
+    };
+
     pub const VTable = struct {
         copy: *const fn (*anyopaque, []const u8) void,
-        paste: *const fn (*anyopaque, std.mem.Allocator) ?[]const u8,
+        paste: *const fn (*anyopaque, Sink) void,
     };
 
     pub fn of(impl: anytype) Clipboard {
@@ -55,8 +63,8 @@ pub const Clipboard = struct {
             fn copy(ptr: *anyopaque, text: []const u8) void {
                 T.copy(@ptrCast(@alignCast(ptr)), text);
             }
-            fn paste(ptr: *anyopaque, a: std.mem.Allocator) ?[]const u8 {
-                return T.paste(@ptrCast(@alignCast(ptr)), a);
+            fn paste(ptr: *anyopaque, sink: Sink) void {
+                T.paste(@ptrCast(@alignCast(ptr)), .{ .ctx = sink.ctx, .f = sink.f });
             }
         }.vtable };
     }
@@ -98,6 +106,9 @@ pub const Ui = struct {
     /// copied within the app (`local_clipboard`).
     clipboard: ?Clipboard = null,
     local_clipboard: std.ArrayList(u8) = .empty,
+    /// A paste under way: the widget that asked (whose going drops it),
+    /// and where the text goes.
+    paste: ?struct { owner: *Node, on_text: widget.ValueCallback([]const u8) } = null,
     /// The menu shown, if any: its items (with their own copy), where it
     /// was asked for (in the window), and the widget that asked (which
     /// takes it away if it goes). Its nodes are made at the next frame.
@@ -245,11 +256,22 @@ pub const Ui = struct {
         ui.local_clipboard.appendSlice(ui.gpa, text) catch {};
     }
 
-    /// The text on the clipboard (in `a`), if there is any.
-    pub fn pasteText(ui: *Ui, a: std.mem.Allocator) ?[]const u8 {
-        if (ui.clipboard) |c| return c.vtable.paste(c.ptr, a);
-        if (ui.local_clipboard.items.len == 0) return null;
-        return a.dupe(u8, ui.local_clipboard.items) catch null;
+    /// Asks for the text on the clipboard, for `owner`: it goes to
+    /// `on_text` when it comes (which may be later: another app gives it),
+    /// unless `owner` has gone, another paste has been asked for, or there
+    /// is none. A frame is asked for then.
+    pub fn pasteText(ui: *Ui, owner: *Node, on_text: widget.ValueCallback([]const u8)) void {
+        ui.paste = .{ .owner = owner, .on_text = on_text };
+        if (ui.clipboard) |c| return c.vtable.paste(c.ptr, .{ .ctx = ui, .f = pasted });
+        pasted(ui, if (ui.local_clipboard.items.len > 0) ui.local_clipboard.items else null);
+    }
+
+    fn pasted(ctx: *anyopaque, text: ?[]const u8) void {
+        const ui: *Ui = @ptrCast(@alignCast(ctx));
+        const p = ui.paste orelse return;
+        ui.paste = null;
+        if (text) |t| p.on_text.call(t);
+        ui.needs_frame = true;
     }
 
     // --- Long presses ---------------------------------------------------------------
@@ -518,6 +540,9 @@ pub const Ui = struct {
     /// Drops references to a node being freed.
     pub fn forget(ui: *Ui, n: *Node) void {
         if (ui.menu) |m| if (m.owner == n) ui.closeMenu();
+        if (ui.paste) |p| if (p.owner == n) {
+            ui.paste = null;
+        };
         if (ui.hold) |h| if (h.node == n) {
             ui.hold = null;
         };

@@ -236,9 +236,11 @@ pub const Window = struct {
         m.string(app_id).end();
     }
 
-    /// Handles events that have arrived, without waiting.
+    /// Handles events that have arrived (and pasted text), without
+    /// waiting.
     pub fn poll(w: *Window) !void {
         _ = try w.conn.dispatchPending();
+        w.clipboard.service();
     }
 
     /// Asks the shell to fill the screen with the window, or to make it
@@ -303,10 +305,26 @@ pub const Window = struct {
         w.conn.flush() catch {};
     }
 
-    /// Waits for events (input, a configure, a released buffer) for up to
-    /// `timeout_ns`, and handles them: for when there is nothing to draw.
+    /// Waits for events (input, a configure, a released buffer, pasted
+    /// text) for up to `timeout_ns`, and handles them: for when there is
+    /// nothing to draw.
     pub fn wait(w: *Window, timeout_ns: u64) !void {
-        try w.conn.dispatchTimeout(@intCast(@min(std.math.divCeil(u64, timeout_ns, std.time.ns_per_ms) catch 0, std.math.maxInt(i32))));
+        const timeout_ms: u64 = std.math.divCeil(u64, timeout_ns, std.time.ns_per_ms) catch 0;
+        const paste_fd = w.clipboard.pasteFd() orelse
+            return w.conn.dispatchTimeout(@intCast(@min(timeout_ms, std.math.maxInt(i32))));
+        // A paste under way: its pipe is waited on too (no longer than
+        // until it gives up).
+        try w.conn.flush();
+        if (try w.conn.dispatchPending() == 0) {
+            const ms = @min(timeout_ms, w.clipboard.pasteTimeoutMs() orelse timeout_ms, std.math.maxInt(i32));
+            var fds = [_]linux.pollfd{
+                .{ .fd = w.conn.conn.fd, .events = linux.POLL.IN, .revents = 0 },
+                .{ .fd = paste_fd, .events = linux.POLL.IN, .revents = 0 },
+            };
+            _ = linux.poll(&fds, fds.len, @intCast(ms));
+            _ = try w.conn.dispatchPending();
+        }
+        w.clipboard.service();
     }
 
     /// Acknowledges a pending configure. Returns the new size if it changed;

@@ -5,8 +5,11 @@
 //! (the shell takes it only from the window with the keyboard, with the
 //! serial of the input that asked); the shell asks for it (`send`) when
 //! another client pastes. Pasting asks the clipboard's offer for text
-//! through a pipe, and waits a moment for it. Text this window copied is
-//! pasted from its own copy, without the shell.
+//! through a pipe and returns at once: the text comes to a `Sink` once it
+//! has all arrived, read as the window's event loop sees it come
+//! (`Window.wait` and `poll` watch the pipe, and call `service`), or
+//! nothing if it does not come within `paste_timeout_ms`. Text this window
+//! copied is pasted from its own copy, without the shell, at once.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -23,6 +26,19 @@ const mime_types = [_][]const u8{ "text/plain;charset=utf-8", "text/plain", "UTF
 pub const max_paste = 1024 * 1024;
 /// How long pasting waits for the text.
 pub const paste_timeout_ms = 1000;
+
+/// Where pasted text goes: `f(ctx, text)`, with the text (valid during the
+/// call), or null if there was none.
+pub const Sink = struct {
+    ctx: *anyopaque,
+    f: *const fn (ctx: *anyopaque, text: ?[]const u8) void,
+};
+
+fn nowMs() u64 {
+    var ts: linux.timespec = undefined;
+    _ = linux.clock_gettime(.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * std.time.ms_per_s + @as(u64, @intCast(ts.nsec)) / std.time.ns_per_ms;
+}
 
 pub const Clipboard = struct {
     gpa: std.mem.Allocator,
@@ -42,6 +58,9 @@ pub const Clipboard = struct {
     /// What this window copied, while it is the selection.
     source: ?client.Proxy = null,
     text: []u8 = &.{},
+    /// A paste under way: the pipe it comes through (non-blocking), what
+    /// has come, where it goes, and when to give up.
+    pending: ?struct { fd: linux.fd_t, got: std.ArrayList(u8) = .empty, sink: Sink, deadline_ms: u64 } = null,
 
     /// Starts using the data device of `seat`, if the shell has one.
     pub fn attach(c: *Clipboard, conn: *client.Display, manager: ?client.Proxy, seat: ?client.Proxy) !void {
@@ -57,6 +76,7 @@ pub const Clipboard = struct {
     }
 
     pub fn deinit(c: *Clipboard) void {
+        c.cancelPaste();
         c.gpa.free(c.text);
         c.text = &.{};
     }
@@ -80,46 +100,78 @@ pub const Clipboard = struct {
         c.conn.flush() catch {};
     }
 
-    /// The clipboard's text (in `a`), if it has any: this window's own
-    /// copy, or asked of the client that copied it.
-    pub fn paste(c: *Clipboard, a: std.mem.Allocator) ?[]const u8 {
-        if (c.source != null) return a.dupe(u8, c.text) catch null;
-        const offer = c.offer orelse return null;
-        const mime = mime_types[c.offer_mime orelse return null];
+    /// Asks for the clipboard's text, which goes to `sink` (once; null if
+    /// it has none): this window's own copy at once, or what the client
+    /// that copied it writes, as it comes (see `service`). Another paste
+    /// under way is dropped (its sink never called).
+    pub fn paste(c: *Clipboard, sink: Sink) void {
+        c.cancelPaste();
+        if (c.source != null) return sink.f(sink.ctx, c.text);
+        const offer = c.offer orelse return sink.f(sink.ctx, null);
+        const mime = mime_types[c.offer_mime orelse return sink.f(sink.ctx, null)];
         var fds: [2]linux.fd_t = undefined;
-        if (linux.errno(linux.pipe2(&fds, .{ .CLOEXEC = true })) != .SUCCESS) return null;
-        defer _ = linux.close(fds[0]);
+        if (linux.errno(linux.pipe2(&fds, .{ .CLOEXEC = true })) != .SUCCESS) return sink.f(sink.ctx, null);
+        // Only this end is non-blocking: the writer's is as it likes.
+        const flags = linux.fcntl(fds[0], linux.F.GETFL, 0);
+        _ = linux.fcntl(fds[0], linux.F.SETFL, flags | @as(u32, @bitCast(linux.O{ .NONBLOCK = true })));
         // The write end goes to the shell (and is closed here once sent).
         var m = (client.Proxy{ .display = c.conn, .id = offer }).request(p.wl_data_offer.request.receive) catch {
+            _ = linux.close(fds[0]);
             _ = linux.close(fds[1]);
-            return null;
+            return sink.f(sink.ctx, null);
         };
         m.string(mime).fd(fds[1]).end();
-        c.conn.flush() catch return null;
-        return readAll(a, fds[0]);
+        c.conn.flush() catch {};
+        c.pending = .{ .fd = fds[0], .sink = sink, .deadline_ms = nowMs() + paste_timeout_ms };
     }
 
-    /// What `fd` holds until its end, waiting up to `paste_timeout_ms`.
-    fn readAll(a: std.mem.Allocator, fd: linux.fd_t) ?[]const u8 {
-        var out: std.ArrayList(u8) = .empty;
+    /// The pipe a paste comes through, for the event loop to wait on.
+    pub fn pasteFd(c: *const Clipboard) ?linux.fd_t {
+        return if (c.pending) |pd| pd.fd else null;
+    }
+
+    /// How long until a paste under way gives up (null if none is).
+    pub fn pasteTimeoutMs(c: *const Clipboard) ?u64 {
+        const pd = c.pending orelse return null;
+        return pd.deadline_ms -| nowMs();
+    }
+
+    /// Reads what has come of a paste under way, without waiting; once it
+    /// has all come (or the time is up), gives it to its sink.
+    pub fn service(c: *Clipboard) void {
+        const pd = &(c.pending orelse return);
         var buf: [4096]u8 = undefined;
-        var waited: i32 = 0;
-        while (out.items.len < max_paste) {
-            var pfd = [_]linux.pollfd{.{ .fd = fd, .events = linux.POLL.IN, .revents = 0 }};
-            if (linux.poll(&pfd, 1, 50) == 0) {
-                waited += 50;
-                if (waited >= paste_timeout_ms) break;
-                continue;
+        while (true) {
+            const n = linux.read(pd.fd, &buf, buf.len);
+            switch (linux.errno(n)) {
+                .SUCCESS => {
+                    if (n == 0) return c.finishPaste(true);
+                    pd.got.appendSlice(c.gpa, buf[0..@min(n, max_paste -| pd.got.items.len)]) catch return c.finishPaste(false);
+                    if (pd.got.items.len >= max_paste) return c.finishPaste(true);
+                },
+                .INTR => {},
+                .AGAIN => break,
+                else => return c.finishPaste(false),
             }
-            const n = linux.read(fd, &buf, buf.len);
-            if (linux.errno(n) == .INTR) continue;
-            if (linux.errno(n) != .SUCCESS or n == 0) break;
-            out.appendSlice(a, buf[0..n]) catch break;
         }
-        return out.toOwnedSlice(a) catch {
-            out.deinit(a);
-            return null;
-        };
+        if (nowMs() >= pd.deadline_ms) c.finishPaste(false);
+    }
+
+    /// Ends a paste: its text (or none) to its sink.
+    fn finishPaste(c: *Clipboard, ok: bool) void {
+        var pd = c.pending orelse return;
+        c.pending = null;
+        _ = linux.close(pd.fd);
+        defer pd.got.deinit(c.gpa);
+        pd.sink.f(pd.sink.ctx, if (ok) pd.got.items else null);
+    }
+
+    /// Drops a paste under way, without telling its sink.
+    pub fn cancelPaste(c: *Clipboard) void {
+        var pd = c.pending orelse return;
+        c.pending = null;
+        _ = linux.close(pd.fd);
+        pd.got.deinit(c.gpa);
     }
 
     /// Forgets what this window copied (its source destroyed).

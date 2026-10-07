@@ -39,7 +39,7 @@ The code is split into Zig modules, linked statically into each program:
 | `sys` | `src/sys/` | Linux system call helpers (sleeping, clocks, logging, the kernel command line) |
 | `vc4` | `src/vc4/` | The low-level graphics API for the VideoCore IV, described below |
 | `shader` | `src/shader/` | Shaders written in Zig: SPIR-V translated to `vc4` programs, and pipelines for drawing with them |
-| `app` | `src/app/` | Native apps' windows on dazzle-shell: buffers shared with the shell, frame pacing and input, and the system's clipboard (`clipboard.zig`: text copied as a Wayland data source, and pasted from the selection's offer through a pipe) |
+| `app` | `src/app/` | Native apps' windows on dazzle-shell: buffers shared with the shell, frame pacing and input, and the system's clipboard (`clipboard.zig`: text copied as a Wayland data source, and pasted from the selection's offer through a pipe, read as the window's event loop sees it come, so the app goes on meanwhile) |
 | `gfx` | `src/gfx/` | 2D graphics for the toolkit: anti-aliased rounded rectangles, circles, polygons and polylines, filled or stroked, and text, blended |
 | `ui` | `src/ui/` | The widget toolkit: declarative widgets with state, layout, painting and input, in Material 3's style |
 | `font` | `src/font/` | OpenType font rendering, described below |
@@ -335,6 +335,10 @@ refused.
   (whose source is cancelled). Drag and drop is not supported yet.
   Dazzle's apps copy and paste text this way (`app/clipboard.zig`, for the
   toolkit's text fields); text an app copied it pastes from its own copy.
+  Pasting does not wait: the text is read from the pipe as it comes, in
+  the app's event loop (`Window.wait` watches the pipe), and put in the
+  field once it has all come; an app that has not written it within a
+  second has its paste dropped, and a field that has gone gets nothing.
 
 - **Windows:** each toplevel starts maximized, filling the screen above
   the dock. Unmaximized (`unset_maximized`), it is told half the work
