@@ -13,6 +13,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
+const locale = @import("locale");
 const font = @import("font");
 const vc4 = @import("vc4");
 const app = @import("app");
@@ -70,6 +71,10 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     const suggestion = names.random(&name_buf);
     // Preparing the card starts now, while the pages are filled in.
     var report: ?proto.Report = ask("prepare\n");
+    // The language and keyboard, as they are (until others are picked).
+    const start_locale: locale.Settings = if (report) |r| r.locale else .{};
+    locale.current = start_locale.language;
+    window_ui.keyboard = start_locale.keyboard;
     var next_ask: u64 = sys.nowNs() + 500 * std.time.ns_per_ms;
     var actions: view.Actions = .{};
     // The apps that can be installed (once the card is ready), and those
@@ -110,6 +115,15 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             .touch_cancel => window_ui.touchCancel(),
         };
 
+        // A language or keyboard picked: used now, and kept.
+        if (actions.locale) |l| {
+            actions.locale = null;
+            locale.current = l.language;
+            window_ui.keyboard = l.keyboard;
+            var req_buf: [64]u8 = undefined;
+            _ = ask(std.fmt.bufPrint(&req_buf, "locale {s} {s}\n", .{ l.language.code(), l.keyboard.code() }) catch "");
+            dirty = true;
+        }
         // How preparing goes: often while it does.
         if (now >= next_ask) {
             report = ask("status\n");
@@ -172,6 +186,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             dirty = false;
             window_ui.frame(width, height, now, view.Setup{
                 .suggestion = suggestion,
+                .locale = start_locale,
                 .report = if (report) |*r| r else null,
                 .apps = .{
                     .list = apps.apps(),

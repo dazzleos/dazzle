@@ -13,6 +13,7 @@ const Modules = struct {
     wayland: *std.Build.Module,
     build_info: *std.Build.Module,
     store: *std.Build.Module,
+    locale: *std.Build.Module,
 };
 
 /// Puts `<program>.icon` in the initramfs: the name of the program's icon
@@ -113,6 +114,8 @@ fn addIconFont(b: *std.Build) IconFont {
 /// * `font`: OpenType font rendering
 /// * `icons`: Material icons, and the font (with just those) to draw them
 /// * `wayland`: the Wayland wire protocol and a client library
+/// * `locale`: languages and keyboards: the choice, the keys' characters,
+///   and how dates, times and text are written
 /// * `store`: installing and removing apps (the catalogue, downloads,
 ///   archives), for the settings and setup apps
 /// * `build_info`: `commit`, the source's git commit (short, with "-dirty"
@@ -153,11 +156,13 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         },
     });
     addShaderImports(gfx, shaders, .gfx);
+    const locale = sys.import_table.get("locale").?;
     const ui = b.createModule(.{
         .root_source_file = b.path("src/ui/ui.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
+            .{ .name = "locale", .module = locale },
             .{ .name = "vc4", .module = vc4 },
             .{ .name = "gfx", .module = gfx },
             .{ .name = "font", .module = font },
@@ -171,6 +176,7 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         .imports = &.{
             .{ .name = "vc4", .module = vc4 },
             .{ .name = "wayland", .module = wayland },
+            .{ .name = "locale", .module = locale },
         },
     });
     const info = b.addOptions();
@@ -183,16 +189,22 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         .optimize = optimize,
         .imports = &.{.{ .name = "sys", .module = sys }},
     });
-    return .{ .sys = sys, .vc4 = vc4, .shader = shader, .app = app, .gfx = gfx, .ui = ui, .font = font, .icons = icons, .wayland = wayland, .build_info = info.createModule(), .store = store };
+    return .{ .sys = sys, .vc4 = vc4, .shader = shader, .app = app, .gfx = gfx, .ui = ui, .font = font, .icons = icons, .wayland = wayland, .build_info = info.createModule(), .store = store, .locale = locale };
 }
 
 /// `sys`, `vc4` and `shader`: what the GPU's users need, and what the
 /// shader compiler needs on the build machine.
 fn addGpuModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) struct { *std.Build.Module, *std.Build.Module, *std.Build.Module } {
+    const locale = b.createModule(.{
+        .root_source_file = b.path("src/locale/locale.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const sys = b.createModule(.{
         .root_source_file = b.path("src/sys/sys.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{.{ .name = "locale", .module = locale }},
     });
     const vc4 = b.createModule(.{
         .root_source_file = b.path("src/vc4/vc4.zig"),
@@ -347,6 +359,7 @@ fn addProgramModule(b: *std.Build, path: []const u8, target: std.Build.ResolvedT
             .{ .name = "wayland", .module = m.wayland },
             .{ .name = "build_info", .module = m.build_info },
             .{ .name = "store", .module = m.store },
+            .{ .name = "locale", .module = m.locale },
         },
     });
     // src/<owner>/main.zig embeds its shader programs.
@@ -982,6 +995,7 @@ pub fn build(b: *std.Build) void {
         host.icons,
         host.wayland,
         host.store,
+        host.locale,
         addProgramModule(b, "src/init/main.zig", b.graph.host, test_optimize, host, shaders, false),
         host_demo,
         host_settings,

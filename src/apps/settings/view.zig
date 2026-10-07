@@ -1,7 +1,8 @@
 //! The settings app's window, as widgets: pages, chosen with the tabs on
 //! the left, about the Wi-Fi networks around, Ethernet, the resources in
 //! use (with meters), the board (drawn: picking a part says what it is;
-//! see board.zig) and the system (its build, Linux and the board).
+//! see board.zig), the language and keyboard, and the system (its build,
+//! Linux and the board).
 //! Choosing a Wi-Fi network shows a password field (for WPA2) and a
 //! Connect button; choosing a static address for Ethernet shows fields for
 //! it. The Apps page lists the apps that can be installed (from the
@@ -13,6 +14,7 @@ const std = @import("std");
 const ui = @import("ui");
 const gfx = @import("gfx");
 const info = @import("info.zig");
+const locale = @import("locale");
 const store = @import("store");
 const update = @import("update.zig");
 const board = @import("board.zig");
@@ -37,6 +39,8 @@ pub const Actions = struct {
     check_update: bool = false,
     download_update: bool = false,
     restart: bool = false,
+    /// The language and keyboard to use.
+    locale: ?locale.Settings = null,
 
     fn checkUpdate(a: *Actions) void {
         a.check_update = true;
@@ -115,6 +119,8 @@ pub const Update = struct {
 
 pub const Settings = struct {
     commit: []const u8,
+    /// The language and keyboard in use.
+    locale: locale.Settings = .{},
     /// Where the window's requests go (none in tests that do not look).
     actions: ?*Actions = null,
     system: *const info.System,
@@ -193,6 +199,7 @@ pub const Settings = struct {
             .ethernet => self.networkCard(b, state),
             .resources => self.resourcesCard(b),
             .board => self.boardCard(b, state),
+            .language => self.languageCard(b),
             .system => self.systemCard(b),
             .apps => self.appsCard(b, state),
         };
@@ -331,7 +338,8 @@ pub const Settings = struct {
         var b2: [32]u8 = undefined;
         const cores = self.system.cores;
         const cpu = if (u.cpu_busy) |busy| cx.fmt("{d:.0}% busy ({d} {s})", .{ busy, cores, if (cores == 1) "core" else "cores" }) else "Measuring…";
-        const temperature = if (u.temperature) |c| cx.fmt("{d:.1} °C", .{c}) else "Unknown";
+        var temp_buf: [32]u8 = undefined;
+        const temperature = if (u.temperature) |c| cx.fmt("{s}", .{locale.formatTemperature(&temp_buf, c)}) else "Unknown";
         const mem = cx.fmt("{s} of {s} in use", .{ info.formatBytes(&b1, u.memUsed()), info.formatBytes(&b2, u.mem_total) });
         const gpu = if (u.gpu_total > 0) cx.fmt("{s} of {s} in use", .{ info.formatBytes(&b1, u.gpuUsed()), info.formatBytes(&b2, u.gpu_total) }) else "Unknown";
         return b.card("Resources", &.{
@@ -341,6 +349,33 @@ pub const Settings = struct {
             b.meter("GPU memory", gpu, fraction(u.gpuUsed(), u.gpu_total)),
             b.storage(u.storage),
         });
+    }
+
+    /// The language and keyboard, and a field to try the keyboard in.
+    fn languageCard(self: *const Settings, b: Builder) ui.Widget {
+        const cx = b.cx;
+        const t = cx.theme();
+        const a = cx.ui.arena();
+        const picker = a.create(LocalePick) catch return cx.make(ui.Empty{});
+        picker.* = .{ .actions = self.actions, .current = self.locale };
+        var rows: std.ArrayList(ui.Widget) = .empty;
+        const heading: ui.TextStyle = .{ .size = 18, .color = t.on_surface_variant };
+        rows.append(a, cx.make(ui.Text{ .text = "Language", .style = heading })) catch {};
+        for (std.enums.values(locale.Language)) |l| rows.append(a, cx.make(ui.Radio(locale.Language){
+            .value = l,
+            .group_value = self.locale.language,
+            .on_changed = if (self.actions != null) .of(picker, LocalePick.language) else null,
+            .label = l.name(),
+        })) catch {};
+        rows.append(a, cx.make(ui.Padding{ .padding = .{ .top = 12 }, .child = cx.make(ui.Text{ .text = "Keyboard", .style = heading }) })) catch {};
+        for (std.enums.values(locale.Keyboard)) |k| rows.append(a, cx.make(ui.Radio(locale.Keyboard){
+            .value = k,
+            .group_value = self.locale.keyboard,
+            .on_changed = if (self.actions != null) .of(picker, LocalePick.keyboard) else null,
+            .label = k.name(),
+        })) catch {};
+        rows.append(a, cx.make(ui.Row{ .children = &.{cx.make(ui.TextField{ .placeholder = "Type here to try the keyboard", .width = 360 })} })) catch {};
+        return b.card("Language and keyboard", rows.items);
     }
 
     /// The board, drawn, and about the part picked on it.
@@ -371,7 +406,7 @@ pub const Settings = struct {
         var b1: [32]u8 = undefined;
         var b2: [32]u8 = undefined;
         const now: ?[]const u8 = switch (part.kind) {
-            .soc => if (u.cpu_busy) |busy| (if (u.temperature) |c| cx.fmt("{d:.0}% busy, at {d:.1} °C", .{ busy, c }) else cx.fmt("{d:.0}% busy", .{busy})) else null,
+            .soc => if (u.cpu_busy) |busy| (if (u.temperature) |c| cx.fmt("{d:.0}% busy, at {s}", .{ busy, locale.formatTemperature(&b1, c) }) else cx.fmt("{d:.0}% busy", .{busy})) else null,
             .soc_with_ram => if (u.cpu_busy) |busy| cx.fmt("{d:.0}% busy; {s} of {s} of memory in use", .{ busy, info.formatBytes(&b1, u.memUsed()), info.formatBytes(&b2, u.mem_total) }) else null,
             .ram => cx.fmt("{s} of {s} in use", .{ info.formatBytes(&b1, u.memUsed()), info.formatBytes(&b2, u.mem_total) }),
             .micro_sd, .sd, .emmc => if (u.storage.user + u.storage.apps > 0) cx.fmt("{s} of your files and {s} of apps", .{ info.formatBytes(&b1, u.storage.user), info.formatBytes(&b2, u.storage.apps) }) else null,
@@ -646,6 +681,7 @@ pub const Page = enum {
     ethernet,
     resources,
     board,
+    language,
     apps,
     system,
 
@@ -655,6 +691,7 @@ pub const Page = enum {
             .ethernet => "Ethernet",
             .resources => "Resources",
             .board => "Board",
+            .language => "Language",
             .apps => "Apps",
             .system => "System",
         };
@@ -666,6 +703,7 @@ pub const Page = enum {
             .ethernet => .lan,
             .resources => .speed,
             .board => .developer_board,
+            .language => .language,
             .apps => .apps,
             .system => .info,
         };
@@ -712,6 +750,20 @@ const Tab = struct {
                 },
             }) }) }),
         }) });
+    }
+};
+
+/// Picking a language or keyboard (keeping the other as it is).
+const LocalePick = struct {
+    actions: ?*Actions,
+    current: locale.Settings,
+
+    fn language(p: *LocalePick, l: locale.Language) void {
+        if (p.actions) |a| a.locale = .{ .language = l, .keyboard = p.current.keyboard };
+    }
+
+    fn keyboard(p: *LocalePick, k: locale.Keyboard) void {
+        if (p.actions) |a| a.locale = .{ .language = p.current.language, .keyboard = k };
     }
 };
 
@@ -1539,4 +1591,22 @@ test "the board, drawn: picking a part says what it is" {
         }
     }
     try testing.expect(findText(u.root.?, "There is no drawing of this board") != null);
+}
+
+test "the language and keyboard: picking one keeps the other" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    const d = sample();
+    var actions: Actions = .{};
+    const settings: Settings = .{ .commit = "574d538", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .locale = .{ .language = .en_gb, .keyboard = .gb } };
+    u.frame(1600, 900, 0, settings);
+    u.root.?.state(Settings.State).page = .language;
+    u.frame(1600, 900, 1, settings);
+    try testing.expect(findText(u.root.?, "English (Canada)") != null);
+    click(u, findText(u.root.?, "English (Canada)").?);
+    try testing.expectEqual(locale.Settings{ .language = .en_ca, .keyboard = .gb }, actions.locale.?);
+    click(u, findText(u.root.?, "English (US)").?);
+    try testing.expectEqual(locale.Settings{ .language = .en_gb, .keyboard = .us }, actions.locale.?);
+    try testing.expect(findType(u.root.?, ui.TextField) != null);
 }

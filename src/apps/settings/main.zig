@@ -19,6 +19,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
+const locale = @import("locale");
 const font = @import("font");
 const vc4 = @import("vc4");
 const app = @import("app");
@@ -51,6 +52,9 @@ pub fn main(init: std.process.Init.Minimal) u8 {
 }
 
 fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
+    // The language chosen (in setup, or here).
+    var chosen = locale.load();
+    locale.current = chosen.language;
     const gpa = std.heap.page_allocator;
     var dev = vc4.device.openRender() catch |err| {
         print("dazzle-settings: no GPU ({s})\n", .{@errorName(err)});
@@ -123,6 +127,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             if (suspended) win.releaseSpareBuffers() else next_update = 0;
         }
         const now = sys.nowNs();
+        // The keyboard's layout, as the shell says.
+        window_ui.keyboard = win.layout;
         for (win.takeInput()) |e| switch (e) {
             .motion => |pos| window_ui.pointerMotion(pos),
             .button => |b| window_ui.pointerButton(b.pos, b.code, b.pressed),
@@ -169,6 +175,20 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             actions.restart = false;
             dirty = true;
         }
+        // A language or keyboard picked: the system manager keeps it (and
+        // the shell sends the apps the keyboard's layout).
+        if (actions.locale) |l| {
+            actions.locale = null;
+            var req_buf: [64]u8 = undefined;
+            const req = std.fmt.bufPrint(&req_buf, "locale {s} {s}\n", .{ l.language.code(), l.keyboard.code() }) catch "";
+            if (sys.system.ask(req, 3000)) |r| {
+                if (!r.denied) {
+                    chosen = l;
+                    locale.current = l.language;
+                }
+            } else print("dazzle-settings: the system did not answer\n", .{});
+            dirty = true;
+        }
         if (view.shownPage(window_ui) == .system and !updater.asked) {
             updater.check(false);
             dirty = true;
@@ -208,6 +228,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             for (catalogue, installed[0..catalogue.len]) |a, *i| i.* = store.isInstalled(store.apps_dir, a.name);
             window_ui.frame(width, height, now, view.Settings{
                 .commit = build,
+                .locale = chosen,
                 .system = &system,
                 .usage = usage,
                 .network = &network,

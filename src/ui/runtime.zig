@@ -33,6 +33,7 @@ const damage_mod = @import("damage.zig");
 const keymap = @import("keymap.zig");
 const menu_mod = @import("menu.zig");
 const drag_mod = @import("drag.zig");
+const locale = @import("locale");
 
 const Point = geometry.Point;
 const Size = geometry.Size;
@@ -108,7 +109,11 @@ pub const Ui = struct {
     focused: ?*Node = null,
     shift: u2 = 0,
     ctrl: u2 = 0,
+    /// The right Alt, for a keyboard's third characters (the UK's €).
+    altgr: u2 = 0,
     caps_lock: bool = false,
+    /// The keyboard's layout: what character each key types.
+    keyboard: locale.Keyboard = .us,
     /// The system's clipboard (the app gives it); without one, text is
     /// copied within the app (`local_clipboard`).
     clipboard: ?Clipboard = null,
@@ -624,6 +629,10 @@ pub const Ui = struct {
                 ui.ctrl = if (pressed) ui.ctrl +| 1 else ui.ctrl -| 1;
                 return;
             },
+            keymap.right_alt => {
+                ui.altgr = if (pressed) ui.altgr +| 1 else ui.altgr -| 1;
+                return;
+            },
             keymap.caps_lock => if (pressed) {
                 ui.caps_lock = !ui.caps_lock;
             },
@@ -639,7 +648,7 @@ pub const Ui = struct {
         _ = send(n, .{ .key = .{
             .code = code,
             .pressed = pressed,
-            .char = if (pressed and !ctrl) keymap.char(code, shift, ui.caps_lock) else null,
+            .char = if (pressed and !ctrl) ui.keyboard.char(code, shift, ui.caps_lock, ui.altgr > 0) else null,
             .ctrl = ctrl,
             .shift = shift,
         } });

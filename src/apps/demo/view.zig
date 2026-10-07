@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const ui = @import("ui");
+const locale = @import("locale");
 const gfx = @import("gfx");
 const vc4 = @import("vc4");
 const solids = @import("solids.zig");
@@ -131,7 +132,7 @@ pub const Demo = struct {
                             cx.make(ui.SizedBox{ .height = 4 }),
                             cx.make(ui.Switch{ .value = state.look.lighting, .on_changed = .of(state, State.setLighting), .label = "Lighting" }),
                             cx.make(ui.Switch{ .value = state.look.texturing, .on_changed = .of(state, State.setTexturing), .label = "Texture" }),
-                            cx.make(ui.Switch{ .value = state.colour_16, .on_changed = .of(state, State.setColour16), .label = "16-bit colour" }),
+                            cx.make(ui.Switch{ .value = state.colour_16, .on_changed = .of(state, State.setColour16), .label = locale.text("16-bit colour") }),
                         },
                     }) }) }),
                 },

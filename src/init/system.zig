@@ -36,6 +36,7 @@ const mkfs = @import("mkfs.zig");
 const slots = @import("slots.zig");
 const update = @import("update.zig");
 const trial = @import("trial.zig");
+const locale = @import("locale");
 
 const proto = sys.system;
 const print = sys.print;
@@ -76,6 +77,7 @@ pub fn start(card: bool, mounted: bool, slot: ?u8, setup_done: bool) ?linux.pid_
     sys.ignoreBrokenPipes();
     var m: Manager = .{ .report = .{ .storage = if (mounted) .ready else if (card) .unprepared else .none, .slot = if (card) slot orelse 'a' else null }, .finished = setup_done };
     m.readSlots();
+    m.report.locale = locale.load();
     // The last update did not work (and the system before is running).
     if (storage.exists(trial.failed_marker)) {
         m.report.update = .failed;
@@ -191,7 +193,21 @@ const Manager = struct {
             .finish => |h| m.finish(h),
             .update => |sha256| m.startUpdate(sha256),
             .restart => m.restart = true,
+            .locale => |l| {
+                m.report.locale = l;
+                m.keepLocale();
+            },
         }
+    }
+
+    /// Keeps the language and keyboard in /data/system (if it is there
+    /// yet: setup chooses them before, and they are kept when it
+    /// finishes).
+    fn keepLocale(m: *Manager) void {
+        if (!storage.exists(proto.config_dir)) return;
+        var buf: [64]u8 = undefined;
+        writeFile(locale.settings_file, m.report.locale.write(&buf));
+        print("dazzle: system: language {s}, keyboard {s}\n", .{ m.report.locale.language.code(), m.report.locale.keyboard.code() });
     }
 
     /// Starts installing the update Settings downloaded.
@@ -350,6 +366,7 @@ const Manager = struct {
         if (m.report.storage == .ready) {
             var line: [80]u8 = undefined;
             writeFile(proto.hostname_file, std.fmt.bufPrint(&line, "{s}\n", .{name}) catch name);
+            m.keepLocale();
             writeFile(proto.setup_done_file, "");
         }
         m.finished = true;

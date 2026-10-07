@@ -16,6 +16,7 @@
 //! Downloads run in a child process (`store.Job`), as the apps' do.
 
 const std = @import("std");
+const locale = @import("locale");
 const linux = std.os.linux;
 const sys = @import("sys");
 const store = @import("store");
@@ -216,13 +217,12 @@ fn childDownload(gpa: std.mem.Allocator, base_url: []const u8, m: Manifest) !voi
     if (report.denied or report.update == .failed) return error.InstallFailed;
 }
 
-/// "7 October 2026".
+/// "7 October 2026" (in the current language's way: "October 7, 2026").
 pub fn formatDate(buf: []u8, seconds: u64) []const u8 {
     const day = std.time.epoch.EpochSeconds{ .secs = seconds };
     const yd = day.getEpochDay().calculateYearDay();
     const md = yd.calculateMonthDay();
-    const months = [_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
-    return std.fmt.bufPrint(buf, "{d} {s} {d}", .{ md.day_index + 1, months[@intFromEnum(md.month) - 1], yd.year }) catch "";
+    return locale.formatLongDate(buf, md.day_index + 1, @intFromEnum(md.month), yd.year);
 }
 
 const testing = std.testing;

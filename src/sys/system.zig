@@ -15,6 +15,10 @@
 //!                              SHA-256 this is, into the slot not in use,
 //!                              and start that slot next time (settings)
 //!     restart                  restart the computer (settings)
+//!     locale <language> <keyboard>
+//!                              the language and keyboard (setup and
+//!                              settings): kept in /data/system/locale
+//!                              (once there is a /data)
 //!
 //! and the report:
 //!
@@ -25,6 +29,7 @@
 //!     version a 1791331200 de14aa2
 //!     version b -
 //!     update none
+//!     locale en-GB gb
 //!     end
 //!
 //! "storage" is how the card's free space is: "none" (there is no card),
@@ -40,6 +45,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys.zig");
+const locale = @import("locale");
 
 /// The manager's socket.
 pub const socket_path = "/os/sockets/system";
@@ -98,6 +104,7 @@ pub const Request = union(enum) {
     /// The archive's SHA-256, in hex.
     update: [64]u8,
     restart,
+    locale: locale.Settings,
 
     pub fn parse(line: []const u8) ?Request {
         var f = std.mem.tokenizeAny(u8, line, " \n");
@@ -106,6 +113,10 @@ pub const Request = union(enum) {
         if (std.mem.eql(u8, kind, "prepare")) return .prepare;
         if (std.mem.eql(u8, kind, "finish")) return .{ .finish = Hostname.parse(f.next() orelse return null) orelse return null };
         if (std.mem.eql(u8, kind, "restart")) return .restart;
+        if (std.mem.eql(u8, kind, "locale")) return .{ .locale = .{
+            .language = locale.Language.fromCode(f.next() orelse return null) orelse return null,
+            .keyboard = locale.Keyboard.fromCode(f.next() orelse return null) orelse return null,
+        } };
         if (std.mem.eql(u8, kind, "update")) {
             const hex = f.next() orelse return null;
             if (hex.len != 64) return null;
@@ -123,6 +134,7 @@ pub const Request = union(enum) {
             .status => true,
             .prepare, .finish => client == .setup,
             .update, .restart => client == .settings,
+            .locale => true,
         };
     }
 };
@@ -223,6 +235,8 @@ pub const Report = struct {
     versions: [2]?Version = .{ null, null },
     update: UpdateState = .none,
     update_failure: UpdateFailure = .none,
+    /// The language and keyboard chosen.
+    locale: locale.Settings = .{},
     /// The manager refused the client.
     denied: bool = false,
 
@@ -253,6 +267,7 @@ pub const Report = struct {
         }
         w.print("update {s}", .{@tagName(r.update)}) catch {};
         if (r.update == .failed) w.print(" {s}", .{@tagName(r.update_failure)}) catch {};
+        w.print("\nlocale {s} {s}", .{ r.locale.language.code(), r.locale.keyboard.code() }) catch {};
         w.writeAll("\nend\n") catch {};
         return w.buffered();
     }
@@ -284,6 +299,9 @@ pub const Report = struct {
             } else if (std.mem.eql(u8, kind, "version")) {
                 const s = parseSlot(f.next() orelse continue) orelse continue;
                 r.versions[s - 'a'] = Version.parse(f.rest());
+            } else if (std.mem.eql(u8, kind, "locale")) {
+                if (locale.Language.fromCode(f.next() orelse continue)) |l| r.locale.language = l;
+                if (locale.Keyboard.fromCode(f.next() orelse continue)) |k| r.locale.keyboard = k;
             } else if (std.mem.eql(u8, kind, "update")) {
                 r.update = std.meta.stringToEnum(UpdateState, f.next() orelse continue) orelse .none;
                 if (r.update == .failed) r.update_failure = std.meta.stringToEnum(UpdateFailure, f.next() orelse "io") orelse .io;
@@ -351,11 +369,20 @@ test "requests and reports go through the socket" {
     try testing.expect(!Request.allowedFor(.prepare, .settings));
     try testing.expect(!Request.allowedFor(.restart, .setup));
     try testing.expect(Request.allowedFor(.restart, .settings));
+    const lr = Request.parse("locale en-NZ gb\n").?.locale;
+    try testing.expectEqual(locale.Language.en_nz, lr.language);
+    try testing.expectEqual(locale.Keyboard.gb, lr.keyboard);
+    try testing.expect(Request.parse("locale fr-FR us\n") == null);
+    try testing.expect(Request.allowedFor(.{ .locale = .{} }, .setup));
+    try testing.expect(Request.allowedFor(.{ .locale = .{} }, .settings));
+    const chosen: Report = .{ .locale = .{ .language = .en_au, .keyboard = .gb } };
+    var chosen_buf: [256]u8 = undefined;
+    try testing.expectEqual(locale.Language.en_au, Report.parse(chosen.write(&chosen_buf)).?.locale.language);
 
     var r: Report = .{ .storage = .preparing, .progress = 42, .hostname = Hostname.parse("awesome-elephant").? };
     var buf: [256]u8 = undefined;
     const text = r.write(&buf);
-    try testing.expectEqualStrings("storage preparing 42\nhostname awesome-elephant\nversion a -\nversion b -\nupdate none\nend\n", text);
+    try testing.expectEqualStrings("storage preparing 42\nhostname awesome-elephant\nversion a -\nversion b -\nupdate none\nlocale en-US us\nend\n", text);
     const back = Report.parse(text).?;
     try testing.expectEqual(StorageState.preparing, back.storage);
     try testing.expectEqual(@as(u8, 42), back.progress);

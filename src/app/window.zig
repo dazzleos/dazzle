@@ -36,6 +36,7 @@
 
 const std = @import("std");
 const linux = std.os.linux;
+const locale = @import("locale");
 const vc4 = @import("vc4");
 const wayland = @import("wayland");
 
@@ -196,6 +197,9 @@ pub const Window = struct {
     touch: ?client.Proxy = null,
     /// The system's clipboard (for the toolkit's `Ui.clipboard`).
     clipboard: Clipboard,
+    /// The keyboard's layout, as the shell's keymap says (give it to the
+    /// toolkit: `Ui.keyboard`).
+    layout: locale.Keyboard = .us,
     /// A file of the app's that `wait` also wakes for when it can be
     /// read (a camera's frames, say).
     wake_fd: ?linux.fd_t = null,
@@ -730,11 +734,15 @@ pub const Window = struct {
     fn keyboardEvent(ptr: ?*anyopaque, _: *client.Display, _: u32, opcode: u16, r: *wire.Reader) void {
         const w: *Window = @ptrCast(@alignCast(ptr.?));
         switch (opcode) {
-            // No keymap is needed for evdev codes; just close it.
+            // Key events carry evdev codes, which the toolkit maps itself:
+            // only the layout's name is needed (Dazzle's shell names the
+            // keymap's symbols after it).
             p.wl_keyboard.event.keymap => {
                 _ = r.uint() catch return;
                 const fd = r.fd() catch return;
-                _ = linux.close(fd);
+                defer _ = linux.close(fd);
+                const size = r.uint() catch return;
+                if (keyboardFromKeymap(fd, size)) |k| w.layout = k;
             },
             p.wl_keyboard.event.key => {
                 const serial = r.uint() catch return;
@@ -784,3 +792,28 @@ pub const Window = struct {
         }
     }
 };
+
+/// The layout a keymap is for, from its symbols' name (`xkb_symbols
+/// "gb"`); null if it is not one Dazzle knows.
+fn keyboardFromKeymap(fd: linux.fd_t, size: u32) ?locale.Keyboard {
+    if (size == 0 or size > 1 << 20) return null;
+    const rc = linux.mmap(null, size, .{ .READ = true }, .{ .TYPE = .PRIVATE }, fd, 0);
+    if (linux.errno(rc) != .SUCCESS) return null;
+    const text = @as([*]const u8, @ptrFromInt(rc))[0..size];
+    defer _ = linux.munmap(text.ptr, size);
+    return layoutNamed(text);
+}
+
+fn layoutNamed(keymap: []const u8) ?locale.Keyboard {
+    const key = "xkb_symbols \"";
+    const at = std.mem.indexOf(u8, keymap, key) orelse return null;
+    const rest = keymap[at + key.len ..];
+    const end = std.mem.indexOfScalar(u8, rest, '"') orelse return null;
+    return locale.Keyboard.fromCode(rest[0..end]);
+}
+
+test "the layout is named in the keymap" {
+    try std.testing.expectEqual(locale.Keyboard.gb, layoutNamed("xkb_keymap {\nxkb_symbols \"gb\" {\n").?);
+    try std.testing.expect(layoutNamed("xkb_symbols \"pc+us+inet(evdev)\" {") == null);
+    try std.testing.expect(layoutNamed("nothing") == null);
+}

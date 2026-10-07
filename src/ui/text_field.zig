@@ -101,27 +101,56 @@ pub const TextField = struct {
             return true;
         }
 
-        /// Puts `t` at the cursor, over the selection: its printable ASCII
-        /// (line breaks and tabs as spaces), as much as fits. Returns
-        /// whether the text changed.
+        /// Puts `t` (UTF-8) at the cursor, over the selection: its
+        /// printable characters (line breaks and tabs as spaces), as many
+        /// as fit (`max` bytes in all). Returns whether the text changed.
         fn insert(s: *State, t: []const u8, max: usize) bool {
             var changed = s.deleteSelection();
-            for (t) |c0| {
-                const c = if (c0 == '\n' or c0 == '\t' or c0 == '\r') ' ' else c0;
-                if (c < 0x20 or c > 0x7e) continue;
-                if (s.len >= @min(max, capacity)) break;
-                std.mem.copyBackwards(u8, s.buf[s.cursor + 1 .. s.len + 1], s.buf[s.cursor..s.len]);
-                s.buf[s.cursor] = c;
-                s.len += 1;
-                s.cursor += 1;
+            var at: usize = 0;
+            while (at < t.len) {
+                const n = std.unicode.utf8ByteSequenceLength(t[at]) catch {
+                    at += 1;
+                    continue;
+                };
+                if (at + n > t.len) break;
+                const c0 = std.unicode.utf8Decode(t[at..][0..n]) catch {
+                    at += 1;
+                    continue;
+                };
+                at += n;
+                const c: u21 = if (c0 == '\n' or c0 == '\t' or c0 == '\r') ' ' else c0;
+                if (c < 0x20 or (c >= 0x7f and c < 0xa0)) continue;
+                var enc: [4]u8 = undefined;
+                const len = std.unicode.utf8Encode(c, &enc) catch continue;
+                if (s.len + len > @min(max, capacity)) break;
+                std.mem.copyBackwards(u8, s.buf[s.cursor + len .. s.len + len], s.buf[s.cursor..s.len]);
+                @memcpy(s.buf[s.cursor..][0..len], enc[0..len]);
+                s.len += len;
+                s.cursor += len;
                 changed = true;
             }
             return changed;
         }
 
-        fn removeAt(s: *State, i: usize) void {
-            std.mem.copyForwards(u8, s.buf[i .. s.len - 1], s.buf[i + 1 .. s.len]);
-            s.len -= 1;
+        /// Removes the bytes from `from` to `to`.
+        fn remove(s: *State, from: usize, to: usize) void {
+            std.mem.copyForwards(u8, s.buf[from .. s.len - (to - from)], s.buf[to..s.len]);
+            s.len -= to - from;
+        }
+
+        /// The character boundary before byte `i` (0 at the start).
+        fn before(s: *const State, i: usize) usize {
+            var j = i -| 1;
+            while (j > 0 and s.buf[j] & 0xc0 == 0x80) j -= 1;
+            return j;
+        }
+
+        /// The character boundary after byte `i` (the end at the end).
+        fn after(s: *const State, i: usize) usize {
+            if (i >= s.len) return s.len;
+            var j = i + 1;
+            while (j < s.len and s.buf[j] & 0xc0 == 0x80) j += 1;
+            return j;
         }
 
         /// Moves the cursor, extending the selection (from where the cursor
@@ -186,22 +215,27 @@ pub const TextField = struct {
                 keymap.backspace => {
                     if (s.deleteSelection()) return true;
                     if (s.cursor == 0) return false;
-                    s.cursor -= 1;
-                    s.removeAt(s.cursor);
+                    const from = s.before(s.cursor);
+                    s.remove(from, s.cursor);
+                    s.cursor = from;
                     return true;
                 },
                 keymap.delete => {
                     if (s.deleteSelection()) return true;
                     if (s.cursor == s.len) return false;
-                    s.removeAt(s.cursor);
+                    s.remove(s.cursor, s.after(s.cursor));
                     return true;
                 },
                 // Without Shift, a selection collapses to its start or end.
-                keymap.left => if (!k.shift and s.selection() != null) s.moveTo(s.selection().?[0], false) else s.moveTo(s.cursor -| 1, k.shift),
-                keymap.right => if (!k.shift and s.selection() != null) s.moveTo(s.selection().?[1], false) else s.moveTo(@min(s.cursor + 1, s.len), k.shift),
+                keymap.left => if (!k.shift and s.selection() != null) s.moveTo(s.selection().?[0], false) else s.moveTo(s.before(s.cursor), k.shift),
+                keymap.right => if (!k.shift and s.selection() != null) s.moveTo(s.selection().?[1], false) else s.moveTo(s.after(s.cursor), k.shift),
                 keymap.home => s.moveTo(0, k.shift),
                 keymap.end => s.moveTo(s.len, k.shift),
-                else => if (k.char) |c| return s.insert(&.{c}, max),
+                else => if (k.char) |c| {
+                    var enc: [4]u8 = undefined;
+                    const n = std.unicode.utf8Encode(c, &enc) catch return false;
+                    return s.insert(enc[0..n], max);
+                },
             }
             return false;
         }
@@ -238,10 +272,10 @@ pub const TextField = struct {
         return c.constrain(.{ .w = self.width, .h = h });
     }
 
-    /// What is shown for the first `n` characters.
+    /// What is shown for `text`: it, or a dot for each character.
     fn shown(self: *const TextField, buf: []u8, text: []const u8) []const u8 {
         if (!self.obscure) return text;
-        const count = @min(text.len, buf.len / dot.len);
+        const count = @min(std.unicode.utf8CountCodepoints(text) catch text.len, buf.len / dot.len);
         for (0..count) |i| @memcpy(buf[i * dot.len ..][0..dot.len], dot);
         return buf[0 .. count * dot.len];
     }
@@ -352,6 +386,8 @@ pub const TextField = struct {
         var best: usize = 0;
         var best_d = std.math.inf(f32);
         for (0..st.len + 1) |i| {
+            // Only between characters.
+            if (i < st.len and st.buf[i] & 0xc0 == 0x80) continue;
             const d = @abs(pad + self.xOf(style, st, i) - x);
             if (d < best_d) {
                 best = i;
@@ -699,4 +735,63 @@ test "a field asked for takes the keyboard by itself, once" {
     u.focus(null);
     u.frame(400, 200, 1, App{ .sink = &sink });
     try testing.expect(u.focused == null);
+}
+
+test "a UK keyboard types £ and €, and characters are edited whole" {
+    const Ui = @import("runtime.zig").Ui;
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    u.keyboard = .gb;
+    var text: [64]u8 = undefined;
+    var len: usize = 0;
+    const Sink = struct {
+        text: *[64]u8,
+        len: *usize,
+        fn changed(s: *const @This(), t: []const u8) void {
+            @memcpy(s.text[0..t.len], t);
+            s.len.* = t.len;
+        }
+    };
+    const sink: Sink = .{ .text = &text, .len = &len };
+    const App = struct {
+        sink: *const Sink,
+        pub fn build(self: *const @This(), cx: *widget.Context) widget.Widget {
+            return cx.make(Padding{ .padding = .all(20), .child = cx.make(TextField{ .autofocus = true, .on_changed = .of(self.sink, Sink.changed) }) });
+        }
+    };
+    u.frame(400, 200, 0, App{ .sink = &sink });
+    const press = struct {
+        fn key(uu: *Ui, code: u32) void {
+            uu.keyEvent(code, true);
+            uu.keyEvent(code, false);
+        }
+    }.key;
+    // Shift+3, AltGr+4, Shift+', #.
+    u.keyEvent(keymap.left_shift, true);
+    press(u, 4);
+    u.keyEvent(keymap.left_shift, false);
+    u.keyEvent(keymap.right_alt, true);
+    press(u, 5);
+    u.keyEvent(keymap.right_alt, false);
+    u.keyEvent(keymap.left_shift, true);
+    press(u, 40);
+    u.keyEvent(keymap.left_shift, false);
+    press(u, 43);
+    try testing.expectEqualStrings("£€@#", text[0..len]);
+    // Left over #, @ and €, then Backspace takes the £ whole.
+    press(u, keymap.left);
+    press(u, keymap.left);
+    press(u, keymap.left);
+    press(u, keymap.backspace);
+    try testing.expectEqualStrings("€@#", text[0..len]);
+    // Delete takes the € whole.
+    press(u, keymap.delete);
+    try testing.expectEqualStrings("@#", text[0..len]);
+    // A US keyboard types what the US has there.
+    u.keyboard = .us;
+    u.keyEvent(keymap.left_shift, true);
+    press(u, 4);
+    u.keyEvent(keymap.left_shift, false);
+    try testing.expectEqualStrings("#@#", text[0..len]);
 }

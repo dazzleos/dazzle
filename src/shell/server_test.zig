@@ -540,8 +540,8 @@ test "the shown window gets the pointer and keyboard" {
     try testing.expectEqual(@as(u32, p.wl_seat.capability.pointer | p.wl_seat.capability.keyboard | p.wl_seat.capability.touch), input.capabilities);
     // An XKB keymap, in a file the client can read; keys repeat.
     try testing.expectEqual(@as(?u32, p.wl_keyboard.keymap_format.xkb_v1), input.keymap_format);
-    try testing.expectEqual(@as(u32, @import("keyboard.zig").keymap.len), input.keymap_size);
-    try testing.expectEqualStrings("// A US keyboar", input.keymap_head[0..15]);
+    try testing.expectEqual(@as(u32, @intCast(@import("keyboard.zig").keymap(.us).len)), input.keymap_size);
+    try testing.expectEqualStrings("// The keymap W", input.keymap_head[0..15]);
     try testing.expectEqual(@as(i32, 25), input.repeat_rate);
 
     // A mapped window (an shm buffer) gets the keyboard focus.

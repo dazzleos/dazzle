@@ -2,6 +2,8 @@
 //! button (Finish on the last, and Back after the first), filling the
 //! screen. The pages:
 //!
+//! * the language and the keyboard (which changes with the language, until
+//!   one is picked), with a field to try the keyboard in;
 //! * the computer's name, filled in with a random one;
 //! * the apps to install (the image has none), from the catalogue, all
 //!   chosen to begin with;
@@ -15,12 +17,13 @@ const std = @import("std");
 const ui = @import("ui");
 const sys = @import("sys");
 const store = @import("store");
+const locale = @import("locale");
 
 const proto = sys.system;
 
-/// The pages, in order. More (language, keyboard, network) can follow.
-pub const Page = enum { hostname, apps };
-pub const pages = [_]Page{ .hostname, .apps };
+/// The pages, in order. More (the network, say) can follow.
+pub const Page = enum { language, hostname, apps };
+pub const pages = [_]Page{ .language, .hostname, .apps };
 
 /// The most apps that can be chosen (the catalogue's first).
 pub const max_apps = 64;
@@ -33,6 +36,8 @@ pub const Actions = struct {
     without_storage: bool = false,
     /// The apps to install: bit i for the catalogue's app i.
     apps: u64 = 0,
+    /// The language or keyboard picked (to use now, and keep).
+    locale: ?locale.Settings = null,
 };
 
 /// What the apps page shows.
@@ -54,6 +59,8 @@ pub const Apps = struct {
 pub const Setup = struct {
     /// The name to start with.
     suggestion: []const u8,
+    /// The language and keyboard to start with.
+    locale: locale.Settings = .{},
     /// What the system manager last said; null if it could not be asked.
     report: ?*const proto.Report = null,
     apps: Apps = .{},
@@ -68,6 +75,28 @@ pub const Setup = struct {
         name_invalid: bool = false,
         /// The apps not chosen: bit i for the catalogue's app i.
         skipped: u64 = 0,
+        language: locale.Language = .en_us,
+        keyboard: locale.Keyboard = .us,
+        /// The keyboard was picked (rather than going with the language).
+        keyboard_picked: bool = false,
+        /// Where the window's choices go.
+        actions: ?*Actions = null,
+
+        fn setLanguage(st: *State, l: locale.Language) void {
+            st.language = l;
+            if (!st.keyboard_picked) st.keyboard = l.keyboard();
+            st.chose();
+        }
+
+        fn setKeyboard(st: *State, k: locale.Keyboard) void {
+            st.keyboard = k;
+            st.keyboard_picked = true;
+            st.chose();
+        }
+
+        fn chose(st: *State) void {
+            if (st.actions) |a| a.locale = .{ .language = st.language, .keyboard = st.keyboard };
+        }
 
         fn chosen(st: *const State, i: usize) bool {
             return i < max_apps and st.skipped & (@as(u64, 1) << @intCast(i)) == 0;
@@ -85,7 +114,7 @@ pub const Setup = struct {
     };
 
     pub fn initState(self: *const Setup) State {
-        var st: State = .{};
+        var st: State = .{ .language = self.locale.language, .keyboard = self.locale.keyboard };
         st.setName(self.suggestion);
         return st;
     }
@@ -93,6 +122,7 @@ pub const Setup = struct {
     pub fn build(self: *const Setup, cx: *ui.Context, state: *State) ui.Widget {
         const nav = cx.ui.arena().create(Nav) catch return cx.make(ui.Empty{});
         nav.* = .{ .state = state, .actions = self.actions };
+        state.actions = self.actions;
         const content = if (state.finishing) self.finishing(cx, nav) else self.page(cx, state, nav);
         // At most 720 pixels wide, narrower in a narrower window.
         return cx.make(ui.Decorated{ .color = cx.theme().surface, .child = cx.make(ui.Center{ .child = cx.make(ui.ConstrainedBox{
@@ -105,6 +135,7 @@ pub const Setup = struct {
     fn page(self: *const Setup, cx: *ui.Context, state: *State, nav: *Nav) ui.Widget {
         const t = cx.theme();
         const body = switch (pages[state.page]) {
+            .language => languagePage(cx, state),
             .hostname => self.hostnamePage(cx, state, nav),
             .apps => self.appsPage(cx, state),
         };
@@ -115,6 +146,40 @@ pub const Setup = struct {
             cx.make(ui.Row{ .spacing = 12, .main_axis_alignment = .end, .children = &.{
                 if (state.page > 0) cx.make(ui.OutlinedButton{ .label = "Back", .icon = .arrow_back, .on_press = .of(nav, Nav.back) }) else cx.make(ui.Empty{}),
                 cx.make(ui.OutlinedButton{ .label = if (last) "Finish" else "Next", .icon = if (last) .check else .arrow_forward, .on_press = .of(nav, Nav.next) }),
+            } }),
+        } });
+    }
+
+    fn languagePage(cx: *ui.Context, state: *State) ui.Widget {
+        const t = cx.theme();
+        const a = cx.ui.arena();
+        var languages: std.ArrayList(ui.Widget) = .empty;
+        for (std.enums.values(locale.Language)) |l| languages.append(a, cx.make(ui.Radio(locale.Language){
+            .value = l,
+            .group_value = state.language,
+            .on_changed = .of(state, State.setLanguage),
+            .label = l.name(),
+        })) catch {};
+        var keyboards: std.ArrayList(ui.Widget) = .empty;
+        for (std.enums.values(locale.Keyboard)) |k| keyboards.append(a, cx.make(ui.Radio(locale.Keyboard){
+            .value = k,
+            .group_value = state.keyboard,
+            .on_changed = .of(state, State.setKeyboard),
+            .label = k.name(),
+        })) catch {};
+        const heading: ui.TextStyle = .{ .size = 20, .color = t.on_surface_variant };
+        return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 12, .children = &.{
+            cx.make(ui.Text{ .text = "Language and keyboard", .style = .{ .size = 28 } }),
+            cx.make(ui.Row{ .spacing = 24, .cross_axis_alignment = .start, .children = &.{
+                cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .start, .main_axis_size = .min, .spacing = 4, .children = &.{
+                    cx.make(ui.Text{ .text = "Language", .style = heading }),
+                    cx.make(ui.Column{ .cross_axis_alignment = .start, .main_axis_size = .min, .children = languages.items }),
+                } }) }),
+                cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 4, .children = &.{
+                    cx.make(ui.Text{ .text = "Keyboard", .style = heading }),
+                    cx.make(ui.Column{ .cross_axis_alignment = .start, .main_axis_size = .min, .children = keyboards.items }),
+                    cx.make(ui.Padding{ .padding = .{ .top = 8 }, .child = cx.make(ui.TextField{ .placeholder = "Type here to try it", .width = std.math.inf(f32) }) }),
+                } }) }),
             } }),
         } });
     }
@@ -224,7 +289,7 @@ const Nav = struct {
                 st.name_invalid = true;
                 return;
             },
-            .apps => {},
+            .language, .apps => {},
         }
         if (st.page + 1 < pages.len) {
             st.page += 1;
@@ -305,6 +370,14 @@ test "naming the computer, then waiting for the card" {
         Draw(u, &report, &actions, &now, size);
         try testing.expect(!overflows(u.root.?));
     }
+    // The language first; then the name, which fits too.
+    try testing.expect(findText(u.root.?, "Language and keyboard") != null);
+    click(u, findText(u.root.?, "Next").?);
+    for ([_][2]u32{ .{ 1920, 1080 }, .{ 640, 480 } }) |size| {
+        Draw(u, &report, &actions, &now, size);
+        try testing.expect(!overflows(u.root.?));
+    }
+    Draw(u, &report, &actions, &now, .{ 1920, 1080 });
     // The suggestion is filled in.
     const field = findType(u.root.?, ui.TextField).?;
     try testing.expectEqualStrings("awesome-elephant", field.state(ui.TextField.State).text());
@@ -353,7 +426,7 @@ test "choosing apps, then installing them" {
     };
     var setup: Setup = .{ .suggestion = "my-pi", .report = &report, .actions = &actions, .apps = .{ .list = &list } };
     u.frame(1280, 720, 0, setup);
-    u.root.?.state(Setup.State).page = 1;
+    u.root.?.state(Setup.State).page = 2;
     u.frame(1280, 720, 1, setup);
     try testing.expect(!overflows(u.root.?));
     try testing.expect(findText(u.root.?, "Browse your files") != null);
@@ -382,4 +455,31 @@ fn up(n: *ui.Node, comptime T: type) ?*ui.Node {
     var at: ?*ui.Node = n;
     while (at) |a| : (at = a.parent) if (a.widget.is(T)) return a;
     return null;
+}
+
+test "the language and keyboard: the keyboard goes with the language, until one is picked" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    var actions: Actions = .{};
+    const report: proto.Report = .{ .storage = .preparing };
+    const setup: Setup = .{ .suggestion = "my-pi", .report = &report, .actions = &actions, .locale = .{ .language = .en_us, .keyboard = .us } };
+    u.frame(1280, 720, 0, setup);
+    const st = u.root.?.state(Setup.State);
+    try testing.expect(findText(u.root.?, "English (New Zealand)") != null);
+    // British English: and a UK keyboard.
+    click(u, findText(u.root.?, "English (United Kingdom)").?);
+    u.frame(1280, 720, 1, setup);
+    try testing.expectEqual(locale.Language.en_gb, st.language);
+    try testing.expectEqual(locale.Keyboard.gb, st.keyboard);
+    try testing.expectEqual(locale.Keyboard.gb, actions.locale.?.keyboard);
+    // A US keyboard picked stays, whatever the language.
+    click(u, findText(u.root.?, "English (US)").?);
+    u.frame(1280, 720, 2, setup);
+    click(u, findText(u.root.?, "English (Australia)").?);
+    u.frame(1280, 720, 3, setup);
+    try testing.expectEqual(locale.Settings{ .language = .en_au, .keyboard = .us }, actions.locale.?);
+    // Somewhere to try it.
+    try testing.expect(findType(u.root.?, ui.TextField) != null);
+    try testing.expect(!overflows(u.root.?));
 }

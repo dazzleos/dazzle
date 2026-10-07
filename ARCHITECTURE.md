@@ -49,6 +49,7 @@ The shared code is in modules linked into each program:
 | `wayland` | The Wayland protocol, and a client library |
 | `app` | An app's window on the shell: buffers, input and the clipboard |
 | `store` | Installing and removing apps |
+| `locale` | Languages and keyboards: the choice, the keys' characters, and how dates, times and temperatures are written |
 
 Apps use these modules and nothing of each other's or the system's
 programs.
@@ -77,7 +78,8 @@ root filesystem. The card's partitions are mounted on it:
 /boot/        the card's boot partition (FAT), read-only: the firmware,
               config.txt and the two OS slots
 /data/        the rest of the card (ext4), made on the first start:
-  system/     the computer's settings (root's)
+  system/     the computer's settings (root's): its name, language and
+              keyboard
   user/       the user's files
   apps/       the apps installed, each in apps/<name>/<name>
   update/     where updates are downloaded
@@ -109,6 +111,16 @@ slot B. The setup app then lists the apps that can be installed, installs
 those chosen, and finishes: the computer is named, setup is marked done,
 and the dock appears. From then on, the system starts straight to the
 desktop.
+
+## Language and keyboard
+
+The language and the keyboard's layout are chosen in setup (its first
+page) and in Settings, and kept by the system manager in
+`/data/system/locale`. Apps read the language when they start, for their
+text and how they write dates, times and temperatures. The shell sends
+apps an XKB keymap made from the layout (as Wayland compositors do), and
+sends it again when the layout changes; the toolkit maps key codes to
+characters by the layout the keymap names.
 
 ## Apps
 

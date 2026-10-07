@@ -17,6 +17,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
+const locale = @import("locale");
 const font = @import("font");
 const vc4 = @import("vc4");
 const app = @import("app");
@@ -226,6 +227,8 @@ const Saving = struct {
 };
 
 fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
+    // The language chosen (in setup, or Settings).
+    locale.current = locale.load().language;
     const gpa = std.heap.page_allocator;
     var dev = vc4.device.openRender() catch |err| {
         print("dazzle-camera: no GPU ({s})\n", .{@errorName(err)});

@@ -16,6 +16,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
+const locale = @import("locale");
 const font = @import("font");
 const vc4 = @import("vc4");
 const app = @import("app");
@@ -80,6 +81,8 @@ fn openWindow(gpa: std.mem.Allocator, init: std.process.Init.Minimal, dev: *vc4.
 var frame: vc4.render.Frame = undefined;
 
 fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
+    // The language chosen (in setup, or Settings).
+    locale.current = locale.load().language;
     const gpa = std.heap.page_allocator;
     var dev = vc4.device.openRender() catch |err| {
         print("dazzle: no GPU ({s}); look for vc4 or v3d errors earlier in the log\n", .{@errorName(err)});
@@ -310,7 +313,7 @@ fn temperatureText(buf: []u8, t: ?f32) []const u8 {
 fn statusLines(bufs: *[view.lines][96]u8, s: Stats.Summary, width: u32, height: u32, format: vc4.Format, input: InputStatus, health: sysinfo.Sample) [view.lines][]const u8 {
     var out: [view.lines][]const u8 = undefined;
     out[0] = std.fmt.bufPrint(&bufs[0], "{d:.1} fps  ·  {d}×{d}  ·  {d:.0}% redrawn", .{ s.fps, width, height, s.redrawn }) catch "";
-    out[1] = std.fmt.bufPrint(&bufs[1], "GPU {d:.2} ms per frame  ·  {d}-bit colour", .{ s.gpu_ms, format.bytesPerPixel() * 8 }) catch "";
+    out[1] = std.fmt.bufPrint(&bufs[1], "GPU {d:.2} ms per frame  ·  {d}-bit {s}", .{ s.gpu_ms, format.bytesPerPixel() * 8, locale.text("colour") }) catch "";
     out[2] = std.fmt.bufPrint(&bufs[2], "CPU {d:.2} ms per frame", .{s.cpu_ms}) catch "";
     var key_buf: [16]u8 = undefined;
     const key = if (input.key) |k| keyName(&key_buf, k) else "none";

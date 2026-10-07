@@ -26,6 +26,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
+const locale = @import("locale");
 const vc4 = @import("vc4");
 const font = @import("font");
 const wayland = @import("wayland");
@@ -88,6 +89,10 @@ fn run(init: std.process.Init.Minimal) !void {
     // Apps installed or removed (from Settings) come and go from the dock.
     var apps_watch: dock_mod.Watch = .{ .path = dock_mod.apps_dir };
     _ = apps_watch.changed();
+    // The keyboard's layout, as chosen (in setup or Settings): the clients
+    // are sent its keymap, again when it changes.
+    var locale_watch: dock_mod.Watch = .{ .path = locale.settings_file };
+    _ = locale_watch.changed();
     for (apps) |app| print("dazzle-shell: app {s} ({s})\n", .{ app.label, app.path });
     var dock = try dock_mod.Dock.init(gpa, ui_font, apps, renderer.width, renderer.height);
     const dock_y: u32 = renderer.height - dock.height;
@@ -114,6 +119,7 @@ fn run(init: std.process.Init.Minimal) !void {
         .width = renderer.width,
         .height = renderer.height,
     });
+    server.setKeyboard(locale.load().keyboard);
     // The screen, for clients that ask (wl_output).
     server.output = .{
         .width = renderer.width,
@@ -313,6 +319,11 @@ fn run(init: std.process.Init.Minimal) !void {
             next_tick = start + ((t_now - start) / std.time.ns_per_s + 1) * std.time.ns_per_s;
             // Keyboards and mice plugged in since.
             devices.scan();
+            if (locale_watch.changed()) {
+                const chosen = locale.load();
+                print("dazzle-shell: keyboard {s}\n", .{chosen.keyboard.code()});
+                server.setKeyboard(chosen.keyboard);
+            }
             if (apps_watch.changed()) {
                 if (dock_mod.rescan(gpa, apps, dock_mod.apps_dir, &builtin_apps)) |new| {
                     apps = new;

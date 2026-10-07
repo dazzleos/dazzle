@@ -44,6 +44,7 @@ const wire = wayland.wire;
 const p = wayland.protocol;
 
 const keyboard = @import("keyboard.zig");
+const locale = @import("locale");
 const placement = @import("placement.zig");
 
 const log = std.log.scoped(.shell);
@@ -395,6 +396,8 @@ pub const Server = struct {
     /// Where the pointer is on the screen.
     pointer_x: f64 = 0,
     pointer_y: f64 = 0,
+    /// The keyboard's layout (its keymap is sent to clients).
+    keyboard_layout: locale.Keyboard = .us,
     /// The surfaces with pointer and keyboard focus.
     pointer_focus: ?*Surface = null,
     keyboard_focus: ?*Surface = null,
@@ -1585,14 +1588,9 @@ pub const Server = struct {
             p.wl_seat.request.get_keyboard => {
                 const id = try r.uint();
                 try c.addObject(id, .{ .keyboard = version });
-                // A US keyboard's XKB keymap (key events carry Linux key
+                // The layout's XKB keymap (key events carry Linux key
                 // codes, which are its key codes less 8).
-                if (keyboard.keymapFile()) |fd| {
-                    if (c.send(id, p.wl_keyboard.event.keymap)) |m0| {
-                        var e = m0;
-                        e.uint(p.wl_keyboard.keymap_format.xkb_v1).fd(fd).uint(keyboard.keymap.len).end();
-                    } else _ = linux.close(fd);
-                } else |err| log.info("no keymap: {s}", .{@errorName(err)});
+                s.sendKeymap(c, id);
                 // Clients repeat held keys themselves: 25 a second, after
                 // 600 ms.
                 if (version >= 4) sendTo(c, id, p.wl_keyboard.event.repeat_info, .{ @as(i32, 25), @as(i32, 600) });
@@ -2250,6 +2248,33 @@ pub const Server = struct {
         const no_keys: []const u8 = &.{};
         sendTo(c, id, p.wl_keyboard.event.enter, .{ s.nextSerial(), surf.id, no_keys });
         sendTo(c, id, p.wl_keyboard.event.modifiers, .{ s.serial, s.modifiers.depressed(), @as(u32, 0), s.modifiers.locked, @as(u32, 0) });
+    }
+
+    /// Sends a keyboard (`id`) the layout's keymap.
+    fn sendKeymap(s: *Server, c: *Client, id: u32) void {
+        const fd = keyboard.keymapFile(s.keyboard_layout) catch |err| return log.info("no keymap: {s}", .{@errorName(err)});
+        var m = c.send(id, p.wl_keyboard.event.keymap) orelse {
+            _ = linux.close(fd);
+            return;
+        };
+        m.uint(p.wl_keyboard.keymap_format.xkb_v1).fd(fd).uint(@intCast(keyboard.keymap(s.keyboard_layout).len)).end();
+    }
+
+    /// Changes the keyboard's layout: every client's keyboards are sent its
+    /// keymap.
+    pub fn setKeyboard(s: *Server, layout: locale.Keyboard) void {
+        if (layout == s.keyboard_layout) return;
+        s.keyboard_layout = layout;
+        s.modifiers.altgr = for (layout.keys()) |k| {
+            if (k.altgr != null) break true;
+        } else false;
+        for (s.clients.items) |c| {
+            var it = c.objects.iterator();
+            while (it.next()) |e| switch (e.value_ptr.*) {
+                .keyboard => s.sendKeymap(c, e.key_ptr.*),
+                else => {},
+            };
+        }
     }
 
     /// Sends an event to each of a client's pointers or keyboards (bound at

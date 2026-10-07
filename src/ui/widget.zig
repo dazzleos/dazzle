@@ -99,9 +99,9 @@ pub const Event = union(enum) {
         /// A Linux key code (see keymap.zig).
         code: u32,
         pressed: bool,
-        /// The character it types (US layout), if any: none while Control
-        /// is held.
-        char: ?u8,
+        /// The character it types (on the keyboard `Ui.keyboard`), if
+        /// any: none while Control is held.
+        char: ?u21,
         /// Modifiers held.
         ctrl: bool = false,
         shift: bool = false,
