@@ -18,6 +18,9 @@
 //! it --setup) it starts the setup app with the whole screen and no dock;
 //! the dock appears once setup has finished.
 //!
+//! Apps can ask it to open another app, showing something (see
+//! `sys.shell`): the Data Logger opens Settings at its GPIO page.
+//!
 //! Init starts it as the unprivileged Dazzle user, with stdout and stderr
 //! going to the kernel log.
 //!
@@ -106,7 +109,7 @@ fn run(init: std.process.Init.Minimal) !void {
     var setup_args = args;
     while (setup_args.next()) |arg| if (std.mem.eql(u8, arg, "--setup")) {
         var setup_buf: [512]u8 = undefined;
-        setup_pid = spawn(try sys.appFile(&setup_buf, "dazzle-setup"), runtime_dir);
+        setup_pid = spawn(try sys.appFile(&setup_buf, "dazzle-setup"), null, runtime_dir);
     };
     var dock_shown = setup_pid == null;
     if (dock_shown) {
@@ -134,8 +137,13 @@ fn run(init: std.process.Init.Minimal) !void {
 
     // Start the clients named on the command line.
     while (args.next()) |client| if (!std.mem.eql(u8, client, "--setup")) {
-        _ = spawn(client, runtime_dir);
+        _ = spawn(client, null, runtime_dir);
     };
+    // Apps asking for another app to be opened.
+    const opener: ?linux.fd_t = if (runtime_dir == null) sys.shell.listen(sys.shell.socket_path) catch |err| blk: {
+        print("dazzle-shell: cannot listen on {s}: {s}\n", .{ sys.shell.socket_path, @errorName(err) });
+        break :blk null;
+    } else null;
 
     // The pointer starts in the middle of the screen.
     var devices: input.Devices = .{};
@@ -184,7 +192,7 @@ fn run(init: std.process.Init.Minimal) !void {
         // Wait for clients, input, the display (a page flip completing), or
         // the next clock tick; or not at all if a frame is due and can be
         // drawn.
-        var fds: [2 + max_clients + input.max_devices]linux.pollfd = undefined;
+        var fds: [3 + max_clients + input.max_devices]linux.pollfd = undefined;
         fds[0] = .{ .fd = listener, .events = linux.POLL.IN, .revents = 0 };
         fds[1] = .{ .fd = renderer.dev.fd, .events = linux.POLL.IN, .revents = 0 };
         const n_clients = @min(server.clients.items.len, max_clients);
@@ -197,7 +205,16 @@ fn run(init: std.process.Init.Minimal) !void {
             if (panels_damaged) wake = @min(wake, client_frame_ns + panel_grace_ns);
         }
         const timeout: i32 = if (wake > now) @intCast((wake - now) / std.time.ns_per_ms + 1) else 0;
-        _ = linux.poll(&fds, 2 + n_clients + n_inputs, timeout);
+        const opener_index = 2 + n_clients + n_inputs;
+        fds[opener_index] = .{ .fd = opener orelse -1, .events = linux.POLL.IN, .revents = 0 };
+        _ = linux.poll(&fds, opener_index + 1, timeout);
+        if (fds[opener_index].revents != 0) if (opener) |l| {
+            if (openApp(l, apps, &server, runtime_dir) and dock_shown) {
+                dock.draw();
+                renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+                panels_damaged = true;
+            }
+        };
         const work_start = sys.nowNs();
 
         // The last frame reached the screen: its frame callbacks fire, and
@@ -254,7 +271,7 @@ fn run(init: std.process.Init.Minimal) !void {
                     if (app.pid) |pid| {
                         if (!server.raise(pid)) print("dazzle-shell: {s} has no window yet\n", .{app.label});
                     } else {
-                        app.pid = spawn(app.path, runtime_dir);
+                        app.pid = spawn(app.path, null, runtime_dir);
                         dock.draw();
                         renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
                         panels_damaged = true;
@@ -599,10 +616,48 @@ fn listen(path: [:0]const u8) !linux.fd_t {
     return fd;
 }
 
+/// An app asks for another to be opened (see `sys.shell`): one running is
+/// raised, and told what to show; another is started, with it as its
+/// argument. Returns whether an app was started.
+fn openApp(listener: linux.fd_t, apps: []dock_mod.App, server: *server_mod.Server, runtime_dir: ?[:0]const u8) bool {
+    var buf: [160]u8 = undefined;
+    const got = sys.shell.accept(listener, &buf) orelse return false;
+    defer sys.close(got.fd);
+    const req = sys.shell.Request.parse(got.line) orelse {
+        _ = linux.write(got.fd, "unknown\n", 8);
+        return false;
+    };
+    const app = for (apps) |*a| {
+        if (std.mem.eql(u8, a.name, req.app)) break a;
+    } else {
+        _ = linux.write(got.fd, "unknown\n", 8);
+        return false;
+    };
+    _ = linux.write(got.fd, "opened\n", 7);
+    if (app.pid) |pid| {
+        _ = server.raise(pid);
+        if (req.what) |what| {
+            var path_buf: [96]u8 = undefined;
+            var line_buf: [80]u8 = undefined;
+            var none: [0]u8 = .{};
+            if (sys.shell.appSocket(&path_buf, app.name)) |path| {
+                const line = std.fmt.bufPrint(&line_buf, "{s}\n", .{what}) catch return false;
+                _ = sys.shell.send(path, line, &none);
+            }
+        }
+        return false;
+    }
+    var arg_buf: [80]u8 = undefined;
+    const arg: ?[*:0]const u8 = if (req.what) |w| (std.fmt.bufPrintZ(&arg_buf, "{s}", .{w}) catch return false).ptr else null;
+    print("dazzle-shell: opening {s}{s}{s}\n", .{ app.name, if (req.what != null) " at " else "", req.what orelse "" });
+    app.pid = spawn(app.path, arg, runtime_dir);
+    return true;
+}
+
 /// Starts a client program. Dazzle's apps find the shell on
 /// /os/sockets/wayland-0;
 /// with a runtime directory (run elsewhere) they are told where it is.
-fn spawn(program: [*:0]const u8, runtime_dir: ?[:0]const u8) ?linux.pid_t {
+fn spawn(program: [*:0]const u8, arg: ?[*:0]const u8, runtime_dir: ?[:0]const u8) ?linux.pid_t {
     var env_buf: [160]u8 = undefined;
     const runtime_env: ?[*:0]const u8 = if (runtime_dir) |dir| (std.fmt.bufPrintZ(&env_buf, "XDG_RUNTIME_DIR={s}", .{dir}) catch return null).ptr else null;
     const rc = linux.fork();
@@ -614,7 +669,7 @@ fn spawn(program: [*:0]const u8, runtime_dir: ?[:0]const u8) ?linux.pid_t {
         print("dazzle-shell: started {s} (pid {d})\n", .{ program, rc });
         return @intCast(rc);
     }
-    const argv = [_:null]?[*:0]const u8{program};
+    const argv = [_:null]?[*:0]const u8{ program, arg };
     const envp = if (runtime_env) |r| [_:null]?[*:0]const u8{ "HOME=/", "WAYLAND_DISPLAY=wayland-0", r } else [_:null]?[*:0]const u8{ "HOME=/", null, null };
     const err = linux.errno(linux.execve(program, &argv, &envp));
     print("dazzle-shell: cannot run {s} ({s})\n", .{ program, @tagName(err) });

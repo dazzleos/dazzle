@@ -12,7 +12,11 @@
 //! system are checked for when the System page is first shown, and
 //! downloaded and installed from there (see update.zig).
 //!
-//!     dazzle-settings [font.ttf]
+//!     dazzle-settings [page] [font.ttf]
+//!
+//! It starts at `page` if it is given ("gpio": see `view.Page`); while it
+//! runs, other apps can show it a page through the shell (see
+//! `sys.shell`), which sends it on to /os/sockets/app-dazzle-settings.
 //!
 //! It runs until it is stopped or its window is closed.
 
@@ -30,12 +34,12 @@ const info = @import("info.zig");
 const usb = @import("usb.zig");
 const log = @import("log.zig");
 const gpio = @import("gpio.zig");
-
-/// How often the GPIO pins' levels are read, while their page shows.
-const gpio_poll_ns = 100 * std.time.ns_per_ms;
 const view = @import("view.zig");
 const store = @import("store");
 const update = @import("update.zig");
+
+/// How often the GPIO pins' levels are read, while their page shows.
+const gpio_poll_ns = 100 * std.time.ns_per_ms;
 
 const print = sys.print;
 
@@ -49,15 +53,19 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     var args = init.args.iterate();
     _ = args.skip();
     var font_buf: [512]u8 = undefined;
-    const font_path: [*:0]const u8 = args.next() orelse sys.fontFile(&font_buf, font.default_font_file);
-    run(init, font_path) catch |err| {
+    var font_path: [*:0]const u8 = sys.fontFile(&font_buf, font.default_font_file);
+    var page: ?view.Page = null;
+    while (args.next()) |arg| {
+        if (std.meta.stringToEnum(view.Page, arg)) |p| page = p else font_path = arg.ptr;
+    }
+    run(init, font_path, page) catch |err| {
         print("dazzle-settings: error: {s}\n", .{@errorName(err)});
         return 1;
     };
     return 0;
 }
 
-fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
+fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?view.Page) !void {
     // The language chosen (in setup, or here).
     var chosen = locale.load();
     locale.current = chosen.language;
@@ -117,6 +125,16 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     const build = std.fmt.bufPrint(&build_buf, "{s} ({s})", .{ build_info.commit, update.formatDate(&date_buf, build_info.commit_time) }) catch build_info.commit;
     var controls: app.Controls = .{ .win = win };
     win.setMinSize(view.min_size[0], view.min_size[1]);
+    // The page to show, once the window is built: the one asked for.
+    var pending_page = first_page;
+    var sock_buf: [64]u8 = undefined;
+    const sock_path = sys.shell.appSocket(&sock_buf, "dazzle-settings").?;
+    const pages_fd: ?linux.fd_t = sys.shell.listen(sock_path) catch null;
+    defer if (pages_fd) |fd| {
+        sys.close(fd);
+        _ = linux.unlink(sock_path);
+    };
+    win.wake_fd = pages_fd;
 
     var next_update: u64 = sys.nowNs() + std.time.ns_per_s;
     var dirty = true;
@@ -258,6 +276,19 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             report = info.askManager(if (wifi_page) "wifi scan\n" else "status\n");
             dirty = true;
         }
+
+        // Another app asked (through the shell) for a page to be shown.
+        if (pages_fd) |fd| {
+            var line_buf: [64]u8 = undefined;
+            while (sys.shell.accept(fd, &line_buf)) |got| {
+                sys.close(got.fd);
+                if (std.meta.stringToEnum(view.Page, got.line)) |p| pending_page = p;
+            }
+        }
+        if (pending_page) |p| if (view.showPage(window_ui, p)) {
+            pending_page = null;
+            dirty = true;
+        };
 
         idle = true;
         if (!suspended and (dirty or window_ui.needs_frame)) {

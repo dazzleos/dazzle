@@ -837,6 +837,15 @@ pub fn shownPage(u: *ui.Ui) Page {
     return root.state(Settings.State).page;
 }
 
+/// Shows page `p` in `u` (running a `Settings`); false if the window is
+/// not built yet.
+pub fn showPage(u: *ui.Ui, p: Page) bool {
+    const root = u.root orelse return false;
+    if (!root.widget.is(Settings)) return false;
+    root.state(Settings.State).page = p;
+    return true;
+}
+
 /// A tab: pressing it shows its page.
 const Tab = struct {
     label: []const u8,

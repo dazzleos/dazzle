@@ -1,11 +1,13 @@
-//! The device manager: hands input devices, the camera and the GPIO to
-//! the Dazzle user.
+//! The device manager: hands input devices, the camera, the GPIO, I2C and
+//! serial ports to the Dazzle user.
 //!
 //! The kernel creates /dev/input/eventN (one per keyboard, mouse or other
 //! input device) owned by root, so the unprivileged shell could not read
 //! them; likewise the camera's nodes (/dev/videoN, /dev/v4l-subdevN,
 //! /dev/mediaN), which the Camera app uses, and the GPIO's (/dev/gpiochipN,
-//! and /dev/gpiomem, its registers), which Settings uses. Init forks this process, which
+//! and /dev/gpiomem, its registers), which Settings uses, and the I2C
+//! buses and serial ports (/dev/i2c-N, /dev/ttyUSBN, /dev/ttyACMN and the
+//! header's UART), which the Data Logger reads. Init forks this process, which
 //! drops to the user keeping only CAP_CHOWN, gives the user every such
 //! node there already is, and then does the same for each one that comes
 //! later (plugged in, or probed late), as the kernel announces it with a
@@ -62,7 +64,7 @@ const max_scanned = 32;
 
 /// The device nodes the user gets (relative to /dev, without their
 /// numbers): input events, and the camera's.
-const user_devices = [_][]const u8{ "input/event", "video", "v4l-subdev", "media", "gpiochip" };
+const user_devices = [_][]const u8{ "input/event", "video", "v4l-subdev", "media", "gpiochip", "i2c-", "ttyUSB", "ttyACM", "ttyAMA", "ttyS" };
 
 /// Device nodes the user gets that are not numbered.
 const single_devices = [_][]const u8{"gpiomem"};
@@ -111,6 +113,9 @@ test "the camera's uevents" {
     const media = "add@/devices/x\x00ACTION=add\x00DEVNAME=media0\x00";
     try std.testing.expectEqualStrings("media0", userDevice(media).?);
     try std.testing.expectEqualStrings("gpiochip0", userDevice("add@/x\x00ACTION=add\x00DEVNAME=gpiochip0\x00").?);
+    try std.testing.expectEqualStrings("i2c-1", userDevice("add@/x\x00ACTION=add\x00DEVNAME=i2c-1\x00").?);
+    try std.testing.expectEqualStrings("ttyUSB0", userDevice("add@/x\x00ACTION=add\x00DEVNAME=ttyUSB0\x00").?);
+    try std.testing.expect(userDevice("add@/x\x00ACTION=add\x00DEVNAME=tty1\x00") == null);
     try std.testing.expectEqualStrings("gpiomem", userDevice("add@/x\x00ACTION=add\x00DEVNAME=gpiomem\x00").?);
     // Not "videofoo", nor others.
     try std.testing.expect(userDevice("add@/x\x00ACTION=add\x00DEVNAME=videofoo\x00") == null);

@@ -24,6 +24,11 @@ camera_auto_detect=1
 # I2C pins the camera uses (on some boards), which Linux drives.
 disable_touchscreen=1
 
+# The I2C bus on the GPIO header (pins 3 and 5: GPIO 2 and 3, which have
+# pull-up resistors on the board for it), for sensors and converters the
+# Data Logger reads.
+dtparam=i2c_arm=on
+
 # Serial console on GPIO 14 (TX) / 15 (RX), 115200 8N1. On the boards with
 # Bluetooth this is the mini UART, which needs a fixed core clock.
 enable_uart=1

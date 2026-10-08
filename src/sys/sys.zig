@@ -18,6 +18,9 @@ pub const media = @import("media.zig");
 pub const log = @import("log.zig");
 pub const apps = @import("apps.zig");
 pub const gpio = @import("gpio.zig");
+pub const i2c = @import("i2c.zig");
+pub const serial = @import("serial.zig");
+pub const shell = @import("shell.zig");
 pub const files = @import("files.zig");
 pub const archive = @import("archive.zig");
 
@@ -28,6 +31,9 @@ test {
     _ = log;
     _ = apps;
     _ = gpio;
+    _ = i2c;
+    _ = serial;
+    _ = shell;
     _ = files;
     _ = archive;
 }
@@ -92,6 +98,29 @@ pub fn sleepMs(ms: u32) void {
         linux.SYS.clock_nanosleep;
     while (true) {
         const rc = linux.syscall4(sys_nr, @intFromEnum(linux.CLOCK.MONOTONIC), 0, @intFromPtr(&ts), @intFromPtr(&ts));
+        if (linux.errno(rc) != .INTR) return;
+    }
+}
+
+/// Sleeps for `us` microseconds.
+pub fn sleepUs(us: u32) void {
+    sleepNs(@as(u64, us) * std.time.ns_per_us, false);
+}
+
+/// Sleeps until `ns` on the monotonic clock (see `nowNs`).
+pub fn sleepUntil(ns: u64) void {
+    sleepNs(ns, true);
+}
+
+fn sleepNs(ns: u64, absolute: bool) void {
+    var ts: linux.kernel_timespec = .{ .sec = @intCast(ns / std.time.ns_per_s), .nsec = @intCast(ns % std.time.ns_per_s) };
+    const sys_nr = if (@hasField(linux.SYS, "clock_nanosleep_time64"))
+        linux.SYS.clock_nanosleep_time64
+    else
+        linux.SYS.clock_nanosleep;
+    const flags: usize = if (absolute) 1 else 0; // TIMER_ABSTIME
+    while (true) {
+        const rc = linux.syscall4(sys_nr, @intFromEnum(linux.CLOCK.MONOTONIC), flags, @intFromPtr(&ts), if (absolute) 0 else @intFromPtr(&ts));
         if (linux.errno(rc) != .INTR) return;
     }
 }
