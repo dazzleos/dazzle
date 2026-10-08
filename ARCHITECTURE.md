@@ -129,6 +129,11 @@ An app is a folder, `/data/apps/<name>/`, with its program (also called
 every app there, and follows the folder as apps come and go. Apps run as
 the Dazzle user, and are started by the shell when their icon is clicked.
 
+An app can say which kinds of files it opens, as MIME types one a line in
+`<name>.handles`; it is then started with a file's path as its argument.
+Files offers to make and edit text files only if an app opens
+`text/plain` (the text editor does), and starts that app to edit them.
+
 Apps are published beside the system image: each as an archive of its
 folder (`<name>.tar.xz`), with a catalogue (`apps.json`) giving each one's
 title, description, icon, size and SHA-256. The setup app and Settings

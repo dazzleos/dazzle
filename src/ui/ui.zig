@@ -47,6 +47,7 @@
 //! * `checkbox`, `radio`, `switch`: Checkbox, Radio, Switch (and `control`,
 //!   what they share)
 //! * `text_field`: TextField, with selection, and copying and pasting
+//! * `text_area`: TextArea, many lines of a Document to edit, wrapped
 //! * `menu`: Menu, shown above everything (`Ui.openMenu`)
 //! * `title_bar`: TitleBar, the bar apps draw across the top of their
 //!   window (with `bar_button`'s buttons)
@@ -79,6 +80,7 @@ pub const checkbox = @import("checkbox.zig");
 pub const radio = @import("radio.zig");
 pub const @"switch" = @import("switch.zig");
 pub const text_field = @import("text_field.zig");
+pub const text_area = @import("text_area.zig");
 pub const menu = @import("menu.zig");
 pub const title_bar = @import("title_bar.zig");
 pub const bar_button = @import("bar_button.zig");
@@ -144,6 +146,8 @@ pub const Checkbox = checkbox.Checkbox;
 pub const Radio = radio.Radio;
 pub const Switch = @"switch".Switch;
 pub const TextField = text_field.TextField;
+pub const TextArea = text_area.TextArea;
+pub const TextDocument = text_area.Document;
 pub const Menu = menu.Menu;
 pub const MenuItem = menu.Item;
 pub const TitleBar = title_bar.TitleBar;
@@ -182,6 +186,7 @@ test {
     _ = radio;
     _ = @"switch";
     _ = text_field;
+    _ = text_area;
     _ = menu;
     _ = title_bar;
     _ = bar_button;

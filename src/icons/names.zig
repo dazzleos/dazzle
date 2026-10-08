@@ -69,4 +69,8 @@ pub const Icon = enum {
     // The camera.
     photo_camera,
     no_photography,
+    // The text editor, and Files' buttons for it.
+    edit_note,
+    edit,
+    note_add,
 };

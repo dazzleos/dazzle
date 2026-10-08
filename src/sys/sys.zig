@@ -16,6 +16,7 @@ pub const network = @import("network.zig");
 pub const system = @import("system.zig");
 pub const media = @import("media.zig");
 pub const log = @import("log.zig");
+pub const apps = @import("apps.zig");
 pub const files = @import("files.zig");
 pub const archive = @import("archive.zig");
 
@@ -24,6 +25,7 @@ test {
     _ = system;
     _ = media;
     _ = log;
+    _ = apps;
     _ = files;
     _ = archive;
 }
