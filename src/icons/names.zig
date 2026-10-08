@@ -43,6 +43,14 @@ pub const Icon = enum {
     info,
     developer_board,
     language,
+    // Settings' USB devices.
+    keyboard,
+    mouse,
+    device_hub,
+    headphones,
+    videocam,
+    print,
+    sports_esports,
     wifi_1_bar,
     wifi_2_bar,
     // The demo.

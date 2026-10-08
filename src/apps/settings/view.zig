@@ -1,7 +1,7 @@
 //! The settings app's window, as widgets: pages, chosen with the tabs on
 //! the left, about the Wi-Fi networks around, Ethernet, the resources in
 //! use (with meters), the board (drawn: picking a part says what it is;
-//! see board.zig), the language and keyboard, and the system (its build,
+//! see board.zig), the USB devices plugged in, the language and keyboard, and the system (its build,
 //! Linux and the board).
 //! Choosing a Wi-Fi network shows a password field (for WPA2) and a
 //! Connect button; choosing a static address for Ethernet shows fields for
@@ -18,6 +18,7 @@ const locale = @import("locale");
 const store = @import("store");
 const update = @import("update.zig");
 const board = @import("board.zig");
+const usb = @import("usb.zig");
 const BoardView = @import("board_view.zig").BoardView;
 
 /// The storage bar's colours (the system's is the theme's primary).
@@ -126,6 +127,8 @@ pub const Settings = struct {
     system: *const info.System,
     usage: info.Usage,
     network: *const info.Network,
+    /// The USB devices plugged in.
+    usb: *const usb.Devices = &.{},
     /// What the network manager last said; null if it could not be asked.
     manager: ?*const info.manager.Report = null,
     /// The apps that can be installed, and how installing goes.
@@ -200,6 +203,7 @@ pub const Settings = struct {
             .resources => self.resourcesCard(b),
             .board => self.boardCard(b, state),
             .language => self.languageCard(b),
+            .usb => self.usbCard(b),
             .system => self.systemCard(b),
             .apps => self.appsCard(b, state),
         };
@@ -209,13 +213,15 @@ pub const Settings = struct {
             const p: Page = @enumFromInt(field.value);
             w.* = cx.make(Tab{ .label = p.label(), .icon = p.icon(), .selected = state.page == p, .on_press = pick(cx, state, p) });
         }
+        // The tabs scroll in a window too short for them all.
         const sidebar = cx.make(ui.SizedBox{ .width = 190, .child = cx.make(ui.Decorated{
             .color = t.surface_container,
-            .child = cx.make(ui.Padding{ .padding = .all(12), .child = cx.make(ui.Column{
+            .child = cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(12), .child = cx.make(ui.Column{
                 .cross_axis_alignment = .stretch,
+                .main_axis_size = .min,
                 .spacing = 4,
                 .children = &tabs,
-            }) }),
+            }) }) }),
         }) });
         // A page longer than the window scrolls; another page starts at
         // its top. In a wide window the page is no wider than reads well,
@@ -349,6 +355,35 @@ pub const Settings = struct {
             b.meter("GPU memory", gpu, fraction(u.gpuUsed(), u.gpu_total)),
             b.storage(u.storage),
         });
+    }
+
+    /// The USB devices: what each is, who made it and how fast it talks;
+    /// those that are part of the board last.
+    fn usbCard(self: *const Settings, b: Builder) ui.Widget {
+        const cx = b.cx;
+        const t = cx.theme();
+        const devices = self.usb.slice();
+        if (devices.len == 0) return b.card("USB", &.{b.value("Nothing is plugged in")});
+        const a = cx.ui.arena();
+        var rows: std.ArrayList(ui.Widget) = .empty;
+        for (devices) |*d| {
+            var name_buf: [64]u8 = undefined;
+            var speed_buf: [16]u8 = undefined;
+            var detail: std.ArrayList(u8) = .empty;
+            detail.appendSlice(a, d.kind.label()) catch {};
+            if (d.manufacturer.len > 0) detail.print(a, "  \u{b7}  {s}", .{d.manufacturer.slice()}) catch {};
+            const speed = usb.formatSpeed(&speed_buf, d.speed_mbps);
+            if (speed.len > 0) detail.print(a, "  \u{b7}  {s}", .{speed}) catch {};
+            if (d.built_in) detail.appendSlice(a, "  \u{b7}  Part of the board") catch {};
+            rows.append(a, cx.make(ui.Row{ .spacing = 16, .cross_axis_alignment = .center, .children = &.{
+                cx.make(ui.Icon{ .icon = usbIcon(d.kind), .size = 28, .color = t.on_surface_variant }),
+                cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 2, .children = &.{
+                    cx.make(ui.Text{ .text = cx.fmt("{s}", .{d.name(&name_buf)}), .style = .{ .size = 18 }, .wrap = false, .ellipsis = true }),
+                    cx.make(ui.Text{ .text = detail.items, .style = .{ .size = 15, .color = t.on_surface_variant }, .wrap = false, .ellipsis = true }),
+                } }) }),
+            } })) catch {};
+        }
+        return b.card("USB", rows.items);
     }
 
     /// The language and keyboard, and a field to try the keyboard in.
@@ -686,6 +721,7 @@ pub const Page = enum {
     ethernet,
     resources,
     board,
+    usb,
     language,
     apps,
     system,
@@ -696,6 +732,7 @@ pub const Page = enum {
             .ethernet => "Ethernet",
             .resources => "Resources",
             .board => "Board",
+            .usb => "USB",
             .language => "Language",
             .apps => "Apps",
             .system => "System",
@@ -708,6 +745,7 @@ pub const Page = enum {
             .ethernet => .lan,
             .resources => .speed,
             .board => .developer_board,
+            .usb => .usb,
             .language => .language,
             .apps => .apps,
             .system => .info,
@@ -757,6 +795,22 @@ const Tab = struct {
         }) });
     }
 };
+
+fn usbIcon(k: usb.Kind) ui.icons.Icon {
+    return switch (k) {
+        .keyboard => .keyboard,
+        .mouse => .mouse,
+        .input => .sports_esports,
+        .storage => .usb,
+        .hub => .device_hub,
+        .network => .lan,
+        .wireless => .wifi,
+        .audio => .headphones,
+        .camera => .videocam,
+        .printer => .print,
+        .other => .usb,
+    };
+}
 
 /// Picking a language or keyboard (keeping the other as it is).
 const LocalePick = struct {
@@ -1614,4 +1668,35 @@ test "the language and keyboard: picking one keeps the other" {
     click(u, findText(u.root.?, "English (US)").?);
     try testing.expectEqual(locale.Settings{ .language = .en_gb, .keyboard = .us }, actions.locale.?);
     try testing.expect(findType(u.root.?, ui.TextField) != null);
+}
+
+test "the USB devices: each with what it is, and the board's own" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    const d = sample();
+    var devices: usb.Devices = .{};
+    devices.items[0] = .{ .kind = .keyboard, .speed_mbps = 1.5, .vendor_id = 0x046d, .product_id = 0xc31c };
+    devices.items[0].product.set("USB Keyboard");
+    devices.items[0].manufacturer.set("Logitech");
+    devices.items[1] = .{ .kind = .storage, .speed_mbps = 480, .vendor_id = 0x0781, .product_id = 0x5567 };
+    devices.items[2] = .{ .kind = .network, .speed_mbps = 480, .built_in = true, .vendor_id = 0x0424, .product_id = 0xec00 };
+    devices.len = 3;
+    var settings: Settings = .{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .usb = &devices };
+    u.frame(1600, 900, 0, settings);
+    u.root.?.state(Settings.State).page = .usb;
+    for (test_sizes) |size| {
+        u.frame(size[0], size[1], 1, settings);
+        try testing.expect(!overflows(u.root.?));
+    }
+    u.frame(1600, 900, 2, settings);
+    try testing.expect(findText(u.root.?, "USB Keyboard") != null);
+    try testing.expect(findText(u.root.?, "Keyboard  \u{b7}  Logitech  \u{b7}  1.5 Mb/s") != null);
+    try testing.expect(findText(u.root.?, "USB device 0781:5567") != null);
+    try testing.expect(findText(u.root.?, "Network adapter  \u{b7}  480 Mb/s  \u{b7}  Part of the board") != null);
+    // Nothing: it says so.
+    const none: usb.Devices = .{};
+    settings.usb = &none;
+    u.frame(1600, 900, 3, settings);
+    try testing.expect(findText(u.root.?, "Nothing is plugged in") != null);
 }

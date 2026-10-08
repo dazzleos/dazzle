@@ -27,6 +27,7 @@ const ui = @import("ui");
 const wayland = @import("wayland");
 const build_info = @import("build_info");
 const info = @import("info.zig");
+const usb = @import("usb.zig");
 const view = @import("view.zig");
 const store = @import("store");
 const update = @import("update.zig");
@@ -81,6 +82,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     var monitor: info.UsageMonitor = .{};
     var usage = monitor.read(sys.nowNs());
     var network = info.Network.read();
+    // The USB devices, read while their page shows.
+    var devices: usb.Devices = .{};
     // The network manager is asked less often: each request may start a
     // Wi-Fi scan.
     var report: ?info.manager.Report = null;
@@ -146,6 +149,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             next_update = now + std.time.ns_per_s;
             usage = monitor.read(now);
             network = info.Network.read();
+            if (view.shownPage(window_ui) == .usb) devices = usb.Devices.read();
             dirty = true;
         }
         // Installing, or getting the list of apps.
@@ -232,6 +236,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
                 .system = &system,
                 .usage = usage,
                 .network = &network,
+                .usb = &devices,
                 .manager = if (report) |*r| r else null,
                 .actions = &actions,
                 .apps = .{
@@ -291,4 +296,5 @@ test {
     _ = view;
     _ = @import("update.zig");
     _ = @import("board.zig");
+    _ = usb;
 }
