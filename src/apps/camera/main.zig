@@ -312,6 +312,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         if (!suspended and (dirty or window_ui.needs_frame)) {
             dirty = false;
             const v: ?*Viewer = if (viewer) |*vw| vw else null;
+            window_ui.fullscreen = win.fullscreen;
             window_ui.frame(width, height, now, view.Camera{
                 .preview = if (v) |vw| if (vw.image) |*img| img else null else null,
                 .message = if (v) |vw| (if (vw.image == null) "Starting the camera…" else "") else no_camera,

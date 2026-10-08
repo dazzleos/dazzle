@@ -40,6 +40,8 @@ pub const TitleBar = struct {
     pub const height = 44;
 
     pub fn build(self: *const TitleBar, cx: *Context) Widget {
+        // A fullscreen window has none.
+        if (cx.ui.fullscreen) return cx.make(@import("empty.zig").Empty{});
         const t = cx.theme();
         const size = 34;
         var buttons: [2]Widget = undefined;
@@ -138,4 +140,39 @@ test "the title bar's buttons, and dragging it" {
     u.pointerButton(max_at, btn_left, false);
     try testing.expectEqual(@as(u32, 1), app.maximizes);
     try testing.expectEqual(@as(u32, 1), app.drags);
+}
+
+test "a fullscreen window has no title bar" {
+    const Ui = @import("runtime.zig").Ui;
+    const font = @import("font");
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    var closed = false;
+    const Root = struct {
+        closed: *bool,
+        fn close(b: *bool) void {
+            b.* = true;
+        }
+        pub fn build(self: *const @This(), cx: *Context) Widget {
+            return cx.make(Column{ .cross_axis_alignment = .stretch, .children = &.{
+                cx.make(TitleBar{ .title = "Settings", .on_close = .of(self.closed, close) }),
+            } });
+        }
+    };
+    u.fullscreen = true;
+    u.frame(800, 600, 0, Root{ .closed = &closed });
+    // Where its close button would be, there is nothing to press.
+    const at: geometry.Point = .{ 800 - 8 - 17, 22 };
+    u.pointerMotion(at);
+    u.pointerButton(at, btn_left, true);
+    u.pointerButton(at, btn_left, false);
+    try testing.expect(!closed);
+    // Out of fullscreen, it is back.
+    u.fullscreen = false;
+    u.frame(800, 600, 1, Root{ .closed = &closed });
+    u.pointerMotion(at);
+    u.pointerButton(at, btn_left, true);
+    u.pointerButton(at, btn_left, false);
+    try testing.expect(closed);
 }

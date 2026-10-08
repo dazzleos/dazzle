@@ -181,6 +181,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         idle = true;
         if (!suspended and (dirty or window_ui.needs_frame)) {
             dirty = false;
+            window_ui.fullscreen = win.fullscreen;
             window_ui.frame(width, height, frame_start, view.Demo{
                 .solids = &all_solids,
                 .rings = &rings,

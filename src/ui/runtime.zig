@@ -114,6 +114,9 @@ pub const Ui = struct {
     caps_lock: bool = false,
     /// The keyboard's layout: what character each key types.
     keyboard: locale.Keyboard = .us,
+    /// The window fills the screen: title bars are not drawn (set from
+    /// the app's window, as `keyboard` is).
+    fullscreen: bool = false,
     /// The system's clipboard (the app gives it); without one, text is
     /// copied within the app (`local_clipboard`).
     clipboard: ?Clipboard = null,

@@ -312,6 +312,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             const catalogue = apps.apps()[0..@min(apps.apps().len, installed.len)];
             var available_buf: [64]u8 = undefined;
             for (catalogue, installed[0..catalogue.len]) |a, *i| i.* = store.isInstalled(store.apps_dir, a.name);
+            window_ui.fullscreen = win.fullscreen;
             window_ui.frame(width, height, now, view.Settings{
                 .commit = build,
                 .locale = chosen,
