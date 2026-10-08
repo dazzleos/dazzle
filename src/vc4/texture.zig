@@ -14,8 +14,13 @@
 //!
 //! The kernel decides which layout the hardware uses from the size alone
 //! (vc4_validate.c, size_is_lt) and checks that the buffer is big enough,
-//! so uploads here must agree with it exactly. Mipmaps are not supported
-//! yet.
+//! so uploads here must agree with it exactly.
+//!
+//! Mipmaps: the smaller levels go just before level 0 in the buffer, the
+//! smallest first, each straight after the next smaller, and level 0
+//! starts on a 4 KB page (the texture's offset points at it; the texture
+//! unit finds the others by going back from there). Each level is T or LT
+//! by its own size, as the kernel works out when it checks the buffer.
 //!
 //! Reference: Mesa src/gallium/drivers/vc4/vc4_tiling.c.
 
@@ -45,6 +50,8 @@ pub const Type = enum(u5) {
 };
 
 pub const Filter = enum { linear, nearest };
+/// Between mipmap levels: the nearest level, or a mix of the two nearest.
+pub const MipFilter = enum { none, nearest, linear };
 pub const Wrap = enum(u2) { repeat = 0, clamp = 1, mirror = 2, border = 3 };
 
 pub const Config = struct {
@@ -57,20 +64,28 @@ pub const Config = struct {
     min_filter: Filter = .linear,
     wrap_s: Wrap = .repeat,
     wrap_t: Wrap = .repeat,
+    /// Mipmap levels after level 0 (see `mipmapLayout`), and how they are
+    /// chosen between.
+    mip_levels: u4 = 0,
+    mip_filter: MipFilter = .none,
 };
 
 /// Texture config parameter 0: image offset, type and mip levels. The
 /// kernel adds the buffer's physical address when relocating it.
 pub fn p0(c: Config) u32 {
     std.debug.assert(c.offset & 0xfff == 0);
-    return c.offset | (@as(u32, @intFromEnum(c.type)) & 0xf) << 4;
+    return c.offset | (@as(u32, @intFromEnum(c.type)) & 0xf) << 4 | c.mip_levels;
 }
 
 /// Texture config parameter 1: size, filtering and wrapping.
 pub fn p1(c: Config) u32 {
-    const min: u32 = switch (c.min_filter) {
+    const mipmapped = c.mip_levels > 0 and c.mip_filter != .none;
+    const min: u32 = if (!mipmapped) switch (c.min_filter) {
         .linear => 0,
         .nearest => 1,
+    } else switch (c.min_filter) {
+        .nearest => if (c.mip_filter == .nearest) 2 else 3,
+        .linear => if (c.mip_filter == .nearest) 4 else 5,
     };
     const mag: u32 = switch (c.mag_filter) {
         .linear => 0,
@@ -95,12 +110,106 @@ pub fn decodeConfig(param0: u32, param1: u32) Config {
         .height = if (h == 0) 2048 else h,
         .mag_filter = if ((param1 >> 7) & 1 != 0) .nearest else .linear,
         .min_filter = switch ((param1 >> 4) & 7) {
-            1 => .nearest,
+            1, 2, 3 => .nearest,
             else => .linear,
         },
         .wrap_t = @enumFromInt(@as(u2, @truncate(param1 >> 2))),
         .wrap_s = @enumFromInt(@as(u2, @truncate(param1))),
+        .mip_levels = @truncate(param0),
+        .mip_filter = switch ((param1 >> 4) & 7) {
+            2, 4 => .nearest,
+            3, 5 => .linear,
+            else => .none,
+        },
     };
+}
+
+// --- Mipmaps --------------------------------------------------------------------
+
+/// Where a 32-bit mipmapped image goes in its buffer.
+pub const Mipmapped = struct {
+    /// Bytes the buffer needs.
+    size: u32,
+    /// Where level 0 starts (4 KB aligned): the texture's offset.
+    base: u32,
+};
+
+/// The size of level `level` (0 is the image itself).
+pub fn levelSize(width: u32, height: u32, level: u4) [2]u32 {
+    return .{ @max(width >> level, 1), @max(height >> level, 1) };
+}
+
+/// The layout of a 32-bit image with `levels` levels after level 0.
+pub fn mipmapLayout(width: u32, height: u32, levels: u4) Mipmapped {
+    var below: u32 = 0;
+    var i: u4 = 1;
+    while (i <= levels) : (i += 1) {
+        const sz = levelSize(width, height, i);
+        below += imageSize(sz[0], sz[1]);
+        if (i == 15) break;
+    }
+    const base = std.mem.alignForward(u32, below, 4096);
+    return .{ .size = base + imageSize(width, height), .base = base };
+}
+
+/// Where level `level` starts, in an image laid out as `mipmapLayout`.
+pub fn levelOffset(width: u32, height: u32, layout: Mipmapped, level: u4) u32 {
+    var offset = layout.base;
+    var i: u4 = 1;
+    while (i <= level) : (i += 1) {
+        const sz = levelSize(width, height, i);
+        offset -= imageSize(sz[0], sz[1]);
+        if (i == 15) break;
+    }
+    return offset;
+}
+
+/// The most levels after level 0 an image can have (down to a pixel).
+pub fn maxLevels(width: u32, height: u32) u4 {
+    return @intCast(std.math.log2_int(u32, @max(width, height)));
+}
+
+/// Uploads a 32-bit image (0xAARRGGBB, raster order) and its smaller
+/// levels, each a quarter of the one before (each pixel the average of
+/// four, weighted by how opaque they are, so see-through pixels do not
+/// darken the edges of what is not), into `dst` as `mipmapLayout` says.
+pub fn uploadMipmaps(gpa: std.mem.Allocator, dst: []u8, pixels: []const u32, width: u32, height: u32, levels: u4) !void {
+    const layout = mipmapLayout(width, height, levels);
+    std.debug.assert(dst.len >= layout.size);
+    upload(dst[layout.base..], pixels, width, height);
+    var prev = try gpa.dupe(u32, pixels);
+    defer gpa.free(prev);
+    var pw = width;
+    var ph = height;
+    var level: u4 = 1;
+    while (level <= levels) : (level += 1) {
+        const sz = levelSize(width, height, level);
+        const next = try gpa.alloc(u32, sz[0] * sz[1]);
+        for (0..sz[1]) |y| for (0..sz[0]) |x| {
+            var sum: [4]f32 = .{ 0, 0, 0, 0 };
+            var n: f32 = 0;
+            for ([2]u32{ 0, 1 }) |dy| for ([2]u32{ 0, 1 }) |dx| {
+                const sx = @min(@as(u32, @intCast(x)) * 2 + dx, pw - 1);
+                const sy = @min(@as(u32, @intCast(y)) * 2 + dy, ph - 1);
+                const c = prev[sy * pw + sx];
+                const a: f32 = @floatFromInt(c >> 24);
+                sum[0] += a;
+                for (0..3) |k| sum[k + 1] += a * @as(f32, @floatFromInt(c >> @intCast(16 - k * 8) & 0xff));
+                n += 1;
+            };
+            var out: u32 = @as(u32, @intFromFloat(@round(sum[0] / n))) << 24;
+            if (sum[0] > 0) for (0..3) |k| {
+                out |= @as(u32, @intFromFloat(@round(sum[k + 1] / sum[0]))) << @intCast(16 - k * 8);
+            };
+            next[y * sz[0] + x] = out;
+        };
+        upload(dst[levelOffset(width, height, layout, level)..], next, sz[0], sz[1]);
+        gpa.free(prev);
+        prev = next;
+        pw = sz[0];
+        ph = sz[1];
+        if (level == 15) break;
+    }
 }
 
 /// Whether the hardware treats a 32-bit image of this size as LT rather
@@ -241,6 +350,66 @@ test "config round trip" {
     try testing.expectEqual(c.min_filter, d.min_filter);
     try testing.expectEqual(c.wrap_s, d.wrap_s);
     try testing.expectEqual(c.wrap_t, d.wrap_t);
+}
+
+test "mipmaps: the levels packed before level 0, sized as the kernel checks them" {
+    // A strip of tiles, 64 by 1024: 32x512 is T, then LT from 16 across.
+    const layout = mipmapLayout(64, 1024, 6);
+    const sizes = [_]u32{ 32 * 512 * 4, 16 * 256 * 4, 8 * 128 * 4, 4 * 64 * 4, 4 * 32 * 4, 4 * 16 * 4 };
+    var below: u32 = 0;
+    for (sizes) |sz| below += sz;
+    try testing.expectEqual(std.mem.alignForward(u32, below, 4096), layout.base);
+    try testing.expectEqual(layout.base + 64 * 1024 * 4, layout.size);
+    // Each level ends where the next larger starts; the kernel's check (the
+    // offset is at least the levels' sizes) holds.
+    var end = layout.base;
+    for (sizes, 1..) |sz, i| {
+        const off = levelOffset(64, 1024, layout, @intCast(i));
+        try testing.expectEqual(end - sz, off);
+        end = off;
+    }
+    try testing.expectEqual(@as(u4, 10), maxLevels(64, 1024));
+    // The levels go in P0, and the mip filter in P1.
+    const c: Config = .{ .offset = layout.base, .width = 64, .height = 1024, .min_filter = .nearest, .mip_levels = 6, .mip_filter = .linear };
+    try testing.expectEqual(@as(u32, 6), p0(c) & 0xf);
+    try testing.expectEqual(@as(u32, 3), p1(c) >> 4 & 7);
+    const d = decodeConfig(p0(c), p1(c));
+    try testing.expectEqual(c.mip_levels, d.mip_levels);
+    try testing.expectEqual(c.mip_filter, d.mip_filter);
+    try testing.expectEqual(c.min_filter, d.min_filter);
+    try testing.expectEqual(c.offset, d.offset);
+}
+
+test "mipmaps: each level averages the one before, and see-through pixels do not darken it" {
+    const gpa = testing.allocator;
+    const w = 8;
+    const h = 32;
+    var px: [w * h]u32 = undefined;
+    // Left half opaque red, right half clear black.
+    for (0..h) |y| for (0..w) |x| {
+        px[y * w + x] = if (x < 4) 0xffff0000 else 0x00000000;
+    };
+    // One pixel of the top left 2x2 is see-through.
+    px[1] = 0;
+    const layout = mipmapLayout(w, h, 3);
+    const mem = try gpa.alloc(u8, layout.size);
+    defer gpa.free(mem);
+    try uploadMipmaps(gpa, mem, &px, w, h, 3);
+    const at = struct {
+        fn f(m: []const u8, off: u32, ww: u32, hh: u32, x: u32, y: u32) u32 {
+            return std.mem.readInt(u32, m[off + texelOffset(ww, hh, x, y) ..][0..4], .little);
+        }
+    }.f;
+    try testing.expectEqual(@as(u32, 0xffff0000), at(mem, layout.base, w, h, 0, 1));
+    const l1 = levelOffset(w, h, layout, 1);
+    // Three red, one clear: red, three quarters opaque.
+    try testing.expectEqual(@as(u32, 0xbfff0000), at(mem, l1, 4, 16, 0, 0));
+    try testing.expectEqual(@as(u32, 0xffff0000), at(mem, l1, 4, 16, 1, 1));
+    try testing.expectEqual(@as(u32, 0x00000000), at(mem, l1, 4, 16, 3, 3));
+    // Level 2 is 2x8: half red (the left column, mostly opaque).
+    const l2 = levelOffset(w, h, layout, 2);
+    try testing.expectEqual(@as(u32, 0x00ff0000), at(mem, l2, 2, 8, 0, 1) & 0x00ffffff);
+    try testing.expectEqual(@as(u32, 0xff), at(mem, l2, 2, 8, 0, 1) >> 24);
 }
 
 test "layout matches the reference description" {

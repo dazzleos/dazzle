@@ -424,23 +424,51 @@ fn write(s: *State, r: *Result, env: Env, waddr: u6, file: File, value: Vec, con
     }
 }
 
-/// Nearest-neighbour sampling of an RGBA8888, RGB565 or ALPHA texture,
-/// with repeat or clamp wrapping. A 32-bit texel comes back as it is in
-/// memory; an RGB565 one with red in the low byte, then green and blue
-/// (each widened to 8 bits), and opaque: the order Mesa's vc4 driver
-/// expects (its B5G6R5 swizzle is XYZ1); an ALPHA one in the top byte,
-/// with the rest 0 (its A8 swizzle is 000W).
+/// Sampling of an RGBA8888, RGB565 or ALPHA texture, with repeat or
+/// clamp wrapping. A 32-bit texel comes back as it is in memory; an RGB565
+/// one with red in the low byte, then green and blue (each widened to 8
+/// bits), and opaque: the order Mesa's vc4 driver expects (its B5G6R5
+/// swizzle is XYZ1); an ALPHA one in the top byte, with the rest 0 (its A8
+/// swizzle is 000W).
+///
+/// Only level 0 is sampled (which mipmap level the hardware picks depends
+/// on the neighbouring pixels, which the simulator does not have), with the
+/// magnification filter: nearest, or bilinear.
 fn sample(memory: []const u8, p0: u32, p1: u32, s: f32, t: f32) Error!u32 {
     const p = texture.decodeConfig(p0, p1);
-    if (p.mag_filter != .nearest or p.min_filter != .nearest) return error.Unsupported;
     const cpp: u32 = switch (p.type) {
         .rgba8888 => 4,
         .rgb565 => 2,
         .alpha => 1,
         else => return error.Unsupported,
     };
-    const x = try wrap(s, p.width, p.wrap_s);
-    const y = try wrap(t, p.height, p.wrap_t);
+    const w: f32 = @floatFromInt(p.width);
+    const h: f32 = @floatFromInt(p.height);
+    if (p.mag_filter == .nearest) return fetch(memory, p, cpp, try wrap(@floor(s * w), p.width, p.wrap_s), try wrap(@floor(t * h), p.height, p.wrap_t));
+    // Bilinear: the four texels around the point, by how near each is.
+    const fx = s * w - 0.5;
+    const fy = t * h - 0.5;
+    const x0 = @floor(fx);
+    const y0 = @floor(fy);
+    const ax = fx - x0;
+    const ay = fy - y0;
+    var out: u32 = 0;
+    var c: [4]u32 = undefined;
+    for (0..4) |k| {
+        const x = try wrap(x0 + @as(f32, @floatFromInt(k & 1)), p.width, p.wrap_s);
+        const y = try wrap(y0 + @as(f32, @floatFromInt(k >> 1)), p.height, p.wrap_t);
+        c[k] = try fetch(memory, p, cpp, x, y);
+    }
+    for (0..4) |byte| {
+        const sh: u5 = @intCast(byte * 8);
+        var v: f32 = 0;
+        for (c, [4]f32{ (1 - ax) * (1 - ay), ax * (1 - ay), (1 - ax) * ay, ax * ay }) |cc, k| v += @as(f32, @floatFromInt(cc >> sh & 0xff)) * k;
+        out |= @as(u32, @intFromFloat(@round(v))) << sh;
+    }
+    return out;
+}
+
+fn fetch(memory: []const u8, p: texture.Config, cpp: u32, x: u32, y: u32) Error!u32 {
     const offset = p.offset + referenceTexelOffsetOf(cpp, p.width, p.height, x, y);
     if (offset + cpp > memory.len) return error.Unsupported;
     if (cpp == 4) return std.mem.readInt(u32, memory[offset..][0..4], .little);
@@ -450,9 +478,10 @@ fn sample(memory: []const u8, p0: u32, p1: u32, s: f32, t: f32) Error!u32 {
     return 0xff000000 | (argb & 0xff) << 16 | (argb & 0xff00) | ((argb >> 16) & 0xff);
 }
 
+/// A texel's column (or row), wrapped into the texture.
 fn wrap(coord: f32, size: u32, mode: texture.Wrap) Error!u32 {
     const n: i64 = size;
-    const i: i64 = @intFromFloat(std.math.clamp(@floor(coord * @as(f32, @floatFromInt(size))), -1e9, 1e9));
+    const i: i64 = @intFromFloat(std.math.clamp(coord, -1e9, 1e9));
     return switch (mode) {
         .repeat => @intCast(@mod(i, n)),
         .clamp => @intCast(std.math.clamp(i, 0, n - 1)),

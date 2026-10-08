@@ -241,6 +241,17 @@ what the VideoCore IV does well, and left out where it would not.
   colour is worked out per vertex: turquoise in the shallows and dark in
   the deep, the sky reflected more at a glancing angle, and the sun
   glinting. The fragment shader passes the colour on.
+- **Detailed textures, filtered by the texture unit.** Tiles are 64
+  pixels, drawn by code: bevelled bricks, wood grain, cobbles, bark,
+  bookshelves. Up close they are filtered smoothly; further off they come
+  from mipmaps (`vc4.texture`, laid out as the kernel checks them), so
+  they do not shimmer. Mipmaps need the GPU to see how fast the texture
+  coordinates change across each 2x2 block of pixels. Wrapping a tile
+  inside a merged face in the shader would give it a sudden jump there,
+  and so a seam. Instead, the tiles are in strips one tile wide, which the
+  texture unit repeats across a face by itself. Faces are merged only
+  along that direction (which costs few quads, as light and shade break
+  up merges the other way anyway).
 - **Moving things for free.** Leaves and plants sway in the wind in the
   vertex shader. Time of day is a matter of uniforms: sunrise, a red
   sunset, and night with stars and lamps' warm light.
@@ -248,12 +259,11 @@ what the VideoCore IV does well, and left out where it would not.
   stored), so the whole world is drawn in one. A chunk out of view or
   past the fog is not drawn. The whole island in view is about 150 draws
   and 100,000 triangles.
-- **Left out.** There are no mipmaps (the textures are pixel art, drawn
-  nearest), no shadows, and no flowing water. Leaves are drawn solid
+- **Left out.** There are no shadows, and no flowing water. Leaves are drawn solid
   (cutting holes in a fragment shader is not supported yet). Glass and
   plants are blended, nearest last, but not sorted face by face.
 
-The textures are drawn by code (`textures.zig`). The world is made from a
+The textures are drawn by code when the game starts (`textures.zig`). The world is made from a
 seed: an island with beaches, hills, a snowy mountain, trees and flowers.
 It is saved in the user's files (`Island.blocks`), every minute it has
 changed and on closing.
