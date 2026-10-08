@@ -892,11 +892,11 @@ pub fn build(b: *std.Build) void {
         .root_module = addProgramModule(b, "src/apps/camera/main.zig", target, optimize, pi, shaders, true),
     });
     const install_camera = b.addInstallArtifact(camera_exe, .{});
-    const editor_exe = b.addExecutable(.{
-        .name = "dazzle-editor",
-        .root_module = addProgramModule(b, "src/apps/editor/main.zig", target, optimize, pi, shaders, true),
+    const text_editor_exe = b.addExecutable(.{
+        .name = "dazzle-text-editor",
+        .root_module = addProgramModule(b, "src/apps/text_editor/main.zig", target, optimize, pi, shaders, true),
     });
-    const install_editor = b.addInstallArtifact(editor_exe, .{});
+    const install_text_editor = b.addInstallArtifact(text_editor_exe, .{});
     const setup_exe = b.addExecutable(.{
         .name = "dazzle-setup",
         .root_module = addProgramModule(b, "src/apps/setup/main.zig", target, optimize, pi, shaders, true),
@@ -949,14 +949,14 @@ pub fn build(b: *std.Build) void {
         .{ .exe = demo_exe, .icon = .view_in_ar, .title = "Demo", .description = "A spinning 3D shape that shows off the graphics, with controls to play with" },
         .{ .exe = files_exe, .icon = .folder, .title = "Files", .description = "Browse your files, and look inside them: text, pictures and fonts" },
         .{ .exe = camera_exe, .icon = .photo_camera, .title = "Camera", .description = "See what a Raspberry Pi Camera Module sees, and take photos" },
-        .{ .exe = editor_exe, .icon = .edit_note, .title = "Text Editor", .description = "Write and change text files, from Files; they are saved as you type", .handles = &.{"text/plain"} },
+        .{ .exe = text_editor_exe, .icon = .edit_note, .title = "Text Editor", .description = "Write and change text files, from Files; they are saved as you type", .handles = &.{"text/plain"} },
     };
     const apps_step = b.step("apps", "Build the apps' archives and their catalogue (zig-out/apps)");
     apps_step.dependOn(addAppArchives(b, &apps));
     b.getInstallStep().dependOn(apps_step);
     const install_initramfs = b.addInstallFile(initramfs, "initramfs.cpio");
     const programs_step = b.step("programs", "Build just the programs (zig-out/bin) and zig-out/initramfs.cpio");
-    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_settings.step, &install_files.step, &install_camera.step, &install_editor.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
+    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_settings.step, &install_files.step, &install_camera.step, &install_text_editor.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
         programs_step.dependOn(st);
         b.getInstallStep().dependOn(st);
     }
@@ -997,8 +997,8 @@ pub fn build(b: *std.Build) void {
     host_files.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_camera = addProgramModule(b, "src/apps/camera/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_camera.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
-    const host_editor = addProgramModule(b, "src/apps/editor/main.zig", b.graph.host, test_optimize, host, shaders, false);
-    host_editor.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
+    const host_text_editor = addProgramModule(b, "src/apps/text_editor/main.zig", b.graph.host, test_optimize, host, shaders, false);
+    host_text_editor.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_setup = addProgramModule(b, "src/apps/setup/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_setup.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     for ([_]*std.Build.Module{
@@ -1018,7 +1018,7 @@ pub fn build(b: *std.Build) void {
         host_settings,
         host_files,
         host_camera,
-        host_editor,
+        host_text_editor,
         host_setup,
         addProgramModule(b, "src/shell/main.zig", b.graph.host, test_optimize, host, shaders, false),
     }) |m| {

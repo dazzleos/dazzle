@@ -9,6 +9,10 @@
 //! characters. Ctrl+A selects everything, and Ctrl+X, Ctrl+C and Ctrl+V cut,
 //! copy and paste (through the UI's clipboard), as the menu does (the
 //! right button, or a touch held down).
+//!
+//! Code can be coloured: a `highlighter` says what each byte of the text
+//! is (a keyword, a string, ...), and each is drawn in the theme's colour
+//! for it.
 
 const std = @import("std");
 const gfx = @import("gfx");
@@ -18,6 +22,7 @@ const widget = @import("widget.zig");
 const painter_mod = @import("painter.zig");
 const keymap = @import("keymap.zig");
 const menu = @import("menu.zig");
+const Highlight = @import("theme.zig").Highlight;
 
 const Node = widget.Node;
 const Event = widget.Event;
@@ -145,6 +150,11 @@ pub const TextArea = struct {
     on_changed: ?widget.Callback = null,
     /// Take the keyboard when it first appears.
     autofocus: bool = false,
+    /// Says what each byte of the text is, for its colour (`out` is as long
+    /// as the text, and all `plain` to start with).
+    highlighter: ?Highlighter = null,
+
+    pub const Highlighter = *const fn (text: []const u8, out: []Highlight) void;
 
     pub const pad = 12;
 
@@ -164,13 +174,21 @@ pub const TextArea = struct {
         lines_version: u64 = std.math.maxInt(u64),
         lines_width: f32 = -1,
         lines_doc: ?*Document = null,
+        /// What each byte is, for the text's version (if highlighted).
+        colours: std.ArrayList(Highlight) = .empty,
+        colours_version: u64 = std.math.maxInt(u64),
+        colours_doc: ?*Document = null,
+        colours_by: ?Highlighter = null,
         /// What the menu's actions need, from the widget as last seen.
         doc: ?*Document = null,
         node: ?*Node = null,
         on_changed: ?widget.Callback = null,
 
         pub fn deinit(s: *State) void {
-            if (s.gpa) |g| s.lines.deinit(g);
+            if (s.gpa) |g| {
+                s.lines.deinit(g);
+                s.colours.deinit(g);
+            }
         }
 
         fn changed(s: *State) void {
@@ -259,6 +277,26 @@ pub const TextArea = struct {
         wrapText(n.ui.gpa, &st.lines, s, d.text(), width - 2 * pad);
     }
 
+    /// What each byte of the text is (again only if it changed), or null
+    /// if it is not highlighted.
+    fn highlight(self: *const TextArea, n: *Node) ?[]const Highlight {
+        const h = self.highlighter orelse return null;
+        const st = n.state(State);
+        const d = self.doc;
+        if (st.colours_doc != d or st.colours_version != d.version or st.colours_by != h) {
+            st.colours_doc = d;
+            st.colours_version = d.version;
+            st.colours_by = h;
+            st.colours.resize(n.ui.gpa, d.text().len) catch {
+                st.colours_doc = null;
+                return null;
+            };
+            @memset(st.colours.items, .plain);
+            h(d.text(), st.colours.items);
+        }
+        return st.colours.items;
+    }
+
     pub fn paint(self: *const TextArea, n: *Node, p: *Painter) void {
         const t = &n.ui.theme;
         const st = n.state(State);
@@ -274,6 +312,7 @@ pub const TextArea = struct {
         const lines = st.lines.items;
         const first: usize = @intFromFloat(@max(0, @floor((st.scroll - pad) / lh)));
         const sel = d.selection();
+        const colours = self.highlight(n);
         var i = first;
         while (i < lines.len) : (i += 1) {
             const top = pad + @as(f32, @floatFromInt(i)) * lh - st.scroll;
@@ -288,7 +327,19 @@ pub const TextArea = struct {
                 const x1 = font.measure(s, text[l.start..b]) + @as(f32, if (range[1] > l.end) s.size * 0.3 else 0);
                 c.fillRect(.{ .x = pad + x0, .y = top, .w = x1 - x0, .h = lh }, t.primary.withAlpha(if (st.focused) 0.35 else 0.15));
             };
-            _ = p.text(s.size, pad, baseline, text[l.start..l.end], t.on_surface);
+            const cs = colours orelse {
+                _ = p.text(s.size, pad, baseline, text[l.start..l.end], t.on_surface);
+                continue;
+            };
+            // In runs of one colour.
+            var x: f32 = pad;
+            var at = l.start;
+            while (at < l.end) {
+                var end = at + 1;
+                while (end < l.end and cs[end] == cs[at]) end += 1;
+                x = p.text(s.size, x, baseline, text[at..end], t.syntax.color(cs[at], t.on_surface));
+                at = end;
+            }
         }
         if (st.focused and sel == null) {
             const li = lineOf(lines, d.cursor);

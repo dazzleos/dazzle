@@ -140,6 +140,7 @@ pub const TextStyle = text.TextStyle;
 pub const TextAlign = text.TextAlign;
 
 pub const Theme = theme.Theme;
+pub const Highlight = theme.Highlight;
 pub const OutlinedButton = outlined_button.OutlinedButton;
 pub const Spinner = spinner.Spinner;
 pub const Checkbox = checkbox.Checkbox;

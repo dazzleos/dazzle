@@ -20,6 +20,8 @@ pub const Theme = struct {
     outline: Color,
     outline_variant: Color,
     @"error": Color,
+    /// The colours of code's parts (see `Highlight`).
+    syntax: Syntax,
     body_size: f32 = 14,
     label_size: f32 = 14,
     title_size: f32 = 22,
@@ -39,6 +41,17 @@ pub const Theme = struct {
         .outline = .rgb(0x79747e),
         .outline_variant = .rgb(0xcac4d0),
         .@"error" = .rgb(0xb3261e),
+        .syntax = .{
+            .keyword = .rgb(0x8e24aa),
+            .type = .rgb(0x00796b),
+            .function = .rgb(0x1565c0),
+            .builtin = .rgb(0xad1457),
+            .string = .rgb(0x2e7d32),
+            .number = .rgb(0xc65400),
+            .constant = .rgb(0xc65400),
+            .property = .rgb(0x1565c0),
+            .comment = .rgb(0x79747e),
+        },
     };
 
     /// The baseline dark scheme.
@@ -56,5 +69,53 @@ pub const Theme = struct {
         .outline = .rgb(0x938f99),
         .outline_variant = .rgb(0x49454f),
         .@"error" = .rgb(0xf2b8b5),
+        .syntax = .{
+            .keyword = .rgb(0xd0a8ff),
+            .type = .rgb(0x80cbc4),
+            .function = .rgb(0x90caf9),
+            .builtin = .rgb(0xf48fb1),
+            .string = .rgb(0xa5d6a7),
+            .number = .rgb(0xffb74d),
+            .constant = .rgb(0xffb74d),
+            .property = .rgb(0x90caf9),
+            .comment = .rgb(0x938f99),
+        },
     };
+};
+
+/// What a piece of code is, for its colour (plain text is `on_surface`).
+pub const Highlight = enum(u8) {
+    plain,
+    keyword,
+    type,
+    function,
+    /// Built into the language: Zig's @functions, Python's print and len.
+    builtin,
+    string,
+    number,
+    /// true, false, null and the like.
+    constant,
+    /// A JSON object's names.
+    property,
+    comment,
+};
+
+/// The colours of code, by what it is.
+pub const Syntax = struct {
+    keyword: Color,
+    type: Color,
+    function: Color,
+    builtin: Color,
+    string: Color,
+    number: Color,
+    constant: Color,
+    property: Color,
+    comment: Color,
+
+    pub fn color(s: *const Syntax, h: Highlight, plain: Color) Color {
+        return switch (h) {
+            .plain => plain,
+            inline else => |tag| @field(s, @tagName(tag)),
+        };
+    }
 };
