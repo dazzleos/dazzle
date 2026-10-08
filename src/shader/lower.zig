@@ -42,6 +42,9 @@ pub const Interface = struct {
     uniform_words: u32 = 0,
     depth_write: bool = false,
     blend: Blend = .none,
+    /// Samples a pixel has: 4 in a multisampled frame, where blending
+    /// reads and writes each sample's colour.
+    samples: u8 = 1,
 };
 
 pub const Error = error{ Unsupported, InvalidSpirv, OutOfMemory };
@@ -1468,13 +1471,21 @@ pub fn lower(
                 // The render target is B8G8R8A8.
                 .none => s.tlbColor(s.packUnorm8888(rgba[2], rgba[1], rgba[0], rgba[3])),
                 .source_over => {
-                    const dst = s.tlbColorLoad();
                     const alpha = rgba[3];
                     const inv = s.fsub(l.k(1), alpha);
                     const src = [4]Value{ rgba[2], rgba[1], rgba[0], l.k(1) };
-                    var out: [4]Value = undefined;
-                    for (&out, src, 0..) |*o, x, i| o.* = s.fadd(s.fmul(x, alpha), s.fmul(s.unpackUnorm8(dst, @intCast(i)), inv));
-                    s.tlbColor(s.packUnorm8888(out[0], out[1], out[2], out[3]));
+                    // Multisampled, each sample is blended with its own
+                    // colour: the four read in turn, then written in turn
+                    // (as Mesa does).
+                    var dsts: [4]Value = undefined;
+                    const n: usize = if (iface.samples == 4) 4 else 1;
+                    for (dsts[0..n]) |*d| d.* = s.tlbColorLoad();
+                    for (dsts[0..n]) |dst| {
+                        var out: [4]Value = undefined;
+                        for (&out, src, 0..) |*o, x, i| o.* = s.fadd(s.fmul(x, alpha), s.fmul(s.unpackUnorm8(dst, @intCast(i)), inv));
+                        const px = s.packUnorm8888(out[0], out[1], out[2], out[3]);
+                        if (n == 4) s.tlbColorMs(px) else s.tlbColor(px);
+                    }
                 },
             }
         },

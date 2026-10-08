@@ -177,10 +177,30 @@ pub const Frame = struct {
     region_count: usize = 0,
     /// Set by `limitTo` with nothing to draw: `regionCount` is then 0.
     limited_to_nothing: bool = false,
+    /// 4x multisampled (antialiased), each pixel's samples averaged as
+    /// tiles are stored: see `beginMultisampled`.
+    msaa: bool = false,
 
     pub const max_regions = 4;
 
     pub fn begin(f: *Frame, target: Target, load: Load) void {
+        f.beginWith(target, load, false);
+    }
+
+    /// Begins a frame with 4x multisampling: edges are antialiased. Each
+    /// pixel has four samples in the tile buffer (so tiles are 32 pixels
+    /// square, four times as many), which are averaged as each tile is
+    /// stored: the fragment shaders still run once a pixel, and as many
+    /// bytes are written as without it. Programs that blend use their
+    /// multisampled fragment shaders (see shader.Program.fs_ms). It starts
+    /// from a colour: a tile buffer of samples cannot be loaded from an
+    /// image of pixels.
+    pub fn beginMultisampled(f: *Frame, target: Target, clear: u32) void {
+        f.beginWith(target, .{ .clear = clear }, true);
+    }
+
+    fn beginWith(f: *Frame, target: Target, load: Load, msaa: bool) void {
+        f.msaa = msaa;
         f.bin = .init(&f.bcl_buf);
         f.rec = .init(&f.rec_buf);
         f.rec_count = 0;
@@ -195,7 +215,7 @@ pub const Frame = struct {
         _ = f.index(target.handle) catch unreachable;
 
         const tiles = f.tileCounts();
-        f.bin.tileBinningModeConfig(@intCast(tiles[0]), @intCast(tiles[1]));
+        f.bin.tileBinningModeConfig(@intCast(tiles[0]), @intCast(tiles[1]), msaa);
         f.bin.startTileBinning();
         f.bin.primitiveListFormat();
     }
@@ -203,19 +223,29 @@ pub const Frame = struct {
     /// Starts the frame again once it has been rendered, on the same
     /// target and parts of it, keeping what it drew.
     pub fn again(f: *Frame) void {
-        const regions = f.regions;
+        var regions = f.regions;
         const region_count = f.region_count;
         const nothing = f.limited_to_nothing;
+        // Not multisampled again (what is drawn is loaded, as pixels):
+        // the regions' tiles, in the bigger tiles.
+        if (f.msaa) for (regions[0..region_count]) |*t| {
+            for (t) |*c| c.* /= 2;
+        };
         f.begin(f.target, .keep);
         f.regions = regions;
         f.region_count = region_count;
         f.limited_to_nothing = nothing;
     }
 
+    /// Tiles' size, in pixels.
+    pub fn tileSize(f: *const Frame) u16 {
+        return if (f.msaa) cl.multisample_tile_size else cl.tile_size;
+    }
+
     fn tileCounts(f: *const Frame) [2]u16 {
         return .{
-            std.math.divCeil(u16, f.target.width, cl.tile_size) catch unreachable,
-            std.math.divCeil(u16, f.target.height, cl.tile_size) catch unreachable,
+            std.math.divCeil(u16, f.target.width, f.tileSize()) catch unreachable,
+            std.math.divCeil(u16, f.target.height, f.tileSize()) catch unreachable,
         };
     }
 
@@ -318,8 +348,9 @@ pub const Frame = struct {
     }
 
     /// Renders only the tiles covering `rects` (in target pixels): the rest
-    /// of the target keeps what it holds. Tiles are 64 pixels square, so
-    /// those within the rectangles are cleared and drawn whole. Rectangles
+    /// of the target keeps what it holds. Tiles are 64 pixels square (32
+    /// multisampled), so those within the rectangles are cleared and drawn
+    /// whole. Rectangles
     /// whose tiles overlap are rendered together; empty ones are dropped.
     /// Without a call (or after `limitTo(null)`), everything is rendered.
     pub fn limitTo(f: *Frame, rects: ?[]const Viewport) void {
@@ -335,7 +366,8 @@ pub const Frame = struct {
             const x1 = @min(r.x + @as(i32, @intCast(r.width)), f.target.width);
             const y1 = @min(r.y + @as(i32, @intCast(r.height)), f.target.height);
             if (x1 <= x0 or y1 <= y0) continue;
-            var t: [4]i32 = .{ @divFloor(x0, cl.tile_size), @divFloor(y0, cl.tile_size), @divFloor(x1 - 1, cl.tile_size), @divFloor(y1 - 1, cl.tile_size) };
+            const ts: i32 = f.tileSize();
+            var t: [4]i32 = .{ @divFloor(x0, ts), @divFloor(y0, ts), @divFloor(x1 - 1, ts), @divFloor(y1 - 1, ts) };
             t[2] = @min(t[2], tiles[0] - 1);
             t[3] = @min(t[3], tiles[1] - 1);
             // Merge with the ranges it overlaps (repeatedly, as merging
@@ -382,10 +414,11 @@ pub const Frame = struct {
     pub fn covers(f: *const Frame, r: Viewport) bool {
         if (f.limited_to_nothing) return false;
         if (f.region_count == 0) return true;
-        const x0 = @divFloor(r.x, cl.tile_size);
-        const y0 = @divFloor(r.y, cl.tile_size);
-        const x1 = @divFloor(r.x + @as(i32, @intCast(r.width)) - 1, cl.tile_size);
-        const y1 = @divFloor(r.y + @as(i32, @intCast(r.height)) - 1, cl.tile_size);
+        const ts: i32 = f.tileSize();
+        const x0 = @divFloor(r.x, ts);
+        const y0 = @divFloor(r.y, ts);
+        const x1 = @divFloor(r.x + @as(i32, @intCast(r.width)) - 1, ts);
+        const y1 = @divFloor(r.y + @as(i32, @intCast(r.height)) - 1, ts);
         for (f.regions[0..f.region_count]) |t| {
             if (x0 <= t[2] and t[0] <= x1 and y0 <= t[3] and t[1] <= y1) return true;
         }
@@ -427,7 +460,8 @@ pub const Frame = struct {
             .max_y_tile = @intCast(tiles[1] - 1),
             .color_write = .{
                 .hindex = 0,
-                .bits = cl.renderConfigBits(f.target.tiling, f.target.format.renderConfigFormat()),
+                .bits = cl.renderConfigBits(f.target.tiling, f.target.format.renderConfigFormat()) |
+                    (if (f.msaa) cl.render_config_multisample else 0),
             },
             // The clear values are always loaded so depth starts cleared;
             // keeping the colour loads it back from the target.
@@ -554,6 +588,37 @@ test "frames limited to regions render the tiles covering them" {
     _ = f.finish();
     const all = f.submitRegion(0);
     try std.testing.expectEqual([4]u8{ 0, 0, 9, 7 }, [4]u8{ all.min_x_tile, all.min_y_tile, all.max_x_tile, all.max_y_tile });
+}
+
+test "multisampled frames: tiles of 32 pixels, the binner and the store told, the next part not" {
+    const f = try testing.allocator.create(Frame);
+    defer testing.allocator.destroy(f);
+    f.* = .{};
+    f.beginMultisampled(.{ .handle = 10, .width = 640, .height = 480 }, 0xff000000);
+    try testing.expect(f.msaa);
+    // The binning config's flags (its last byte): 4x multisampling; and
+    // twice as many tiles each way.
+    const b = f.bcl();
+    try testing.expectEqual(@as(u8, 1), b[15]);
+    try testing.expectEqual(@as(u8, 20), b[13]);
+    try testing.expectEqual(@as(u8, 15), b[14]);
+    // Regions are in its tiles.
+    f.limitTo(&.{.{ .x = 600, .y = 400, .width = 40, .height = 80 }});
+    const s = f.finish();
+    try testing.expectEqual([4]u8{ 18, 12, 19, 14 }, [4]u8{ s.min_x_tile, s.min_y_tile, s.max_x_tile, s.max_y_tile });
+    try testing.expectEqual(cl.render_config_multisample, s.color_write.bits & cl.render_config_multisample);
+    try testing.expectEqual(device.SubmitRclSurface.no_surface, s.color_read.hindex);
+    // Drawing goes on (a full frame) without multisampling, loading what
+    // was drawn, on the same parts, in its tiles.
+    f.again();
+    try testing.expect(!f.msaa);
+    const t = f.finish();
+    try testing.expectEqual([4]u8{ 9, 6, 9, 7 }, [4]u8{ t.min_x_tile, t.min_y_tile, t.max_x_tile, t.max_y_tile });
+    try testing.expectEqual(@as(u16, 0), t.color_write.bits & cl.render_config_multisample);
+    // Plain frames are as before.
+    f.begin(.{ .handle = 10, .width = 640, .height = 480 }, .{ .clear = 0 });
+    try testing.expect(!f.msaa);
+    try testing.expectEqual(@as(u8, 0), f.bcl()[15]);
 }
 
 test "a full frame starts again on the same parts, keeping what it drew" {

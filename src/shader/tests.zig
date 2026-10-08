@@ -55,6 +55,36 @@ test "every program passes the hardware rules" {
     for (programs) |p| {
         const prog = try Program.decode(p.program);
         for ([_]compiler.Compiled{ prog.fs, prog.vs, prog.cs }) |c| try vc4.qpu.validate(c.code(), c.stage, null);
+        if (prog.has_fs_ms) try vc4.qpu.validate(prog.fs_ms.code(), .fragment, null);
+    }
+}
+
+test "multisampled, blending reads each sample, blends it and writes it, as one sample is" {
+    for (programs) |p| {
+        const prog = try Program.decode(p.program);
+        // Only programs that blend have (and need) a multisampled shader.
+        try testing.expectEqual(prog.options.blend != .none, prog.has_fs_ms);
+        if (!prog.has_fs_ms) continue;
+        var user: [64]u32 = undefined;
+        for (&user, 0..) |*w, i| w.* = f2u(0.1 + @as(f32, @floatFromInt(i % 7)) * 0.1);
+        var tex: TestTexture = undefined;
+        tex.init();
+        var varyings: [16]sim.Vec = undefined;
+        for (&varyings, 0..) |*v, k| {
+            var vals: [sim.lanes]f32 = undefined;
+            for (&vals, 0..) |*x, l| x.* = 0.05 + @as(f32, @floatFromInt((l * 3 + k * 5) % 17)) / 20;
+            v.* = lanes(vals);
+        }
+        const nv = prog.fs.num_varyings;
+        const cfg = [2]u32{ texture.p0(tex.cfg), texture.p1(tex.cfg) };
+        var buf: [64]u32 = undefined;
+        var buf_ms: [64]u32 = undefined;
+        const one = try sim.run(prog.fs.code(), .{ .uniforms = uniformStream(&buf, &prog.fs, &user, cfg), .varyings = varyings[0..nv], .tlb_color_in = sim.splat(0xff336699), .texture_memory = &tex.memory });
+        const ms = try sim.run(prog.fs_ms.code(), .{ .uniforms = uniformStream(&buf_ms, &prog.fs_ms, &user, cfg), .varyings = varyings[0..nv], .tlb_color_in = sim.splat(0xff336699), .texture_memory = &tex.memory });
+        try testing.expectEqual(@as(usize, 1), one.color_loads);
+        try testing.expectEqual(@as(usize, 4), ms.color_loads);
+        try testing.expectEqual(@as(usize, 4), ms.tlb_samples);
+        for (ms.tlb_color_samples) |sample| try testing.expectEqual(one.tlb_color.?, sample);
     }
 }
 

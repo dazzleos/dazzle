@@ -96,10 +96,13 @@ pub const Op = enum {
     vpm_write,
     tlb_z,
     tlb_color,
+    /// A colour for the next sample of the fragment (multisampled frames:
+    /// four, in turn).
+    tlb_color_ms,
 
     fn hasResult(op: Op) bool {
         return switch (op) {
-            .vpm_write, .tlb_z, .tlb_color => false,
+            .vpm_write, .tlb_z, .tlb_color, .tlb_color_ms => false,
             else => true,
         };
     }
@@ -107,7 +110,7 @@ pub const Op = enum {
     /// Instructions that must be kept even if their result is unused.
     fn hasSideEffects(op: Op) bool {
         return switch (op) {
-            .vpm_read, .varying, .tex, .vpm_write, .tlb_z, .tlb_color => true,
+            .vpm_read, .varying, .tex, .vpm_write, .tlb_z, .tlb_color, .tlb_color_ms => true,
             else => false,
         };
     }
@@ -247,6 +250,12 @@ pub const Shader = struct {
     }
     pub fn tlbColor(s: *Shader, v: Value) void {
         _ = s.pushSrcs(.tlb_color, &.{v}, 0);
+    }
+    /// Writes the colour of the fragment's next sample (in a multisampled
+    /// frame: each of the four, in turn, after reading each of them with
+    /// `tlbColorLoad`).
+    pub fn tlbColorMs(s: *Shader, v: Value) void {
+        _ = s.pushSrcs(.tlb_color_ms, &.{v}, 0);
     }
 
     fn operands(s: *const Shader, i: usize) []const Value {
@@ -418,7 +427,7 @@ fn canThread(shader: *const Shader, live: *const [max_insts]bool) bool {
     };
     const t = last_tex orelse return false;
     for (0..t) |j| if (live[j]) switch (shader.insts[j].op) {
-        .tlb_color_load, .tlb_z, .tlb_color => return false,
+        .tlb_color_load, .tlb_z, .tlb_color, .tlb_color_ms => return false,
         else => {},
     };
     return true;
@@ -764,10 +773,11 @@ fn compileThreaded(shader: *const Shader, options: Options, threaded: bool) Erro
                 try g.emit(qpu.nop(.color_load));
                 try g.emit(try qpu.mov(dst.dst(), qpu.r(4)));
             },
-            .vpm_write, .tlb_z, .tlb_color => {
+            .vpm_write, .tlb_z, .tlb_color, .tlb_color_ms => {
                 const periph: u6 = switch (inst.op) {
                     .vpm_write => qpu.W.vpm,
                     .tlb_z => qpu.W.tlb_z,
+                    .tlb_color_ms => qpu.W.tlb_color_ms,
                     else => qpu.W.tlb_color_all,
                 };
                 const a = try g.operand(shader, reg, inst.srcs[0]);

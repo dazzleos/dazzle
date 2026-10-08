@@ -46,6 +46,8 @@ pub const Pipeline = struct {
     gpa: std.mem.Allocator,
     program: *Program,
     fs: Stage,
+    /// For multisampled frames, if the program blends (see Program.fs_ms).
+    fs_ms: ?Stage,
     vs: Stage,
     cs: Stage,
     /// The uniform words, then the viewport scale.
@@ -71,6 +73,7 @@ pub const Pipeline = struct {
             .gpa = gpa,
             .program = p,
             .fs = .{ .handle = try dev.createShaderBo(p.fs.code()), .compiled = &p.fs },
+            .fs_ms = if (p.has_fs_ms) .{ .handle = try dev.createShaderBo(p.fs_ms.code()), .compiled = &p.fs_ms } else null,
             .vs = .{ .handle = try dev.createShaderBo(p.vs.code()), .compiled = &p.vs },
             .cs = .{ .handle = try dev.createShaderBo(p.cs.code()), .compiled = &p.cs },
             .values = values,
@@ -81,6 +84,7 @@ pub const Pipeline = struct {
 
     pub fn deinit(p: *Pipeline, dev: anytype) void {
         for ([_]u32{ p.fs.handle, p.vs.handle, p.cs.handle }) |h| vc4.drm.gemClose(dev.fd, h);
+        if (p.fs_ms) |ms| vc4.drm.gemClose(dev.fd, ms.handle);
         p.gpa.free(p.values);
         p.gpa.destroy(p.program);
     }
@@ -136,12 +140,13 @@ pub const Pipeline = struct {
         p.values[prog.uniform_words] = scale[0];
         p.values[prog.uniform_words + 1] = scale[1];
         const cull = p.options.cull;
+        const fs = if (frame.msaa) p.fs_ms orelse p.fs else p.fs;
         try frame.draw(.{
-            .fs = p.fs.binding(p.values),
+            .fs = fs.binding(p.values),
             .vs = p.vs.binding(p.values),
             .cs = p.cs.binding(p.values),
             .fs_num_varyings = prog.varying_components,
-            .fs_threaded = prog.fs.threaded,
+            .fs_threaded = fs.compiled.threaded,
             .attributes = attrs[0..prog.num_attributes],
             .vs_attribute_mask = @intCast((@as(u16, 1) << @intCast(prog.num_attributes)) - 1),
             .vs_attributes_size = vs_size,

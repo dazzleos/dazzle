@@ -252,6 +252,15 @@ what the VideoCore IV does well, and left out where it would not.
   texture unit repeats across a face by itself. Faces are merged only
   along that direction (which costs few quads, as light and shade break
   up merges the other way anyway).
+- **Antialiased edges, nearly free.** Frames are 4x multisampled
+  (`Frame.beginMultisampled`; M turns it off). The tile buffer holds four
+  samples a pixel, and they are averaged as each tile is stored. So the
+  fragment shaders still run once a pixel, and no more is written to
+  memory: what it costs is four times as many tiles (32 pixels square, not
+  64) for the GPU to bin and walk through. Shaders that blend read the
+  tile buffer to blend with it, and multisampled they must read and write
+  each sample in turn, so every program that blends is also compiled that
+  way (`Program.fs_ms`), and its pipeline uses it in multisampled frames.
 - **Moving things for free.** Leaves and plants sway in the wind in the
   vertex shader. Time of day is a matter of uniforms: sunrise, a red
   sunset, and night with stars and lamps' warm light.

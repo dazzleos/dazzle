@@ -38,6 +38,11 @@ pub const Error = lower.Error || spirv.Error || compiler.Error || error{ LinkFai
 
 pub const Program = struct {
     fs: compiler.Compiled,
+    /// For a program that blends: its fragment shader for multisampled
+    /// frames, which blends each sample on its own (`has_fs_ms`). Programs
+    /// that do not blend write all samples at once, multisampled or not.
+    fs_ms: compiler.Compiled,
+    has_fs_ms: bool = false,
     vs: compiler.Compiled,
     cs: compiler.Compiled,
     attributes: [max_attributes]Attribute = undefined,
@@ -67,7 +72,7 @@ pub const Program = struct {
         const vs_entry = vertex orelse return link(diag, "no vertex shader (export fn ... callconv(.spirv_vertex))", .{});
         const fs_entry = fragment orelse return link(diag, "no fragment shader (export fn ... callconv(.spirv_fragment))", .{});
 
-        var p: Program = .{ .fs = undefined, .vs = undefined, .cs = undefined, .options = options };
+        var p: Program = .{ .fs = undefined, .fs_ms = undefined, .vs = undefined, .cs = undefined, .options = options };
 
         // Attributes: the vertex shader's inputs, by location.
         var attrs: [max_attributes]lower.Slot = undefined;
@@ -118,6 +123,13 @@ pub const Program = struct {
 
         try lower.lower(gpa, &m, fs_entry, fs_entry.interface, .fragment, &iface, shader, diag);
         p.fs = try compiler.compile(shader);
+        if (options.blend != .none) {
+            iface.samples = 4;
+            try lower.lower(gpa, &m, fs_entry, fs_entry.interface, .fragment, &iface, shader, diag);
+            p.fs_ms = try compiler.compile(shader);
+            p.has_fs_ms = true;
+            iface.samples = 1;
+        }
         try lower.lower(gpa, &m, vs_entry, vs_entry.interface, .vertex, &iface, shader, diag);
         p.vs = try compiler.compile(shader);
 
@@ -148,7 +160,7 @@ pub const Program = struct {
     // --- Encoding ---------------------------------------------------------------
 
     const format_magic = "SDSH";
-    const format_version: u32 = 2;
+    const format_version: u32 = 3;
 
     /// The program as bytes, for embedding (see `decode`).
     pub fn encode(p: *const Program, gpa: std.mem.Allocator) ![]u8 {
@@ -166,7 +178,9 @@ pub const Program = struct {
             try putInt(&out, gpa, a.components);
             try putInt(&out, gpa, @intFromBool(a.in_coordinate_shader));
         }
-        for ([_]*const compiler.Compiled{ &p.fs, &p.vs, &p.cs }) |c| {
+        try putInt(&out, gpa, @intFromBool(p.has_fs_ms));
+        const stages = [_]*const compiler.Compiled{ &p.fs, &p.vs, &p.cs, &p.fs_ms };
+        for (stages[0..if (p.has_fs_ms) 4 else 3]) |c| {
             try putInt(&out, gpa, @intFromEnum(c.stage));
             try putInt(&out, gpa, c.num_vpm_reads);
             try putInt(&out, gpa, c.num_vpm_writes);
@@ -198,7 +212,7 @@ pub const Program = struct {
         if (bytes.len < 4 or !std.mem.eql(u8, bytes[0..4], format_magic)) return error.BadProgram;
         r.at = 4;
         if (try r.int() != format_version) return error.BadProgram;
-        var p: Program = .{ .fs = undefined, .vs = undefined, .cs = undefined };
+        var p: Program = .{ .fs = undefined, .fs_ms = undefined, .vs = undefined, .cs = undefined };
         p.options.depth_test = try r.int() != 0;
         p.options.blend = std.enums.fromInt(Blend, try r.int()) orelse return error.BadProgram;
         p.uniform_words = try r.int();
@@ -207,7 +221,9 @@ pub const Program = struct {
         if (n > max_attributes) return error.BadProgram;
         p.num_attributes = @intCast(n);
         for (p.attributes[0..n]) |*a| a.* = .{ .location = try r.int(), .components = @intCast(try r.int()), .in_coordinate_shader = try r.int() != 0 };
-        for ([_]*compiler.Compiled{ &p.fs, &p.vs, &p.cs }) |c| {
+        p.has_fs_ms = try r.int() != 0;
+        const stages = [_]*compiler.Compiled{ &p.fs, &p.vs, &p.cs, &p.fs_ms };
+        for (stages[0..if (p.has_fs_ms) 4 else 3]) |c| {
             c.* = .{ .stage = std.enums.fromInt(compiler.Stage, try r.int()) orelse return error.BadProgram };
             c.num_vpm_reads = try r.int();
             c.num_vpm_writes = try r.int();

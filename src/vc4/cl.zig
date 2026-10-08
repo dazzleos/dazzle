@@ -101,14 +101,15 @@ pub const Bcl = struct {
 
     /// Must come first. The kernel allocates the tile state and tile
     /// allocation memory and fills in their addresses and the flags.
-    pub fn tileBinningModeConfig(b: *Bcl, width_tiles: u8, height_tiles: u8) void {
+    /// `multisample`: 4x multisampling (tiles are then 32 pixels).
+    pub fn tileBinningModeConfig(b: *Bcl, width_tiles: u8, height_tiles: u8, multisample: bool) void {
         b.w.packet(.tile_binning_mode_config);
         b.w.u32_(0); // tile allocation memory address
         b.w.u32_(0); // tile allocation memory size
         b.w.u32_(0); // tile state data array address
         b.w.u8_(width_tiles);
         b.w.u8_(height_tiles);
-        b.w.u8_(0); // flags
+        b.w.u8_(@intFromBool(multisample)); // flags: VC4_BIN_CONFIG_MS_MODE_4X
     }
 
     pub fn startTileBinning(b: *Bcl) void {
@@ -299,6 +300,15 @@ pub fn renderConfigBits(tiling: Tiling, format: u2) u16 {
     return @as(u16, @intFromEnum(tiling)) << 6 | @as(u16, format) << 2;
 }
 
+/// Render config bits for 4x multisampling, each pixel's samples averaged
+/// as the tile is stored (VC4_RENDER_CONFIG_MS_MODE_4X and
+/// VC4_RENDER_CONFIG_DECIMATE_MODE_4X; the kernel allows both).
+pub const render_config_multisample: u16 = 1 << 0 | 1 << 4;
+
+/// Tiles are this many pixels square in a multisampled frame (the tile
+/// buffer holds four samples a pixel).
+pub const multisample_tile_size = 32;
+
 const testing = std.testing;
 
 test "packet sizes match the kernel's table" {
@@ -319,7 +329,7 @@ test "packet sizes match the kernel's table" {
     }) |c| {
         var b: Bcl = .init(&buf);
         switch (c.p) {
-            .tile_binning_mode_config => b.tileBinningModeConfig(1, 1),
+            .tile_binning_mode_config => b.tileBinningModeConfig(1, 1, false),
             .clip_window => b.clipWindow(0, 0, 1, 1),
             .configuration_bits => b.configurationBits(.{}),
             .viewport_offset => b.viewportOffset(1, 1),

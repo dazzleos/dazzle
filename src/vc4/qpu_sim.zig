@@ -47,6 +47,11 @@ pub const Result = struct {
     vpm_out: [max_vpm_out]Vec = undefined,
     vpm_out_len: usize = 0,
     tlb_color: ?Vec = null,
+    /// Multisampled: each sample's colour, as written in turn.
+    tlb_color_samples: [4]Vec = undefined,
+    tlb_samples: usize = 0,
+    /// Times the tile buffer's colour was read.
+    color_loads: usize = 0,
     tlb_z: ?Vec = null,
     uniforms_read: usize = 0,
     varyings_read: usize = 0,
@@ -293,7 +298,10 @@ pub fn run(code: []const qpu.Inst, env: Env) Error!Result {
                 std.mem.copyForwards(Vec, s.tmu_fifo[0 .. s.tmu_fifo_len - 1], s.tmu_fifo[1..s.tmu_fifo_len]);
                 s.tmu_fifo_len -= 1;
             },
-            .color_load => s.acc[4] = env.tlb_color_in,
+            .color_load => {
+                s.acc[4] = env.tlb_color_in;
+                r.color_loads += 1;
+            },
             .prog_end => end_at = ip + 2,
             .thread_switch, .last_thread_switch => switch_at = ip + 3,
             .none, .small_imm, .load_imm, .scoreboard_unlock, .wait_scoreboard => {},
@@ -390,6 +398,13 @@ fn write(s: *State, r: *Result, env: Env, waddr: u6, file: File, value: Vec, con
             } else if (v & 0xff != 0) return error.Unsupported;
         },
         qpu.W.tlb_color_all => r.tlb_color = value,
+        // A sample's colour, in turn (the simulated tile buffer's samples
+        // all start as tlb_color_in).
+        qpu.W.tlb_color_ms => {
+            if (r.tlb_samples < r.tlb_color_samples.len) r.tlb_color_samples[r.tlb_samples] = value;
+            r.tlb_samples += 1;
+            r.tlb_color = value;
+        },
         qpu.W.tlb_z => r.tlb_z = value,
         qpu.W.sfu_recip, qpu.W.sfu_recipsqrt, qpu.W.sfu_exp, qpu.W.sfu_log => {
             for (&s.acc[4], value) |*o, v| o.* = u(switch (waddr) {
