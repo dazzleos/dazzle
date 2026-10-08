@@ -233,9 +233,13 @@ pub const Shader = struct {
     pub fn packScreenXy(s: *Shader, x: Value, y: Value) Value {
         return s.pushSrcs(.pack_screen_xy, &.{ x, y }, 0);
     }
-    /// Samples texture unit `unit` (0 or 1) at (s, t).
-    pub fn texture(s: *Shader, unit: u1, tex_s: Value, tex_t: Value) Value {
-        return s.pushSrcs(.tex, &.{ tex_s, tex_t }, unit);
+    /// Samples the draw's texture `slot` (0 to 2) at (s, t). Each sample
+    /// carries its texture's config, so a texture unit can sample several
+    /// textures: the slots take turns between the two units (0 and 2 on
+    /// unit 0, 1 on unit 1), so that two different textures can be fetched
+    /// at once.
+    pub fn texture(s: *Shader, slot: u2, tex_s: Value, tex_t: Value) Value {
+        return s.pushSrcs(.tex, &.{ tex_s, tex_t }, slot);
     }
     /// The colour the tile buffer holds at this fragment, packed like
     /// `tlbColor`'s input (fragment shaders). Read it to blend.
@@ -268,9 +272,10 @@ pub const Shader = struct {
 pub const UniformKind = union(enum) {
     /// The caller's uniform with this index.
     user: u32,
-    /// Texture config parameter 0 (relocated by the kernel) for a unit.
+    /// Texture config parameter 0 (relocated by the kernel) for a texture
+    /// slot.
     tex_p0: u8,
-    /// Texture config parameter 1 for a unit.
+    /// Texture config parameter 1 for a texture slot.
     tex_p1: u8,
 };
 
@@ -284,14 +289,22 @@ pub const Compiled = struct {
     num_vpm_writes: u32 = 0,
     num_varyings: u32 = 0,
     num_texture_samples: u32 = 0,
-    /// It samples texture unit 1 too (a draw must then give two textures).
-    samples_unit1: bool = false,
     /// A fragment shader that runs two threads per QPU (see
     /// `Options.threaded`): its draws must say so in their shader record.
     threaded: bool = false,
 
     pub fn code(c: *const Compiled) []const qpu.Inst {
         return c.code_buf[0..c.code_len];
+    }
+
+    /// The texture slots it samples, a bit each (a draw must give them).
+    pub fn textureSlots(c: *const Compiled) u4 {
+        var slots: u4 = 0;
+        for (c.uniforms()) |k| switch (k) {
+            .tex_p0 => |slot| slots |= @as(u4, 1) << @intCast(slot),
+            else => {},
+        };
+        return slots;
     }
 
     pub fn uniforms(c: *const Compiled) []const UniformKind {
@@ -750,13 +763,14 @@ fn compileThreaded(shader: *const Shader, options: Options, threaded: bool) Erro
             .tex => {
                 // Writing T then S each take one config uniform (P0, P1);
                 // the S write starts the fetch.
-                const unit: u8 = @intCast(inst.imm);
+                const slot: u8 = @intCast(inst.imm);
+                const unit = slot & 1;
                 const s_reg = try g.operand(shader, reg, inst.srcs[0]);
                 const t_reg = try g.operand(shader, reg, inst.srcs[1]);
                 try g.emit(try qpu.mov(.{ .periph = if (unit == 0) qpu.W.tmu0_t else qpu.W.tmu1_t }, t_reg.src()));
-                try g.addUniform(.{ .tex_p0 = unit });
+                try g.addUniform(.{ .tex_p0 = slot });
                 try g.emit(try qpu.mov(.{ .periph = if (unit == 0) qpu.W.tmu0_s else qpu.W.tmu1_s }, s_reg.src()));
-                try g.addUniform(.{ .tex_p1 = unit });
+                try g.addUniform(.{ .tex_p1 = slot });
                 // Threaded: let the other thread run while the texture
                 // unit fetches (placed by `placeThreadSwitches`).
                 if (threaded) {
@@ -766,7 +780,6 @@ fn compileThreaded(shader: *const Shader, options: Options, threaded: bool) Erro
                 try g.emit(qpu.nop(if (unit == 0) .load_tmu0 else .load_tmu1));
                 try g.emit(try qpu.mov(dst.dst(), qpu.r(4)));
                 g.out.num_texture_samples += 1;
-                if (unit == 1) g.out.samples_unit1 = true;
             },
             .tlb_color_load => {
                 // Reading the tile buffer needs the scoreboard (writes wait

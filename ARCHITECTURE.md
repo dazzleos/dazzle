@@ -260,9 +260,32 @@ what the VideoCore IV does well, and left out where it would not.
   (across the tile, down it, out of the face), so the fragment shader
   needs only a dot product to light every pixel, and the mortar, grain and
   cobbles catch the light and turn with it through the day. The light of
-  the sky, lamps and ambient occlusion is still summed per vertex. It
-  costs the fragment shader 57 instructions rather than 32; N turns it
-  off, and the tiles are then drawn with their shading baked in.
+  the sky, lamps and ambient occlusion is still summed per vertex. N
+  turns it off, and the tiles are then drawn with their shading baked in.
+- **Finer detail up close.** A third texture (`gpu.texture2`) is a patch
+  of noise, repeating several times a block, which leans the normal and
+  lightens or darkens: grains of sand finer than the tile's texels, wood's
+  fibres, the grit of stone (each tile says which: `Tile.detail`, packed
+  into its vertices). It shares texture unit 0 with the colour: each
+  texture read carries its own config, so a unit can read any number of
+  textures (`compiler.Shader.texture` takes a slot; slots alternate
+  between the two units, so two reads can be in flight at once). It
+  fades out by 12 blocks away.
+- **Less work further off.** The bumps fade out by 32 blocks away, where
+  the normal maps' mipmaps are nearly flat anyway, and chunks beyond that
+  are drawn by the plain terrain shader, with the same plain colours:
+  32 fragment shader instructions rather than 79, and half the vertex
+  shader. Up close, most of the screen is near chunks, so that is where
+  the cost is; the F3 panel shows how many draws are detailed.
+- **Only faces that can be seen.** Faces between two solid blocks are
+  never made. Chunks behind the eye, or past the fog, are not drawn. Of
+  the rest, each chunk's solid faces are kept grouped by the way they
+  face (`mesher.face_order`), and a group the eye is behind (all the
+  west faces of a chunk east of the eye) is not drawn: about four in ten
+  of the solid faces, each saving the coordinate shader and binning. The
+  solid blocks are drawn nearest first, so with early-Z a pixel hidden
+  behind a nearer one does not run the fragment shader. Chunks hidden
+  behind a hill are still drawn (only their pixels are skipped).
 - **Antialiased edges, nearly free.** Frames are 4x multisampled
   (`Frame.beginMultisampled`; M turns it off). The tile buffer holds four
   samples a pixel, and they are averaged as each tile is stored. So the
@@ -277,8 +300,8 @@ what the VideoCore IV does well, and left out where it would not.
   sunset, and night with stars and lamps' warm light.
 - **One frame.** The GPU keeps depth only within a frame (it is never
   stored), so the whole world is drawn in one. A chunk out of view or
-  past the fog is not drawn. The whole island in view is about 150 draws
-  and 100,000 triangles.
+  past the fog is not drawn. The whole island in view is about 170 draws
+  and 80,000 triangles.
 - **Left out.** There are no shadows, and no flowing water. Leaves are drawn solid
   (cutting holes in a fragment shader is not supported yet). Glass and
   plants are blended, nearest last, but not sorted face by face.

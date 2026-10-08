@@ -268,6 +268,7 @@ const test_shaders = [_][]const u8{
     "src/shader/testdata/flow.zig",
     "src/shader/testdata/endless.zig",
     "src/shader/testdata/two_textures.zig",
+    "src/shader/testdata/three_textures.zig",
 };
 
 const ShaderBlob = struct {

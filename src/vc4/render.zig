@@ -93,13 +93,17 @@ pub const Draw = struct {
     viewport: ?Viewport = null,
     /// Further limits rendering to this rectangle (y = 0 at the top).
     scissor: ?Viewport = null,
-    /// Texture for unit 0 of the fragment shader.
+    /// The fragment shader's textures, by slot (see compiler.Shader.texture).
     texture: ?Texture = null,
-    /// Texture for unit 1, for shaders that sample two.
     texture1: ?Texture = null,
+    texture2: ?Texture = null,
 
-    fn unit(d: *const Draw, u: u8) Texture {
-        return if (u == 0) d.texture.? else d.texture1.?;
+    fn unit(d: *const Draw, slot: u8) Texture {
+        return switch (slot) {
+            0 => d.texture.?,
+            1 => d.texture1.?,
+            else => d.texture2.?,
+        };
     }
 };
 

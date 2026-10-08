@@ -74,8 +74,8 @@ const Val = union(enum) {
     split: *const Lowerer.Split,
     list: []const Val,
     ptr: Ptr,
-    /// A texture, by the unit that samples it.
-    image: u1,
+    /// A texture, by its slot (see compiler.Shader.texture).
+    image: u2,
     none,
 };
 
@@ -1432,9 +1432,15 @@ pub fn lower(
             spirv.StorageClass.input => if (in_interface and deco.location != null) (input_vals.get(deco.location.?) orelse try l.zero(pointee)) else .none,
             spirv.StorageClass.output => try l.zero(pointee),
             spirv.StorageClass.uniform => try l.uniformTree(pointee, 0),
-            // Texture unit 1's is bound at 2 (see gpu.texture1); unit 0's
-            // is not bound.
-            spirv.StorageClass.uniform_constant => .{ .image = if (deco.binding == 2) 1 else 0 },
+            spirv.StorageClass.uniform_constant => .{
+                .image = switch (deco.binding orelse 0) {
+                    // gpu.texture's is not bound (the uniforms are at 0);
+                    // gpu.texture1's is at 2, and gpu.texture2's at 3.
+                    0, 1 => 0,
+                    2 => 1,
+                    else => 2,
+                },
+            },
             else => try l.zero(pointee),
         };
         const p = try l.slot(value);

@@ -106,8 +106,9 @@ pub const Pipeline = struct {
         indices: ?render.Indices = null,
         /// For fragment shaders that sample a texture.
         texture: ?render.Texture = null,
-        /// For those that sample a second (texture unit 1).
+        /// For those that sample a second (`gpu.texture1`), and a third.
         texture1: ?render.Texture = null,
+        texture2: ?render.Texture = null,
         /// Defaults to the whole target.
         viewport: ?render.Viewport = null,
         scissor: ?render.Viewport = null,
@@ -116,8 +117,10 @@ pub const Pipeline = struct {
     /// Records a draw into `frame`, with the uniforms as they are now.
     pub fn draw(p: *Pipeline, frame: *render.Frame, d: Draw) !void {
         const prog = p.program;
-        if (prog.fs.num_texture_samples > 0 and d.texture == null) return error.NoTexture;
-        if (prog.fs.samples_unit1 and d.texture1 == null) return error.NoTexture;
+        const slots = prog.fs.textureSlots();
+        for ([_]?render.Texture{ d.texture, d.texture1, d.texture2 }, 0..) |t, i| {
+            if (slots >> @intCast(i) & 1 != 0 and t == null) return error.NoTexture;
+        }
         var attrs: [program_mod.max_attributes]render.Attribute = undefined;
         var vs_size: u8 = 0;
         var cs_size: u8 = 0;
@@ -173,6 +176,7 @@ pub const Pipeline = struct {
             .scissor = d.scissor,
             .texture = d.texture,
             .texture1 = d.texture1,
+            .texture2 = d.texture2,
         });
     }
 };

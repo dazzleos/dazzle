@@ -362,7 +362,7 @@ test "two textures: unit 0's and unit 1's, each with its own config and memory" 
         std.debug.print("{s}\n", .{diag.message()});
         return err;
     };
-    try testing.expect(p.fs.samples_unit1);
+    try testing.expectEqual(@as(u4, 0b11), p.fs.textureSlots());
     try testing.expectEqual(@as(u32, 2), p.fs.num_texture_samples);
     var units: [2]bool = .{ false, false };
     for (p.fs.uniforms()) |k| switch (k) {
@@ -404,4 +404,44 @@ test "loops whose number of iterations is not known when compiled are reported" 
     try testing.expectError(error.Unsupported, Program.compile(testing.allocator, @embedFile("endless.spv"), .{}, &diag));
     try testing.expect(std.mem.indexOf(u8, diag.message(), "endless.zig:") != null);
     try testing.expect(std.mem.indexOf(u8, diag.message(), "loops must stop") != null);
+}
+
+test "three textures: the third on unit 0 with the first, each with its own config and memory" {
+    var diag: program_mod.Diagnostic = .{};
+    const p = Program.compile(testing.allocator, @embedFile("three_textures.spv"), .{}, &diag) catch |err| {
+        std.debug.print("{s}\n", .{diag.message()});
+        return err;
+    };
+    try testing.expectEqual(@as(u4, 0b111), p.fs.textureSlots());
+    try vc4.qpu.validate(p.fs.code(), .fragment, null);
+    var t: [3]TestTexture = undefined;
+    for (&t) |*x| x.init();
+    // Each texture different at each place: the same texels, turned
+    // around, and shifted along.
+    std.mem.reverse(u32, &t[1].pixels);
+    std.mem.rotate(u32, &t[2].pixels, 37);
+    for (t[1..]) |*x| {
+        texture.upload(&x.memory, &x.pixels, TestTexture.w, TestTexture.h);
+        x.cfg.offset = 0;
+    }
+    var buf: [8]u32 = undefined;
+    var n: usize = 0;
+    for (p.fs.uniforms()) |k| {
+        buf[n] = switch (k) {
+            .user => unreachable,
+            .tex_p0 => |slot| texture.p0(t[slot].cfg) + slot * sim.texture_base,
+            .tex_p1 => |slot| texture.p1(t[slot].cfg),
+        };
+        n += 1;
+    }
+    const varyings = [_]sim.Vec{ lane(TestTexture.u[0], TestTexture.u[1]), lane(TestTexture.v[0], TestTexture.v[1]) };
+    const mems = [_][]const u8{ &t[0].memory, &t[1].memory, &t[2].memory };
+    const r = try sim.run(p.fs.code(), .{ .uniforms = buf[0..n], .varyings = &varyings, .textures = &mems });
+    try testing.expectEqual(@as(usize, 3), r.texture_samples);
+    for (0..sim.lanes) |i| {
+        const at = (10 + 2 * i) * TestTexture.w + 3 * i;
+        try testing.expectEqual(t[0].at(i) >> 16 & 0xff, r.tlb_color.?[i] >> 16 & 0xff);
+        try testing.expectEqual(t[1].pixels[at] >> 8 & 0xff, r.tlb_color.?[i] >> 8 & 0xff);
+        try testing.expectEqual(t[2].pixels[at] & 0xff, r.tlb_color.?[i] & 0xff);
+    }
 }

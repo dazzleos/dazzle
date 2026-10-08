@@ -100,6 +100,25 @@ pub fn texture1(coord: Vec2) Vec4 {
     );
 }
 
+/// Samples the draw's third texture at `coord`, as RGBA (bound at 3; on
+/// texture unit 0, with the first).
+pub fn texture2(coord: Vec2) Vec4 {
+    return asm volatile (
+        \\%f32 = OpTypeFloat 32
+        \\%v4 = OpTypeVector %f32 4
+        \\%img = OpTypeImage %f32 2D 0 0 0 1 Unknown
+        \\%simg = OpTypeSampledImage %img
+        \\%ptr = OpTypePointer UniformConstant %simg
+        \\%tex = OpVariable %ptr UniformConstant
+        \\OpDecorate %tex DescriptorSet 0
+        \\OpDecorate %tex Binding 3
+        \\%s = OpLoad %simg %tex
+        \\%ret = OpImageSampleImplicitLod %v4 %s %coord
+        : [ret] "" (-> Vec4),
+        : [coord] "" (coord),
+    );
+}
+
 pub fn splat2(x: f32) Vec2 {
     return @splat(x);
 }

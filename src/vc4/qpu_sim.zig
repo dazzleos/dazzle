@@ -38,6 +38,10 @@ pub const Env = struct {
     texture_memory: []const u8 = &.{},
     /// And texture unit 1.
     texture_memory1: []const u8 = &.{},
+    /// Or, for shaders that sample several textures on a unit: each
+    /// texture's memory, at `texture_base` times its index (the address
+    /// the kernel relocates P0 by, as if each buffer were there).
+    textures: []const []const u8 = &.{},
     /// Fragment shaders: the packed colours the tile buffer holds, which a
     /// colour load reads.
     tlb_color_in: Vec = splat(0),
@@ -437,10 +441,17 @@ fn write(s: *State, r: *Result, env: Env, waddr: u6, file: File, value: Vec, con
                 return;
             }
             if (t.param_count < 2 or t.fifo_len == t.fifo.len) return error.Unsupported;
-            const memory = if (unit == 0) env.texture_memory else env.texture_memory1;
+            var memory = if (unit == 0) env.texture_memory else env.texture_memory1;
+            var p0 = t.params[0];
+            if (env.textures.len > 0) {
+                const i = p0 / texture_base;
+                if (i >= env.textures.len) return error.Unsupported;
+                memory = env.textures[i];
+                p0 -= i * texture_base;
+            }
             var texel: Vec = undefined;
             for (&texel, value, t.coord_t) |*o, sc, tc|
-                o.* = try sample(memory, t.params[0], t.params[1], f(sc), f(tc));
+                o.* = try sample(memory, p0, t.params[1], f(sc), f(tc));
             t.fifo[t.fifo_len] = texel;
             t.fifo_len += 1;
             t.param_count = 0;
@@ -450,6 +461,9 @@ fn write(s: *State, r: *Result, env: Env, waddr: u6, file: File, value: Vec, con
         else => return error.Unsupported,
     }
 }
+
+/// Where `Env.textures` are, one after another.
+pub const texture_base: u32 = 1 << 28;
 
 /// Sampling of an RGBA8888, RGB565 or ALPHA texture, with repeat or
 /// clamp wrapping. A 32-bit texel comes back as it is in memory; an RGB565
