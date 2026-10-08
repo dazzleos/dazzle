@@ -133,6 +133,13 @@ output (high or low), and lets it go at once. The Pi's pin driver keeps an
 output's level and the pulls after that, so the pin stays so until it is
 changed or the Pi restarts, and any app can use the pins in the meantime.
 
+The Data Logger records the pins, read the same way, beside analog inputs
+on I2C converters (ADS1115/ADS1015 or PCF8591), registers of I2C devices
+(on the header's bus, which config.txt turns on) and serial ports (the
+header's UART, and USB adapters). A thread reads every source at the rate
+chosen into storage set aside for each, which the window draws as it
+fills; a recording is saved as CSV in the user's files.
+
 ## Apps
 
 An app is a folder, `/data/apps/<name>/`, with its program (also called
@@ -144,6 +151,11 @@ An app can say which kinds of files it opens, as MIME types one a line in
 `<name>.handles`; it is then started with a file's path as its argument.
 Files offers to make and edit text files only if an app opens
 `text/plain` (the text editor does), and starts that app to edit them.
+
+An app can ask the shell to open another, showing something
+(`/os/sockets/shell`, see `sys.shell`): the Data Logger opens Settings at
+its GPIO page. The shell starts the app with it as its argument, or raises
+the running app and sends it on to the app's own socket.
 
 Apps are published beside the system image: each as an archive of its
 folder (`<name>.tar.xz`), with a catalogue (`apps.json`) giving each one's

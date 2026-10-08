@@ -70,6 +70,15 @@ pub const Icon = enum {
     // The camera.
     photo_camera,
     no_photography,
+    // The Data Logger.
+    show_chart,
+    fiber_manual_record,
+    stop,
+    save,
+    add,
+    zoom_in,
+    zoom_out,
+    delete_sweep,
     // The text editor, and Files' buttons for it.
     edit_note,
     edit,
