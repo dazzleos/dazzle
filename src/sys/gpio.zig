@@ -1,0 +1,306 @@
+//! The Raspberry Pi's GPIO: what each pin is doing, read from the GPIO
+//! registers (/dev/gpiomem, mapped read-only), and changing a pin through
+//! the kernel's GPIO character device (/dev/gpiochipN, its v2 interface).
+//!
+//! Reading the registers sees every pin as it is, whatever it is used for,
+//! without disturbing it; the character device would take a pin over to
+//! read it, and give it back as an input. Changing a pin goes through the
+//! kernel, which refuses pins its drivers use (the console's UART, say).
+//! Settings asks for a pin, sets it up and lets it go at once: the Pi's
+//! pin driver keeps an output's level, and pulls, after it is let go.
+//!
+//! The device manager gives the Dazzle user both devices.
+
+const std = @import("std");
+const linux = std.os.linux;
+const sys = @import("sys.zig");
+
+/// The BCM283x has 54 GPIO lines.
+pub const line_count = 54;
+
+pub const gpiomem_path = "/dev/gpiomem";
+
+/// What a pin does: GPIO in or out, or one of six alternate functions (I2C,
+/// SPI, UART, PWM, ...: which depends on the pin).
+pub const Function = enum(u3) {
+    input = 0b000,
+    output = 0b001,
+    alt0 = 0b100,
+    alt1 = 0b101,
+    alt2 = 0b110,
+    alt3 = 0b111,
+    alt4 = 0b011,
+    alt5 = 0b010,
+
+    /// The alternate function's number, if it is one.
+    pub fn alt(f: Function) ?u3 {
+        return switch (f) {
+            .input, .output => null,
+            .alt0 => 0,
+            .alt1 => 1,
+            .alt2 => 2,
+            .alt3 => 3,
+            .alt4 => 4,
+            .alt5 => 5,
+        };
+    }
+};
+
+/// The GPIO registers, mapped read-only.
+pub const Registers = struct {
+    regs: []align(std.heap.page_size_min) const u8,
+
+    pub fn open() !Registers {
+        const fd = try sys.open(gpiomem_path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .SYNC = true });
+        defer sys.close(fd);
+        const rc = linux.mmap(null, 4096, .{ .READ = true }, .{ .TYPE = .SHARED }, fd, 0);
+        if (linux.errno(rc) != .SUCCESS) return error.Unexpected;
+        const p: [*]align(std.heap.page_size_min) const u8 = @ptrFromInt(rc);
+        return .{ .regs = p[0..4096] };
+    }
+
+    pub fn close(r: *Registers) void {
+        _ = linux.munmap(r.regs.ptr, r.regs.len);
+    }
+
+    fn word(r: *const Registers, offset: usize) u32 {
+        const p: *const volatile u32 = @ptrCast(@alignCast(r.regs.ptr + offset));
+        return p.*;
+    }
+
+    /// What every pin does, and its level.
+    pub fn read(r: *const Registers) State {
+        var s: State = .{};
+        // GPFSEL0..5: three bits a pin, ten pins a register.
+        for (0..6) |i| {
+            const w = r.word(i * 4);
+            for (0..10) |j| {
+                const pin = i * 10 + j;
+                if (pin >= line_count) break;
+                s.functions[pin] = @enumFromInt(@as(u3, @truncate(w >> @intCast(j * 3))));
+            }
+        }
+        // GPLEV0..1.
+        s.levels = @as(u64, r.word(0x34)) | @as(u64, r.word(0x38)) << 32;
+        return s;
+    }
+};
+
+/// What the pins are doing.
+pub const State = struct {
+    functions: [line_count]Function = @splat(.input),
+    /// Bit n: whether pin n is high.
+    levels: u64 = 0,
+
+    pub fn level(s: *const State, pin: u6) bool {
+        return s.levels >> pin & 1 != 0;
+    }
+};
+
+// --- The character device (linux/gpio.h, v2) -------------------------------------
+
+pub const line_flag = struct {
+    pub const used: u64 = 1 << 0;
+    pub const active_low: u64 = 1 << 1;
+    pub const input: u64 = 1 << 2;
+    pub const output: u64 = 1 << 3;
+    pub const bias_pull_up: u64 = 1 << 8;
+    pub const bias_pull_down: u64 = 1 << 9;
+    pub const bias_disabled: u64 = 1 << 10;
+};
+
+const attr_output_values = 2;
+
+const ChipInfo = extern struct {
+    name: [32]u8,
+    label: [32]u8,
+    lines: u32,
+};
+
+const LineAttribute = extern struct {
+    id: u32,
+    padding: u32 = 0,
+    value: u64,
+};
+
+pub const LineInfo = extern struct {
+    name: [32]u8 = @splat(0),
+    consumer: [32]u8 = @splat(0),
+    offset: u32 = 0,
+    num_attrs: u32 = 0,
+    flags: u64 = 0,
+    attrs: [10]LineAttribute = @splat(.{ .id = 0, .value = 0 }),
+    padding: [4]u32 = @splat(0),
+
+    pub fn used(i: *const LineInfo) bool {
+        return i.flags & line_flag.used != 0;
+    }
+
+    /// Who has the line (a driver, or a program), if anyone says.
+    pub fn consumerName(i: *const LineInfo) []const u8 {
+        return std.mem.sliceTo(&i.consumer, 0);
+    }
+
+    pub fn lineName(i: *const LineInfo) []const u8 {
+        return std.mem.sliceTo(&i.name, 0);
+    }
+};
+
+const LineConfigAttribute = extern struct {
+    attr: LineAttribute,
+    mask: u64,
+};
+
+const LineConfig = extern struct {
+    flags: u64,
+    num_attrs: u32,
+    padding: [5]u32 = @splat(0),
+    attrs: [10]LineConfigAttribute = @splat(.{ .attr = .{ .id = 0, .value = 0 }, .mask = 0 }),
+};
+
+const LineRequest = extern struct {
+    offsets: [64]u32 = @splat(0),
+    consumer: [32]u8 = @splat(0),
+    config: LineConfig,
+    num_lines: u32,
+    event_buffer_size: u32 = 0,
+    padding: [5]u32 = @splat(0),
+    fd: i32 = 0,
+};
+
+const IOCTL = linux.IOCTL;
+const get_chipinfo = IOCTL.IOR(0xB4, 0x01, ChipInfo);
+const get_lineinfo = IOCTL.IOWR(0xB4, 0x05, LineInfo);
+const get_line = IOCTL.IOWR(0xB4, 0x07, LineRequest);
+
+/// How a pin can be set up.
+pub const Mode = enum {
+    input,
+    input_pull_up,
+    input_pull_down,
+    output_low,
+    output_high,
+
+    pub fn flags(m: Mode) u64 {
+        return switch (m) {
+            .input => line_flag.input | line_flag.bias_disabled,
+            .input_pull_up => line_flag.input | line_flag.bias_pull_up,
+            .input_pull_down => line_flag.input | line_flag.bias_pull_down,
+            .output_low, .output_high => line_flag.output,
+        };
+    }
+
+    pub fn code(m: Mode) []const u8 {
+        return switch (m) {
+            .input => "input",
+            .input_pull_up => "input-pull-up",
+            .input_pull_down => "input-pull-down",
+            .output_low => "output-low",
+            .output_high => "output-high",
+        };
+    }
+};
+
+/// The GPIO chip of the SoC's pins.
+pub const Chip = struct {
+    fd: linux.fd_t,
+
+    /// Finds the SoC's chip among /dev/gpiochip0..7 (the others are
+    /// expanders: the firmware's, on the Pi 3).
+    pub fn open() !Chip {
+        var buf: [32]u8 = undefined;
+        var denied = false;
+        for (0..8) |n| {
+            const path = std.fmt.bufPrintZ(&buf, "/dev/gpiochip{d}", .{n}) catch unreachable;
+            const fd = sys.open(path, .{ .ACCMODE = .RDWR, .CLOEXEC = true }) catch |err| {
+                if (err == error.AccessDenied) denied = true;
+                continue;
+            };
+            var info: ChipInfo = undefined;
+            if (linux.errno(linux.ioctl(fd, get_chipinfo, @intFromPtr(&info))) == .SUCCESS and info.lines >= line_count) {
+                return .{ .fd = fd };
+            }
+            sys.close(fd);
+        }
+        return if (denied) error.AccessDenied else error.NotFound;
+    }
+
+    pub fn close(c: *Chip) void {
+        sys.close(c.fd);
+    }
+
+    pub fn lineInfo(c: *const Chip, pin: u32) ?LineInfo {
+        var info: LineInfo = .{ .offset = pin };
+        if (linux.errno(linux.ioctl(c.fd, get_lineinfo, @intFromPtr(&info))) != .SUCCESS) return null;
+        return info;
+    }
+
+    /// Sets pin `pin` up as `mode`, and lets it go (it stays so).
+    pub fn set(c: *const Chip, pin: u32, mode: Mode) SetError!void {
+        var req: LineRequest = .{
+            .config = .{ .flags = mode.flags(), .num_attrs = 0 },
+            .num_lines = 1,
+        };
+        req.offsets[0] = pin;
+        @memcpy(req.consumer[0..consumer.len], consumer);
+        if (mode == .output_low or mode == .output_high) {
+            req.config.num_attrs = 1;
+            req.config.attrs[0] = .{ .attr = .{ .id = attr_output_values, .value = @intFromBool(mode == .output_high) }, .mask = 1 };
+        }
+        switch (linux.errno(linux.ioctl(c.fd, get_line, @intFromPtr(&req)))) {
+            .SUCCESS => sys.close(req.fd),
+            .BUSY => return error.Busy,
+            .ACCES, .PERM => return error.AccessDenied,
+            .INVAL => return error.Invalid,
+            else => return error.Unexpected,
+        }
+    }
+
+    const consumer = "dazzle";
+};
+
+pub const SetError = error{
+    /// Something else has the pin (a driver, or a program).
+    Busy,
+    AccessDenied,
+    Invalid,
+    Unexpected,
+};
+
+const testing = std.testing;
+
+test "the kernel's structures are its size" {
+    try testing.expectEqual(@as(usize, 68), @sizeOf(ChipInfo));
+    try testing.expectEqual(@as(usize, 256), @sizeOf(LineInfo));
+    try testing.expectEqual(@as(usize, 272), @sizeOf(LineConfig));
+    try testing.expectEqual(@as(usize, 592), @sizeOf(LineRequest));
+    // _IOWR(0xB4, 0x05, struct gpio_v2_line_info) and the others.
+    try testing.expectEqual(@as(u32, 0xc100b405), get_lineinfo);
+    try testing.expectEqual(@as(u32, 0xc250b407), get_line);
+    try testing.expectEqual(@as(u32, 0x8044b401), get_chipinfo);
+}
+
+test "functions from the registers" {
+    // A fake register page: pin 0 an output, pin 2 ALT0 (I2C), pin 14 ALT5,
+    // pin 53 ALT3; pins 1 and 33 high.
+    var page: [4096]u8 align(std.heap.page_size_min) = @splat(0);
+    const put = struct {
+        fn f(p: []u8, off: usize, v: u32) void {
+            std.mem.writeInt(u32, p[off..][0..4], v, .little);
+        }
+    }.f;
+    put(&page, 0x00, 0b001 | 0b100 << 6);
+    put(&page, 0x04, 0b010 << 12);
+    put(&page, 0x14, 0b111 << 9);
+    put(&page, 0x34, 0b10);
+    put(&page, 0x38, 0b10);
+    const r: Registers = .{ .regs = &page };
+    const s = r.read();
+    try testing.expectEqual(Function.output, s.functions[0]);
+    try testing.expectEqual(Function.input, s.functions[1]);
+    try testing.expectEqual(Function.alt0, s.functions[2]);
+    try testing.expectEqual(Function.alt5, s.functions[14]);
+    try testing.expectEqual(Function.alt3, s.functions[53]);
+    try testing.expect(s.level(1) and s.level(33) and !s.level(0));
+    try testing.expectEqual(@as(?u3, 5), Function.alt5.alt());
+}

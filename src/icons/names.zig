@@ -42,6 +42,7 @@ pub const Icon = enum {
     speed,
     info,
     developer_board,
+    settings_input_component,
     language,
     // Settings' USB devices.
     keyboard,

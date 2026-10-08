@@ -20,6 +20,8 @@ const store = @import("store");
 const update = @import("update.zig");
 const board = @import("board.zig");
 const usb = @import("usb.zig");
+const gpio = @import("gpio.zig");
+const GpioPage = @import("gpio_view.zig").GpioPage;
 const log = @import("log.zig");
 const BoardView = @import("board_view.zig").BoardView;
 
@@ -44,6 +46,10 @@ pub const Actions = struct {
     restart: bool = false,
     /// The language and keyboard to use.
     locale: ?locale.Settings = null,
+    /// A GPIO pin to set up, and how.
+    gpio: ?GpioChange = null,
+
+    pub const GpioChange = struct { pin: u6, mode: gpio.Mode };
 
     fn checkUpdate(a: *Actions) void {
         a.check_update = true;
@@ -131,6 +137,8 @@ pub const Settings = struct {
     network: *const info.Network,
     /// The USB devices plugged in.
     usb: *const usb.Devices = &.{},
+    /// The GPIO pins (while their page shows).
+    gpio: ?*const gpio.Pins = null,
     /// The system's log, as read so far (while its page shows).
     log: ?*const log.Log = null,
     /// What the network manager last said; null if it could not be asked.
@@ -151,6 +159,8 @@ pub const Settings = struct {
         /// The part of the board picked (an index into its parts), if one
         /// is.
         board_part: ?usize = null,
+        /// The GPIO pin picked.
+        gpio_pin: u6 = 17,
         /// The log shows only warnings and errors.
         log_problems: bool = false,
         /// The Wi-Fi network chosen (its SSID), and the password typed.
@@ -213,6 +223,7 @@ pub const Settings = struct {
             .resources => self.resourcesCard(b),
             .board => self.boardCard(b, state),
             .language => self.languageCard(b),
+            .gpio => self.gpioCard(b, state),
             .usb => self.usbCard(b),
             .log => self.logCard(b, state),
             .system => self.systemCard(b),
@@ -393,6 +404,28 @@ pub const Settings = struct {
                 .item = .of(lines, LogLines.row),
             }),
         });
+    }
+
+    /// The GPIO pins: the header as it is laid out, what each pin does,
+    /// and the pin picked, to set up.
+    fn gpioCard(self: *const Settings, b: Builder, state: *State) ui.Widget {
+        const cx = b.cx;
+        const pins = self.gpio orelse return b.card("GPIO", &.{b.value("Reading the pins\u{2026}")});
+        return b.card("GPIO", &.{cx.make(GpioPage{
+            .pins = pins,
+            .header = gpio.headerFor(self.system.model.slice()),
+            .picked = state.gpio_pin,
+            .on_pick = .of(state, struct {
+                fn set(st: *State, i: usize) void {
+                    st.gpio_pin = @intCast(i);
+                }
+            }.set),
+            .on_mode = if (self.actions) |a| blk: {
+                const set = cx.ui.arena().create(GpioSet) catch break :blk null;
+                set.* = .{ .actions = a, .pin = state.gpio_pin };
+                break :blk .of(set, GpioSet.set);
+            } else null,
+        })});
     }
 
     /// The USB devices: what each is, who made it and how fast it talks;
@@ -759,6 +792,7 @@ pub const Page = enum {
     ethernet,
     resources,
     board,
+    gpio,
     usb,
     language,
     apps,
@@ -771,6 +805,7 @@ pub const Page = enum {
             .ethernet => "Ethernet",
             .resources => "Resources",
             .board => "Board",
+            .gpio => "GPIO",
             .usb => "USB",
             .log => "Log",
             .language => "Language",
@@ -785,6 +820,7 @@ pub const Page = enum {
             .ethernet => .lan,
             .resources => .speed,
             .board => .developer_board,
+            .gpio => .settings_input_component,
             .usb => .usb,
             .log => .article,
             .language => .language,
@@ -889,6 +925,16 @@ const LocalePick = struct {
 
     fn keyboard(p: *LocalePick, k: locale.Keyboard) void {
         if (p.actions) |a| a.locale = .{ .language = p.current.language, .keyboard = k };
+    }
+};
+
+/// Setting a GPIO pin up.
+const GpioSet = struct {
+    actions: *Actions,
+    pin: u6,
+
+    fn set(g: *GpioSet, m: gpio.Mode) void {
+        g.actions.gpio = .{ .pin = g.pin, .mode = m };
     }
 };
 
@@ -1802,4 +1848,50 @@ test "the log: newest first, or only its warnings and errors" {
     const reading: Settings = .{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net };
     u.frame(1600, 900, 4, reading);
     try testing.expect(findText(u.root.?, "Reading the log…") != null);
+}
+
+test "the GPIO pins: the header as it is laid out, and setting a pin up" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    var d = sample();
+    var actions: Actions = .{};
+    var pins: gpio.Pins = .{ .opened = true, .chip = .{ .fd = -1 } };
+    pins.lines[17] = .{ .function = .output, .high = true };
+    pins.lines[4] = .{ .function = .input, .high = true };
+    pins.lines[14] = .{ .function = .alt0, .used = true };
+    @memcpy(pins.lines[14].consumer_buf[0..6], "serial");
+    pins.lines[14].consumer_len = 6;
+    const settings: Settings = .{ .commit = "574d538", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .gpio = &pins };
+    u.frame(1600, 900, 0, settings);
+    u.root.?.state(Settings.State).page = .gpio;
+    for ([_][]const u8{ "Raspberry Pi 3 Model B Rev 1.2", "Raspberry Pi Model B Rev 1", "Raspberry Pi Compute Module 3 Rev 1.0" }) |model| {
+        d.sys.model = .of(model);
+        for (test_sizes) |size| {
+            u.frame(size[0], size[1], 1, settings);
+            try testing.expect(!overflows(u.root.?));
+        }
+    }
+    d.sys.model = .of("Raspberry Pi 3 Model B Rev 1.2");
+    u.frame(1600, 900, 2, settings);
+    // GPIO 17 is picked to start with: pin 11, an output, high.
+    try testing.expect(findText(u.root.?, "GPIO 17, pin 11") != null);
+    try testing.expect(findText(u.root.?, "Output, high") != null);
+    click(u, findText(u.root.?, "Output, low").?);
+    try testing.expectEqual(Actions.GpioChange{ .pin = 17, .mode = .output_low }, actions.gpio.?);
+    // A pin a driver has cannot be changed.
+    click(u, findText(u.root.?, "GPIO 14 (TXD)").?);
+    u.frame(1600, 900, 3, settings);
+    try testing.expect(findText(u.root.?, "GPIO 14, pin 8") != null);
+    try testing.expect(findText(u.root.?, "UART 0 transmit") != null);
+    try testing.expect(findText(u.root.?, "In use by serial, so it cannot be changed here") != null);
+    try testing.expect(findText(u.root.?, "Input, pulled up") == null);
+    // An input whose pull is not known.
+    click(u, findText(u.root.?, "GPIO 4 (GPCLK0)").?);
+    u.frame(1600, 900, 4, settings);
+    try testing.expect(findText(u.root.?, "Its pull (up, down or none) is not known until it is set here") != null);
+    // The pins cannot be read.
+    pins.read_failure = "Not allowed to use the GPIO";
+    u.frame(1600, 900, 5, settings);
+    try testing.expect(findText(u.root.?, "Not allowed to use the GPIO") != null);
 }

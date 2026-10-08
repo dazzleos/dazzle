@@ -21,7 +21,7 @@ programs make Linux system calls directly.
   user the GPU, and starts the shell. It also runs a few small managers,
   each a child process keeping only the privileges it needs: the network
   (Ethernet, Wi-Fi, DHCP, DNS servers and the clock), devices (giving the
-  user input and camera devices as they appear), media (mounting USB
+  user input, camera and GPIO devices as they appear), media (mounting USB
   drives as they are plugged in, and ejecting them) and the system
   (setting up the card, the OS slots, updates and restarting), and a log
   server that shows the system's log over HTTP.
@@ -121,6 +121,17 @@ text and how they write dates, times and temperatures. The shell sends
 apps an XKB keymap made from the layout (as Wayland compositors do), and
 sends it again when the layout changes; the toolkit maps key codes to
 characters by the layout the keymap names.
+
+## GPIO
+
+Settings shows what each GPIO pin is doing, live, by reading the GPIO
+registers through `/dev/gpiomem` (mapped read-only, which disturbs no pin,
+whatever it is used for). It sets pins up through the kernel's GPIO
+character device, which refuses pins a driver has (the console's UART, say):
+it asks for a pin, sets it as an input (with a pull up, down or none) or an
+output (high or low), and lets it go at once. The Pi's pin driver keeps an
+output's level and the pulls after that, so the pin stays so until it is
+changed or the Pi restarts, and any app can use the pins in the meantime.
 
 ## Apps
 

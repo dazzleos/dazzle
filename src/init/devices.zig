@@ -1,10 +1,11 @@
-//! The device manager: hands input devices and the camera to the Dazzle
-//! user.
+//! The device manager: hands input devices, the camera and the GPIO to
+//! the Dazzle user.
 //!
 //! The kernel creates /dev/input/eventN (one per keyboard, mouse or other
 //! input device) owned by root, so the unprivileged shell could not read
 //! them; likewise the camera's nodes (/dev/videoN, /dev/v4l-subdevN,
-//! /dev/mediaN), which the Camera app uses. Init forks this process, which
+//! /dev/mediaN), which the Camera app uses, and the GPIO's (/dev/gpiochipN,
+//! and /dev/gpiomem, its registers), which Settings uses. Init forks this process, which
 //! drops to the user keeping only CAP_CHOWN, gives the user every such
 //! node there already is, and then does the same for each one that comes
 //! later (plugged in, or probed late), as the kernel announces it with a
@@ -46,6 +47,7 @@ fn run() !void {
         const name = std.fmt.bufPrint(&name_buf, "{s}{d}", .{ prefix, n }) catch continue;
         grant(name, false);
     };
+    for (single_devices) |name| grant(name, false);
 
     var buf: [4096]u8 = undefined;
     while (true) {
@@ -60,7 +62,10 @@ const max_scanned = 32;
 
 /// The device nodes the user gets (relative to /dev, without their
 /// numbers): input events, and the camera's.
-const user_devices = [_][]const u8{ "input/event", "video", "v4l-subdev", "media" };
+const user_devices = [_][]const u8{ "input/event", "video", "v4l-subdev", "media", "gpiochip" };
+
+/// Device nodes the user gets that are not numbered.
+const single_devices = [_][]const u8{"gpiomem"};
 
 /// The device node (relative to /dev) a uevent adds, if it is one the
 /// user gets.
@@ -73,6 +78,7 @@ fn userDevice(msg: []const u8) ?[]const u8 {
         if (std.mem.startsWith(u8, field, "DEVNAME=")) devname = field["DEVNAME=".len..];
     }
     if (!std.mem.eql(u8, action, "add")) return null;
+    for (single_devices) |name| if (std.mem.eql(u8, devname, name)) return devname;
     for (user_devices) |prefix| {
         if (devname.len > prefix.len and std.mem.startsWith(u8, devname, prefix) and std.ascii.isDigit(devname[prefix.len])) return devname;
     }
@@ -104,6 +110,8 @@ test "the camera's uevents" {
     try std.testing.expectEqualStrings("v4l-subdev1", userDevice(subdev).?);
     const media = "add@/devices/x\x00ACTION=add\x00DEVNAME=media0\x00";
     try std.testing.expectEqualStrings("media0", userDevice(media).?);
+    try std.testing.expectEqualStrings("gpiochip0", userDevice("add@/x\x00ACTION=add\x00DEVNAME=gpiochip0\x00").?);
+    try std.testing.expectEqualStrings("gpiomem", userDevice("add@/x\x00ACTION=add\x00DEVNAME=gpiomem\x00").?);
     // Not "videofoo", nor others.
     try std.testing.expect(userDevice("add@/x\x00ACTION=add\x00DEVNAME=videofoo\x00") == null);
     try std.testing.expect(userDevice("add@/x\x00ACTION=add\x00DEVNAME=mmcblk0\x00") == null);

@@ -17,6 +17,7 @@ pub const system = @import("system.zig");
 pub const media = @import("media.zig");
 pub const log = @import("log.zig");
 pub const apps = @import("apps.zig");
+pub const gpio = @import("gpio.zig");
 pub const files = @import("files.zig");
 pub const archive = @import("archive.zig");
 
@@ -26,6 +27,7 @@ test {
     _ = media;
     _ = log;
     _ = apps;
+    _ = gpio;
     _ = files;
     _ = archive;
 }

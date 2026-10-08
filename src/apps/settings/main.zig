@@ -29,6 +29,10 @@ const build_info = @import("build_info");
 const info = @import("info.zig");
 const usb = @import("usb.zig");
 const log = @import("log.zig");
+const gpio = @import("gpio.zig");
+
+/// How often the GPIO pins' levels are read, while their page shows.
+const gpio_poll_ns = 100 * std.time.ns_per_ms;
 const view = @import("view.zig");
 const store = @import("store");
 const update = @import("update.zig");
@@ -85,6 +89,12 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     var network = info.Network.read();
     // The USB devices, read while their page shows.
     var devices: usb.Devices = .{};
+    // The GPIO pins, read while their page shows: their levels several
+    // times a second (inputs change as they like).
+    var pins: gpio.Pins = .{};
+    defer pins.deinit();
+    var pins_read = false;
+    var next_levels: u64 = 0;
     // The system's log, read while its page shows.
     var syslog: log.Log = .{};
     defer syslog.deinit();
@@ -114,7 +124,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     var suspended = false;
     while (true) {
         const waited = if (idle) blk: {
-            const until = if (suspended) sys.nowNs() + 60 * std.time.ns_per_s else if (window_ui.needs_frame) sys.nowNs() + 16 * std.time.ns_per_ms else next_update;
+            const gpio_page = view.shownPage(window_ui) == .gpio;
+            const until = if (suspended) sys.nowNs() + 60 * std.time.ns_per_s else if (window_ui.needs_frame) sys.nowNs() + 16 * std.time.ns_per_ms else if (gpio_page) @min(next_update, next_levels) else next_update;
             break :blk win.wait(@max(until -| sys.nowNs(), std.time.ns_per_ms));
         } else win.poll();
         waited catch |err| {
@@ -155,6 +166,20 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             network = info.Network.read();
             if (view.shownPage(window_ui) == .usb) devices = usb.Devices.read();
             if (view.shownPage(window_ui) == .log) _ = syslog.poll();
+            if (view.shownPage(window_ui) == .gpio) pins.readUsers();
+            dirty = true;
+        }
+        if (!suspended and view.shownPage(window_ui) == .gpio and now >= next_levels) {
+            next_levels = now + gpio_poll_ns;
+            const before = pins.lines;
+            pins.readLevels();
+            if (!pins_read) pins.readUsers();
+            if (!pins_read or !std.mem.eql(u8, std.mem.asBytes(&before), std.mem.asBytes(&pins.lines))) dirty = true;
+            pins_read = true;
+        }
+        if (actions.gpio) |g| {
+            actions.gpio = null;
+            pins.set(g.pin, g.mode);
             dirty = true;
         }
         // Installing, or getting the list of apps.
@@ -247,6 +272,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
                 .usage = usage,
                 .network = &network,
                 .usb = &devices,
+                .gpio = if (pins_read) &pins else null,
                 .log = if (syslog.fd != null or syslog.failed) &syslog else null,
                 .manager = if (report) |*r| r else null,
                 .actions = &actions,
@@ -308,5 +334,7 @@ test {
     _ = @import("update.zig");
     _ = @import("board.zig");
     _ = usb;
+    _ = gpio;
+    _ = @import("gpio_view.zig");
     _ = log;
 }
