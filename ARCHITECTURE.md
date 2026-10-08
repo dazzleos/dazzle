@@ -237,10 +237,17 @@ what the VideoCore IV does well, and left out where it would not.
   first, with the GPU's early depth test on, so what is hidden is not
   shaded. The sky goes after them, only where they left it showing. Its
   sun, moon and stars are per pixel, but only over that part.
-- **Water by the vertex.** Waves move the surface's vertices, and its
-  colour is worked out per vertex: turquoise in the shallows and dark in
-  the deep, the sky reflected more at a glancing angle, and the sun
-  glinting. The fragment shader passes the colour on.
+- **Water by the vertex, ripples by the pixel.** Waves move the surface's
+  vertices, and its colour is worked out per vertex: turquoise in the
+  shallows and dark in the deep, the sky reflected more at a glancing
+  angle. Over that, a normal map of ripples (`textures.ripples`) is read
+  twice, at two sizes drifting different ways, and the sun glints off
+  each ripple: the vertex shader works out the half-way vector between
+  eye and sun, so the fragment shader needs a dot product and seven
+  squarings (84 instructions, where the water lit only per vertex is 32).
+  The ripples fade out by 56 blocks away. With N, water is lit per vertex
+  only, glint and all. The sea beyond the world's edge is in quads of 1,
+  then 4, then 16 blocks, so the per-vertex light changes smoothly.
 - **Detailed textures, filtered by the texture unit.** Tiles are 64
   pixels, drawn by code: bevelled bricks, wood grain, cobbles, bark,
   bookshelves. Up close they are filtered smoothly; further off they come
