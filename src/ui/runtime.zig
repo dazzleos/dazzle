@@ -186,6 +186,12 @@ pub const Ui = struct {
         ui.renderer = try gfx.Renderer.init(ui.gpa, dev);
     }
 
+    /// Lets a frame be recorded while the one before still renders (see
+    /// app.Window.setPipelined): the UI's GPU buffers take turns.
+    pub fn setPipelined(ui: *Ui, on: bool) void {
+        if (ui.renderer) |*r| r.pipelined = on;
+    }
+
     /// The arena this frame's widgets are made in.
     pub fn arena(ui: *Ui) std.mem.Allocator {
         return ui.arenas[@intCast(ui.frame_no % 2)].allocator();

@@ -211,6 +211,17 @@ textures into the screen's buffer and shows it with kernel mode setting,
 flipping between two buffers at vertical blank. Apps and the shell redraw
 only what changed.
 
+An app usually waits for the GPU to render each frame before showing it
+and starting the next. One that draws all the time (Blocks) can keep a
+frame in flight instead (`Window.setPipelined`): it hands a frame to the
+GPU, shows the one before (done by then, as the GPU takes jobs in turn),
+and records the next while this one renders. The kernel copies a frame's
+control lists when it is submitted, so only the window's buffers and the
+toolkit's vertex and glyph buffers need a second copy (they take turns).
+That needs a third window buffer, which is only made while a quarter of
+the GPU's memory would still be free afterwards; otherwise frames go one
+at a time.
+
 ## Blocks, the voxel game
 
 Blocks (`src/apps/blocks/`) is a building game in the manner of Minecraft's
@@ -351,6 +362,8 @@ Graphics memory is saved where it can be:
   memory of 32-bit colour.
 - An app whose window is covered gives back its spare buffers, and one
   that cannot get another buffer makes do with those it has.
+- Only apps that ask keep a frame in flight, and only while memory allows
+  (see above).
 
 ## The toolkit
 

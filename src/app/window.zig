@@ -12,6 +12,15 @@
 //! callback, so at most one frame is queued) and commits the new one. A
 //! resize takes effect at the next `beginFrame`.
 //!
+//! An app that draws all the time (a game) can keep a frame in flight
+//! (`setPipelined`): `submit` hands a frame to the GPU without waiting for
+//! it, and shows the one before (which the GPU has finished by then, or
+//! soon), so the app records the next frame while the GPU renders this
+//! one, rather than each waiting for the other. That takes a third buffer
+//! (one shown, one rendering, one being drawn), which is only made while
+//! a quarter of the GPU's memory would still be free; otherwise frames go
+//! one at a time, as `present` does.
+//!
 //! The window is resized by dragging its edges when it is not maximized:
 //! a press within `resize_border` of an edge (inside the window: it has
 //! nothing outside) asks the shell to resize it (xdg_toplevel.resize)
@@ -37,6 +46,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const locale = @import("locale");
+const sys = @import("sys");
 const vc4 = @import("vc4");
 const wayland = @import("wayland");
 
@@ -57,6 +67,14 @@ pub const Gpu = struct {
         exportBo: *const fn (ptr: *anyopaque, handle: u32) anyerror!linux.fd_t,
         /// Submits a frame and waits for the GPU to finish it.
         run: *const fn (ptr: *anyopaque, frame: *vc4.render.Frame) anyerror!void,
+        /// Submits a frame without waiting, returning what to wait for
+        /// (null: it cannot, and frames go one at a time).
+        submit: ?*const fn (ptr: *anyopaque, frame: *vc4.render.Frame) anyerror!u64 = null,
+        /// Waits for what `submit` returned.
+        wait: ?*const fn (ptr: *anyopaque, seqno: u64) anyerror!void = null,
+        /// The GPU's memory: the pool's size and how much is free, in bytes
+        /// (null if unknown).
+        memory: ?*const fn (ptr: *anyopaque) ?[2]u64 = null,
     };
 
     fn devOf(ptr: *anyopaque) *vc4.Device {
@@ -72,17 +90,39 @@ pub const Gpu = struct {
         return vc4.drm.exportBuffer(devOf(ptr).fd, handle);
     }
     fn devRun(ptr: *anyopaque, frame: *vc4.render.Frame) anyerror!void {
+        try devWait(ptr, try devSubmit(ptr, frame));
+    }
+    fn devSubmit(ptr: *anyopaque, frame: *vc4.render.Frame) anyerror!u64 {
         const dev = devOf(ptr);
         _ = frame.finish();
-        // One job per region the frame is limited to.
-        var seqno: ?u64 = null;
+        // One job per region the frame is limited to (the GPU runs jobs in
+        // the order they come, so waiting for the last waits for all).
+        // The kernel copies the control lists, so the frame can be reused
+        // at once.
+        var seqno: u64 = 0;
         for (0..frame.regionCount()) |i| seqno = try dev.submit(frame.submitRegion(i));
-        if (seqno) |s| try dev.waitSeqno(s, std.time.ns_per_s);
+        return seqno;
+    }
+    fn devWait(ptr: *anyopaque, seqno: u64) anyerror!void {
+        if (seqno != 0) try devOf(ptr).waitSeqno(seqno, std.time.ns_per_s);
+    }
+    fn devMemory(_: *anyopaque) ?[2]u64 {
+        const mi = sys.meminfo() orelse return null;
+        if (mi.cma_total == 0) return null;
+        return .{ mi.cma_total, mi.cma_free };
     }
 
     /// The real GPU. `dev` must stay in place.
     pub fn device(dev: *vc4.Device) Gpu {
-        return .{ .ptr = dev, .vtable = &.{ .createBo = devCreateBo, .destroyBo = devDestroyBo, .exportBo = devExportBo, .run = devRun } };
+        return .{ .ptr = dev, .vtable = &.{
+            .createBo = devCreateBo,
+            .destroyBo = devDestroyBo,
+            .exportBo = devExportBo,
+            .run = devRun,
+            .submit = devSubmit,
+            .wait = devWait,
+            .memory = devMemory,
+        } };
     }
 };
 
@@ -125,6 +165,18 @@ pub const edge_right = 8;
 
 const max_buffers = 3;
 
+/// A frame with the GPU (see `Window.submit`): its buffer, what to wait
+/// for, and what changed in it.
+const InFlight = struct {
+    buffer: usize,
+    seqno: u64,
+    damage: [max_damage]vc4.render.Viewport = undefined,
+    /// Null: all of it.
+    damage_len: ?usize,
+};
+
+const max_damage = 16;
+
 const Buffer = struct {
     /// The frame (counting from 1) last drawn in it; 0 if none.
     drawn: u64 = 0,
@@ -135,6 +187,8 @@ const Buffer = struct {
     format: vc4.Format,
     /// Committed and not yet released by the compositor.
     busy: bool = false,
+    /// Its frame is with the GPU, not yet shown (see `submit`).
+    rendering: bool = false,
 
     fn target(b: *const Buffer) vc4.render.Target {
         return .{
@@ -192,6 +246,10 @@ pub const Window = struct {
     frame_pending: bool = false,
     /// Frames shown so far.
     frames: u64 = 0,
+    /// Keep a frame in flight (see `setPipelined`).
+    pipelined: bool = false,
+    /// The frame submitted and not yet shown.
+    in_flight: ?InFlight = null,
 
     seat: ?client.Proxy = null,
     touch: ?client.Proxy = null,
@@ -420,7 +478,52 @@ pub const Window = struct {
         const i = w.back orelse return 0;
         const b = &w.buffers[i].?;
         if (b.drawn == 0) return 0;
-        return @intCast(@min(w.frames + 1 - b.drawn, std.math.maxInt(u32)));
+        // The frame in flight is drawn, though not shown yet.
+        const drawn = w.frames + @intFromBool(w.in_flight != null);
+        return @intCast(@min(drawn + 1 - b.drawn, std.math.maxInt(u32)));
+    }
+
+    /// Keeps a frame in flight from now on, if the GPU can (see `submit`);
+    /// or not, showing the one in flight.
+    pub fn setPipelined(w: *Window, on: bool) !void {
+        w.pipelined = on and w.gpu.vtable.submit != null and w.gpu.vtable.wait != null;
+        if (!w.pipelined) try w.finishInFlight();
+    }
+
+    /// Hands `frame` (begun on `beginFrame`'s target) to the GPU, and
+    /// shows the frame submitted before it, saying which parts of the
+    /// window changed in it (all if null): with `setPipelined`, without
+    /// waiting for the GPU to render this one; otherwise as `render` and
+    /// `showDamaged`.
+    pub fn submit(w: *Window, frame: *vc4.render.Frame, damage: ?[]const vc4.render.Viewport) !void {
+        if (!w.pipelined) {
+            try w.render(frame);
+            return w.showDamaged(damage);
+        }
+        const i = w.back orelse return error.NoFrameBegun;
+        const seqno = try w.gpu.vtable.submit.?(w.gpu.ptr, frame);
+        // The frame before is done by the time this one starts (the GPU
+        // takes jobs in turn): show it while this one renders.
+        try w.finishInFlight();
+        var f: InFlight = .{ .buffer = i, .seqno = seqno, .damage_len = null };
+        if (damage) |rects| if (rects.len <= max_damage) {
+            @memcpy(f.damage[0..rects.len], rects);
+            f.damage_len = rects.len;
+        };
+        w.in_flight = f;
+        w.buffers[i].?.rendering = true;
+        w.back = null;
+    }
+
+    /// Waits for the frame in flight (if there is one) and shows it: before
+    /// the app stops drawing for a while.
+    pub fn finishInFlight(w: *Window) !void {
+        const f = w.in_flight orelse return;
+        w.in_flight = null;
+        try w.gpu.vtable.wait.?(w.gpu.ptr, f.seqno);
+        const b = &w.buffers[f.buffer].?;
+        b.rendering = false;
+        try w.showBuffer(f.buffer, if (f.damage_len) |n| f.damage[0..n] else null);
     }
 
     /// Hands the rendered frame to the compositor, once it has shown the
@@ -432,13 +535,19 @@ pub const Window = struct {
     /// Like `show`, saying which parts of the window changed since the
     /// last frame shown (all of it if null).
     pub fn showDamaged(w: *Window, damage: ?[]const vc4.render.Viewport) !void {
+        const i = w.back orelse return error.NoFrameBegun;
+        try w.finishInFlight();
+        try w.showBuffer(i, damage);
+        w.back = null;
+    }
+
+    fn showBuffer(w: *Window, i: usize, damage: ?[]const vc4.render.Viewport) !void {
         while (w.frame_pending) {
             try w.conn.dispatch();
             // Covered while waiting: the callback comes when it is in
             // front again.
             if (w.suspended) w.releaseSpareBuffers();
         }
-        const i = w.back orelse return error.NoFrameBegun;
         const b = &w.buffers[i].?;
         var m = try w.surface.request(p.wl_surface.request.attach);
         m.uint(b.proxy.id).int(0).int(0).end();
@@ -461,7 +570,6 @@ pub const Window = struct {
         w.frames += 1;
         b.drawn = w.frames;
         w.frame_pending = true;
-        w.back = null;
     }
 
     /// The input events received since the last call. The slice is valid
@@ -494,7 +602,7 @@ pub const Window = struct {
             var stale: ?usize = null;
             for (&w.buffers, 0..) |*slot, i| {
                 if (slot.*) |*b| {
-                    if (b.busy) continue;
+                    if (b.busy or b.rendering) continue;
                     if (b.width == w.width and b.height == w.height and b.format == w.bufferFormat()) return i;
                     stale = i;
                 } else empty = i;
@@ -502,6 +610,13 @@ pub const Window = struct {
             if (stale) |i| {
                 w.freeBuffer(&w.buffers[i].?, &w.buffers[i]);
                 empty = i;
+            }
+            // A third buffer only for a frame in flight, and only while the
+            // GPU's memory allows it; else that frame is shown, and this
+            // one waits for a buffer as usual.
+            if (empty != null and w.in_flight != null and !w.roomForAnotherBuffer()) {
+                try w.finishInFlight();
+                continue;
             }
             if (empty) |i| {
                 if (w.allocBuffer(i)) |b| {
@@ -514,6 +629,10 @@ pub const Window = struct {
                     const busy = for (w.buffers) |slot| {
                         if (slot) |b| if (b.busy) break true;
                     } else false;
+                    if (w.in_flight != null) {
+                        try w.finishInFlight();
+                        continue;
+                    }
                     if (!busy) {
                         out_of_memory_waits += 1;
                         if (out_of_memory_waits > 40) return err;
@@ -522,7 +641,12 @@ pub const Window = struct {
                     }
                 }
             }
-            // All buffers are with the compositor: wait for a release.
+            // All buffers are with the compositor (or the GPU): wait for a
+            // release, having shown the frame in flight.
+            if (w.in_flight != null) {
+                try w.finishInFlight();
+                continue;
+            }
             try w.conn.dispatch();
         }
     }
@@ -532,9 +656,18 @@ pub const Window = struct {
     /// used by the window in front.
     pub fn releaseSpareBuffers(w: *Window) void {
         for (&w.buffers, 0..) |*slot, i| if (slot.*) |*b| {
-            if (b.busy or w.back == i) continue;
+            if (b.busy or b.rendering or w.back == i) continue;
             w.freeBuffer(b, slot);
         };
+    }
+
+    /// Whether a buffer of the window's size can be made leaving a quarter
+    /// of the GPU's memory free (for other apps, and the shell).
+    fn roomForAnotherBuffer(w: *const Window) bool {
+        const get = w.gpu.vtable.memory orelse return false;
+        const mem = get(w.gpu.ptr) orelse return false;
+        const size = vc4.texture.imageSizeOf(w.bufferFormat(), w.width, w.height);
+        return mem[1] >= size + mem[0] / 4;
     }
 
     fn allocBuffer(w: *Window, slot: usize) !Buffer {

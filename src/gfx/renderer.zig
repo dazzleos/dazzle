@@ -27,11 +27,27 @@ pub const Renderer = struct {
     images: std.AutoHashMapUnmanaged(u64, vc4.Bo) = .empty,
     /// The frame's vertices; replaced by a bigger one when it fills up.
     vbo: ?vc4.Bo = null,
+    /// With `pipelined`: the previous frame's, which the GPU may still be
+    /// drawing from while this one is recorded. The two take turns.
+    other_vbo: ?vc4.Bo = null,
+    /// The previous frame may still be rendering when the next is
+    /// prepared (see app.Window.setPipelined). Its vertices and glyph
+    /// texture are left alone: each frame has its own, taking turns, and a
+    /// glyph texture catches up on the glyphs added since its last turn.
+    /// (Images no longer drawn are freed, but the kernel keeps a buffer a
+    /// frame uses until it is done.)
+    pipelined: bool = false,
     /// Where the next canvas's vertices go.
     cursor: u32 = 0,
-    /// The glyph atlas's texture, and the atlas last uploaded to it.
+    /// The glyph atlas's texture, and the atlas last uploaded to it; and
+    /// the rows of it not uploaded yet.
     atlas_bo: ?vc4.Bo = null,
     atlas: ?*atlas_mod.Atlas = null,
+    atlas_stale: ?atlas_mod.Rect = null,
+    /// With `pipelined`: the previous frame's glyph texture, and its rows
+    /// not uploaded yet.
+    other_atlas_bo: ?vc4.Bo = null,
+    other_atlas_stale: ?atlas_mod.Rect = null,
 
     pub fn init(gpa: std.mem.Allocator, dev: vc4.Device) !Renderer {
         var shape = try shader.Pipeline.init(gpa, dev, shaders.shape(), shaders.shape_layout);
@@ -55,7 +71,9 @@ pub const Renderer = struct {
         while (it.next()) |bo| r.dev.destroyBo(bo.*);
         r.images.deinit(r.gpa);
         if (r.vbo) |bo| r.dev.destroyBo(bo);
+        if (r.other_vbo) |bo| r.dev.destroyBo(bo);
         if (r.atlas_bo) |bo| r.dev.destroyBo(bo);
+        if (r.other_atlas_bo) |bo| r.dev.destroyBo(bo);
     }
 
     /// Records one canvas's shapes into `frame` (whose previous use of the
@@ -67,8 +85,13 @@ pub const Renderer = struct {
 
     /// Makes room for the canvases a frame draws, and uploads the glyphs
     /// their text added to the atlas. The previous frame must have
-    /// finished rendering.
+    /// finished rendering, unless `pipelined`.
     pub fn prepare(r: *Renderer, canvases: []const *const Canvas) !void {
+        if (r.pipelined) {
+            std.mem.swap(?vc4.Bo, &r.vbo, &r.other_vbo);
+            std.mem.swap(?vc4.Bo, &r.atlas_bo, &r.other_atlas_bo);
+            std.mem.swap(?atlas_mod.Rect, &r.atlas_stale, &r.other_atlas_stale);
+        }
         var bytes: usize = 0;
         for (canvases) |c| for (c.batches.items) |*b| {
             bytes += std.mem.alignForward(usize, b.floats.items.len * 4, 16);
@@ -107,19 +130,34 @@ pub const Renderer = struct {
     fn upload(r: *Renderer, a: *atlas_mod.Atlas) !void {
         const w = atlas_mod.width;
         const h = atlas_mod.height;
-        if (r.atlas_bo == null) r.atlas_bo = try r.dev.createBo(vc4.texture.imageSizeOf(.a8, w, h));
+        const all: atlas_mod.Rect = .{ .x0 = 0, .y0 = 0, .x1 = w, .y1 = h };
+        if (r.atlas_bo == null) {
+            r.atlas_bo = try r.dev.createBo(vc4.texture.imageSizeOf(.a8, w, h));
+            r.atlas_stale = all;
+        }
         // Another atlas (or the first): all of it.
         if (r.atlas != a) {
             r.atlas = a;
-            a.dirty = .{ .x0 = 0, .y0 = 0, .x1 = w, .y1 = h };
+            a.dirty = all;
         }
-        const d = a.dirty orelse return;
+        // What changed, for this texture and (taking turns) the other.
+        if (a.dirty) |d| {
+            r.atlas_stale = merge(r.atlas_stale, d);
+            r.other_atlas_stale = merge(r.other_atlas_stale, d);
+            a.dirty = null;
+        }
+        const d = r.atlas_stale orelse return;
         // Whole micro-tiles' rows, so uploads stay aligned.
         const uh = vc4.Format.a8.utileHeight();
         const y0: u32 = d.y0 / uh * uh;
         const y1: u32 = @min(std.mem.alignForward(u32, d.y1, uh), h);
         vc4.texture.uploadRectOf(.a8, r.atlas_bo.?.map, w, h, .{ .x = 0, .y = y0, .width = w, .height = y1 - y0 }, a.pixels[y0 * w .. y1 * w], w);
-        a.dirty = null;
+        r.atlas_stale = null;
+    }
+
+    fn merge(a: ?atlas_mod.Rect, b: atlas_mod.Rect) atlas_mod.Rect {
+        const x = a orelse return b;
+        return .{ .x0 = @min(x.x0, b.x0), .y0 = @min(x.y0, b.y0), .x1 = @max(x.x1, b.x1), .y1 = @max(x.y1, b.y1) };
     }
 
     /// Records a canvas (one of those given to `prepare`) into `frame`.

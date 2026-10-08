@@ -154,22 +154,8 @@ pub const Storage = struct {
     }
 };
 
-pub const Meminfo = struct { total: u64 = 0, available: u64 = 0, cma_total: u64 = 0, cma_free: u64 = 0 };
-
-/// /proc/meminfo's figures, in bytes.
-pub fn parseMeminfo(text: []const u8) Meminfo {
-    var out: Meminfo = .{};
-    var lines = std.mem.tokenizeScalar(u8, text, '\n');
-    while (lines.next()) |line| {
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-        var fields = std.mem.tokenizeScalar(u8, line[colon + 1 ..], ' ');
-        const kb = std.fmt.parseInt(u64, fields.next() orelse continue, 10) catch continue;
-        const key = line[0..colon];
-        const field: ?*u64 = if (std.mem.eql(u8, key, "MemTotal")) &out.total else if (std.mem.eql(u8, key, "MemAvailable")) &out.available else if (std.mem.eql(u8, key, "CmaTotal")) &out.cma_total else if (std.mem.eql(u8, key, "CmaFree")) &out.cma_free else null;
-        if (field) |f| f.* = kb * 1024;
-    }
-    return out;
-}
+pub const Meminfo = sys.Meminfo;
+pub const parseMeminfo = sys.parseMeminfo;
 
 /// The total and idle (idle + iowait) ticks from /proc/stat's first line.
 pub fn parseStat(stat: []const u8) ?[2]u64 {

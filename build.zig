@@ -184,6 +184,7 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         .optimize = optimize,
         .imports = &.{
             .{ .name = "vc4", .module = vc4 },
+            .{ .name = "sys", .module = sys },
             .{ .name = "wayland", .module = wayland },
             .{ .name = "locale", .module = locale },
         },

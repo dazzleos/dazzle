@@ -336,9 +336,35 @@ const FakeGpu = struct {
     next_handle: u32 = 1,
     frames: u32 = 0,
     last_target: ?vc4.render.Target = null,
+    /// Frames submitted without waiting, and the last waited for.
+    submitted: u64 = 0,
+    waited: u64 = 0,
+    /// The GPU's memory pool, and how much of it is free.
+    memory_total: u64 = 64 << 20,
+    memory_free: u64 = 48 << 20,
 
     fn gpu(f: *FakeGpu) app.Gpu {
         return .{ .ptr = f, .vtable = &.{ .createBo = createBo, .destroyBo = destroyBo, .exportBo = exportBo, .run = run } };
+    }
+
+    /// One that can keep a frame in flight.
+    fn pipelinedGpu(f: *FakeGpu) app.Gpu {
+        return .{ .ptr = f, .vtable = &.{ .createBo = createBo, .destroyBo = destroyBo, .exportBo = exportBo, .run = run, .submit = submit, .wait = wait, .memory = memory } };
+    }
+
+    fn submit(ptr: *anyopaque, frame: *vc4.render.Frame) anyerror!u64 {
+        const f: *FakeGpu = @ptrCast(@alignCast(ptr));
+        try run(ptr, frame);
+        f.submitted += 1;
+        return f.submitted;
+    }
+    fn wait(ptr: *anyopaque, seqno: u64) anyerror!void {
+        const f: *FakeGpu = @ptrCast(@alignCast(ptr));
+        f.waited = @max(f.waited, seqno);
+    }
+    fn memory(ptr: *anyopaque) ?[2]u64 {
+        const f: *FakeGpu = @ptrCast(@alignCast(ptr));
+        return .{ f.memory_total, f.memory_free };
     }
 
     fn createBo(ptr: *anyopaque, size: u32) anyerror!vc4.Bo {
@@ -368,6 +394,58 @@ const FakeGpu = struct {
 };
 
 var test_frame: vc4.render.Frame = undefined;
+
+test "a pipelined app window keeps a frame in flight, while memory allows" {
+    var pair: [2]linux.fd_t = undefined;
+    try testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &pair));
+    var renderer: FakeRenderer = .{};
+    const st = try testing.allocator.create(ServerThread);
+    defer testing.allocator.destroy(st);
+    st.* = .{ .server = .init(testing.allocator, renderer.backend(), .{ .x = 0, .y = 40, .width = 320, .height = 200 }), .fd = pair[0] };
+    defer st.server.deinit();
+    const thread = try std.Thread.spawn(.{}, ServerThread.run, .{st});
+
+    var fake: FakeGpu = .{};
+    const d = try client.Display.fromFd(testing.allocator, pair[1]);
+    const win = try app.Window.openOn(testing.allocator, fake.pipelinedGpu(), d, "Test window");
+    try win.setPipelined(true);
+    try testing.expect(win.pipelined);
+
+    for (1..9) |n| {
+        const target = try win.beginFrame();
+        // Never the buffer the GPU is still rendering.
+        if (win.in_flight) |f| try testing.expect(f.buffer != win.back.?);
+        test_frame.begin(target, .{ .clear = 0xff000000 });
+        try win.submit(&test_frame, null);
+        // Submitted without waiting; the frame before waited for (and
+        // shown).
+        try testing.expectEqual(@as(u64, n), fake.submitted);
+        try testing.expectEqual(@as(u64, n - 1), fake.waited);
+        try testing.expectEqual(@as(u64, n - 1), win.frames);
+    }
+    try win.finishInFlight();
+    try testing.expectEqual(@as(u64, 8), fake.waited);
+    try testing.expectEqual(@as(u64, 8), win.frames);
+    try testing.expect(fake.live_bos <= 3);
+
+    // With the GPU's memory short, no buffer is made for a frame in
+    // flight: that frame is shown first.
+    fake.memory_free = 4 << 20;
+    while (win.frame_pending) try d.dispatch();
+    try d.roundtrip();
+    const bos = fake.live_bos;
+    for (0..4) |_| {
+        test_frame.begin(try win.beginFrame(), .{ .clear = 0xff000000 });
+        try win.submit(&test_frame, null);
+    }
+    try win.finishInFlight();
+    try testing.expectEqual(@as(u64, 12), win.frames);
+    try testing.expect(fake.live_bos <= bos);
+
+    win.close();
+    thread.join();
+    try testing.expectEqual(@as(u32, 0), fake.live_bos);
+}
 
 test "app windows render, present through the compositor and resize" {
     var pair: [2]linux.fd_t = undefined;
