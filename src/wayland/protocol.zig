@@ -585,6 +585,59 @@ pub const wp_cursor_shape_device_v1 = struct {
     };
 };
 
+/// Locking the pointer in place, for a game that turns its view with the
+/// mouse (pointer-constraints-unstable-v1.xml; confining is not supported).
+pub const zwp_pointer_constraints_v1 = struct {
+    pub const name = "zwp_pointer_constraints_v1";
+    pub const version = 1;
+    pub const request = struct {
+        pub const destroy = 0;
+        pub const lock_pointer = 1;
+        pub const confine_pointer = 2;
+    };
+    pub const err = struct {
+        pub const already_constrained = 1;
+    };
+    pub const lifetime = struct {
+        pub const oneshot = 1;
+        pub const persistent = 2;
+    };
+};
+
+pub const zwp_locked_pointer_v1 = struct {
+    pub const name = "zwp_locked_pointer_v1";
+    pub const request = struct {
+        pub const destroy = 0;
+        pub const set_cursor_position_hint = 1;
+        pub const set_region = 2;
+    };
+    pub const event = struct {
+        pub const locked = 0;
+        pub const unlocked = 1;
+    };
+};
+
+/// The pointer's movements as they are, not limited by the screen's edges
+/// (relative-pointer-unstable-v1.xml).
+pub const zwp_relative_pointer_manager_v1 = struct {
+    pub const name = "zwp_relative_pointer_manager_v1";
+    pub const version = 1;
+    pub const request = struct {
+        pub const destroy = 0;
+        pub const get_relative_pointer = 1;
+    };
+};
+
+pub const zwp_relative_pointer_v1 = struct {
+    pub const name = "zwp_relative_pointer_v1";
+    pub const request = struct {
+        pub const destroy = 0;
+    };
+    pub const event = struct {
+        pub const relative_motion = 0;
+    };
+};
+
 /// Linux input event codes (linux/input-event-codes.h) used by Dazzle.
 pub const input = struct {
     pub const btn_left = 0x110;

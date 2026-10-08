@@ -2,7 +2,8 @@
 //! job that clears the screen and draws the panels (the dock) and the top
 //! window as textured quads, then is shown with a page flip. A window the
 //! size of the work area is shown directly instead, with the panels on
-//! overlay planes.
+//! overlay planes; a fullscreen window the size of the screen alone, on
+//! the display's primary plane.
 //!
 //! Window contents are textures: clients' dma-bufs used in place (they
 //! render in the GPU's T-tiled layout, which the texture unit reads), or
@@ -134,6 +135,8 @@ const Panel = struct {
     /// other is on the screen.
     planes: [2]?Scanout = .{ null, null },
     shown: u1 = 0,
+    /// Not shown (under a fullscreen window).
+    hidden: bool = false,
 };
 
 const n_cursors = @typeInfo(cursor.Shape).@"enum".fields.len;
@@ -233,10 +236,15 @@ pub const Renderer = struct {
         p.texture_stale = true;
     }
 
+    /// Hides the panels (under a fullscreen window), or shows them again.
+    pub fn hidePanels(r: *Renderer, hidden: bool) void {
+        for (&r.panels) |*p| p.hidden = hidden;
+    }
+
     fn panelLayers(r: *Renderer) ?vc4.kms.Overlays {
         var out: vc4.kms.Overlays = @splat(null);
         for (&r.panels, 0..) |*p, i| {
-            if (p.width == 0 or p.height == 0) continue;
+            if (p.width == 0 or p.height == 0 or p.hidden) continue;
             out[i] = r.panelLayer(p) orelse return null;
         }
         return out;
@@ -368,7 +376,7 @@ pub const Renderer = struct {
     fn panelQuads(r: *Renderer) ![n_panels]?PanelQuad {
         var quads: [n_panels]?PanelQuad = @splat(null);
         for (&r.panels, &quads) |*p, *q| {
-            if (p.width == 0 or p.height == 0) continue;
+            if (p.width == 0 or p.height == 0 or p.hidden) continue;
             if (p.texture_stale) {
                 p.texture = try uploadPixels(r, p.texture, std.mem.sliceAsBytes(p.pixels), p.width, p.height, p.width * 4, .xrgb8888);
                 p.texture_stale = false;

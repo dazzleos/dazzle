@@ -211,6 +211,19 @@ textures into the screen's buffer and shows it with kernel mode setting,
 flipping between two buffers at vertical blank. Apps and the shell redraw
 only what changed.
 
+The shell composites only when it must. A maximized window the size of
+the work area goes on the display as it is (its buffer is scanned out by
+the display hardware, with no GPU work), with the dock on an overlay
+plane. A fullscreen window (`Window.setFullscreen`) covers the dock: the
+dock is hidden, and the window's buffer, the size of the screen, is the
+only plane. Either way the shell draws nothing while the app animates.
+
+A game can lock the pointer (`Window.lockPointer`, with the standard
+pointer-constraints and relative-pointer protocols): while it is over the
+window and the window is on top, the pointer stays where it is, its
+picture is hidden, and the app hears only how the mouse moves. The Super
+key always takes the pointer back.
+
 An app usually waits for the GPU to render each frame before showing it
 and starting the next. One that draws all the time (Blocks) can keep a
 frame in flight instead (`Window.setPipelined`): it hands a frame to the

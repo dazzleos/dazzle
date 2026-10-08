@@ -147,6 +147,11 @@ pub const InputEvent = union(enum) {
     /// The window's touches are the shell's now (it moves the window, say):
     /// forget them, without acting on them.
     touch_cancel,
+    /// The pointer moved this far, in pixels, whatever the screen's edges
+    /// (for a locked pointer: see `lockPointer`).
+    relative_motion: [2]f32,
+    /// The pointer lock took effect (true), or ended (false).
+    pointer_locked: bool,
 };
 
 /// Used when the compositor leaves the size to us.
@@ -228,6 +233,8 @@ pub const Window = struct {
     /// Filling the screen (the shell's configure says so); otherwise
     /// movable and resizable.
     maximized: bool = true,
+    /// On the whole screen, over the shell's dock (see `setFullscreen`).
+    fullscreen: bool = false,
     /// The serial of the last pointer button press, for asking the shell
     /// to move the window from it.
     press_serial: u32 = 0,
@@ -253,6 +260,14 @@ pub const Window = struct {
 
     seat: ?client.Proxy = null,
     touch: ?client.Proxy = null,
+    /// For locking the pointer (see `lockPointer`): the shell's globals,
+    /// the pointer's relative motion, the lock asked for, and whether it
+    /// is in effect.
+    pointer_constraints: ?client.Proxy = null,
+    relative_pointer_manager: ?client.Proxy = null,
+    relative_pointer: ?client.Proxy = null,
+    locked_pointer: ?client.Proxy = null,
+    pointer_locked: bool = false,
     /// The system's clipboard (for the toolkit's `Ui.clipboard`).
     clipboard: Clipboard,
     /// The keyboard's layout, as the shell's keymap says (give it to the
@@ -289,6 +304,10 @@ pub const Window = struct {
         // Optional: the pointer's pictures, and the pointer and keyboard
         // (which come with the seat's capabilities).
         w.cursor_shape_manager = try w.globals.bind(registry, p.wp_cursor_shape_manager_v1.name, 1, null);
+        // Optional: locking the pointer in place, and its relative motion
+        // (bound before the seat, which makes the pointer).
+        w.pointer_constraints = try w.globals.bind(registry, p.zwp_pointer_constraints_v1.name, 1, null);
+        w.relative_pointer_manager = try w.globals.bind(registry, p.zwp_relative_pointer_manager_v1.name, 1, null);
         w.seat = try w.globals.bind(registry, p.wl_seat.name, 5, .{ .ptr = w, .handler = seatEvent });
         // Optional: copy and paste.
         try w.clipboard.attach(conn, try w.globals.bind(registry, p.wl_data_device_manager.name, 3, null), w.seat);
@@ -334,6 +353,70 @@ pub const Window = struct {
         w.clipboard.service();
     }
 
+    /// Asks the shell to show the window on the whole screen, over its
+    /// dock (`fullscreen` says when it does), or not; a configure follows.
+    pub fn setFullscreen(w: *Window, on: bool) void {
+        var m = w.toplevel.request(if (on) p.xdg_toplevel.request.set_fullscreen else p.xdg_toplevel.request.unset_fullscreen) catch return;
+        // On whichever output the shell chooses.
+        if (on) _ = m.uint(0);
+        m.end();
+        w.conn.flush() catch {};
+    }
+
+    /// Asks the shell to keep the pointer where it is and hide it, while it
+    /// is over the window and the window is on top: the app then gets only
+    /// how it moves (`relative_motion` events), as a game turning its view
+    /// with the mouse wants. `pointer_locked` events say when that takes
+    /// effect and ends (the shell can end it: the Super key does). Returns
+    /// whether the shell can.
+    pub fn lockPointer(w: *Window) bool {
+        if (w.locked_pointer != null) return true;
+        const constraints = w.pointer_constraints orelse return false;
+        const pointer = w.pointer orelse return false;
+        if (w.relative_pointer == null) return false;
+        const lock = w.conn.newObject(.{ .ptr = w, .handler = lockEvent }) catch return false;
+        var m = constraints.request(p.zwp_pointer_constraints_v1.request.lock_pointer) catch return false;
+        // The whole surface (no region), for as long as it is not unlocked.
+        m.uint(lock.id).uint(w.surface.id).uint(pointer.id).uint(0).uint(p.zwp_pointer_constraints_v1.lifetime.persistent).end();
+        w.conn.flush() catch {};
+        w.locked_pointer = lock;
+        return true;
+    }
+
+    /// Gives the pointer back (see `lockPointer`).
+    pub fn unlockPointer(w: *Window) void {
+        const lock = w.locked_pointer orelse return;
+        if (lock.request(p.zwp_locked_pointer_v1.request.destroy)) |m0| {
+            var m = m0;
+            m.end();
+        } else |_| {}
+        w.conn.forget(lock.id);
+        w.locked_pointer = null;
+        if (w.pointer_locked) {
+            w.pointer_locked = false;
+            w.pushInput(.{ .pointer_locked = false });
+        }
+        w.conn.flush() catch {};
+    }
+
+    fn lockEvent(ptr: ?*anyopaque, _: *client.Display, _: u32, opcode: u16, _: *wire.Reader) void {
+        const w: *Window = @ptrCast(@alignCast(ptr.?));
+        const locked = opcode == p.zwp_locked_pointer_v1.event.locked;
+        if (locked == w.pointer_locked) return;
+        w.pointer_locked = locked;
+        w.pushInput(.{ .pointer_locked = locked });
+    }
+
+    fn relativeEvent(ptr: ?*anyopaque, _: *client.Display, _: u32, opcode: u16, r: *wire.Reader) void {
+        const w: *Window = @ptrCast(@alignCast(ptr.?));
+        if (opcode != p.zwp_relative_pointer_v1.event.relative_motion) return;
+        _ = r.uint() catch return; // the time, in microseconds
+        _ = r.uint() catch return;
+        const dx: f32 = @floatCast(r.fixed() catch return);
+        const dy: f32 = @floatCast(r.fixed() catch return);
+        w.pushInput(.{ .relative_motion = .{ dx, dy } });
+    }
+
     /// Asks the shell to fill the screen with the window, or to make it
     /// its own size again; a configure follows.
     pub fn setMaximized(w: *Window, on: bool) void {
@@ -353,7 +436,7 @@ pub const Window = struct {
     /// The edges a press at `pos` would resize the window by (0 for none:
     /// a maximized window is not resized).
     pub fn edgesAt(w: *const Window, pos: [2]f32) u32 {
-        if (w.maximized) return 0;
+        if (w.maximized or w.fullscreen) return 0;
         const width: f32 = @floatFromInt(w.width);
         const height: f32 = @floatFromInt(w.height);
         const x = pos[0];
@@ -757,6 +840,12 @@ pub const Window = struct {
                 m.uint(device.id).uint(pointer.id).end();
                 w.cursor_device = device;
             }
+            if (w.relative_pointer_manager) |manager| {
+                const rel = d.newObject(.{ .ptr = w, .handler = relativeEvent }) catch return;
+                m = manager.request(p.zwp_relative_pointer_manager_v1.request.get_relative_pointer) catch return;
+                m.uint(rel.id).uint(pointer.id).end();
+                w.relative_pointer = rel;
+            }
         }
         if (caps & p.wl_seat.capability.touch != 0 and w.touch == null) {
             const touch = d.newObject(.{ .ptr = w, .handler = touchEvent }) catch return;
@@ -911,14 +1000,17 @@ pub const Window = struct {
                 const states = r.array() catch &.{};
                 var suspended = false;
                 var maximized = false;
+                var fullscreen = false;
                 var i: usize = 0;
                 while (i + 4 <= states.len) : (i += 4) switch (std.mem.readInt(u32, states[i..][0..4], .little)) {
                     p.xdg_toplevel.state.suspended => suspended = true,
                     p.xdg_toplevel.state.maximized => maximized = true,
+                    p.xdg_toplevel.state.fullscreen => fullscreen = true,
                     else => {},
                 };
                 w.suspended = suspended;
                 w.maximized = maximized;
+                w.fullscreen = fullscreen;
             },
             p.xdg_toplevel.event.close => w.closed = true,
             else => {},

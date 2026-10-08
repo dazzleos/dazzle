@@ -176,6 +176,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             .touch_motion => |t| window_ui.touchMotion(t.id, t.pos),
             .touch_up => |id| window_ui.touchUp(id),
             .touch_cancel => window_ui.touchCancel(),
+            .relative_motion, .pointer_locked => {},
         };
 
         // The figures change every second.

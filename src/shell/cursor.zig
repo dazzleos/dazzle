@@ -15,6 +15,8 @@ pub const Shape = enum {
     resize_diagonal_down,
     /// Bottom left to top right.
     resize_diagonal_up,
+    /// None (while a game has the pointer locked).
+    hidden,
 };
 
 /// The point that is where the pointer is, from the top left corner: the
@@ -32,9 +34,10 @@ const scale = 1.5;
 const border = 1.0;
 
 pub fn draw(pixels: *[size * size]u32, shape: Shape) void {
+    if (shape == .hidden) return @memset(pixels, 0);
     // The outline, turned for the double arrows.
     const angle: f32 = switch (shape) {
-        .arrow, .resize_horizontal => 0,
+        .arrow, .resize_horizontal, .hidden => 0,
         .resize_vertical => std.math.pi / 2.0,
         .resize_diagonal_down => std.math.pi / 4.0,
         .resize_diagonal_up => -std.math.pi / 4.0,

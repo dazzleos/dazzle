@@ -65,6 +65,20 @@ const ServerThread = struct {
     hold_top: std.atomic.Value(bool) = .init(false),
     drop_held: std.atomic.Value(bool) = .init(false),
     held: ?*server_mod.Buffer = null,
+    /// Set by the test to have it report whether the top window is
+    /// fullscreen, and the width of the buffer the display could show
+    /// directly (0 if none).
+    check_fullscreen: std.atomic.Value(bool) = .init(false),
+    fullscreen_top: std.atomic.Value(bool) = .init(false),
+    scanout_width: std.atomic.Value(u32) = .init(0),
+    checked: std.atomic.Value(bool) = .init(false),
+    /// Set by the test to have it move the pointer into the window and
+    /// then by (5, -3), reporting whether it was locked there and hidden;
+    /// or to have it break a lock (the Super key).
+    send_relative: std.atomic.Value(bool) = .init(false),
+    relative_locked: std.atomic.Value(bool) = .init(false),
+    cursor_hidden: std.atomic.Value(bool) = .init(false),
+    break_lock: std.atomic.Value(bool) = .init(false),
 
     fn run(st: *ServerThread) void {
         const c = st.server.addClient(st.fd) catch return;
@@ -97,6 +111,26 @@ const ServerThread = struct {
                 srv.keyboardKey(5, 30, true); // KEY_A
                 srv.keyboardKey(6, 30, false);
                 srv.flushClients();
+            }
+            if (st.check_fullscreen.swap(false, .monotonic)) {
+                const srv = &st.server;
+                st.fullscreen_top.store(srv.fullscreenTop(), .monotonic);
+                const b = if (srv.topWindow()) |t| srv.scanoutBuffer(t) else null;
+                st.scanout_width.store(if (b) |x| x.width else 0, .monotonic);
+                st.checked.store(true, .release);
+            }
+            if (st.send_relative.swap(false, .monotonic)) {
+                const srv = &st.server;
+                srv.pointerMotion(1, 100, 100);
+                srv.pointerFrame();
+                st.relative_locked.store(srv.pointerRelative(2, 5, -3), .monotonic);
+                st.cursor_hidden.store(srv.cursor() == .hidden, .monotonic);
+                srv.pointerFrame();
+                srv.flushClients();
+            }
+            if (st.break_lock.swap(false, .monotonic)) {
+                st.server.breakLock();
+                st.server.flushClients();
             }
             if (st.send_touch.swap(false, .monotonic)) {
                 const srv = &st.server;
@@ -248,7 +282,7 @@ test "a client maps a window, gets frame callbacks and buffer releases" {
     var state: State = .{};
     var globals: client.Globals = .{};
     const registry = try globals.fetch(d);
-    try testing.expectEqual(@as(usize, 9), globals.len);
+    try testing.expectEqual(@as(usize, 11), globals.len);
     const compositor = (try globals.bind(registry, p.wl_compositor.name, 4, null)).?;
     const wm_base = (try globals.bind(registry, p.xdg_wm_base.name, 1, null)).?;
     const dmabuf = (try globals.bind(registry, p.zwp_linux_dmabuf_v1.name, 3, .{ .ptr = &state, .handler = State.dmabufEvent })).?;
@@ -441,6 +475,77 @@ test "a pipelined app window keeps a frame in flight, while memory allows" {
     try win.finishInFlight();
     try testing.expectEqual(@as(u64, 12), win.frames);
     try testing.expect(fake.live_bos <= bos);
+
+    win.close();
+    thread.join();
+    try testing.expectEqual(@as(u32, 0), fake.live_bos);
+}
+
+test "a fullscreen window covers the dock and can be shown directly; a game locks the pointer" {
+    var pair: [2]linux.fd_t = undefined;
+    try testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &pair));
+    var renderer: FakeRenderer = .{};
+    const st = try testing.allocator.create(ServerThread);
+    defer testing.allocator.destroy(st);
+    st.* = .{ .server = .init(testing.allocator, renderer.backend(), .{ .x = 0, .y = 40, .width = 320, .height = 200 }), .fd = pair[0] };
+    st.server.output = .{ .width = 400, .height = 300 };
+    defer st.server.deinit();
+    const thread = try std.Thread.spawn(.{}, ServerThread.run, .{st});
+
+    var fake: FakeGpu = .{};
+    const d = try client.Display.fromFd(testing.allocator, pair[1]);
+    const win = try app.Window.openOn(testing.allocator, fake.gpu(), d, "Test window");
+    try d.roundtrip();
+    try testing.expectEqual(@as(u32, 320), win.width);
+
+    // Fullscreen: the whole screen, over the dock.
+    win.setFullscreen(true);
+    while (!win.fullscreen) try d.dispatch();
+    _ = try win.applyConfigure();
+    try testing.expectEqual(@as(u32, 400), win.width);
+    try testing.expectEqual(@as(u32, 300), win.height);
+    test_frame.begin(try win.beginFrame(), .{ .clear = 0xff000000 });
+    try win.present(&test_frame);
+    while (win.frame_pending) try d.dispatch();
+    st.check_fullscreen.store(true, .monotonic);
+    while (!st.checked.load(.acquire)) try d.dispatchTimeout(10);
+    try testing.expect(st.fullscreen_top.load(.monotonic));
+    // Its buffer is the screen's size: the display can show it as it is.
+    try testing.expectEqual(@as(u32, 400), st.scanout_width.load(.monotonic));
+
+    // The pointer locked over it: it stays put, hidden, and the window
+    // hears only how it moves.
+    try testing.expect(win.lockPointer());
+    try d.roundtrip();
+    st.send_relative.store(true, .monotonic);
+    var locked = false;
+    var moved: ?[2]f32 = null;
+    while (!locked or moved == null) {
+        try d.dispatch();
+        for (win.takeInput()) |e| switch (e) {
+            .pointer_locked => |l| locked = l,
+            .relative_motion => |m| moved = m,
+            else => {},
+        };
+    }
+    try testing.expectEqual([2]f32{ 5, -3 }, moved.?);
+    try testing.expect(st.relative_locked.load(.monotonic));
+    try testing.expect(st.cursor_hidden.load(.monotonic));
+    // The Super key takes it back.
+    st.break_lock.store(true, .monotonic);
+    while (locked) {
+        try d.dispatch();
+        for (win.takeInput()) |e| if (e == .pointer_locked) {
+            locked = e.pointer_locked;
+        };
+    }
+    win.unlockPointer();
+
+    // Back to the work area.
+    win.setFullscreen(false);
+    while (win.fullscreen) try d.dispatch();
+    _ = try win.applyConfigure();
+    try testing.expectEqual(@as(u32, 320), win.width);
 
     win.close();
     thread.join();

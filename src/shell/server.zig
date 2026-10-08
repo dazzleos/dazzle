@@ -19,6 +19,8 @@
 //! size only once it has drawn at the last one, so a slow client is not
 //! sent sizes it cannot keep up with. Clients choose the pointer's picture
 //! over their windows with wp_cursor_shape_v1 (an arrow, or a resize).
+//! A window can also fill the whole screen, over the dock
+//! (xdg_toplevel.set_fullscreen): the dock is hidden while it is on top.
 //! They are stacked most recently mapped (or raised, or clicked) on top,
 //! and the top one has the keyboard. Windows hidden behind others are
 //! covered: they get xdg_toplevel's suspended state, their frame callbacks
@@ -101,6 +103,8 @@ const globals = [_]struct { name: []const u8, version: u32 }{
     .{ .name = p.wl_data_device_manager.name, .version = p.wl_data_device_manager.version },
     .{ .name = p.wl_subcompositor.name, .version = p.wl_subcompositor.version },
     .{ .name = p.wl_output.name, .version = p.wl_output.version },
+    .{ .name = p.zwp_pointer_constraints_v1.name, .version = p.zwp_pointer_constraints_v1.version },
+    .{ .name = p.zwp_relative_pointer_manager_v1.name, .version = p.zwp_relative_pointer_manager_v1.version },
 };
 
 /// The screen, as wl_output describes it.
@@ -143,6 +147,30 @@ const Object = union(enum) {
     data_source: *DataSource,
     data_device,
     data_offer: *DataOffer,
+    pointer_constraints,
+    locked_pointer: *PointerLock,
+    /// Confining the pointer is not supported: the object does nothing.
+    confined_pointer,
+    relative_pointer_manager,
+    /// With the version bound (1), for `broadcast`.
+    relative_pointer: u32,
+};
+
+/// A client's wish to have the pointer locked in place over a surface
+/// (zwp_locked_pointer_v1), for a game turning its view with the mouse.
+/// It takes effect while the pointer is over the surface and its window is
+/// on top: the pointer stays where it is, its picture is hidden, and the
+/// client gets only its relative motion.
+pub const PointerLock = struct {
+    client: *Client,
+    id: u32,
+    /// Null once the surface has been destroyed.
+    surface: ?*Surface,
+    /// Takes effect again after it ends (lifetime persistent); otherwise
+    /// only once.
+    persistent: bool,
+    /// Ended, and not persistent: it will not take effect again.
+    spent: bool = false,
 };
 
 /// What a client offers to paste, as MIME types. The clipboard (the
@@ -278,6 +306,9 @@ pub const Toplevel = struct {
     capabilities_sent: bool = false,
     /// Filling the work area; otherwise restored, at `x`, `y` on the screen.
     maximized: bool = true,
+    /// Filling the whole screen, over the dock (whether maximized or not
+    /// is kept for when it leaves fullscreen).
+    fullscreen: bool = false,
     x: i32 = 0,
     y: i32 = 0,
     /// Restored before, so `x`, `y` and its size are where and how big it
@@ -428,6 +459,9 @@ pub const Server = struct {
     popups: std.ArrayList(*Popup) = .empty,
     /// The keyboard's modifiers.
     modifiers: keyboard.Modifiers = .{},
+    /// Pointer locks asked for, and the one in effect.
+    locks: std.ArrayList(*PointerLock) = .empty,
+    active_lock: ?*PointerLock = null,
 
     /// A move or resize: by the pointer, or by a touch (`touch`: its ID).
     const Grab = struct { t: *Toplevel, dx: f64, dy: f64, resize: ?Resize = null, touch: ?i32 = null };
@@ -466,6 +500,7 @@ pub const Server = struct {
         s.presenting.deinit(s.gpa);
         s.offers.deinit(s.gpa);
         s.popups.deinit(s.gpa);
+        s.locks.deinit(s.gpa);
     }
 
     /// Adds a client connected on `fd`.
@@ -596,11 +631,17 @@ pub const Server = struct {
             .positioner => |pos| s.gpa.destroy(pos),
             .popup => |pp| s.destroyPopup(pp),
             .subsurface => |sub| s.destroySubsurface(sub),
+            .locked_pointer => |lock| s.destroyLock(lock),
             else => {},
         }
     }
 
     fn destroySurface(s: *Server, surf: *Surface) void {
+        // A lock on it ends.
+        for (s.locks.items) |lock| if (lock.surface == surf) {
+            lock.surface = null;
+        };
+        if (s.active_lock) |lock| if (lock.surface == null) s.endLock(lock);
         // The client knows it destroyed the surface; no leave events.
         if (s.pointer_focus == surf) s.pointer_focus = null;
         if (s.keyboard_focus == surf) s.keyboard_focus = null;
@@ -697,16 +738,34 @@ pub const Server = struct {
         s.damaged = true;
     }
 
+    /// The whole screen.
+    pub fn screen(s: *const Server) Rect {
+        return .{ .x = 0, .y = 0, .width = s.output.width, .height = s.output.height };
+    }
+
+    /// The area a window fills, maximized: the screen if fullscreen,
+    /// otherwise the work area.
+    fn areaOf(s: *const Server, t: *const Toplevel) Rect {
+        return if (t.fullscreen) s.screen() else s.work_area;
+    }
+
+    /// The top window fills the screen: the shell's panels are hidden.
+    pub fn fullscreenTop(s: *const Server) bool {
+        const t = s.topWindow() orelse return false;
+        return t.fullscreen;
+    }
+
     /// The dma-buf buffer a window shows, if it can go on the display as it
-    /// is: maximized, and the size of the work area.
+    /// is: maximized or fullscreen, and the size of the area it fills.
     pub fn scanoutBuffer(s: *const Server, t: *const Toplevel) ?*Buffer {
-        if (!t.maximized) return null;
+        if (!t.maximized and !t.fullscreen) return null;
         const surf = t.xdg.surface orelse return null;
         // Subsurfaces and popups are drawn on it.
         if (surf.subsurfaces.items.len > 0) return null;
         for (s.popups.items) |pp| if (pp.xdg.surface) |ps| if (s.rootToplevel(ps) == t) return null;
         const b = surf.buffer orelse return null;
-        if (b.dmabuf == null or b.width != s.work_area.width or b.height != s.work_area.height) return null;
+        const area = s.areaOf(t);
+        if (b.dmabuf == null or b.width != area.width or b.height != area.height) return null;
         return b;
     }
 
@@ -770,7 +829,10 @@ pub const Server = struct {
     /// Where a window is on the screen, at the size of what it shows.
     pub fn windowRect(s: *const Server, t: *const Toplevel) Rect {
         const tex = t.xdg.surface.?.texture().?;
-        if (t.maximized) return .{ .x = s.work_area.x, .y = s.work_area.y, .width = tex.width, .height = tex.height };
+        if (t.maximized or t.fullscreen) {
+            const area = s.areaOf(t);
+            return .{ .x = area.x, .y = area.y, .width = tex.width, .height = tex.height };
+        }
         return .{
             .x = if (t.anchor_right) |r| r - @as(i32, @intCast(tex.width)) else t.x,
             .y = if (t.anchor_bottom) |b| b - @as(i32, @intCast(tex.height)) else t.y,
@@ -779,10 +841,11 @@ pub const Server = struct {
         };
     }
 
-    /// The part of a window that can be seen: what is in the work area.
+    /// The part of a window that can be seen: what is in the work area (or,
+    /// fullscreen, the screen).
     fn visibleRect(s: *const Server, t: *const Toplevel) Rect {
         const r = s.windowRect(t);
-        const wa = s.work_area;
+        const wa = s.areaOf(t);
         const x0 = @max(r.x, wa.x);
         const y0 = @max(r.y, wa.y);
         const x1 = @min(r.x + @as(i32, @intCast(r.width)), wa.x + @as(i32, @intCast(wa.width)));
@@ -795,6 +858,7 @@ pub const Server = struct {
     /// nor bigger than the work area.
     pub fn configuredSize(s: *const Server, t: *const Toplevel) [2]u32 {
         const wa = s.work_area;
+        if (t.fullscreen) return .{ s.output.width, s.output.height };
         if (t.maximized) return .{ wa.width, wa.height };
         const w = if (t.width != 0) t.width else wa.width / 2;
         const h = if (t.height != 0) t.height else wa.height / 2;
@@ -829,6 +893,18 @@ pub const Server = struct {
             t.y = s.work_area.y + @max(@divTrunc(@as(i32, @intCast(s.work_area.height)) - @as(i32, @intCast(size[1])), 2), 0);
             t.placed = true;
         }
+        t.anchor_right = null;
+        t.anchor_bottom = null;
+        if (t.xdg.configured) s.configure(c, t);
+        s.damaged = true;
+        s.replacePopups(t);
+    }
+
+    /// Makes a window fill the screen, over the dock, or not.
+    fn setFullscreen(s: *Server, c: *Client, t: *Toplevel, on: bool) void {
+        if (t.fullscreen == on) return;
+        if (s.grab) |g| if (g.t == t) s.endGrab();
+        t.fullscreen = on;
         t.anchor_right = null;
         t.anchor_bottom = null;
         if (t.xdg.configured) s.configure(c, t);
@@ -1024,6 +1100,7 @@ pub const Server = struct {
     /// The pointer's picture: a resize while resizing; otherwise the one
     /// the client under it chose.
     pub fn cursor(s: *const Server) Cursor {
+        if (s.active_lock != null) return .hidden;
         const g = s.grab orelse return if (s.pointer_focus != null) s.client_cursor else .arrow;
         const edges = if (g.resize) |r| r.edges else 0;
         const v = edges & (edge_top | edge_bottom);
@@ -1357,6 +1434,9 @@ pub const Server = struct {
                 },
                 p.xdg_toplevel.request.set_maximized => s.setMaximized(c, t, true),
                 p.xdg_toplevel.request.unset_maximized => s.setMaximized(c, t, false),
+                // On the one screen there is, whichever output is asked for.
+                p.xdg_toplevel.request.set_fullscreen => s.setFullscreen(c, t, true),
+                p.xdg_toplevel.request.unset_fullscreen => s.setFullscreen(c, t, false),
                 p.xdg_toplevel.request.move => {
                     _ = try r.uint();
                     s.startMove(t, try r.uint());
@@ -1374,8 +1454,7 @@ pub const Server = struct {
                     const w = try r.int();
                     s.setMaxSize(c, t, w, try r.int());
                 },
-                // Windows cannot be minimized or made fullscreen, and have
-                // no menu.
+                // Windows cannot be minimized, and have no menu.
                 else => {},
             },
             .dmabuf => switch (m.opcode) {
@@ -1393,6 +1472,52 @@ pub const Server = struct {
             },
             .params => |pr| try s.paramsRequest(c, pr, m, r),
             .seat => |version| try s.seatRequest(c, version, m, r),
+            .pointer_constraints => switch (m.opcode) {
+                p.zwp_pointer_constraints_v1.request.destroy => c.deleteId(m.object),
+                p.zwp_pointer_constraints_v1.request.lock_pointer => {
+                    const id = try r.uint();
+                    const surf_id = try r.uint();
+                    _ = try r.uint(); // the wl_pointer
+                    _ = try r.uint(); // a region (the whole surface is used)
+                    const lifetime = try r.uint();
+                    const surf = switch (c.objects.get(surf_id) orelse return error.InvalidObject) {
+                        .surface => |x| x,
+                        else => return error.InvalidObject,
+                    };
+                    for (s.locks.items) |other| if (other.surface == surf) {
+                        return c.postError(m.object, p.zwp_pointer_constraints_v1.err.already_constrained, "the pointer is already locked on surface {d}", .{surf_id});
+                    };
+                    const lock = try s.gpa.create(PointerLock);
+                    lock.* = .{ .client = c, .id = id, .surface = surf, .persistent = lifetime == p.zwp_pointer_constraints_v1.lifetime.persistent };
+                    errdefer s.gpa.destroy(lock);
+                    try s.locks.append(s.gpa, lock);
+                    errdefer _ = s.locks.pop();
+                    try c.addObject(id, .{ .locked_pointer = lock });
+                    s.updateLock();
+                },
+                p.zwp_pointer_constraints_v1.request.confine_pointer => try c.addObject(try r.uint(), .confined_pointer),
+                else => return error.InvalidOpcode,
+            },
+            .locked_pointer => |lock| switch (m.opcode) {
+                p.zwp_locked_pointer_v1.request.destroy => {
+                    c.deleteId(m.object);
+                    s.destroyLock(lock);
+                },
+                // The pointer stays where it was; its whole surface counts.
+                p.zwp_locked_pointer_v1.request.set_cursor_position_hint, p.zwp_locked_pointer_v1.request.set_region => {},
+                else => return error.InvalidOpcode,
+            },
+            .confined_pointer => if (m.opcode == 0) c.deleteId(m.object),
+            .relative_pointer_manager => switch (m.opcode) {
+                p.zwp_relative_pointer_manager_v1.request.destroy => c.deleteId(m.object),
+                p.zwp_relative_pointer_manager_v1.request.get_relative_pointer => {
+                    const id = try r.uint();
+                    _ = try r.uint(); // the wl_pointer
+                    try c.addObject(id, .{ .relative_pointer = 1 });
+                },
+                else => return error.InvalidOpcode,
+            },
+            .relative_pointer => if (m.opcode == p.zwp_relative_pointer_v1.request.destroy) c.deleteId(m.object),
             // The cursor is the shell's own.
             .pointer => if (m.opcode == p.wl_pointer.request.release) c.deleteId(m.object),
             .touch => if (m.opcode == p.wl_touch.request.release) c.deleteId(m.object),
@@ -1529,6 +1654,8 @@ pub const Server = struct {
             6 => try c.addObject(id, .cursor_shape_manager),
             7 => try c.addObject(id, .data_device_manager),
             8 => try c.addObject(id, .subcompositor),
+            10 => try c.addObject(id, .pointer_constraints),
+            11 => try c.addObject(id, .relative_pointer_manager),
             9 => {
                 try c.addObject(id, .{ .output = version });
                 s.describeOutput(c, id, version);
@@ -1638,14 +1765,18 @@ pub const Server = struct {
     }
 
     /// Places a popup as its positioner says, relative to its parent, in
-    /// the work area as far as its constraint adjustments allow.
+    /// the work area (or, over a fullscreen window, the screen) as far as
+    /// its constraint adjustments allow.
     fn placePopup(s: *const Server, pp: *Popup, pos: Positioner) void {
         pp.positioner = pos;
-        const area: ?placement.Rect = if (pp.parent) |parent| if (parent.surface) |ps| if (s.surfaceOrigin(ps)) |o| .{
-            .x = s.work_area.x - o[0],
-            .y = s.work_area.y - o[1],
-            .w = @intCast(s.work_area.width),
-            .h = @intCast(s.work_area.height),
+        const area: ?placement.Rect = if (pp.parent) |parent| if (parent.surface) |ps| if (s.surfaceOrigin(ps)) |o| blk: {
+            const wa = if (s.rootToplevel(ps)) |t| s.areaOf(t) else s.work_area;
+            break :blk .{
+                .x = wa.x - o[0],
+                .y = wa.y - o[1],
+                .w = @intCast(wa.width),
+                .h = @intCast(wa.height),
+            };
         } else null else null else null;
         const r = placement.place(pos, area);
         pp.x = r.x;
@@ -1813,21 +1944,23 @@ pub const Server = struct {
         var list: std.ArrayList(Quad) = .initBuffer(buf);
         for (s.visibleWindows(&shown)) |t| {
             const surf = t.xdg.surface orelse continue;
-            s.addTree(&list, surf);
-            for (s.popups.items) |pp| if (pp.xdg.surface) |ps| if (s.rootToplevel(ps) == t) s.addTree(&list, ps);
+            // Clipped to the work area, or the screen for a fullscreen one.
+            const clip = s.areaOf(t);
+            s.addTree(&list, surf, clip);
+            for (s.popups.items) |pp| if (pp.xdg.surface) |ps| if (s.rootToplevel(ps) == t) s.addTree(&list, ps, clip);
         }
         return list.items;
     }
 
     /// A surface and its subsurfaces, above it.
-    fn addTree(s: *const Server, list: *std.ArrayList(Quad), surf: *const Surface) void {
+    fn addTree(s: *const Server, list: *std.ArrayList(Quad), surf: *const Surface, clip: Rect) void {
         const o = s.surfaceOrigin(surf) orelse return;
         if (surf.texture()) |tex| {
             // Over the most there is room for: the newest, at the top.
             if (list.items.len == list.capacity) _ = list.orderedRemove(0);
-            list.appendAssumeCapacity(.{ .texture = tex, .x = o[0], .y = o[1], .clip = s.work_area });
+            list.appendAssumeCapacity(.{ .texture = tex, .x = o[0], .y = o[1], .clip = clip });
         }
-        for (surf.subsurfaces.items) |sub| if (sub.surface) |child| s.addTree(list, child);
+        for (surf.subsurfaces.items) |sub| if (sub.surface) |child| s.addTree(list, child, clip);
     }
 
     /// The topmost surface of a tree (`surf` and its subsurfaces) at
@@ -2070,6 +2203,70 @@ pub const Server = struct {
         broadcast(surf.client, .pointer, p.wl_pointer.event.motion, 1, .{ time_ms, local[0], local[1] });
     }
 
+    /// The pointer moved by (`dx`, `dy`), before the screen's edges limit
+    /// it: the client under it hears of it (zwp_relative_pointer_v1).
+    /// Returns whether the pointer is locked, and so stays where it is
+    /// (`pointerMotion` is not called).
+    pub fn pointerRelative(s: *Server, time_ms: u32, dx: f64, dy: f64) bool {
+        if (s.grab == null) if (s.pointer_focus) |surf| {
+            const us: u64 = @as(u64, time_ms) * 1000;
+            broadcast(surf.client, .relative_pointer, p.zwp_relative_pointer_v1.event.relative_motion, 1, .{ @as(u32, @truncate(us >> 32)), @as(u32, @truncate(us)), dx, dy, dx, dy });
+        };
+        return s.active_lock != null;
+    }
+
+    /// The pointer is locked in place (its picture hidden).
+    pub fn pointerLocked(s: *const Server) bool {
+        return s.active_lock != null;
+    }
+
+    /// Puts the lock that should be in effect into effect: the one on the
+    /// surface under the pointer, if its window is on top (and nothing is
+    /// being moved). One that ends is told so.
+    fn updateLock(s: *Server) void {
+        const top = s.topWindow();
+        const want: ?*PointerLock = for (s.locks.items) |lock| {
+            const surf = lock.surface orelse continue;
+            if (lock.spent or surf != s.pointer_focus or s.grab != null) continue;
+            if (top == null or s.rootToplevel(surf) != top) continue;
+            break lock;
+        } else null;
+        if (want == s.active_lock) return;
+        if (s.active_lock) |old| s.endLock(old);
+        if (want) |lock| {
+            s.active_lock = lock;
+            sendTo(lock.client, lock.id, p.zwp_locked_pointer_v1.event.locked, .{});
+        }
+    }
+
+    /// The lock in effect ends: the client is told, and a one-shot lock
+    /// is spent.
+    fn endLock(s: *Server, lock: *PointerLock) void {
+        if (s.active_lock != lock) return;
+        s.active_lock = null;
+        sendTo(lock.client, lock.id, p.zwp_locked_pointer_v1.event.unlocked, .{});
+        if (!lock.persistent) lock.spent = true;
+    }
+
+    /// Ends the lock in effect for good, whatever its lifetime: the user
+    /// wants the pointer back (the shell's way out of a game that keeps
+    /// it).
+    pub fn breakLock(s: *Server) void {
+        const lock = s.active_lock orelse return;
+        s.endLock(lock);
+        lock.spent = true;
+    }
+
+    fn destroyLock(s: *Server, lock: *PointerLock) void {
+        // The client destroyed it: no unlocked event.
+        if (s.active_lock == lock) s.active_lock = null;
+        for (s.locks.items, 0..) |x, i| if (x == lock) {
+            _ = s.locks.swapRemove(i);
+            break;
+        };
+        s.gpa.destroy(lock);
+    }
+
     /// `button` is a Linux button code (BTN_LEFT, ...).
     pub fn pointerButton(s: *Server, time_ms: u32, button: u32, pressed: bool) void {
         if (pressed) {
@@ -2169,6 +2366,7 @@ pub const Server = struct {
     pub fn updateFocus(s: *Server) void {
         s.updateCovered();
         if (s.updatePointerFocus()) s.pointerFrame();
+        s.updateLock();
         // The top window has the keyboard, or its topmost grabbing popup
         // (a menu) has.
         var top: ?*Surface = if (s.topWindow()) |t| t.xdg.surface else null;
@@ -2193,8 +2391,9 @@ pub const Server = struct {
 
     /// The surface at (`x`, `y`) on the screen, if any: the top one there.
     fn surfaceAt(s: *Server, x: f64, y: f64) ?*Surface {
-        // Only what is in the work area can be seen.
-        const wa = s.work_area;
+        // Only what is in the work area can be seen (or, under a fullscreen
+        // window, the screen).
+        const wa = if (s.fullscreenTop()) s.screen() else s.work_area;
         if (x < @as(f64, @floatFromInt(wa.x)) or y < @as(f64, @floatFromInt(wa.y)) or
             x >= @as(f64, @floatFromInt(wa.x + @as(i32, @intCast(wa.width)))) or
             y >= @as(f64, @floatFromInt(wa.y + @as(i32, @intCast(wa.height))))) return null;
@@ -2241,6 +2440,7 @@ pub const Server = struct {
             const local = s.surfaceLocal();
             broadcast(surf.client, .pointer, p.wl_pointer.event.enter, 1, .{ s.nextSerial(), surf.id, local[0], local[1] });
         }
+        s.updateLock();
         return true;
     }
 
@@ -2441,24 +2641,27 @@ pub const Server = struct {
 
     fn configure(s: *Server, c: *Client, t: *Toplevel) void {
         if (t.xdg.version >= 5 and !t.capabilities_sent) {
-            // Of the optional features, only maximizing: no menus,
-            // fullscreen or minimizing.
+            // Of the optional features, maximizing and fullscreen: no
+            // menus or minimizing.
             if (c.send(t.id, p.xdg_toplevel.event.wm_capabilities)) |m0| {
                 var e = m0;
-                var caps: [4]u8 = undefined;
-                std.mem.writeInt(u32, &caps, p.xdg_toplevel.wm_capabilities.maximize, .little);
+                var caps: [8]u8 = undefined;
+                std.mem.writeInt(u32, caps[0..4], p.xdg_toplevel.wm_capabilities.maximize, .little);
+                std.mem.writeInt(u32, caps[4..8], p.xdg_toplevel.wm_capabilities.fullscreen, .little);
                 e.array(&caps).end();
             }
             t.capabilities_sent = true;
         }
-        // The biggest it can usefully be: the work area.
-        if (t.xdg.version >= 4) sendTo(c, t.id, p.xdg_toplevel.event.configure_bounds, .{ @as(i32, @intCast(s.work_area.width)), @as(i32, @intCast(s.work_area.height)) });
+        // The biggest it can usefully be: the work area (or the screen).
+        const bounds = s.areaOf(t);
+        if (t.xdg.version >= 4) sendTo(c, t.id, p.xdg_toplevel.event.configure_bounds, .{ @as(i32, @intCast(bounds.width)), @as(i32, @intCast(bounds.height)) });
         if (c.send(t.id, p.xdg_toplevel.event.configure)) |m0| {
             var e = m0;
             var states: [16]u8 = undefined;
             var n: usize = 0;
             const set = [_]struct { bool, u32 }{
-                .{ t.maximized, p.xdg_toplevel.state.maximized },
+                .{ t.maximized and !t.fullscreen, p.xdg_toplevel.state.maximized },
+                .{ t.fullscreen, p.xdg_toplevel.state.fullscreen },
                 .{ s.resizing(t), p.xdg_toplevel.state.resizing },
                 .{ t.activated, p.xdg_toplevel.state.activated },
                 .{ t.suspended and t.xdg.version >= 6, p.xdg_toplevel.state.suspended },

@@ -233,6 +233,8 @@ fn run(init: std.process.Init.Minimal) !void {
         }
 
         const time_ms: u32 = @truncate((sys.nowNs() - start) / std.time.ns_per_ms);
+        // Under a fullscreen window the dock is hidden, and takes no input.
+        const dock_visible = dock_shown and !server.fullscreenTop();
         for (fds[2 + n_clients ..][0..n_inputs]) |f| if (f.revents != 0) {
             var events: [64]input.Event = undefined;
             for (devices.read(f.fd, &events)) |e| {
@@ -248,7 +250,7 @@ fn run(init: std.process.Init.Minimal) !void {
                     const t = e.touch;
                     const x = t.x * @as(f64, @floatFromInt(renderer.width - 1));
                     const y = t.y * @as(f64, @floatFromInt(renderer.height - 1));
-                    const on_dock = dock_shown and y >= @as(f64, @floatFromInt(dock_y));
+                    const on_dock = dock_visible and y >= @as(f64, @floatFromInt(dock_y));
                     switch (t.kind) {
                         .down => if (on_dock) {
                             dock_touches.set(t.id);
@@ -260,7 +262,7 @@ fn run(init: std.process.Init.Minimal) !void {
                     if (dock_tap == null) continue;
                 }
                 // Buttons over the dock are the shell's.
-                if (dock_tap != null or (dock_shown and e == .button and pointer.y >= @as(f64, @floatFromInt(dock_y)))) {
+                if (dock_tap != null or (dock_visible and e == .button and pointer.y >= @as(f64, @floatFromInt(dock_y)))) {
                     if (dock_tap == null) {
                         pointer.flushMotion(&server, time_ms);
                         if (!e.button.pressed or e.button.code != btn_left) continue;
@@ -284,7 +286,7 @@ fn run(init: std.process.Init.Minimal) !void {
             if (pointer.moved) {
                 pointer.moved = false;
                 renderer.moveCursor(@intFromFloat(pointer.x), @intFromFloat(pointer.y));
-                const in_dock = dock_shown and pointer.y >= @as(f64, @floatFromInt(dock_y));
+                const in_dock = dock_visible and pointer.y >= @as(f64, @floatFromInt(dock_y));
                 if (dock.pointerAt(if (in_dock) pointer.x else null, pointer.y - @as(f64, @floatFromInt(dock_y)))) {
                     dock.draw();
                     renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
@@ -368,12 +370,16 @@ fn run(init: std.process.Init.Minimal) !void {
             defer stats.display_ns += sys.nowNs() - draw_start;
             panels_damaged = false;
             server.frameDrawn();
+            // A fullscreen window on top hides the dock.
+            renderer.hidePanels(server.fullscreenTop());
             // A maximized, full-size window on top goes straight onto the
-            // display, with the dock on a plane below it. Otherwise (or if
-            // the display cannot show it) the frame is composited.
+            // display, with the dock on a plane below it; a fullscreen one,
+            // alone. Otherwise (or if the display cannot show it) the frame
+            // is composited.
             var on_screen: ?bool = null;
             if (top) |t| if (server.scanoutBuffer(t)) |b| {
-                if (renderer.showDirect(b.dmabuf.?, server.work_area.x, server.work_area.y)) |at_once| {
+                const at = server.windowRect(t);
+                if (renderer.showDirect(b.dmabuf.?, at.x, at.y)) |at_once| {
                     server.holdBuffer(b);
                     scanout.queued = b;
                     stats.direct += 1;
@@ -527,13 +533,18 @@ const FrameStats = struct {
 const max_clients = 32;
 
 /// The pointer: input events move it and go to the server.
+/// KEY_LEFTMETA (linux/input-event-codes.h).
+const key_left_meta = 125;
+
 const Pointer = struct {
     x: f64,
     y: f64,
     max_x: f64,
     max_y: f64,
-    /// Motion not sent to the server yet.
+    /// Motion not sent to the server yet, and how much.
     pending_motion: bool = false,
+    dx: f64 = 0,
+    dy: f64 = 0,
     /// Pointer events since the last frame.
     in_frame: bool = false,
     /// Moved since the cursor was last moved.
@@ -542,10 +553,9 @@ const Pointer = struct {
     fn handle(ptr: *Pointer, server: *server_mod.Server, time_ms: u32, e: input.Event) void {
         switch (e) {
             .motion => |d| {
-                ptr.x = std.math.clamp(ptr.x + @as(f64, @floatFromInt(d[0])), 0, ptr.max_x);
-                ptr.y = std.math.clamp(ptr.y + @as(f64, @floatFromInt(d[1])), 0, ptr.max_y);
+                ptr.dx += @floatFromInt(d[0]);
+                ptr.dy += @floatFromInt(d[1]);
                 ptr.pending_motion = true;
-                ptr.moved = true;
             },
             .button => |b| {
                 ptr.flushMotion(server, time_ms);
@@ -557,7 +567,12 @@ const Pointer = struct {
                 server.pointerAxis(time_ms, a.axis, a.value);
                 ptr.in_frame = true;
             },
-            .key => |k| server.keyboardKey(time_ms, k.code, k.pressed),
+            .key => |k| {
+                // The Super key takes the pointer back from a game that
+                // has it locked.
+                if (k.code == key_left_meta and k.pressed) server.breakLock();
+                server.keyboardKey(time_ms, k.code, k.pressed);
+            },
             // Touches are handled before.
             .touch => {},
             .frame => {
@@ -568,12 +583,22 @@ const Pointer = struct {
         }
     }
 
-    /// X and Y motion arrive as separate events; they become one.
+    /// X and Y motion arrive as separate events; they become one. A
+    /// locked pointer stays where it is (the client hears only how it
+    /// moved).
     fn flushMotion(ptr: *Pointer, server: *server_mod.Server, time_ms: u32) void {
         if (!ptr.pending_motion) return;
         ptr.pending_motion = false;
-        server.pointerMotion(time_ms, ptr.x, ptr.y);
         ptr.in_frame = true;
+        const dx = ptr.dx;
+        const dy = ptr.dy;
+        ptr.dx = 0;
+        ptr.dy = 0;
+        if (server.pointerRelative(time_ms, dx, dy)) return;
+        ptr.x = std.math.clamp(ptr.x + dx, 0, ptr.max_x);
+        ptr.y = std.math.clamp(ptr.y + dy, 0, ptr.max_y);
+        ptr.moved = true;
+        server.pointerMotion(time_ms, ptr.x, ptr.y);
     }
 };
 
