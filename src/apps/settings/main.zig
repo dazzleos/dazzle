@@ -120,6 +120,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
     var installed: [64]bool = undefined;
     // Updates of the system, and which system this is.
     var updater: update.Updater = .init(gpa, build_info.apps_url, sys.system.Version.init(build_info.commit_time, build_info.commit) orelse .{});
+    var video_memory_failed = false;
     var date_buf: [32]u8 = undefined;
     var build_buf: [64]u8 = undefined;
     const build = std.fmt.bufPrint(&build_buf, "{s} ({s})", .{ build_info.commit, update.formatDate(&date_buf, build_info.commit_time) }) catch build_info.commit;
@@ -246,6 +247,20 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             } else print("dazzle-settings: the system did not answer\n", .{});
             dirty = true;
         }
+        // Video memory chosen: the system manager has the next start use
+        // it, and says what that now is.
+        if (actions.video_memory) |mib| {
+            actions.video_memory = null;
+            var req_buf: [32]u8 = undefined;
+            const req = std.fmt.bufPrint(&req_buf, "video_memory {d}\n", .{mib}) catch "";
+            const r = sys.system.ask(req, 3000);
+            if (r) |have| if (!have.denied) {
+                updater.report = have;
+            };
+            video_memory_failed = if (r) |have| have.denied or have.video_memory_next != mib else true;
+            print("dazzle-settings: video memory {d} MiB from the next start{s}\n", .{ mib, if (video_memory_failed) ": refused" else "" });
+            dirty = true;
+        }
         if (view.shownPage(window_ui) == .system and !updater.asked) {
             updater.check(false);
             dirty = true;
@@ -313,6 +328,11 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
                     .busy = apps.busy(),
                     .message = apps.message(),
                     .source = build_info.apps_url,
+                },
+                .video_memory = .{
+                    .now = if (updater.report) |r| r.video_memory_now else null,
+                    .next = if (updater.report) |r| r.video_memory_next else null,
+                    .failed = video_memory_failed,
                 },
                 .update = .{
                     .status = updater.status(),

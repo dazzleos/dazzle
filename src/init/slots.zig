@@ -280,6 +280,107 @@ pub fn retarget(cmdline: []const u8, to: u8, out: []u8) []const u8 {
     return w.buffered();
 }
 
+/// The video memory a kernel command line gives (its cma=), in MiB; null
+/// if it gives none (the device tree's then) or one not in whole MiB.
+pub fn cmaMiB(cmdline: []const u8) ?u16 {
+    const key = "cma=";
+    var found: ?u16 = null;
+    var it = std.mem.tokenizeAny(u8, cmdline, " \n");
+    while (it.next()) |arg| {
+        if (!std.mem.startsWith(u8, arg, key)) continue;
+        const v = arg[key.len..];
+        if (v.len < 2) continue;
+        const n = std.fmt.parseInt(u32, v[0 .. v.len - 1], 10) catch continue;
+        // The last one counts, as for the kernel.
+        found = switch (v[v.len - 1]) {
+            'M', 'm' => std.math.cast(u16, n),
+            'G', 'g' => std.math.cast(u16, n * 1024),
+            else => null,
+        };
+    }
+    return found;
+}
+
+/// A kernel command line with cma= set to `mib` MiB (changed, or added).
+pub fn setCma(cmdline: []const u8, mib: u16, out: []u8) []const u8 {
+    const key = "cma=";
+    var w: std.Io.Writer = .fixed(out);
+    var found = false;
+    var it = std.mem.tokenizeAny(u8, cmdline, " \n");
+    var first = true;
+    while (it.next()) |arg| {
+        const is_cma = std.mem.startsWith(u8, arg, key);
+        // Only one.
+        if (is_cma and found) continue;
+        if (!first) w.writeByte(' ') catch {};
+        first = false;
+        if (is_cma) {
+            w.print("{s}{d}M", .{ key, mib }) catch {};
+            found = true;
+        } else w.writeAll(arg) catch {};
+    }
+    if (!found) w.print("{s}{s}{d}M", .{ if (first) "" else " ", key, mib }) catch {};
+    w.writeByte('\n') catch {};
+    return w.buffered();
+}
+
+/// The video memory `slot` starts with (its cmdline.txt's cma=).
+pub fn videoMemory(slot: u8) ?u16 {
+    var dir_buf: [96]u8 = undefined;
+    var path_buf: [128]u8 = undefined;
+    const path = filePath(&path_buf, slotPath(&dir_buf, slot, ""), "cmdline.txt") orelse return null;
+    var buf: [1024]u8 = undefined;
+    return cmaMiB(sys.readFile(path, &buf) orelse return null);
+}
+
+/// Has both slots start with `mib` MiB of video memory: each one's
+/// cmdline.txt changed, written as cmdline.txt.new, then renamed over it
+/// (both, so it holds whichever starts: the one running, an update, or the
+/// one before if an update does not work). The boot partition must be
+/// writable.
+pub fn setVideoMemory(mib: u16) !void {
+    var wrote = false;
+    for ("ab") |slot| {
+        var dir_buf: [96]u8 = undefined;
+        var path_buf: [128]u8 = undefined;
+        var tmp_buf: [128]u8 = undefined;
+        const dir = slotPath(&dir_buf, slot, "");
+        const path = filePath(&path_buf, dir, "cmdline.txt") orelse return error.NameTooLong;
+        var buf: [1024]u8 = undefined;
+        const cmdline = sys.readFile(path, &buf) orelse continue;
+        var out: [1024 + 16]u8 = undefined;
+        const changed = setCma(cmdline, mib, &out);
+        const tmp = filePath(&tmp_buf, dir, "cmdline.txt.new") orelse return error.NameTooLong;
+        _ = linux.unlink(tmp);
+        const fd = try sys.open(tmp, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true });
+        {
+            defer sys.close(fd);
+            try writeAll(fd, changed);
+            _ = try sys.check(linux.fsync(fd));
+        }
+        _ = try sys.check(linux.rename(tmp, path));
+        if (sys.open(dir, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true })) |d| {
+            _ = linux.fsync(d);
+            sys.close(d);
+        } else |_| {}
+        wrote = true;
+    }
+    if (!wrote) return error.NotFound;
+}
+
+test "the command line's cma= is the video memory" {
+    try std.testing.expectEqual(@as(?u16, 128), cmaMiB("loglevel=6 cma=128M rdinit=/os/init\n"));
+    try std.testing.expectEqual(@as(?u16, 1024), cmaMiB("cma=1G"));
+    try std.testing.expectEqual(@as(?u16, 256), cmaMiB("cma=64M cma=256M"));
+    try std.testing.expectEqual(@as(?u16, null), cmaMiB("loglevel=6"));
+    try std.testing.expectEqual(@as(?u16, null), cmaMiB("cma=65536K"));
+    var out: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("loglevel=6 cma=256M rdinit=/os/init dazzle.slot=a\n", setCma("loglevel=6 cma=128M rdinit=/os/init dazzle.slot=a\n", 256, &out));
+    try std.testing.expectEqualStrings("loglevel=6 cma=64M\n", setCma("loglevel=6\n", 64, &out));
+    try std.testing.expectEqualStrings("cma=96M x\n", setCma("cma=1G x cma=64M", 96, &out));
+    try std.testing.expectEqualStrings("cma=192M\n", setCma("", 192, &out));
+}
+
 test "config.txt's os_prefix picks the slot" {
     const config = "# Dazzle\narm_64bit=0\nos_prefix=slot-a/\ncamera_auto_detect=1\n";
     try std.testing.expectEqual(@as(?u8, 'a'), osPrefix(config));

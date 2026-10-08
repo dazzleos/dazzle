@@ -19,6 +19,8 @@
 //!                              the language and keyboard (setup and
 //!                              settings): kept in /data/system/locale
 //!                              (once there is a /data)
+//!     video_memory <MiB>       how much memory the GPU may have, from the
+//!                              next start (settings): see `video_memory`
 //!
 //! and the report:
 //!
@@ -30,6 +32,7 @@
 //!     version b -
 //!     update none
 //!     locale en-GB gb
+//!     video_memory 128 256
 //!     end
 //!
 //! "storage" is how the card's free space is: "none" (there is no card),
@@ -39,7 +42,9 @@
 //! "version" what each slot holds ("-": nothing, or not known). "update"
 //! is how installing an update goes: "none", "installing", "ready" (the
 //! next start runs it) or "failed" with why ("did_not_start" when it was
-//! installed but did not work, and the system before is running again). A client the manager does not
+//! installed but did not work, and the system before is running again).
+//! "video_memory" is the memory the GPU may have now and from the next
+//! start, in MiB ("-": not known). A client the manager does not
 //! serve, or a request it does not serve that client, gets "denied\n".
 
 const std = @import("std");
@@ -73,6 +78,22 @@ pub const update_dir = "/data/update";
 /// compressed with xz (see tools/mkos.zig).
 pub const update_archive = update_dir ++ "/dazzle-os.tar.xz";
 
+/// Video memory: the kernel's CMA pool, which every buffer the GPU uses
+/// comes from (the V3D has no MMU), and which the rest of the system can
+/// use only for memory it can move. Its size is cma=<n>M on the kernel's
+/// command line, the slots' cmdline.txt, so a change applies from the next
+/// start (and updates keep it: they copy the running slot's command line).
+/// The sizes offered, in MiB.
+pub const video_memory_sizes = [_]u16{ 64, 96, 128, 192, 256, 384 };
+
+/// Whether `mib` may be chosen on a computer with `ram_mib` of memory (as
+/// Linux has it): one of the sizes, and no more than half of it, so the
+/// system and the apps keep enough.
+pub fn videoMemoryAllowed(mib: u16, ram_mib: u64) bool {
+    if (std.mem.indexOfScalar(u16, &video_memory_sizes, mib) == null) return false;
+    return @as(u64, mib) * 2 <= ram_mib;
+}
+
 pub const StorageState = enum { none, unprepared, preparing, ready, failed };
 
 pub const Failure = enum {
@@ -105,6 +126,8 @@ pub const Request = union(enum) {
     update: [64]u8,
     restart,
     locale: locale.Settings,
+    /// In MiB, one of `video_memory_sizes`.
+    video_memory: u16,
 
     pub fn parse(line: []const u8) ?Request {
         var f = std.mem.tokenizeAny(u8, line, " \n");
@@ -117,6 +140,11 @@ pub const Request = union(enum) {
             .language = locale.Language.fromCode(f.next() orelse return null) orelse return null,
             .keyboard = locale.Keyboard.fromCode(f.next() orelse return null) orelse return null,
         } };
+        if (std.mem.eql(u8, kind, "video_memory")) {
+            const mib = std.fmt.parseInt(u16, f.next() orelse return null, 10) catch return null;
+            if (std.mem.indexOfScalar(u16, &video_memory_sizes, mib) == null) return null;
+            return .{ .video_memory = mib };
+        }
         if (std.mem.eql(u8, kind, "update")) {
             const hex = f.next() orelse return null;
             if (hex.len != 64) return null;
@@ -133,7 +161,7 @@ pub const Request = union(enum) {
         return switch (r) {
             .status => true,
             .prepare, .finish => client == .setup,
-            .update, .restart => client == .settings,
+            .update, .restart, .video_memory => client == .settings,
             .locale => true,
         };
     }
@@ -237,6 +265,9 @@ pub const Report = struct {
     update_failure: UpdateFailure = .none,
     /// The language and keyboard chosen.
     locale: locale.Settings = .{},
+    /// The memory the GPU may have now, and from the next start, in MiB.
+    video_memory_now: ?u16 = null,
+    video_memory_next: ?u16 = null,
     /// The manager refused the client.
     denied: bool = false,
 
@@ -268,6 +299,8 @@ pub const Report = struct {
         w.print("update {s}", .{@tagName(r.update)}) catch {};
         if (r.update == .failed) w.print(" {s}", .{@tagName(r.update_failure)}) catch {};
         w.print("\nlocale {s} {s}", .{ r.locale.language.code(), r.locale.keyboard.code() }) catch {};
+        w.writeAll("\nvideo_memory") catch {};
+        for ([_]?u16{ r.video_memory_now, r.video_memory_next }) |v| if (v) |mib| w.print(" {d}", .{mib}) catch {} else w.writeAll(" -") catch {};
         w.writeAll("\nend\n") catch {};
         return w.buffered();
     }
@@ -302,6 +335,9 @@ pub const Report = struct {
             } else if (std.mem.eql(u8, kind, "locale")) {
                 if (locale.Language.fromCode(f.next() orelse continue)) |l| r.locale.language = l;
                 if (locale.Keyboard.fromCode(f.next() orelse continue)) |k| r.locale.keyboard = k;
+            } else if (std.mem.eql(u8, kind, "video_memory")) {
+                r.video_memory_now = std.fmt.parseInt(u16, f.next() orelse continue, 10) catch null;
+                r.video_memory_next = std.fmt.parseInt(u16, f.next() orelse continue, 10) catch null;
             } else if (std.mem.eql(u8, kind, "update")) {
                 r.update = std.meta.stringToEnum(UpdateState, f.next() orelse continue) orelse .none;
                 if (r.update == .failed) r.update_failure = std.meta.stringToEnum(UpdateFailure, f.next() orelse "io") orelse .io;
@@ -382,7 +418,7 @@ test "requests and reports go through the socket" {
     var r: Report = .{ .storage = .preparing, .progress = 42, .hostname = Hostname.parse("awesome-elephant").? };
     var buf: [256]u8 = undefined;
     const text = r.write(&buf);
-    try testing.expectEqualStrings("storage preparing 42\nhostname awesome-elephant\nversion a -\nversion b -\nupdate none\nlocale en-US us\nend\n", text);
+    try testing.expectEqualStrings("storage preparing 42\nhostname awesome-elephant\nversion a -\nversion b -\nupdate none\nlocale en-US us\nvideo_memory - -\nend\n", text);
     const back = Report.parse(text).?;
     try testing.expectEqual(StorageState.preparing, back.storage);
     try testing.expectEqual(@as(u8, 42), back.progress);
@@ -408,6 +444,20 @@ test "requests and reports go through the socket" {
     const failed_update = Report.parse(r.write(&buf)).?;
     try testing.expectEqual(UpdateFailure.archive, failed_update.update_failure);
     try testing.expect(failed_update.version('a') == null);
+    // Video memory: now, and from the next start.
+    r = .{ .video_memory_now = 128, .video_memory_next = 256 };
+    const vm = Report.parse(r.write(&buf)).?;
+    try testing.expectEqual(@as(?u16, 128), vm.video_memory_now);
+    try testing.expectEqual(@as(?u16, 256), vm.video_memory_next);
+    try testing.expectEqual(@as(u16, 192), Request.parse("video_memory 192\n").?.video_memory);
+    try testing.expect(Request.parse("video_memory 100\n") == null);
+    try testing.expect(Request.parse("video_memory\n") == null);
+    try testing.expect(Request.allowedFor(.{ .video_memory = 128 }, .settings));
+    try testing.expect(!Request.allowedFor(.{ .video_memory = 128 }, .setup));
+    try testing.expect(videoMemoryAllowed(256, 940));
+    try testing.expect(!videoMemoryAllowed(256, 430));
+    try testing.expect(videoMemoryAllowed(192, 430));
+    try testing.expect(!videoMemoryAllowed(100, 940));
     try testing.expect(Version.parse("soon abc") == null);
     try testing.expect(Version.parse("12 a/b") == null);
 }

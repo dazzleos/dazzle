@@ -221,6 +221,13 @@ sets `cma=128M`. That leaves about 380 MB for everything else on the
 512 MB boards, but only about 128 MB on the 256 MB Pi 1 A and A+. The
 system itself is in memory too: the initramfs is about 5 MB.
 
+The size can be changed on Settings' Resources page (64 to 384 MB, no more
+than half the computer's memory): more for running many apps at once, less
+to leave more for one. Settings asks the system manager, which rewrites
+`cma=` in both OS slots' `cmdline.txt` (updates copy the running slot's, so
+they keep it); it applies from the next start, and Settings offers to
+restart.
+
 Graphics memory is saved where it can be:
 
 - Windows are BGR565, 16 bits a pixel: half the memory of 32-bit colour,

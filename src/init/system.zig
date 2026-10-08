@@ -77,6 +77,8 @@ pub fn start(card: bool, mounted: bool, slot: ?u8, setup_done: bool) ?linux.pid_
     sys.ignoreBrokenPipes();
     var m: Manager = .{ .report = .{ .storage = if (mounted) .ready else if (card) .unprepared else .none, .slot = if (card) slot orelse 'a' else null }, .finished = setup_done };
     m.readSlots();
+    var cmdline: [1024]u8 = undefined;
+    if (sys.readFile("/proc/cmdline", &cmdline)) |text| m.report.video_memory_now = slots.cmaMiB(text);
     m.report.locale = locale.load();
     // The last update did not work (and the system before is running).
     if (storage.exists(trial.failed_marker)) {
@@ -120,6 +122,7 @@ const Manager = struct {
             m.report.next = running;
         };
         for (&m.report.versions, "ab") |*v, s| v.* = slots.version(s);
+        m.report.video_memory_next = slots.videoMemory(m.report.next orelse running);
     }
 
     fn run(m: *Manager) !void {
@@ -197,7 +200,31 @@ const Manager = struct {
                 m.report.locale = l;
                 m.keepLocale();
             },
+            .video_memory => |mib| m.setVideoMemory(mib),
         }
+    }
+
+    /// Has the next start give the GPU `mib` MiB (in both slots'
+    /// cmdline.txt). Not while the boot partition is being written for
+    /// something else (making the other slot, or an update); the report
+    /// says what the next start has, whether it changed or not.
+    fn setVideoMemory(m: *Manager, mib: u16) void {
+        var info: linux.Sysinfo = undefined;
+        if (linux.errno(linux.sysinfo(&info)) != .SUCCESS) return;
+        const ram_mib = @as(u64, info.totalram) * @max(info.mem_unit, 1) >> 20;
+        if (!proto.videoMemoryAllowed(mib, ram_mib)) return;
+        if (m.copier != null or m.installer != null) return;
+        slots.remount(false) catch |err| {
+            print("dazzle: system: cannot write the boot partition: {s}\n", .{@errorName(err)});
+            return;
+        };
+        defer slots.remount(true) catch {};
+        defer m.readSlots();
+        slots.setVideoMemory(mib) catch |err| {
+            print("dazzle: system: cannot set the video memory: {s}\n", .{@errorName(err)});
+            return;
+        };
+        print("dazzle: system: video memory {d} MiB from the next start\n", .{mib});
     }
 
     /// Keeps the language and keyboard in /data/system (if it is there

@@ -24,6 +24,7 @@ const gpio = @import("gpio.zig");
 const GpioPage = @import("gpio_view.zig").GpioPage;
 const log = @import("log.zig");
 const BoardView = @import("board_view.zig").BoardView;
+const proto = @import("sys").system;
 
 /// The storage bar's colours (the system's is the theme's primary).
 pub const apps_color = gfx.Color.argb(0xff4fd8c4);
@@ -48,6 +49,8 @@ pub const Actions = struct {
     locale: ?locale.Settings = null,
     /// A GPIO pin to set up, and how.
     gpio: ?GpioChange = null,
+    /// The video memory to have from the next start, in MiB.
+    video_memory: ?u16 = null,
 
     pub const GpioChange = struct { pin: u6, mode: gpio.Mode };
 
@@ -61,6 +64,14 @@ pub const Actions = struct {
 
     fn restartNow(a: *Actions) void {
         a.restart = true;
+    }
+
+    fn videoMemorySetter(comptime mib: u16) fn (*Actions) void {
+        return struct {
+            fn set(a: *Actions) void {
+                a.video_memory = mib;
+            }
+        }.set;
     }
 
     pub const AppName = struct {
@@ -117,6 +128,15 @@ pub const Apps = struct {
     source: []const u8 = "",
 };
 
+/// Video memory (see `sys.system.video_memory_sizes`), in MiB: what the GPU
+/// may have now, and from the next start; null if not known.
+pub const VideoMemory = struct {
+    now: ?u16 = null,
+    next: ?u16 = null,
+    /// Asking for a change failed.
+    failed: bool = false,
+};
+
 /// What the System page shows of updates.
 pub const Update = struct {
     status: update.Status = .unknown,
@@ -146,6 +166,7 @@ pub const Settings = struct {
     /// The apps that can be installed, and how installing goes.
     apps: Apps = .{},
     update: Update = .{},
+    video_memory: VideoMemory = .{},
     /// The title bar's buttons (close, and maximize, which shows whether
     /// the window is), and pressing the bar (to move the window).
     on_close: ?ui.Callback = null,
@@ -375,8 +396,45 @@ pub const Settings = struct {
             b.item("Temperature", temperature),
             b.meter("Memory", mem, fraction(u.memUsed(), u.mem_total)),
             b.meter("GPU memory", gpu, fraction(u.gpuUsed(), u.gpu_total)),
+            self.videoMemoryRow(b),
             b.storage(u.storage),
         });
+    }
+
+    /// How much memory the GPU may have: what it has now, what it has from
+    /// the next start (with Restart, if that is different), and a menu of
+    /// the sizes to choose from.
+    fn videoMemoryRow(self: *const Settings, b: Builder) ui.Widget {
+        const cx = b.cx;
+        const t = cx.theme();
+        const vm = self.video_memory;
+        var b1: [32]u8 = undefined;
+        var b2: [32]u8 = undefined;
+        const pending = vm.next != null and vm.now != vm.next;
+        const text = if (vm.failed)
+            "It could not be changed"
+        else if (pending)
+            cx.fmt("{s} after a restart (now {s})", .{ info.formatBytes(&b1, @as(u64, vm.next.?) << 20), if (vm.now) |n| info.formatBytes(&b2, @as(u64, n) << 20) else "unknown" })
+        else if (vm.next orelse vm.now) |n|
+            cx.fmt("{s}", .{info.formatBytes(&b1, @as(u64, n) << 20)})
+        else
+            "Unknown";
+        const ram_mib = self.usage.mem_total >> 20;
+        var buttons: std.ArrayList(ui.Widget) = .empty;
+        const a = cx.ui.arena();
+        buttons.append(a, cx.make(VideoMemoryMenu{ .chosen = vm.next, .ram_mib = ram_mib, .actions = if (vm.next != null) self.actions else null })) catch {};
+        if (pending) buttons.append(a, cx.make(ui.OutlinedButton{ .label = "Restart", .icon = .restart_alt, .on_press = if (self.actions) |acts| .of(acts, Actions.restartNow) else null })) catch {};
+        return cx.make(ui.Row{ .cross_axis_alignment = .start, .spacing = 12, .children = &.{
+            b.label("Video memory"),
+            cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 8, .children = &.{
+                b.value(text),
+                cx.make(ui.Text{
+                    .text = "What the GPU draws windows and pictures in. More lets more apps run at once; less leaves more memory for each app. A change applies when the computer restarts.",
+                    .style = .{ .size = 14, .color = t.on_surface_variant },
+                }),
+                cx.make(ui.Row{ .spacing = 8, .main_axis_size = .min, .children = buttons.items }),
+            } }) }),
+        } });
     }
 
     /// The system's log, newest first: when each message came (since the
@@ -1074,6 +1132,44 @@ fn fraction(part: u64, whole: u64) f32 {
     return @as(f32, @floatFromInt(part)) / @as(f32, @floatFromInt(whole));
 }
 
+/// Change, for video memory: pressing it offers the sizes in a menu (those
+/// too big for the computer's memory dimmed).
+const VideoMemoryMenu = struct {
+    chosen: ?u16,
+    ram_mib: u64,
+    /// None if it cannot be changed (the system manager has not said).
+    actions: ?*Actions,
+
+    pub const State = struct {
+        node: ?*ui.Node = null,
+        actions: ?*Actions = null,
+        chosen: ?u16 = null,
+        ram_mib: u64 = 0,
+
+        fn open(st: *State) void {
+            const n = st.node orelse return;
+            const acts = st.actions orelse return;
+            var items: [proto.video_memory_sizes.len]ui.menu.Item = undefined;
+            inline for (proto.video_memory_sizes, &items) |mib, *item| {
+                const chosen = st.chosen == mib;
+                // (The menu keeps the labels: these last.)
+                item.* = .{
+                    .label = if (chosen) std.fmt.comptimePrint("{d} MB (chosen)", .{mib}) else std.fmt.comptimePrint("{d} MB", .{mib}),
+                    .enabled = !chosen and proto.videoMemoryAllowed(mib, st.ram_mib),
+                    .on_press = .of(acts, Actions.videoMemorySetter(mib)),
+                };
+            }
+            const pos = n.position();
+            n.ui.openMenu(n, .{ pos[0], pos[1] + n.size.h }, &items);
+        }
+    };
+
+    pub fn build(self: *const VideoMemoryMenu, cx: *ui.Context, state: *State) ui.Widget {
+        state.* = .{ .node = cx.node, .actions = self.actions, .chosen = self.chosen, .ram_mib = self.ram_mib };
+        return cx.make(ui.OutlinedButton{ .label = "Change", .icon = .expand_more, .on_press = if (self.actions != null) .of(state, State.open) else null });
+    }
+};
+
 /// Makes the cards and their rows.
 const Builder = struct {
     cx: *ui.Context,
@@ -1367,13 +1463,13 @@ test "everything is shown, and fits from the smallest window to the biggest" {
     for (std.enums.values(Page)) |page| {
         for (test_sizes) |size| {
             frame_no += 1;
-            u.frame(size[0], size[1], frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps });
+            u.frame(size[0], size[1], frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps, .video_memory = .{ .now = 128, .next = 192 } });
             try testing.expect(!overflows(u.root.?));
         }
         // What shows maximized (in a smaller window, rows of the lists
         // further down are not made).
         frame_no += 1;
-        u.frame(1920, 1036, frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps });
+        u.frame(1920, 1036, frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps, .video_memory = .{ .now = 128, .next = 192 } });
         texts(u.root.?, &all);
         // The next page, from its tab.
         if (@as(usize, @intFromEnum(page)) + 1 < std.enums.values(Page).len) {
@@ -1427,8 +1523,8 @@ test "everything is shown, and fits from the smallest window to the biggest" {
     }
     // In a small window, only the networks that show are made.
     u.root.?.state(Settings.State).page = .wifi;
-    u.frame(min_size[0], min_size[1], frame_no + 1, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps });
-    u.frame(min_size[0], min_size[1], frame_no + 2, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps });
+    u.frame(min_size[0], min_size[1], frame_no + 1, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps, .video_memory = .{ .now = 128, .next = 192 } });
+    u.frame(min_size[0], min_size[1], frame_no + 2, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps, .video_memory = .{ .now = 128, .next = 192 } });
     try testing.expect(findText(u.root.?, "Home") != null);
     try testing.expect(findText(u.root.?, "bad?name") == null);
     // The build is in the system card, not beside the title; the hardware
@@ -1723,6 +1819,43 @@ test "updates: offered, downloaded, installed, then a restart" {
     settings.update = .{};
     u.frame(1920, 960, 6, settings);
     try testing.expect(findText(u.root.?, "Not checked yet") != null);
+}
+
+test "video memory: choosing a size, then a restart" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    const d = sample();
+    var actions: Actions = .{};
+    var settings: Settings = .{ .commit = "de14aa2", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .video_memory = .{ .now = 128, .next = 128 } };
+    u.frame(1280, 720, 0, settings);
+    u.root.?.state(Settings.State).page = .resources;
+    u.frame(1280, 720, 1, settings);
+    try testing.expect(findText(u.root.?, "128 MB") != null);
+    try testing.expect(findText(u.root.?, "Restart") == null);
+    click(u, up(findText(u.root.?, "Change").?, ui.OutlinedButton).?);
+    u.frame(1280, 720, 2, settings);
+    // 434 MB of memory: no more than half of it.
+    const menu = u.menu.?.items;
+    try testing.expectEqualStrings("128 MB (chosen)", menu[2].label);
+    try testing.expect(!menu[2].enabled);
+    try testing.expect(menu[3].enabled and !menu[4].enabled);
+    click(u, findText(u.menu_root.?, "192 MB").?);
+    try testing.expectEqual(@as(?u16, 192), actions.video_memory);
+
+    settings.video_memory = .{ .now = 128, .next = 192 };
+    u.frame(1280, 720, 3, settings);
+    try testing.expect(findText(u.root.?, "192 MB after a restart (now 128 MB)") != null);
+    click(u, up(findText(u.root.?, "Restart").?, ui.OutlinedButton).?);
+    try testing.expect(actions.restart);
+
+    // Not known: nothing to change.
+    settings.video_memory = .{};
+    u.frame(1280, 720, 4, settings);
+    try testing.expect(findText(u.root.?, "Unknown") != null);
+    actions = .{};
+    click(u, up(findText(u.root.?, "Change").?, ui.OutlinedButton).?);
+    try testing.expect(u.menu == null);
 }
 
 test "the board, drawn: picking a part says what it is" {
