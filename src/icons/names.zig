@@ -70,6 +70,8 @@ pub const Icon = enum {
     // The camera.
     photo_camera,
     no_photography,
+    // Blocks.
+    landscape,
     // The Data Logger.
     show_chart,
     fiber_manual_record,

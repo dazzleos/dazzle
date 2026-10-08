@@ -211,6 +211,59 @@ textures into the screen's buffer and shows it with kernel mode setting,
 flipping between two buffers at vertical blank. Apps and the shell redraw
 only what changed.
 
+## Blocks, the voxel game
+
+Blocks (`src/apps/blocks/`) is a building game in the manner of Minecraft's
+creative mode: an island to change a block at a time, from a palette of 36.
+It is there to show what the GPU can do, so what it draws is chosen for
+what the VideoCore IV does well, and left out where it would not.
+
+- **A small world.** 128 by 128 blocks and 64 high, in 64 chunks of 16 by
+  16 (the full height). The sea goes on past the edge to the horizon, as a
+  ring of quads that are only water, not blocks. You can see across the
+  whole world: fog from 55 blocks out hides where it stops.
+- **Few vertices.** Only faces next to something they can be seen through
+  are drawn. Neighbouring faces that look the same are merged into one
+  quad (greedy meshing), cutting the island to about 38,000 quads. A
+  vertex is six floats: the GPU only reads float attributes, so the tile,
+  shade, light and how it moves are packed into one float, which the
+  vertex shader takes apart. One index buffer serves every quad.
+- **Lighting per vertex, not per pixel.** Ambient occlusion darkens
+  corners in nooks. Light is smooth across faces: Minecraft-style
+  sunlight and lamp light, kept per block and spread when blocks change.
+  The sun, sky and fog are worked out per vertex too. The fragment shader
+  is a texture read and a multiply-add, because it runs for every pixel.
+- **Shading each pixel about once.** Solid blocks are drawn nearest
+  first, with the GPU's early depth test on, so what is hidden is not
+  shaded. The sky goes after them, only where they left it showing. Its
+  sun, moon and stars are per pixel, but only over that part.
+- **Water by the vertex.** Waves move the surface's vertices, and its
+  colour is worked out per vertex: turquoise in the shallows and dark in
+  the deep, the sky reflected more at a glancing angle, and the sun
+  glinting. The fragment shader passes the colour on.
+- **Moving things for free.** Leaves and plants sway in the wind in the
+  vertex shader. Time of day is a matter of uniforms: sunrise, a red
+  sunset, and night with stars and lamps' warm light.
+- **One frame.** The GPU keeps depth only within a frame (it is never
+  stored), so the whole world is drawn in one. A chunk out of view or
+  past the fog is not drawn. The whole island in view is about 150 draws
+  and 100,000 triangles.
+- **Left out.** There are no mipmaps (the textures are pixel art, drawn
+  nearest), no shadows, and no flowing water. Leaves are drawn solid
+  (cutting holes in a fragment shader is not supported yet). Glass and
+  plants are blended, nearest last, but not sorted face by face.
+
+The textures are drawn by code (`textures.zig`). The world is made from a
+seed: an island with beaches, hills, a snowy mountain, trees and flowers.
+It is saved in the user's files (`Island.blocks`), every minute it has
+changed and on closing.
+
+Every change to the world goes through one function (`Game.edit`), ready
+for a game over the network to send and receive.
+
+The tests draw the island with the real compiled shaders, run in the QPU
+simulator (`preview.zig`), so how it looks can be checked without a Pi.
+
 ## Memory
 
 The GPU has no MMU, so every buffer it uses (the screen, the windows,

@@ -333,6 +333,25 @@ const Lowerer = struct {
         return l.exp2(l.mul(b, l.log2(a)));
     }
 
+    /// Rounds down: truncated (towards zero, as ftoi does), then one less
+    /// in the lanes where that went up (negative numbers with a fraction).
+    fn floor(l: *Lowerer, inst: spirv.Inst, v: Val) Error!Val {
+        switch (v) {
+            .scalar => |x| {
+                if (l.constF(x)) |c| return .{ .scalar = l.k(@floor(c)) };
+                const t: Val = .{ .scalar = l.s.unary(.itof, l.s.unary(.ftoi, x)) };
+                const over = try l.compare(inst, t, v, .gt);
+                return l.select(inst, over, .{ .scalar = l.sub(t.scalar, l.k(1)) }, t);
+            },
+            .list => |items| {
+                const out = try l.a.alloc(Val, items.len);
+                for (items, out) |item, *o| o.* = try l.floor(inst, item);
+                return .{ .list = out };
+            },
+            else => return l.fail(inst, "floor of a value that is not a float", .{}),
+        }
+    }
+
     fn dot(l: *Lowerer, a: Val, b: Val) Error!Value {
         if (a != .list or b != .list) return l.mul(l.asScalar(a), l.asScalar(b));
         var sum = l.mul(l.asScalar(a.list[0]), l.asScalar(b.list[0]));
@@ -349,6 +368,7 @@ const Lowerer = struct {
         if (args.len < need) return error.InvalidSpirv;
         return switch (number) {
             Glsl.fabs => l.map1(args[0], fabs),
+            Glsl.floor => l.floor(inst, args[0]),
             Glsl.sqrt => l.map1(args[0], sqrt),
             Glsl.inverse_sqrt => l.map1(args[0], rsqrt),
             Glsl.exp2 => l.map1(args[0], exp2),

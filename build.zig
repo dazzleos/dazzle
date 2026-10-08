@@ -234,7 +234,7 @@ fn addGpuModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
 }
 
 /// Who embeds a shader program.
-const ShaderOwner = enum { gfx, demo, shell };
+const ShaderOwner = enum { gfx, demo, shell, blocks };
 
 /// The shader programs: Zig sources compiled to SPIR-V, then for the GPU
 /// by tools/shaderc.zig (with the render state that changes their code),
@@ -249,6 +249,13 @@ const shader_programs = [_]struct { source: []const u8, name: ?[]const u8 = null
     .{ .source = "src/gfx/shaders/text.zig", .owner = .gfx, .args = &.{"--blend=source-over"} },
     .{ .source = "src/gfx/shaders/image.zig", .owner = .gfx, .args = &.{"--blend=source-over"} },
     .{ .source = "src/apps/demo/shaders/polyhedron.zig", .owner = .demo, .args = &.{"--depth-test"} },
+    // The voxel game's: blocks (solid, then glass and plants blended),
+    // water, the sky and the outline of the block picked.
+    .{ .source = "src/apps/blocks/shaders/terrain.zig", .owner = .blocks, .args = &.{"--depth-test"} },
+    .{ .source = "src/apps/blocks/shaders/terrain.zig", .name = "terrain_blend", .owner = .blocks, .args = &.{ "--depth-test", "--blend=source-over" } },
+    .{ .source = "src/apps/blocks/shaders/water.zig", .owner = .blocks, .args = &.{ "--depth-test", "--blend=source-over" } },
+    .{ .source = "src/apps/blocks/shaders/sky.zig", .owner = .blocks, .args = &.{"--depth-test"} },
+    .{ .source = "src/apps/blocks/shaders/line.zig", .owner = .blocks, .args = &.{"--depth-test"} },
     .{ .source = "src/shell/shaders/quad.zig", .owner = .shell, .args = &.{} },
     .{ .source = "src/shell/shaders/quad_rgb565.zig", .owner = .shell, .args = &.{} },
 };
@@ -902,6 +909,11 @@ pub fn build(b: *std.Build) void {
         .root_module = addProgramModule(b, "src/apps/logger/main.zig", target, optimize, pi, shaders, true),
     });
     const install_logger = b.addInstallArtifact(logger_exe, .{});
+    const blocks_exe = b.addExecutable(.{
+        .name = "dazzle-blocks",
+        .root_module = addProgramModule(b, "src/apps/blocks/main.zig", target, optimize, pi, shaders, true),
+    });
+    const install_blocks = b.addInstallArtifact(blocks_exe, .{});
     const setup_exe = b.addExecutable(.{
         .name = "dazzle-setup",
         .root_module = addProgramModule(b, "src/apps/setup/main.zig", target, optimize, pi, shaders, true),
@@ -955,6 +967,7 @@ pub fn build(b: *std.Build) void {
         .{ .exe = files_exe, .icon = .folder, .title = "Files", .description = "Browse your files, and look inside them: text, pictures and fonts" },
         .{ .exe = camera_exe, .icon = .photo_camera, .title = "Camera", .description = "See what a Raspberry Pi Camera Module sees, and take photos" },
         .{ .exe = text_editor_exe, .icon = .edit_note, .title = "Text Editor", .description = "Write and change text files, from Files; they are saved as you type", .handles = &.{"text/plain"} },
+        .{ .exe = blocks_exe, .icon = .landscape, .title = "Blocks", .description = "Build anything, a block at a time, on an island in the sea" },
         .{ .exe = logger_exe, .icon = .show_chart, .title = "Data Logger", .description = "Record GPIO pins, analog inputs, I2C devices and serial ports over time, and save them as CSV" },
     };
     const apps_step = b.step("apps", "Build the apps' archives and their catalogue (zig-out/apps)");
@@ -962,7 +975,7 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(apps_step);
     const install_initramfs = b.addInstallFile(initramfs, "initramfs.cpio");
     const programs_step = b.step("programs", "Build just the programs (zig-out/bin) and zig-out/initramfs.cpio");
-    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_settings.step, &install_files.step, &install_camera.step, &install_text_editor.step, &install_logger.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
+    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_settings.step, &install_files.step, &install_camera.step, &install_text_editor.step, &install_logger.step, &install_blocks.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
         programs_step.dependOn(st);
         b.getInstallStep().dependOn(st);
     }
@@ -1005,6 +1018,8 @@ pub fn build(b: *std.Build) void {
     host_camera.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_text_editor = addProgramModule(b, "src/apps/text_editor/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_text_editor.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
+    const host_blocks = addProgramModule(b, "src/apps/blocks/main.zig", b.graph.host, test_optimize, host, shaders, false);
+    host_blocks.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_logger = addProgramModule(b, "src/apps/logger/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_logger.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_setup = addProgramModule(b, "src/apps/setup/main.zig", b.graph.host, test_optimize, host, shaders, false);
@@ -1028,6 +1043,7 @@ pub fn build(b: *std.Build) void {
         host_camera,
         host_text_editor,
         host_logger,
+        host_blocks,
         host_setup,
         addProgramModule(b, "src/shell/main.zig", b.graph.host, test_optimize, host, shaders, false),
     }) |m| {

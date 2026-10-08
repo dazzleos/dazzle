@@ -134,7 +134,9 @@ pub const Load = union(enum) {
     keep,
 };
 
-pub const max_bos = 64;
+/// Buffers a frame can use (a 3D scene drawn from many buffers, and the
+/// UI over it).
+pub const max_bos = 256;
 
 pub const Error = error{FrameFull};
 
@@ -156,12 +158,12 @@ pub const Flush = struct {
 /// declare it `undefined` (`begin` initialises it) so it costs nothing in
 /// the binary.
 pub const Frame = struct {
-    bcl_buf: [16 * 1024]u8 = undefined,
+    bcl_buf: [32 * 1024]u8 = undefined,
     bin: cl.Bcl = undefined,
-    rec_buf: [16 * 1024]u8 = undefined,
+    rec_buf: [32 * 1024]u8 = undefined,
     rec: cl.Writer = undefined,
     rec_count: u32 = 0,
-    uniforms: [8 * 1024]u32 = undefined,
+    uniforms: [32 * 1024]u32 = undefined,
     uniforms_len: usize = 0,
     bo_handles: [max_bos]u32 = undefined,
     bo_count: u32 = 0,

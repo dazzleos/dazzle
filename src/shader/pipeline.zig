@@ -26,6 +26,11 @@ pub const Options = struct {
     attributes: []const VertexField,
     cull: Cull = .none,
     primitive: cl.PrimitiveMode = .triangles,
+    /// With depth testing: reject hidden fragments before they are shaded
+    /// (the hardware's early Z), which saves shading what is drawn behind
+    /// what was drawn before. Every draw in the frame that tests depth must
+    /// then test it the same way (less), as all programs here do.
+    early_z: bool = false,
 };
 
 const Stage = struct {
@@ -154,6 +159,7 @@ pub const Pipeline = struct {
                 .clockwise_primitives = true,
                 .depth_func = if (prog.options.depth_test) .less else .always,
                 .z_updates = prog.options.depth_test,
+                .early_z = prog.options.depth_test and p.options.early_z,
             },
             .viewport = viewport,
             .scissor = d.scissor,

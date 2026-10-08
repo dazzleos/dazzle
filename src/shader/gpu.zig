@@ -84,6 +84,10 @@ pub fn splat2(x: f32) Vec2 {
     return @splat(x);
 }
 
+pub fn splat3(x: f32) Vec3 {
+    return @splat(x);
+}
+
 pub fn splat4(x: f32) Vec4 {
     return @splat(x);
 }
@@ -98,4 +102,8 @@ pub fn dot(a: anytype, b: @TypeOf(a)) f32 {
 
 pub fn length(a: anytype) f32 {
     return @sqrt(dot(a, a));
+}
+
+pub fn normalize(a: anytype) @TypeOf(a) {
+    return a * @as(@TypeOf(a), @splat(1 / length(a)));
 }
