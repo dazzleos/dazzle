@@ -396,8 +396,6 @@ pub const Settings = struct {
         var rows: std.ArrayList(ui.Widget) = .empty;
         const a = cx.ui.arena();
         rows.appendSlice(a, &.{
-            b.value(orUnknown(model)),
-            cx.make(ui.Padding{ .padding = .symmetric(0, 8), .child = cx.make(BoardView{ .board = drawing, .selected = picked, .on_select = partPicker(state) }) }),
             cx.make(ui.Text{ .text = if (part.chip.len > 0) cx.fmt("{s}: {s}", .{ about.title, part.chip }) else about.title, .style = .{ .size = 20, .color = t.on_surface } }),
             cx.make(ui.Text{ .text = cx.fmt("{s}{s}", .{ about.about, if (part.underside) " (underneath the board)" else "" }), .style = .{ .size = 16, .color = t.on_surface_variant } }),
         }) catch {};
@@ -412,9 +410,16 @@ pub const Settings = struct {
             .micro_sd, .sd, .emmc => if (u.storage.user + u.storage.apps > 0) cx.fmt("{s} of your files and {s} of apps", .{ info.formatBytes(&b1, u.storage.user), info.formatBytes(&b2, u.storage.apps) }) else null,
             else => null,
         };
-        if (now) |text| rows.append(a, b.item("Now", text)) catch {};
+        if (now) |text| rows.append(a, cx.make(ui.Text{ .text = text, .style = .{ .size = 16, .color = t.on_surface } })) catch {};
         rows.append(a, cx.make(ui.Text{ .text = "Pick a part to see what it is", .style = .{ .size = 14, .color = t.on_surface_variant } })) catch {};
-        return b.card("Board", rows.items);
+        // The drawing, small, beside what is said about the part picked.
+        return b.card("Board", &.{
+            b.value(orUnknown(model)),
+            cx.make(ui.Row{ .spacing = 24, .cross_axis_alignment = .start, .children = &.{
+                cx.make(BoardView{ .board = drawing, .selected = picked, .on_select = partPicker(state) }),
+                cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 6, .children = rows.items }) }),
+            } }),
+        });
     }
 
     fn wifiCard(self: *const Settings, b: Builder, state: *State) ui.Widget {

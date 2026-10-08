@@ -1,8 +1,9 @@
-//! A board, drawn (see board.zig): the board in green with its mounting
-//! holes, the chips black (or metal, with a heat spreader or a can), the
-//! connectors in metal or plastic with their openings, and what is under
-//! the board as outlines. The part under the pointer is lit, and the one
-//! picked is outlined; clicking (or tapping) a part picks it.
+//! A board, drawn as line art in the theme's colours (see board.zig): its
+//! outline and mounting holes, and its parts, the chips a little heavier
+//! than the connectors, and what is under the board fainter. The part
+//! under the pointer is lit, and the one picked is filled in; clicking (or
+//! tapping) a part picks it. It is small: it shows which board this is at
+//! a glance, beside what is said about it.
 
 const std = @import("std");
 const ui = @import("ui");
@@ -11,24 +12,17 @@ const board = @import("board.zig");
 
 const Color = gfx.Color;
 
-const pcb = Color.argb(0xff1f7a4a);
-const pcb_edge = Color.argb(0xff2f9a62);
-const gold = Color.argb(0xffd9b45a);
-const metal = Color.argb(0xffbfc4c9);
-const metal_dark = Color.argb(0xff8d939a);
-const plastic = Color.argb(0xff26282b);
-const opening = Color.argb(0xff151617);
-const chip_black = Color.argb(0xff222324);
-const latch = Color.argb(0xffe8e4d8);
-const yellow = Color.argb(0xffe6c229);
-const copper = Color.argb(0xffc9824a);
+/// Line widths, in pixels whatever the drawing's size.
+const line: f32 = 1.25;
+const heavy: f32 = 1.75;
 
 pub const BoardView = struct {
     board: *const board.Board,
     selected: ?usize = null,
     on_select: ?ui.ValueCallback(usize) = null,
-    /// The tallest it is drawn.
-    max_height: f32 = 360,
+    /// The biggest it is drawn.
+    max_width: f32 = 260,
+    max_height: f32 = 170,
 
     pub const State = struct {
         hovered: ?usize = null,
@@ -36,9 +30,10 @@ pub const BoardView = struct {
 
     pub fn layout(self: *const BoardView, _: *ui.Node, c: ui.Constraints) ui.Size {
         const r = self.board.bounds();
-        const w = if (std.math.isFinite(c.max_w)) c.max_w else 600;
+        // Beside text: at most a little under half the width there is.
+        const w = @min(if (std.math.isFinite(c.max_w)) c.max_w * 0.45 else self.max_width, self.max_width);
         const h = @min(w * r.h / r.w, self.max_height);
-        return c.constrain(.{ .w = w, .h = h });
+        return c.constrain(.{ .w = w * @min(1, h / (w * r.h / r.w)), .h = h });
     }
 
     /// Millimetres to the widget's pixels: the scale, and where the
@@ -80,143 +75,125 @@ pub const BoardView = struct {
     }
 
     pub fn paint(self: *const BoardView, n: *ui.Node, p: *ui.Painter) void {
-        const c = p.canvas();
         const theme = &n.ui.theme;
         const t = self.transform(n.size);
         const b = self.board;
         const s = t.scale;
+        const st = n.state(State);
+        const ink = theme.on_surface_variant;
         const map = struct {
             fn f(tr: @TypeOf(t), r: board.Rect) gfx.Rect {
                 return .{ .x = tr.x + r.x * tr.scale, .y = tr.y + r.y * tr.scale, .w = r.w * tr.scale, .h = r.h * tr.scale };
             }
         }.f;
-        const st = n.state(State);
 
-        // Underneath: outlines, showing through the board.
-        for (b.parts, 0..) |part, i| if (part.underside) {
-            const r = map(t, part.rect);
-            c.fillRoundedRect(r, .all(0.8 * s), theme.on_surface.withAlpha(if (st.hovered == i) 0.18 else 0.06));
-        };
-
-        // The board, its notches and holes cut out (in the background's
-        // colour).
+        // The board, with its notches cut into the edge.
         const outline = map(t, .{ .x = 0, .y = 0, .w = b.width, .h = b.height });
-        c.fillRoundedRect(outline, .all(b.corner * s), pcb_edge);
-        c.fillRoundedRect(outline.outset(-0.4 * s), .all(@max(0, b.corner - 0.4) * s), pcb);
-        for (b.notches) |notch| c.fillCircle(.{ t.x + notch.x * s, t.y + notch.y * s }, notch.r * s, theme.surface_container);
-        for (b.holes) |h| {
-            const center: gfx.Point = .{ t.x + h[0] * s, t.y + h[1] * s };
-            c.fillCircle(center, (b.hole_diameter / 2 + 1.2) * s, gold);
-            c.fillCircle(center, b.hole_diameter / 2 * s, theme.surface_container);
+        var c = p.canvas();
+        c.fillRoundedRect(outline, .all(b.corner * s), theme.on_surface.withAlpha(0.04));
+        c.strokeRoundedRect(outline, .all(b.corner * s), heavy, ink);
+        if (b.notches.len > 0) {
+            const old = p.clipTo(outline.outset(heavy));
+            c = p.canvas();
+            for (b.notches) |notch| {
+                const center: gfx.Point = .{ t.x + notch.x * s, t.y + notch.y * s };
+                c.fillCircle(center, notch.r * s + heavy / 2, theme.surface_container);
+                c.strokeCircle(center, notch.r * s, heavy, ink);
+            }
+            p.restoreClip(old);
+            c = p.canvas();
         }
+        for (b.holes) |h| c.strokeCircle(.{ t.x + h[0] * s, t.y + h[1] * s }, b.hole_diameter / 2 * s, line, ink);
 
-        // The underside's outlines over the board.
-        for (b.parts) |part| if (part.underside) {
-            c.strokeRoundedRect(map(t, part.rect), .all(0.8 * s), @max(1, 0.3 * s), Color.argb(0xffb8e0c8).withAlpha(0.6));
-        };
+        // What is under the board, faint; then what is on it.
+        for (b.parts) |part| if (part.underside) drawPart(c, &part, map(t, part.rect), s, ink.withAlpha(0.35));
+        for (b.parts) |part| if (!part.underside) drawPart(c, &part, map(t, part.rect), s, ink);
 
-        // What is on top.
-        for (b.parts) |part| if (!part.underside) drawPart(c, &part, map(t, part.rect), s);
-
-        // Lit under the pointer, outlined when picked.
-        if (st.hovered) |i| {
-            const r = map(t, b.parts[i].rect);
-            c.fillRoundedRect(r, .all(0.8 * s), theme.primary.withAlpha(0.25));
-        }
+        // Lit under the pointer, filled in when picked.
+        if (st.hovered) |i| c.fillRoundedRect(map(t, b.parts[i].rect), .all(0.6 * s), theme.primary.withAlpha(0.18));
         if (self.selected) |i| if (i < b.parts.len) {
-            const r = map(t, b.parts[i].rect).outset(2);
-            c.strokeRoundedRect(r, .all(0.8 * s + 2), 3, theme.primary);
+            const r = map(t, b.parts[i].rect);
+            c.fillRoundedRect(r, .all(0.6 * s), theme.primary.withAlpha(0.35));
+            c.strokeRoundedRect(r, .all(0.6 * s), heavy, theme.primary);
         };
     }
 };
 
-fn drawPart(c: *gfx.Canvas, part: *const board.Part, r: gfx.Rect, s: f32) void {
+/// A part, as lines: its outline, and what makes it recognisable (a
+/// connector's opening, a header's pins, a chip's pin 1).
+fn drawPart(c: *gfx.Canvas, part: *const board.Part, r: gfx.Rect, s: f32, ink: Color) void {
     const radius: gfx.Radii = .all(0.6 * s);
     switch (part.kind) {
         .soc, .soc_with_ram, .ram, .usb_ethernet, .wireless, .pmic, .emmc => {
+            c.strokeRoundedRect(r, radius, heavy, ink);
             if (part.lidded) {
-                c.fillRoundedRect(r.outset(0.6 * s), radius, chip_black);
-                c.fillRoundedRect(r, radius, metal);
-                c.strokeRoundedRect(r, radius, @max(1, 0.25 * s), metal_dark);
-            } else {
-                c.fillRoundedRect(r, radius, chip_black);
+                c.strokeRoundedRect(r.outset(-1.2 * s), radius, line, ink);
+            } else if (r.w > 3 * s) {
                 // Pin 1.
-                c.fillCircle(.{ r.x + 1.2 * s, r.y + 1.2 * s }, 0.45 * s, Color.argb(0xff4a4c4f));
+                c.fillCircle(.{ r.x + 1.4 * s, r.y + 1.4 * s }, @max(1, 0.4 * s), ink);
             }
         },
         .wireless_can => {
-            c.fillRoundedRect(r, radius, metal);
-            c.strokeRoundedRect(r, radius, @max(1, 0.25 * s), metal_dark);
+            c.strokeRoundedRect(r, radius, line, ink);
+            c.strokeRoundedRect(r.outset(-1 * s), radius, line, ink.withAlpha(ink.a * 0.5));
         },
-        .antenna => c.fillRoundedRect(r, .all(0.3 * s), copper),
+        .antenna => c.strokeRoundedRect(r, .all(0.3 * s), line, ink),
         .gpio, .gpio_holes => {
-            if (part.kind == .gpio) c.fillRect(r, plastic);
-            const cols: usize = part.pins[0];
-            const rows: usize = part.pins[1];
+            if (part.kind == .gpio) c.strokeRect(r, line, ink);
             const pitch = 2.54 * s;
-            for (0..rows) |row| for (0..cols) |col| {
+            for (0..part.pins[1]) |row| for (0..part.pins[0]) |col| {
                 const center: gfx.Point = .{ r.x + (@as(f32, @floatFromInt(col)) + 0.5) * pitch, r.y + (@as(f32, @floatFromInt(row)) + 0.5) * pitch };
-                if (part.kind == .gpio) {
-                    c.fillRect(.{ .x = center[0] - 0.32 * s, .y = center[1] - 0.32 * s, .w = 0.64 * s, .h = 0.64 * s }, gold);
-                } else {
-                    c.fillCircle(center, 0.85 * s, gold);
-                    c.fillCircle(center, 0.5 * s, pcb.withAlpha(1));
-                }
+                if (part.kind == .gpio) c.fillCircle(center, @max(0.75, 0.35 * s), ink) else c.strokeCircle(center, @max(1, 0.6 * s), line, ink);
             };
         },
-        .usb, .usb_double, .ethernet, .hdmi, .mini_hdmi, .power, .usb_otg, .micro_sd => {
-            c.fillRoundedRect(r, .all(0.4 * s), metal);
-            c.strokeRoundedRect(r, .all(0.4 * s), @max(1, 0.2 * s), metal_dark);
+        .usb, .usb_double, .ethernet, .hdmi, .mini_hdmi, .power, .usb_otg, .micro_sd, .sd => {
+            c.strokeRoundedRect(r, .all(0.4 * s), line, ink);
             // The opening, along the edge it faces.
-            const ports: usize = if (part.kind == .usb_double) 2 else 1;
             const e = part.faces orelse return;
+            const ports: usize = if (part.kind == .usb_double) 2 else 1;
             const depth = switch (part.kind) {
-                .ethernet, .usb, .usb_double => 3.5 * s,
-                else => 1.6 * s,
+                .ethernet, .usb, .usb_double => 3 * s,
+                else => 1.2 * s,
             };
             for (0..ports) |i| {
                 const f: f32 = @floatFromInt(i);
                 const across: f32 = @floatFromInt(ports);
                 const slot: gfx.Rect = switch (e) {
-                    .left, .right => .{ .x = if (e == .right) r.x + r.w - depth else r.x, .y = r.y + r.h * (0.15 + f) / across, .w = depth, .h = r.h * 0.7 / across },
-                    .top, .bottom => .{ .x = r.x + r.w * 0.15, .y = if (e == .bottom) r.y + r.h - depth else r.y, .w = r.w * 0.7, .h = depth },
+                    .left, .right => .{ .x = if (e == .right) r.x + r.w - depth - 0.8 * s else r.x + 0.8 * s, .y = r.y + r.h * (0.2 + f) / across, .w = depth, .h = r.h * 0.6 / across },
+                    .top, .bottom => .{ .x = r.x + r.w * 0.2, .y = if (e == .bottom) r.y + r.h - depth - 0.8 * s else r.y + 0.8 * s, .w = r.w * 0.6, .h = depth },
                 };
-                c.fillRect(slot, opening);
+                c.strokeRect(slot, line, ink);
             }
         },
         .audio => {
-            c.fillRoundedRect(r, .all(0.6 * s), plastic);
+            c.strokeRoundedRect(r, .all(0.6 * s), line, ink);
             const e = part.faces orelse return;
             const center: gfx.Point = switch (e) {
-                .bottom => .{ r.x + r.w / 2, r.y + r.h - 1.6 * s },
-                .top => .{ r.x + r.w / 2, r.y + 1.6 * s },
-                .left => .{ r.x + 1.6 * s, r.y + r.h / 2 },
-                .right => .{ r.x + r.w - 1.6 * s, r.y + r.h / 2 },
+                .bottom => .{ r.x + r.w / 2, r.y + r.h - 2 * s },
+                .top => .{ r.x + r.w / 2, r.y + 2 * s },
+                .left => .{ r.x + 2 * s, r.y + r.h / 2 },
+                .right => .{ r.x + r.w - 2 * s, r.y + r.h / 2 },
             };
-            c.fillCircle(center, 1.4 * s, metal);
-            c.fillCircle(center, 0.9 * s, opening);
+            c.strokeCircle(center, 1.2 * s, line, ink);
         },
         .composite => {
-            // A yellow body, and the metal barrel out past the edge.
-            c.fillRoundedRect(.{ .x = r.x, .y = r.y + r.h * 0.45, .w = r.w, .h = r.h * 0.55 }, .all(0.6 * s), yellow);
-            c.fillRoundedRect(.{ .x = r.x + r.w * 0.2, .y = r.y, .w = r.w * 0.6, .h = r.h * 0.5 }, .all(0.4 * s), metal);
+            c.strokeRoundedRect(.{ .x = r.x, .y = r.y + r.h * 0.45, .w = r.w, .h = r.h * 0.55 }, .all(0.6 * s), line, ink);
+            c.strokeRoundedRect(.{ .x = r.x + r.w * 0.2, .y = r.y, .w = r.w * 0.6, .h = r.h * 0.45 }, .all(0.4 * s), line, ink);
         },
         .camera, .display => {
-            c.fillRoundedRect(r, .all(0.4 * s), plastic);
+            c.strokeRoundedRect(r, .all(0.4 * s), line, ink);
             // The latch along it.
-            const inset = 0.8 * s;
             if (r.h > r.w) {
-                c.fillRect(.{ .x = r.x + inset, .y = r.y + 1.5 * s, .w = r.w - 2 * inset, .h = r.h - 3 * s }, latch);
+                c.fillRect(.{ .x = r.x + r.w / 2 - line / 2, .y = r.y + 1.5 * s, .w = line, .h = r.h - 3 * s }, ink);
             } else {
-                c.fillRect(.{ .x = r.x + 1.5 * s, .y = r.y + inset, .w = r.w - 3 * s, .h = r.h - 2 * inset }, latch);
+                c.fillRect(.{ .x = r.x + 1.5 * s, .y = r.y + r.h / 2 - line / 2, .w = r.w - 3 * s, .h = line }, ink);
             }
         },
-        .sd => {},
         .edge => {
-            // Gold contacts.
-            const pitch = 0.6 * s;
+            // The contacts.
+            const pitch = 1.2 * s;
             var x = r.x + pitch / 2;
-            while (x + pitch / 2 <= r.x + r.w) : (x += pitch) c.fillRect(.{ .x = x, .y = r.y, .w = pitch * 0.55, .h = r.h }, gold);
+            while (x <= r.x + r.w) : (x += pitch) c.fillRect(.{ .x = x, .y = r.y + 0.3 * s, .w = line, .h = r.h - 0.6 * s }, ink);
         },
     }
 }
