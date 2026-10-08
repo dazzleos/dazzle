@@ -233,8 +233,9 @@ pub const Shader = struct {
     pub fn packScreenXy(s: *Shader, x: Value, y: Value) Value {
         return s.pushSrcs(.pack_screen_xy, &.{ x, y }, 0);
     }
-    pub fn texture(s: *Shader, tex_s: Value, tex_t: Value) Value {
-        return s.pushSrcs(.tex, &.{ tex_s, tex_t }, 0);
+    /// Samples texture unit `unit` (0 or 1) at (s, t).
+    pub fn texture(s: *Shader, unit: u1, tex_s: Value, tex_t: Value) Value {
+        return s.pushSrcs(.tex, &.{ tex_s, tex_t }, unit);
     }
     /// The colour the tile buffer holds at this fragment, packed like
     /// `tlbColor`'s input (fragment shaders). Read it to blend.
@@ -283,6 +284,8 @@ pub const Compiled = struct {
     num_vpm_writes: u32 = 0,
     num_varyings: u32 = 0,
     num_texture_samples: u32 = 0,
+    /// It samples texture unit 1 too (a draw must then give two textures).
+    samples_unit1: bool = false,
     /// A fragment shader that runs two threads per QPU (see
     /// `Options.threaded`): its draws must say so in their shader record.
     threaded: bool = false,
@@ -747,21 +750,23 @@ fn compileThreaded(shader: *const Shader, options: Options, threaded: bool) Erro
             .tex => {
                 // Writing T then S each take one config uniform (P0, P1);
                 // the S write starts the fetch.
+                const unit: u8 = @intCast(inst.imm);
                 const s_reg = try g.operand(shader, reg, inst.srcs[0]);
                 const t_reg = try g.operand(shader, reg, inst.srcs[1]);
-                try g.emit(try qpu.mov(.{ .periph = qpu.W.tmu0_t }, t_reg.src()));
-                try g.addUniform(.{ .tex_p0 = 0 });
-                try g.emit(try qpu.mov(.{ .periph = qpu.W.tmu0_s }, s_reg.src()));
-                try g.addUniform(.{ .tex_p1 = 0 });
+                try g.emit(try qpu.mov(.{ .periph = if (unit == 0) qpu.W.tmu0_t else qpu.W.tmu1_t }, t_reg.src()));
+                try g.addUniform(.{ .tex_p0 = unit });
+                try g.emit(try qpu.mov(.{ .periph = if (unit == 0) qpu.W.tmu0_s else qpu.W.tmu1_s }, s_reg.src()));
+                try g.addUniform(.{ .tex_p1 = unit });
                 // Threaded: let the other thread run while the texture
                 // unit fetches (placed by `placeThreadSwitches`).
                 if (threaded) {
                     try g.push(qpu.nop(.thread_switch));
                     g.last_switch = g.out.code_len - 1;
                 }
-                try g.emit(qpu.nop(.load_tmu0));
+                try g.emit(qpu.nop(if (unit == 0) .load_tmu0 else .load_tmu1));
                 try g.emit(try qpu.mov(dst.dst(), qpu.r(4)));
                 g.out.num_texture_samples += 1;
+                if (unit == 1) g.out.samples_unit1 = true;
             },
             .tlb_color_load => {
                 // Reading the tile buffer needs the scoreboard (writes wait
@@ -1009,7 +1014,7 @@ fn texturedShader(extra: usize) Shader {
     const v = s.varying();
     var keep: [40]Value = undefined;
     for (keep[0..extra]) |*k| k.* = s.varying();
-    var t = s.texture(u, v);
+    var t = s.texture(0, u, v);
     for (keep[0..extra]) |k| t = s.fadd(t, k);
     s.tlbColor(t);
     return s;
@@ -1060,8 +1065,8 @@ test "each texture sample switches threads, the last one last" {
     var s = Shader.init(.fragment);
     const u = s.varying();
     const v = s.varying();
-    const t0 = s.texture(u, v);
-    const t1 = s.texture(v, u);
+    const t0 = s.texture(0, u, v);
+    const t1 = s.texture(0, v, u);
     s.tlbColor(s.fadd(t0, t1));
     const c = try compile(&s);
     try std.testing.expect(c.threaded);

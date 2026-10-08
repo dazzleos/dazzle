@@ -34,8 +34,10 @@ pub const Env = struct {
     varyings: []const Vec = &.{},
     frag_w: Vec = splatF(1.0),
     frag_z: Vec = splat(0),
-    /// Memory the texture unit samples from; P0's offset indexes into it.
+    /// Memory texture unit 0 samples from; P0's offset indexes into it.
     texture_memory: []const u8 = &.{},
+    /// And texture unit 1.
+    texture_memory1: []const u8 = &.{},
     /// Fragment shaders: the packed colours the tile buffer holds, which a
     /// colour load reads.
     tlb_color_in: Vec = splat(0),
@@ -86,11 +88,16 @@ const State = struct {
     zero: [lanes]bool = @splat(false),
     neg: [lanes]bool = @splat(false),
     vpm_read_left: u32 = 0,
-    tmu_params: [4]u32 = undefined,
-    tmu_param_count: usize = 0,
-    tmu_coord_t: Vec = splat(0),
-    tmu_fifo: [4]Vec = undefined,
-    tmu_fifo_len: usize = 0,
+    /// Each texture unit's.
+    tmu: [2]Tmu = .{ .{}, .{} },
+
+    const Tmu = struct {
+        params: [4]u32 = undefined,
+        param_count: usize = 0,
+        coord_t: Vec = splat(0),
+        fifo: [4]Vec = undefined,
+        fifo_len: usize = 0,
+    };
 };
 
 fn f(v: u32) f32 {
@@ -292,11 +299,12 @@ pub fn run(code: []const qpu.Inst, env: Env) Error!Result {
         try write(&s, &r, env, waddr_mul, if (ws) .a else .b, mul_result, cond_mul, if (ws) a_pack else 0, mul_pack);
 
         switch (sig) {
-            .load_tmu0 => {
-                if (s.tmu_fifo_len == 0) return error.TmuUnderflow;
-                s.acc[4] = s.tmu_fifo[0];
-                std.mem.copyForwards(Vec, s.tmu_fifo[0 .. s.tmu_fifo_len - 1], s.tmu_fifo[1..s.tmu_fifo_len]);
-                s.tmu_fifo_len -= 1;
+            .load_tmu0, .load_tmu1 => {
+                const t = &s.tmu[if (sig == .load_tmu0) 0 else 1];
+                if (t.fifo_len == 0) return error.TmuUnderflow;
+                s.acc[4] = t.fifo[0];
+                std.mem.copyForwards(Vec, t.fifo[0 .. t.fifo_len - 1], t.fifo[1..t.fifo_len]);
+                t.fifo_len -= 1;
             },
             .color_load => {
                 s.acc[4] = env.tlb_color_in;
@@ -414,25 +422,29 @@ fn write(s: *State, r: *Result, env: Env, waddr: u6, file: File, value: Vec, con
                 else => std.math.log2(f(v)),
             });
         },
-        qpu.W.tmu0_s, qpu.W.tmu0_t => {
+        qpu.W.tmu0_s, qpu.W.tmu0_t, qpu.W.tmu1_s, qpu.W.tmu1_t => {
             // Each TMU write takes the next uniform as a texture config
             // parameter (P0, then P1, ...).
+            const unit: usize = if (waddr == qpu.W.tmu0_s or waddr == qpu.W.tmu0_t) 0 else 1;
+            const t = &s.tmu[unit];
             if (r.uniforms_read >= env.uniforms.len) return error.UniformUnderflow;
-            s.tmu_params[s.tmu_param_count] = env.uniforms[r.uniforms_read];
-            s.tmu_param_count += 1;
+            if (t.param_count == t.params.len) return error.Unsupported;
+            t.params[t.param_count] = env.uniforms[r.uniforms_read];
+            t.param_count += 1;
             r.uniforms_read += 1;
-            if (waddr == qpu.W.tmu0_t) {
-                s.tmu_coord_t = value;
+            if (waddr == qpu.W.tmu0_t or waddr == qpu.W.tmu1_t) {
+                t.coord_t = value;
                 return;
             }
-            if (s.tmu_param_count < 2 or s.tmu_fifo_len == s.tmu_fifo.len) return error.Unsupported;
+            if (t.param_count < 2 or t.fifo_len == t.fifo.len) return error.Unsupported;
+            const memory = if (unit == 0) env.texture_memory else env.texture_memory1;
             var texel: Vec = undefined;
-            for (&texel, value, s.tmu_coord_t) |*o, sc, tc|
-                o.* = try sample(env.texture_memory, s.tmu_params[0], s.tmu_params[1], f(sc), f(tc));
-            s.tmu_fifo[s.tmu_fifo_len] = texel;
-            s.tmu_fifo_len += 1;
-            s.tmu_param_count = 0;
-            s.tmu_coord_t = splat(0);
+            for (&texel, value, t.coord_t) |*o, sc, tc|
+                o.* = try sample(memory, t.params[0], t.params[1], f(sc), f(tc));
+            t.fifo[t.fifo_len] = texel;
+            t.fifo_len += 1;
+            t.param_count = 0;
+            t.coord_t = splat(0);
             r.texture_samples += 1;
         },
         else => return error.Unsupported,

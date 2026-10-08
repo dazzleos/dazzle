@@ -249,9 +249,11 @@ const shader_programs = [_]struct { source: []const u8, name: ?[]const u8 = null
     .{ .source = "src/gfx/shaders/text.zig", .owner = .gfx, .args = &.{"--blend=source-over"} },
     .{ .source = "src/gfx/shaders/image.zig", .owner = .gfx, .args = &.{"--blend=source-over"} },
     .{ .source = "src/apps/demo/shaders/polyhedron.zig", .owner = .demo, .args = &.{"--depth-test"} },
-    // The voxel game's: blocks (solid, then glass and plants blended),
-    // water, the sky and the outline of the block picked.
+    // The voxel game's: blocks (solid, flat or bump mapped, then glass
+    // and plants blended), water, the sky and the outline of the block
+    // picked.
     .{ .source = "src/apps/blocks/shaders/terrain.zig", .owner = .blocks, .args = &.{"--depth-test"} },
+    .{ .source = "src/apps/blocks/shaders/terrain_bump.zig", .owner = .blocks, .args = &.{"--depth-test"} },
     .{ .source = "src/apps/blocks/shaders/terrain.zig", .name = "terrain_blend", .owner = .blocks, .args = &.{ "--depth-test", "--blend=source-over" } },
     .{ .source = "src/apps/blocks/shaders/water.zig", .owner = .blocks, .args = &.{ "--depth-test", "--blend=source-over" } },
     .{ .source = "src/apps/blocks/shaders/sky.zig", .owner = .blocks, .args = &.{"--depth-test"} },
@@ -265,6 +267,7 @@ const shader_programs = [_]struct { source: []const u8, name: ?[]const u8 = null
 const test_shaders = [_][]const u8{
     "src/shader/testdata/flow.zig",
     "src/shader/testdata/endless.zig",
+    "src/shader/testdata/two_textures.zig",
 };
 
 const ShaderBlob = struct {

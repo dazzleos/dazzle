@@ -173,7 +173,16 @@ pub fn maxLevels(width: u32, height: u32) u4 {
 /// levels, each a quarter of the one before (each pixel the average of
 /// four, weighted by how opaque they are, so see-through pixels do not
 /// darken the edges of what is not), into `dst` as `mipmapLayout` says.
-pub fn uploadMipmaps(gpa: std.mem.Allocator, dst: []u8, pixels: []const u32, width: u32, height: u32, levels: u4) !void {
+/// What a texture's texels are, for making its mipmaps.
+pub const MipKind = enum {
+    /// Colours, averaged weighted by alpha.
+    colour,
+    /// Normals packed as r, g, b = (n + 1) / 2: averaged, and made unit
+    /// length again (a shorter normal would darken what is lit by it).
+    normal,
+};
+
+pub fn uploadMipmaps(gpa: std.mem.Allocator, dst: []u8, pixels: []const u32, width: u32, height: u32, levels: u4, kind: MipKind) !void {
     const layout = mipmapLayout(width, height, levels);
     std.debug.assert(dst.len >= layout.size);
     upload(dst[layout.base..], pixels, width, height);
@@ -198,8 +207,19 @@ pub fn uploadMipmaps(gpa: std.mem.Allocator, dst: []u8, pixels: []const u32, wid
                 n += 1;
             };
             var out: u32 = @as(u32, @intFromFloat(@round(sum[0] / n))) << 24;
-            if (sum[0] > 0) for (0..3) |k| {
-                out |= @as(u32, @intFromFloat(@round(sum[k + 1] / sum[0]))) << @intCast(16 - k * 8);
+            if (sum[0] > 0) switch (kind) {
+                .colour => for (0..3) |k| {
+                    out |= @as(u32, @intFromFloat(@round(sum[k + 1] / sum[0]))) << @intCast(16 - k * 8);
+                },
+                .normal => {
+                    var v: [3]f32 = undefined;
+                    for (&v, 0..) |*e, k| e.* = sum[k + 1] / sum[0] / 127.5 - 1;
+                    const len = @sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+                    for (v, 0..) |e, k| {
+                        const unit = if (len > 1e-4) e / len else @as(f32, if (k == 2) 1 else 0);
+                        out |= @as(u32, @intFromFloat(std.math.clamp(@round((unit + 1) * 127.5), 0, 255))) << @intCast(16 - k * 8);
+                    }
+                },
             };
             next[y * sz[0] + x] = out;
         };
@@ -394,7 +414,7 @@ test "mipmaps: each level averages the one before, and see-through pixels do not
     const layout = mipmapLayout(w, h, 3);
     const mem = try gpa.alloc(u8, layout.size);
     defer gpa.free(mem);
-    try uploadMipmaps(gpa, mem, &px, w, h, 3);
+    try uploadMipmaps(gpa, mem, &px, w, h, 3, .colour);
     const at = struct {
         fn f(m: []const u8, off: u32, ww: u32, hh: u32, x: u32, y: u32) u32 {
             return std.mem.readInt(u32, m[off + texelOffset(ww, hh, x, y) ..][0..4], .little);
@@ -410,6 +430,24 @@ test "mipmaps: each level averages the one before, and see-through pixels do not
     const l2 = levelOffset(w, h, layout, 2);
     try testing.expectEqual(@as(u32, 0x00ff0000), at(mem, l2, 2, 8, 0, 1) & 0x00ffffff);
     try testing.expectEqual(@as(u32, 0xff), at(mem, l2, 2, 8, 0, 1) >> 24);
+}
+
+test "mipmaps of normals stay unit length" {
+    const gpa = testing.allocator;
+    const w = 8;
+    const h = 32;
+    // Columns tilted left and right in turn (+-0.6, 0, 0.8): their average
+    // is (0, 0, 0.8), made (0, 0, 1) again.
+    var px: [w * h]u32 = undefined;
+    for (0..h) |y| for (0..w) |x| {
+        px[y * w + x] = if (x % 2 == 0) 0xff_33_80_e5 else 0xff_cc_80_e5;
+    };
+    const layout = mipmapLayout(w, h, 1);
+    const mem = try gpa.alloc(u8, layout.size);
+    defer gpa.free(mem);
+    try uploadMipmaps(gpa, mem, &px, w, h, 1, .normal);
+    const c = std.mem.readInt(u32, mem[levelOffset(w, h, layout, 1) + texelOffset(4, 16, 1, 2) ..][0..4], .little);
+    try testing.expectEqual(@as(u32, 0xff_80_80_ff), c);
 }
 
 test "layout matches the reference description" {

@@ -252,6 +252,17 @@ what the VideoCore IV does well, and left out where it would not.
   texture unit repeats across a face by itself. Faces are merged only
   along that direction (which costs few quads, as light and shade break
   up merges the other way anyway).
+- **Bump mapping, with a second texture unit.** Each tile is drawn with a
+  height as well as a colour, and from the heights comes a normal map (its
+  mipmaps made unit length again). Solid blocks are drawn reading both: the
+  colour from texture unit 0 and the normal from unit 1 (`gpu.texture1`,
+  binding 2). The vertex shader turns the sun into each face's own frame
+  (across the tile, down it, out of the face), so the fragment shader
+  needs only a dot product to light every pixel, and the mortar, grain and
+  cobbles catch the light and turn with it through the day. The light of
+  the sky, lamps and ambient occlusion is still summed per vertex. It
+  costs the fragment shader 57 instructions rather than 32; N turns it
+  off, and the tiles are then drawn with their shading baked in.
 - **Antialiased edges, nearly free.** Frames are 4x multisampled
   (`Frame.beginMultisampled`; M turns it off). The tile buffer holds four
   samples a pixel, and they are averaged as each tile is stored. So the

@@ -74,7 +74,8 @@ const Val = union(enum) {
     split: *const Lowerer.Split,
     list: []const Val,
     ptr: Ptr,
-    image,
+    /// A texture, by the unit that samples it.
+    image: u1,
     none,
 };
 
@@ -1323,12 +1324,14 @@ const Lowerer = struct {
                 for (o[3..], call_args) |arg, *x| x.* = try l.keep(frame, arg);
                 try frame.put(l.a, o[1], try l.call(o[2], call_args));
             },
-            Op.sampled_image => try frame.put(l.a, o[1], .image),
+            Op.sampled_image => try frame.put(l.a, o[1], try l.val(frame, o[2])),
             Op.image_sample_implicit_lod, Op.image_sample_explicit_lod => {
                 if (l.stage != .fragment) return l.fail(inst, "textures can only be sampled in fragment shaders", .{});
+                const image = try l.val(frame, o[2]);
+                if (image != .image) return l.fail(inst, "sampling something that is not a texture", .{});
                 const coord = try l.val(frame, o[3]);
                 if (coord != .list or coord.list.len < 2) return l.fail(inst, "texture coordinates must be a Vec2", .{});
-                const texel = l.s.texture(l.asScalar(coord.list[0]), l.asScalar(coord.list[1]));
+                const texel = l.s.texture(image.image, l.asScalar(coord.list[0]), l.asScalar(coord.list[1]));
                 // Texels are B, G, R, A.
                 const out = try l.a.alloc(Val, 4);
                 for (out, [_]u2{ 2, 1, 0, 3 }) |*c, byte| c.* = .{ .scalar = l.s.unpackUnorm8(texel, byte) };
@@ -1429,7 +1432,9 @@ pub fn lower(
             spirv.StorageClass.input => if (in_interface and deco.location != null) (input_vals.get(deco.location.?) orelse try l.zero(pointee)) else .none,
             spirv.StorageClass.output => try l.zero(pointee),
             spirv.StorageClass.uniform => try l.uniformTree(pointee, 0),
-            spirv.StorageClass.uniform_constant => .image,
+            // Texture unit 1's is bound at 2 (see gpu.texture1); unit 0's
+            // is not bound.
+            spirv.StorageClass.uniform_constant => .{ .image = if (deco.binding == 2) 1 else 0 },
             else => try l.zero(pointee),
         };
         const p = try l.slot(value);

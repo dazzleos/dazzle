@@ -356,6 +356,49 @@ test "control flow: each fragment takes its own way through ifs, returns, loops 
     }
 }
 
+test "two textures: unit 0's and unit 1's, each with its own config and memory" {
+    var diag: program_mod.Diagnostic = .{};
+    const p = Program.compile(testing.allocator, @embedFile("two_textures.spv"), .{}, &diag) catch |err| {
+        std.debug.print("{s}\n", .{diag.message()});
+        return err;
+    };
+    try testing.expect(p.fs.samples_unit1);
+    try testing.expectEqual(@as(u32, 2), p.fs.num_texture_samples);
+    var units: [2]bool = .{ false, false };
+    for (p.fs.uniforms()) |k| switch (k) {
+        .tex_p0 => |u| units[u] = true,
+        else => {},
+    };
+    try testing.expect(units[0] and units[1]);
+    try vc4.qpu.validate(p.fs.code(), .fragment, null);
+    var a: TestTexture = undefined;
+    a.init();
+    var b: TestTexture = undefined;
+    b.init();
+    // Unit 1's texels: the same, turned around (so they differ from unit
+    // 0's at each place).
+    std.mem.reverse(u32, &b.pixels);
+    texture.upload(&b.memory, &b.pixels, TestTexture.w, TestTexture.h);
+    b.cfg.offset = 0;
+    var buf: [8]u32 = undefined;
+    const stream = uniformStream(&buf, &p.fs, &.{}, .{ texture.p0(a.cfg), texture.p1(a.cfg) });
+    const varyings = [_]sim.Vec{ lane(TestTexture.u[0], TestTexture.u[1]), lane(TestTexture.v[0], TestTexture.v[1]) };
+    const r = try sim.run(p.fs.code(), .{ .uniforms = stream, .varyings = &varyings, .texture_memory = &a.memory, .texture_memory1 = &b.memory });
+    try testing.expectEqual(@as(usize, 2), r.texture_samples);
+    for (0..sim.lanes) |i| {
+        const ta = a.at(i);
+        const tb = b.pixels[(10 + 2 * i) * TestTexture.w + 3 * i];
+        // Texels and the tile buffer are both B, G, R, A from the low
+        // byte: the colour scaled by unit 1's red.
+        const k = @as(f32, @floatFromInt(tb >> 16 & 0xff)) / 255;
+        for ([_]u5{ 0, 8, 16 }) |sh| {
+            const want: u32 = @intFromFloat(@round(@as(f32, @floatFromInt(ta >> sh & 0xff)) / 255 * k * 255));
+            const got = r.tlb_color.?[i] >> sh & 0xff;
+            try testing.expect(@abs(@as(i32, @intCast(got)) - @as(i32, @intCast(want))) <= 1);
+        }
+    }
+}
+
 test "loops whose number of iterations is not known when compiled are reported" {
     var diag: program_mod.Diagnostic = .{};
     try testing.expectError(error.Unsupported, Program.compile(testing.allocator, @embedFile("endless.spv"), .{}, &diag));

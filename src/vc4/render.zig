@@ -95,6 +95,12 @@ pub const Draw = struct {
     scissor: ?Viewport = null,
     /// Texture for unit 0 of the fragment shader.
     texture: ?Texture = null,
+    /// Texture for unit 1, for shaders that sample two.
+    texture1: ?Texture = null,
+
+    fn unit(d: *const Draw, u: u8) Texture {
+        return if (u == 0) d.texture.? else d.texture1.?;
+    }
 };
 
 /// A colour buffer: the tile buffer is stored to it (and, to keep what
@@ -329,11 +335,14 @@ pub const Frame = struct {
         // with the bo_handles index of every texture it samples, which the
         // kernel uses to relocate P0, followed by the uniform words.
         for ([_]ShaderBinding{ d.fs, d.vs, d.cs }) |s| {
-            for (s.layout) |k| if (k == .tex_p0) try f.pushUniform(try f.index(d.texture.?.handle));
+            for (s.layout) |k| switch (k) {
+                .tex_p0 => |u| try f.pushUniform(try f.index(d.unit(u).handle)),
+                else => {},
+            };
             for (s.layout) |k| try f.pushUniform(switch (k) {
                 .user => |i| s.user[i],
-                .tex_p0 => texture.p0(d.texture.?.config),
-                .tex_p1 => texture.p1(d.texture.?.config),
+                .tex_p0 => |u| texture.p0(d.unit(u).config),
+                .tex_p1 => |u| texture.p1(d.unit(u).config),
             });
         }
 
