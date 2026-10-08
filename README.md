@@ -36,7 +36,7 @@ Dazzle to your microSD card:
 4. Click **Next**. When asked about OS customisation, choose **No**: Dazzle
    asks for its own settings when it starts.
 
-## Special Thanks
+## Special Thanks ❤️
 
 Dazzle is built on the foundations of these great projects:
 
