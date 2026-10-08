@@ -675,6 +675,7 @@ fn compileThreaded(shader: *const Shader, options: Options, threaded: bool) Erro
     if (g.out.num_vpm_writes > 0)
         try g.emit(try qpu.loadImm(.{ .add_dst = qpu.vpm_write_setup, .value = vpmSetup(0, 0) }));
     var vpm_reads_left = g.out.num_vpm_reads;
+    var tex: TexRequests = .{};
     var vpm_fifo: u32 = 0;
     var vpm_addr: u32 = 0;
 
@@ -761,25 +762,40 @@ fn compileThreaded(shader: *const Shader, options: Options, threaded: bool) Erro
                 }
             },
             .tex => {
-                // Writing T then S each take one config uniform (P0, P1);
-                // the S write starts the fetch.
-                const slot: u8 = @intCast(inst.imm);
-                const unit = slot & 1;
-                const s_reg = try g.operand(shader, reg, inst.srcs[0]);
-                const t_reg = try g.operand(shader, reg, inst.srcs[1]);
-                try g.emit(try qpu.mov(.{ .periph = if (unit == 0) qpu.W.tmu0_t else qpu.W.tmu1_t }, t_reg.src()));
-                try g.addUniform(.{ .tex_p0 = slot });
-                try g.emit(try qpu.mov(.{ .periph = if (unit == 0) qpu.W.tmu0_s else qpu.W.tmu1_s }, s_reg.src()));
-                try g.addUniform(.{ .tex_p1 = slot });
+                // Fetches overlap: with this one, request the later ones
+                // whose coordinates are already worked out, so the texture
+                // units fetch them all while this one is waited for. Each
+                // unit returns its results in the order they were asked
+                // for, so once one of a unit's cannot be asked for yet,
+                // none after it is; and each unit holds only so many.
+                if (!tex.requested[j]) try tex.request(&g, shader, reg, j);
+                var blocked: [2]bool = .{ false, false };
+                for (j + 1..n) |k| {
+                    const later = shader.insts[k];
+                    if (!live[k] or later.op != .tex or tex.requested[k]) continue;
+                    const u = later.imm & 1;
+                    if (blocked[u]) continue;
+                    var ready = tex.outstanding[u] < tex_fifo_depth(threaded);
+                    for (later.srcs[0..2]) |v| {
+                        if (@intFromEnum(v) >= j or reg[@intFromEnum(v)] == .unif) ready = false;
+                    }
+                    if (ready) try tex.request(&g, shader, reg, k) else blocked[u] = true;
+                }
                 // Threaded: let the other thread run while the texture
-                // unit fetches (placed by `placeThreadSwitches`).
-                if (threaded) {
+                // unit fetches (placed by `placeThreadSwitches`); fetches
+                // asked for before the switch are waited for with this
+                // one, and need no switch of their own.
+                const unit = inst.imm & 1;
+                if (threaded and !tex.covered[j]) {
                     try g.push(qpu.nop(.thread_switch));
                     g.last_switch = g.out.code_len - 1;
+                    for (0..n) |k| if (tex.requested[k]) {
+                        tex.covered[k] = true;
+                    };
                 }
                 try g.emit(qpu.nop(if (unit == 0) .load_tmu0 else .load_tmu1));
                 try g.emit(try qpu.mov(dst.dst(), qpu.r(4)));
-                g.out.num_texture_samples += 1;
+                tex.outstanding[unit] -= 1;
             },
             .tlb_color_load => {
                 // Reading the tile buffer needs the scoreboard (writes wait
@@ -823,6 +839,38 @@ fn compileThreaded(shader: *const Shader, options: Options, threaded: bool) Erro
 fn vpmSetup(count: u4, addr: u32) u32 {
     return @as(u32, count) << 20 | 1 << 12 | 1 << 11 | 2 << 8 | (addr & 0xff);
 }
+
+/// How many fetches a texture unit holds for a QPU: 4, or 2 for each of a
+/// threaded shader's two threads.
+fn tex_fifo_depth(threaded: bool) u8 {
+    return if (threaded) 2 else 4;
+}
+
+/// The texture fetches asked for ahead of when their results are read.
+const TexRequests = struct {
+    requested: [max_insts]bool = @splat(false),
+    /// Asked for before a thread switch, so already waited for.
+    covered: [max_insts]bool = @splat(false),
+    /// Asked for and not yet read, on each unit.
+    outstanding: [2]u8 = .{ 0, 0 },
+
+    /// Asks for fetch `j`: writing T then S each take one config uniform
+    /// (P0, P1); the S write starts the fetch.
+    fn request(t: *TexRequests, g: *Gen, shader: *const Shader, reg: [max_insts]Reg, j: usize) Error!void {
+        const inst = shader.insts[j];
+        const slot: u8 = @intCast(inst.imm);
+        const unit = slot & 1;
+        const s_reg = try g.operand(shader, reg, inst.srcs[0]);
+        const t_reg = try g.operand(shader, reg, inst.srcs[1]);
+        try g.emit(try qpu.mov(.{ .periph = if (unit == 0) qpu.W.tmu0_t else qpu.W.tmu1_t }, t_reg.src()));
+        try g.addUniform(.{ .tex_p0 = slot });
+        try g.emit(try qpu.mov(.{ .periph = if (unit == 0) qpu.W.tmu0_s else qpu.W.tmu1_s }, s_reg.src()));
+        try g.addUniform(.{ .tex_p1 = slot });
+        t.requested[j] = true;
+        t.outstanding[unit] += 1;
+        g.out.num_texture_samples += 1;
+    }
+};
 
 const Gen = struct {
     stage: Stage,
@@ -994,6 +1042,14 @@ fn isTlb(inst: qpu.Inst) bool {
         qpu.writesAddr(inst, qpu.W.tlb_color_ms) or qpu.writesAddr(inst, qpu.W.tlb_stencil_setup);
 }
 
+/// Whether an instruction starts a texture fetch (writes a unit's S).
+fn writesTmuS(i: qpu.Inst) bool {
+    for ([_]u6{ qpu.getWaddrAdd(i), qpu.getWaddrMul(i) }) |w| {
+        if (w == qpu.W.tmu0_s or w == qpu.W.tmu1_s) return true;
+    }
+    return false;
+}
+
 fn countSig(code: []const qpu.Inst, sig: qpu.Sig) usize {
     var n: usize = 0;
     for (code) |i| n += @intFromBool(qpu.getSig(i) == sig);
@@ -1074,13 +1130,55 @@ test "shaders without textures, or needing more registers, run one thread" {
     try std.testing.expectEqual(@as(usize, 0), countSig(c.code(), .last_thread_switch));
 }
 
-test "each texture sample switches threads, the last one last" {
+test "texture samples are asked for together, and waited for with one thread switch" {
     var s = Shader.init(.fragment);
     const u = s.varying();
     const v = s.varying();
     const t0 = s.texture(0, u, v);
-    const t1 = s.texture(0, v, u);
-    s.tlbColor(s.fadd(t0, t1));
+    const t1 = s.texture(1, v, u);
+    const t2 = s.texture(2, u, u);
+    s.tlbColor(s.fadd(s.fadd(t0, t1), t2));
+    const c = try compile(&s);
+    try std.testing.expect(c.threaded);
+    try std.testing.expectEqual(@as(usize, 0), countSig(c.code(), .thread_switch));
+    try std.testing.expectEqual(@as(usize, 1), countSig(c.code(), .last_thread_switch));
+    // All three are asked for before the first result is read.
+    var first_load: ?usize = null;
+    var last_request: usize = 0;
+    for (c.code(), 0..) |i, ip| {
+        const sig = qpu.getSig(i);
+        if (first_load == null and (sig == .load_tmu0 or sig == .load_tmu1)) first_load = ip;
+        if (writesTmuS(i)) last_request = ip;
+    }
+    try std.testing.expect(last_request < first_load.?);
+    // In order, their config uniforms: slot 0's, 1's, then 2's.
+    const want = [_]UniformKind{ .{ .tex_p0 = 0 }, .{ .tex_p1 = 0 }, .{ .tex_p0 = 1 }, .{ .tex_p1 = 1 }, .{ .tex_p0 = 2 }, .{ .tex_p1 = 2 } };
+    try std.testing.expectEqualSlices(UniformKind, &want, c.uniforms());
+}
+
+test "a texture unit's fetches stay within what it holds for a thread" {
+    var s = Shader.init(.fragment);
+    const u = s.varying();
+    var sum = s.texture(0, u, u);
+    for (0..3) |_| sum = s.fadd(sum, s.texture(0, u, u));
+    s.tlbColor(sum);
+    const c = try compile(&s);
+    try std.testing.expect(c.threaded);
+    var outstanding: i32 = 0;
+    for (c.code()) |i| {
+        if (writesTmuS(i)) outstanding += 1;
+        if (qpu.getSig(i) == .load_tmu0) outstanding -= 1;
+        try std.testing.expect(outstanding <= tex_fifo_depth(true));
+    }
+}
+
+test "a sample whose place comes from another's waits for it, switching threads again" {
+    var s = Shader.init(.fragment);
+    const u = s.varying();
+    const v = s.varying();
+    const t0 = s.texture(0, u, v);
+    const t1 = s.texture(0, t0, u);
+    s.tlbColor(t1);
     const c = try compile(&s);
     try std.testing.expect(c.threaded);
     try std.testing.expectEqual(@as(usize, 1), countSig(c.code(), .thread_switch));
