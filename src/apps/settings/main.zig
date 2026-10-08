@@ -28,6 +28,7 @@ const wayland = @import("wayland");
 const build_info = @import("build_info");
 const info = @import("info.zig");
 const usb = @import("usb.zig");
+const log = @import("log.zig");
 const view = @import("view.zig");
 const store = @import("store");
 const update = @import("update.zig");
@@ -84,6 +85,9 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     var network = info.Network.read();
     // The USB devices, read while their page shows.
     var devices: usb.Devices = .{};
+    // The system's log, read while its page shows.
+    var syslog: log.Log = .{};
+    defer syslog.deinit();
     // The network manager is asked less often: each request may start a
     // Wi-Fi scan.
     var report: ?info.manager.Report = null;
@@ -150,6 +154,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             usage = monitor.read(now);
             network = info.Network.read();
             if (view.shownPage(window_ui) == .usb) devices = usb.Devices.read();
+            if (view.shownPage(window_ui) == .log) _ = syslog.poll();
             dirty = true;
         }
         // Installing, or getting the list of apps.
@@ -164,6 +169,11 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             dirty = true;
         }
         // The list is got when the page is first shown.
+        // The log is read as soon as its page shows.
+        if (view.shownPage(window_ui) == .log and syslog.fd == null and !syslog.failed) {
+            _ = syslog.poll();
+            dirty = true;
+        }
         if (view.shownPage(window_ui) == .apps and !apps.asked) {
             apps.refresh(false);
             dirty = true;
@@ -237,6 +247,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
                 .usage = usage,
                 .network = &network,
                 .usb = &devices,
+                .log = if (syslog.fd != null or syslog.failed) &syslog else null,
                 .manager = if (report) |*r| r else null,
                 .actions = &actions,
                 .apps = .{
@@ -297,4 +308,5 @@ test {
     _ = @import("update.zig");
     _ = @import("board.zig");
     _ = usb;
+    _ = log;
 }

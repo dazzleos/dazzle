@@ -51,6 +51,7 @@ pub const Icon = enum {
     videocam,
     print,
     sports_esports,
+    article,
     wifi_1_bar,
     wifi_2_bar,
     // The demo.

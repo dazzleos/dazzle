@@ -1,8 +1,9 @@
 //! The settings app's window, as widgets: pages, chosen with the tabs on
 //! the left, about the Wi-Fi networks around, Ethernet, the resources in
 //! use (with meters), the board (drawn: picking a part says what it is;
-//! see board.zig), the USB devices plugged in, the language and keyboard, and the system (its build,
-//! Linux and the board).
+//! see board.zig), the USB devices plugged in, the language and keyboard,
+//! the system (its build, Linux and the board) and the system's log
+//! (newest first, or only its warnings and errors).
 //! Choosing a Wi-Fi network shows a password field (for WPA2) and a
 //! Connect button; choosing a static address for Ethernet shows fields for
 //! it. The Apps page lists the apps that can be installed (from the
@@ -19,6 +20,7 @@ const store = @import("store");
 const update = @import("update.zig");
 const board = @import("board.zig");
 const usb = @import("usb.zig");
+const log = @import("log.zig");
 const BoardView = @import("board_view.zig").BoardView;
 
 /// The storage bar's colours (the system's is the theme's primary).
@@ -129,6 +131,8 @@ pub const Settings = struct {
     network: *const info.Network,
     /// The USB devices plugged in.
     usb: *const usb.Devices = &.{},
+    /// The system's log, as read so far (while its page shows).
+    log: ?*const log.Log = null,
     /// What the network manager last said; null if it could not be asked.
     manager: ?*const info.manager.Report = null,
     /// The apps that can be installed, and how installing goes.
@@ -147,6 +151,8 @@ pub const Settings = struct {
         /// The part of the board picked (an index into its parts), if one
         /// is.
         board_part: ?usize = null,
+        /// The log shows only warnings and errors.
+        log_problems: bool = false,
         /// The Wi-Fi network chosen (its SSID), and the password typed.
         selected_buf: [32]u8 = undefined,
         selected_len: u8 = 0,
@@ -177,6 +183,10 @@ pub const Settings = struct {
             }
         };
 
+        fn setLogProblems(st: *State, on: bool) void {
+            st.log_problems = on;
+        }
+
         fn setAddress(st: *State, t: []const u8) void {
             st.address.set(t);
         }
@@ -204,6 +214,7 @@ pub const Settings = struct {
             .board => self.boardCard(b, state),
             .language => self.languageCard(b),
             .usb => self.usbCard(b),
+            .log => self.logCard(b, state),
             .system => self.systemCard(b),
             .apps => self.appsCard(b, state),
         };
@@ -354,6 +365,33 @@ pub const Settings = struct {
             b.meter("Memory", mem, fraction(u.memUsed(), u.mem_total)),
             b.meter("GPU memory", gpu, fraction(u.gpuUsed(), u.gpu_total)),
             b.storage(u.storage),
+        });
+    }
+
+    /// The system's log, newest first: when each message came (since the
+    /// system started) and what it says, warnings and errors in colour;
+    /// or only those.
+    fn logCard(self: *const Settings, b: Builder, state: *State) ui.Widget {
+        const cx = b.cx;
+        const a = cx.ui.arena();
+        const problems = cx.make(ui.Switch{ .value = state.log_problems, .on_changed = .of(state, State.setLogProblems), .label = "Only warnings and errors" });
+        const l = self.log orelse return b.card("Log", &.{ problems, b.value("Reading the log…") });
+        if (l.failed) return b.card("Log", &.{b.value("The log cannot be read")});
+        // The lines shown, newest first.
+        var shown: std.ArrayList(*const log.Line) = .empty;
+        for (0..l.count) |i| {
+            const line = l.newest(i);
+            if (!state.log_problems or line.level.problem()) shown.append(a, line) catch break;
+        }
+        const lines = a.create(LogLines) catch return cx.make(ui.Empty{});
+        lines.* = .{ .lines = shown.items };
+        return b.card("Log", &.{
+            problems,
+            if (shown.items.len == 0) b.value(if (state.log_problems) "No warnings or errors" else "Nothing yet") else cx.make(ui.LazyGrid{
+                .count = shown.items.len,
+                .cell = .{ .w = std.math.inf(f32), .h = log_row_height },
+                .item = .of(lines, LogLines.row),
+            }),
         });
     }
 
@@ -725,6 +763,7 @@ pub const Page = enum {
     language,
     apps,
     system,
+    log,
 
     pub fn label(p: Page) []const u8 {
         return switch (p) {
@@ -733,6 +772,7 @@ pub const Page = enum {
             .resources => "Resources",
             .board => "Board",
             .usb => "USB",
+            .log => "Log",
             .language => "Language",
             .apps => "Apps",
             .system => "System",
@@ -746,6 +786,7 @@ pub const Page = enum {
             .resources => .speed,
             .board => .developer_board,
             .usb => .usb,
+            .log => .article,
             .language => .language,
             .apps => .apps,
             .system => .info,
@@ -795,6 +836,31 @@ const Tab = struct {
         }) });
     }
 };
+
+const log_row_height = 26;
+
+/// The log's lines, to make rows of (in the frame's arena).
+const LogLines = struct {
+    lines: []const *const log.Line,
+
+    fn row(l: *const LogLines, cx: *ui.Context, i: usize) ui.Widget {
+        const t = cx.theme();
+        const line = l.lines[i];
+        var time_buf: [32]u8 = undefined;
+        const color = switch (line.level) {
+            .emergency, .alert, .critical, .@"error" => t.@"error",
+            .warning => warning_color,
+            else => t.on_surface,
+        };
+        return cx.make(ui.Row{ .spacing = 12, .cross_axis_alignment = .center, .children = &.{
+            cx.make(ui.SizedBox{ .width = 96, .child = cx.make(ui.Text{ .text = cx.fmt("{s}", .{log.formatUptime(&time_buf, line.usec)}), .style = .{ .size = 14, .color = t.on_surface_variant }, .wrap = false, .text_align = .end }) }),
+            cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = line.text(), .style = .{ .size = 14, .color = color }, .wrap = false, .ellipsis = true }) }),
+        } });
+    }
+};
+
+/// Warnings in the log.
+const warning_color = gfx.Color.argb(0xffe6b450);
 
 fn usbIcon(k: usb.Kind) ui.icons.Icon {
     return switch (k) {
@@ -1699,4 +1765,41 @@ test "the USB devices: each with what it is, and the board's own" {
     settings.usb = &none;
     u.frame(1600, 900, 3, settings);
     try testing.expect(findText(u.root.?, "Nothing is plugged in") != null);
+}
+
+test "the log: newest first, or only its warnings and errors" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    const d = sample();
+    var l: log.Log = .{};
+    l.add("6,1,1500000,-;dazzle: starting as init\n");
+    l.add("4,2,2000000,-;dazzle: network: no answer from the time servers\n");
+    l.add("3,3,3250000,-;dazzle-files: error: OutOfMemory\n");
+    l.add("6,4,65000000,-;dazzle-shell: started\n");
+    const settings: Settings = .{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .log = &l };
+    u.frame(1600, 900, 0, settings);
+    const st = u.root.?.state(Settings.State);
+    st.page = .log;
+    for (test_sizes) |size| {
+        u.frame(size[0], size[1], 1, settings);
+        try testing.expect(!overflows(u.root.?));
+    }
+    u.frame(1600, 900, 2, settings);
+    // Newest first, with when.
+    const newest = findText(u.root.?, "dazzle-shell: started").?;
+    const oldest = findText(u.root.?, "dazzle: starting as init").?;
+    try testing.expect(newest.position()[1] < oldest.position()[1]);
+    try testing.expect(findText(u.root.?, "1:05.000") != null);
+    try testing.expect(findText(u.root.?, "3.250") != null);
+    // Only the problems.
+    click(u, up(findText(u.root.?, "Only warnings and errors").?, ui.Switch).?);
+    u.frame(1600, 900, 3, settings);
+    try testing.expect(findText(u.root.?, "dazzle-shell: started") == null);
+    try testing.expect(findText(u.root.?, "dazzle-files: error: OutOfMemory") != null);
+    try testing.expect(findText(u.root.?, "dazzle: network: no answer from the time servers") != null);
+    // Not read yet, and none to show.
+    const reading: Settings = .{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net };
+    u.frame(1600, 900, 4, reading);
+    try testing.expect(findText(u.root.?, "Reading the log…") != null);
 }

@@ -15,6 +15,7 @@ const linux = std.os.linux;
 pub const network = @import("network.zig");
 pub const system = @import("system.zig");
 pub const media = @import("media.zig");
+pub const log = @import("log.zig");
 pub const files = @import("files.zig");
 pub const archive = @import("archive.zig");
 
@@ -22,6 +23,7 @@ test {
     _ = network;
     _ = system;
     _ = media;
+    _ = log;
     _ = files;
     _ = archive;
 }
@@ -131,8 +133,10 @@ pub fn logToKmsgIfStderr() void {
 /// otherwise to stderr.
 pub fn print(comptime fmt: []const u8, args: anytype) void {
     var buf: [512]u8 = undefined;
-    // "<5>" is the notice log level; it is ignored when writing to stderr.
-    const prefix = "<5>";
+    // The log level ("<5>": notice), which is ignored when writing to
+    // stderr. What says something failed is a warning or an error, so the
+    // log's readers (Settings) can pick those out.
+    const prefix = comptime levelPrefix(fmt);
     @memcpy(buf[0..prefix.len], prefix);
     const msg = std.fmt.bufPrint(buf[prefix.len..], fmt, args) catch blk: {
         const trunc = "...(truncated)\n";
@@ -150,6 +154,22 @@ pub fn print(comptime fmt: []const u8, args: anytype) void {
         if (linux.errno(rc) != .SUCCESS) return;
         rest = rest[rc..];
     }
+}
+
+/// The log level a message is written at, from what it says: "error:"
+/// or "failed" an error, "cannot" a warning, else a notice.
+fn levelPrefix(comptime fmt: []const u8) []const u8 {
+    @setEvalBranchQuota(20 * fmt.len + 1000);
+    if (std.mem.indexOf(u8, fmt, "error:") != null or std.mem.indexOf(u8, fmt, " failed") != null) return "<3>";
+    if (std.mem.indexOf(u8, fmt, "cannot ") != null) return "<4>";
+    return "<5>";
+}
+
+test "messages that say something failed are warnings or errors" {
+    try std.testing.expectEqualStrings("<3>", comptime levelPrefix("dazzle-files: error: {s}\n"));
+    try std.testing.expectEqualStrings("<3>", comptime levelPrefix("dazzle: system: fork failed ({s})\n"));
+    try std.testing.expectEqualStrings("<4>", comptime levelPrefix("dazzle: cannot mount {s}\n"));
+    try std.testing.expectEqualStrings("<5>", comptime levelPrefix("dazzle: mounted {s} at {s}\n"));
 }
 
 /// Dazzle has a single user, which everything but init runs as.
