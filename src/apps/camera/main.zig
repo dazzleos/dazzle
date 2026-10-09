@@ -347,7 +347,7 @@ fn openWindow(gpa: std.mem.Allocator, init: std.process.Init.Minimal, dev: *vc4.
         print("dazzle-camera: WAYLAND_DISPLAY needs XDG_RUNTIME_DIR\n", .{});
         return error.NoCompositor;
     };
-    const win = app.Window.open(gpa, .device(dev), path, "Camera") catch |err| {
+    const win = app.Window.open(gpa, .device(dev), path, .{ .title = "Camera", .size = view.open_size }) catch |err| {
         print(sys.log_warning ++ "dazzle-camera: cannot open a window on {s} ({s})\n", .{ path, @errorName(err) });
         return err;
     };

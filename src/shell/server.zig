@@ -10,8 +10,10 @@
 //! (the pointer's picture, by name) and wl_data_device_manager (copy and
 //! paste: see `setSelection`; drag and drop is not supported yet).
 //!
-//! Windows go in the work area above the shell's dock: maximized (filling
-//! it, as they start), or restored (at first to half its width and height),
+//! Windows go in the work area above the shell's dock: restored (as they
+//! start, at the size the client chooses when told 0 by 0, in the middle
+//! of the work area; or, restored from maximized without one, half the
+//! work area), or maximized (filling it),
 //! where the client can move them with xdg_toplevel.move (dragging its
 //! title bar) and resize with xdg_toplevel.resize (dragging an edge), no
 //! smaller than the size it asks for with xdg_toplevel.set_min_size, nor
@@ -305,7 +307,9 @@ pub const Toplevel = struct {
     activated: bool = true,
     capabilities_sent: bool = false,
     /// Filling the work area; otherwise restored, at `x`, `y` on the screen.
-    maximized: bool = true,
+    /// A window starts restored, at the size its client chooses (see
+    /// `placeFirst`).
+    maximized: bool = false,
     /// Filling the whole screen, over the dock (whether maximized or not
     /// is kept for when it leaves fullscreen).
     fullscreen: bool = false,
@@ -898,6 +902,22 @@ pub const Server = struct {
         if (t.xdg.configured) s.configure(c, t);
         s.damaged = true;
         s.replacePopups(t);
+    }
+
+    /// A restored window's first buffer: the size its client chose (it was
+    /// told 0 by 0: see `configure`), as far as the work area and its size
+    /// limits allow, in the middle of the work area. If it had to be made
+    /// smaller, it is told so.
+    fn placeFirst(s: *Server, c: *Client, t: *Toplevel) void {
+        if (t.placed or t.maximized) return;
+        const tex = t.xdg.surface.?.texture().?;
+        const wa = s.work_area;
+        t.width = s.clampWidth(t, tex.width, wa.width);
+        t.height = s.clampHeight(t, tex.height, wa.height);
+        t.x = wa.x + @divTrunc(@as(i32, @intCast(wa.width)) - @as(i32, @intCast(t.width)), 2);
+        t.y = wa.y + @max(@divTrunc(@as(i32, @intCast(wa.height)) - @as(i32, @intCast(t.height)), 2), 0);
+        t.placed = true;
+        if (t.width != tex.width or t.height != tex.height) s.requestConfigure(c, t);
     }
 
     /// Makes a window fill the screen, over the dock, or not.
@@ -2588,6 +2608,7 @@ pub const Server = struct {
                 x.configured = true;
             } else if (surf.texture() != null and !t.mapped) {
                 t.mapped = true;
+                s.placeFirst(c, t);
                 try s.toplevels.append(s.gpa, t);
             } else if (surf.texture() == null and t.mapped) {
                 s.unmap(t);
@@ -2670,7 +2691,8 @@ pub const Server = struct {
                 std.mem.writeInt(u32, states[n..][0..4], st[1], .little);
                 n += 4;
             };
-            const size = s.configuredSize(t);
+            // A window not yet placed chooses its own size (0 by 0).
+            const size: [2]u32 = if (!t.placed and !t.maximized and !t.fullscreen) .{ 0, 0 } else s.configuredSize(t);
             e.int(@intCast(size[0])).int(@intCast(size[1])).array(states[0..n]).end();
         }
         if (c.send(t.xdg.id, p.xdg_surface.event.configure)) |m0| {

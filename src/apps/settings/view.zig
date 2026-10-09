@@ -111,6 +111,9 @@ pub const Actions = struct {
 /// `max_page_width`), and their pages scroll.
 pub const min_size = [2]u32{ 720, 440 };
 
+/// The size the window opens at: the tabs of pages beside a page.
+pub const open_size = [2]u32{ 1000, 680 };
+
 /// The widest a page is.
 const max_page_width = 960;
 

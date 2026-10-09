@@ -9,6 +9,9 @@ const gfx = @import("gfx");
 /// The smallest the window may be.
 pub const min_size = [2]u32{ 480, 400 };
 
+/// The size the window opens at: a 4:3 picture 960 wide, under the title bar.
+pub const open_size = [2]u32{ 960, 764 };
+
 /// The height of the title bar and the bar under the picture, which the
 /// preview leaves room for.
 pub const chrome_height = 48 + 72;

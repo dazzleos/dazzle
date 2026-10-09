@@ -230,9 +230,9 @@ pub const Window = struct {
     closed: bool = false,
     /// Covered by another window: there is no point drawing.
     suspended: bool = false,
-    /// Filling the screen (the shell's configure says so); otherwise
+    /// Filling the work area (the shell's configure says so); otherwise
     /// movable and resizable.
-    maximized: bool = true,
+    maximized: bool = false,
     /// On the whole screen, over the shell's dock (see `setFullscreen`).
     fullscreen: bool = false,
     /// The serial of the last pointer button press, for asking the shell
@@ -284,18 +284,30 @@ pub const Window = struct {
     input_len: usize = 0,
 
     /// Connects to the compositor listening on `path` and opens a window.
-    pub fn open(gpa: std.mem.Allocator, gpu: Gpu, path: []const u8, title: []const u8) !*Window {
+    pub fn open(gpa: std.mem.Allocator, gpu: Gpu, path: []const u8, options: Options) !*Window {
         const conn = try client.Display.connect(gpa, path);
         errdefer conn.disconnect();
-        return openOn(gpa, gpu, conn, title);
+        return openOn(gpa, gpu, conn, options);
     }
+
+    /// How a window opens.
+    pub const Options = struct {
+        title: []const u8,
+        /// The size it opens at: the best for what the app shows. The
+        /// shell lets the app choose (it places the window in the middle
+        /// of its work area), and makes it smaller if it does not fit.
+        size: [2]u32 = default_size,
+        /// Open maximized instead.
+        maximized: bool = false,
+    };
 
     /// Opens a window on an existing connection, which the window then
     /// owns. Waits for the first configure.
-    pub fn openOn(gpa: std.mem.Allocator, gpu: Gpu, conn: *client.Display, title: []const u8) !*Window {
+    pub fn openOn(gpa: std.mem.Allocator, gpu: Gpu, conn: *client.Display, options: Options) !*Window {
         const w = try gpa.create(Window);
         errdefer gpa.destroy(w);
-        w.* = .{ .gpa = gpa, .gpu = gpu, .conn = conn, .clipboard = .{ .gpa = gpa } };
+        w.* = .{ .gpa = gpa, .gpu = gpu, .conn = conn, .clipboard = .{ .gpa = gpa }, .width = options.size[0], .height = options.size[1], .maximized = options.maximized };
+        const title = options.title;
         const registry = try w.globals.fetch(conn);
         const compositor = (try w.globals.bind(registry, p.wl_compositor.name, 4, null)) orelse return error.NoCompositor;
         // Version 6 for the suspended state.
@@ -323,6 +335,10 @@ pub const Window = struct {
         m.uint(w.toplevel.id).end();
         m = try w.toplevel.request(p.xdg_toplevel.request.set_title);
         m.string(title).end();
+        if (options.maximized) {
+            m = try w.toplevel.request(p.xdg_toplevel.request.set_maximized);
+            m.end();
+        }
         // The initial commit, without a buffer, asks for the first configure.
         m = try w.surface.request(p.wl_surface.request.commit);
         m.end();

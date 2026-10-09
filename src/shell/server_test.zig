@@ -72,6 +72,9 @@ const ServerThread = struct {
     fullscreen_top: std.atomic.Value(bool) = .init(false),
     scanout_width: std.atomic.Value(u32) = .init(0),
     checked: std.atomic.Value(bool) = .init(false),
+    /// With `check_fullscreen`: where the top window is (x, y, width,
+    /// height).
+    top_rect: [4]std.atomic.Value(i32) = @splat(.init(0)),
     /// Set by the test to have it move the pointer into the window and
     /// then by (5, -3), reporting whether it was locked there and hidden;
     /// or to have it break a lock (the Super key).
@@ -117,6 +120,10 @@ const ServerThread = struct {
                 st.fullscreen_top.store(srv.fullscreenTop(), .monotonic);
                 const b = if (srv.topWindow()) |t| srv.scanoutBuffer(t) else null;
                 st.scanout_width.store(if (b) |x| x.width else 0, .monotonic);
+                if (srv.topWindow()) |t| {
+                    const r = srv.windowRect(t);
+                    for (&st.top_rect, [4]i32{ r.x, r.y, @intCast(r.width), @intCast(r.height) }) |*o, v| o.store(v, .monotonic);
+                }
                 st.checked.store(true, .release);
             }
             if (st.send_relative.swap(false, .monotonic)) {
@@ -307,8 +314,9 @@ test "a client maps a window, gets frame callbacks and buffer releases" {
     m = try surface.request(p.wl_surface.request.commit);
     m.end();
     try d.roundtrip();
-    try testing.expectEqual(@as(i32, 800), state.configure_width);
-    try testing.expectEqual(@as(i32, 560), state.configure_height);
+    // 0 by 0: the client chooses its size (the shell places it).
+    try testing.expectEqual(@as(i32, 0), state.configure_width);
+    try testing.expectEqual(@as(i32, 0), state.configure_height);
     try testing.expect(state.configure_serial != 0);
     m = try xdg_surface.request(p.xdg_surface.request.ack_configure);
     m.uint(state.configure_serial).end();
@@ -441,7 +449,7 @@ test "a pipelined app window keeps a frame in flight, while memory allows" {
 
     var fake: FakeGpu = .{};
     const d = try client.Display.fromFd(testing.allocator, pair[1]);
-    const win = try app.Window.openOn(testing.allocator, fake.pipelinedGpu(), d, "Test window");
+    const win = try app.Window.openOn(testing.allocator, fake.pipelinedGpu(), d, .{ .title = "Test window", .maximized = true });
     try win.setPipelined(true);
     try testing.expect(win.pipelined);
 
@@ -481,6 +489,43 @@ test "a pipelined app window keeps a frame in flight, while memory allows" {
     try testing.expectEqual(@as(u32, 0), fake.live_bos);
 }
 
+test "an app window opens at the size it chooses, in the middle of the work area, shrunk to fit" {
+    var pair: [2]linux.fd_t = undefined;
+    try testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &pair));
+    var renderer: FakeRenderer = .{};
+    const st = try testing.allocator.create(ServerThread);
+    defer testing.allocator.destroy(st);
+    st.* = .{ .server = .init(testing.allocator, renderer.backend(), .{ .x = 0, .y = 40, .width = 800, .height = 560 }), .fd = pair[0] };
+    defer st.server.deinit();
+    const thread = try std.Thread.spawn(.{}, ServerThread.run, .{st});
+
+    var fake: FakeGpu = .{};
+    const d = try client.Display.fromFd(testing.allocator, pair[1]);
+    // Bigger than the work area is tall.
+    const win = try app.Window.openOn(testing.allocator, fake.gpu(), d, .{ .title = "Test window", .size = .{ 400, 700 } });
+    // Not maximized: the size it chose.
+    try testing.expect(!win.maximized);
+    try testing.expectEqual([2]u32{ 400, 700 }, [2]u32{ win.width, win.height });
+    test_frame.begin(try win.beginFrame(), .{ .clear = 0xff000000 });
+    try win.present(&test_frame);
+    // Too tall: it is told to be the work area's height.
+    while (win.pending_serial == null) try d.dispatch();
+    _ = try win.applyConfigure();
+    try testing.expectEqual([2]u32{ 400, 560 }, [2]u32{ win.width, win.height });
+    test_frame.begin(try win.beginFrame(), .{ .clear = 0xff000000 });
+    try win.present(&test_frame);
+    while (win.frame_pending) try d.dispatch();
+    // In the middle across, at the top of the work area.
+    st.check_fullscreen.store(true, .monotonic);
+    while (!st.checked.load(.acquire)) try d.dispatchTimeout(10);
+    const r = [4]i32{ st.top_rect[0].load(.monotonic), st.top_rect[1].load(.monotonic), st.top_rect[2].load(.monotonic), st.top_rect[3].load(.monotonic) };
+    try testing.expectEqual([4]i32{ 200, 40, 400, 560 }, r);
+
+    win.close();
+    thread.join();
+    try testing.expectEqual(@as(u32, 0), fake.live_bos);
+}
+
 test "a fullscreen window covers the dock and can be shown directly; a game locks the pointer" {
     var pair: [2]linux.fd_t = undefined;
     try testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &pair));
@@ -494,7 +539,7 @@ test "a fullscreen window covers the dock and can be shown directly; a game lock
 
     var fake: FakeGpu = .{};
     const d = try client.Display.fromFd(testing.allocator, pair[1]);
-    const win = try app.Window.openOn(testing.allocator, fake.gpu(), d, "Test window");
+    const win = try app.Window.openOn(testing.allocator, fake.gpu(), d, .{ .title = "Test window", .maximized = true });
     try d.roundtrip();
     try testing.expectEqual(@as(u32, 320), win.width);
 
@@ -564,7 +609,7 @@ test "app windows render, present through the compositor and resize" {
 
     var fake: FakeGpu = .{};
     const d = try client.Display.fromFd(testing.allocator, pair[1]);
-    const win = try app.Window.openOn(testing.allocator, fake.gpu(), d, "Test window");
+    const win = try app.Window.openOn(testing.allocator, fake.gpu(), d, .{ .title = "Test window", .maximized = true });
     // Maximized into the work area.
     try testing.expectEqual(@as(u32, 320), win.width);
     try testing.expectEqual(@as(u32, 200), win.height);
@@ -737,6 +782,10 @@ test "the shown window gets the pointer and keyboard" {
     const toplevel = try d.newObject(.{ .ptr = &state, .handler = State.toplevelEvent });
     m = try xdg_surface.request(p.xdg_surface.request.get_toplevel);
     m.uint(toplevel.id).end();
+    // Maximized: in the work area's corner (windows otherwise open at
+    // the size they choose, in its middle).
+    m = try toplevel.request(p.xdg_toplevel.request.set_maximized);
+    m.end();
     m = try surface.request(p.wl_surface.request.commit);
     m.end();
     try d.roundtrip();
@@ -803,6 +852,10 @@ test "a buffer on the display is released only once it leaves the screen" {
     const toplevel = try d.newObject(.{ .ptr = &state, .handler = State.toplevelEvent });
     m = try xdg_surface.request(p.xdg_surface.request.get_toplevel);
     m.uint(toplevel.id).end();
+    // Maximized: in the work area's corner (windows otherwise open at
+    // the size they choose, in its middle).
+    m = try toplevel.request(p.xdg_toplevel.request.set_maximized);
+    m.end();
     m = try surface.request(p.wl_surface.request.commit);
     m.end();
     try d.roundtrip();
@@ -998,6 +1051,9 @@ const TestWindow = struct {
         tw.toplevel = try d.newObject(.{ .ptr = &tw.state, .handler = State.toplevelEvent });
         m = try xdg_surface.request(p.xdg_surface.request.get_toplevel);
         m.uint(tw.toplevel.id).end();
+        // Maximized (windows otherwise open at the size they choose).
+        m = try tw.toplevel.request(p.xdg_toplevel.request.set_maximized);
+        m.end();
         m = try tw.surface.request(p.wl_surface.request.commit);
         m.end();
         try d.roundtrip();
@@ -1278,7 +1334,7 @@ test "text copied in one app window is pasted in another, through the shell" {
         }
     }.f;
     // The first window, with the keyboard, copies.
-    const first = try app.Window.openOn(testing.allocator, fake.gpu(), try client.Display.fromFd(testing.allocator, a[1]), "First");
+    const first = try app.Window.openOn(testing.allocator, fake.gpu(), try client.Display.fromFd(testing.allocator, a[1]), .{ .title = "First", .maximized = true });
     try show(first);
     first.clipboard.copy("hello from the first");
     try first.conn.roundtrip();
@@ -1306,7 +1362,7 @@ test "text copied in one app window is pasted in another, through the shell" {
 
     // The second window opens on top, with the keyboard, and is told what
     // the clipboard holds.
-    const second = try app.Window.openOn(testing.allocator, fake.gpu(), try client.Display.fromFd(testing.allocator, b[1]), "Second");
+    const second = try app.Window.openOn(testing.allocator, fake.gpu(), try client.Display.fromFd(testing.allocator, b[1]), .{ .title = "Second", .maximized = true });
     try show(second);
     for (0..100) |_| {
         if (second.clipboard.offer_mime != null) break;
@@ -1366,7 +1422,7 @@ test "an app window's touches come as its input" {
     const thread = try std.Thread.spawn(.{}, ServerThread.run, .{st});
 
     var fake: FakeGpu = .{};
-    const win = try app.Window.openOn(testing.allocator, fake.gpu(), try client.Display.fromFd(testing.allocator, pair[1]), "Touched");
+    const win = try app.Window.openOn(testing.allocator, fake.gpu(), try client.Display.fromFd(testing.allocator, pair[1]), .{ .title = "Touched", .maximized = true });
     test_frame.begin(try win.beginFrame(), .{ .clear = 0xff000000 });
     try win.present(&test_frame);
     while (win.frame_pending) try win.conn.dispatch();

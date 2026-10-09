@@ -373,7 +373,7 @@ fn openWindow(gpa: std.mem.Allocator, init: std.process.Init.Minimal, dev: *vc4.
         print("dazzle-settings: WAYLAND_DISPLAY needs XDG_RUNTIME_DIR\n", .{});
         return error.NoCompositor;
     };
-    const win = app.Window.open(gpa, .device(dev), path, "Settings") catch |err| {
+    const win = app.Window.open(gpa, .device(dev), path, .{ .title = "Settings", .size = view.open_size }) catch |err| {
         print(sys.log_warning ++ "dazzle-settings: cannot open a window on {s} ({s})\n", .{ path, @errorName(err) });
         return err;
     };

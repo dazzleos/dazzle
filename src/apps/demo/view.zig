@@ -28,6 +28,9 @@ pub const lines = 5;
 /// there is.
 pub const min_size = [2]u32{ 560, 420 };
 
+/// The size the window opens at: the shape beside its controls.
+pub const open_size = [2]u32{ 960, 700 };
+
 pub const Demo = struct {
     /// Null in tests (nothing is drawn where it would be).
     solids: ?*solids.Solids,

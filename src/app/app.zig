@@ -9,7 +9,7 @@
 //! * `Clipboard`: the system's clipboard, for text (`Window.clipboard`)
 //!
 //!     const dev = try vc4.device.openRender();
-//!     const win = try app.Window.open(gpa, .device(&dev), socket_path, "Hello");
+//!     const win = try app.Window.open(gpa, .device(&dev), socket_path, .{ .title = "Hello", .size = .{ 640, 480 } });
 //!     while (!win.closed) {
 //!         try win.poll();
 //!         frame.begin(try win.beginFrame(), .{ .clear = 0xff000000 });

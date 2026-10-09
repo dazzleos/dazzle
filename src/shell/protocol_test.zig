@@ -214,6 +214,10 @@ const Window = struct {
         win.toplevel = try peer.d.newObject(null);
         m = try win.xdg.request(p.xdg_surface.request.get_toplevel);
         m.uint(win.toplevel.id).end();
+        // Windows open at the size their client chooses; this one fills
+        // the work area.
+        m = try win.toplevel.request(p.xdg_toplevel.request.set_maximized);
+        m.end();
         m = try win.surface.request(p.wl_surface.request.commit);
         m.end();
         try peer.world.pump();

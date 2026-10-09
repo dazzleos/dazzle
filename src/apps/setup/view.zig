@@ -22,6 +22,9 @@ const locale = @import("locale");
 const proto = sys.system;
 
 /// The pages, in order. More (the network, say) can follow.
+/// The size the window opens at: one step at a time.
+pub const open_size = [2]u32{ 880, 620 };
+
 pub const Page = enum { language, hostname, apps };
 pub const pages = [_]Page{ .language, .hostname, .apps };
 
