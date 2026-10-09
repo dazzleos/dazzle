@@ -43,7 +43,7 @@ fn writeResolvConf(servers: []const Ip4) void {
     var w: std.Io.Writer = .fixed(&buf);
     for (servers) |s| w.print("nameserver {d}.{d}.{d}.{d}\n", .{ s[0], s[1], s[2], s[3] }) catch break;
     const fd = sys.open(resolv_conf, .{ .ACCMODE = .WRONLY, .TRUNC = true, .CLOEXEC = true }) catch |err| {
-        print("dazzle: network: cannot write {s}: {s}\n", .{ resolv_conf, @errorName(err) });
+        print(sys.log_warning ++ "dazzle: network: cannot write {s}: {s}\n", .{ resolv_conf, @errorName(err) });
         return;
     };
     defer sys.close(fd);
@@ -58,20 +58,20 @@ fn setClock(ntp: []const Ip4, dns: []const Ip4) void {
             break pool_buf[0..1];
         }
     } else {
-        print("dazzle: network: no time server (cannot look up {s})\n", .{time_pool});
+        print(sys.log_warning ++ sys.log_warning ++ "dazzle: network: no time server (cannot look up {s})\n", .{time_pool});
         return;
     };
     for (servers) |s| {
         const now = sntp(s) orelse continue;
         sys.setRealtimeNs(now) catch |err| {
-            print("dazzle: network: cannot set the clock: {s}\n", .{@errorName(err)});
+            print(sys.log_warning ++ "dazzle: network: cannot set the clock: {s}\n", .{@errorName(err)});
             return;
         };
         synced = true;
         print("dazzle: network: clock set from {d}.{d}.{d}.{d}\n", .{ s[0], s[1], s[2], s[3] });
         return;
     }
-    print("dazzle: network: no answer from the time servers\n", .{});
+    print(sys.log_warning ++ "dazzle: network: no answer from the time servers\n", .{});
 }
 
 /// Sends `request` to `server`:`port` over UDP and waits up to `timeout_ms`

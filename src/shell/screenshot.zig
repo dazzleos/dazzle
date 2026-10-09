@@ -22,7 +22,7 @@ pub const folder = sys.system.user_dir;
 /// which must be thread-safe).
 pub fn save(gpa: std.mem.Allocator, dir: []const u8, pixels: []u32, width: u32, height: u32) void {
     const t = std.Thread.spawn(.{ .stack_size = 256 * 1024 }, saveNow, .{ gpa, dir, pixels, width, height }) catch |err| {
-        sys.print("dazzle-shell: cannot save a screenshot ({s})\n", .{@errorName(err)});
+        sys.print(sys.log_warning ++ "dazzle-shell: cannot save a screenshot ({s})\n", .{@errorName(err)});
         gpa.free(pixels);
         return;
     };
@@ -32,7 +32,7 @@ pub fn save(gpa: std.mem.Allocator, dir: []const u8, pixels: []u32, width: u32, 
 fn saveNow(gpa: std.mem.Allocator, dir: []const u8, pixels: []u32, width: u32, height: u32) void {
     defer gpa.free(pixels);
     const data = png.encode(gpa, pixels, width, height) catch |err| {
-        sys.print("dazzle-shell: cannot make a screenshot: {s}\n", .{@errorName(err)});
+        sys.print(sys.log_warning ++ "dazzle-shell: cannot make a screenshot: {s}\n", .{@errorName(err)});
         return;
     };
     defer gpa.free(data);
@@ -43,13 +43,13 @@ fn saveNow(gpa: std.mem.Allocator, dir: []const u8, pixels: []u32, width: u32, h
         const path = nextName(&path_buf, dir) orelse break;
         sys.files.writeNew(path, data) catch |err| {
             if (err == error.Exists) continue;
-            sys.print("dazzle-shell: cannot write {s}: {s}\n", .{ path, @errorName(err) });
+            sys.print(sys.log_warning ++ "dazzle-shell: cannot write {s}: {s}\n", .{ path, @errorName(err) });
             return;
         };
         sys.print("dazzle-shell: saved {s}\n", .{path});
         return;
     }
-    sys.print("dazzle-shell: no name for a screenshot in {s}\n", .{dir});
+    sys.print(sys.log_warning ++ "dazzle-shell: no name for a screenshot in {s}\n", .{dir});
 }
 
 /// "<dir>/Screenshot N.png" for the first N not taken.

@@ -55,7 +55,7 @@ const btn_left = 0x110;
 pub fn main(init: std.process.Init.Minimal) u8 {
     sys.logToKmsgIfStderr();
     run(init) catch |err| {
-        print("dazzle-shell: error: {s}\n", .{@errorName(err)});
+        print(sys.log_error ++ "dazzle-shell: error: {s}\n", .{@errorName(err)});
         return 1;
     };
     return 0;
@@ -82,7 +82,7 @@ fn run(init: std.process.Init.Minimal) !void {
         if (font.Font.init(data)) |f| {
             ui_font = f;
         } else |err| print("dazzle-shell: font: {s}\n", .{@errorName(err)});
-    } else |err| print("dazzle-shell: cannot read {s}: {s}\n", .{ font_path, @errorName(err) });
+    } else |err| print(sys.log_warning ++ "dazzle-shell: cannot read {s}: {s}\n", .{ font_path, @errorName(err) });
 
     // The shell's own apps are beside it; the others are in /data/apps.
     var settings_buf: [512]u8 = undefined;
@@ -141,7 +141,7 @@ fn run(init: std.process.Init.Minimal) !void {
     };
     // Apps asking for another app to be opened.
     const opener: ?linux.fd_t = if (runtime_dir == null) sys.shell.listen(sys.shell.socket_path) catch |err| blk: {
-        print("dazzle-shell: cannot listen on {s}: {s}\n", .{ sys.shell.socket_path, @errorName(err) });
+        print(sys.log_warning ++ "dazzle-shell: cannot listen on {s}: {s}\n", .{ sys.shell.socket_path, @errorName(err) });
         break :blk null;
     } else null;
 
@@ -300,7 +300,7 @@ fn run(init: std.process.Init.Minimal) !void {
             var windows: [render.max_windows]render.Window = undefined;
             if (renderer.capture(gpa, frameWindows(&server, &windows))) |pixels| {
                 screenshot.save(gpa, screenshot.folder, pixels, renderer.width, renderer.height);
-            } else |err| print("dazzle-shell: cannot take a screenshot: {s}\n", .{@errorName(err)});
+            } else |err| print(sys.log_warning ++ "dazzle-shell: cannot take a screenshot: {s}\n", .{@errorName(err)});
         }
 
         if (fds[0].revents != 0) {
@@ -354,7 +354,7 @@ fn run(init: std.process.Init.Minimal) !void {
                         renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
                         panels_damaged = true;
                     }
-                } else |err| print("dazzle-shell: cannot list the apps: {s}\n", .{@errorName(err)});
+                } else |err| print(sys.log_warning ++ "dazzle-shell: cannot list the apps: {s}\n", .{@errorName(err)});
             }
         }
 
@@ -391,14 +391,14 @@ fn run(init: std.process.Init.Minimal) !void {
                 if (renderer.composite(frameWindows(&server, &windows))) |timing| {
                     stats.composited(timing);
                     on_screen = renderer.show() catch |err| blk: {
-                        print("dazzle-shell: cannot show the frame: {s}\n", .{@errorName(err)});
+                        print(sys.log_warning ++ "dazzle-shell: cannot show the frame: {s}\n", .{@errorName(err)});
                         server.framePresented(@truncate(sys.nowNs() / std.time.ns_per_ms));
                         break :blk false;
                     };
                 } else |err| {
                     // Nothing new reaches the screen, but the clients should
                     // not wait for it.
-                    print("dazzle-shell: frame failed: {s}\n", .{@errorName(err)});
+                    print(sys.log_error ++ "dazzle-shell: frame failed: {s}\n", .{@errorName(err)});
                     server.framePresented(@truncate(sys.nowNs() / std.time.ns_per_ms));
                     on_screen = false;
                 }
@@ -413,7 +413,7 @@ fn run(init: std.process.Init.Minimal) !void {
                 if (renderer.showCursor(.arrow)) {
                     renderer.moveCursor(@intFromFloat(pointer.x), @intFromFloat(pointer.y));
                     print("dazzle-shell: cursor shown\n", .{});
-                } else |err| print("dazzle-shell: no cursor: {s}\n", .{@errorName(err)});
+                } else |err| print(sys.log_warning ++ "dazzle-shell: no cursor: {s}\n", .{@errorName(err)});
             }
         }
         // The pointer's picture: a resize while one is under way, or what
@@ -421,7 +421,7 @@ fn run(init: std.process.Init.Minimal) !void {
         if (renderer.cursor_shape) |shown| if (server.cursor() != shown) {
             if (renderer.showCursor(server.cursor())) {
                 renderer.moveCursor(@intFromFloat(pointer.x), @intFromFloat(pointer.y));
-            } else |err| print("dazzle-shell: cannot change the cursor: {s}\n", .{@errorName(err)});
+            } else |err| print(sys.log_warning ++ "dazzle-shell: cannot change the cursor: {s}\n", .{@errorName(err)});
         };
         server.flushClients();
         const work_end = sys.nowNs();
@@ -687,7 +687,7 @@ fn spawn(program: [*:0]const u8, arg: ?[*:0]const u8, runtime_dir: ?[:0]const u8
     const runtime_env: ?[*:0]const u8 = if (runtime_dir) |dir| (std.fmt.bufPrintZ(&env_buf, "XDG_RUNTIME_DIR={s}", .{dir}) catch return null).ptr else null;
     const rc = linux.fork();
     if (linux.errno(rc) != .SUCCESS) {
-        print("dazzle-shell: cannot start {s}: fork failed\n", .{program});
+        print(sys.log_error ++ "dazzle-shell: cannot start {s}: fork failed\n", .{program});
         return null;
     }
     if (rc != 0) {
@@ -697,7 +697,7 @@ fn spawn(program: [*:0]const u8, arg: ?[*:0]const u8, runtime_dir: ?[:0]const u8
     const argv = [_:null]?[*:0]const u8{ program, arg };
     const envp = if (runtime_env) |r| [_:null]?[*:0]const u8{ "HOME=/", "WAYLAND_DISPLAY=wayland-0", r } else [_:null]?[*:0]const u8{ "HOME=/", null, null };
     const err = linux.errno(linux.execve(program, &argv, &envp));
-    print("dazzle-shell: cannot run {s} ({s})\n", .{ program, @tagName(err) });
+    print(sys.log_warning ++ "dazzle-shell: cannot run {s} ({s})\n", .{ program, @tagName(err) });
     linux.exit(127);
 }
 

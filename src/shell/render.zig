@@ -262,7 +262,7 @@ pub const Renderer = struct {
         const panels = r.panelLayers() orelse return null;
         const fb = r.clientFramebuffer(t, x, y, panels) orelse return null;
         return r.display.queueLayers(windowLayer(fb, t, x, y), panels) catch |err| {
-            sys.print("dazzle-shell: cannot show the window directly: {s}\n", .{@errorName(err)});
+            sys.print(sys.log_warning ++ "dazzle-shell: cannot show the window directly: {s}\n", .{@errorName(err)});
             return null;
         };
     }
@@ -279,11 +279,11 @@ pub const Renderer = struct {
         // T-tiled images are padded to whole columns of tiles.
         const pitch = texture.tiledPitch(t.format, t.width, t.height);
         var fb: ?u32 = vc4.drm.addFramebufferWithModifier(r.dev.fd, t.handle, t.width, t.height, pitch, t.format.fourcc(), vc4.kms.modifier_t_tiled) catch |err| blk: {
-            sys.print("dazzle-shell: no framebuffer for a {d}x{d} window: {s}\n", .{ t.width, t.height, @errorName(err) });
+            sys.print(sys.log_warning ++ "dazzle-shell: no framebuffer for a {d}x{d} window: {s}\n", .{ t.width, t.height, @errorName(err) });
             break :blk null;
         };
         if (fb) |id| if (!r.display.canShow(windowLayer(id, t, x, y), panels)) {
-            sys.print("dazzle-shell: the display cannot show a {d}x{d} window directly\n", .{ t.width, t.height });
+            sys.print(sys.log_warning ++ "dazzle-shell: the display cannot show a {d}x{d} window directly\n", .{ t.width, t.height });
             vc4.drm.removeFramebuffer(r.dev.fd, id);
             fb = null;
         };
@@ -342,7 +342,7 @@ pub const Renderer = struct {
         const shape = r.cursor_shape orelse return;
         const hot = cursor.hotspot(shape);
         vc4.drm.moveCursor(r.dev.fd, r.display.output.crtc_id, x - hot[0], y - hot[1]) catch |err| {
-            if (!r.cursor_move_failed) sys.print("dazzle-shell: cannot move the cursor: {s}\n", .{@errorName(err)});
+            if (!r.cursor_move_failed) sys.print(sys.log_warning ++ "dazzle-shell: cannot move the cursor: {s}\n", .{@errorName(err)});
             r.cursor_move_failed = true;
         };
     }

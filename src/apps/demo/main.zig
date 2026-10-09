@@ -42,7 +42,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     print("dazzle: demo (build {s}) running as uid {d}\n", .{ build_info.commit, linux.getuid() });
 
     run(init, font_path) catch |err| {
-        print("dazzle: error: {s}\n", .{@errorName(err)});
+        print(sys.log_error ++ "dazzle: error: {s}\n", .{@errorName(err)});
         return 1;
     };
     return 0;
@@ -50,7 +50,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
 
 fn loadFont(gpa: std.mem.Allocator, path: [*:0]const u8) ?font.Font {
     const data = sys.readFileAlloc(gpa, path, 32 * 1024 * 1024) catch |err| {
-        print("dazzle: cannot read the font {s} ({s}); no text\n", .{ path, @errorName(err) });
+        print(sys.log_warning ++ "dazzle: cannot read the font {s} ({s}); no text\n", .{ path, @errorName(err) });
         return null;
     };
     return font.Font.init(data) catch |err| {
@@ -70,7 +70,7 @@ fn openWindow(gpa: std.mem.Allocator, init: std.process.Init.Minimal, dev: *vc4.
         return error.NoCompositor;
     };
     const win = app.Window.open(gpa, .device(dev), path, "Dazzle demo") catch |err| {
-        print("dazzle: cannot open a window on {s} ({s})\n", .{ path, @errorName(err) });
+        print(sys.log_warning ++ "dazzle: cannot open a window on {s} ({s})\n", .{ path, @errorName(err) });
         return err;
     };
     try win.setAppId("dazzle-demo");
@@ -85,7 +85,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     locale.current = locale.load().language;
     const gpa = std.heap.page_allocator;
     var dev = vc4.device.openRender() catch |err| {
-        print("dazzle: no GPU ({s}); look for vc4 or v3d errors earlier in the log\n", .{@errorName(err)});
+        print(sys.log_error ++ "dazzle: no GPU ({s}); look for vc4 or v3d errors earlier in the log\n", .{@errorName(err)});
         return err;
     };
     const win = try openWindow(gpa, init, &dev);
@@ -130,7 +130,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             break :blk win.wait(@max(until -| sys.nowNs(), std.time.ns_per_ms));
         } else win.poll();
         waited catch |err| {
-            if (err == error.ServerError) print("dazzle: compositor error: {s}\n", .{win.conn.errorMessage()});
+            if (err == error.ServerError) print(sys.log_error ++ "dazzle: compositor error: {s}\n", .{win.conn.errorMessage()});
             return err;
         };
         if (win.closed or controls.quit) return;

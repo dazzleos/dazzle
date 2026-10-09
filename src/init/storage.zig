@@ -134,11 +134,11 @@ fn growBoot() void {
         break :blk true;
     };
     if (!ok) {
-        print("dazzle: cannot grow {s}\n", .{boot_partition});
+        print(sys.log_warning ++ "dazzle: cannot grow {s}\n", .{boot_partition});
         return;
     }
     resizePartition(disk, .{ .entry = 0, .start = @intCast(start), .sectors = new_len }) catch |err|
-        print("dazzle: cannot resize {s}: {s}\n", .{ boot_partition, @errorName(err) });
+        print(sys.log_warning ++ "dazzle: cannot resize {s}: {s}\n", .{ boot_partition, @errorName(err) });
     print("dazzle: grew {s} to {d} MiB\n", .{ boot_partition, new_len / 2048 });
 }
 
@@ -230,7 +230,7 @@ fn mountBoot() void {
     _ = linux.mkdir(boot_dir, 0o755);
     const flags = linux.MS.RDONLY | linux.MS.NODEV | linux.MS.NOSUID;
     _ = sys.check(linux.mount(boot_partition, boot_dir, "vfat", flags, @intFromPtr(boot_options))) catch |err| {
-        print("dazzle: cannot mount {s} at {s}: {s}\n", .{ boot_partition, boot_dir, @errorName(err) });
+        print(sys.log_warning ++ "dazzle: cannot mount {s} at {s}: {s}\n", .{ boot_partition, boot_dir, @errorName(err) });
         return;
     };
     print("dazzle: mounted {s} at {s}\n", .{ boot_partition, boot_dir });
@@ -240,7 +240,7 @@ fn mountBoot() void {
 pub fn mountData() bool {
     const flags = linux.MS.NOATIME | linux.MS.NODEV | linux.MS.NOSUID;
     _ = sys.check(linux.mount(data_partition, proto.data_dir, "ext4", flags, 0)) catch |err| {
-        print("dazzle: cannot mount {s} at {s}: {s}\n", .{ data_partition, proto.data_dir, @errorName(err) });
+        print(sys.log_warning ++ "dazzle: cannot mount {s} at {s}: {s}\n", .{ data_partition, proto.data_dir, @errorName(err) });
         return false;
     };
     print("dazzle: mounted {s} at {s}\n", .{ data_partition, proto.data_dir });

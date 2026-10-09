@@ -386,7 +386,7 @@ pub fn bringUp(name: []const u8) bool {
     if (req.ifru.flags.UP) return true;
     req.ifru.flags.UP = true;
     if (linux.errno(linux.ioctl(sock, linux.SIOCSIFFLAGS, @intFromPtr(&req))) != .SUCCESS) {
-        print("dazzle: network: cannot bring {s} up\n", .{name});
+        print(sys.log_warning ++ "dazzle: network: cannot bring {s} up\n", .{name});
         return false;
     }
     return true;

@@ -291,7 +291,7 @@ pub const Devices = struct {
                     print("dazzle-shell: input: /dev/input/event{d} removed\n", .{i});
                 };
                 sys.close(fd);
-                if (e != .NODEV) print("dazzle-shell: input: read failed ({s})\n", .{@tagName(e)});
+                if (e != .NODEV) print(sys.log_error ++ "dazzle-shell: input: read failed ({s})\n", .{@tagName(e)});
                 return out[0..0];
             },
         }

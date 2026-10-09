@@ -38,13 +38,13 @@ pub fn start() ?linux.pid_t {
     switch (linux.errno(rc)) {
         .SUCCESS => if (rc != 0) return @intCast(rc),
         else => |e| {
-            print("dazzle: network: fork failed ({s})\n", .{@tagName(e)});
+            print(sys.log_error ++ "dazzle: network: fork failed ({s})\n", .{@tagName(e)});
             return null;
         },
     }
     // And setting the clock, from the network's time (netconf.zig).
     sys.dropPrivilegesKeeping(&.{ .net_admin, .net_raw, .net_bind_service, .sys_time }) catch |err| {
-        print("dazzle: network: cannot drop privileges ({s})\n", .{@errorName(err)});
+        print(sys.log_warning ++ "dazzle: network: cannot drop privileges ({s})\n", .{@errorName(err)});
         linux.exit(1);
     };
     sys.ignoreBrokenPipes();
@@ -102,11 +102,11 @@ const Ethernet = struct {
         _ = ipv4.bringUp(i.name());
         switch (e.addressing) {
             .static => |st| ipv4.setStatic(i.name(), st.address, st.prefix, st.gateway) catch |err| {
-                print("dazzle: network: cannot set {s}'s address ({s})\n", .{ i.name(), @errorName(err) });
+                print(sys.log_warning ++ "dazzle: network: cannot set {s}'s address ({s})\n", .{ i.name(), @errorName(err) });
             },
             .dhcp => {
                 const rc = linux.fork();
-                if (linux.errno(rc) != .SUCCESS) return print("dazzle: network: cannot start DHCP on {s}\n", .{i.name()});
+                if (linux.errno(rc) != .SUCCESS) return print(sys.log_warning ++ "dazzle: network: cannot start DHCP on {s}\n", .{i.name()});
                 if (rc == 0) ipv4.runDhcp(i.name());
                 e.dhcp_pid = @intCast(rc);
             },

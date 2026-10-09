@@ -213,7 +213,7 @@ pub const Job = struct {
         const comm = std.mem.trimEnd(u8, sys.readFile("/proc/self/comm", &comm_buf) orelse "dazzle", "\n");
         var status_buf: [16]u8 = undefined;
         const status = if (last_status != 0) std.fmt.bufPrint(&status_buf, " (HTTP {d})", .{last_status}) catch "" else "";
-        sys.print("{s}: cannot {s}{s}{s}: {s}{s}{s}{s}\n", .{
+        sys.print(sys.log_warning ++ "{s}: cannot {s}{s}{s}: {s}{s}{s}{s}\n", .{
             comm,
             switch (kind) {
                 .catalogue => "get the list of apps",

@@ -46,7 +46,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     var font_buf: [512]u8 = undefined;
     const font_path: [*:0]const u8 = args.next() orelse sys.fontFile(&font_buf, font.default_font_file);
     run(init, font_path) catch |err| {
-        print("dazzle-camera: error: {s}\n", .{@errorName(err)});
+        print(sys.log_error ++ "dazzle-camera: error: {s}\n", .{@errorName(err)});
         return 1;
     };
     return 0;
@@ -218,7 +218,7 @@ const Saving = struct {
         const data = gfx.png.encode(s.gpa, pixels, s.raw.width, s.raw.height) catch return;
         defer s.gpa.free(data);
         sys.files.writeNew(path, data) catch |err| {
-            print("dazzle-camera: cannot write {s}: {s}\n", .{ path, @errorName(err) });
+            print(sys.log_warning ++ "dazzle-camera: cannot write {s}: {s}\n", .{ path, @errorName(err) });
             return;
         };
         print("dazzle-camera: saved {s}\n", .{path});
@@ -231,7 +231,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     locale.current = locale.load().language;
     const gpa = std.heap.page_allocator;
     var dev = vc4.device.openRender() catch |err| {
-        print("dazzle-camera: no GPU ({s})\n", .{@errorName(err)});
+        print(sys.log_error ++ "dazzle-camera: no GPU ({s})\n", .{@errorName(err)});
         return err;
     };
     const win = try openWindow(gpa, init, &dev);
@@ -240,7 +240,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
 
     var f: ?font.Font = blk: {
         const data = sys.readFileAlloc(gpa, font_path, 32 * 1024 * 1024) catch |err| {
-            print("dazzle-camera: cannot read the font {s} ({s}); no text\n", .{ font_path, @errorName(err) });
+            print(sys.log_warning ++ "dazzle-camera: cannot read the font {s} ({s}); no text\n", .{ font_path, @errorName(err) });
             break :blk null;
         };
         break :blk font.Font.init(data) catch null;
@@ -271,7 +271,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             break :blk win.wait(timeout);
         } else win.poll();
         waited catch |err| {
-            if (err == error.ServerError) print("dazzle-camera: compositor error: {s}\n", .{win.conn.errorMessage()});
+            if (err == error.ServerError) print(sys.log_error ++ "dazzle-camera: compositor error: {s}\n", .{win.conn.errorMessage()});
             return err;
         };
         if (win.closed or controls.quit) {
@@ -348,7 +348,7 @@ fn openWindow(gpa: std.mem.Allocator, init: std.process.Init.Minimal, dev: *vc4.
         return error.NoCompositor;
     };
     const win = app.Window.open(gpa, .device(dev), path, "Camera") catch |err| {
-        print("dazzle-camera: cannot open a window on {s} ({s})\n", .{ path, @errorName(err) });
+        print(sys.log_warning ++ "dazzle-camera: cannot open a window on {s} ({s})\n", .{ path, @errorName(err) });
         return err;
     };
     try win.setAppId("dazzle-camera");

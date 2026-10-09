@@ -76,7 +76,7 @@ pub fn launch(program: [:0]const u8, arg: [:0]const u8, env: []const [*:0]const 
         const rc2 = linux.fork();
         if (linux.errno(rc2) == .SUCCESS and rc2 == 0) {
             const err = linux.errno(linux.execve(program, &argv, &envp));
-            sys.print("cannot run {s} ({s})\n", .{ program, @tagName(err) });
+            sys.print(sys.log_warning ++ "cannot run {s} ({s})\n", .{ program, @tagName(err) });
             linux.exit(127);
         }
         linux.exit(0);

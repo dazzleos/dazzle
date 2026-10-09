@@ -26,12 +26,12 @@ pub fn start() ?linux.pid_t {
     switch (linux.errno(rc)) {
         .SUCCESS => if (rc != 0) return @intCast(rc),
         else => |e| {
-            print("dazzle: devices: fork failed ({s})\n", .{@tagName(e)});
+            print(sys.log_error ++ "dazzle: devices: fork failed ({s})\n", .{@tagName(e)});
             return null;
         },
     }
     sys.dropPrivilegesKeeping(&.{.chown}) catch |err| {
-        print("dazzle: devices: cannot drop privileges ({s})\n", .{@errorName(err)});
+        print(sys.log_warning ++ "dazzle: devices: cannot drop privileges ({s})\n", .{@errorName(err)});
         linux.exit(1);
     };
     run() catch |err| print("dazzle: devices: {s}\n", .{@errorName(err)});
@@ -97,7 +97,7 @@ fn grant(name: []const u8, log: bool) void {
         const err = linux.errno(linux.chown(path.ptr, sys.user.uid, sys.user.gid));
         if (err == .SUCCESS) break;
         if (err != .NOENT or !log or attempt == 10) {
-            if (log or err != .NOENT) print("dazzle: devices: cannot chown {s} ({s})\n", .{ path, @tagName(err) });
+            if (log or err != .NOENT) print(sys.log_warning ++ "dazzle: devices: cannot chown {s} ({s})\n", .{ path, @tagName(err) });
             return;
         }
         sys.sleepMs(10);

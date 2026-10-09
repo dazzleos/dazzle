@@ -222,16 +222,23 @@ pub fn logToKmsgIfStderr() void {
     if (stx.mode & linux.S.IFMT == linux.S.IFCHR and stx.rdev_major == 1 and stx.rdev_minor == 11) kmsg_fd = 2;
 }
 
+/// Log levels, as the kernel log has them: start a message with one to
+/// log it at that level (`print(sys.log_warning ++ "...", ...)`), so the
+/// log's readers (Settings) can pick out what went wrong. Without one, a
+/// message is a notice.
+pub const log_error = "<3>";
+pub const log_warning = "<4>";
+pub const log_notice = "<5>";
+
 /// Writes formatted text to the kernel log if `logToKmsg` was called,
-/// otherwise to stderr.
+/// otherwise to stderr (without the level).
 pub fn print(comptime fmt: []const u8, args: anytype) void {
+    const level = comptime logLevel(fmt);
+    const text = fmt[level.len..];
     var buf: [512]u8 = undefined;
-    // The log level ("<5>": notice), which is ignored when writing to
-    // stderr. What says something failed is a warning or an error, so the
-    // log's readers (Settings) can pick those out.
-    const prefix = comptime levelPrefix(fmt);
+    const prefix = if (level.len > 0) level else log_notice;
     @memcpy(buf[0..prefix.len], prefix);
-    const msg = std.fmt.bufPrint(buf[prefix.len..], fmt, args) catch blk: {
+    const msg = std.fmt.bufPrint(buf[prefix.len..], text, args) catch blk: {
         const trunc = "...(truncated)\n";
         @memcpy(buf[buf.len - trunc.len ..], trunc);
         break :blk buf[prefix.len..];
@@ -249,20 +256,18 @@ pub fn print(comptime fmt: []const u8, args: anytype) void {
     }
 }
 
-/// The log level a message is written at, from what it says: "error:"
-/// or "failed" an error, "cannot" a warning, else a notice.
-fn levelPrefix(comptime fmt: []const u8) []const u8 {
-    @setEvalBranchQuota(20 * fmt.len + 1000);
-    if (std.mem.indexOf(u8, fmt, "error:") != null or std.mem.indexOf(u8, fmt, " failed") != null) return "<3>";
-    if (std.mem.indexOf(u8, fmt, "cannot ") != null) return "<4>";
-    return "<5>";
+/// The level a message starts with ("<3>" and so on), if any.
+fn logLevel(comptime fmt: []const u8) []const u8 {
+    if (fmt.len >= 3 and fmt[0] == '<' and std.ascii.isDigit(fmt[1]) and fmt[2] == '>') return fmt[0..3];
+    return "";
 }
 
-test "messages that say something failed are warnings or errors" {
-    try std.testing.expectEqualStrings("<3>", comptime levelPrefix("dazzle-files: error: {s}\n"));
-    try std.testing.expectEqualStrings("<3>", comptime levelPrefix("dazzle: system: fork failed ({s})\n"));
-    try std.testing.expectEqualStrings("<4>", comptime levelPrefix("dazzle: cannot mount {s}\n"));
-    try std.testing.expectEqualStrings("<5>", comptime levelPrefix("dazzle: mounted {s} at {s}\n"));
+test "a message's level is what it starts with, else a notice" {
+    try std.testing.expectEqualStrings("<3>", comptime logLevel(log_error ++ "dazzle-files: error: {s}\n"));
+    try std.testing.expectEqualStrings("<4>", comptime logLevel(log_warning ++ "dazzle: cannot mount {s}\n"));
+    // Words in a message do not make it one (nothing is guessed).
+    try std.testing.expectEqualStrings("", comptime logLevel("dazzle: system: fork failed ({s})\n"));
+    try std.testing.expectEqualStrings("", comptime logLevel("dazzle: mounted {s} at {s}\n"));
 }
 
 /// Dazzle has a single user, which everything but init runs as.

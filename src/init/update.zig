@@ -51,7 +51,7 @@ pub const Installer = struct {
         if (rc == 0) {
             sys.close(fds[0]);
             install(std.heap.page_allocator, &sha256, running) catch |err| {
-                print("dazzle: system: cannot install the update: {s}\n", .{@errorName(err)});
+                print(sys.log_warning ++ "dazzle: system: cannot install the update: {s}\n", .{@errorName(err)});
                 const why = @tagName(failure(err));
                 _ = linux.write(fds[1], why.ptr, why.len);
             };

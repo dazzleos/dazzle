@@ -162,7 +162,7 @@ fn reportDevice(base: []const u8, name: []const u8) void {
     var buf: [32]u8 = undefined;
     const waiting_path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}/waiting_for_supplier", .{ base, name }) catch return;
     const waiting = std.mem.trim(u8, sys.readFile(waiting_path.ptr, &buf) orelse "?", " \n");
-    print("dazzle: display part {s}: no driver (waiting for a supplier: {s})\n", .{ name, waiting });
+    print(sys.log_warning ++ "dazzle: display part {s}: no driver (waiting for a supplier: {s})\n", .{ name, waiting });
     // Its suppliers: links named supplier:<bus>:<device>, each with a
     // status ("available" once the supplier has its driver).
     const dev_path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ base, name }) catch return;
@@ -200,7 +200,7 @@ fn grantGpuAccess() void {
         if (!found) sys.sleepMs(100);
     }
     if (!found) {
-        print("dazzle: no vc4 DRM device after 10 s\n", .{});
+        print(sys.log_error ++ "dazzle: no vc4 DRM device after 10 s\n", .{});
         reportDisplayDevices();
     }
 
@@ -221,7 +221,7 @@ fn startShell(setup: bool) ?linux.pid_t {
     switch (linux.errno(rc)) {
         .SUCCESS => {},
         else => |e| {
-            print("dazzle: cannot start the shell: fork failed ({s})\n", .{@tagName(e)});
+            print(sys.log_error ++ "dazzle: cannot start the shell: fork failed ({s})\n", .{@tagName(e)});
             return null;
         },
     }
@@ -238,13 +238,13 @@ fn startShell(setup: bool) ?linux.pid_t {
         _ = linux.dup2(kmsg, 2);
     }
     sys.dropPrivileges() catch |err| {
-        print("dazzle: cannot drop privileges ({s}); not starting the shell\n", .{@errorName(err)});
+        print(sys.log_warning ++ "dazzle: cannot drop privileges ({s}); not starting the shell\n", .{@errorName(err)});
         linux.exit(126);
     };
     const argv = [_:null]?[*:0]const u8{ shell_path, if (setup) "--setup" else null };
     const envp = [_:null]?[*:0]const u8{ "HOME=/", "USER=" ++ sys.user.name };
     const err = linux.errno(linux.execve(shell_path, &argv, &envp));
-    print("dazzle: cannot run {s} ({s})\n", .{ shell_path, @tagName(err) });
+    print(sys.log_warning ++ "dazzle: cannot run {s} ({s})\n", .{ shell_path, @tagName(err) });
     linux.exit(127);
 }
 
@@ -329,7 +329,7 @@ fn reapForever(shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, first_d
         // The update does not work: back to the system before (which the
         // next start already is).
         if (t.timer != null) {
-            print("dazzle: the update did not work\n", .{});
+            print(sys.log_error ++ "dazzle: the update did not work\n", .{});
             trial.restart();
         }
     }

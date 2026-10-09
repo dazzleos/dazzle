@@ -133,7 +133,7 @@ pub const Manager = struct {
             // Another scan is under way (the kernel's own).
             error.Busy => m.scan_started_ns = now,
             else => {
-                print("dazzle: wifi: cannot scan ({s})\n", .{@errorName(err)});
+                print(sys.log_warning ++ "dazzle: wifi: cannot scan ({s})\n", .{@errorName(err)});
                 // Down, perhaps: up again, and try at the next request.
                 m.station.?.adapter.up = ipv4.bringUp(st.adapter.name());
             },
@@ -141,7 +141,7 @@ pub const Manager = struct {
     }
 
     fn fail(m: *Manager, why: wifi.Failure) void {
-        print("dazzle: wifi: could not join \"{s}\": {s}\n", .{ m.report.connection.ssid(), @tagName(why) });
+        print(sys.log_warning ++ "dazzle: wifi: could not join \"{s}\": {s}\n", .{ m.report.connection.ssid(), @tagName(why) });
         m.leave(false);
         m.report.connection.state = .failed;
         m.report.connection.failure = why;
@@ -170,7 +170,7 @@ pub const Manager = struct {
         } else if (bss.network.security != .open) return m.fail(.unsupported);
         m.join = j;
         m.startJoin(now) catch |err| {
-            print("dazzle: wifi: cannot connect ({s})\n", .{@errorName(err)});
+            print(sys.log_warning ++ "dazzle: wifi: cannot connect ({s})\n", .{@errorName(err)});
             m.fail(.rejected);
         };
     }
@@ -245,7 +245,7 @@ pub const Manager = struct {
             if (nl.scanResults(st.index, &fresh)) {
                 m.report.networks = fresh.networks;
                 m.report.len = fresh.len;
-            } else |err| print("dazzle: wifi: cannot read the scan ({s})\n", .{@errorName(err)});
+            } else |err| print(sys.log_warning ++ "dazzle: wifi: cannot read the scan ({s})\n", .{@errorName(err)});
         } else if (m.scan_started_ns) |t| if (now -| t > scan_timeout_ns) {
             m.scan_started_ns = null;
         };
@@ -299,11 +299,11 @@ pub const Manager = struct {
             const st = m.station.?;
             if (actions.reply) |reply| sendEapol(fd, st.index, j.bss.bssid, reply);
             if (actions.pairwise) |tk| m.nl.?.setPairwiseKey(st.index, j.bss.bssid, tk) catch |err| {
-                print("dazzle: wifi: cannot install the pairwise key ({s})\n", .{@errorName(err)});
+                print(sys.log_warning ++ "dazzle: wifi: cannot install the pairwise key ({s})\n", .{@errorName(err)});
                 return m.fail(.rejected);
             };
             if (actions.group) |g| m.nl.?.setGroupKey(st.index, j.bss.group_cipher, g.index, g.key[0..g.len], g.rsc) catch |err| {
-                print("dazzle: wifi: cannot install the group key ({s})\n", .{@errorName(err)});
+                print(sys.log_warning ++ "dazzle: wifi: cannot install the group key ({s})\n", .{@errorName(err)});
             };
             if (actions.complete and !m.report.connection.state.joined()) {
                 print("dazzle: wifi: joined \"{s}\" (WPA2)\n", .{j.ssid()});

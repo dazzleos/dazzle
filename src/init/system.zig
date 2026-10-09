@@ -66,12 +66,12 @@ pub fn start(card: bool, mounted: bool, slot: ?u8, setup_done: bool) ?linux.pid_
     switch (linux.errno(rc)) {
         .SUCCESS => if (rc != 0) return @intCast(rc),
         else => |e| {
-            print("dazzle: system: fork failed ({s})\n", .{@tagName(e)});
+            print(sys.log_error ++ "dazzle: system: fork failed ({s})\n", .{@tagName(e)});
             return null;
         },
     }
     sys.dropPrivilegesKeeping(&.{ .sys_admin, .dac_override, .chown, .sys_boot }) catch |err| {
-        print("dazzle: system: cannot drop privileges ({s})\n", .{@errorName(err)});
+        print(sys.log_warning ++ "dazzle: system: cannot drop privileges ({s})\n", .{@errorName(err)});
         linux.exit(1);
     };
     sys.ignoreBrokenPipes();
@@ -88,7 +88,7 @@ pub fn start(card: bool, mounted: bool, slot: ?u8, setup_done: bool) ?linux.pid_
     var uts: linux.utsname = undefined;
     if (linux.errno(linux.uname(&uts)) == .SUCCESS) m.report.hostname = proto.Hostname.parse(std.mem.sliceTo(&uts.nodename, 0)) orelse .{};
     if (card) m.copier = slots.Copier.start(slot orelse 'a') catch |err| blk: {
-        print("dazzle: system: cannot copy the OS slot: {s}\n", .{@errorName(err)});
+        print(sys.log_warning ++ "dazzle: system: cannot copy the OS slot: {s}\n", .{@errorName(err)});
         break :blk null;
     };
     if (m.copier != null) m.startCopying();
@@ -215,13 +215,13 @@ const Manager = struct {
         if (!proto.videoMemoryAllowed(mib, ram_mib)) return;
         if (m.copier != null or m.installer != null) return;
         slots.remount(false) catch |err| {
-            print("dazzle: system: cannot write the boot partition: {s}\n", .{@errorName(err)});
+            print(sys.log_warning ++ "dazzle: system: cannot write the boot partition: {s}\n", .{@errorName(err)});
             return;
         };
         defer slots.remount(true) catch {};
         defer m.readSlots();
         slots.setVideoMemory(mib) catch |err| {
-            print("dazzle: system: cannot set the video memory: {s}\n", .{@errorName(err)});
+            print(sys.log_warning ++ "dazzle: system: cannot set the video memory: {s}\n", .{@errorName(err)});
             return;
         };
         print("dazzle: system: video memory {d} MiB from the next start\n", .{mib});
@@ -244,7 +244,7 @@ const Manager = struct {
         // Not while the other slot is being made.
         if (m.copier != null) return m.updateFailed(.busy);
         m.installer = update.Installer.start(sha256, running) catch |err| {
-            print("dazzle: system: cannot start installing the update: {s}\n", .{@errorName(err)});
+            print(sys.log_warning ++ "dazzle: system: cannot start installing the update: {s}\n", .{@errorName(err)});
             return m.updateFailed(.io);
         };
         m.report.update = .installing;
@@ -257,7 +257,7 @@ const Manager = struct {
     }
 
     fn fail(m: *Manager, why: proto.Failure, err: anyerror) void {
-        print("dazzle: system: cannot prepare the card: {s} ({s})\n", .{ @tagName(why), @errorName(err) });
+        print(sys.log_warning ++ "dazzle: system: cannot prepare the card: {s} ({s})\n", .{ @tagName(why), @errorName(err) });
         m.stopFormatting();
         m.report.storage = .failed;
         m.report.failure = why;
@@ -332,7 +332,7 @@ const Manager = struct {
     fn startCopying(m: *Manager) void {
         m.copying = .{ .thread = undefined };
         m.copying.?.thread = std.Thread.spawn(.{ .stack_size = 256 * 1024 }, copyAll, .{m}) catch |err| {
-            print("dazzle: system: cannot copy the OS slot: {s}\n", .{@errorName(err)});
+            print(sys.log_warning ++ "dazzle: system: cannot copy the OS slot: {s}\n", .{@errorName(err)});
             m.copying = null;
             m.copier.?.deinit();
             m.copier = null;
@@ -367,7 +367,7 @@ const Manager = struct {
         const w = &(m.copying orelse return);
         if (!w.finished()) return;
         w.thread.join();
-        if (w.err) |err| print("dazzle: system: cannot copy the OS slot: {s}\n", .{@errorName(err)});
+        if (w.err) |err| print(sys.log_warning ++ "dazzle: system: cannot copy the OS slot: {s}\n", .{@errorName(err)});
         m.copying = null;
         m.copier = null;
         m.readSlots();
@@ -387,7 +387,7 @@ const Manager = struct {
         if (sys.check(linux.syscall2(.sethostname, @intFromPtr(name.ptr), name.len))) |_| {
             m.report.hostname = h;
             print("dazzle: system: named {s}\n", .{name});
-        } else |err| print("dazzle: system: cannot set the hostname: {s}\n", .{@errorName(err)});
+        } else |err| print(sys.log_warning ++ "dazzle: system: cannot set the hostname: {s}\n", .{@errorName(err)});
         if (m.report.storage == .ready) {
             var line: [80]u8 = undefined;
             writeFile(proto.hostname_file, std.fmt.bufPrint(&line, "{s}\n", .{name}) catch name);
@@ -401,7 +401,7 @@ const Manager = struct {
 /// Writes a small root-owned file.
 fn writeFile(path: [*:0]const u8, data: []const u8) void {
     const fd = sys.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }) catch |err| {
-        print("dazzle: system: cannot write {s}: {s}\n", .{ path, @errorName(err) });
+        print(sys.log_warning ++ "dazzle: system: cannot write {s}: {s}\n", .{ path, @errorName(err) });
         return;
     };
     defer sys.close(fd);
@@ -425,7 +425,7 @@ fn restart() noreturn {
     print("dazzle: system: restarting\n", .{});
     linux.sync();
     _ = linux.reboot(.MAGIC1, .MAGIC2, .RESTART, null);
-    print("dazzle: system: cannot restart\n", .{});
+    print(sys.log_warning ++ "dazzle: system: cannot restart\n", .{});
     linux.exit(1);
 }
 

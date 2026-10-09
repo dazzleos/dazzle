@@ -39,7 +39,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     var font_buf: [512]u8 = undefined;
     const font_path: [*:0]const u8 = args.next() orelse sys.fontFile(&font_buf, font.default_font_file);
     run(init, font_path) catch |err| {
-        print("dazzle-setup: error: {s}\n", .{@errorName(err)});
+        print(sys.log_error ++ "dazzle-setup: error: {s}\n", .{@errorName(err)});
         return 1;
     };
     return 0;
@@ -48,7 +48,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
 fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     const gpa = std.heap.page_allocator;
     var dev = vc4.device.openRender() catch |err| {
-        print("dazzle-setup: no GPU ({s})\n", .{@errorName(err)});
+        print(sys.log_error ++ "dazzle-setup: no GPU ({s})\n", .{@errorName(err)});
         return err;
     };
     const win = try openWindow(gpa, init, &dev);
@@ -57,7 +57,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
 
     var f: ?font.Font = blk: {
         const data = sys.readFileAlloc(gpa, font_path, 32 * 1024 * 1024) catch |err| {
-            print("dazzle-setup: cannot read the font {s} ({s}); no text\n", .{ font_path, @errorName(err) });
+            print(sys.log_warning ++ "dazzle-setup: cannot read the font {s} ({s}); no text\n", .{ font_path, @errorName(err) });
             break :blk null;
         };
         break :blk font.Font.init(data) catch null;
@@ -93,7 +93,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             break :blk win.wait(@max(until -| sys.nowNs(), std.time.ns_per_ms));
         } else win.poll();
         waited catch |err| {
-            if (err == error.ServerError) print("dazzle-setup: compositor error: {s}\n", .{win.conn.errorMessage()});
+            if (err == error.ServerError) print(sys.log_error ++ "dazzle-setup: compositor error: {s}\n", .{win.conn.errorMessage()});
             return err;
         };
         if (win.closed) return;
@@ -233,7 +233,7 @@ fn openWindow(gpa: std.mem.Allocator, init: std.process.Init.Minimal, dev: *vc4.
         return error.NoCompositor;
     };
     const win = app.Window.open(gpa, .device(dev), path, "Setup") catch |err| {
-        print("dazzle-setup: cannot open a window on {s} ({s})\n", .{ path, @errorName(err) });
+        print(sys.log_warning ++ "dazzle-setup: cannot open a window on {s} ({s})\n", .{ path, @errorName(err) });
         return err;
     };
     try win.setAppId("dazzle-setup");

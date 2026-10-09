@@ -88,15 +88,15 @@ pub fn atBoot(running: ?u8) Outcome {
     const t = read() orelse return .none;
     const slot = running orelse return .none;
     slots.remount(false) catch |err| {
-        print("dazzle: trial: cannot write the boot partition: {s}\n", .{@errorName(err)});
+        print(sys.log_warning ++ "dazzle: trial: cannot write the boot partition: {s}\n", .{@errorName(err)});
         return .none;
     };
     defer slots.remount(true) catch {};
     if (t.slot == slot) {
         // The updated system: the next start is the one before, unless
         // this one works.
-        write(.{ .slot = slot, .state = .started }) catch |err| print("dazzle: trial: cannot mark it started: {s}\n", .{@errorName(err)});
-        slots.startNext(slots.other(slot)) catch |err| print("dazzle: trial: cannot keep the system before: {s}\n", .{@errorName(err)});
+        write(.{ .slot = slot, .state = .started }) catch |err| print(sys.log_warning ++ "dazzle: trial: cannot mark it started: {s}\n", .{@errorName(err)});
+        slots.startNext(slots.other(slot)) catch |err| print(sys.log_warning ++ "dazzle: trial: cannot keep the system before: {s}\n", .{@errorName(err)});
         print("dazzle: trying the update in OS slot {c}\n", .{std.ascii.toUpper(slot)});
         return .trying;
     }
@@ -108,19 +108,19 @@ pub fn atBoot(running: ?u8) Outcome {
     _ = linux.unlink(failed_marker);
     _ = linux.rename(marker, failed_marker);
     slots.startNext(slot) catch {};
-    print("dazzle: the update in OS slot {c} did not work: back to slot {c}\n", .{ std.ascii.toUpper(t.slot), std.ascii.toUpper(slot) });
+    print(sys.log_error ++ "dazzle: the update in OS slot {c} did not work: back to slot {c}\n", .{ std.ascii.toUpper(t.slot), std.ascii.toUpper(slot) });
     return .failed;
 }
 
 /// The update has worked: it starts from now on.
 pub fn commit(running: u8) void {
     slots.remount(false) catch |err| {
-        print("dazzle: trial: cannot write the boot partition: {s}\n", .{@errorName(err)});
+        print(sys.log_warning ++ "dazzle: trial: cannot write the boot partition: {s}\n", .{@errorName(err)});
         return;
     };
     defer slots.remount(true) catch {};
     slots.startNext(running) catch |err| {
-        print("dazzle: trial: cannot keep the update: {s}\n", .{@errorName(err)});
+        print(sys.log_warning ++ "dazzle: trial: cannot keep the update: {s}\n", .{@errorName(err)});
         return;
     };
     _ = linux.unlink(marker);
@@ -167,7 +167,7 @@ pub const Watchdog = struct {
 
     fn feed(stop: linux.fd_t) void {
         const fd = sys.open(device, .{ .ACCMODE = .WRONLY, .CLOEXEC = true }) catch |err| {
-            print("dazzle: trial: no watchdog ({s})\n", .{@errorName(err)});
+            print(sys.log_warning ++ "dazzle: trial: no watchdog ({s})\n", .{@errorName(err)});
             return;
         };
         // WDIOC_SETTIMEOUT: _IOWR('W', 6, int).

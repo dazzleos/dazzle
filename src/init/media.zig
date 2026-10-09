@@ -41,12 +41,12 @@ pub fn start() ?linux.pid_t {
     switch (linux.errno(rc)) {
         .SUCCESS => if (rc != 0) return @intCast(rc),
         else => |e| {
-            print("dazzle: media: fork failed ({s})\n", .{@tagName(e)});
+            print(sys.log_error ++ "dazzle: media: fork failed ({s})\n", .{@tagName(e)});
             return null;
         },
     }
     sys.dropPrivilegesKeeping(&.{ .sys_admin, .dac_read_search }) catch |err| {
-        print("dazzle: media: cannot drop privileges ({s})\n", .{@errorName(err)});
+        print(sys.log_warning ++ "dazzle: media: cannot drop privileges ({s})\n", .{@errorName(err)});
         linux.exit(1);
     };
     sys.ignoreBrokenPipes();
@@ -190,7 +190,7 @@ const Manager = struct {
         };
         const flags = linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOATIME;
         _ = sys.check(linux.mount(dev_path, path, vol.kind.fsType(), flags, if (options) |o| @intFromPtr(o.ptr) else 0)) catch |err| {
-            print("dazzle: media: cannot mount {s} ({s}) at {s}: {s}\n", .{ dev_path, vol.kind.fsType(), path, @errorName(err) });
+            print(sys.log_warning ++ "dazzle: media: cannot mount {s} ({s}) at {s}: {s}\n", .{ dev_path, vol.kind.fsType(), path, @errorName(err) });
             _ = linux.rmdir(path);
             return;
         };
@@ -231,7 +231,7 @@ const Manager = struct {
             .SUCCESS => {},
             .BUSY => return .busy,
             else => |e| {
-                print("dazzle: media: cannot unmount {s} ({s})\n", .{ path, @tagName(e) });
+                print(sys.log_warning ++ "dazzle: media: cannot unmount {s} ({s})\n", .{ path, @tagName(e) });
                 return .failed;
             },
         }
@@ -251,7 +251,7 @@ fn isDrive(name: []const u8) bool {
 /// What filesystem the device holds.
 fn probe(dev_path: [:0]const u8) ?volume.Volume {
     const fd = sys.open(dev_path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }) catch |err| {
-        print("dazzle: media: cannot read {s}: {s}\n", .{ dev_path, @errorName(err) });
+        print(sys.log_warning ++ "dazzle: media: cannot read {s}: {s}\n", .{ dev_path, @errorName(err) });
         return null;
     };
     defer sys.close(fd);

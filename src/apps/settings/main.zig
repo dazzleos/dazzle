@@ -59,7 +59,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         if (std.meta.stringToEnum(view.Page, arg)) |p| page = p else font_path = arg.ptr;
     }
     run(init, font_path, page) catch |err| {
-        print("dazzle-settings: error: {s}\n", .{@errorName(err)});
+        print(sys.log_error ++ "dazzle-settings: error: {s}\n", .{@errorName(err)});
         return 1;
     };
     return 0;
@@ -71,7 +71,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
     locale.current = chosen.language;
     const gpa = std.heap.page_allocator;
     var dev = vc4.device.openRender() catch |err| {
-        print("dazzle-settings: no GPU ({s})\n", .{@errorName(err)});
+        print(sys.log_error ++ "dazzle-settings: no GPU ({s})\n", .{@errorName(err)});
         return err;
     };
     const win = try openWindow(gpa, init, &dev);
@@ -80,7 +80,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
 
     var f: ?font.Font = blk: {
         const data = sys.readFileAlloc(gpa, font_path, 32 * 1024 * 1024) catch |err| {
-            print("dazzle-settings: cannot read the font {s} ({s}); no text\n", .{ font_path, @errorName(err) });
+            print(sys.log_warning ++ "dazzle-settings: cannot read the font {s} ({s}); no text\n", .{ font_path, @errorName(err) });
             break :blk null;
         };
         break :blk font.Font.init(data) catch null;
@@ -148,7 +148,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             break :blk win.wait(@max(until -| sys.nowNs(), std.time.ns_per_ms));
         } else win.poll();
         waited catch |err| {
-            if (err == error.ServerError) print("dazzle-settings: compositor error: {s}\n", .{win.conn.errorMessage()});
+            if (err == error.ServerError) print(sys.log_error ++ "dazzle-settings: compositor error: {s}\n", .{win.conn.errorMessage()});
             return err;
         };
         if (win.closed or controls.quit) return;
@@ -245,7 +245,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
                     chosen = l;
                     locale.current = l.language;
                 }
-            } else print("dazzle-settings: the system did not answer\n", .{});
+            } else print(sys.log_warning ++ "dazzle-settings: the system did not answer\n", .{});
             dirty = true;
         }
         // Video memory chosen: the system manager has the next start use
@@ -374,7 +374,7 @@ fn openWindow(gpa: std.mem.Allocator, init: std.process.Init.Minimal, dev: *vc4.
         return error.NoCompositor;
     };
     const win = app.Window.open(gpa, .device(dev), path, "Settings") catch |err| {
-        print("dazzle-settings: cannot open a window on {s} ({s})\n", .{ path, @errorName(err) });
+        print(sys.log_warning ++ "dazzle-settings: cannot open a window on {s} ({s})\n", .{ path, @errorName(err) });
         return err;
     };
     try win.setAppId("dazzle-settings");

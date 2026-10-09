@@ -41,7 +41,7 @@ pub fn start() void {
     switch (linux.errno(rc)) {
         .SUCCESS => if (rc != 0) return,
         else => |e| {
-            sys.print("dazzle: log server: fork failed ({s})\n", .{@tagName(e)});
+            sys.print(sys.log_error ++ "dazzle: log server: fork failed ({s})\n", .{@tagName(e)});
             return;
         },
     }
