@@ -2,8 +2,9 @@
 # https://www.raspberrypi.com/documentation/computers/config_txt.html
 
 # The system is in one of two OS slots, slot-a/ and slot-b/: the firmware
-# looks for the kernel, the initramfs, cmdline.txt and the device trees
-# there. (An update writes the other slot, then switches this.)
+# looks for the kernel, the initramfs, cmdline.txt, the device trees and
+# (as the slot's overlays/ has a README) the overlays there. (An update
+# writes the other slot, then switches this.)
 os_prefix=slot-a/
 
 # The firmware picks the kernel (kernel.img on the ARMv6 boards: the Pi 1,

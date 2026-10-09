@@ -449,6 +449,19 @@ const device_trees = [_][]const u8{
 /// which board.
 const overlays = [_][]const u8{ "vc4-kms-v3d.dtbo", "imx219.dtbo", "ov5647.dtbo", "overlay_map.dtb" };
 
+/// Each slot's overlays/README. The firmware only reads overlays from
+/// `${os_prefix}overlays/` when this file is there (it says nothing
+/// otherwise, and looks in /overlays/ instead).
+const overlays_readme =
+    \\Device tree overlays for this Dazzle OS slot (vc4-kms-v3d for the
+    \\display, imx219 and ov5647 for the cameras), from the Raspberry Pi
+    \\kernel.
+    \\
+    \\The Raspberry Pi firmware loads overlays from the folder os_prefix
+    \\names (config.txt) only when this README is here: keep it.
+    \\
+;
+
 const Kernel = struct {
     /// The last step of the kernel builds.
     step: *std.Build.Step,
@@ -716,6 +729,11 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.B
     // the cameras, applied when the firmware finds one).
     for (device_trees) |d| files.append(b.allocator, .{ d, kernel.deviceTree(b, d) }) catch @panic("OOM");
     for (overlays) |d| files.append(b.allocator, .{ b.fmt("overlays/{s}", .{d}), kernel.overlay(b, d) }) catch @panic("OOM");
+    // The firmware takes overlays from the slot's overlays/ (config.txt's
+    // os_prefix) only if there is a README there; otherwise it looks in
+    // the card's own /overlays/, which there is not, and silently applies
+    // none: no vc4 (no display), and no camera.
+    files.append(b.allocator, .{ "overlays/README", b.addWriteFiles().add("README", overlays_readme) }) catch @panic("OOM");
     for (files.items) |f| boot_files.append(b.allocator, .{ b.fmt("slot-a/{s}", .{f[0]}), f[1] }) catch @panic("OOM");
     boot_files.append(b.allocator, .{ "slot-a/cmdline.txt", b.addWriteFiles().add("cmdline.txt", b.fmt("{s} dazzle.slot=a\n", .{cmdline})) }) catch @panic("OOM");
     // The same files as an update (zig-out/os: the archive and its
