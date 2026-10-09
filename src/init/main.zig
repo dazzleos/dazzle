@@ -117,6 +117,76 @@ fn isVc4Card(n: usize) bool {
     return std.mem.endsWith(u8, link[0..len], "/vc4-drm");
 }
 
+/// The display's and GPU's parts in the device tree (platform devices
+/// named for their nodes), which the vc4 driver binds together.
+const display_parts = [_][]const u8{ ".hdmi", ".hvs", ".v3d", ".txp", ".pixelvalve", ":gpu", ":firmware", ":clocks", ":power", ".i2c", ".dma", ".dma-controller", ".gpio", ".mailbox" };
+
+/// Says which of the display's parts have no driver, and what each waits
+/// for (its suppliers, by device link, that are not ready), so a log shows
+/// why vc4 did not come.
+fn reportDisplayDevices() void {
+    // Whether the device tree has vc4 on at all: config.txt's
+    // dtoverlay=vc4-kms-v3d turns it on, if the firmware applied it.
+    var buf: [32]u8 = undefined;
+    const status = sys.readFile("/sys/firmware/devicetree/base/soc/gpu/status", &buf);
+    print("dazzle: device tree: vc4 (soc/gpu) is {s}\n", .{if (status) |st| std.mem.sliceTo(st, 0) else "not there"});
+    const base = "/sys/bus/platform/devices";
+    const dir = sys.open(base, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }) catch return;
+    defer sys.close(dir);
+    var dents: [8192]u8 align(8) = undefined;
+    while (true) {
+        const n = sys.check(linux.getdents64(dir, &dents, dents.len)) catch return;
+        if (n == 0) return;
+        var at: usize = 0;
+        while (at < n) {
+            const reclen = std.mem.readInt(u16, dents[at + 16 ..][0..2], .little);
+            const name = std.mem.sliceTo(dents[at + 19 .. at + reclen], 0);
+            at += reclen;
+            const part = for (display_parts) |suffix| {
+                if (std.mem.endsWith(u8, name, suffix)) break true;
+            } else false;
+            if (part) reportDevice(base, name);
+        }
+    }
+}
+
+fn reportDevice(base: []const u8, name: []const u8) void {
+    var path_buf: [256]u8 = undefined;
+    var link: [256]u8 = undefined;
+    const driver = std.fmt.bufPrintZ(&path_buf, "{s}/{s}/driver", .{ base, name }) catch return;
+    if (sys.check(linux.readlink(driver.ptr, &link, link.len))) |len| {
+        const d = link[0..len];
+        print("dazzle: display part {s}: driver {s}\n", .{ name, d[(std.mem.lastIndexOfScalar(u8, d, '/') orelse 0) + 1 ..] });
+        return;
+    } else |_| {}
+    var buf: [32]u8 = undefined;
+    const waiting_path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}/waiting_for_supplier", .{ base, name }) catch return;
+    const waiting = std.mem.trim(u8, sys.readFile(waiting_path.ptr, &buf) orelse "?", " \n");
+    print("dazzle: display part {s}: no driver (waiting for a supplier: {s})\n", .{ name, waiting });
+    // Its suppliers: links named supplier:<bus>:<device>, each with a
+    // status ("available" once the supplier has its driver).
+    const dev_path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ base, name }) catch return;
+    const dir = sys.open(dev_path.ptr, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }) catch return;
+    defer sys.close(dir);
+    var dents: [4096]u8 align(8) = undefined;
+    while (true) {
+        const n = sys.check(linux.getdents64(dir, &dents, dents.len)) catch return;
+        if (n == 0) return;
+        var at: usize = 0;
+        while (at < n) {
+            const reclen = std.mem.readInt(u16, dents[at + 16 ..][0..2], .little);
+            const entry = std.mem.sliceTo(dents[at + 19 .. at + reclen], 0);
+            at += reclen;
+            if (!std.mem.startsWith(u8, entry, "supplier:")) continue;
+            var status_path_buf: [320]u8 = undefined;
+            const status_path = std.fmt.bufPrintZ(&status_path_buf, "{s}/{s}/{s}/status", .{ base, name, entry }) catch continue;
+            var status_buf: [32]u8 = undefined;
+            const status = std.mem.trim(u8, sys.readFile(status_path.ptr, &status_buf) orelse "?", " \n");
+            print("dazzle:   {s}: {s}\n", .{ entry["supplier:".len..], status });
+        }
+    }
+}
+
 /// DRM device nodes are created root-only (0600). Once the vc4 driver has
 /// probed (it may still be loading firmware or waiting for other devices
 /// when init starts), hand every DRM node to the Dazzle user. The first
@@ -129,7 +199,10 @@ fn grantGpuAccess() void {
         for (0..max_cards) |n| found = found or isVc4Card(n);
         if (!found) sys.sleepMs(100);
     }
-    if (!found) print("dazzle: no vc4 DRM device after 10 s\n", .{});
+    if (!found) {
+        print("dazzle: no vc4 DRM device after 10 s\n", .{});
+        reportDisplayDevices();
+    }
 
     var path_buf: [32]u8 = undefined;
     for (0..max_cards) |n| {
