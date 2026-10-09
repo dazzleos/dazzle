@@ -291,9 +291,7 @@ const Manager = struct {
         // A random (version 4) UUID.
         uuid[6] = (uuid[6] & 0x0f) | 0x40;
         uuid[8] = (uuid[8] & 0x3f) | 0x80;
-        var ts: linux.timespec = undefined;
-        _ = linux.clock_gettime(.REALTIME, &ts);
-        m.formatter = mkfs.Formatter.init(std.heap.page_allocator, fd, @as(u64, plan.sectors) * 512, uuid, @intCast(@max(ts.sec, 0))) catch |err| {
+        m.formatter = mkfs.Formatter.init(std.heap.page_allocator, fd, @as(u64, plan.sectors) * 512, uuid, @intCast(@max(sys.realtimeSec(), 0))) catch |err| {
             sys.close(fd);
             return m.fail(if (err == error.TooSmall) .too_small else .io, err);
         };

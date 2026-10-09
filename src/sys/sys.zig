@@ -83,10 +83,10 @@ pub fn close(fd: linux.fd_t) void {
 
 /// Sleeps on the monotonic clock.
 ///
-/// On 32-bit ARM this uses clock_nanosleep_time64: the Dazzle kernel is
-/// built without CONFIG_COMPAT_32BIT_TIME, so the older 32-bit time
-/// syscalls (nanosleep, clock_nanosleep) that std.os.linux uses there fail
-/// with ENOSYS.
+/// On 32-bit ARM this uses clock_nanosleep_time64, as Dazzle's time
+/// functions use the 64-bit time syscalls (the 32-bit ones, which
+/// std.os.linux uses there, are in the kernel only for the standard
+/// library: see kernel/dazzle.config's CONFIG_COMPAT_32BIT_TIME).
 pub fn sleepMs(ms: u32) void {
     var ts: linux.kernel_timespec = .{
         .sec = ms / 1000,
@@ -128,13 +128,73 @@ fn sleepNs(ns: u64, absolute: bool) void {
 /// Nanoseconds on the monotonic clock. Like sleepMs, uses the 64-bit time
 /// syscall on 32-bit targets.
 pub fn nowNs() u64 {
-    var ts: linux.kernel_timespec = undefined;
+    const ts = clockTime(.MONOTONIC);
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
+
+/// The time of day: seconds since 1970 (counting from 1970 at boot until
+/// the network manager sets the clock).
+pub fn realtimeSec() i64 {
+    return clockTime(.REALTIME).sec;
+}
+
+/// The time of day, in nanoseconds since 1970.
+pub fn realtimeNs() i128 {
+    const ts = clockTime(.REALTIME);
+    return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+}
+
+/// Sets the time of day, to `ns` nanoseconds since 1970 (CAP_SYS_TIME).
+pub fn setRealtimeNs(ns: i128) Error!void {
+    const ts: linux.kernel_timespec = .{ .sec = @intCast(@divFloor(ns, std.time.ns_per_s)), .nsec = @intCast(@mod(ns, std.time.ns_per_s)) };
+    const sys_nr = if (@hasField(linux.SYS, "clock_settime64"))
+        linux.SYS.clock_settime64
+    else
+        linux.SYS.clock_settime;
+    _ = try check(linux.syscall2(sys_nr, @intFromEnum(linux.CLOCK.REALTIME), @intFromPtr(&ts)));
+}
+
+/// Sets a file's access and modification times to `sec`.`nsec` (since
+/// 1970): the file open as `fd` if `path` is null, otherwise `path`
+/// (relative to `fd`, which may be AT.FDCWD).
+pub fn setFileTimes(fd: linux.fd_t, path: ?[*:0]const u8, sec: i64, nsec: i64) Error!void {
+    const times = [2]linux.kernel_timespec{ .{ .sec = sec, .nsec = nsec }, .{ .sec = sec, .nsec = nsec } };
+    const sys_nr = if (@hasField(linux.SYS, "utimensat_time64"))
+        linux.SYS.utimensat_time64
+    else
+        linux.SYS.utimensat;
+    _ = try check(linux.syscall4(sys_nr, @as(usize, @bitCast(@as(isize, fd))), @intFromPtr(path), @intFromPtr(&times), 0));
+}
+
+/// A clock's time, by the 64-bit time syscall on 32-bit targets (the
+/// kernel has no other: see sleepMs).
+fn clockTime(clock: linux.CLOCK) linux.kernel_timespec {
+    var ts: linux.kernel_timespec = .{ .sec = 0, .nsec = 0 };
     const sys_nr = if (@hasField(linux.SYS, "clock_gettime64"))
         linux.SYS.clock_gettime64
     else
         linux.SYS.clock_gettime;
-    _ = linux.syscall2(sys_nr, @intFromEnum(linux.CLOCK.MONOTONIC), @intFromPtr(&ts));
-    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+    _ = linux.syscall2(sys_nr, @intFromEnum(clock), @intFromPtr(&ts));
+    return ts;
+}
+
+test "the time of day, and setting a file's times" {
+    // Some time after this was written.
+    try std.testing.expect(realtimeSec() > 1_700_000_000);
+    try std.testing.expect(@divFloor(realtimeNs(), std.time.ns_per_s) >= realtimeSec() - 1);
+    const name = "/tmp/dazzle-sys-times-test";
+    const fd = try open(name, .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true, .CLOEXEC = true });
+    defer {
+        close(fd);
+        _ = linux.unlink(name);
+    }
+    try setFileTimes(fd, null, 1_000_000_000, 5);
+    var st: linux.Statx = undefined;
+    _ = try check(linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .MTIME = true }, &st));
+    try std.testing.expectEqual(@as(i64, 1_000_000_000), st.mtime.sec);
+    try setFileTimes(linux.AT.FDCWD, name, 2_000_000_000, 0);
+    _ = try check(linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .MTIME = true }, &st));
+    try std.testing.expectEqual(@as(i64, 2_000_000_000), st.mtime.sec);
 }
 
 var kmsg_fd: ?linux.fd_t = null;

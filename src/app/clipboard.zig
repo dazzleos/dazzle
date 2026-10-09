@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const linux = std.os.linux;
+const sys = @import("sys");
 const wayland = @import("wayland");
 
 const client = wayland.client;
@@ -35,9 +36,7 @@ pub const Sink = struct {
 };
 
 fn nowMs() u64 {
-    var ts: linux.timespec = undefined;
-    _ = linux.clock_gettime(.MONOTONIC, &ts);
-    return @as(u64, @intCast(ts.sec)) * std.time.ms_per_s + @as(u64, @intCast(ts.nsec)) / std.time.ns_per_ms;
+    return sys.nowNs() / std.time.ns_per_ms;
 }
 
 pub const Clipboard = struct {

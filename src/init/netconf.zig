@@ -63,11 +63,10 @@ fn setClock(ntp: []const Ip4, dns: []const Ip4) void {
     };
     for (servers) |s| {
         const now = sntp(s) orelse continue;
-        const ts: linux.timespec = .{ .sec = @intCast(@divFloor(now, std.time.ns_per_s)), .nsec = @intCast(@mod(now, std.time.ns_per_s)) };
-        if (linux.errno(linux.clock_settime(.REALTIME, &ts)) != .SUCCESS) {
-            print("dazzle: network: cannot set the clock\n", .{});
+        sys.setRealtimeNs(now) catch |err| {
+            print("dazzle: network: cannot set the clock: {s}\n", .{@errorName(err)});
             return;
-        }
+        };
         synced = true;
         print("dazzle: network: clock set from {d}.{d}.{d}.{d}\n", .{ s[0], s[1], s[2], s[3] });
         return;
