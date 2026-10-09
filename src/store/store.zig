@@ -121,8 +121,15 @@ pub fn remove(dir: []const u8, name: []const u8) !void {
 
 // --- Downloading, in a child process ---------------------------------------------
 
+/// What the last download asked for, and the HTTP status that said no (0
+/// if none did), for the log (in a job's child process).
+var last_url: []const u8 = "";
+var last_status: u16 = 0;
+
 /// Downloads `url` over HTTPS.
 pub fn download(gpa: std.mem.Allocator, url: []const u8) ![]u8 {
+    last_url = url;
+    last_status = 0;
     var threaded: std.Io.Threaded = .init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -139,7 +146,10 @@ pub fn download(gpa: std.mem.Allocator, url: []const u8) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(gpa);
     errdefer out.deinit();
     const result = try client.fetch(.{ .location = .{ .url = url }, .response_writer = &out.writer });
-    if (result.status != .ok) return error.HttpError;
+    if (result.status != .ok) {
+        last_status = @intFromEnum(result.status);
+        return error.HttpError;
+    }
     if (out.written().len > max_download) return error.TooBig;
     return out.toOwnedSlice();
 }
@@ -178,9 +188,13 @@ pub const Job = struct {
         if (rc == 0) {
             sys.close(fds[0]);
             @call(.auto, work, args) catch |err| {
-                const why = describe(err);
+                var why_buf: [160]u8 = undefined;
+                const why = if (last_status != 0)
+                    std.fmt.bufPrint(&why_buf, "{s} (HTTP {d})", .{ describe(err), last_status }) catch describe(err)
+                else
+                    describe(err);
                 _ = linux.write(fds[1], why.ptr, why.len);
-                sys.print("dazzle-settings: {s} {s}: {s}\n", .{ @tagName(kind), job_name, @errorName(err) });
+                logFailure(kind, job_name, err);
             };
             linux.exit(0);
         }
@@ -189,6 +203,31 @@ pub const Job = struct {
         j.name_len = @min(job_name.len, j.name_buf.len);
         @memcpy(j.name_buf[0..j.name_len], job_name[0..j.name_len]);
         return j;
+    }
+
+    /// Logs (as a warning) why a job failed: the program's name (setup or
+    /// Settings), what it was doing, the error, and the URL and HTTP
+    /// status if it was a download that the server said no to.
+    fn logFailure(kind: Kind, job_name: []const u8, err: anyerror) void {
+        var comm_buf: [32]u8 = undefined;
+        const comm = std.mem.trimEnd(u8, sys.readFile("/proc/self/comm", &comm_buf) orelse "dazzle", "\n");
+        var status_buf: [16]u8 = undefined;
+        const status = if (last_status != 0) std.fmt.bufPrint(&status_buf, " (HTTP {d})", .{last_status}) catch "" else "";
+        sys.print("{s}: cannot {s}{s}{s}: {s}{s}{s}{s}\n", .{
+            comm,
+            switch (kind) {
+                .catalogue => "get the list of apps",
+                .install => "install",
+                .os_check => "check for a system update",
+                .os_download => "download the system update",
+            },
+            if (job_name.len > 0) " " else "",
+            job_name,
+            @errorName(err),
+            status,
+            if (last_url.len > 0) " from " else "",
+            last_url,
+        });
     }
 
     const time_limit = 10 * 60 * std.time.ns_per_s;
