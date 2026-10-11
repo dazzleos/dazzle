@@ -288,11 +288,13 @@ pub const Settings = struct {
         // A page longer than the window scrolls; another page starts at
         // its top. In a wide window the page is no wider than reads well,
         // in the middle.
-        const right = if (state.page == .apps)
+        const right = if (state.page == .wifi)
+            self.wifiPage(b, state)
+        else if (state.page == .apps)
             self.appsPage(b, state)
         else blk: {
             const page = switch (state.page) {
-                .wifi => self.wifiPage(b, state),
+                .wifi, .apps => unreachable,
                 .ethernet => self.networkPage(b, state),
                 .resources => self.resourcesPage(b),
                 .board => self.boardPage(b, state),
@@ -300,7 +302,6 @@ pub const Settings = struct {
                 .gpio => self.gpioPage(b, state),
                 .usb => self.usbPage(b),
                 .log => self.logPage(b, state),
-                .apps => unreachable,
             };
             break :blk cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(24), .child = cx.make(ui.Align{
                 .alignment = .top_center,
@@ -685,14 +686,22 @@ pub const Settings = struct {
 
     fn wifiPage(self: *const Settings, b: Builder, state: *State) ui.Widget {
         const cx = b.cx;
-        const report = self.manager orelse return b.page(&.{b.item("Status", "The network manager is not running")});
-        if (report.denied) return b.page(&.{b.item("Status", "Not allowed to scan")});
+        const wrap = struct {
+            fn frame(c: *ui.Context, child: ui.Widget) ui.Widget {
+                return c.make(ui.Padding{ .padding = .all(24), .child = c.make(ui.Align{
+                    .alignment = .top_center,
+                    .child = c.make(ui.ConstrainedBox{ .constraints = .{ .max_w = max_page_width }, .child = child }),
+                }) });
+            }
+        }.frame;
+        const report = self.manager orelse return wrap(cx, b.page(&.{b.item("Status", "The network manager is not running")}));
+        if (report.denied) return wrap(cx, b.page(&.{b.item("Status", "Not allowed to scan")}));
         const adapters = report.wifiAdapters();
-        if (adapters.len == 0) return b.page(&.{b.item("Status", "No Wi-Fi adapter")});
+        if (adapters.len == 0) return wrap(cx, b.page(&.{b.item("Status", "No Wi-Fi adapter")}));
         const idx = @min(state.wifi_adapter, adapters.len - 1);
         state.wifi_adapter = idx;
         const adapter = adapters[idx];
-        var rows: std.ArrayList(ui.Widget) = .empty;
+        var top_rows: std.ArrayList(ui.Widget) = .empty;
         const a = cx.ui.arena();
         if (adapters.len > 1) {
             var pills: std.ArrayList(ui.Widget) = .empty;
@@ -705,12 +714,13 @@ pub const Settings = struct {
                     .on_press = pickAdapter(cx, state, self.actions, .wifi, i, ad.name()),
                 })) catch {};
             }
-            rows.append(a, cx.make(ui.Center{ .height_factor = 1, .child = cx.make(PillBar{ .children = pills.items }) })) catch {};
+            top_rows.append(a, cx.make(ui.Center{ .height_factor = 1, .child = cx.make(PillBar{ .children = pills.items }) })) catch {};
         }
+        top_rows.append(a, self.connectionRow(b, state, adapter.name(), &report.connection)) catch {};
         const m = adapter.mac;
-        rows.append(a, b.item("Adapter", cx.fmt("{s} ({x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}){s}", .{ adapter.name(), m[0], m[1], m[2], m[3], m[4], m[5], if (adapter.up) "" else ", down" }))) catch {};
-        rows.append(a, self.connectionRow(b, state, adapter.name(), &report.connection)) catch {};
+        top_rows.append(a, b.item("MAC address", cx.fmt("{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}", .{ m[0], m[1], m[2], m[3], m[4], m[5] }))) catch {};
 
+        var list_rows: std.ArrayList(ui.Widget) = .empty;
         const nets = report.slice();
         // The chosen network, if it is still around (and not the one joined).
         const conn = &report.connection;
@@ -721,12 +731,29 @@ pub const Settings = struct {
         // The networks, in lists that make only the rows that show; the
         // form for joining the chosen one goes under it, between two.
         const split = if (form) chosen.? - nets.ptr + 1 else nets.len;
-        if (split > 0) rows.append(a, networkList(b, state, report, nets[0..split], chosen)) catch {};
-        if (form) rows.append(a, self.joinForm(b, state, adapter.name(), chosen.?)) catch {};
-        if (split < nets.len) rows.append(a, networkList(b, state, report, nets[split..], chosen)) catch {};
+        if (split > 0) list_rows.append(a, networkList(b, state, report, nets[0..split], chosen)) catch {};
+        if (form) list_rows.append(a, self.joinForm(b, state, adapter.name(), chosen.?)) catch {};
+        if (split < nets.len) list_rows.append(a, networkList(b, state, report, nets[split..], chosen)) catch {};
         const footer = if (report.scanning) "Scanning…" else if (nets.len == 0) "No networks found" else "";
-        if (footer.len > 0) rows.append(a, b.item("", footer)) catch {};
-        return b.page(rows.items);
+        if (footer.len > 0) list_rows.append(a, b.item("", footer)) catch {};
+
+        return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &.{
+            cx.make(ui.Padding{
+                .padding = .{ .left = 24, .top = 24, .right = 24, .bottom = 10 },
+                .child = cx.make(ui.Align{
+                    .alignment = .top_center,
+                    .height_factor = 1,
+                    .child = cx.make(ui.ConstrainedBox{ .constraints = .{ .max_w = max_page_width }, .child = b.page(top_rows.items) }),
+                }),
+            }),
+            cx.make(ui.Expanded{ .child = cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{
+                .padding = .{ .left = 24, .top = 0, .right = 24, .bottom = 24 },
+                .child = cx.make(ui.Align{
+                    .alignment = .top_center,
+                    .child = cx.make(ui.ConstrainedBox{ .constraints = .{ .max_w = max_page_width }, .child = b.page(list_rows.items) }),
+                }),
+            }) }).withKey(@as(u64, @intFromEnum(Page.wifi)) + 1) }),
+        } });
     }
 
     /// The connection's state, with Disconnect while there is one.
@@ -740,9 +767,9 @@ pub const Settings = struct {
             .connecting, .authenticating, .addressing => cx.fmt("{s}: {s}…", .{ name, c.state.label() }),
             .failed => cx.fmt("Could not connect to {s}: {s}", .{ name, c.failure.label() }),
         };
-        if (!on_this or !connectionBusy(c)) return b.item("Connection", text);
+        if (!on_this or !connectionBusy(c)) return b.item("Status", text);
         return cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-            b.label("Connection"),
+            b.label("Status"),
             cx.make(ui.Expanded{ .child = b.value(text) }),
             cx.make(ui.OutlinedButton{ .label = "Disconnect", .on_press = if (self.actions) |acts| .of(act(cx, acts, state, adapter_name, ""), Act.disconnect) else null }),
         } });
@@ -1494,18 +1521,14 @@ const Builder = struct {
         });
     }
 
-    /// A Wi-Fi network: its signal, name, security and band, in the middle
-    /// of its row (`network_row_height`); pressing it chooses it.
+    /// A Wi-Fi network: its signal and its name, in the middle of its row
+    /// (`network_row_height`); pressing it chooses it.
     fn network(b: Builder, n: *const info.manager.Network, chosen: bool, joined: bool, on_press: ui.Callback) ui.Widget {
         const cx = b.cx;
         const t = &cx.ui.theme;
         const row = cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-            cx.make(ui.SizedBox{ .width = 150, .child = cx.make(ui.Row{ .spacing = 8, .main_axis_size = .min, .cross_axis_alignment = .center, .children = &.{
-                cx.make(Signal{ .bars = n.bars(), .size = 20 }),
-                cx.make(ui.Text{ .text = cx.fmt("{d} dBm", .{n.dbm()}), .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }),
-            } }) }),
+            cx.make(Signal{ .bars = n.bars(), .locked = n.security != .open, .size = 20 }),
             cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = printable(cx, n.ssid()), .style = .{ .size = 18, .color = if (joined) t.primary else t.on_surface }, .wrap = false }) }),
-            cx.make(ui.Text{ .text = cx.fmt("{s} · {s}", .{ n.security.label(), n.band() }), .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }),
         } });
         return cx.make(ui.Pressable{ .on_press = on_press, .child = cx.make(ui.Decorated{
             .color = if (chosen) t.secondary_container else gfx.Color.argb(0),
@@ -1532,21 +1555,23 @@ const Builder = struct {
 /// 3, the dot for 1 or 2, none for 0.
 pub const Signal = struct {
     bars: u8,
+    locked: bool = false,
     size: f32,
 
-    pub fn lit(bars: u8) ?ui.icons.Icon {
+    pub fn lit(bars: u8, locked: bool) ?ui.icons.Icon {
         return switch (bars) {
             0 => null,
             1, 2 => .wifi_1_bar,
             3 => .wifi_2_bar,
-            else => .wifi,
+            else => if (locked) .wifi_password else .wifi,
         };
     }
 
     pub fn build(self: *const Signal, cx: *ui.Context) ui.Widget {
         const t = cx.theme();
-        const back = cx.make(ui.Icon{ .icon = .wifi, .size = self.size, .color = t.on_surface.withAlpha(0.25) });
-        const front = lit(self.bars) orelse return back;
+        const full: ui.icons.Icon = if (self.locked) .wifi_password else .wifi;
+        const back = cx.make(ui.Icon{ .icon = full, .size = self.size, .color = t.on_surface.withAlpha(0.25) });
+        const front = lit(self.bars, self.locked) orelse return back;
         return cx.make(ui.SizedBox{ .width = self.size, .height = self.size, .child = cx.make(ui.Overlay{ .children = &.{
             back,
             cx.make(ui.Icon{ .icon = front, .size = self.size, .color = t.on_surface }),
@@ -1867,17 +1892,13 @@ test "everything is shown, and fits from the smallest window to the biggest" {
         "12 MB received, 3.0 MB sent",
         "Not connected: no cable",
         "192.168.1.1",
-        "wlan0 (b8:27:eb:01:02:03)",
+        "b8:27:eb:01:02:03",
         "Scanning…",
         // Every network: the page scrolls.
         "Further",
         "bad?name",
         "Not connected",
         "Home",
-        "WPA2 · 5 GHz",
-        "-48 dBm",
-        "Open · 2.4 GHz",
-        "Enterprise · 2.4 GHz",
         // The software list.
         "Software",
         "Dazzle",
@@ -1897,9 +1918,11 @@ test "everything is shown, and fits from the smallest window to the biggest" {
     u.frame(min_size[0], min_size[1], frame_no + 2, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps, .video_memory = .{ .now = 128, .next = 192 } });
     try testing.expect(findText(u.root.?, "Home") != null);
     try testing.expect(findText(u.root.?, "bad?name") == null);
+    // All network names are horizontally aligned, whether locked or open.
+    try testing.expectEqual(findText(u.root.?, "Home").?.position()[0], findText(u.root.?, "Cafe").?.position()[0]);
     // The build is on the Software page, not beside the title; the hardware
-    // is the board alone; Catalogue/2 apps/From url are gone.
-    for ([_][]const u8{ "Dazzle build", "Hardware\n", "Chip", "GPU\n", "Revision", "In use", "Up for", "Hostname", "Catalogue", "2 apps", "From https://example.com/apps" }) |gone| {
+    // is the board alone; Catalogue/2 apps/From url and dBm/adapter name/WPA2/GHz on Wi-Fi are gone.
+    for ([_][]const u8{ "Dazzle build", "Hardware\n", "Chip", "GPU\n", "Revision", "In use", "Up for", "Hostname", "Catalogue", "2 apps", "From https://example.com/apps", "dBm", "wlan0", "WPA2", "GHz" }) |gone| {
         try testing.expect(std.mem.indexOf(u8, all.items, gone) == null);
     }
 }
@@ -2136,13 +2159,13 @@ test "choosing between multiple Wi-Fi and Ethernet adapters with pill buttons" {
     report.addAdapter(a0);
     report.addAdapter(a1);
     u.frame(1920, 960, 1, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &report });
-    try testing.expect(findText(u.root.?, "wlan0 (b8:27:eb:01:02:03)") != null);
-    try testing.expect(findText(u.root.?, "wlan1 (00:e0:4c:04:05:06)") == null);
+    try testing.expect(findText(u.root.?, "b8:27:eb:01:02:03") != null);
+    try testing.expect(findText(u.root.?, "00:e0:4c:04:05:06") == null);
     click(u, up(findText(u.root.?, "wlan1").?, PillButton).?);
     try testing.expectEqualStrings("wlan1", actions.wifi_adapter.?.slice());
     u.frame(1920, 960, 2, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &report });
-    try testing.expect(findText(u.root.?, "wlan1 (00:e0:4c:04:05:06)") != null);
-    try testing.expect(findText(u.root.?, "wlan0 (b8:27:eb:01:02:03)") == null);
+    try testing.expect(findText(u.root.?, "00:e0:4c:04:05:06") != null);
+    try testing.expect(findText(u.root.?, "b8:27:eb:01:02:03") == null);
 
     // Ethernet: sample() has eth0 and eth1, selectable via pill buttons.
     click(u, up(findText(u.root.?, "Ethernet").?, Tab).?);
@@ -2600,3 +2623,5 @@ test "the software list scrolls vertically while the bottom bar stays visible" {
     try testing.expectEqual(refresh_before, refresh_after);
     try testing.expect(status_after + 20 <= @as(f32, @floatFromInt(min_size[1])));
 }
+
+

@@ -55,6 +55,7 @@ pub const Icon = enum {
     article,
     wifi_1_bar,
     wifi_2_bar,
+    wifi_password,
     // The demo.
     view_in_ar,
     fast_rewind,
