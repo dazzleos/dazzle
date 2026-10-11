@@ -2,8 +2,7 @@
 //! outline and mounting holes, and its parts, the chips a little heavier
 //! than the connectors, and what is under the board fainter. The part
 //! under the pointer is lit, and the one picked is filled in; clicking (or
-//! tapping) a part picks it. It is small: it shows which board this is at
-//! a glance, beside what is said about it.
+//! tapping) a part picks it.
 
 const std = @import("std");
 const ui = @import("ui");
@@ -30,8 +29,7 @@ pub const BoardView = struct {
 
     pub fn layout(self: *const BoardView, _: *ui.Node, c: ui.Constraints) ui.Size {
         const r = self.board.bounds();
-        // Beside text: at most a little under half the width there is.
-        const w = @min(if (std.math.isFinite(c.max_w)) c.max_w * 0.45 else self.max_width, self.max_width);
+        const w = @min(if (std.math.isFinite(c.max_w)) c.max_w else self.max_width, self.max_width);
         const h = @min(w * r.h / r.w, self.max_height);
         return c.constrain(.{ .w = w * @min(1, h / (w * r.h / r.w)), .h = h });
     }

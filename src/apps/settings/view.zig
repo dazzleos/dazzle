@@ -388,53 +388,52 @@ pub const Settings = struct {
         var b2: [32]u8 = undefined;
         const cores = self.system.cores;
         const cpu = if (u.cpu_busy) |busy| cx.fmt("{d:.0}% busy ({d} {s})", .{ busy, cores, if (cores == 1) "core" else "cores" }) else "Measuring…";
-        var temp_buf: [32]u8 = undefined;
-        const temperature = if (u.temperature) |c| cx.fmt("{s}", .{locale.formatTemperature(&temp_buf, c)}) else "Unknown";
         const mem = cx.fmt("{s} of {s} in use", .{ info.formatBytes(&b1, u.memUsed()), info.formatBytes(&b2, u.mem_total) });
-        const gpu = if (u.gpu_total > 0) cx.fmt("{s} of {s} in use", .{ info.formatBytes(&b1, u.gpuUsed()), info.formatBytes(&b2, u.gpu_total) }) else "Unknown";
         return b.page(&.{
             b.meter("CPU", cpu, (u.cpu_busy orelse 0) / 100),
-            b.item("Temperature", temperature),
-            b.meter("Memory", mem, fraction(u.memUsed(), u.mem_total)),
-            b.meter("GPU memory", gpu, fraction(u.gpuUsed(), u.gpu_total)),
-            self.videoMemoryRow(b),
+            b.meter("CPU Memory", mem, fraction(u.memUsed(), u.mem_total)),
+            self.gpuMemoryRow(b),
             b.storage(u.storage),
         });
     }
 
-    /// How much memory the GPU may have: what it has now, what it has from
-    /// the next start (with Restart, if that is different), and a menu of
-    /// the sizes to choose from.
-    fn videoMemoryRow(self: *const Settings, b: Builder) ui.Widget {
+    /// GPU memory: how much is in use (with a meter), and an icon beside the
+    /// label that opens a menu of the sizes to choose from for the next
+    /// start (with Restart when a change is waiting).
+    fn gpuMemoryRow(self: *const Settings, b: Builder) ui.Widget {
         const cx = b.cx;
         const t = cx.theme();
+        const u = self.usage;
         const vm = self.video_memory;
         var b1: [32]u8 = undefined;
         var b2: [32]u8 = undefined;
+        var b3: [32]u8 = undefined;
+        const gpu = if (u.gpu_total > 0) cx.fmt("{s} of {s} in use", .{ info.formatBytes(&b1, u.gpuUsed()), info.formatBytes(&b2, u.gpu_total) }) else "Unknown";
         const pending = vm.next != null and vm.now != vm.next;
-        const text = if (vm.failed)
-            "It could not be changed"
-        else if (pending)
-            cx.fmt("{s} after a restart (now {s})", .{ info.formatBytes(&b1, @as(u64, vm.next.?) << 20), if (vm.now) |n| info.formatBytes(&b2, @as(u64, n) << 20) else "unknown" })
-        else if (vm.next orelse vm.now) |n|
-            cx.fmt("{s}", .{info.formatBytes(&b1, @as(u64, n) << 20)})
-        else
-            "Unknown";
-        const ram_mib = self.usage.mem_total >> 20;
-        var buttons: std.ArrayList(ui.Widget) = .empty;
+        const ram_mib = u.mem_total >> 20;
         const a = cx.ui.arena();
-        buttons.append(a, cx.make(VideoMemoryMenu{ .chosen = vm.next, .ram_mib = ram_mib, .actions = if (vm.next != null) self.actions else null })) catch {};
-        if (pending) buttons.append(a, cx.make(ui.OutlinedButton{ .label = "Restart", .icon = .restart_alt, .on_press = if (self.actions) |acts| .of(acts, Actions.restartNow) else null })) catch {};
+        var col: std.ArrayList(ui.Widget) = .empty;
+        col.appendSlice(a, &.{
+            b.value(gpu),
+            cx.make(Meter{ .fraction = fraction(u.gpuUsed(), u.gpu_total), .height = @max(8, 4) }),
+        }) catch {};
+        if (vm.failed) {
+            col.append(a, cx.make(ui.Text{ .text = "It could not be changed", .style = .{ .size = 15, .color = t.@"error" } })) catch {};
+        } else if (pending) {
+            col.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
+                cx.make(ui.Expanded{ .child = cx.make(ui.Text{
+                    .text = cx.fmt("{s} after a restart", .{info.formatBytes(&b3, @as(u64, vm.next.?) << 20)}),
+                    .style = .{ .size = 15, .color = t.on_surface_variant },
+                }) }),
+                cx.make(ui.OutlinedButton{ .label = "Restart", .icon = .restart_alt, .on_press = if (self.actions) |acts| .of(acts, Actions.restartNow) else null }),
+            } })) catch {};
+        }
         return cx.make(ui.Row{ .cross_axis_alignment = .start, .spacing = 12, .children = &.{
-            b.label("Video memory"),
-            cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 8, .children = &.{
-                b.value(text),
-                cx.make(ui.Text{
-                    .text = "What the GPU draws windows and pictures in. More lets more apps run at once; less leaves more memory for each app. A change applies when the computer restarts.",
-                    .style = .{ .size = 14, .color = t.on_surface_variant },
-                }),
-                cx.make(ui.Row{ .spacing = 8, .main_axis_size = .min, .children = buttons.items }),
+            cx.make(ui.SizedBox{ .width = 150, .child = cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 4, .children = &.{
+                cx.make(ui.Text{ .text = "GPU memory", .style = .{ .size = 18, .color = t.on_surface_variant }, .wrap = false }),
+                cx.make(VideoMemoryMenu{ .chosen = vm.next, .ram_mib = ram_mib, .actions = if (vm.next != null) self.actions else null }),
             } }) }),
+            cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 6, .children = col.items }) }),
         } });
     }
 
@@ -549,12 +548,12 @@ pub const Settings = struct {
         const t = cx.theme();
         const a = cx.ui.arena();
         const model = self.system.model.slice();
-        var page: std.ArrayList(ui.Widget) = .empty;
-        page.append(a, b.item("Board", orUnknown(model))) catch {};
-        if (self.system.serial.len > 0) page.append(a, b.item("Serial", self.system.serial.slice())) catch {};
+        var rows: std.ArrayList(ui.Widget) = .empty;
+        rows.append(a, b.value(orUnknown(model))) catch {};
+        if (self.system.serial.len > 0) rows.append(a, cx.make(ui.Text{ .text = cx.fmt("Serial: {s}", .{self.system.serial.slice()}), .style = .{ .size = 16, .color = t.on_surface_variant } })) catch {};
         const drawing = board.forModel(model) orelse {
-            page.append(a, b.value("There is no drawing of this board")) catch {};
-            return b.page(page.items);
+            rows.append(a, b.value("There is no drawing of this board")) catch {};
+            return b.page(rows.items);
         };
         // The processor, until something else is picked.
         const picked = state.board_part orelse for (drawing.parts, 0..) |part, i| {
@@ -562,8 +561,8 @@ pub const Settings = struct {
         } else 0;
         const part = &drawing.parts[@min(picked, drawing.parts.len - 1)];
         const about = board.describe(part);
-        var rows: std.ArrayList(ui.Widget) = .empty;
         rows.appendSlice(a, &.{
+            cx.make(ui.Padding{ .padding = .symmetric(0, 8), .child = cx.make(ui.Align{ .alignment = .center_left, .child = cx.make(BoardView{ .board = drawing, .selected = picked, .on_select = partPicker(state) }) }) }),
             cx.make(ui.Text{ .text = if (part.chip.len > 0) cx.fmt("{s}: {s}", .{ about.title, part.chip }) else about.title, .style = .{ .size = 20, .color = t.on_surface } }),
             cx.make(ui.Text{ .text = cx.fmt("{s}{s}", .{ about.about, if (part.underside) " (underneath the board)" else "" }), .style = .{ .size = 16, .color = t.on_surface_variant } }),
         }) catch {};
@@ -579,13 +578,7 @@ pub const Settings = struct {
             else => null,
         };
         if (now) |text| rows.append(a, cx.make(ui.Text{ .text = text, .style = .{ .size = 16, .color = t.on_surface } })) catch {};
-        rows.append(a, cx.make(ui.Text{ .text = "Pick a part to see what it is", .style = .{ .size = 14, .color = t.on_surface_variant } })) catch {};
-        // The drawing, small, beside what is said about the part picked.
-        page.append(a, cx.make(ui.Row{ .spacing = 24, .cross_axis_alignment = .start, .children = &.{
-            cx.make(BoardView{ .board = drawing, .selected = picked, .on_select = partPicker(state) }),
-            cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 6, .children = rows.items }) }),
-        } })) catch {};
-        return b.page(page.items);
+        return b.page(rows.items);
     }
 
     fn wifiPage(self: *const Settings, b: Builder, state: *State) ui.Widget {
@@ -1134,8 +1127,8 @@ fn fraction(part: u64, whole: u64) f32 {
     return @as(f32, @floatFromInt(part)) / @as(f32, @floatFromInt(whole));
 }
 
-/// Change, for video memory: pressing it offers the sizes in a menu (those
-/// too big for the computer's memory dimmed).
+/// An icon beside "GPU memory": pressing it offers the sizes in a menu
+/// (those too big for the computer's memory dimmed).
 const VideoMemoryMenu = struct {
     chosen: ?u16,
     ram_mib: u64,
@@ -1147,6 +1140,7 @@ const VideoMemoryMenu = struct {
         actions: ?*Actions = null,
         chosen: ?u16 = null,
         ram_mib: u64 = 0,
+        interaction: ui.Interaction = .{},
 
         fn open(st: *State) void {
             const n = st.node orelse return;
@@ -1167,8 +1161,26 @@ const VideoMemoryMenu = struct {
     };
 
     pub fn build(self: *const VideoMemoryMenu, cx: *ui.Context, state: *State) ui.Widget {
-        state.* = .{ .node = cx.node, .actions = self.actions, .chosen = self.chosen, .ram_mib = self.ram_mib };
-        return cx.make(ui.OutlinedButton{ .label = "Change", .icon = .expand_more, .on_press = if (self.actions != null) .of(state, State.open) else null });
+        const t = cx.theme();
+        const enabled = self.actions != null;
+        state.node = cx.node;
+        state.actions = self.actions;
+        state.chosen = self.chosen;
+        state.ram_mib = self.ram_mib;
+        const size = 24;
+        return cx.make(ui.Pressable{
+            .on_press = if (enabled) .of(state, State.open) else null,
+            .interaction = &state.interaction,
+            .child = cx.make(ui.Decorated{
+                .color = if (enabled and state.interaction.hovered) t.on_surface.withAlpha(0.08) else null,
+                .radius = .all(size / 2),
+                .child = cx.make(ui.SizedBox{ .width = size, .height = size, .child = cx.make(ui.Center{ .child = cx.make(ui.Icon{
+                    .icon = .settings,
+                    .size = 18,
+                    .color = if (enabled) t.on_surface_variant else t.on_surface.withAlpha(0.38),
+                }) }) }),
+            }),
+        });
     }
 };
 
@@ -1480,7 +1492,7 @@ test "everything is shown, and fits from the smallest window to the biggest" {
         "a1b2c3d4",
         "Resources",
         "23% busy (1 core)",
-        "48.3 °C",
+        "CPU Memory",
         "134 MB of 434 MB in use",
         "4.0 MB of 64 MB in use",
         "System 600 KB",
@@ -1827,9 +1839,8 @@ test "video memory: choosing a size, then a restart" {
     u.frame(1280, 720, 0, settings);
     u.root.?.state(Settings.State).page = .resources;
     u.frame(1280, 720, 1, settings);
-    try testing.expect(findText(u.root.?, "128 MB") != null);
     try testing.expect(findText(u.root.?, "Restart") == null);
-    click(u, up(findText(u.root.?, "Change").?, ui.OutlinedButton).?);
+    click(u, findType(u.root.?, VideoMemoryMenu).?);
     u.frame(1280, 720, 2, settings);
     // 434 MB of memory: no more than half of it.
     const menu = u.menu.?.items;
@@ -1841,16 +1852,15 @@ test "video memory: choosing a size, then a restart" {
 
     settings.video_memory = .{ .now = 128, .next = 192 };
     u.frame(1280, 720, 3, settings);
-    try testing.expect(findText(u.root.?, "192 MB after a restart (now 128 MB)") != null);
+    try testing.expect(findText(u.root.?, "192 MB after a restart") != null);
     click(u, up(findText(u.root.?, "Restart").?, ui.OutlinedButton).?);
     try testing.expect(actions.restart);
 
     // Not known: nothing to change.
     settings.video_memory = .{};
     u.frame(1280, 720, 4, settings);
-    try testing.expect(findText(u.root.?, "Unknown") != null);
     actions = .{};
-    click(u, up(findText(u.root.?, "Change").?, ui.OutlinedButton).?);
+    click(u, findType(u.root.?, VideoMemoryMenu).?);
     try testing.expect(u.menu == null);
 }
 
