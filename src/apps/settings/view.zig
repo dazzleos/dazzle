@@ -105,10 +105,10 @@ pub const Actions = struct {
     };
 };
 
-/// The smallest the window may be: the tabs, and the widest card's rows
+/// The smallest the window may be: the tabs, and the widest page's rows
 /// beside them. Everything is the same size in pixels whatever the
-/// window's size; the cards grow to fill the width (up to
-/// `max_page_width`), and their pages scroll.
+/// window's size; the pages grow to fill the width (up to
+/// `max_page_width`), and scroll.
 pub const min_size = [2]u32{ 720, 440 };
 
 /// The size the window opens at: the tabs of pages beside a page.
@@ -242,16 +242,16 @@ pub const Settings = struct {
     pub fn build(self: *const Settings, cx: *ui.Context, state: *State) ui.Widget {
         const b: Builder = .{ .cx = cx };
         const page = switch (state.page) {
-            .wifi => self.wifiCard(b, state),
-            .ethernet => self.networkCard(b, state),
-            .resources => self.resourcesCard(b),
-            .board => self.boardCard(b, state),
-            .language => self.languageCard(b),
-            .gpio => self.gpioCard(b, state),
-            .usb => self.usbCard(b),
-            .log => self.logCard(b, state),
-            .system => self.systemCard(b),
-            .apps => self.appsCard(b, state),
+            .wifi => self.wifiPage(b, state),
+            .ethernet => self.networkPage(b, state),
+            .resources => self.resourcesPage(b),
+            .board => self.boardPage(b, state),
+            .language => self.languagePage(b),
+            .gpio => self.gpioPage(b, state),
+            .usb => self.usbPage(b),
+            .log => self.logPage(b, state),
+            .system => self.systemPage(b),
+            .apps => self.appsPage(b, state),
         };
         const t = cx.theme();
         var tabs: [std.meta.fields(Page).len]ui.Widget = undefined;
@@ -274,10 +274,13 @@ pub const Settings = struct {
         // in the middle.
         const content = cx.make(ui.Row{ .cross_axis_alignment = .stretch, .children = &.{
             sidebar,
-            cx.make(ui.Expanded{ .child = cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(24), .child = cx.make(ui.Align{
-                .alignment = .top_center,
-                .child = cx.make(ui.ConstrainedBox{ .constraints = .{ .max_w = max_page_width }, .child = page }),
-            }) }) }).withKey(@as(u64, @intFromEnum(state.page)) + 1) }),
+            cx.make(ui.Expanded{ .child = cx.make(ui.Decorated{
+                .color = t.surface,
+                .child = cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(24), .child = cx.make(ui.Align{
+                    .alignment = .top_center,
+                    .child = cx.make(ui.ConstrainedBox{ .constraints = .{ .max_w = max_page_width }, .child = page }),
+                }) }) }).withKey(@as(u64, @intFromEnum(state.page)) + 1),
+            }) }),
         } });
         return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &.{
             cx.make(ui.TitleBar{
@@ -291,7 +294,7 @@ pub const Settings = struct {
         } });
     }
 
-    fn appsCard(self: *const Settings, b: Builder, state: *State) ui.Widget {
+    fn appsPage(self: *const Settings, b: Builder, state: *State) ui.Widget {
         const cx = b.cx;
         const t = &cx.ui.theme;
         const apps = &self.apps;
@@ -332,10 +335,10 @@ pub const Settings = struct {
             } })) catch {};
         }
         if (apps.source.len > 0) rows.append(a, cx.make(ui.Text{ .text = cx.fmt("From {s}", .{apps.source}), .style = .{ .size = 14, .color = t.on_surface_variant } })) catch {};
-        return b.card("Apps", rows.items);
+        return b.page(rows.items);
     }
 
-    fn systemCard(self: *const Settings, b: Builder) ui.Widget {
+    fn systemPage(self: *const Settings, b: Builder) ui.Widget {
         const cx = b.cx;
         const sys = self.system;
         var dur: [32]u8 = undefined;
@@ -350,7 +353,7 @@ pub const Settings = struct {
             b.item("Hostname", orUnknown(sys.hostname.slice())),
         }) catch {};
         if (sys.serial.len > 0) rows.append(a, b.item("Serial", sys.serial.slice())) catch {};
-        return b.card("System", rows.items);
+        return b.page(rows.items);
     }
 
     /// Updates: how they stand, and what can be done about them.
@@ -383,7 +386,7 @@ pub const Settings = struct {
         } });
     }
 
-    fn resourcesCard(self: *const Settings, b: Builder) ui.Widget {
+    fn resourcesPage(self: *const Settings, b: Builder) ui.Widget {
         const cx = b.cx;
         const u = self.usage;
         var b1: [32]u8 = undefined;
@@ -394,7 +397,7 @@ pub const Settings = struct {
         const temperature = if (u.temperature) |c| cx.fmt("{s}", .{locale.formatTemperature(&temp_buf, c)}) else "Unknown";
         const mem = cx.fmt("{s} of {s} in use", .{ info.formatBytes(&b1, u.memUsed()), info.formatBytes(&b2, u.mem_total) });
         const gpu = if (u.gpu_total > 0) cx.fmt("{s} of {s} in use", .{ info.formatBytes(&b1, u.gpuUsed()), info.formatBytes(&b2, u.gpu_total) }) else "Unknown";
-        return b.card("Resources", &.{
+        return b.page(&.{
             b.meter("CPU", cpu, (u.cpu_busy orelse 0) / 100),
             b.item("Temperature", temperature),
             b.meter("Memory", mem, fraction(u.memUsed(), u.mem_total)),
@@ -443,12 +446,12 @@ pub const Settings = struct {
     /// The system's log, newest first: when each message came (since the
     /// system started) and what it says, warnings and errors in colour;
     /// or only those.
-    fn logCard(self: *const Settings, b: Builder, state: *State) ui.Widget {
+    fn logPage(self: *const Settings, b: Builder, state: *State) ui.Widget {
         const cx = b.cx;
         const a = cx.ui.arena();
         const problems = cx.make(ui.Switch{ .value = state.log_problems, .on_changed = .of(state, State.setLogProblems), .label = "Only warnings and errors" });
-        const l = self.log orelse return b.card("Log", &.{ problems, b.value("Reading the log…") });
-        if (l.failed) return b.card("Log", &.{b.value("The log cannot be read")});
+        const l = self.log orelse return b.page(&.{ problems, b.value("Reading the log…") });
+        if (l.failed) return b.page(&.{b.value("The log cannot be read")});
         // The lines shown, newest first.
         var shown: std.ArrayList(*const log.Line) = .empty;
         for (0..l.count) |i| {
@@ -457,7 +460,7 @@ pub const Settings = struct {
         }
         const lines = a.create(LogLines) catch return cx.make(ui.Empty{});
         lines.* = .{ .lines = shown.items };
-        return b.card("Log", &.{
+        return b.page(&.{
             problems,
             if (shown.items.len == 0) b.value(if (state.log_problems) "No warnings or errors" else "Nothing yet") else cx.make(ui.LazyGrid{
                 .count = shown.items.len,
@@ -469,10 +472,10 @@ pub const Settings = struct {
 
     /// The GPIO pins: the header as it is laid out, what each pin does,
     /// and the pin picked, to set up.
-    fn gpioCard(self: *const Settings, b: Builder, state: *State) ui.Widget {
+    fn gpioPage(self: *const Settings, b: Builder, state: *State) ui.Widget {
         const cx = b.cx;
-        const pins = self.gpio orelse return b.card("GPIO", &.{b.value("Reading the pins\u{2026}")});
-        return b.card("GPIO", &.{cx.make(GpioPage{
+        const pins = self.gpio orelse return b.page(&.{b.value("Reading the pins\u{2026}")});
+        return b.page(&.{cx.make(GpioPage{
             .pins = pins,
             .header = gpio.headerFor(self.system.model.slice()),
             .picked = state.gpio_pin,
@@ -491,11 +494,11 @@ pub const Settings = struct {
 
     /// The USB devices: what each is, who made it and how fast it talks;
     /// those that are part of the board last.
-    fn usbCard(self: *const Settings, b: Builder) ui.Widget {
+    fn usbPage(self: *const Settings, b: Builder) ui.Widget {
         const cx = b.cx;
         const t = cx.theme();
         const devices = self.usb.slice();
-        if (devices.len == 0) return b.card("USB", &.{b.value("Nothing is plugged in")});
+        if (devices.len == 0) return b.page(&.{b.value("Nothing is plugged in")});
         const a = cx.ui.arena();
         var rows: std.ArrayList(ui.Widget) = .empty;
         for (devices) |*d| {
@@ -515,11 +518,11 @@ pub const Settings = struct {
                 } }) }),
             } })) catch {};
         }
-        return b.card("USB", rows.items);
+        return b.page(rows.items);
     }
 
     /// The language and keyboard, and a field to try the keyboard in.
-    fn languageCard(self: *const Settings, b: Builder) ui.Widget {
+    fn languagePage(self: *const Settings, b: Builder) ui.Widget {
         const cx = b.cx;
         const t = cx.theme();
         const a = cx.ui.arena();
@@ -542,15 +545,15 @@ pub const Settings = struct {
             .label = k.name(),
         })) catch {};
         rows.append(a, cx.make(ui.Row{ .children = &.{cx.make(ui.TextField{ .placeholder = "Type here to try the keyboard", .width = 360 })} })) catch {};
-        return b.card("Language and keyboard", rows.items);
+        return b.page(rows.items);
     }
 
     /// The board, drawn, and about the part picked on it.
-    fn boardCard(self: *const Settings, b: Builder, state: *State) ui.Widget {
+    fn boardPage(self: *const Settings, b: Builder, state: *State) ui.Widget {
         const cx = b.cx;
         const t = cx.theme();
         const model = self.system.model.slice();
-        const drawing = board.forModel(model) orelse return b.card("Board", &.{
+        const drawing = board.forModel(model) orelse return b.page(&.{
             b.item("Board", orUnknown(model)),
             b.value("There is no drawing of this board"),
         });
@@ -580,7 +583,7 @@ pub const Settings = struct {
         if (now) |text| rows.append(a, cx.make(ui.Text{ .text = text, .style = .{ .size = 16, .color = t.on_surface } })) catch {};
         rows.append(a, cx.make(ui.Text{ .text = "Pick a part to see what it is", .style = .{ .size = 14, .color = t.on_surface_variant } })) catch {};
         // The drawing, small, beside what is said about the part picked.
-        return b.card("Board", &.{
+        return b.page(&.{
             b.value(orUnknown(model)),
             cx.make(ui.Row{ .spacing = 24, .cross_axis_alignment = .start, .children = &.{
                 cx.make(BoardView{ .board = drawing, .selected = picked, .on_select = partPicker(state) }),
@@ -589,11 +592,11 @@ pub const Settings = struct {
         });
     }
 
-    fn wifiCard(self: *const Settings, b: Builder, state: *State) ui.Widget {
+    fn wifiPage(self: *const Settings, b: Builder, state: *State) ui.Widget {
         const cx = b.cx;
-        const report = self.manager orelse return b.card("Wi-Fi", &.{b.item("Status", "The network manager is not running")});
-        if (report.denied) return b.card("Wi-Fi", &.{b.item("Status", "Not allowed to scan")});
-        const adapter = report.adapter orelse return b.card("Wi-Fi", &.{b.item("Status", "No Wi-Fi adapter")});
+        const report = self.manager orelse return b.page(&.{b.item("Status", "The network manager is not running")});
+        if (report.denied) return b.page(&.{b.item("Status", "Not allowed to scan")});
+        const adapter = report.adapter orelse return b.page(&.{b.item("Status", "No Wi-Fi adapter")});
         var rows: std.ArrayList(ui.Widget) = .empty;
         const a = cx.ui.arena();
         const m = adapter.mac;
@@ -615,7 +618,7 @@ pub const Settings = struct {
         if (split < nets.len) rows.append(a, networkList(b, state, report, nets[split..], chosen)) catch {};
         const footer = if (report.scanning) "Scanning…" else if (nets.len == 0) "No networks found" else "";
         if (footer.len > 0) rows.append(a, b.item("", footer)) catch {};
-        return b.card("Wi-Fi", rows.items);
+        return b.page(rows.items);
     }
 
     /// The connection's state, with Disconnect while there is one.
@@ -660,7 +663,7 @@ pub const Settings = struct {
         } });
     }
 
-    fn networkCard(self: *const Settings, b: Builder, state: *State) ui.Widget {
+    fn networkPage(self: *const Settings, b: Builder, state: *State) ui.Widget {
         const cx = b.cx;
         const net = self.network;
         var rows: std.ArrayList(ui.Widget) = .empty;
@@ -694,7 +697,7 @@ pub const Settings = struct {
         // How the adapter gets its address, if there is one and the
         // network manager can be asked.
         if (net.len > 0 and self.manager != null) self.addressingRows(b, state, &rows);
-        return b.card("Ethernet", rows.items);
+        return b.page(rows.items);
     }
 
     /// How the wired adapter gets its address, as the network manager says.
@@ -1173,20 +1176,14 @@ const VideoMemoryMenu = struct {
     }
 };
 
-/// Makes the cards and their rows.
+/// Makes the pages and their rows.
 const Builder = struct {
     cx: *ui.Context,
 
-    fn card(b: Builder, title: []const u8, rows: []const ui.Widget) ui.Widget {
+    fn page(b: Builder, rows: []const ui.Widget) ui.Widget {
         const cx = b.cx;
-        const t = &cx.ui.theme;
-        const children = cx.ui.arena().alloc(ui.Widget, rows.len + 1) catch return cx.make(ui.Empty{});
-        children[0] = cx.make(ui.Padding{ .padding = .{ .bottom = 4 }, .child = cx.make(ui.Text{ .text = title, .style = .{ .size = 24, .color = t.primary }, .wrap = false }) });
-        @memcpy(children[1..], rows);
-        return cx.make(ui.Decorated{ .color = t.surface_container, .radius = .all(16), .child = cx.make(ui.Padding{
-            .padding = .all(20),
-            .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 10, .children = children }),
-        }) });
+        const children = cx.ui.arena().dupe(ui.Widget, rows) catch return cx.make(ui.Empty{});
+        return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 10, .children = children });
     }
 
     fn label(b: Builder, text: []const u8) ui.Widget {
@@ -1530,14 +1527,14 @@ test "everything is shown, and fits from the smallest window to the biggest" {
     u.frame(min_size[0], min_size[1], frame_no + 2, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps, .video_memory = .{ .now = 128, .next = 192 } });
     try testing.expect(findText(u.root.?, "Home") != null);
     try testing.expect(findText(u.root.?, "bad?name") == null);
-    // The build is in the system card, not beside the title; the hardware
+    // The build is on the system page, not beside the title; the hardware
     // is the board alone.
     for ([_][]const u8{ "Dazzle build", "Hardware\n", "Chip", "GPU\n", "Revision", "In use" }) |gone| {
         try testing.expect(std.mem.indexOf(u8, all.items, gone) == null);
     }
 }
 
-test "without a network adapter, the network card says so" {
+test "without a network adapter, the network page says so" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
     const u = try ui.Ui.create(testing.allocator, &f);
     defer u.destroy();
@@ -1553,7 +1550,7 @@ test "without a network adapter, the network card says so" {
     try testing.expect(findText(u.root.?, "Measuring…") != null);
 }
 
-test "the Wi-Fi card says when it cannot list networks" {
+test "the Wi-Fi page says when it cannot list networks" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
     const u = try ui.Ui.create(testing.allocator, &f);
     defer u.destroy();
@@ -2040,3 +2037,4 @@ test "the GPIO pins: the header as it is laid out, and setting a pin up" {
     u.frame(1600, 900, 5, settings);
     try testing.expect(findText(u.root.?, "Not allowed to use the GPIO") != null);
 }
+

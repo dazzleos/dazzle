@@ -97,7 +97,7 @@ pub const BoardView = struct {
             c = p.canvas();
             for (b.notches) |notch| {
                 const center: gfx.Point = .{ t.x + notch.x * s, t.y + notch.y * s };
-                c.fillCircle(center, notch.r * s + heavy / 2, theme.surface_container);
+                c.fillCircle(center, notch.r * s + heavy / 2, theme.surface);
                 c.strokeCircle(center, notch.r * s, heavy, ink);
             }
             p.restoreClip(old);
