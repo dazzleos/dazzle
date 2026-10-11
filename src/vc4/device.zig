@@ -164,6 +164,15 @@ pub const V3dGetParam = extern struct {
     value: u64 = 0,
 };
 
+pub const V3dParam = enum(u32) {
+    v3d_core0_ident0 = 0,
+    v3d_core0_ident1 = 1,
+    v3d_core0_ident2 = 2,
+    v3d_hub_ident1 = 3,
+    v3d_hub_ident2 = 4,
+    v3d_hub_ident3 = 5,
+};
+
 pub const V3dGetBoOffset = extern struct {
     handle: u32,
     offset: u32 = 0,
@@ -206,6 +215,23 @@ pub const Bo = struct {
     }
 };
 
+fn getV3dParam(fd: linux.fd_t, param: V3dParam) ?u64 {
+    var arg: V3dGetParam = .{ .param = @intFromEnum(param) };
+    drm.ioctl(fd, IOCTL_V3D_GET_PARAM, &arg) catch return null;
+    return arg.value;
+}
+
+fn queryV3dVersion(fd: linux.fd_t) struct { ver: u8, rev: u8 } {
+    const ident0 = getV3dParam(fd, .v3d_core0_ident0) orelse return .{ .ver = 42, .rev = 0 };
+    const ident1 = getV3dParam(fd, .v3d_core0_ident1) orelse return .{ .ver = 42, .rev = 0 };
+    const hub3 = getV3dParam(fd, .v3d_hub_ident3) orelse 0;
+    const major: u8 = @intCast((ident0 >> 24) & 0xff);
+    const minor: u8 = @intCast(ident1 & 0xf);
+    const rev: u8 = @intCast((hub3 >> 8) & 0xff);
+    const ver: u8 = if (major >= 3 and major <= 9) major * 10 + minor else 42;
+    return .{ .ver = ver, .rev = rev };
+}
+
 fn openV3dNode() ?linux.fd_t {
     var path_buf: [32]u8 = undefined;
     for (128..132) |n| {
@@ -233,9 +259,9 @@ fn openV3dNode() ?linux.fd_t {
     return null;
 }
 
-/// Opens the vc4 DRM device (and on BCM2711 / RPi 4, the companion v3d 3D
-/// device). Drivers may still be probing when init starts, so this polls for
-/// a few seconds.
+/// Opens the vc4 DRM device (and on BCM2711 / RPi 4 or BCM2712 / RPi 5, the
+/// companion v3d 3D device). Drivers may still be probing when init starts,
+/// so this polls for a few seconds.
 pub fn open() !Device {
     const paths = [_][*:0]const u8{ "/dev/dri/card0", "/dev/dri/card1", "/dev/dri/card2" };
     var attempt: u32 = 0;
@@ -250,10 +276,11 @@ pub fn open() !Device {
                     sys.print("dazzle: opened {s} ({s})\n", .{ path, name });
                     return dev;
                 } else |_| {
-                    // BCM2711 (RPi 4): vc4 is KMS-only; 3D is on the v3d device.
+                    // BCM2711 (RPi 4) / BCM2712 (RPi 5): vc4 is KMS-only; 3D is on v3d.
                     if (openV3dNode()) |v3d_fd| {
-                        sys.print("dazzle: opened {s} ({s}) + v3d\n", .{ path, name });
-                        return .{ .fd = fd, .v3d_fd = v3d_fd, .is_v3d = true };
+                        const info = queryV3dVersion(v3d_fd);
+                        sys.print("dazzle: opened {s} ({s}) + v3d ({d}.{d} rev {d})\n", .{ path, name, info.ver / 10, info.ver % 10, info.rev });
+                        return .{ .fd = fd, .v3d_fd = v3d_fd, .is_v3d = true, .v3d_ver = info.ver, .v3d_rev = info.rev };
                     }
                 }
             }
@@ -264,7 +291,7 @@ pub fn open() !Device {
     return error.NoVc4Device;
 }
 
-/// Opens the 3D render node (`v3d` on RPi 4, `vc4` on RPi 0-3): GPU rendering
+/// Opens the 3D render node (`v3d` on RPi 4/5, `vc4` on RPi 0-3): GPU rendering
 /// without display control, for clients of a compositor.
 pub fn openRender() !Device {
     var path_buf: [32]u8 = undefined;
@@ -273,7 +300,10 @@ pub fn openRender() !Device {
         const fd = sys.open(path.ptr, .{ .ACCMODE = .RDWR, .CLOEXEC = true }) catch continue;
         var name_buf: [32]u8 = undefined;
         const name = drm.driverName(fd, &name_buf) catch "";
-        if (std.mem.eql(u8, name, "v3d")) return .{ .fd = fd, .is_v3d = true };
+        if (std.mem.eql(u8, name, "v3d")) {
+            const info = queryV3dVersion(fd);
+            return .{ .fd = fd, .is_v3d = true, .v3d_ver = info.ver, .v3d_rev = info.rev };
+        }
         if (std.mem.eql(u8, name, "vc4")) {
             var dev: Device = .{ .fd = fd };
             if (dev.getParam(.v3d_ident0)) |_| return dev else |_| {}
@@ -287,6 +317,13 @@ pub const Device = struct {
     fd: linux.fd_t,
     v3d_fd: ?linux.fd_t = null,
     is_v3d: bool = false,
+    /// V3D architecture version (`42` on BCM2711, `71` on BCM2712, `0` on VC4).
+    v3d_ver: u8 = 42,
+    v3d_rev: u8 = 0,
+
+    pub fn hasDrawIndex(dev: Device) bool {
+        return dev.v3d_ver > 71 or (dev.v3d_ver == 71 and dev.v3d_rev >= 10);
+    }
 
     pub fn renderFd(dev: Device) linux.fd_t {
         return dev.v3d_fd orelse dev.fd;

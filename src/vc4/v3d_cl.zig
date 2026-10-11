@@ -208,25 +208,24 @@ pub const Bcl = struct {
         b.w.u8_(layers - 1);
     }
 
-    /// Emits `TILE_BINNING_MODE_CFG` (ver = 42), `FLUSH_VCD_CACHE`,
+    /// Emits `TILE_BINNING_MODE_CFG`, `FLUSH_VCD_CACHE`,
     /// `OCCLUSION_QUERY_COUNTER`, and `START_TILE_BINNING`, plus initial state
     /// resets (`TRANSFORM_FEEDBACK_SPECS`, `BLEND_ENABLES`, `COLOR_WRITE_MASKS`,
     /// `ZERO_ALL_FLAT_SHADE_FLAGS`, `ZERO_ALL_NON_PERSPECTIVE_FLAGS`,
     /// `ZERO_ALL_CENTROID_FLAGS`, `SAMPLE_STATE`).
-    pub fn startBinning(b: *Bcl, width: u16, height: u16, msaa: bool) void {
+    pub fn startBinning(b: *Bcl, width: u16, height: u16, msaa: bool, v3d_ver: u8) void {
         b.numberOfLayers(1);
 
         // Packet 120: Tile Binning Mode Cfg (8 bytes payload).
-        // bits 2..3: initial block size = 0 (64B)
-        // bits 4..5: overflow block size = 0 (64B)
-        // bits 8..11: number_of_render_targets - 1 = 0
-        // bits 12..13: maximum_bpp = 0 (32bpp)
-        // bit 14: multisample_mode_4x
-        // bit 15: double_buffer_in_non_ms_mode = 0
-        // bits 32..47: width - 1
-        // bits 48..63: height - 1
+        // On V3D 4.2: bit 14 = multisample_mode_4x.
+        // On V3D 7.1: bits 8..10 = log2_tile_width (3 -> 64), bits 11..13 = log2_tile_height (3 -> 64, 2 -> 32).
         b.w.u8_(@intFromEnum(Packet.tile_binning_mode_cfg));
-        const flags: u32 = if (msaa) (1 << 14) else 0;
+        const flags: u32 = if (v3d_ver >= 71)
+            (@as(u32, 3) << 8) | (@as(u32, if (msaa) 2 else 3) << 11)
+        else if (msaa)
+            (1 << 14)
+        else
+            0;
         b.w.u32_(flags);
         b.w.u16_(width - 1);
         b.w.u16_(height - 1);
@@ -275,8 +274,8 @@ pub const Bcl = struct {
         b.w.u16_(height);
     }
 
-    pub fn cfgBits(b: *Bcl, c: cl.Bcl.Config, msaa: bool) void {
-        // Packet 96: Cfg Bits (ver = 42, 3 bytes payload = 24 bits).
+    pub fn cfgBits(b: *Bcl, c: cl.Bcl.Config, msaa: bool, v3d_ver: u8) void {
+        // Packet 96: Cfg Bits (3 bytes payload = 24 bits).
         var bits: u32 = 0;
         if (c.enable_forward_facing) bits |= 1 << 0;
         if (c.enable_reverse_facing) bits |= 1 << 1;
@@ -284,14 +283,19 @@ pub const Bcl = struct {
         if (msaa) bits |= 1 << 6;
         bits |= @as(u32, @intFromEnum(c.depth_func)) << 12;
         if (c.z_updates) bits |= 1 << 15;
-        if (c.early_z) bits |= 1 << 16;
-        if (c.early_z_updates) bits |= 1 << 17;
+        if (v3d_ver >= 71) {
+            // V3D_Z_CLIP_MODE_MIN_ONE_TO_ONE (1) in bits 22..23
+            bits |= 1 << 22;
+        } else {
+            if (c.early_z) bits |= 1 << 16;
+            if (c.early_z_updates) bits |= 1 << 17;
+        }
         b.w.u8_(@intFromEnum(Packet.cfg_bits));
         b.w.u8_(@truncate(bits));
         b.w.u8_(@truncate(bits >> 8));
         b.w.u8_(@truncate(bits >> 16));
 
-        // V3D 4.2 hardware workaround: emit POINT_SIZE between draws to flush
+        // Hardware workaround: emit POINT_SIZE between draws to flush
         // the binner FIFO (`v3dx_emit.c`).
         b.w.u8_(@intFromEnum(Packet.point_size));
         b.w.f32_(1.0);
@@ -300,12 +304,13 @@ pub const Bcl = struct {
     /// Emits `CLIPPER_XY_SCALING`, `CLIPPER_Z_SCALE_AND_OFFSET`,
     /// `CLIPPER_Z_MIN_MAX_CLIPPING_PLANES`, and `VIEWPORT_OFFSET`.
     /// Note that `half_width_16ths` and `half_height_16ths` are in 1/16ths of
-    /// a pixel (from `render.Viewport.scale()`), whereas V3D 4.2's
-    /// `CLIPPER_XY_SCALING` packet takes 1/256ths of a pixel (`* 16.0`).
-    pub fn viewport(b: *Bcl, center_x: f32, center_y: f32, half_width_16ths: f32, half_height_16ths: f32) void {
+    /// a pixel (from `render.Viewport.scale()`), whereas `CLIPPER_XY_SCALING`
+    /// takes 1/256ths of a pixel (`* 16.0`) on V3D 4.2 and 1/64ths (`* 4.0`) on V3D 7.1.
+    pub fn viewport(b: *Bcl, center_x: f32, center_y: f32, half_width_16ths: f32, half_height_16ths: f32, v3d_ver: u8) void {
+        const xy_mul: f32 = if (v3d_ver >= 71) 4.0 else 16.0;
         b.w.u8_(@intFromEnum(Packet.clipper_xy_scaling));
-        b.w.f32_(half_width_16ths * 16.0);
-        b.w.f32_(half_height_16ths * 16.0);
+        b.w.f32_(half_width_16ths * xy_mul);
+        b.w.f32_(half_height_16ths * xy_mul);
 
         b.w.u8_(@intFromEnum(Packet.clipper_z_scale_and_offset));
         b.w.f32_(0.5);
@@ -362,7 +367,7 @@ pub const Bcl = struct {
     }
 };
 
-/// Rendering Control List (RCL) writer for V3D 4.2.
+/// Rendering Control List (RCL) writer for V3D 4.2 and V3D 7.1.
 pub const Rcl = struct {
     w: cl.Writer,
 
@@ -381,19 +386,9 @@ pub const Rcl = struct {
         msaa: bool,
         early_z: bool,
         early_zs_clear: bool,
+        v3d_ver: u8,
     ) void {
         // Packet 121 sub-id 0: Tile Rendering Mode Cfg (Common) (8 bytes payload).
-        // bits 0..3: sub-id = 0
-        // bits 4..7: number_of_render_targets - 1 = 0
-        // bits 8..23: image_width_pixels
-        // bits 24..39: image_height_pixels
-        // bits 40..41: maximum_bpp = 0 (32bpp)
-        // bit 42: multisample_mode_4x
-        // bit 43: double_buffer_in_non_ms_mode = 0
-        // bit 45: early_z_test_and_update_direction = 0 (LT/LE)
-        // bit 46: early_z_disable
-        // bits 47..50: internal_depth_type = 1 (depth_24)
-        // bit 51: early_depth_stencil_clear
         const word0: u32 = 0 |
             (@as(u32, width) << 8) |
             (@as(u32, height & 0xff) << 24);
@@ -402,6 +397,9 @@ pub const Rcl = struct {
         if (!early_z) word1 |= 1 << (46 - 32);
         word1 |= @as(u32, @intFromEnum(InternalDepthType.depth_24)) << (47 - 32);
         if (early_zs_clear) word1 |= 1 << (51 - 32);
+        if (v3d_ver >= 71) {
+            word1 |= (@as(u32, 3) << (52 - 32)) | (@as(u32, if (msaa) 2 else 3) << (55 - 32));
+        }
 
         r.w.u8_(@intFromEnum(Packet.tile_rendering_mode_cfg));
         r.w.u32_(word0);
@@ -409,10 +407,8 @@ pub const Rcl = struct {
     }
 
     /// Converts 0xAARRGGBB to the 32-bit internal RGBA8 clear word expected by
-    /// V3D 4.2 (`v3dx_rcl.c` / `u_pack_color`), where R is in bits 0..7, G in
-    /// 8..15, B in 16..23, and A in 24..31 (since `store_general`'s `r_b_swap`
-    /// swaps R and B when storing to `0xAARRGGBB` memory, and for `bgr565`
-    /// R is in the high bits when not swapped).
+    /// V3D 4.2/7.1 (`v3dx_rcl.c` / `u_pack_color`), where R is in bits 0..7, G in
+    /// 8..15, B in 16..23, and A in 24..31.
     pub fn packClearColor(argb: u32) u32 {
         const a = (argb >> 24) & 0xff;
         const r_ch = (argb >> 16) & 0xff;
@@ -423,10 +419,6 @@ pub const Rcl = struct {
 
     pub fn tileRenderingModeCfgClearColorsPart1(r: *Rcl, clear_rgba: u32) void {
         // Packet 121 sub-id 3: Clear Colors Part1 (8 bytes payload).
-        // bits 0..3: sub-id = 3
-        // bits 4..7: render_target_number = 0
-        // bits 8..39: clear_color_low_32_bits
-        // bits 40..63: clear_color_next_24_bits = 0
         r.w.u8_(@intFromEnum(Packet.tile_rendering_mode_cfg));
         r.w.u8_(3);
         r.w.u32_(clear_rgba);
@@ -436,11 +428,6 @@ pub const Rcl = struct {
 
     pub fn tileRenderingModeCfgClearColorsPart3(r: *Rcl, uif_padded_height_in_ub: u13) void {
         // Packet 121 sub-id 5: Clear Colors Part3 (8 bytes payload).
-        // bits 0..3: sub-id = 5
-        // bits 4..7: render_target_number = 0
-        // bits 8..23: clear_color_high_16_bits = 0
-        // bits 24..39: raster_row_stride_or_image_height = 0
-        // bits 40..52: uif_padded_height_in_uif_blocks
         r.w.u8_(@intFromEnum(Packet.tile_rendering_mode_cfg));
         r.w.u32_(5);
         r.w.u32_(@as(u32, uif_padded_height_in_ub) << (40 - 32));
@@ -448,21 +435,33 @@ pub const Rcl = struct {
 
     pub fn tileRenderingModeCfgColor(r: *Rcl) void {
         // Packet 121 sub-id 1: Tile Rendering Mode Cfg (Color) (8 bytes payload).
-        // RT 0: internal_bpp = 0 (32bpp, bits 4..5), internal_type = 2 (type_8,
-        // bits 6..9), clamp = 0 (none, bits 10..11).
         const word0: u32 = 1 | (@as(u32, @intFromEnum(InternalType.type_8)) << 6);
         r.w.u8_(@intFromEnum(Packet.tile_rendering_mode_cfg));
         r.w.u32_(word0);
         r.w.u32_(0);
     }
 
-    pub fn tileRenderingModeCfgZsClearValues(r: *Rcl, clear_z: f32, clear_s: u8) void {
-        // Packet 121 sub-id 2: Tile Rendering Mode Cfg (ZS Clear Values).
-        // bits 0..3: sub-id = 2
-        // bits 8..15: stencil_clear_value
-        // bits 16..47: z_clear_value (float)
+    /// V3D 7.1 `Tile Rendering Mode Cfg (Render Target Part1)` (`sub-id = 2`),
+    /// which replaces `Clear Colors Part1` and `Color` on V3D 7.1.
+    pub fn tileRenderingModeCfgRenderTargetPart1(r: *Rcl, clear_rgba: u32) void {
+        // bits 0..2: sub-id = 2
+        // bits 3..5: render_target_number = 0
+        // bits 7..17: base_address = 0
+        // bits 18..24: stride - 1 = (64 / 2) - 1 = 31
+        // bits 25..26: internal_bpp = 0 (32bpp)
+        // bits 27..31: internal_type_and_clamping = 4 (V3D_RENDER_TARGET_TYPE_CLAMP_8)
+        // bits 32..63: clear_color_low_bits
+        const word0: u32 = 2 | (@as(u32, 31) << 18) | (@as(u32, 4) << 27);
         r.w.u8_(@intFromEnum(Packet.tile_rendering_mode_cfg));
-        r.w.u8_(2);
+        r.w.u32_(word0);
+        r.w.u32_(clear_rgba);
+    }
+
+    pub fn tileRenderingModeCfgZsClearValues(r: *Rcl, clear_z: f32, clear_s: u8, v3d_ver: u8) void {
+        // Packet 121: Tile Rendering Mode Cfg (ZS Clear Values).
+        // sub-id = 2 on V3D 4.2, sub-id = 1 on V3D 7.1.
+        r.w.u8_(@intFromEnum(Packet.tile_rendering_mode_cfg));
+        r.w.u8_(if (v3d_ver >= 71) 1 else 2);
         r.w.u8_(clear_s);
         r.w.f32_(clear_z);
         r.w.u16_(0);
@@ -481,17 +480,6 @@ pub const Rcl = struct {
     }
 
     pub fn multicoreRenderingSupertileCfg(r: *Rcl, tiles_x: u12, tiles_y: u12) void {
-        // Packet 122: Multicore Rendering Supertile Cfg (8 bytes payload).
-        // Using 1x1 supertiles (supertile_w = 1, supertile_h = 1, minus_one = 0).
-        // bits 0..7: supertile_w - 1 = 0
-        // bits 8..15: supertile_h - 1 = 0
-        // bits 16..23: frame_w_in_supertiles = tiles_x
-        // bits 24..31: frame_h_in_supertiles = tiles_y
-        // bits 32..43: total_frame_width_in_tiles = tiles_x
-        // bits 44..55: total_frame_height_in_tiles = tiles_y
-        // bit 56: multicore_enable = 0
-        // bit 60: supertile_raster_order = 0
-        // bits 61..63: number_of_bin_tile_lists - 1 = 0
         const word0: u32 = (@as(u32, tiles_x) << 16) | (@as(u32, tiles_y) << 24);
         const word1: u32 = @as(u32, tiles_x) | (@as(u32, tiles_y) << 12);
         r.w.u8_(@intFromEnum(Packet.multicore_rendering_supertile_cfg));
@@ -523,12 +511,14 @@ pub const Rcl = struct {
         r.w.u8_(@intFromEnum(Packet.flush_vcd_cache));
     }
 
-    pub fn clearTileBuffers(r: *Rcl, clear_color: bool, clear_zs: bool) void {
+    pub fn clearTileBuffers(r: *Rcl, clear_color: bool, clear_zs: bool, v3d_ver: u8) void {
         r.w.u8_(@intFromEnum(Packet.clear_tile_buffers));
-        var bits: u8 = 0;
-        if (clear_color) bits |= 1 << 0;
-        if (clear_zs) bits |= 1 << 1;
-        r.w.u8_(bits);
+        if (v3d_ver < 71) {
+            var bits: u8 = 0;
+            if (clear_color) bits |= 1 << 0;
+            if (clear_zs) bits |= 1 << 1;
+            r.w.u8_(bits);
+        }
     }
 
     pub fn storeTileBufferGeneralNone(r: *Rcl) void {
@@ -551,15 +541,6 @@ pub const Rcl = struct {
         const out = outputFormat(format);
         const layout = targetLayout(format, tiling, width, height);
         const decimate: DecimateMode = if (msaa) .mode_4x else .sample_0;
-        // Packet 29: Store Tile Buffer General (12 bytes payload = 96 bits).
-        // bits 0..3: buffer_to_store = 0 (RT0)
-        // bits 4..6: memory_format
-        // bits 10..11: decimate_mode
-        // bits 12..17: output_image_format
-        // bit 20: r_b_swap
-        // bits 28..47: height_in_ub_or_stride (20 bits)
-        // bits 48..63: height (16 bits)
-        // bits 64..95: address (32 bits)
         const stride_val: u32 = layout.height_in_ub_or_stride;
         var word0: u32 = @intFromEnum(Buffer.render_target_0) |
             (@as(u32, @intFromEnum(layout.mem_format)) << 4) |
@@ -659,72 +640,82 @@ pub const ShaderRecord = struct {
 /// Writes a 36-byte V3D 4.2 `GL Shader State Record` followed by `N` 16-byte
 /// `GL Shader State Attribute Record`s into `w` (`v3d_packet.xml` ver = 42).
 pub fn writeShaderStateRecord(w: *cl.Writer, rec: ShaderRecord) void {
-    // Bytes 0..2: flags
-    // bit 1: enable_clipping = 1
-    // bit 10: coordinate_shader_has_separate_input_and_output_vpm_blocks = 0
-    // bit 11: vertex_shader_has_separate_input_and_output_vpm_blocks = 0
-    // bit 17: do_scoreboard_wait_on_first_thread_switch = 0 (we emit explicit waitu)
-    // bit 18: disable_implicit_point_line_varyings = 1
     const flags: u32 = (1 << 1) | (1 << 18);
     w.u8_(@truncate(flags));
     w.u8_(@truncate(flags >> 8));
     w.u8_(@truncate(flags >> 16));
-    // Byte 3: number_of_varyings_in_fragment_shader
     w.u8_(rec.fs_num_varyings);
 
-    // Byte 4: cs_output_vpm_segment_size = 1 (bits 0..3), min_cs_output_segs = 1 (bits 4..7)
     w.u8_(1 | (1 << 4));
-    // Byte 5: cs_input_vpm_segment_size = 1 (bits 0..3), min_cs_input_segs - 1 = 0 (bits 4..7)
     w.u8_(1);
-    // Byte 6: vs_output_vpm_segment_size = 1 (bits 0..3), min_vs_output_segs = 1 (bits 4..7)
     w.u8_(1 | (1 << 4));
-    // Byte 7: vs_input_vpm_segment_size = 1 (bits 0..3), min_vs_input_segs - 1 = 0 (bits 4..7)
     w.u8_(1);
 
-    // Bytes 8..11: address_of_default_attribute_values
     w.u32_(rec.default_attr_addr);
 
-    // Bytes 12..15: FS code address (8-byte aligned) | 4-way threadable (bit 0)
-    // | start_in_final_thread_section (bit 1) | propagate_nans (bit 2).
     const shader_mode_bits: u32 = (1 << 0) | (1 << 1) | (1 << 2);
     w.u32_((rec.fs_code_addr & ~@as(u32, 7)) | shader_mode_bits);
-    // Bytes 16..19: FS uniforms address
     w.u32_(rec.fs_uniforms_addr);
 
-    // Bytes 20..23: VS code address | mode bits
     w.u32_((rec.vs_code_addr & ~@as(u32, 7)) | shader_mode_bits);
-    // Bytes 24..27: VS uniforms address
     w.u32_(rec.vs_uniforms_addr);
 
-    // Bytes 28..31: CS code address | mode bits
     w.u32_((rec.cs_code_addr & ~@as(u32, 7)) | shader_mode_bits);
-    // Bytes 32..35: CS uniforms address
     w.u32_(rec.cs_uniforms_addr);
 
-    // Attribute records (16 bytes each).
-    // GFXH-930: At least one attribute must be read by CS.
+    writeAttributeRecords(w, rec.attributes);
+}
+
+/// Writes a 32-byte V3D 7.1 `GL Shader State Record` followed by `N` 16-byte
+/// `GL Shader State Attribute Record`s into `w` (`v3d_packet.xml` ver = 71).
+/// On BCM2712 D0 (`has_draw_index = true`), `enable_clipping` and subsequent
+/// flags in bytes 0..2 are shifted left by 2 bits.
+pub fn writeShaderStateRecord71(w: *cl.Writer, rec: ShaderRecord, has_draw_index: bool) void {
+    const flags: u32 = if (has_draw_index)
+        (1 << 3) | (1 << 20)
+    else
+        (1 << 1) | (1 << 18);
+    w.u8_(@truncate(flags));
+    w.u8_(@truncate(flags >> 8));
+    w.u8_(@truncate(flags >> 16));
+    w.u8_(rec.fs_num_varyings);
+
+    w.u8_(1 | (1 << 4));
+    w.u8_(0); // cs_input_vpm_segment_size = 0 on V3D 7.1
+    w.u8_(1 | (1 << 4));
+    w.u8_(0); // vs_input_vpm_segment_size = 0 on V3D 7.1
+
+    // Note: V3D 7.1 omits the 4-byte `address_of_default_attribute_values` field
+    // and only uses bits 0..1 (`0x3`) for shader mode bits.
+    const shader_mode_bits: u32 = (1 << 0) | (1 << 1);
+    w.u32_((rec.fs_code_addr & ~@as(u32, 7)) | shader_mode_bits);
+    w.u32_(rec.fs_uniforms_addr);
+
+    w.u32_((rec.vs_code_addr & ~@as(u32, 7)) | shader_mode_bits);
+    w.u32_(rec.vs_uniforms_addr);
+
+    w.u32_((rec.cs_code_addr & ~@as(u32, 7)) | shader_mode_bits);
+    w.u32_(rec.cs_uniforms_addr);
+
+    writeAttributeRecords(w, rec.attributes);
+}
+
+fn writeAttributeRecords(w: *cl.Writer, attributes: []const AttributeRecord) void {
     var any_cs = false;
-    for (rec.attributes) |a| {
+    for (attributes) |a| {
         if (a.read_by_cs) any_cs = true;
     }
-    for (rec.attributes, 0..) |a, i| {
+    for (attributes, 0..) |a, i| {
         w.u32_(a.addr);
-        // Byte 4: vec_size (bits 0..1, where 1..3 = 1..3 and 0 = 4),
-        // type = 2 (ATTRIBUTE_FLOAT, bits 2..4).
         const vec_size: u8 = @intCast(a.components & 3);
         const attr_type: u8 = 2; // ATTRIBUTE_FLOAT
         w.u8_(vec_size | (attr_type << 2));
-        // Byte 5: number_of_values_read_by_cs (bits 0..3),
-        // number_of_values_read_by_vs (bits 4..7).
-        const force_cs = !any_cs and (i == rec.attributes.len - 1);
+        const force_cs = !any_cs and (i == attributes.len - 1);
         const cs_vals: u8 = if (a.read_by_cs or force_cs) a.components else 0;
         const vs_vals: u8 = if (a.read_by_vs) a.components else 0;
         w.u8_(cs_vals | (vs_vals << 4));
-        // Bytes 6..7: instance_divisor = 0
         w.u16_(0);
-        // Bytes 8..11: stride
         w.u32_(a.stride);
-        // Bytes 12..15: maximum_index
         w.u32_(0xffffff);
     }
 }
@@ -872,10 +863,10 @@ pub fn tmuConfigP1(sampler_state_addr: u32) u32 {
 
 const testing = std.testing;
 
-test "V3D 4.2 BCL and RCL packet encoding" {
+test "V3D 4.2 and V3D 7.1 BCL and RCL packet encoding" {
     var bcl_buf: [256]u8 = undefined;
     var bcl = Bcl.init(&bcl_buf);
-    bcl.startBinning(640, 480, false);
+    bcl.startBinning(640, 480, false, 42);
     bcl.finish();
     const b = bcl.bytes();
     try testing.expectEqual(@intFromEnum(Packet.number_of_layers), b[0]);
@@ -885,13 +876,22 @@ test "V3D 4.2 BCL and RCL packet encoding" {
 
     var rcl_buf: [256]u8 = undefined;
     var rcl = Rcl.init(&rcl_buf);
-    rcl.tileRenderingModeCfgCommon(640, 480, false, false, true);
+    rcl.tileRenderingModeCfgCommon(640, 480, false, false, true, 42);
     rcl.tileRenderingModeCfgClearColorsPart1(Rcl.packClearColor(0xff112233));
     rcl.tileRenderingModeCfgColor();
-    rcl.tileRenderingModeCfgZsClearValues(1.0, 0);
+    rcl.tileRenderingModeCfgZsClearValues(1.0, 0, 42);
     rcl.endOfRendering();
     try testing.expectEqual(@as(u32, 0xff332211), Rcl.packClearColor(0xff112233));
     try testing.expectEqual(@intFromEnum(Packet.end_of_rendering), rcl.bytes()[rcl.bytes().len - 1]);
+
+    // V3D 7.1 RCL
+    var rcl71 = Rcl.init(&rcl_buf);
+    rcl71.tileRenderingModeCfgCommon(640, 480, false, false, true, 71);
+    rcl71.tileRenderingModeCfgRenderTargetPart1(Rcl.packClearColor(0xff112233));
+    rcl71.tileRenderingModeCfgZsClearValues(1.0, 0, 71);
+    rcl71.clearTileBuffers(true, true, 71);
+    rcl71.endOfRendering();
+    try testing.expectEqual(@intFromEnum(Packet.end_of_rendering), rcl71.bytes()[rcl71.bytes().len - 1]);
 }
 
 test "V3D 4.2 texture and sampler state packing" {
@@ -902,3 +902,4 @@ test "V3D 4.2 texture and sampler state packing" {
     try testing.expectEqual(@as(u32, 0x100f), tmuConfigP0(0x1000));
     try testing.expectEqual(@as(u32, 0x2001), tmuConfigP1(0x2000));
 }
+

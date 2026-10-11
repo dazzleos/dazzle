@@ -8,11 +8,14 @@
 os_prefix=slot-a/
 
 # The firmware picks the kernel (kernel.img on the ARMv6 boards: the Pi 1,
-# Zero and Zero W; kernel7.img on the others), and the board's device tree,
-# from the slot by itself. Both are the Raspberry Pi kernel's.
+# Zero and Zero W; kernel7.img on the Pi 2, 3, Zero 2 W and 4; kernel8.img
+# on the Pi 5), and the board's device tree, from the slot by itself.
 arm_64bit=0
 [pi4]
 kernel=kernel7.img
+[pi5]
+arm_64bit=1
+kernel=kernel8.img
 [all]
 initramfs initramfs.cpio followkernel
 

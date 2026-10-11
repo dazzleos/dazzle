@@ -74,10 +74,12 @@ pub const Pipeline = struct {
             else => @TypeOf(dev),
         };
         const is_v3d = if (@hasField(Dev, "is_v3d")) dev.is_v3d else false;
-        const fs_c = if (is_v3d) &p.v3d_fs else &p.fs;
-        const fs_ms_c = if (is_v3d) &p.v3d_fs_ms else &p.fs_ms;
-        const vs_c = if (is_v3d) &p.v3d_vs else &p.vs;
-        const cs_c = if (is_v3d) &p.v3d_cs else &p.cs;
+        const v3d_ver: u8 = if (@hasField(Dev, "v3d_ver")) dev.v3d_ver else 42;
+        const is_v3d71 = is_v3d and v3d_ver >= 71;
+        const fs_c = if (is_v3d71) &p.v3d71_fs else if (is_v3d) &p.v3d_fs else &p.fs;
+        const fs_ms_c = if (is_v3d71) &p.v3d71_fs_ms else if (is_v3d) &p.v3d_fs_ms else &p.fs_ms;
+        const vs_c = if (is_v3d71) &p.v3d71_vs else if (is_v3d) &p.v3d_vs else &p.vs;
+        const cs_c = if (is_v3d71) &p.v3d71_cs else if (is_v3d) &p.v3d_cs else &p.cs;
         return .{
             .gpa = gpa,
             .program = p,

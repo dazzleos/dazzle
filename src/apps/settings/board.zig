@@ -24,7 +24,9 @@ pub const Kind = enum {
     usb_ethernet,
     /// USB 3.0 host controller (the Pi 4's VL805).
     usb_controller,
-    /// Gigabit Ethernet transceiver (the Pi 4's BCM54213PE).
+    /// The Pi 5's RP1 I/O controller (southbridge).
+    southbridge,
+    /// Gigabit Ethernet transceiver (the Pi 4 and 5's BCM54213PE).
     ethernet_phy,
     /// Wi-Fi and Bluetooth (in a metal can, or bare).
     wireless,
@@ -43,6 +45,7 @@ pub const Kind = enum {
     usb_otg,
     power,
     usb_c_power,
+    power_button,
     ethernet,
     hdmi,
     mini_hdmi,
@@ -53,6 +56,8 @@ pub const Kind = enum {
     composite,
     camera,
     display,
+    camera_display,
+    pcie,
     micro_sd,
     sd,
     /// The Compute Modules' edge connector.
@@ -234,6 +239,27 @@ const pi4_b: Board = .{ .width = 85, .height = 56, .holes = &b_plus_holes, .part
     chip(.pmic, "MxL7704", 15, 38.5, 5),
 } };
 
+const pi5_b: Board = .{ .width = 85, .height = 56, .holes = &b_plus_holes, .parts = &.{
+    header(.gpio, 32.5, 3.5, 20),
+    facing(at(.usb_c_power, 11.2, 53.5, 9, 7.4), .bottom),
+    facing(at(.micro_hdmi, 25.8, 53, 6.8, 7.8), .bottom),
+    facing(at(.micro_hdmi, 39.2, 53, 6.8, 7.8), .bottom),
+    at(.camera_display, 47.5, 44, 3.2, 16),
+    at(.camera_display, 52.5, 44, 3.2, 16),
+    at(.pcie, 3.6, 28, 3.2, 14),
+    facing(at(.power_button, 1.8, 17.5, 3.6, 4.5), .left),
+    under(facing(at(.micro_sd, 6.5, 28, 15, 12), .left)),
+    facing(at(.usb_double, 78.4, 9, 17.4, 13.1), .right),
+    facing(at(.usb_double, 78.4, 27, 17.4, 13.1), .right),
+    facing(at(.ethernet, 76.3, 45.75, 21.6, 15.9), .right),
+    lidded(chip(.soc, "BCM2712", 29.5, 29, 17)),
+    chip(.ram, "LPDDR4X", 29.5, 15, 10),
+    chip(.southbridge, "RP1", 59.5, 23, 12),
+    chip(.ethernet_phy, "BCM54213PE", 60, 39, 6.5),
+    at(.wireless_can, 13.5, 11.5, 12, 10.5),
+    chip(.pmic, "DA9091", 14.5, 40.5, 7),
+} };
+
 // --- The A+ layout (65 × 56): the 1 A+ and 3 A+ ---------------------------------
 
 fn aPlus(comptime extra: []const Part) [8 + extra.len]Part {
@@ -351,6 +377,16 @@ const cm4: Board = .{ .width = 55, .height = 40, .corner = 1.5, .holes = &cm4_ho
     chip(.pmic, "DA9090", 28, 34, 5),
 } };
 
+const cm5: Board = .{ .width = 55, .height = 40, .corner = 1.5, .holes = &cm4_holes, .hole_diameter = 2.5, .parts = &.{
+    lidded(chip(.soc, "BCM2712", 29.5, 20, 17)),
+    chip(.ram, "LPDDR4X", 45.5, 13, 10),
+    chip(.southbridge, "RP1", 45.5, 29, 12),
+    under(at(.emmc, 45.5, 28.5, 11.5, 13)),
+    at(.wireless_can, 11, 13, 12, 10.5),
+    chip(.ethernet_phy, "BCM54210PE", 11, 29, 6.5),
+    chip(.pmic, "DA9091", 21, 32, 7),
+} };
+
 /// The board's drawing, from its model (as the device tree gives it:
 /// "Raspberry Pi 3 Model B Plus Rev 1.3"); null for a board not known.
 pub fn forModel(model: []const u8) ?*const Board {
@@ -361,6 +397,7 @@ pub fn forModel(model: []const u8) ?*const Board {
     }.f;
     if (!std.mem.startsWith(u8, model, "Raspberry Pi")) return null;
     // Most particular first.
+    if (has(model, "Compute Module 5")) return &cm5;
     if (has(model, "Compute Module 4")) return &cm4;
     if (has(model, "Compute Module 3 Plus")) return &cm3_plus;
     if (has(model, "Compute Module 3")) return &cm3;
@@ -368,6 +405,7 @@ pub fn forModel(model: []const u8) ?*const Board {
     if (has(model, "Zero 2 W")) return &pi_zero_2_w;
     if (has(model, "Zero W")) return &pi_zero_w;
     if (has(model, "Zero")) return &pi_zero;
+    if (has(model, "5 Model B")) return &pi5_b;
     if (has(model, "4 Model B")) return &pi4_b;
     if (has(model, "3 Model B Plus")) return &pi3_b_plus;
     if (has(model, "3 Model A Plus")) return &pi3_a_plus;
@@ -386,7 +424,9 @@ pub fn describe(p: *const Part) struct { title: []const u8, about: []const u8 } 
     return switch (p.kind) {
         .soc => .{
             .title = "Processor and graphics",
-            .about = if (std.mem.eql(u8, p.chip, "BCM2711"))
+            .about = if (std.mem.eql(u8, p.chip, "BCM2712"))
+                "The system on a chip: the processor that runs Dazzle and its apps, and the VideoCore VII graphics processor Dazzle draws everything with"
+            else if (std.mem.eql(u8, p.chip, "BCM2711"))
                 "The system on a chip: the processor that runs Dazzle and its apps, and the VideoCore VI graphics processor Dazzle draws everything with"
             else
                 "The system on a chip: the processor that runs Dazzle and its apps, and the VideoCore IV graphics processor Dazzle draws everything with",
@@ -395,6 +435,7 @@ pub fn describe(p: *const Part) struct { title: []const u8, about: []const u8 } 
         .ram => .{ .title = "Memory", .about = if (p.underside) "The memory the processor and graphics share, underneath the board" else "The memory the processor and graphics share" },
         .usb_ethernet => .{ .title = "USB and Ethernet", .about = "A USB hub, for the USB ports, with the wired network adapter on it" },
         .usb_controller => .{ .title = "USB controller", .about = "For the USB ports, connected to the processor by PCI Express" },
+        .southbridge => .{ .title = "I/O controller", .about = "The RP1 southbridge: runs the GPIO header, USB ports, Ethernet, cameras and displays, connected to the processor by PCI Express" },
         .ethernet_phy => .{ .title = "Ethernet transceiver", .about = "For the Gigabit Ethernet port" },
         .wireless, .wireless_can => .{ .title = "Wi-Fi and Bluetooth", .about = "The wireless network adapter (Dazzle uses its Wi-Fi)" },
         .antenna => .{ .title = "Antenna", .about = "For Wi-Fi and Bluetooth" },
@@ -406,6 +447,7 @@ pub fn describe(p: *const Part) struct { title: []const u8, about: []const u8 } 
         .usb_otg => .{ .title = "USB", .about = "A micro USB port: for a keyboard, mouse or USB drive (through an adapter or hub)" },
         .power => .{ .title = "Power", .about = "5 V in, through a micro USB cable" },
         .usb_c_power => .{ .title = "Power", .about = "5 V in, through a USB-C cable" },
+        .power_button => .{ .title = "Power button", .about = "Turns the Raspberry Pi on and off" },
         .ethernet => .{ .title = "Ethernet", .about = "The wired network" },
         .hdmi => .{ .title = "HDMI", .about = "The screen, and its sound" },
         .mini_hdmi => .{ .title = "Mini HDMI", .about = "The screen, and its sound (through a mini HDMI cable or adapter)" },
@@ -414,6 +456,8 @@ pub fn describe(p: *const Part) struct { title: []const u8, about: []const u8 } 
         .composite => .{ .title = "Composite video", .about = "For an old television" },
         .camera => .{ .title = "Camera", .about = "For a Raspberry Pi camera module, by its ribbon cable" },
         .display => .{ .title = "Display", .about = "For the Raspberry Pi touch display, by its ribbon cable" },
+        .camera_display => .{ .title = "Camera or display", .about = "For a Raspberry Pi camera module or touch display, by its ribbon cable" },
+        .pcie => .{ .title = "PCI Express", .about = "For an NVMe SSD or other PCI Express add-on board, by its ribbon cable" },
         .micro_sd => .{ .title = "microSD card", .about = "Where Dazzle and your files are kept" },
         .sd => .{ .title = "SD card", .about = "Where Dazzle and your files are kept" },
         .edge => .{ .title = "Edge connector", .about = "Plugs into a carrier board, which has the connectors" },
@@ -423,6 +467,7 @@ pub fn describe(p: *const Part) struct { title: []const u8, about: []const u8 } 
 const testing = std.testing;
 
 test "boards by their model" {
+    try testing.expect(forModel("Raspberry Pi 5 Model B Rev 1.0").? == &pi5_b);
     try testing.expect(forModel("Raspberry Pi 4 Model B Rev 1.4").? == &pi4_b);
     try testing.expect(forModel("Raspberry Pi 3 Model B Plus Rev 1.3").? == &pi3_b_plus);
     try testing.expect(forModel("Raspberry Pi 3 Model B Rev 1.2").? == &pi3_b);
@@ -440,6 +485,7 @@ test "boards by their model" {
     try testing.expect(forModel("Raspberry Pi Compute Module 3 Rev 1.0").? == &cm3);
     try testing.expect(forModel("Raspberry Pi Compute Module 3 Plus Rev 1.0").? == &cm3_plus);
     try testing.expect(forModel("Raspberry Pi Compute Module 4 Rev 1.0").? == &cm4);
+    try testing.expect(forModel("Raspberry Pi Compute Module 5 Rev 1.0").? == &cm5);
     try testing.expect(forModel("QEMU") == null);
 }
 
@@ -456,7 +502,7 @@ test "parts are found where they are, those on top first" {
 }
 
 test "every part is on or at the edge of its board" {
-    const all = [_]*const Board{ &pi1_a, &pi1_b, &pi1_a_plus, &pi1_b_plus, &pi2_b, &pi2_b_v12, &pi3_b, &pi3_b_plus, &pi3_a_plus, &pi4_b, &pi_zero, &pi_zero_w, &pi_zero_2_w, &cm1, &cm3, &cm3_plus, &cm4 };
+    const all = [_]*const Board{ &pi1_a, &pi1_b, &pi1_a_plus, &pi1_b_plus, &pi2_b, &pi2_b_v12, &pi3_b, &pi3_b_plus, &pi3_a_plus, &pi4_b, &pi5_b, &pi_zero, &pi_zero_w, &pi_zero_2_w, &cm1, &cm3, &cm3_plus, &cm4, &cm5 };
     for (all) |b| for (b.parts) |p| {
         try testing.expect(p.rect.x + p.rect.w > 0 and p.rect.x < b.width);
         try testing.expect(p.rect.y + p.rect.h > 0 and p.rect.y < b.height);

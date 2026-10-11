@@ -64,7 +64,7 @@ const max_scanned = 32;
 
 /// The device nodes the user gets (relative to /dev, without their
 /// numbers): input events, and the camera's.
-const user_devices = [_][]const u8{ "input/event", "video", "v4l-subdev", "media", "gpiochip", "i2c-", "ttyUSB", "ttyACM", "ttyAMA", "ttyS" };
+const user_devices = [_][]const u8{ "input/event", "video", "v4l-subdev", "media", "gpiochip", "gpiomem", "i2c-", "ttyUSB", "ttyACM", "ttyAMA", "ttyS" };
 
 /// Device nodes the user gets that are not numbered.
 const single_devices = [_][]const u8{"gpiomem"};

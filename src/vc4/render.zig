@@ -613,6 +613,8 @@ pub const Frame = struct {
         @memset(cl_bo.map[0..64], 0);
         const default_attr_addr = cl_base;
 
+        const v3d_ver = dev.v3d_ver;
+
         // 64..128: generic per-tile list.
         var gen_rcl = v3d_cl.Rcl.init(cl_bo.map[64..128]);
         gen_rcl.tileCoordinatesImplicit();
@@ -626,7 +628,7 @@ pub const Frame = struct {
             gen_rcl.branchToImplicitTileList();
         }
         gen_rcl.storeTileBufferGeneralColor(target_addr, f.target.format, f.target.tiling, f.target.width, f.target.height, f.msaa);
-        gen_rcl.clearTileBuffers(true, false);
+        gen_rcl.clearTileBuffers(true, false, v3d_ver);
         gen_rcl.endOfTileMarker();
         gen_rcl.returnFromSubList();
         const generic_start = cl_base + 64;
@@ -641,17 +643,18 @@ pub const Frame = struct {
         var v3d_bcl = v3d_cl.Bcl.init(cl_bo.map[bcl_off..245760]);
         var any_early_z = false;
         if (f.draws > 0) {
-            v3d_bcl.startBinning(f.target.width, f.target.height, f.msaa);
+            v3d_bcl.startBinning(f.target.width, f.target.height, f.msaa, v3d_ver);
             for (f.v3d_draws[0..f.draws]) |*d| {
                 if (d.config.early_z) any_early_z = true;
                 v3d_bcl.clipWindow(d.x0, d.y0, d.width, d.height);
-                v3d_bcl.cfgBits(d.config, f.msaa);
+                v3d_bcl.cfgBits(d.config, f.msaa, v3d_ver);
                 const scale = d.vp.scale();
                 v3d_bcl.viewport(
                     @as(f32, @floatFromInt(d.vp.x)) + @as(f32, @floatFromInt(d.vp.width)) / 2.0,
                     @as(f32, @floatFromInt(d.vp.y)) + @as(f32, @floatFromInt(d.vp.height)) / 2.0,
                     scale[0],
                     scale[1],
+                    v3d_ver,
                 );
 
                 // Emit Texture Shader State (32-byte aligned) and Sampler State
@@ -711,9 +714,10 @@ pub const Frame = struct {
                         .read_by_cs = (d.cs_attribute_mask >> @intCast(ai)) & 1 != 0,
                     };
                 }
-                const rec_bytes_len: u32 = 36 + @as(u32, d.attrs_len) * 16;
+                const rec_hdr_len: u32 = if (v3d_ver >= 71) 32 else 36;
+                const rec_bytes_len: u32 = rec_hdr_len + @as(u32, d.attrs_len) * 16;
                 var rec_w = cl.Writer.init(cl_bo.map[ind_off..][0..rec_bytes_len]);
-                v3d_cl.writeShaderStateRecord(&rec_w, .{
+                const srec: v3d_cl.ShaderRecord = .{
                     .fs_code_addr = f.boAddr(&bo_addrs, d.fs_handle),
                     .fs_uniforms_addr = uni_addrs[0],
                     .vs_code_addr = f.boAddr(&bo_addrs, d.vs_handle),
@@ -723,7 +727,12 @@ pub const Frame = struct {
                     .default_attr_addr = default_attr_addr,
                     .fs_num_varyings = d.fs_num_varyings,
                     .attributes = attr_recs[0..d.attrs_len],
-                });
+                };
+                if (v3d_ver >= 71) {
+                    v3d_cl.writeShaderStateRecord71(&rec_w, srec, dev.hasDrawIndex());
+                } else {
+                    v3d_cl.writeShaderStateRecord(&rec_w, srec);
+                }
                 ind_off += rec_bytes_len;
 
                 v3d_bcl.vcmCacheSize(4, 4);
@@ -745,19 +754,24 @@ pub const Frame = struct {
         // 245760..262144: RCL.
         const rcl_off: u32 = 245760;
         var rcl = v3d_cl.Rcl.init(cl_bo.map[rcl_off..262144]);
-        rcl.tileRenderingModeCfgCommon(f.target.width, f.target.height, f.msaa, any_early_z, true);
+        rcl.tileRenderingModeCfgCommon(f.target.width, f.target.height, f.msaa, any_early_z, true, v3d_ver);
         const clear_argb: u32 = switch (f.load) {
             .clear => |c| c,
             .keep => 0,
         };
-        rcl.tileRenderingModeCfgClearColorsPart1(v3d_cl.Rcl.packClearColor(clear_argb));
-        const layout = v3d_cl.targetLayout(f.target.format, f.target.tiling, f.target.width, f.target.height);
-        if (layout.uif_padded_height_in_ub -| layout.implicit_padded_height_in_ub >= 15) {
-            rcl.tileRenderingModeCfgClearColorsPart3(layout.uif_padded_height_in_ub);
+        const clear_rgba = v3d_cl.Rcl.packClearColor(clear_argb);
+        if (v3d_ver >= 71) {
+            rcl.tileRenderingModeCfgRenderTargetPart1(clear_rgba);
+        } else {
+            rcl.tileRenderingModeCfgClearColorsPart1(clear_rgba);
+            const layout = v3d_cl.targetLayout(f.target.format, f.target.tiling, f.target.width, f.target.height);
+            if (layout.uif_padded_height_in_ub -| layout.implicit_padded_height_in_ub >= 15) {
+                rcl.tileRenderingModeCfgClearColorsPart3(layout.uif_padded_height_in_ub);
+            }
+            rcl.tileRenderingModeCfgColor();
         }
-        rcl.tileRenderingModeCfgColor();
         const clear_z_f: f32 = @as(f32, @floatFromInt(f.clear_z)) / @as(f32, @floatFromInt(0xffffff));
-        rcl.tileRenderingModeCfgZsClearValues(clear_z_f, 0);
+        rcl.tileRenderingModeCfgZsClearValues(clear_z_f, 0, v3d_ver);
         rcl.tileListInitialBlockSize();
         rcl.multicoreRenderingTileListSetBase(tile_alloc_addr);
         rcl.multicoreRenderingSupertileCfg(@intCast(tiles[0]), @intCast(tiles[1]));
@@ -767,7 +781,7 @@ pub const Frame = struct {
             rcl.tileCoordinates(0, 0);
             rcl.endOfLoads();
             rcl.storeTileBufferGeneralNone();
-            if (i == 0) rcl.clearTileBuffers(true, false);
+            if (i == 0) rcl.clearTileBuffers(true, false, v3d_ver);
             rcl.endOfTileMarker();
         }
         rcl.flushVcdCache();

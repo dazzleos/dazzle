@@ -117,7 +117,7 @@ pub const GpioPage = struct {
         return switch (l.function) {
             .output => cx.fmt("Output, {s}", .{level}),
             .input => cx.fmt("Input, {s}", .{level}),
-            else => |f| if (gpio.altName(g, f.alt().?)) |n| n else if (short) cx.fmt("Function {d}", .{f.alt().?}) else cx.fmt("Alternate function {d}", .{f.alt().?}),
+            else => |f| if (self.pins.altName(g, f.alt().?)) |n| n else if (short) cx.fmt("Function {d}", .{f.alt().?}) else cx.fmt("Alternate function {d}", .{f.alt().?}),
         };
     }
 

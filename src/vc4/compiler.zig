@@ -33,7 +33,7 @@ const v3d_qpu = @import("v3d_qpu.zig");
 pub const Stage = qpu.Stage;
 
 pub const max_insts = 1024;
-pub const max_code = 1024;
+pub const max_code = 2048;
 pub const max_uniforms = 128;
 
 /// An SSA value: the index of the instruction that defines it.
@@ -1995,6 +1995,713 @@ test "compileV3d compiles fragment, vertex, and coordinate shaders" {
     fs.tlbZ(fs.fragZ());
     fs.tlbColor(fs.packUnorm8888(b, g, r, a));
     const c_fs = try compileV3d(&fs);
+    try std.testing.expectEqual(@as(u32, 2), c_fs.num_varyings);
+    try std.testing.expectEqual(@as(u32, 1), c_fs.num_texture_samples);
+    try std.testing.expect(c_fs.code().len > 0);
+}
+
+// --- VideoCore VII (V3D 7.1) Compiler ----------------------------------------
+
+pub fn compileV3d71(shader: *const Shader) Error!Compiled {
+    const n = shader.len;
+
+    // On V3D 7.1, coordinate shaders only write pos[0..3] (VPM 0..3) and
+    // Xs, Ys (VPM 4..5), not Zs or 1/Wc. Ignore the Zs and 1/Wc vpm_writes
+    // in coordinate shaders before computing liveness.
+    var skip_inst: [max_insts]bool = @splat(false);
+    var cs_xy_inst: ?usize = null;
+    var vs_xy_inst: ?usize = null;
+    {
+        var vpm_w_idx: u32 = 0;
+        for (0..n) |j| {
+            if (shader.insts[j].op == .vpm_write) {
+                if (shader.stage == .coordinate) {
+                    if (vpm_w_idx == 4) cs_xy_inst = @intFromEnum(shader.insts[j].srcs[0]);
+                    if (vpm_w_idx >= 5) skip_inst[j] = true;
+                } else if (shader.stage == .vertex) {
+                    if (vpm_w_idx == 0) vs_xy_inst = @intFromEnum(shader.insts[j].srcs[0]);
+                }
+                vpm_w_idx += 1;
+            }
+        }
+    }
+
+    var live: [max_insts]bool = @splat(false);
+    var uses: [max_insts]u16 = @splat(0);
+    var first_use: [max_insts]u16 = @splat(std.math.maxInt(u16));
+    var last_use: [max_insts]u16 = @splat(0);
+    {
+        var i: usize = n;
+        while (i > 0) {
+            i -= 1;
+            if (skip_inst[i]) continue;
+            if (shader.insts[i].op.hasSideEffects()) live[i] = true;
+            if (!live[i]) continue;
+            const inst = shader.insts[i];
+            if (inst.op == .tlb_color or inst.op == .tlb_color_ms or inst.op == .vpm_write) {
+                const src_idx = @intFromEnum(inst.srcs[0]);
+                const src_inst = shader.insts[src_idx];
+                if (src_inst.op == .pack_unorm8888 or src_inst.op == .pack_screen_xy) {
+                    live[src_idx] = true;
+                    for (shader.operands(src_idx)) |v| {
+                        const d = @intFromEnum(v);
+                        live[d] = true;
+                        uses[d] += 1;
+                        first_use[d] = @min(first_use[d], @as(u16, @intCast(i)));
+                        last_use[d] = @max(last_use[d], @as(u16, @intCast(i)));
+                    }
+                    continue;
+                }
+            }
+            if (inst.op == .pack_unorm8888 or inst.op == .pack_screen_xy) continue;
+            for (shader.operands(i)) |v| {
+                const d = @intFromEnum(v);
+                live[d] = true;
+                uses[d] += 1;
+                first_use[d] = @min(first_use[d], @as(u16, @intCast(i)));
+                last_use[d] = @max(last_use[d], @as(u16, @intCast(i)));
+            }
+        }
+    }
+
+    var tex_ch_used: [max_insts][4]bool = @splat(.{ false, false, false, false });
+    var tex_ch_last_use: [max_insts][4]u16 = @splat(.{ 0, 0, 0, 0 });
+    var tex_ch_active: [max_insts][4]bool = @splat(.{ false, false, false, false });
+    for (0..n) |j| {
+        if (!live[j] or skip_inst[j]) continue;
+        const inst = shader.insts[j];
+        if (inst.op == .unpack_unorm8) {
+            const src_idx = @intFromEnum(inst.srcs[0]);
+            const src_op = shader.insts[src_idx].op;
+            if (src_op == .tex or src_op == .tlb_color_load) {
+                const byte: u2 = @intCast(inst.imm);
+                tex_ch_used[src_idx][byte] = true;
+                tex_ch_last_use[src_idx][byte] = @max(tex_ch_last_use[src_idx][byte], last_use[j]);
+            }
+        }
+    }
+
+    // Allocate unified RF registers (rf5..rf63; rf0=implicit ldvary C/tmu mask,
+    // rf1=scratch1, rf2=frag_z, rf3=frag_w, rf4=scratch2).
+    var rf_free: [64]bool = @splat(true);
+    for (0..5) |r_idx| rf_free[r_idx] = false;
+
+    const takeRf = struct {
+        fn f(free: *[64]bool) Error!u6 {
+            for (free, 0..) |*slot, idx| if (slot.*) {
+                slot.* = false;
+                return @intCast(idx);
+            };
+            return error.OutOfRegisters;
+        }
+    }.f;
+
+    const isDeferredUnifOrConst = struct {
+        fn f(s: *const Shader, d: usize) bool {
+            const op = s.insts[d].op;
+            if (op == .uniform) return true;
+            if (op == .constant) return v3d_qpu.encodeSmallImm(s.insts[d].imm) == null;
+            return false;
+        }
+    }.f;
+
+    var rf_reg: [max_insts]u6 = @splat(0);
+    var has_rf: [max_insts]bool = @splat(false);
+    var active_rf: [max_insts]bool = @splat(false);
+    var tex_ch_rf: [max_insts][4]u6 = @splat(.{ 0, 0, 0, 0 });
+    var has_tex_ch: [max_insts]bool = @splat(false);
+
+    for (0..n) |j| {
+        for (0..n) |d| {
+            if (active_rf[d] and last_use[d] < j) {
+                if (has_rf[d] and rf_reg[d] >= 5) {
+                    rf_free[rf_reg[d]] = true;
+                }
+                active_rf[d] = false;
+            }
+            if (has_tex_ch[d]) {
+                for (0..4) |ch| {
+                    if (tex_ch_active[d][ch] and tex_ch_last_use[d][ch] < j) {
+                        rf_free[tex_ch_rf[d][ch]] = true;
+                        tex_ch_active[d][ch] = false;
+                    }
+                }
+            }
+        }
+        if (!live[j] or skip_inst[j]) continue;
+
+        for (0..j) |d| {
+            if (live[d] and !skip_inst[d] and isDeferredUnifOrConst(shader, d) and first_use[d] == j) {
+                rf_reg[d] = try takeRf(&rf_free);
+                has_rf[d] = true;
+                active_rf[d] = true;
+            }
+        }
+
+        if (!shader.insts[j].op.hasResult()) continue;
+        const inst = shader.insts[j];
+        switch (inst.op) {
+            .frag_w => {
+                rf_reg[j] = 3; // rf3 = payload W on V3D 7.1
+                has_rf[j] = true;
+            },
+            .frag_z => {
+                rf_reg[j] = 2; // rf2 = payload Z on V3D 7.1
+                has_rf[j] = true;
+            },
+            .uniform, .constant, .pack_unorm8888, .pack_screen_xy => {},
+            .tex, .tlb_color_load => {
+                for (0..4) |ch| {
+                    if (tex_ch_used[j][ch]) {
+                        tex_ch_rf[j][ch] = try takeRf(&rf_free);
+                        tex_ch_active[j][ch] = true;
+                    } else {
+                        tex_ch_rf[j][ch] = 1; // scratch rf1 for unused channel
+                    }
+                }
+                has_tex_ch[j] = true;
+            },
+            .unpack_unorm8 => {
+                const src_idx = @intFromEnum(inst.srcs[0]);
+                const byte: u2 = @intCast(inst.imm);
+                if (has_tex_ch[src_idx]) {
+                    rf_reg[j] = tex_ch_rf[src_idx][byte];
+                    has_rf[j] = true;
+                } else {
+                    rf_reg[j] = try takeRf(&rf_free);
+                    has_rf[j] = true;
+                    active_rf[j] = true;
+                }
+            },
+            else => {
+                if (uses[j] > 0) {
+                    rf_reg[j] = try takeRf(&rf_free);
+                    has_rf[j] = true;
+                    active_rf[j] = true;
+                }
+            },
+        }
+    }
+
+    var out: Compiled = .{
+        .stage = shader.stage,
+        .threaded = true,
+    };
+    var last_rf_write: ?u6 = null;
+
+    const pushRaw = struct {
+        fn f(o: *Compiled, last_w: *?u6, inst: v3d_qpu.Inst, written_rf: ?u6) Error!void {
+            if (o.code_len >= max_code) return error.ProgramTooLong;
+            o.code_buf[o.code_len] = inst;
+            o.code_len += 1;
+            last_w.* = written_rf;
+        }
+    }.f;
+
+    const pushAlu = struct {
+        fn f(o: *Compiled, last_w: *?u6, a: v3d_qpu.Alu71) Error!void {
+            if (last_w.*) |lw| {
+                const add_nsrc = a.add.op.numSrc();
+                const mul_nsrc = a.mul.op.numSrc();
+                const reads_lw = (add_nsrc >= 1 and !a.add.a.imm and a.add.a.raddr == lw) or
+                    (add_nsrc >= 2 and !a.add.b.imm and a.add.b.raddr == lw) or
+                    (mul_nsrc >= 1 and !a.mul.a.imm and a.mul.a.raddr == lw) or
+                    (mul_nsrc >= 2 and !a.mul.b.imm and a.mul.b.raddr == lw);
+                if (reads_lw) {
+                    try pushRaw(o, last_w, v3d_qpu.nop71(), null);
+                }
+            }
+            var written: ?u6 = null;
+            if (!a.add.dst.magic) written = a.add.dst.waddr;
+            if (!a.mul.dst.magic) written = a.mul.dst.waddr;
+            if (a.sig.writesAddress() and !a.sig_magic) {
+                written = a.sig_addr;
+            }
+            try pushRaw(o, last_w, try v3d_qpu.alu71(a), written);
+        }
+    }.f;
+
+    const push = struct {
+        fn f(o: *Compiled, last_w: *?u6, inst: v3d_qpu.Inst) Error!void {
+            const sig: u5 = @truncate(inst >> 53);
+            var written: ?u6 = null;
+            // ldunifrf (12), ldtmu (4), ldvary (8), ldtlbu (9), ldtlb (10)
+            if (sig == 12 or sig == 4 or sig == 8 or sig == 9 or sig == 10) {
+                const cond: u7 = @truncate(inst >> 46);
+                if (cond & (1 << 6) == 0) written = @truncate(cond);
+            }
+            try pushRaw(o, last_w, inst, written);
+        }
+    }.f;
+
+    const addUnif = struct {
+        fn f(o: *Compiled, k: UniformKind) Error!void {
+            if (o.uniform_len >= max_uniforms) return error.TooManyUniforms;
+            o.uniform_buf[o.uniform_len] = k;
+            o.uniform_len += 1;
+        }
+    }.f;
+
+    const prepUnary = struct {
+        fn f(s: *const Shader, r_reg: *const [max_insts]u6, v: Value) v3d_qpu.Input71 {
+            const d = @intFromEnum(v);
+            const def = s.insts[d];
+            if (def.op == .constant) {
+                if (v3d_qpu.encodeSmallImm(def.imm)) |imm| {
+                    return .immVal(imm);
+                }
+            }
+            return .rf(r_reg[d]);
+        }
+    }.f;
+
+    const prepBinary = struct {
+        fn f(o: *Compiled, last_w: *?u6, s: *const Shader, r_reg: *const [max_insts]u6, v0: Value, v1: Value) Error!struct { a: v3d_qpu.Input71, b: v3d_qpu.Input71 } {
+            var in0 = prepUnary(s, r_reg, v0);
+            if (v0 == v1) {
+                if (in0.imm) {
+                    try pushAlu(o, last_w, .{
+                        .mul = .{
+                            .op = .mov,
+                            .dst = .rf(1),
+                            .a = in0,
+                        },
+                    });
+                    return .{ .a = .rf(1), .b = .rf(1) };
+                }
+                return .{ .a = in0, .b = in0 };
+            }
+            var in1 = prepUnary(s, r_reg, v1);
+            // At most one small immediate per instruction, and when v0 != v1 we must
+            // ensure in0.raddr != in1.raddr so fadd/fmin/fmax operand ordering is strict.
+            if (in0.imm and (in1.imm or in0.raddr == in1.raddr)) {
+                try pushAlu(o, last_w, .{
+                    .mul = .{
+                        .op = .mov,
+                        .dst = .rf(1),
+                        .a = in0,
+                    },
+                });
+                in0 = .rf(1);
+            } else if (in1.imm and in0.raddr == in1.raddr) {
+                try pushAlu(o, last_w, .{
+                    .mul = .{
+                        .op = .mov,
+                        .dst = .rf(1),
+                        .a = in1,
+                    },
+                });
+                in1 = .rf(1);
+            }
+            return .{ .a = in0, .b = in1 };
+        }
+    }.f;
+
+    var vpm_read_idx: u32 = 0;
+    var vpm_write_idx: u32 = 0;
+    var tlb_locked = false;
+    var tlb_load_sample: u32 = 0;
+    var tlb_write_sample: u32 = 0;
+    const is_msaa_blend = blk: {
+        for (0..n) |j| if (live[j] and shader.insts[j].op == .tlb_color_ms) break :blk true;
+        break :blk false;
+    };
+
+    const ensureTlbLocked = struct {
+        fn f(o: *Compiled, last_w: *?u6, locked: *bool) Error!void {
+            if (locked.*) return;
+            locked.* = true;
+            try push(o, last_w, v3d_qpu.thrsw71());
+            try push(o, last_w, v3d_qpu.thrsw71());
+            try push(o, last_w, v3d_qpu.nop71());
+            try push(o, last_w, v3d_qpu.nop71());
+        }
+    }.f;
+
+    for (0..n) |j| {
+        if (!live[j] or skip_inst[j]) continue;
+
+        for (0..j) |d| {
+            if (live[d] and !skip_inst[d] and isDeferredUnifOrConst(shader, d) and first_use[d] == j) {
+                const def = shader.insts[d];
+                try push(&out, &last_rf_write, v3d_qpu.ldunifrf71(.rf(rf_reg[d])));
+                if (def.op == .uniform) {
+                    try addUnif(&out, .{ .user = def.imm });
+                } else {
+                    try addUnif(&out, .{ .constant = def.imm });
+                }
+            }
+        }
+
+        const inst = shader.insts[j];
+        const dst_rf = rf_reg[j];
+        const dst: v3d_qpu.Dst = if (has_rf[j]) .rf(dst_rf) else .nop;
+
+        switch (inst.op) {
+            .frag_w, .frag_z, .uniform, .constant, .pack_unorm8888, .pack_screen_xy, .unpack_unorm8 => {},
+            .vpm_read => {
+                if (v3d_qpu.encodeSmallImm(vpm_read_idx)) |enc| {
+                    try pushAlu(&out, &last_rf_write, .{
+                        .add = .{
+                            .op = .ldvpmv_in,
+                            .dst = dst,
+                            .a = .immVal(enc),
+                        },
+                    });
+                } else {
+                    try push(&out, &last_rf_write, v3d_qpu.ldunifrf71(.rf(1)));
+                    try addUnif(&out, .{ .constant = vpm_read_idx });
+                    try pushAlu(&out, &last_rf_write, .{
+                        .add = .{
+                            .op = .ldvpmv_in,
+                            .dst = dst,
+                            .a = .rf(1),
+                        },
+                    });
+                }
+                vpm_read_idx += 1;
+                out.num_vpm_reads += 1;
+            },
+            .varying => {
+                // On V3D 7.1, ldvary rf1 writes (A*x + B*y) to rf1 and C to rf0
+                // after a 1-instruction delay.
+                try push(&out, &last_rf_write, v3d_qpu.ldvary71(.rf(1)));
+                try push(&out, &last_rf_write, v3d_qpu.nop71());
+                try pushAlu(&out, &last_rf_write, .{
+                    .mul = .{
+                        .op = .fmul,
+                        .dst = .rf(1),
+                        .a = .rf(1),
+                        .b = .rf(3), // rf3 = payload W on V3D 7.1
+                    },
+                });
+                try pushAlu(&out, &last_rf_write, .{
+                    .add = .{
+                        .op = .fadd,
+                        .dst = dst,
+                        .a = .rf(1),
+                        .b = .rf(0), // rf0 = C from ldvary
+                    },
+                });
+                out.num_varyings += 1;
+            },
+            .fmaxabs => {
+                const b_op = try prepBinary(&out, &last_rf_write, shader, &rf_reg, inst.srcs[0], inst.srcs[1]);
+                var a_in = b_op.a;
+                var b_in = b_op.b;
+                a_in.unpack = .abs;
+                b_in.unpack = .abs;
+                try pushAlu(&out, &last_rf_write, .{
+                    .add = .{
+                        .op = .fmax,
+                        .dst = dst,
+                        .a = a_in,
+                        .b = b_in,
+                    },
+                });
+            },
+            .ftoi, .itof => {
+                const u_in = prepUnary(shader, &rf_reg, inst.srcs[0]);
+                try pushAlu(&out, &last_rf_write, .{
+                    .add = .{
+                        .op = if (inst.op == .ftoi) .ftoiz else .itof,
+                        .dst = dst,
+                        .a = u_in,
+                    },
+                });
+            },
+            .fadd, .fsub, .fmin, .fmax, .add, .sub, .shl, .shr, .asr, .@"and", .@"or", .xor, .min, .max, .fmul => {
+                const b_op = try prepBinary(&out, &last_rf_write, shader, &rf_reg, inst.srcs[0], inst.srcs[1]);
+                if (inst.op == .fmul) {
+                    try pushAlu(&out, &last_rf_write, .{
+                        .mul = .{
+                            .op = .fmul,
+                            .dst = dst,
+                            .a = b_op.a,
+                            .b = b_op.b,
+                        },
+                    });
+                } else {
+                    const v3d_op: v3d_qpu.AddOp = switch (inst.op) {
+                        .fadd => .fadd,
+                        .fsub => .fsub,
+                        .fmin => .fmin,
+                        .fmax => .fmax,
+                        .add => .add,
+                        .sub => .sub,
+                        .shl => .shl,
+                        .shr => .shr,
+                        .asr => .asr,
+                        .@"and" => .@"and",
+                        .@"or" => .@"or",
+                        .xor => .xor,
+                        .min => .min,
+                        .max => .max,
+                        else => unreachable,
+                    };
+                    try pushAlu(&out, &last_rf_write, .{
+                        .add = .{
+                            .op = v3d_op,
+                            .dst = dst,
+                            .a = b_op.a,
+                            .b = b_op.b,
+                        },
+                    });
+                }
+            },
+            .recip, .rsqrt, .exp2, .log2 => {
+                // On V3D 7.1, SFU operations are direct 1-src ADD ALU instructions.
+                const u_in = prepUnary(shader, &rf_reg, inst.srcs[0]);
+                const v3d_op: v3d_qpu.AddOp = switch (inst.op) {
+                    .recip => .recip,
+                    .rsqrt => .rsqrt,
+                    .exp2 => .exp,
+                    .log2 => .log,
+                    else => unreachable,
+                };
+                try pushAlu(&out, &last_rf_write, .{
+                    .add = .{
+                        .op = v3d_op,
+                        .dst = dst,
+                        .a = u_in,
+                    },
+                });
+            },
+            .tex => {
+                const slot: u8 = @intCast(inst.imm);
+                const u_t = prepUnary(shader, &rf_reg, inst.srcs[1]);
+                // 1. Write T to W.tmut
+                try pushAlu(&out, &last_rf_write, .{
+                    .mul = .{
+                        .op = .mov,
+                        .dst = .magicAddr(v3d_qpu.W.tmut),
+                        .a = u_t,
+                    },
+                });
+                // 2. Emit wrtmuc for P0
+                try push(&out, &last_rf_write, v3d_qpu.wrtmuc71());
+                try addUnif(&out, .{ .tex_p0 = slot });
+                // 3. Emit wrtmuc for P1
+                try push(&out, &last_rf_write, v3d_qpu.wrtmuc71());
+                try addUnif(&out, .{ .tex_p1 = slot });
+                // 4. Clear rf0 (per-pixel TMU mask on V3D 7.1, bit 0 = 0 -> active)
+                // and write S to W.tmus to trigger the 2D lookup.
+                try pushAlu(&out, &last_rf_write, .{
+                    .mul = .{
+                        .op = .mov,
+                        .dst = .rf(0),
+                        .a = .immVal(0),
+                    },
+                });
+                const u_s = prepUnary(shader, &rf_reg, inst.srcs[0]);
+                try pushAlu(&out, &last_rf_write, .{
+                    .mul = .{
+                        .op = .mov,
+                        .dst = .magicAddr(v3d_qpu.W.tmus),
+                        .a = u_s,
+                    },
+                });
+                // 5. Thread switch to wait for TMU, plus 2 delay slots
+                try push(&out, &last_rf_write, v3d_qpu.thrsw71());
+                try push(&out, &last_rf_write, v3d_qpu.nop71());
+                try push(&out, &last_rf_write, v3d_qpu.nop71());
+                // 6. Read 4 RGBA float32 channels via ldtmu
+                const ch = tex_ch_rf[j];
+                for ([4]u6{ ch[2], ch[1], ch[0], ch[3] }) |c_rf| {
+                    try push(&out, &last_rf_write, v3d_qpu.ldtmu71(.rf(c_rf)));
+                }
+                out.num_texture_samples += 1;
+            },
+            .tlb_color_load => {
+                try ensureTlbLocked(&out, &last_rf_write, &tlb_locked);
+                if (is_msaa_blend and tlb_load_sample == 0) {
+                    try push(&out, &last_rf_write, v3d_qpu.ldtlbu71(.rf(1)));
+                    try addUnif(&out, .{ .constant = 0xfffffffb });
+                } else {
+                    try push(&out, &last_rf_write, v3d_qpu.ldtlb71(.rf(1)));
+                }
+                try push(&out, &last_rf_write, v3d_qpu.ldtlb71(.rf(4)));
+                const ch = tex_ch_rf[j];
+                const unpacks = [4]struct { src_rf: u6, unp: v3d_qpu.InputUnpack, rf: u6, used: bool }{
+                    .{ .src_rf = 1, .unp = .l, .rf = ch[2], .used = tex_ch_used[j][2] }, // R
+                    .{ .src_rf = 1, .unp = .h, .rf = ch[1], .used = tex_ch_used[j][1] }, // G
+                    .{ .src_rf = 4, .unp = .l, .rf = ch[0], .used = tex_ch_used[j][0] }, // B
+                    .{ .src_rf = 4, .unp = .h, .rf = ch[3], .used = tex_ch_used[j][3] }, // A
+                };
+                for (unpacks) |u| {
+                    if (!u.used) continue;
+                    try pushAlu(&out, &last_rf_write, .{
+                        .mul = .{
+                            .op = .fmov,
+                            .dst = .rf(u.rf),
+                            .a = .{ .raddr = u.src_rf, .unpack = u.unp },
+                        },
+                    });
+                }
+                tlb_load_sample += 1;
+            },
+            .tlb_z => {
+                try ensureTlbLocked(&out, &last_rf_write, &tlb_locked);
+                try pushAlu(&out, &last_rf_write, .{
+                    .mul = .{
+                        .op = .mov,
+                        .dst = .magicAddr(v3d_qpu.W.tlbu),
+                        .a = .rf(2), // rf2 = payload Z
+                    },
+                });
+                try addUnif(&out, .{ .constant = 0xffffff8c });
+            },
+            .tlb_color, .tlb_color_ms => {
+                try ensureTlbLocked(&out, &last_rf_write, &tlb_locked);
+                const pack_idx = @intFromEnum(inst.srcs[0]);
+                const pack_inst = shader.insts[pack_idx];
+                const r_val: Value = if (pack_inst.op == .pack_unorm8888) pack_inst.srcs[2] else inst.srcs[0];
+                const g_val: Value = if (pack_inst.op == .pack_unorm8888) pack_inst.srcs[1] else inst.srcs[0];
+                const b_val: Value = if (pack_inst.op == .pack_unorm8888) pack_inst.srcs[0] else inst.srcs[0];
+                const a_val: Value = if (pack_inst.op == .pack_unorm8888) pack_inst.srcs[3] else inst.srcs[0];
+
+                const rg_op = try prepBinary(&out, &last_rf_write, shader, &rf_reg, r_val, g_val);
+                const use_tlbu = (inst.op == .tlb_color_ms and tlb_write_sample == 0 and tlb_load_sample == 0);
+                try pushAlu(&out, &last_rf_write, .{
+                    .add = .{
+                        .op = .vfpack,
+                        .dst = .magicAddr(if (use_tlbu) v3d_qpu.W.tlbu else v3d_qpu.W.tlb),
+                        .a = rg_op.a,
+                        .b = rg_op.b,
+                    },
+                });
+                if (use_tlbu) {
+                    try addUnif(&out, .{ .constant = 0xfffffffb });
+                }
+
+                const ba_op = try prepBinary(&out, &last_rf_write, shader, &rf_reg, b_val, a_val);
+                try pushAlu(&out, &last_rf_write, .{
+                    .add = .{
+                        .op = .vfpack,
+                        .dst = .magicAddr(v3d_qpu.W.tlb),
+                        .a = ba_op.a,
+                        .b = ba_op.b,
+                    },
+                });
+                tlb_write_sample += 1;
+            },
+            .vpm_write => {
+                const src_idx = @intFromEnum(inst.srcs[0]);
+                if (src_idx == cs_xy_inst or src_idx == vs_xy_inst) {
+                    const xy_inst = shader.insts[src_idx];
+                    const imm16 = v3d_qpu.encodeSmallImm(@bitCast(@as(f32, 16.0))).?;
+                    for (xy_inst.srcs[0..2]) |coord_val| {
+                        var coord_in = prepUnary(shader, &rf_reg, coord_val);
+                        if (coord_in.imm) {
+                            try pushAlu(&out, &last_rf_write, .{
+                                .mul = .{
+                                    .op = .mov,
+                                    .dst = .rf(1),
+                                    .a = coord_in,
+                                },
+                            });
+                            coord_in = .rf(1);
+                        }
+                        // rf1 = coord * 16.0
+                        try pushAlu(&out, &last_rf_write, .{
+                            .mul = .{
+                                .op = .fmul,
+                                .dst = .rf(1),
+                                .a = coord_in,
+                                .b = .immVal(imm16),
+                            },
+                        });
+                        // rf1 = ffloor(rf1)
+                        try pushAlu(&out, &last_rf_write, .{
+                            .add = .{
+                                .op = .ffloor,
+                                .dst = .rf(1),
+                                .a = .rf(1),
+                            },
+                        });
+                        // rf1 = ftoiz(rf1)
+                        try pushAlu(&out, &last_rf_write, .{
+                            .add = .{
+                                .op = .ftoiz,
+                                .dst = .rf(1),
+                                .a = .rf(1),
+                            },
+                        });
+                        const idx_imm = v3d_qpu.encodeSmallImm(vpm_write_idx).?;
+                        try pushAlu(&out, &last_rf_write, .{
+                            .add = .{
+                                .op = .stvpmv,
+                                .a = .immVal(idx_imm),
+                                .b = .rf(1),
+                            },
+                        });
+                        vpm_write_idx += 1;
+                        out.num_vpm_writes += 1;
+                    }
+                } else {
+                    var val_in = prepUnary(shader, &rf_reg, inst.srcs[0]);
+                    if (val_in.imm) {
+                        try pushAlu(&out, &last_rf_write, .{
+                            .mul = .{
+                                .op = .mov,
+                                .dst = .rf(4),
+                                .a = val_in,
+                            },
+                        });
+                        val_in = .rf(4);
+                    }
+                    if (v3d_qpu.encodeSmallImm(vpm_write_idx)) |enc| {
+                        try pushAlu(&out, &last_rf_write, .{
+                            .add = .{
+                                .op = .stvpmv,
+                                .a = .immVal(enc),
+                                .b = val_in,
+                            },
+                        });
+                    } else {
+                        try push(&out, &last_rf_write, v3d_qpu.ldunifrf71(.rf(1)));
+                        try addUnif(&out, .{ .constant = vpm_write_idx });
+                        try pushAlu(&out, &last_rf_write, .{
+                            .add = .{
+                                .op = .stvpmv,
+                                .a = .rf(1),
+                                .b = val_in,
+                            },
+                        });
+                    }
+                    vpm_write_idx += 1;
+                    out.num_vpm_writes += 1;
+                }
+            },
+        }
+    }
+
+    if (shader.stage != .fragment) {
+        try pushAlu(&out, &last_rf_write, .{
+            .add = .{ .op = .vpmwt },
+        });
+    }
+
+    // Program end: thrsw + 2 delay slots
+    try push(&out, &last_rf_write, v3d_qpu.thrsw71());
+    try push(&out, &last_rf_write, v3d_qpu.nop71());
+    try push(&out, &last_rf_write, v3d_qpu.nop71());
+
+    return out;
+}
+
+test "compileV3d71 compiles fragment, vertex, and coordinate shaders" {
+    var fs = Shader.init(.fragment);
+    const u = fs.varying();
+    const v = fs.varying();
+    const texel = fs.texture(0, u, v);
+    const r = fs.unpackUnorm8(texel, 2);
+    const g = fs.unpackUnorm8(texel, 1);
+    const b = fs.unpackUnorm8(texel, 0);
+    const a = fs.unpackUnorm8(texel, 3);
+    fs.tlbZ(fs.fragZ());
+    fs.tlbColor(fs.packUnorm8888(b, g, r, a));
+    const c_fs = try compileV3d71(&fs);
     try std.testing.expectEqual(@as(u32, 2), c_fs.num_varyings);
     try std.testing.expectEqual(@as(u32, 1), c_fs.num_texture_samples);
     try std.testing.expect(c_fs.code().len > 0);

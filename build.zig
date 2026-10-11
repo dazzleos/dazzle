@@ -457,12 +457,22 @@ const device_trees = [_][]const u8{
     "bcm2711-rpi-cm4s.dtb",
 };
 
+const arm64_device_trees = [_][]const u8{
+    "bcm2712-rpi-5-b.dtb",
+    "bcm2712-d-rpi-5-b.dtb",
+    "bcm2712-rpi-500.dtb",
+    "bcm2712-rpi-cm5-cm5io.dtb",
+    "bcm2712-rpi-cm5-cm4io.dtb",
+    "bcm2712-rpi-cm5l-cm5io.dtb",
+    "bcm2712-rpi-cm5l-cm4io.dtb",
+};
+
 /// The device tree overlays the firmware may apply: the display driver
 /// (config.txt's dtoverlay=vc4-kms-v3d, which overlay_map.dtb redirects to
-/// vc4-kms-v3d-pi4 on the Pi 4) and the cameras (camera_auto_detect
-/// picks one). overlay_map.dtb tells the firmware which overlays suit
-/// which board.
-const overlays = [_][]const u8{ "vc4-kms-v3d.dtbo", "vc4-kms-v3d-pi4.dtbo", "imx219.dtbo", "ov5647.dtbo", "overlay_map.dtb" };
+/// vc4-kms-v3d-pi4 on the Pi 4 and vc4-kms-v3d-pi5 on the Pi 5) and the
+/// cameras (camera_auto_detect picks one). overlay_map.dtb tells the firmware
+/// which overlays suit which board.
+const overlays = [_][]const u8{ "vc4-kms-v3d.dtbo", "vc4-kms-v3d-pi4.dtbo", "vc4-kms-v3d-pi5.dtbo", "imx219.dtbo", "ov5647.dtbo", "overlay_map.dtb" };
 
 /// Each slot's overlays/README. The firmware only reads overlays from
 /// `${os_prefix}overlays/` when this file is there (it says nothing
@@ -480,9 +490,10 @@ const overlays_readme =
 const Kernel = struct {
     /// The last step of the kernel builds.
     step: *std.Build.Step,
-    /// Where make puts the ARMv6 and ARMv7 kernels (O=).
+    /// Where make puts the ARMv6, ARMv7 and ARM64 kernels (O=).
     v6: []const u8,
     v7: []const u8,
+    v8: []const u8,
     /// The source tree.
     src: []const u8,
 
@@ -491,13 +502,22 @@ const Kernel = struct {
         return .{ .cwd_relative = b.pathJoin(&.{ k.v6, "arch/arm/boot/zImage" }) };
     }
 
-    /// kernel7.img: ARMv7, with SMP, for the Pi 2, 3 and Zero 2 W.
+    /// kernel7.img: ARMv7, with SMP, for the Pi 2, 3, Zero 2 W and 4.
     fn armv7(k: Kernel, b: *std.Build) std.Build.LazyPath {
         return .{ .cwd_relative = b.pathJoin(&.{ k.v7, "arch/arm/boot/zImage" }) };
     }
 
+    /// kernel8.img: ARM64 (gzip-compressed Image.gz), for the Pi 5, 500 and CM5.
+    fn arm64(k: Kernel, b: *std.Build) std.Build.LazyPath {
+        return .{ .cwd_relative = b.pathJoin(&.{ k.v8, "arch/arm64/boot/Image.gz" }) };
+    }
+
     fn deviceTree(k: Kernel, b: *std.Build, name: []const u8) std.Build.LazyPath {
         return .{ .cwd_relative = b.pathJoin(&.{ k.v7, "arch/arm/boot/dts/broadcom", name }) };
+    }
+
+    fn arm64DeviceTree(k: Kernel, b: *std.Build, name: []const u8) std.Build.LazyPath {
+        return .{ .cwd_relative = b.pathJoin(&.{ k.v8, "arch/arm64/boot/dts/broadcom", name }) };
     }
 
     fn overlay(k: Kernel, b: *std.Build, name: []const u8) std.Build.LazyPath {
@@ -506,16 +526,18 @@ const Kernel = struct {
 };
 
 /// Linux, built with make (as the kernel must be) with GCC, as Raspberry Pi
-/// build it: twice, as they do, ARMv6 (kernel.img) and ARMv7 with SMP
-/// (kernel7.img), each tinyconfig plus the options in kernel/dazzle.config
-/// and kernel/armv6.config or kernel/armv7.config, checked to have all
-/// taken effect. make does its own incremental building, so this runs every
-/// time and is quick when nothing changed.
+/// build it: ARMv6 (kernel.img), ARMv7 with SMP (kernel7.img) and ARM64 with
+/// 32-bit compatibility (kernel8.img), each tinyconfig plus the options in
+/// kernel/dazzle.config and kernel/armv6.config, kernel/armv7.config or
+/// kernel/arm64.config, checked to have all taken effect. make does its own
+/// incremental building, so this runs every time and is quick when nothing
+/// changed.
 fn addKernel(b: *std.Build) Kernel {
     const own_tree = b.option([]const u8, "linux", "Linux source tree to build, as it is (default: build/linux-rpi, the Raspberry Pi kernel's default branch, fetched again at every build)");
     const offline = b.option(bool, "offline", "Do not fetch the latest Raspberry Pi kernel (build what build/linux-rpi has)") orelse false;
     const linux_dir = own_tree orelse b.pathFromRoot("build/linux-rpi");
-    const cross = b.option([]const u8, "cross-compile", "The GCC cross compiler prefix for the kernel (default: arm-linux-gnueabihf-)") orelse "arm-linux-gnueabihf-";
+    const cross = b.option([]const u8, "cross-compile", "The GCC cross compiler prefix for 32-bit ARM kernels (default: arm-linux-gnueabihf-)") orelse "arm-linux-gnueabihf-";
+    const cross64 = b.option([]const u8, "cross-compile-arm64", "The GCC cross compiler prefix for the 64-bit ARM kernel (default: aarch64-linux-gnu-)") orelse "aarch64-linux-gnu-";
     const out = b.pathFromRoot("build/kernel");
     const jobs = std.Thread.getCpuCount() catch 4;
 
@@ -523,6 +545,8 @@ fn addKernel(b: *std.Build) Kernel {
     tools.appendSlice(b.allocator, &.{ "make:make", "flex:flex", "bison:bison", "bc:bc", "git:git" }) catch @panic("OOM");
     tools.append(b.allocator, b.fmt("{s}gcc:gcc-arm-linux-gnueabihf", .{cross})) catch @panic("OOM");
     tools.append(b.allocator, b.fmt("{s}ld:binutils-arm-linux-gnueabihf", .{cross})) catch @panic("OOM");
+    tools.append(b.allocator, b.fmt("{s}gcc:gcc-aarch64-linux-gnu", .{cross64})) catch @panic("OOM");
+    tools.append(b.allocator, b.fmt("{s}ld:binutils-aarch64-linux-gnu", .{cross64})) catch @panic("OOM");
     var last: *std.Build.Step = &requireTools(b, tools.items).step;
 
     const Chain = struct {
@@ -543,7 +567,8 @@ fn addKernel(b: *std.Build) Kernel {
         }
     }
 
-    const toolchain: []const []const u8 = &.{ "ARCH=arm", b.fmt("CROSS_COMPILE={s}", .{cross}) };
+    const tc32: []const []const u8 = &.{ "ARCH=arm", b.fmt("CROSS_COMPILE={s}", .{cross}) };
+    const tc64: []const []const u8 = &.{ "ARCH=arm64", b.fmt("CROSS_COMPILE={s}", .{cross64}) };
     const make = struct {
         fn cmd(bb: *std.Build, dir: []const u8, o: []const u8, tc: []const []const u8, targets: []const []const u8) *std.Build.Step.Run {
             const run = bb.addSystemCommand(&.{ "make", "-s", "-C", dir, bb.fmt("O={s}", .{o}) });
@@ -552,8 +577,10 @@ fn addKernel(b: *std.Build) Kernel {
             return run;
         }
     }.cmd;
-    var dirs: [2][]const u8 = undefined;
-    for ([_][]const u8{ "armv6", "armv7" }, &dirs) |arch, *dir| {
+    var dirs: [3][]const u8 = undefined;
+    for ([_][]const u8{ "armv6", "armv7", "arm64" }, &dirs) |arch, *dir| {
+        const is_64 = std.mem.eql(u8, arch, "arm64");
+        const toolchain = if (is_64) tc64 else tc32;
         const o = b.pathJoin(&.{ out, arch });
         dir.* = o;
         const fragment = b.path(b.fmt("kernel/{s}.config", .{arch}));
@@ -574,15 +601,18 @@ fn addKernel(b: *std.Build) Kernel {
             Chain.add(&last, check_config);
         }
         var targets: std.ArrayList([]const u8) = .empty;
-        targets.appendSlice(b.allocator, &.{ b.fmt("-j{d}", .{jobs}), "zImage" }) catch @panic("OOM");
-        // The device trees and overlays once, with the ARMv7 kernel.
+        targets.appendSlice(b.allocator, &.{ b.fmt("-j{d}", .{jobs}), if (is_64) "Image.gz" else "zImage" }) catch @panic("OOM");
+        // The 32-bit device trees and overlays once, with the ARMv7 kernel;
+        // the BCM2712 device trees with the ARM64 kernel.
         if (std.mem.eql(u8, arch, "armv7")) {
             for (device_trees) |d| targets.append(b.allocator, b.fmt("broadcom/{s}", .{d})) catch @panic("OOM");
             for (overlays) |d| targets.append(b.allocator, b.fmt("overlays/{s}", .{d})) catch @panic("OOM");
+        } else if (is_64) {
+            for (arm64_device_trees) |d| targets.append(b.allocator, b.fmt("broadcom/{s}", .{d})) catch @panic("OOM");
         }
         Chain.add(&last, make(b, linux_dir, o, toolchain, targets.items));
     }
-    return .{ .step = last, .v6 = dirs[0], .v7 = dirs[1], .src = linux_dir };
+    return .{ .step = last, .v6 = dirs[0], .v7 = dirs[1], .v8 = dirs[2], .src = linux_dir };
 }
 
 /// Raspberry Pi firmware (the GPU's boot loader), pinned by checksum.
@@ -609,10 +639,11 @@ const wifi_firmware = [_]struct { name: []const u8, source: []const u8, sha256: 
     .{ .name = "brcmfmac43430-sdio.bin", .source = "cypress/cyfmac43430-sdio.bin", .sha256 = "0717f8e798f3962230e76e9d840385ba127a38d31d6a55acd5c97cf53e4acc9d" },
     .{ .name = "brcmfmac43430-sdio.txt", .source = "brcm/brcmfmac43430-sdio.txt", .sha256 = "fc3949a4c32f07c18308e7e145c7615be314158e7d714a80e04e4791f16495f9" },
     .{ .name = "brcmfmac43430-sdio.clm_blob", .source = "cypress/cyfmac43430-sdio.clm_blob", .sha256 = "3376b9c9b32d16bf762e21c7fafb665365070ae240d092498d0d1987c22022aa" },
-    // CYW43455: the Pi 3 B+, 3 A+ and 4 B.
+    // CYW43455: the Pi 3 B+, 3 A+, 4 B and 5.
     .{ .name = "brcmfmac43455-sdio.bin", .source = "cypress/cyfmac43455-sdio-standard.bin", .sha256 = "d608f866582519c0a28d86db43040f4f1b98dd1d153e72e9752586546b4a36c3" },
     .{ .name = "brcmfmac43455-sdio.txt", .source = "brcm/brcmfmac43455-sdio.txt", .sha256 = "ca709be81a78bdb6932936374f39943acbd7af07fae6151011127599a3ce9e3d" },
     .{ .name = "brcmfmac43455-sdio.raspberrypi,4-model-b.txt", .source = "brcm/brcmfmac43455-sdio.txt", .sha256 = "ca709be81a78bdb6932936374f39943acbd7af07fae6151011127599a3ce9e3d" },
+    .{ .name = "brcmfmac43455-sdio.raspberrypi,5-model-b.txt", .source = "brcm/brcmfmac43455-sdio.txt", .sha256 = "ca709be81a78bdb6932936374f39943acbd7af07fae6151011127599a3ce9e3d" },
     .{ .name = "brcmfmac43455-sdio.clm_blob", .source = "cypress/cyfmac43455-sdio.clm_blob", .sha256 = "9823842cae9fb9a5dd1e5fb31f595516ec7deee341354bef30bb3026eee29cc1" },
     // CYW43436 (and the earlier 43436s): the Zero 2 W.
     .{ .name = "brcmfmac43436-sdio.bin", .source = "brcm/brcmfmac43436-sdio.bin", .sha256 = "510a7dd1e056199b309425548ee0bd846993a1837ac7fa1e4d3e641f05a1327a" },
@@ -737,10 +768,11 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.B
     const version = version_cmd.captureStdOut(.{ .basename = "version" });
     var files: std.ArrayList(CardFile) = .empty;
     files.appendSlice(b.allocator, &.{
-        // The firmware starts kernel.img on the ARMv6 boards and kernel7.img
-        // on the ARMv7 ones.
+        // The firmware starts kernel.img on the ARMv6 boards, kernel7.img on
+        // the ARMv7 ones (and Pi 4) and kernel8.img on the Pi 5.
         .{ "kernel.img", kernel.armv6(b) },
         .{ "kernel7.img", kernel.armv7(b) },
+        .{ "kernel8.img", kernel.arm64(b) },
         .{ "initramfs.cpio", initramfs },
         // What system the slot holds (sys.system.Version).
         .{ "version", version },
@@ -748,6 +780,7 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.B
     // Every board's device tree, and the overlays (the display driver, and
     // the cameras, applied when the firmware finds one).
     for (device_trees) |d| files.append(b.allocator, .{ d, kernel.deviceTree(b, d) }) catch @panic("OOM");
+    for (arm64_device_trees) |d| files.append(b.allocator, .{ d, kernel.arm64DeviceTree(b, d) }) catch @panic("OOM");
     for (overlays) |d| files.append(b.allocator, .{ b.fmt("overlays/{s}", .{d}), kernel.overlay(b, d) }) catch @panic("OOM");
     // The firmware takes overlays from the slot's overlays/ (config.txt's
     // os_prefix) only if there is a README there; otherwise it looks in

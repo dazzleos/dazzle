@@ -116,12 +116,14 @@ fn isDrmDriverCard(n: usize, driver_suffix: []const u8) bool {
     return std.mem.endsWith(u8, link[0..len], driver_suffix);
 }
 
-/// Whether the board is a BCM2711 (Raspberry Pi 4), where 3D rendering is
-/// driven by the separate `v3d` DRM driver alongside `vc4-drm` for display.
-fn isBcm2711() bool {
+/// Whether the board is a BCM2711 (Raspberry Pi 4) or BCM2712 (Raspberry Pi 5),
+/// where 3D rendering is driven by the separate `v3d` DRM driver alongside
+/// `vc4-drm` for display.
+fn needsV3d() bool {
     var buf: [128]u8 = undefined;
     const compat = sys.readFile("/sys/firmware/devicetree/base/compatible", &buf) orelse return false;
-    return std.mem.indexOf(u8, compat, "brcm,bcm2711") != null;
+    return std.mem.indexOf(u8, compat, "brcm,bcm2711") != null or
+        std.mem.indexOf(u8, compat, "brcm,bcm2712") != null;
 }
 
 /// The display's and GPU's parts in the device tree (platform devices
@@ -196,12 +198,12 @@ fn reportDevice(base: []const u8, name: []const u8) void {
 }
 
 /// DRM device nodes are created root-only (0600). Once the vc4 driver (and
-/// v3d on the Pi 4) has probed (it may still be loading firmware or waiting
-/// for other devices when init starts), hand every DRM node to the Dazzle
-/// user. The first process to open a card becomes its DRM master, which it
-/// needs for mode setting; init itself never opens them.
+/// v3d on the Pi 4 and 5) has probed (it may still be loading firmware or
+/// waiting for other devices when init starts), hand every DRM node to the
+/// Dazzle user. The first process to open a card becomes its DRM master,
+/// which it needs for mode setting; init itself never opens them.
 fn grantGpuAccess() void {
-    const needs_v3d = isBcm2711();
+    const needs_v3d = needsV3d();
     var found_vc4 = false;
     var found_v3d = !needs_v3d;
     var attempt: u32 = 0;

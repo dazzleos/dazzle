@@ -1,7 +1,8 @@
-//! VideoCore VI (V3D 4.2) 64-bit QPU instruction encoding.
+//! VideoCore VI (V3D 4.2) and VideoCore VII (V3D 7.1) 64-bit QPU instruction
+//! encoding.
 //!
 //! Mirrors Mesa's `src/broadcom/qpu/qpu_instr.h` and `qpu_pack.c` for V3D 4.2
-//! (`devinfo->ver == 42`).
+//! (`devinfo->ver == 42`) and V3D 7.1 (`devinfo->ver == 71`).
 
 const std = @import("std");
 
@@ -14,7 +15,7 @@ pub const EncodeError = error{
     InvalidPack,
 };
 
-pub const Sig = packed struct(u14) {
+pub const Sig = packed struct(u17) {
     thrsw: bool = false,
     ldunif: bool = false,
     ldunifa: bool = false,
@@ -28,7 +29,10 @@ pub const Sig = packed struct(u14) {
     ucb: bool = false,
     rotate: bool = false,
     wrtmuc: bool = false,
+    small_imm_a: bool = false,
     small_imm_b: bool = false,
+    small_imm_c: bool = false,
+    small_imm_d: bool = false,
 
     pub fn writesAddress(sig: Sig) bool {
         return sig.ldunifrf or sig.ldunifarf or sig.ldtmu or sig.ldvary or
@@ -71,8 +75,50 @@ const v3d42_sig_map = [32]?Sig{
     .{ .small_imm_b = true, .ldtmu = true }, // 31
 };
 
+const v3d71_sig_map = [32]?Sig{
+    .{}, // 0
+    .{ .thrsw = true }, // 1
+    .{ .ldunif = true }, // 2
+    .{ .thrsw = true, .ldunif = true }, // 3
+    .{ .ldtmu = true }, // 4
+    .{ .thrsw = true, .ldtmu = true }, // 5
+    .{ .ldtmu = true, .ldunif = true }, // 6
+    .{ .thrsw = true, .ldtmu = true, .ldunif = true }, // 7
+    .{ .ldvary = true }, // 8
+    .{ .thrsw = true, .ldvary = true }, // 9
+    .{ .ldvary = true, .ldunif = true }, // 10
+    .{ .thrsw = true, .ldvary = true, .ldunif = true }, // 11
+    .{ .ldunifrf = true }, // 12
+    .{ .thrsw = true, .ldunifrf = true }, // 13
+    .{ .small_imm_a = true }, // 14
+    .{ .small_imm_b = true }, // 15
+    .{ .ldtlb = true }, // 16
+    .{ .ldtlbu = true }, // 17
+    .{ .wrtmuc = true }, // 18
+    .{ .thrsw = true, .wrtmuc = true }, // 19
+    .{ .ldvary = true, .wrtmuc = true }, // 20
+    .{ .thrsw = true, .ldvary = true, .wrtmuc = true }, // 21
+    .{ .ucb = true }, // 22
+    .{ .rotate = true }, // 23
+    .{ .ldunifa = true }, // 24
+    .{ .ldunifarf = true }, // 25
+    null, // 26
+    null, // 27
+    null, // 28
+    null, // 29
+    .{ .small_imm_c = true }, // 30
+    .{ .small_imm_d = true }, // 31
+};
+
 pub fn packSig(sig: Sig) ?u5 {
     for (v3d42_sig_map, 0..) |entry, i| {
+        if (entry) |e| if (e == sig) return @intCast(i);
+    }
+    return null;
+}
+
+pub fn packSig71(sig: Sig) ?u5 {
+    for (v3d71_sig_map, 0..) |entry, i| {
         if (entry) |e| if (e == sig) return @intCast(i);
     }
     return null;
@@ -265,6 +311,20 @@ pub const Input = struct {
     unpack: InputUnpack = .none,
 };
 
+pub const Input71 = struct {
+    raddr: u6 = 0,
+    imm: bool = false,
+    unpack: InputUnpack = .none,
+
+    pub fn rf(addr: u6) Input71 {
+        return .{ .raddr = addr };
+    }
+
+    pub fn immVal(index: u6) Input71 {
+        return .{ .raddr = index, .imm = true };
+    }
+};
+
 pub const Dst = struct {
     waddr: u6 = W.nop,
     magic: bool = true,
@@ -367,11 +427,12 @@ pub const AddOp = enum {
     itof,
     clz,
     utof,
+    mov,
 
     pub fn numSrc(op: AddOp) u2 {
         return switch (op) {
             .nop, .tidx, .eidx, .lr, .vfla, .vflna, .vflb, .vflnb, .fxcd, .xcd, .fycd, .ycd, .msf, .revf, .iid, .sampid, .barrierid, .tmuwt, .vpmwt, .flafirst, .flnafirst => 0,
-            .not, .neg, .flapush, .flbpush, .flpop, .recip, .setmsf, .setrevf, .ldvpmv_in, .ldvpmv_out, .ldvpmd_in, .ldvpmd_out, .ldvpmp, .rsqrt, .exp, .log, .sin, .rsqrt2, .fround, .ftoin, .ftrunc, .ftoiz, .ffloor, .ftouz, .fceil, .ftoc, .fdx, .fdy, .itof, .clz, .utof => 1,
+            .not, .neg, .flapush, .flbpush, .flpop, .recip, .setmsf, .setrevf, .ldvpmv_in, .ldvpmv_out, .ldvpmd_in, .ldvpmd_out, .ldvpmp, .rsqrt, .exp, .log, .sin, .rsqrt2, .fround, .ftoin, .ftrunc, .ftoiz, .ffloor, .ftouz, .fceil, .ftoc, .fdx, .fdy, .itof, .clz, .utof, .mov => 1,
             else => 2,
         };
     }
@@ -452,6 +513,87 @@ pub const AddOp = enum {
             .itof => .{ .opcode = 252, .mux_b = 0 },
             .clz => .{ .opcode = 252, .mux_b = 3 },
             .utof => .{ .opcode = 252, .mux_b = 4 },
+            .mov => .{ .opcode = 249, .mux_b = 0 },
+        };
+    }
+
+    fn desc71(op: AddOp) struct { opcode: u8, raddr_b: u6 = 0, raddr_a: u6 = 0 } {
+        return switch (op) {
+            .fadd, .faddnf => .{ .opcode = 0 },
+            .vfpack => .{ .opcode = 53 },
+            .add => .{ .opcode = 56 },
+            .sub => .{ .opcode = 60 },
+            .fsub => .{ .opcode = 64 },
+            .min => .{ .opcode = 120 },
+            .max => .{ .opcode = 121 },
+            .umin => .{ .opcode = 122 },
+            .umax => .{ .opcode = 123 },
+            .shl => .{ .opcode = 124 },
+            .shr => .{ .opcode = 125 },
+            .asr => .{ .opcode = 126 },
+            .ror => .{ .opcode = 127 },
+            .fmin, .fmax => .{ .opcode = 128 },
+            .vfmin => .{ .opcode = 176 },
+            .@"and" => .{ .opcode = 181 },
+            .@"or" => .{ .opcode = 182 },
+            .xor => .{ .opcode = 183 },
+            .vadd => .{ .opcode = 184 },
+            .vsub => .{ .opcode = 185 },
+            .not => .{ .opcode = 186, .raddr_b = 0 },
+            .neg => .{ .opcode = 186, .raddr_b = 1 },
+            .flapush => .{ .opcode = 186, .raddr_b = 2 },
+            .flbpush => .{ .opcode = 186, .raddr_b = 3 },
+            .flpop => .{ .opcode = 186, .raddr_b = 4 },
+            .setmsf => .{ .opcode = 186, .raddr_b = 6 },
+            .setrevf => .{ .opcode = 186, .raddr_b = 7 },
+            .nop => .{ .opcode = 187, .raddr_b = 0 },
+            .tidx => .{ .opcode = 187, .raddr_b = 1 },
+            .eidx => .{ .opcode = 187, .raddr_b = 2 },
+            .lr => .{ .opcode = 187, .raddr_b = 3 },
+            .vfla => .{ .opcode = 187, .raddr_b = 4 },
+            .vflna => .{ .opcode = 187, .raddr_b = 5 },
+            .vflb => .{ .opcode = 187, .raddr_b = 6 },
+            .vflnb => .{ .opcode = 187, .raddr_b = 7 },
+            .fxcd => .{ .opcode = 187, .raddr_b = 8 },
+            .xcd => .{ .opcode = 187, .raddr_b = 9 },
+            .fycd => .{ .opcode = 187, .raddr_b = 10 },
+            .ycd => .{ .opcode = 187, .raddr_b = 11 },
+            .msf => .{ .opcode = 187, .raddr_b = 12 },
+            .revf => .{ .opcode = 187, .raddr_b = 13 },
+            .iid => .{ .opcode = 187, .raddr_b = 14 },
+            .tmuwt => .{ .opcode = 187, .raddr_b = 15 },
+            .vpmwt => .{ .opcode = 187, .raddr_b = 16 },
+            .sampid => .{ .opcode = 187, .raddr_b = 17 },
+            .barrierid => .{ .opcode = 187, .raddr_b = 18 },
+            .flafirst => .{ .opcode = 187, .raddr_b = 19 },
+            .flnafirst => .{ .opcode = 187, .raddr_b = 20 },
+            .ldvpmv_in, .ldvpmv_out => .{ .opcode = 188, .raddr_b = 0 },
+            .ldvpmd_in, .ldvpmd_out => .{ .opcode = 188, .raddr_b = 1 },
+            .ldvpmp => .{ .opcode = 188, .raddr_b = 2 },
+            .clz => .{ .opcode = 188, .raddr_b = 16 },
+            .itof => .{ .opcode = 188, .raddr_b = 20 },
+            .utof => .{ .opcode = 188, .raddr_b = 24 },
+            .recip => .{ .opcode = 188, .raddr_b = 32 },
+            .rsqrt => .{ .opcode = 188, .raddr_b = 33 },
+            .exp => .{ .opcode = 188, .raddr_b = 34 },
+            .log => .{ .opcode = 188, .raddr_b = 35 },
+            .sin => .{ .opcode = 188, .raddr_b = 36 },
+            .rsqrt2 => .{ .opcode = 188, .raddr_b = 37 },
+            .ldvpmg_in, .ldvpmg_out => .{ .opcode = 189 },
+            .stvpmv, .stvpmd, .stvpmp => .{ .opcode = 190 },
+            .fcmp => .{ .opcode = 192 },
+            .vfmax => .{ .opcode = 240 },
+            .fround => .{ .opcode = 245, .raddr_b = 0 },
+            .ftrunc => .{ .opcode = 245, .raddr_b = 1 },
+            .ffloor => .{ .opcode = 245, .raddr_b = 2 },
+            .fceil => .{ .opcode = 245, .raddr_b = 3 },
+            .fdx => .{ .opcode = 245, .raddr_b = 4 },
+            .fdy => .{ .opcode = 245, .raddr_b = 5 },
+            .ftoin => .{ .opcode = 245, .raddr_b = 12 },
+            .ftoiz => .{ .opcode = 245, .raddr_b = 13 },
+            .ftouz => .{ .opcode = 245, .raddr_b = 14 },
+            .ftoc => .{ .opcode = 245, .raddr_b = 15 },
+            .mov => .{ .opcode = 249, .raddr_b = 0 },
         };
     }
 };
@@ -490,6 +632,21 @@ pub const MulOp = enum {
             .fmul => .{ .opcode = 16 },
         };
     }
+
+    fn desc71(op: MulOp) struct { opcode: u6, raddr_d: u6 = 0, raddr_c: u6 = 0 } {
+        return switch (op) {
+            .add => .{ .opcode = 1 },
+            .sub => .{ .opcode = 2 },
+            .umul24 => .{ .opcode = 3 },
+            .vfmul => .{ .opcode = 4 },
+            .smul24 => .{ .opcode = 9 },
+            .multop => .{ .opcode = 10 },
+            .fmov => .{ .opcode = 12 },
+            .mov => .{ .opcode = 14, .raddr_d = 0 },
+            .nop => .{ .opcode = 14, .raddr_d = 63, .raddr_c = 0 },
+            .fmul => .{ .opcode = 16 },
+        };
+    }
 };
 
 pub const AluAdd = struct {
@@ -517,6 +674,31 @@ pub const Alu = struct {
     flags: Flags = .{},
     add: AluAdd = .{},
     mul: AluMul = .{},
+};
+
+pub const AluAdd71 = struct {
+    op: AddOp = .nop,
+    dst: Dst = .nop,
+    a: Input71 = .{},
+    b: Input71 = .{},
+    output_pack: OutputPack = .none,
+};
+
+pub const AluMul71 = struct {
+    op: MulOp = .nop,
+    dst: Dst = .nop,
+    a: Input71 = .{},
+    b: Input71 = .{},
+    output_pack: OutputPack = .none,
+};
+
+pub const Alu71 = struct {
+    sig: Sig = .{},
+    sig_addr: u6 = W.nop,
+    sig_magic: bool = false,
+    flags: Flags = .{},
+    add: AluAdd71 = .{},
+    mul: AluMul71 = .{},
 };
 
 const MA_BIT: u64 = 1 << 44;
@@ -802,3 +984,256 @@ test "V3D 4.2 QPU instruction packing matches Mesa qpu_pack" {
     try std.testing.expectEqual(@as(u3, 0), @as(u3, @truncate(fa >> 12)));
     try std.testing.expectEqual(@as(u3, 7), @as(u3, @truncate(fa >> 15)));
 }
+
+fn packAdd71(a: AluAdd71, sig: *Sig) EncodeError!u64 {
+    var waddr: u6 = a.dst.waddr;
+    var raddr_a: u6 = a.a.raddr;
+    var raddr_b: u6 = a.b.raddr;
+    const nsrc = a.op.numSrc();
+    const d = a.op.desc71();
+    var opcode: u8 = d.opcode;
+    var imm_a: bool = (nsrc >= 1 and a.a.imm) or sig.small_imm_a;
+    var imm_b: bool = (nsrc >= 2 and a.b.imm) or sig.small_imm_b;
+
+    if (nsrc < 2) raddr_b = d.raddr_b;
+    if (nsrc < 1) raddr_a = d.raddr_a;
+
+    var no_magic_write = false;
+    var extra_ma = false;
+    switch (a.op) {
+        .stvpmv => {
+            waddr = 0;
+            no_magic_write = true;
+        },
+        .stvpmd => {
+            waddr = 1;
+            no_magic_write = true;
+        },
+        .stvpmp => {
+            waddr = 2;
+            no_magic_write = true;
+        },
+        .ldvpmv_in, .ldvpmd_in, .ldvpmp, .ldvpmg_in => {
+            if (a.dst.magic) return error.InvalidOpcode;
+        },
+        .ldvpmv_out, .ldvpmd_out, .ldvpmg_out => {
+            if (a.dst.magic) return error.InvalidOpcode;
+            extra_ma = true;
+        },
+        else => {},
+    }
+
+    switch (a.op) {
+        .fadd, .faddnf, .fsub, .fmin, .fmax, .fcmp => {
+            const out_pack: u8 = @intFromEnum(a.output_pack);
+            opcode |= out_pack << 4;
+            var a_unp: u8 = a.a.unpack.packFloat32() orelse return error.InvalidPack;
+            var b_unp: u8 = a.b.unpack.packFloat32() orelse return error.InvalidPack;
+            const ordering = (@as(u16, a_unp) * 64 + raddr_a) > (@as(u16, b_unp) * 64 + raddr_b);
+            if (((a.op == .fmin or a.op == .fadd) and ordering) or
+                ((a.op == .fmax or a.op == .faddnf) and !ordering))
+            {
+                std.mem.swap(u8, &a_unp, &b_unp);
+                std.mem.swap(u6, &raddr_a, &raddr_b);
+                std.mem.swap(bool, &imm_a, &imm_b);
+            }
+            opcode |= (a_unp << 2) | b_unp;
+        },
+        .vfpack => {
+            if (a.a.unpack == .abs or a.b.unpack == .abs) return error.InvalidPack;
+            const a_unp: u8 = a.a.unpack.packFloat32() orelse return error.InvalidPack;
+            const b_unp: u8 = a.b.unpack.packFloat32() orelse return error.InvalidPack;
+            opcode = (opcode & ~@as(u8, 0xf)) | (a_unp << 2) | b_unp;
+        },
+        .ffloor, .fround, .ftrunc, .fceil, .fdx, .fdy => {
+            raddr_b |= @as(u6, @intFromEnum(a.output_pack)) << 4;
+            const a_unp: u8 = a.a.unpack.packFloat32() orelse return error.InvalidPack;
+            if (a_unp == 0) return error.InvalidPack;
+            opcode = (opcode & ~@as(u8, 0x3)) | a_unp;
+        },
+        .ftoin, .ftoiz, .ftouz, .ftoc => {
+            if (a.output_pack != .none) return error.InvalidPack;
+            const a_unp: u8 = a.a.unpack.packFloat32() orelse return error.InvalidPack;
+            if (a_unp == 0) return error.InvalidPack;
+            opcode = (opcode & ~@as(u8, 0x3)) | a_unp;
+        },
+        .itof, .utof => {
+            if (a.a.unpack != .none) return error.InvalidPack;
+            raddr_b |= @intFromEnum(a.output_pack);
+        },
+        .vfmin, .vfmax => {
+            if (a.output_pack != .none or a.b.unpack != .none) return error.InvalidPack;
+            const a_unp: u8 = a.a.unpack.packFloat16() orelse return error.InvalidPack;
+            opcode |= a_unp;
+        },
+        else => {
+            if (a.op != .nop and (a.output_pack != .none or a.a.unpack != .none or a.b.unpack != .none))
+                return error.InvalidPack;
+        },
+    }
+
+    sig.small_imm_a = imm_a;
+    sig.small_imm_b = imm_b;
+
+    var bits: u64 = 0;
+    bits |= @as(u64, raddr_b) << 0;
+    bits |= @as(u64, raddr_a) << 6;
+    bits |= @as(u64, opcode) << 24;
+    bits |= @as(u64, waddr) << 32;
+    if (extra_ma or (a.dst.magic and !no_magic_write)) bits |= MA_BIT;
+    return bits;
+}
+
+fn packMul71(m: AluMul71, sig: *Sig) EncodeError!u64 {
+    var raddr_c: u6 = m.a.raddr;
+    var raddr_d: u6 = m.b.raddr;
+    const nsrc = m.op.numSrc();
+    const d = m.op.desc71();
+    var opcode: u6 = d.opcode;
+
+    if (nsrc >= 1 and m.a.imm) sig.small_imm_c = true;
+    if (nsrc >= 2 and m.b.imm) sig.small_imm_d = true;
+
+    if (nsrc < 2) raddr_d = d.raddr_d;
+    if (nsrc < 1) raddr_c = d.raddr_c;
+
+    switch (m.op) {
+        .fmul => {
+            const out_pack: u6 = @intFromEnum(m.output_pack);
+            opcode += out_pack << 4;
+            const a_unp: u6 = m.a.unpack.packFloat32() orelse return error.InvalidPack;
+            const b_unp: u6 = m.b.unpack.packFloat32() orelse return error.InvalidPack;
+            opcode |= (a_unp << 2) | b_unp;
+        },
+        .fmov => {
+            const out_pack: u6 = @intFromEnum(m.output_pack);
+            opcode |= out_pack;
+            const a_unp: u6 = m.a.unpack.packFloat32() orelse return error.InvalidPack;
+            raddr_d = a_unp << 4;
+        },
+        .vfmul => {
+            if (m.output_pack != .none or m.b.unpack != .none) return error.InvalidPack;
+            const a_unp: u6 = m.a.unpack.packFloat16() orelse return error.InvalidPack;
+            if (m.a.unpack == .swap_16)
+                opcode = 8
+            else
+                opcode |= (a_unp + 4) & 7;
+        },
+        else => {
+            if (m.op != .nop and (m.output_pack != .none or m.a.unpack != .none or m.b.unpack != .none))
+                return error.InvalidPack;
+        },
+    }
+
+    var bits: u64 = 0;
+    bits |= @as(u64, raddr_d) << 12;
+    bits |= @as(u64, raddr_c) << 18;
+    bits |= @as(u64, opcode) << 58;
+    bits |= @as(u64, m.dst.waddr) << 38;
+    if (m.dst.magic) bits |= MM_BIT;
+    return bits;
+}
+
+pub fn alu71(a: Alu71) EncodeError!Inst {
+    var sig_s = a.sig;
+    const add_bits = try packAdd71(a.add, &sig_s);
+    const mul_bits = try packMul71(a.mul, &sig_s);
+    const sig = packSig71(sig_s) orelse return error.InvalidSignal;
+    var packed_inst: u64 = @as(u64, sig) << 53;
+    packed_inst |= add_bits;
+    packed_inst |= mul_bits;
+
+    var cond: u7 = 0;
+    if (sig_s.writesAddress()) {
+        cond = a.sig_addr;
+        if (a.sig_magic) cond |= 1 << 6;
+    } else {
+        cond = packFlags(a.flags) orelse return error.InvalidFlags;
+    }
+    packed_inst |= @as(u64, cond) << 46;
+    return packed_inst;
+}
+
+pub fn nop71() Inst {
+    return alu71(.{}) catch unreachable;
+}
+
+pub fn thrsw71() Inst {
+    return alu71(.{ .sig = .{ .thrsw = true } }) catch unreachable;
+}
+
+pub fn wrtmuc71() Inst {
+    return alu71(.{ .sig = .{ .wrtmuc = true } }) catch unreachable;
+}
+
+pub fn ldunifrf71(dst: Dst) Inst {
+    return alu71(.{
+        .sig = .{ .ldunifrf = true },
+        .sig_addr = dst.waddr,
+        .sig_magic = dst.magic,
+    }) catch unreachable;
+}
+
+pub fn ldvary71(dst: Dst) Inst {
+    return alu71(.{
+        .sig = .{ .ldvary = true },
+        .sig_addr = dst.waddr,
+        .sig_magic = dst.magic,
+    }) catch unreachable;
+}
+
+pub fn ldtmu71(dst: Dst) Inst {
+    return alu71(.{
+        .sig = .{ .ldtmu = true },
+        .sig_addr = dst.waddr,
+        .sig_magic = dst.magic,
+    }) catch unreachable;
+}
+
+pub fn ldtlbu71(dst: Dst) Inst {
+    return alu71(.{
+        .sig = .{ .ldtlbu = true },
+        .sig_addr = dst.waddr,
+        .sig_magic = dst.magic,
+    }) catch unreachable;
+}
+
+pub fn ldtlb71(dst: Dst) Inst {
+    return alu71(.{
+        .sig = .{ .ldtlb = true },
+        .sig_addr = dst.waddr,
+        .sig_magic = dst.magic,
+    }) catch unreachable;
+}
+
+test "V3D 7.1 QPU instruction packing matches Mesa qpu_pack" {
+    // Plain NOP on V3D 7.1: add=187 (raddr_b=0), mul=14 (raddr_d=63, raddr_c=0).
+    const n = nop71();
+    try std.testing.expectEqual(@as(u6, 14), @as(u6, @truncate(n >> 58)));
+    try std.testing.expectEqual(@as(u6, 63), @as(u6, @truncate(n >> 12)));
+    try std.testing.expectEqual(@as(u6, 0), @as(u6, @truncate(n >> 18)));
+    try std.testing.expectEqual(@as(u8, 187), @as(u8, @truncate(n >> 24)));
+    try std.testing.expect(n & MA_BIT != 0);
+    try std.testing.expect(n & MM_BIT != 0);
+
+    // fadd on V3D 7.1 swaps operands if (a_unpack*64 + raddr_a) > (b_unpack*64 + raddr_b).
+    const fa = try alu71(.{ .add = .{
+        .op = .fadd,
+        .dst = .rf(4),
+        .a = .{ .raddr = 10 },
+        .b = .{ .raddr = 3 },
+    } });
+    try std.testing.expectEqual(@as(u6, 3), @as(u6, @truncate(fa >> 6)));
+    try std.testing.expectEqual(@as(u6, 10), @as(u6, @truncate(fa >> 0)));
+
+    // SFU recip on V3D 7.1: opcode=188, raddr_b=32.
+    const rcp = try alu71(.{ .add = .{
+        .op = .recip,
+        .dst = .rf(5),
+        .a = .{ .raddr = 4 },
+    } });
+    try std.testing.expectEqual(@as(u8, 188), @as(u8, @truncate(rcp >> 24)));
+    try std.testing.expectEqual(@as(u6, 4), @as(u6, @truncate(rcp >> 6)));
+    try std.testing.expectEqual(@as(u6, 32), @as(u6, @truncate(rcp >> 0)));
+}
+

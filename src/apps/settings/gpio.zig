@@ -74,8 +74,8 @@ pub fn headerFor(model: []const u8) ?[]const Pin {
 
 /// What an alternate function of a pin is for, where it is one people use
 /// (null otherwise).
-pub fn altName(pin: u6, alt: u3) ?[]const u8 {
-    const table = [_]struct { u6, u3, []const u8 }{
+pub fn altName(pin: u6, alt: u4) ?[]const u8 {
+    const table = [_]struct { u6, u4, []const u8 }{
         .{ 0, 0, "I2C 0 data (HAT EEPROM)" }, .{ 1, 0, "I2C 0 clock (HAT EEPROM)" },
         .{ 0, 4, "UART 2 transmit" },         .{ 1, 4, "UART 2 receive" },
         .{ 2, 0, "I2C 1 data" },              .{ 3, 0, "I2C 1 clock" },
@@ -102,6 +102,52 @@ pub fn altName(pin: u6, alt: u3) ?[]const u8 {
         .{ 22, 5, "I2C 6 data" },             .{ 23, 5, "I2C 6 clock" },
         .{ 24, 4, "JTAG data out" },          .{ 25, 4, "JTAG clock" },
         .{ 26, 4, "JTAG data in" },           .{ 27, 4, "JTAG mode" },
+    };
+    for (table) |e| if (e[0] == pin and e[1] == alt) return e[2];
+    return null;
+}
+
+/// What an alternate function of an RP1 pin (Pi 5) is for.
+pub fn altNameRp1(pin: u6, alt: u4) ?[]const u8 {
+    const table = [_]struct { u6, u4, []const u8 }{
+        .{ 0, 0, "SPI 0 MISO" },              .{ 1, 0, "SPI 0 chip select 0" },
+        .{ 0, 2, "UART 1 transmit" },         .{ 1, 2, "UART 1 receive" },
+        .{ 0, 3, "I2C 0 data (HAT EEPROM)" }, .{ 1, 3, "I2C 0 clock (HAT EEPROM)" },
+        .{ 0, 8, "SPI 2 chip select 0" },     .{ 1, 8, "SPI 2 MISO" },
+        .{ 2, 0, "SPI 0 MOSI" },              .{ 3, 0, "SPI 0 clock" },
+        .{ 2, 3, "I2C 1 data" },              .{ 3, 3, "I2C 1 clock" },
+        .{ 2, 8, "SPI 2 MOSI" },              .{ 3, 8, "SPI 2 clock" },
+        .{ 4, 0, "General clock 0" },         .{ 5, 0, "General clock 1" },
+        .{ 4, 2, "UART 2 transmit" },         .{ 5, 2, "UART 2 receive" },
+        .{ 4, 3, "I2C 2 data" },              .{ 5, 3, "I2C 2 clock" },
+        .{ 4, 8, "SPI 3 chip select 0" },     .{ 5, 8, "SPI 3 MISO" },
+        .{ 6, 0, "General clock 2" },         .{ 7, 0, "SPI 0 chip select 1" },
+        .{ 6, 3, "I2C 3 data" },              .{ 7, 3, "I2C 3 clock" },
+        .{ 6, 8, "SPI 3 MOSI" },              .{ 7, 8, "SPI 3 clock" },
+        .{ 8, 0, "SPI 0 chip select 0" },     .{ 9, 0, "SPI 0 MISO" },
+        .{ 8, 2, "UART 3 transmit" },         .{ 9, 2, "UART 3 receive" },
+        .{ 8, 3, "I2C 0 data" },              .{ 9, 3, "I2C 0 clock" },
+        .{ 8, 8, "SPI 4 chip select 0" },     .{ 9, 8, "SPI 4 MISO" },
+        .{ 10, 0, "SPI 0 MOSI" },             .{ 11, 0, "SPI 0 clock" },
+        .{ 10, 3, "I2C 1 data" },             .{ 11, 3, "I2C 1 clock" },
+        .{ 10, 8, "SPI 4 MOSI" },             .{ 11, 8, "SPI 4 clock" },
+        .{ 12, 0, "PWM 0" },                  .{ 13, 0, "PWM 1" },
+        .{ 12, 2, "UART 4 transmit" },        .{ 13, 2, "UART 4 receive" },
+        .{ 12, 3, "I2C 2 data" },             .{ 13, 3, "I2C 2 clock" },
+        .{ 12, 8, "SPI 5 chip select 0" },    .{ 13, 8, "SPI 5 MISO" },
+        .{ 14, 0, "PWM 2" },                  .{ 15, 0, "PWM 3" },
+        .{ 14, 3, "I2C 3 data" },             .{ 15, 3, "I2C 3 clock" },
+        .{ 14, 4, "UART 0 transmit" },        .{ 15, 4, "UART 0 receive" },
+        .{ 14, 8, "SPI 5 MOSI" },             .{ 15, 8, "SPI 5 clock" },
+        .{ 16, 0, "SPI 1 chip select 2" },    .{ 17, 0, "SPI 1 chip select 1" },
+        .{ 18, 0, "SPI 1 chip select 0" },    .{ 18, 2, "PCM clock" },
+        .{ 18, 3, "PWM 2" },                  .{ 18, 8, "General clock 1" },
+        .{ 19, 0, "SPI 1 MISO" },             .{ 19, 2, "PCM frame" },
+        .{ 19, 3, "PWM 3" },                  .{ 20, 0, "SPI 1 MOSI" },
+        .{ 20, 2, "PCM in" },                 .{ 20, 3, "General clock 0" },
+        .{ 21, 0, "SPI 1 clock" },            .{ 21, 2, "PCM out" },
+        .{ 21, 3, "General clock 1" },        .{ 22, 3, "I2C 3 data" },
+        .{ 23, 3, "I2C 3 clock" },
     };
     for (table) |e| if (e[0] == pin and e[1] == alt) return e[2];
     return null;
@@ -206,6 +252,12 @@ pub const Pins = struct {
         return p.chip != null and !p.lines[pin].used;
     }
 
+    /// What an alternate function of a pin is for on this board's GPIO chip.
+    pub fn altName(p: *const Pins, pin: u6, alt: u4) ?[]const u8 {
+        const is_rp1 = if (p.regs) |r| r.isRp1() else false;
+        return if (is_rp1) altNameRp1(pin, alt) else @import("gpio.zig").altName(pin, alt);
+    }
+
     /// How the pin is set up, as far as is known: an output's level is
     /// read, but an input's pull only if it was set here.
     pub fn mode(p: *const Pins, pin: u6) ?Mode {
@@ -255,6 +307,8 @@ fn describe(err: anyerror) []const u8 {
 const testing = std.testing;
 
 test "headers by board" {
+    try testing.expectEqual(@as(usize, 40), headerFor("Raspberry Pi 5 Model B Rev 1.0").?.len);
+    try testing.expectEqual(@as(usize, 40), headerFor("Raspberry Pi 500 Rev 1.0").?.len);
     try testing.expectEqual(@as(usize, 40), headerFor("Raspberry Pi 4 Model B Rev 1.1").?.len);
     try testing.expectEqual(@as(usize, 40), headerFor("Raspberry Pi 400 Rev 1.0").?.len);
     try testing.expectEqual(@as(usize, 40), headerFor("Raspberry Pi 3 Model B Plus Rev 1.3").?.len);
@@ -269,6 +323,7 @@ test "headers by board" {
     try testing.expectEqual(Pin{ .gpio = 21 }, b1[12]);
     try testing.expect(headerFor("Raspberry Pi Compute Module 3 Rev 1.0") == null);
     try testing.expect(headerFor("Raspberry Pi Compute Module 4 Rev 1.0") == null);
+    try testing.expect(headerFor("Raspberry Pi Compute Module 5 Rev 1.0") == null);
     // Every GPIO 0-27 is on the 40-pin header, once.
     var seen: [28]bool = @splat(false);
     for (header_40) |pin| switch (pin) {
@@ -293,5 +348,7 @@ test "what a pin is set up as" {
     try testing.expect(p.mode(2) == null);
     try testing.expect(!p.settable(2));
     try testing.expectEqualStrings("I2C 1 data", altName(2, 0).?);
+    try testing.expectEqualStrings("I2C 1 data", altNameRp1(2, 3).?);
+    try testing.expectEqualStrings("UART 0 transmit", altNameRp1(14, 4).?);
     try testing.expect(altName(17, 0) == null);
 }

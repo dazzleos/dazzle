@@ -19,21 +19,27 @@ const sys = @import("sys.zig");
 pub const line_count = 54;
 
 pub const gpiomem_path = "/dev/gpiomem";
+pub const gpiomem0_path = "/dev/gpiomem0";
+pub const gpiomem1_path = "/dev/gpiomem1";
+pub const rp1_bank_size = 0xc000;
 
-/// What a pin does: GPIO in or out, or one of six alternate functions (I2C,
-/// SPI, UART, PWM, ...: which depends on the pin).
-pub const Function = enum(u3) {
-    input = 0b000,
-    output = 0b001,
-    alt0 = 0b100,
-    alt1 = 0b101,
-    alt2 = 0b110,
-    alt3 = 0b111,
-    alt4 = 0b011,
-    alt5 = 0b010,
+/// What a pin does: GPIO in or out, or an alternate function (I2C, SPI,
+/// UART, PWM, ...: which depends on the pin).
+pub const Function = enum(u4) {
+    input = 0b0000,
+    output = 0b0001,
+    alt0 = 0b0100,
+    alt1 = 0b0101,
+    alt2 = 0b0110,
+    alt3 = 0b0111,
+    alt4 = 0b0011,
+    alt5 = 0b0010,
+    alt6 = 0b1000,
+    alt7 = 0b1001,
+    alt8 = 0b1010,
 
     /// The alternate function's number, if it is one.
-    pub fn alt(f: Function) ?u3 {
+    pub fn alt(f: Function) ?u4 {
         return switch (f) {
             .input, .output => null,
             .alt0 => 0,
@@ -42,38 +48,61 @@ pub const Function = enum(u3) {
             .alt3 => 3,
             .alt4 => 4,
             .alt5 => 5,
+            .alt6 => 6,
+            .alt7 => 7,
+            .alt8 => 8,
         };
     }
 };
 
-/// The GPIO registers, mapped read-only.
+/// The GPIO registers, mapped read-only. On the Pi 5, the RP1 southbridge's
+/// IO_BANK0..2 are at /dev/gpiomem0 and SYS_RIO0..2 at /dev/gpiomem1; on
+/// earlier boards, BCM283x's registers are at /dev/gpiomem.
 pub const Registers = struct {
     regs: []align(std.heap.page_size_min) const u8,
+    rio: ?[]align(std.heap.page_size_min) const u8 = null,
 
     pub fn open() !Registers {
-        const fd = try sys.open(gpiomem_path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .SYNC = true });
+        if (mapFile(gpiomem0_path, rp1_bank_size)) |io| {
+            const rio = mapFile(gpiomem1_path, rp1_bank_size) catch |err| {
+                _ = linux.munmap(io.ptr, io.len);
+                return err;
+            };
+            return .{ .regs = io, .rio = rio };
+        } else |_| {}
+        return .{ .regs = try mapFile(gpiomem_path, 4096) };
+    }
+
+    fn mapFile(path: [:0]const u8, len: usize) ![]align(std.heap.page_size_min) const u8 {
+        const fd = try sys.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .SYNC = true });
         defer sys.close(fd);
-        const rc = linux.mmap(null, 4096, .{ .READ = true }, .{ .TYPE = .SHARED }, fd, 0);
+        const rc = linux.mmap(null, len, .{ .READ = true }, .{ .TYPE = .SHARED }, fd, 0);
         if (linux.errno(rc) != .SUCCESS) return error.Unexpected;
         const p: [*]align(std.heap.page_size_min) const u8 = @ptrFromInt(rc);
-        return .{ .regs = p[0..4096] };
+        return p[0..len];
     }
 
     pub fn close(r: *Registers) void {
         _ = linux.munmap(r.regs.ptr, r.regs.len);
+        if (r.rio) |rio| _ = linux.munmap(rio.ptr, rio.len);
     }
 
-    fn word(r: *const Registers, offset: usize) u32 {
-        const p: *const volatile u32 = @ptrCast(@alignCast(r.regs.ptr + offset));
+    pub fn isRp1(r: *const Registers) bool {
+        return r.rio != null;
+    }
+
+    fn word(buf: []align(std.heap.page_size_min) const u8, offset: usize) u32 {
+        const p: *const volatile u32 = @ptrCast(@alignCast(buf.ptr + offset));
         return p.*;
     }
 
     /// What every pin does, and its level.
     pub fn read(r: *const Registers) State {
+        if (r.rio) |rio| return readRp1(r.regs, rio);
         var s: State = .{};
         // GPFSEL0..5: three bits a pin, ten pins a register.
         for (0..6) |i| {
-            const w = r.word(i * 4);
+            const w = word(r.regs, i * 4);
             for (0..10) |j| {
                 const pin = i * 10 + j;
                 if (pin >= line_count) break;
@@ -81,7 +110,43 @@ pub const Registers = struct {
             }
         }
         // GPLEV0..1.
-        s.levels = @as(u64, r.word(0x34)) | @as(u64, r.word(0x38)) << 32;
+        s.levels = @as(u64, word(r.regs, 0x34)) | @as(u64, word(r.regs, 0x38)) << 32;
+        return s;
+    }
+
+    fn readRp1(io: []align(std.heap.page_size_min) const u8, rio: []align(std.heap.page_size_min) const u8) State {
+        var s: State = .{};
+        const banks = [_]struct { start: usize, count: usize, off: usize }{
+            .{ .start = 0, .count = 28, .off = 0x0000 },
+            .{ .start = 28, .count = 6, .off = 0x4000 },
+            .{ .start = 34, .count = 20, .off = 0x8000 },
+        };
+        for (banks) |b| {
+            const rio_oe = word(rio, b.off + 0x0004);
+            const rio_in = word(rio, b.off + 0x0008);
+            for (0..b.count) |p| {
+                const pin = b.start + p;
+                const ctrl = word(io, b.off + p * 8 + 4);
+                const funcsel: u5 = @truncate(ctrl);
+                const oeover: u2 = @truncate(ctrl >> 14);
+                const is_out = (rio_oe >> @intCast(p)) & 1 != 0;
+                s.functions[pin] = if (oeover == 2)
+                    .input
+                else switch (funcsel) {
+                    0 => .alt0,
+                    1 => .alt1,
+                    2 => .alt2,
+                    3 => .alt3,
+                    4 => .alt4,
+                    5 => if (is_out) .output else .input,
+                    6 => .alt6,
+                    7 => .alt7,
+                    8 => .alt8,
+                    else => if (is_out) .output else .input,
+                };
+                if ((rio_in >> @intCast(p)) & 1 != 0) s.levels |= @as(u64, 1) << @intCast(pin);
+            }
+        }
         return s;
     }
 };
@@ -302,5 +367,40 @@ test "functions from the registers" {
     try testing.expectEqual(Function.alt5, s.functions[14]);
     try testing.expectEqual(Function.alt3, s.functions[53]);
     try testing.expect(s.level(1) and s.level(33) and !s.level(0));
-    try testing.expectEqual(@as(?u3, 5), Function.alt5.alt());
+    try testing.expectEqual(@as(?u4, 5), Function.alt5.alt());
+}
+
+test "functions from RP1 registers" {
+    var io: [rp1_bank_size]u8 align(std.heap.page_size_min) = @splat(0);
+    var rio: [rp1_bank_size]u8 align(std.heap.page_size_min) = @splat(0);
+    const put = struct {
+        fn f(p: []u8, off: usize, v: u32) void {
+            std.mem.writeInt(u32, p[off..][0..4], v, .little);
+        }
+    }.f;
+    // Pin 0: FUNCSEL=5 (GPIO), RIO_OE bit 0 = 1 -> output.
+    put(&io, 0x0000 + 0 * 8 + 4, 5);
+    // Pin 1: FUNCSEL=5 (GPIO), RIO_OE bit 1 = 0 -> input.
+    put(&io, 0x0000 + 1 * 8 + 4, 5);
+    // Pin 2: FUNCSEL=3 (ALT3 = I2C1 SDA).
+    put(&io, 0x0000 + 2 * 8 + 4, 3);
+    // Pin 14: FUNCSEL=4 (ALT4 = UART0 TX).
+    put(&io, 0x0000 + 14 * 8 + 4, 4);
+    // Pin 18: FUNCSEL=8 (ALT8 = GPCLK1).
+    put(&io, 0x0000 + 18 * 8 + 4, 8);
+    // Bank 0 RIO_OE (pin 0 output) and RIO_IN (pin 1 high).
+    put(&rio, 0x0004, 1 << 0);
+    put(&rio, 0x0008, 1 << 1);
+    // Pin 33 (Bank 1, p = 5): FUNCSEL=5, RIO_IN bit 5 = 1.
+    put(&io, 0x4000 + 5 * 8 + 4, 5);
+    put(&rio, 0x4008, 1 << 5);
+    const r: Registers = .{ .regs = &io, .rio = &rio };
+    const s = r.read();
+    try testing.expect(r.isRp1());
+    try testing.expectEqual(Function.output, s.functions[0]);
+    try testing.expectEqual(Function.input, s.functions[1]);
+    try testing.expectEqual(Function.alt3, s.functions[2]);
+    try testing.expectEqual(Function.alt4, s.functions[14]);
+    try testing.expectEqual(Function.alt8, s.functions[18]);
+    try testing.expect(s.level(1) and s.level(33) and !s.level(0));
 }
