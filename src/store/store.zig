@@ -34,7 +34,7 @@ const catalogue_file = apps_dir ++ "/.catalogue.json";
 const ca_file = "/os/certs/ca-certificates.pem";
 
 /// The most an archive or the catalogue may be.
-pub const max_download = 64 * 1024 * 1024;
+pub const max_download = 128 * 1024 * 1024;
 
 pub const App = struct {
     name: []const u8,

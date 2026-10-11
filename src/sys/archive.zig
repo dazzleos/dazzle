@@ -7,8 +7,8 @@ const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys.zig");
 
-/// The most an archive may hold, unpacked: it is unpacked in memory.
-pub const max_unpacked = 64 * 1024 * 1024;
+/// The most an archive may hold, unpacked.
+pub const max_unpacked = 512 * 1024 * 1024;
 
 /// Unpacks `archive` (the folder `root`, as tar compressed with xz) into
 /// `dest`, which must be there: `root/a/b` becomes `dest/a/b`. Files are
@@ -18,16 +18,21 @@ pub fn extract(gpa: std.mem.Allocator, archive: []const u8, root: []const u8, de
     var input: std.Io.Reader = .fixed(archive);
     var xz = std.compress.xz.Decompress.init(&input, gpa, &.{}) catch return error.BadArchive;
     defer xz.deinit();
-    var tar: std.Io.Writer.Allocating = .init(gpa);
-    defer tar.deinit();
-    _ = xz.reader.streamRemaining(&tar.writer) catch |err| return if (err == error.WriteFailed) error.OutOfMemory else error.BadArchive;
-    if (tar.written().len > max_unpacked) return error.BadArchive;
 
-    var tar_reader: std.Io.Reader = .fixed(tar.written());
+    var tar_buf: [1024]u8 = undefined;
+    var xz_reader: XzReader = .{
+        .xz = &xz,
+        .interface = .{
+            .vtable = &.{ .stream = XzReader.stream, .discard = XzReader.discard },
+            .buffer = &tar_buf,
+            .seek = 0,
+            .end = 0,
+        },
+    };
     var file_name_buf: [256]u8 = undefined;
     var link_name_buf: [256]u8 = undefined;
-    var it: std.tar.Iterator = .init(&tar_reader, .{ .file_name_buffer = &file_name_buf, .link_name_buffer = &link_name_buf });
-    while (it.next() catch return error.BadArchive) |f| {
+    var it: std.tar.Iterator = .init(&xz_reader.interface, .{ .file_name_buffer = &file_name_buf, .link_name_buffer = &link_name_buf });
+    while (it.next() catch return xzError(&xz)) |f| {
         const name = std.mem.trimEnd(u8, f.name, "/");
         const rel = inside(name, root) orelse return error.BadArchive;
         if (rel.len == 0) {
@@ -47,7 +52,7 @@ pub fn extract(gpa: std.mem.Allocator, archive: []const u8, root: []const u8, de
                 _ = linux.fchmod(fd, if (f.mode & 0o100 != 0) 0o755 else 0o644);
                 var w_buf: [16 * 1024]u8 = undefined;
                 var fw: FdWriter = .{ .fd = fd, .interface = .{ .vtable = &.{ .drain = FdWriter.drain }, .buffer = &w_buf } };
-                it.streamRemaining(f, &fw.interface) catch return if (fw.failed) error.WriteFailed else error.BadArchive;
+                it.streamRemaining(f, &fw.interface) catch return if (fw.failed) error.WriteFailed else xzError(&xz);
                 fw.interface.flush() catch return error.WriteFailed;
                 _ = try sys.check(linux.fsync(fd));
             },
@@ -56,6 +61,48 @@ pub fn extract(gpa: std.mem.Allocator, archive: []const u8, root: []const u8, de
         }
     }
 }
+
+fn xzError(xz: *const std.compress.xz.Decompress) error{ OutOfMemory, BadArchive } {
+    if (xz.err) |e| if (e == error.OutOfMemory) return error.OutOfMemory;
+    return error.BadArchive;
+}
+
+/// Streams decompressed XZ blocks one at a time into `std.tar.Iterator`,
+/// reusing `xz.reader.buffer` across blocks and implementing `discard`.
+const XzReader = struct {
+    xz: *std.compress.xz.Decompress,
+    unpacked: usize = 0,
+    interface: std.Io.Reader,
+
+    fn fillBlock(self: *XzReader) std.Io.Reader.Error![]const u8 {
+        const r = &self.xz.reader;
+        while (r.seek == r.end) {
+            r.seek = 0;
+            r.end = 0;
+            _ = try r.vtable.readVec(r, &.{});
+            self.unpacked +|= r.end;
+            if (self.unpacked > max_unpacked) return error.ReadFailed;
+        }
+        return r.buffer[r.seek..r.end];
+    }
+
+    fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+        const self: *XzReader = @alignCast(@fieldParentPtr("interface", r));
+        const avail = try self.fillBlock();
+        const slice = limit.sliceConst(avail);
+        const n = try w.write(slice);
+        self.xz.reader.seek += n;
+        return n;
+    }
+
+    fn discard(r: *std.Io.Reader, limit: std.Io.Limit) std.Io.Reader.Error!usize {
+        const self: *XzReader = @alignCast(@fieldParentPtr("interface", r));
+        const avail = try self.fillBlock();
+        const n = limit.minInt(avail.len);
+        self.xz.reader.seek += n;
+        return n;
+    }
+};
 
 /// `name` relative to the folder `root` ("" for the folder itself); null
 /// if it is not in it, or has "." or ".." in it.

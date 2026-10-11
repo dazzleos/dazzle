@@ -90,4 +90,6 @@ pub const Icon = enum {
     public,
     layers,
     my_location,
+    // Develop.
+    code,
 };

@@ -125,7 +125,7 @@ fn checkSha256(init: std.process.Init, args: []const [:0]const u8) !bool {
     var ok = true;
     var i: usize = 0;
     while (i < args.len) : (i += 2) {
-        const data = try cwd.readFileAlloc(init.io, args[i], gpa, .limited(64 << 20));
+        const data = try cwd.readFileAlloc(init.io, args[i], gpa, .limited(256 << 20));
         defer gpa.free(data);
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(data, &digest, .{});

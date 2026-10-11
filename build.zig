@@ -56,6 +56,11 @@ const App = struct {
     /// The kinds of files it opens (MIME types), for Files to offer it:
     /// <name>.handles in its folder (see src/sys/apps.zig).
     handles: []const []const u8 = &.{},
+    /// Third-party software built into or bundled with the app (in notices/).
+    notices: []const []const u8 = &.{"MaterialIcons"},
+    /// Extra arguments to `mkapp` (and the step that prepares them, if any).
+    extra_args: []const []const u8 = &.{},
+    extra_step: ?*std.Build.Step = null,
 };
 
 /// Each app as an archive to download (zig-out/apps/<name>.tar.xz: its
@@ -76,6 +81,7 @@ fn addAppArchives(b: *std.Build, apps: []const App) *std.Build.Step {
         const icon_png = b.path(b.fmt("{s}/icon.png", .{app_dir}));
         const icon_rel = b.fmt("icons/{s}.png", .{name});
         const pack = b.addRunArtifact(hostTool(b, "mkapp"));
+        if (a.extra_step) |es| pack.step.dependOn(es);
         const tar = pack.addOutputFileArg(b.fmt("{s}.tar", .{name}));
         pack.addArg(name);
         pack.addArtifactArg(a.exe);
@@ -88,8 +94,9 @@ fn addAppArchives(b: *std.Build, apps: []const App) *std.Build.Step {
             const handles = b.addWriteFiles().add(b.fmt("{s}.handles", .{name}), text.items);
             pack.addPrefixedFileArg(b.fmt("{s}.handles=", .{name}), handles);
         }
-        pack.addPrefixedFileArg("NOTICES=", noticesFile(b, b.fmt("the {s} app", .{a.title}), &.{"MaterialIcons"}));
-        const compress = b.addSystemCommand(&.{ "xz", "-9", "-c" });
+        pack.addPrefixedFileArg("NOTICES=", noticesFile(b, b.fmt("the {s} app", .{a.title}), a.notices));
+        pack.addArgs(a.extra_args);
+        const compress = b.addSystemCommand(&.{ "xz", "-9", "--block-size=4MiB", "-c" });
         compress.step.dependOn(&xz.step);
         compress.addFileArg(tar);
         const archive = compress.captureStdOut(.{ .basename = b.fmt("{s}.tar.xz", .{name}) });
@@ -700,6 +707,35 @@ fn fetchWifiFirmware(b: *std.Build) *std.Build.Step {
     }.url);
 }
 
+/// The ARM Linux Zig compiler bundled into the Develop app, pinned by
+/// version and checksum.
+const zig_version = "0.16.0";
+const zig_arm_archive = [_]struct { name: []const u8, sha256: []const u8 }{
+    .{ .name = "zig-arm-linux-" ++ zig_version ++ ".tar.xz", .sha256 = "f85116bf2f9189bb6ae280c7f92f03b89c2551a88e17881c0c2df86bf4e42c50" },
+};
+
+fn fetchArmZig(b: *std.Build) *std.Build.Step {
+    const dir = b.pathFromRoot("build/zig");
+    const verify = fetchPinned(b, dir, zig_arm_archive, struct {
+        fn url(bb: *std.Build, f: @TypeOf(zig_arm_archive[0])) []const u8 {
+            return bb.fmt("https://ziglang.org/download/{s}/{s}", .{ zig_version, f.name });
+        }
+    }.url);
+    const tools = requireTools(b, &.{ "tar:tar", "xz:xz-utils" });
+    const unpack = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        "test -x \"$2/zig-arm-linux-" ++ zig_version ++ "/zig\" || tar -xJf \"$1\" -C \"$2\"",
+        "unpack-zig",
+        b.pathJoin(&.{ dir, zig_arm_archive[0].name }),
+        dir,
+    });
+    unpack.step.dependOn(verify);
+    unpack.step.dependOn(&tools.step);
+    unpack.has_side_effects = true;
+    return &unpack.step;
+}
+
 /// Where the boot partition ends on the card, in MiB, once init has grown it
 /// on the first start: room for both slots to grow several times over
 /// (each holds about 5 MB now), as it cannot grow once /data follows it.
@@ -1012,6 +1048,11 @@ pub fn build(b: *std.Build) void {
         .root_module = addProgramModule(b, "src/apps/terminal/main.zig", target, optimize, pi, shaders, true),
     });
     const install_terminal = b.addInstallArtifact(terminal_exe, .{});
+    const develop_exe = b.addExecutable(.{
+        .name = "dazzle-develop",
+        .root_module = addProgramModule(b, "src/apps/develop/main.zig", target, optimize, pi, shaders, true),
+    });
+    const install_develop = b.addInstallArtifact(develop_exe, .{});
 
     // Host tool that packs the init binary into a cpio initramfs.
     const mkinitramfs = b.addExecutable(.{
@@ -1051,6 +1092,7 @@ pub fn build(b: *std.Build) void {
     // are not part of the system or the image: each is an archive to
     // download and install, in setup or from Settings (zig-out/apps/, with
     // the catalogue).
+    const zig_root = b.pathFromRoot("build/zig/zig-arm-linux-" ++ zig_version);
     const apps = [_]App{
         .{ .exe = demo_exe, .icon = .view_in_ar, .title = "Demo", .description = "A spinning 3D shape that shows off the graphics, with controls to play with" },
         .{ .exe = files_exe, .icon = .folder, .title = "Files", .description = "Browse your files, and look inside them: text, pictures and fonts" },
@@ -1060,13 +1102,31 @@ pub fn build(b: *std.Build) void {
         .{ .exe = logger_exe, .icon = .show_chart, .title = "Data Logger", .description = "Record GPIO pins, analog inputs, I2C devices and serial ports over time, and save them as CSV" },
         .{ .exe = maps_exe, .icon = .public, .title = "Maps", .description = "Explore the Earth on an interactive 3D globe, with offline world maps and remote tiles" },
         .{ .exe = terminal_exe, .icon = .terminal, .title = "Terminal", .description = "An interactive shell with built-in command-line tools for managing files and inspecting the system" },
+        .{
+            .exe = develop_exe,
+            .icon = .code,
+            .title = "Develop",
+            .description = "Write Zig programs and run them on Dazzle, with the Zig compiler built in",
+            .notices = &.{ "MaterialIcons", "Zig" },
+            .extra_step = fetchArmZig(b),
+            .extra_args = &.{
+                b.fmt("--exe=zig/zig={s}/zig", .{zig_root}),
+                b.fmt("zig/LICENSE={s}/LICENSE", .{zig_root}),
+                "--exclude=zig/lib/libc",
+                "--exclude=zig/lib/libcxx",
+                "--exclude=zig/lib/libcxxabi",
+                "--exclude=zig/lib/libunwind",
+                "--exclude=zig/lib/tsan",
+                b.fmt("--dir=zig/lib={s}/lib", .{zig_root}),
+            },
+        },
     };
     const apps_step = b.step("apps", "Build the apps' archives and their catalogue (zig-out/apps)");
     apps_step.dependOn(addAppArchives(b, &apps));
     b.getInstallStep().dependOn(apps_step);
     const install_initramfs = b.addInstallFile(initramfs, "initramfs.cpio");
     const programs_step = b.step("programs", "Build just the programs (zig-out/bin) and zig-out/initramfs.cpio");
-    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_settings.step, &install_files.step, &install_camera.step, &install_text_editor.step, &install_logger.step, &install_blocks.step, &install_maps.step, &install_terminal.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
+    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_settings.step, &install_files.step, &install_camera.step, &install_text_editor.step, &install_logger.step, &install_blocks.step, &install_maps.step, &install_terminal.step, &install_develop.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
         programs_step.dependOn(st);
         b.getInstallStep().dependOn(st);
     }
@@ -1119,6 +1179,8 @@ pub fn build(b: *std.Build) void {
     host_maps.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_terminal = addProgramModule(b, "src/apps/terminal/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_terminal.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
+    const host_develop = addProgramModule(b, "src/apps/develop/main.zig", b.graph.host, test_optimize, host, shaders, false);
+    host_develop.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     for ([_]*std.Build.Module{
         host.sys,
         host.vc4,
@@ -1142,11 +1204,13 @@ pub fn build(b: *std.Build) void {
         host_setup,
         host_maps,
         host_terminal,
+        host_develop,
         addProgramModule(b, "src/shell/main.zig", b.graph.host, test_optimize, host, shaders, false),
     }) |m| {
         const t = b.addTest(.{ .root_module = m });
         test_step.dependOn(&b.addRunArtifact(t).step);
     }
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hostTool(b, "mkapp").root_module })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hostTool(b, "mkimage").root_module })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hostTool(b, "mkos").root_module })).step);
 
