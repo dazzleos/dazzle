@@ -196,8 +196,8 @@ pub const Pins = struct {
     read_failure: ?[]const u8 = null,
     set_failure: ?[]const u8 = null,
     lines: [gpio.line_count]Line = @splat(.{}),
-    /// How each pin was set up here (pulls cannot be read back), while
-    /// Settings runs.
+    /// How each pin was set up here (pulls cannot be read back from the
+    /// registers), while Settings runs.
     modes: [gpio.line_count]?Mode = @splat(null),
     /// What the last change was, and why it could not be made.
     last_pin: ?u6 = null,
@@ -258,16 +258,16 @@ pub const Pins = struct {
         return if (is_rp1) altNameRp1(pin, alt) else @import("gpio.zig").altName(pin, alt);
     }
 
-    /// How the pin is set up, as far as is known: an output's level is
-    /// read, but an input's pull only if it was set here.
+    /// How the pin is set up: an output's level is read, and an input's
+    /// pull is what was set here, or its pull at start.
     pub fn mode(p: *const Pins, pin: u6) ?Mode {
         const l = &p.lines[pin];
         return switch (l.function) {
             .output => if (l.high) .output_high else .output_low,
             .input => if (p.modes[pin]) |m| switch (m) {
                 .input, .input_pull_up, .input_pull_down => m,
-                else => null,
-            } else null,
+                else => defaultInputMode(pin),
+            } else defaultInputMode(pin),
             else => null,
         };
     }
@@ -296,6 +296,17 @@ pub const Pins = struct {
         p.readUsers();
     }
 };
+
+/// What pull a pin has when the chip starts (from the BCM283x datasheet):
+/// pins 0–8, 34–36 and 46–53 are pulled up; 28–29 and 44–45 have no pull;
+/// the rest are pulled down.
+pub fn defaultInputMode(pin: u6) Mode {
+    return switch (pin) {
+        0...8, 34...36, 46...53 => .input_pull_up,
+        28...29, 44...45 => .input,
+        else => .input_pull_down,
+    };
+}
 
 fn describe(err: anyerror) []const u8 {
     return switch (err) {
@@ -341,9 +352,11 @@ test "what a pin is set up as" {
     p.lines[17] = .{ .function = .output, .high = true };
     try testing.expectEqual(@as(?Mode, .output_high), p.mode(17));
     p.lines[4] = .{ .function = .input };
-    try testing.expect(p.mode(4) == null);
-    p.modes[4] = .input_pull_up;
     try testing.expectEqual(@as(?Mode, .input_pull_up), p.mode(4));
+    p.lines[22] = .{ .function = .input };
+    try testing.expectEqual(@as(?Mode, .input_pull_down), p.mode(22));
+    p.modes[4] = .input_pull_down;
+    try testing.expectEqual(@as(?Mode, .input_pull_down), p.mode(4));
     p.lines[2] = .{ .function = .alt0, .used = true };
     try testing.expect(p.mode(2) == null);
     try testing.expect(!p.settable(2));

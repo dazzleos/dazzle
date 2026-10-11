@@ -2457,10 +2457,12 @@ test "the GPIO pins: the header as it is laid out, and setting a pin up" {
     try testing.expect(findText(u.root.?, "UART 0 transmit") != null);
     try testing.expect(findText(u.root.?, "In use by serial, so it cannot be changed here") != null);
     try testing.expect(findText(u.root.?, "Input, pulled up") == null);
-    // An input whose pull is not known.
+    // An input pin starts with its default pull, and can be changed.
     click(u, findText(u.root.?, "GPIO 4 (GPCLK0)").?);
     u.frame(1600, 900, 4, settings);
-    try testing.expect(findText(u.root.?, "Its pull (up, down or none) is not known until it is set here") != null);
+    try testing.expect(findText(u.root.?, "GPIO 4, pin 7") != null);
+    click(u, findText(u.root.?, "Input, pulled down").?);
+    try testing.expectEqual(Actions.GpioChange{ .pin = 4, .mode = .input_pull_down }, actions.gpio.?);
     // The pins cannot be read.
     pins.read_failure = "Not allowed to use the GPIO";
     u.frame(1600, 900, 5, settings);

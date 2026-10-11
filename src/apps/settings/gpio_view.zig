@@ -49,10 +49,7 @@ pub const GpioPage = struct {
             } })) catch {};
         }
         const pins = cx.make(ui.SizedBox{ .width = 440, .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 2, .children = rows.items }) });
-        return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 16, .children = &.{
-            cx.make(ui.Text{ .text = "Pick a GPIO pin to see what it does, and to set it up. Inputs are read as they change.", .style = .{ .size = 15, .color = t.on_surface_variant } }),
-            cx.make(SideBySide{ .children = &.{ pins, cx.make(ui.SizedBox{ .width = 340, .child = self.detail(cx) }) } }),
-        } });
+        return cx.make(SideBySide{ .children = &.{ pins, cx.make(ui.SizedBox{ .width = 340, .child = self.detail(cx) }) } });
     }
 
     /// A pin, round, with its number (if it is on the header) and the
@@ -166,10 +163,6 @@ pub const GpioPage = struct {
                 .group_value = current,
                 .label = m[1],
                 .on_changed = if (set) |ms| .of(ms, ModeSet.set) else null,
-            })) catch {};
-            if (l.function == .input and current == null) rows.append(a, cx.make(ui.Text{
-                .text = "Its pull (up, down or none) is not known until it is set here",
-                .style = .{ .size = 14, .color = t.on_surface_variant },
             })) catch {};
             if (p.set_failure) |why| rows.append(a, cx.make(ui.Text{ .text = why, .style = .{ .size = 15, .color = t.@"error" } })) catch {};
         }
