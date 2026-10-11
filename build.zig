@@ -1007,6 +1007,11 @@ pub fn build(b: *std.Build) void {
         .root_module = addProgramModule(b, "src/apps/maps/main.zig", target, optimize, pi, shaders, true),
     });
     const install_maps = b.addInstallArtifact(maps_exe, .{});
+    const terminal_exe = b.addExecutable(.{
+        .name = "dazzle-terminal",
+        .root_module = addProgramModule(b, "src/apps/terminal/main.zig", target, optimize, pi, shaders, true),
+    });
+    const install_terminal = b.addInstallArtifact(terminal_exe, .{});
 
     // Host tool that packs the init binary into a cpio initramfs.
     const mkinitramfs = b.addExecutable(.{
@@ -1054,13 +1059,14 @@ pub fn build(b: *std.Build) void {
         .{ .exe = blocks_exe, .icon = .landscape, .title = "Blocks", .description = "Build anything, a block at a time, on an island in the sea" },
         .{ .exe = logger_exe, .icon = .show_chart, .title = "Data Logger", .description = "Record GPIO pins, analog inputs, I2C devices and serial ports over time, and save them as CSV" },
         .{ .exe = maps_exe, .icon = .public, .title = "Maps", .description = "Explore the Earth on an interactive 3D globe, with offline world maps and remote tiles" },
+        .{ .exe = terminal_exe, .icon = .terminal, .title = "Terminal", .description = "An interactive shell with built-in command-line tools for managing files and inspecting the system" },
     };
     const apps_step = b.step("apps", "Build the apps' archives and their catalogue (zig-out/apps)");
     apps_step.dependOn(addAppArchives(b, &apps));
     b.getInstallStep().dependOn(apps_step);
     const install_initramfs = b.addInstallFile(initramfs, "initramfs.cpio");
     const programs_step = b.step("programs", "Build just the programs (zig-out/bin) and zig-out/initramfs.cpio");
-    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_settings.step, &install_files.step, &install_camera.step, &install_text_editor.step, &install_logger.step, &install_blocks.step, &install_maps.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
+    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_settings.step, &install_files.step, &install_camera.step, &install_text_editor.step, &install_logger.step, &install_blocks.step, &install_maps.step, &install_terminal.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
         programs_step.dependOn(st);
         b.getInstallStep().dependOn(st);
     }
@@ -1111,6 +1117,8 @@ pub fn build(b: *std.Build) void {
     host_setup.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_maps = addProgramModule(b, "src/apps/maps/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_maps.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
+    const host_terminal = addProgramModule(b, "src/apps/terminal/main.zig", b.graph.host, test_optimize, host, shaders, false);
+    host_terminal.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     for ([_]*std.Build.Module{
         host.sys,
         host.vc4,
@@ -1133,6 +1141,7 @@ pub fn build(b: *std.Build) void {
         host_blocks,
         host_setup,
         host_maps,
+        host_terminal,
         addProgramModule(b, "src/shell/main.zig", b.graph.host, test_optimize, host, shaders, false),
     }) |m| {
         const t = b.addTest(.{ .root_module = m });
