@@ -1094,7 +1094,6 @@ pub fn build(b: *std.Build) void {
     // the catalogue).
     const zig_root = b.pathFromRoot("build/zig/zig-arm-linux-" ++ zig_version);
     const apps = [_]App{
-        .{ .exe = demo_exe, .icon = .view_in_ar, .title = "Demo", .description = "A spinning 3D shape that shows off the graphics, with controls to play with" },
         .{ .exe = files_exe, .icon = .folder, .title = "Files", .description = "Browse your files, and look inside them: text, pictures and fonts" },
         .{ .exe = camera_exe, .icon = .photo_camera, .title = "Camera", .description = "See what a Raspberry Pi Camera Module sees, and take photos" },
         .{ .exe = text_editor_exe, .icon = .edit_note, .title = "Text Editor", .description = "Write and change text files, from Files; they are saved as you type", .handles = &.{"text/plain"} },
