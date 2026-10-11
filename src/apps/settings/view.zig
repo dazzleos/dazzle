@@ -2,7 +2,7 @@
 //! the left, about the Wi-Fi networks around, Ethernet, the resources in
 //! use (with meters), the board (drawn: picking a part says what it is;
 //! see board.zig), the USB devices plugged in, the language and keyboard,
-//! the system (its build, Linux and the board) and the system's log
+//! the system (its build, updates and Linux) and the system's log
 //! (newest first, or only its warnings and errors).
 //! Choosing a Wi-Fi network shows a password field (for WPA2) and a
 //! Connect button; choosing a static address for Ethernet shows fields for
@@ -342,18 +342,13 @@ pub const Settings = struct {
         const cx = b.cx;
         const sys = self.system;
         var dur: [32]u8 = undefined;
-        var rows: std.ArrayList(ui.Widget) = .empty;
-        const a = cx.ui.arena();
-        rows.appendSlice(a, &.{
+        return b.page(&.{
             b.item("Build", self.commit),
             self.updateRow(b),
             b.item("Linux", orUnknown(sys.kernel.slice())),
             b.item("Up for", cx.fmt("{s}", .{info.formatDuration(&dur, self.usage.uptime_s)})),
-            b.item("Board", orUnknown(sys.model.slice())),
             b.item("Hostname", orUnknown(sys.hostname.slice())),
-        }) catch {};
-        if (sys.serial.len > 0) rows.append(a, b.item("Serial", sys.serial.slice())) catch {};
-        return b.page(rows.items);
+        });
     }
 
     /// Updates: how they stand, and what can be done about them.
@@ -552,11 +547,15 @@ pub const Settings = struct {
     fn boardPage(self: *const Settings, b: Builder, state: *State) ui.Widget {
         const cx = b.cx;
         const t = cx.theme();
+        const a = cx.ui.arena();
         const model = self.system.model.slice();
-        const drawing = board.forModel(model) orelse return b.page(&.{
-            b.item("Board", orUnknown(model)),
-            b.value("There is no drawing of this board"),
-        });
+        var page: std.ArrayList(ui.Widget) = .empty;
+        page.append(a, b.item("Board", orUnknown(model))) catch {};
+        if (self.system.serial.len > 0) page.append(a, b.item("Serial", self.system.serial.slice())) catch {};
+        const drawing = board.forModel(model) orelse {
+            page.append(a, b.value("There is no drawing of this board")) catch {};
+            return b.page(page.items);
+        };
         // The processor, until something else is picked.
         const picked = state.board_part orelse for (drawing.parts, 0..) |part, i| {
             if (part.kind == .soc or part.kind == .soc_with_ram) break i;
@@ -564,7 +563,6 @@ pub const Settings = struct {
         const part = &drawing.parts[@min(picked, drawing.parts.len - 1)];
         const about = board.describe(part);
         var rows: std.ArrayList(ui.Widget) = .empty;
-        const a = cx.ui.arena();
         rows.appendSlice(a, &.{
             cx.make(ui.Text{ .text = if (part.chip.len > 0) cx.fmt("{s}: {s}", .{ about.title, part.chip }) else about.title, .style = .{ .size = 20, .color = t.on_surface } }),
             cx.make(ui.Text{ .text = cx.fmt("{s}{s}", .{ about.about, if (part.underside) " (underneath the board)" else "" }), .style = .{ .size = 16, .color = t.on_surface_variant } }),
@@ -583,13 +581,11 @@ pub const Settings = struct {
         if (now) |text| rows.append(a, cx.make(ui.Text{ .text = text, .style = .{ .size = 16, .color = t.on_surface } })) catch {};
         rows.append(a, cx.make(ui.Text{ .text = "Pick a part to see what it is", .style = .{ .size = 14, .color = t.on_surface_variant } })) catch {};
         // The drawing, small, beside what is said about the part picked.
-        return b.page(&.{
-            b.value(orUnknown(model)),
-            cx.make(ui.Row{ .spacing = 24, .cross_axis_alignment = .start, .children = &.{
-                cx.make(BoardView{ .board = drawing, .selected = picked, .on_select = partPicker(state) }),
-                cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 6, .children = rows.items }) }),
-            } }),
-        });
+        page.append(a, cx.make(ui.Row{ .spacing = 24, .cross_axis_alignment = .start, .children = &.{
+            cx.make(BoardView{ .board = drawing, .selected = picked, .on_select = partPicker(state) }),
+            cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 6, .children = rows.items }) }),
+        } })) catch {};
+        return b.page(page.items);
     }
 
     fn wifiPage(self: *const Settings, b: Builder, state: *State) ui.Widget {
