@@ -122,7 +122,7 @@ pub const BoardView = struct {
 fn drawPart(c: *gfx.Canvas, part: *const board.Part, r: gfx.Rect, s: f32, ink: Color) void {
     const radius: gfx.Radii = .all(0.6 * s);
     switch (part.kind) {
-        .soc, .soc_with_ram, .ram, .usb_ethernet, .wireless, .pmic, .emmc => {
+        .soc, .soc_with_ram, .ram, .usb_ethernet, .usb_controller, .ethernet_phy, .wireless, .pmic, .emmc => {
             c.strokeRoundedRect(r, radius, heavy, ink);
             if (part.lidded) {
                 c.strokeRoundedRect(r.outset(-1.2 * s), radius, line, ink);
@@ -144,7 +144,7 @@ fn drawPart(c: *gfx.Canvas, part: *const board.Part, r: gfx.Rect, s: f32, ink: C
                 if (part.kind == .gpio) c.fillCircle(center, @max(0.75, 0.35 * s), ink) else c.strokeCircle(center, @max(1, 0.6 * s), line, ink);
             };
         },
-        .usb, .usb_double, .ethernet, .hdmi, .mini_hdmi, .power, .usb_otg, .micro_sd, .sd => {
+        .usb, .usb_double, .ethernet, .hdmi, .mini_hdmi, .micro_hdmi, .power, .usb_c_power, .usb_otg, .micro_sd, .sd => {
             c.strokeRoundedRect(r, .all(0.4 * s), line, ink);
             // The opening, along the edge it faces.
             const e = part.faces orelse return;

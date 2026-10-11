@@ -2092,7 +2092,7 @@ test "the board, drawn: picking a part says what it is" {
     try testing.expect(findText(u.root.?, "The wired network") != null);
 
     // Every board fits, at every size.
-    for ([_][]const u8{ "Raspberry Pi Model B Rev 2", "Raspberry Pi Zero 2 W Rev 1.0", "Raspberry Pi Compute Module 3 Rev 1.0", "Something else" }) |model| {
+    for ([_][]const u8{ "Raspberry Pi Model B Rev 2", "Raspberry Pi Zero 2 W Rev 1.0", "Raspberry Pi Compute Module 3 Rev 1.0", "Raspberry Pi 4 Model B Rev 1.4", "Raspberry Pi Compute Module 4 Rev 1.0", "Something else" }) |model| {
         d.sys.model = .of(model);
         for (test_sizes) |size| {
             draw(u, &d, &wifi, &n, size);

@@ -600,9 +600,10 @@ const wifi_firmware = [_]struct { name: []const u8, source: []const u8, sha256: 
     .{ .name = "brcmfmac43430-sdio.bin", .source = "cypress/cyfmac43430-sdio.bin", .sha256 = "0717f8e798f3962230e76e9d840385ba127a38d31d6a55acd5c97cf53e4acc9d" },
     .{ .name = "brcmfmac43430-sdio.txt", .source = "brcm/brcmfmac43430-sdio.txt", .sha256 = "fc3949a4c32f07c18308e7e145c7615be314158e7d714a80e04e4791f16495f9" },
     .{ .name = "brcmfmac43430-sdio.clm_blob", .source = "cypress/cyfmac43430-sdio.clm_blob", .sha256 = "3376b9c9b32d16bf762e21c7fafb665365070ae240d092498d0d1987c22022aa" },
-    // CYW43455: the Pi 3 B+ and 3 A+.
+    // CYW43455: the Pi 3 B+, 3 A+ and 4 B.
     .{ .name = "brcmfmac43455-sdio.bin", .source = "cypress/cyfmac43455-sdio-standard.bin", .sha256 = "d608f866582519c0a28d86db43040f4f1b98dd1d153e72e9752586546b4a36c3" },
     .{ .name = "brcmfmac43455-sdio.txt", .source = "brcm/brcmfmac43455-sdio.txt", .sha256 = "ca709be81a78bdb6932936374f39943acbd7af07fae6151011127599a3ce9e3d" },
+    .{ .name = "brcmfmac43455-sdio.raspberrypi,4-model-b.txt", .source = "brcm/brcmfmac43455-sdio.txt", .sha256 = "ca709be81a78bdb6932936374f39943acbd7af07fae6151011127599a3ce9e3d" },
     .{ .name = "brcmfmac43455-sdio.clm_blob", .source = "cypress/cyfmac43455-sdio.clm_blob", .sha256 = "9823842cae9fb9a5dd1e5fb31f595516ec7deee341354bef30bb3026eee29cc1" },
     // CYW43436 (and the earlier 43436s): the Zero 2 W.
     .{ .name = "brcmfmac43436-sdio.bin", .source = "brcm/brcmfmac43436-sdio.bin", .sha256 = "510a7dd1e056199b309425548ee0bd846993a1837ac7fa1e4d3e641f05a1327a" },

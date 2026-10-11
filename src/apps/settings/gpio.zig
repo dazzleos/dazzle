@@ -66,8 +66,8 @@ pub fn headerFor(model: []const u8) ?[]const Pin {
         }
     }.f;
     if (has(model, "Compute Module")) return null;
-    const first = !has(model, "Plus") and !has(model, "Zero") and !has(model, " 2 ") and !has(model, " 3 ") and
-        (has(model, "Model A") or has(model, "Model B"));
+    const first = !has(model, "Plus") and
+        (std.mem.startsWith(u8, model, "Raspberry Pi Model A") or std.mem.startsWith(u8, model, "Raspberry Pi Model B"));
     if (first) return if (has(model, "Rev 1")) &header_26_rev1 else &header_26;
     return &header_40;
 }
@@ -77,12 +77,19 @@ pub fn headerFor(model: []const u8) ?[]const Pin {
 pub fn altName(pin: u6, alt: u3) ?[]const u8 {
     const table = [_]struct { u6, u3, []const u8 }{
         .{ 0, 0, "I2C 0 data (HAT EEPROM)" }, .{ 1, 0, "I2C 0 clock (HAT EEPROM)" },
+        .{ 0, 4, "UART 2 transmit" },         .{ 1, 4, "UART 2 receive" },
         .{ 2, 0, "I2C 1 data" },              .{ 3, 0, "I2C 1 clock" },
+        .{ 2, 5, "I2C 3 data" },              .{ 3, 5, "I2C 3 clock" },
         .{ 4, 0, "General clock 0" },         .{ 5, 0, "General clock 1" },
+        .{ 4, 4, "UART 3 transmit" },         .{ 5, 4, "UART 3 receive" },
         .{ 6, 0, "General clock 2" },         .{ 7, 0, "SPI 0 chip select 1" },
+        .{ 6, 5, "I2C 4 data" },              .{ 7, 5, "I2C 4 clock" },
         .{ 8, 0, "SPI 0 chip select 0" },     .{ 9, 0, "SPI 0 MISO" },
+        .{ 8, 4, "UART 4 transmit" },         .{ 9, 4, "UART 4 receive" },
         .{ 10, 0, "SPI 0 MOSI" },             .{ 11, 0, "SPI 0 clock" },
+        .{ 10, 5, "I2C 5 data" },             .{ 11, 5, "I2C 5 clock" },
         .{ 12, 0, "PWM 0" },                  .{ 13, 0, "PWM 1" },
+        .{ 12, 4, "UART 5 transmit" },        .{ 13, 4, "UART 5 receive" },
         .{ 14, 0, "UART 0 transmit" },        .{ 15, 0, "UART 0 receive" },
         .{ 14, 5, "UART 1 transmit" },        .{ 15, 5, "UART 1 receive" },
         .{ 16, 4, "SPI 1 chip select 2" },    .{ 17, 4, "SPI 1 chip select 1" },
@@ -92,6 +99,7 @@ pub fn altName(pin: u6, alt: u3) ?[]const u8 {
         .{ 20, 0, "PCM in" },                 .{ 20, 4, "SPI 1 MOSI" },
         .{ 21, 0, "PCM out" },                .{ 21, 4, "SPI 1 clock" },
         .{ 22, 4, "JTAG reset" },             .{ 23, 4, "JTAG return clock" },
+        .{ 22, 5, "I2C 6 data" },             .{ 23, 5, "I2C 6 clock" },
         .{ 24, 4, "JTAG data out" },          .{ 25, 4, "JTAG clock" },
         .{ 26, 4, "JTAG data in" },           .{ 27, 4, "JTAG mode" },
     };
@@ -247,6 +255,8 @@ fn describe(err: anyerror) []const u8 {
 const testing = std.testing;
 
 test "headers by board" {
+    try testing.expectEqual(@as(usize, 40), headerFor("Raspberry Pi 4 Model B Rev 1.1").?.len);
+    try testing.expectEqual(@as(usize, 40), headerFor("Raspberry Pi 400 Rev 1.0").?.len);
     try testing.expectEqual(@as(usize, 40), headerFor("Raspberry Pi 3 Model B Plus Rev 1.3").?.len);
     try testing.expectEqual(@as(usize, 40), headerFor("Raspberry Pi Zero W Rev 1.1").?.len);
     try testing.expectEqual(@as(usize, 40), headerFor("Raspberry Pi Model B Plus Rev 1.2").?.len);
@@ -258,6 +268,7 @@ test "headers by board" {
     try testing.expectEqual(Pin{ .gpio = 0 }, b1[2]);
     try testing.expectEqual(Pin{ .gpio = 21 }, b1[12]);
     try testing.expect(headerFor("Raspberry Pi Compute Module 3 Rev 1.0") == null);
+    try testing.expect(headerFor("Raspberry Pi Compute Module 4 Rev 1.0") == null);
     // Every GPIO 0-27 is on the 40-pin header, once.
     var seen: [28]bool = @splat(false);
     for (header_40) |pin| switch (pin) {
