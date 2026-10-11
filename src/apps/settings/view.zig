@@ -981,25 +981,25 @@ fn connectionBusy(c: *const info.manager.Connection) bool {
 pub const Page = enum {
     wifi,
     ethernet,
-    resources,
     board,
+    apps,
+    resources,
     gpio,
     usb,
     language,
-    apps,
     log,
 
     pub fn label(p: Page) []const u8 {
         return switch (p) {
             .wifi => "Wi-Fi",
             .ethernet => "Ethernet",
-            .resources => "Resources",
             .board => "Board",
+            .apps => "Software",
+            .resources => "Resources",
             .gpio => "GPIO",
             .usb => "USB",
-            .log => "Log",
             .language => "Language",
-            .apps => "Software",
+            .log => "Log",
         };
     }
 
@@ -1007,13 +1007,13 @@ pub const Page = enum {
         return switch (p) {
             .wifi => .wifi,
             .ethernet => .lan,
-            .resources => .speed,
             .board => .developer_board,
+            .apps => .apps,
+            .resources => .speed,
             .gpio => .settings_input_component,
             .usb => .usb,
-            .log => .article,
             .language => .language,
-            .apps => .apps,
+            .log => .article,
         };
     }
 };
@@ -2597,8 +2597,3 @@ test "the software list scrolls vertically while the bottom bar stays visible" {
     try testing.expectEqual(refresh_before, refresh_after);
     try testing.expect(status_after + 20 <= @as(f32, @floatFromInt(min_size[1])));
 }
-
-
-
-
-
