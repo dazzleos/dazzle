@@ -118,9 +118,14 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
     // What the title bar's buttons do, and how small the window may be.
     // The apps that can be installed, and which are.
     var apps: store.Store = .init(gpa, build_info.apps_url);
+    apps.check_os = true;
     var installed: [64]bool = undefined;
+    var updatable: [64]bool = undefined;
     // Updates of the system, and which system this is.
     var updater: update.Updater = .init(gpa, build_info.apps_url, sys.system.Version.init(build_info.commit_time, build_info.commit) orelse .{});
+    var icons: view.IconSet = .init(gpa);
+    defer icons.deinit();
+    var icons_dirty = true;
     var video_memory_failed = false;
     var date_buf: [32]u8 = undefined;
     var build_buf: [64]u8 = undefined;
@@ -203,15 +208,24 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             pins.set(g.pin, g.mode);
             dirty = true;
         }
-        // Installing, or getting the list of apps.
-        if (apps.poll()) dirty = true;
-        if (actions.install != null or actions.remove != null or actions.refresh_apps) {
+        // Installing, or getting the list of apps (and os.json, over the
+        // same keep-alive connection).
+        if (apps.poll()) {
+            updater.loadManifest();
+            icons_dirty = true;
+            dirty = true;
+        }
+        if (actions.install != null or actions.remove != null or actions.refresh_apps or actions.check_update) {
             if (actions.install) |*n| apps.install(n.slice());
-            if (actions.remove) |*n| apps.uninstall(n.slice());
-            if (actions.refresh_apps) apps.refresh(true);
+            if (actions.remove) |*n| {
+                apps.uninstall(n.slice());
+                icons_dirty = true;
+            }
+            if (actions.refresh_apps or actions.check_update) apps.refresh(true);
             actions.install = null;
             actions.remove = null;
             actions.refresh_apps = false;
+            actions.check_update = false;
             dirty = true;
         }
         // The list is got when the page is first shown.
@@ -220,24 +234,21 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             _ = syslog.poll();
             dirty = true;
         }
-        if (view.shownPage(window_ui) == .apps) {
-            if (!apps.asked) {
-                apps.refresh(false);
-                dirty = true;
-            }
-            if (!updater.asked) {
-                updater.check(false);
-                dirty = true;
-            }
+        if (view.shownPage(window_ui) == .apps and !apps.asked) {
+            apps.refresh(false);
+            dirty = true;
         }
         // Updates: checked for when the Software page is first shown.
-        if (!suspended and updater.poll(now)) dirty = true;
-        if (actions.check_update or actions.download_update or actions.restart) {
-            if (actions.check_update) updater.check(true);
-            if (actions.download_update) updater.download();
+        if (!suspended and updater.poll(now)) {
+            icons_dirty = true;
+            dirty = true;
+        }
+        if (actions.download_update or actions.update_all or actions.restart) {
+            if (actions.download_update or actions.update_all) updater.download();
+            if (actions.update_all) apps.updateAll();
             if (actions.restart) updater.restart();
-            actions.check_update = false;
             actions.download_update = false;
+            actions.update_all = false;
             actions.restart = false;
             dirty = true;
         }
@@ -318,7 +329,21 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             dirty = false;
             const catalogue = apps.apps()[0..@min(apps.apps().len, installed.len)];
             var available_buf: [64]u8 = undefined;
-            for (catalogue, installed[0..catalogue.len]) |a, *i| i.* = store.isInstalled(store.apps_dir, a.name);
+            for (catalogue, installed[0..catalogue.len], updatable[0..catalogue.len]) |a, *i, *u| {
+                i.* = store.isInstalled(store.apps_dir, a.name);
+                u.* = i.* and store.hasNewerVersion(store.apps_dir, a);
+            }
+            if (icons_dirty) {
+                icons_dirty = false;
+                icons.reload(
+                    store.os_icon_file,
+                    store.update_icon_file,
+                    updater.available() != null,
+                    store.apps_dir,
+                    store.icons_dir,
+                    catalogue,
+                );
+            }
             window_ui.fullscreen = win.fullscreen;
             window_ui.frame(width, height, now, view.Settings{
                 .commit = build,
@@ -334,6 +359,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
                 .apps = .{
                     .list = catalogue,
                     .installed = installed[0..catalogue.len],
+                    .updatable = updatable[0..catalogue.len],
+                    .icons = icons.appIcons(catalogue.len),
                     .busy = apps.busy(),
                     .message = apps.message(),
                     .source = build_info.apps_url,
@@ -347,6 +374,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
                     .status = updater.status(),
                     .available = if (updater.available()) |m| std.fmt.bufPrint(&available_buf, "{s} ({s})", .{ m.version, update.formatDate(&date_buf, m.time) }) catch m.version else "",
                     .message = updater.message(),
+                    .icon = icons.osIcon(),
                 },
                 .on_close = .of(&controls, app.Controls.close),
                 .on_maximize = .of(&controls, app.Controls.toggleMaximized),

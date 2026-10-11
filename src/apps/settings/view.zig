@@ -24,7 +24,8 @@ const gpio = @import("gpio.zig");
 const GpioPage = @import("gpio_view.zig").GpioPage;
 const log = @import("log.zig");
 const BoardView = @import("board_view.zig").BoardView;
-const proto = @import("sys").system;
+const sys_mod = @import("sys");
+const proto = sys_mod.system;
 
 /// The storage bar's colours (the system's is the theme's primary).
 pub const apps_color = gfx.Color.argb(0xff4fd8c4);
@@ -45,9 +46,10 @@ pub const Actions = struct {
     install: ?AppName = null,
     remove: ?AppName = null,
     refresh_apps: bool = false,
-    /// Updates: check for one, download the one offered, restart into it.
+    /// Updates: check for one, download the one offered, update all, restart into it.
     check_update: bool = false,
     download_update: bool = false,
+    update_all: bool = false,
     restart: bool = false,
     /// The language and keyboard to use.
     locale: ?locale.Settings = null,
@@ -61,6 +63,10 @@ pub const Actions = struct {
 
     fn downloadUpdate(a: *Actions) void {
         a.download_update = true;
+    }
+
+    fn updateAll(a: *Actions) void {
+        a.update_all = true;
     }
 
     fn restartNow(a: *Actions) void {
@@ -121,11 +127,17 @@ const max_page_width = 960;
 
 /// What the Apps page shows.
 pub const Apps = struct {
-    /// The catalogue's apps, and whether each is installed.
+    /// The catalogue's apps, whether each is installed, and whether each
+    /// installed app has a newer version in the catalogue.
     list: []const store.App = &.{},
     installed: []const bool = &.{},
-    /// The app being installed ("" for the list itself); null if nothing
-    /// is under way.
+    updatable: []const bool = &.{},
+    /// Each app's 64x64 icon (installed, or from the server when
+    /// uninstalled, not on disk or a newer version is available); null
+    /// for the fallback icon.
+    icons: []const ?*const gfx.Image = &.{},
+    /// The app being installed ("" for the list itself, "*" for updating
+    /// all); null if nothing is under way.
     busy: ?[]const u8 = null,
     /// What happened last.
     message: []const u8 = "",
@@ -149,6 +161,9 @@ pub const Update = struct {
     available: []const u8 = "",
     /// What went wrong last.
     message: []const u8 = "",
+    /// Dazzle's 64x64 icon (installed, or from the server when a newer
+    /// version is available or none is on disk); null for the fallback icon.
+    icon: ?*const gfx.Image = null,
 };
 
 pub const Settings = struct {
@@ -254,17 +269,6 @@ pub const Settings = struct {
 
     pub fn build(self: *const Settings, cx: *ui.Context, state: *State) ui.Widget {
         const b: Builder = .{ .cx = cx };
-        const page = switch (state.page) {
-            .wifi => self.wifiPage(b, state),
-            .ethernet => self.networkPage(b, state),
-            .resources => self.resourcesPage(b),
-            .board => self.boardPage(b, state),
-            .language => self.languagePage(b),
-            .gpio => self.gpioPage(b, state),
-            .usb => self.usbPage(b),
-            .log => self.logPage(b, state),
-            .apps => self.appsPage(b, state),
-        };
         const t = cx.theme();
         var tabs: [std.meta.fields(Page).len]ui.Widget = undefined;
         inline for (&tabs, std.meta.fields(Page)) |*w, field| {
@@ -284,14 +288,30 @@ pub const Settings = struct {
         // A page longer than the window scrolls; another page starts at
         // its top. In a wide window the page is no wider than reads well,
         // in the middle.
+        const right = if (state.page == .apps)
+            self.appsPage(b, state)
+        else blk: {
+            const page = switch (state.page) {
+                .wifi => self.wifiPage(b, state),
+                .ethernet => self.networkPage(b, state),
+                .resources => self.resourcesPage(b),
+                .board => self.boardPage(b, state),
+                .language => self.languagePage(b),
+                .gpio => self.gpioPage(b, state),
+                .usb => self.usbPage(b),
+                .log => self.logPage(b, state),
+                .apps => unreachable,
+            };
+            break :blk cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(24), .child = cx.make(ui.Align{
+                .alignment = .top_center,
+                .child = cx.make(ui.ConstrainedBox{ .constraints = .{ .max_w = max_page_width }, .child = page }),
+            }) }) }).withKey(@as(u64, @intFromEnum(state.page)) + 1);
+        };
         const content = cx.make(ui.Row{ .cross_axis_alignment = .stretch, .children = &.{
             sidebar,
             cx.make(ui.Expanded{ .child = cx.make(ui.Decorated{
                 .color = t.surface,
-                .child = cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(24), .child = cx.make(ui.Align{
-                    .alignment = .top_center,
-                    .child = cx.make(ui.ConstrainedBox{ .constraints = .{ .max_w = max_page_width }, .child = page }),
-                }) }) }).withKey(@as(u64, @intFromEnum(state.page)) + 1),
+                .child = right,
             }) }),
         } });
         return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &.{
@@ -312,19 +332,16 @@ pub const Settings = struct {
         const apps = &self.apps;
         var rows: std.ArrayList(ui.Widget) = .empty;
         const a = cx.ui.arena();
-        const busy = apps.busy != null;
-        // The list's state, and getting it again.
-        const status = if (apps.busy) |name| (if (name.len == 0) "Getting the list of apps…" else "Installing…") else if (apps.list.len == 0) "No list of apps yet: is the network up?" else cx.fmt("{d} apps", .{apps.list.len});
-        rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-            b.label("Catalogue"),
-            cx.make(ui.Expanded{ .child = b.value(status) }),
-            cx.make(ui.OutlinedButton{ .label = "Refresh", .icon = .refresh, .on_press = if (self.actions != null and !busy) .of(appAct(cx, self.actions.?, state, ""), AppAct.refresh) else null }),
-        } })) catch {};
-        if (apps.message.len > 0) rows.append(a, b.item("", apps.message)) catch {};
+        const os_busy = self.update.status == .checking or self.update.status == .downloading or self.update.status == .installing;
+        const busy = apps.busy != null or os_busy;
+        if (apps.message.len > 0) rows.append(a, b.value(apps.message)) catch {};
         self.dazzleRows(b, state, &rows);
+        var updates: usize = @intFromBool(self.update.status == .available);
         for (apps.list, 0..) |app, i| {
             const installed = i < apps.installed.len and apps.installed[i];
-            const this_busy = if (apps.busy) |n| std.mem.eql(u8, n, app.name) else false;
+            const updatable = installed and i < apps.updatable.len and apps.updatable[i];
+            if (updatable) updates += 1;
+            const this_busy = if (apps.busy) |n| std.mem.eql(u8, n, app.name) or (std.mem.eql(u8, n, "*") and updatable) else false;
             const enabled = self.actions != null and !busy;
             const x = if (self.actions) |acts| appAct(cx, acts, state, app.name) else null;
             const button: ui.Widget = if (this_busy)
@@ -338,8 +355,9 @@ pub const Settings = struct {
                 cx.fmt("{s} · {s}", .{ app.description, info.formatBytes(&size_buf, app.size) })
             else
                 cx.fmt("{s}", .{info.formatBytes(&size_buf, app.size)});
+            const icon: ?*const gfx.Image = if (i < apps.icons.len) apps.icons[i] else null;
             rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = &.{
-                cx.make(ui.Icon{ .icon = ui.icons.fromName(app.icon) orelse .apps, .size = 32, .color = t.on_surface_variant }),
+                softwareIcon(cx, icon),
                 cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 2, .children = &.{
                     cx.make(ui.Text{ .text = app.title, .style = .{ .size = 18, .color = t.on_surface }, .wrap = false, .ellipsis = true }),
                     cx.make(ui.Text{ .text = detail, .style = .{ .size = 15, .color = t.on_surface_variant } }),
@@ -347,8 +365,52 @@ pub const Settings = struct {
                 button,
             } })) catch {};
         }
-        if (apps.source.len > 0) rows.append(a, cx.make(ui.Text{ .text = cx.fmt("From {s}", .{apps.source}), .style = .{ .size = 14, .color = t.on_surface_variant } })) catch {};
-        return b.page(rows.items);
+        const status = if (apps.busy) |name|
+            (if (name.len == 0) "Getting the list of apps…" else if (std.mem.eql(u8, name, "*")) "Updating…" else "Installing…")
+        else if (self.update.status == .checking)
+            "Checking for updates…"
+        else if (self.update.status == .downloading or self.update.status == .installing)
+            "Updating…"
+        else if (updates == 1)
+            "1 update available"
+        else if (updates > 1)
+            cx.fmt("{d} updates available", .{updates})
+        else if (apps.list.len == 0)
+            "No list of apps yet: is the network up?"
+        else
+            "All apps updated";
+        var footer_children: std.ArrayList(ui.Widget) = .empty;
+        footer_children.append(a, cx.make(ui.Expanded{ .child = b.value(status) })) catch {};
+        if (updates > 0) {
+            footer_children.append(a, cx.make(ui.OutlinedButton{
+                .label = "Update all",
+                .icon = .download,
+                .on_press = if (self.actions != null and !busy) .of(self.actions.?, Actions.updateAll) else null,
+            })) catch {};
+        }
+        footer_children.append(a, cx.make(ui.OutlinedButton{
+            .label = "Refresh",
+            .icon = .refresh,
+            .on_press = if (self.actions != null and !busy) .of(appAct(cx, self.actions.?, state, ""), AppAct.refresh) else null,
+        })) catch {};
+        const footer = cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = footer_children.items });
+        return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &.{
+            cx.make(ui.Expanded{ .child = cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{
+                .padding = .{ .left = 24, .top = 24, .right = 24, .bottom = 12 },
+                .child = cx.make(ui.Align{
+                    .alignment = .top_center,
+                    .child = cx.make(ui.ConstrainedBox{ .constraints = .{ .max_w = max_page_width }, .child = b.page(rows.items) }),
+                }),
+            }) }).withKey(@as(u64, @intFromEnum(Page.apps)) + 1) }),
+            cx.make(ui.Padding{
+                .padding = .{ .left = 24, .top = 12, .right = 24, .bottom = 24 },
+                .child = cx.make(ui.Align{
+                    .alignment = .center,
+                    .height_factor = 1,
+                    .child = cx.make(ui.ConstrainedBox{ .constraints = .{ .max_w = max_page_width }, .child = footer }),
+                }),
+            }),
+        } });
     }
 
     /// Dazzle itself, at the head of the Software list: how updates stand
@@ -384,7 +446,7 @@ pub const Settings = struct {
         const header = cx.make(ui.Pressable{
             .on_press = .of(state, State.toggleDazzle),
             .child = cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = &.{
-                cx.make(DazzleLogo{ .size = 32, .color = t.on_surface_variant }),
+                softwareIcon(cx, u.icon),
                 cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 2, .children = &.{
                     cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 4, .children = &.{
                         cx.make(ui.Text{ .text = "Dazzle", .style = .{ .size = 18, .color = t.on_surface }, .wrap = false }),
@@ -399,7 +461,7 @@ pub const Settings = struct {
             end,
         } })) catch {};
         if (state.dazzle_expanded) {
-            rows.append(a, cx.make(ui.Padding{ .padding = .{ .left = 48 }, .child = cx.make(ui.Column{
+            rows.append(a, cx.make(ui.Padding{ .padding = .{ .left = 80 }, .child = cx.make(ui.Column{
                 .cross_axis_alignment = .stretch,
                 .main_axis_size = .min,
                 .spacing = 4,
@@ -1554,53 +1616,119 @@ pub const Meter = struct {
     }
 };
 
-/// The Dazzle logo (logo.svg): a 'Z' with its shadow shifted by (+2, +5) in
-/// a 40x40 square.
-const DazzleLogo = struct {
-    size: f32 = 32,
-    color: gfx.Color,
+/// Renders a 64x64 PNG icon, or the fallback `.apps` icon when no icon
+/// can be found.
+fn softwareIcon(cx: *ui.Context, image: ?*const gfx.Image) ui.Widget {
+    const t = &cx.ui.theme;
+    if (image) |img| {
+        return cx.make(ui.SizedBox{ .width = 64, .height = 64, .child = cx.make(ui.Image{ .image = img }) });
+    }
+    return cx.make(ui.SizedBox{ .width = 64, .height = 64, .child = cx.make(ui.Center{ .child = cx.make(ui.Icon{ .icon = .apps, .size = 48, .color = t.on_surface_variant }) }) });
+}
 
-    const front = [_][2]f32{
-        .{ 0, 0 },  .{ 25, 0 },  .{ 25, 5 }, .{ 7, 23 }, .{ 25, 23 },
-        .{ 25, 28 }, .{ 0, 28 }, .{ 0, 23 }, .{ 18, 5 }, .{ 0, 5 },
-    };
-    const shadow_top = [_][2]f32{
-        .{ 2, 5 },  .{ 27, 5 },  .{ 27, 10 }, .{ 14, 23 },
-        .{ 7, 23 }, .{ 20, 10 }, .{ 2, 10 },
-    };
-    const shadow_bottom = [_][2]f32{
-        .{ 2, 28 }, .{ 27, 28 }, .{ 27, 33 }, .{ 2, 33 },
-    };
+pub const max_icons = 64;
 
-    pub fn layout(self: *const DazzleLogo, _: *ui.Node, c: ui.Constraints) ui.Size {
-        return c.constrain(.{ .w = self.size, .h = self.size });
+/// Decoded 64x64 PNG icons for Dazzle and the catalogue's apps, loaded
+/// with priority: installed icon on disk when up to date, then the server
+/// icon when uninstalled, missing on disk or a newer version is available,
+/// then null (showing the fallback icon).
+pub const IconSet = struct {
+    gpa: std.mem.Allocator,
+    os_decoded: ?gfx.png.Decoded = null,
+    os_image: ?gfx.Image = null,
+    app_decoded: [max_icons]?gfx.png.Decoded = .{null} ** max_icons,
+    app_images: [max_icons]gfx.Image = undefined,
+    app_ptrs: [max_icons]?*const gfx.Image = .{null} ** max_icons,
+
+    pub fn init(gpa: std.mem.Allocator) IconSet {
+        return .{ .gpa = gpa };
     }
 
-    pub fn paint(self: *const DazzleLogo, n: *ui.Node, p: *ui.Painter) void {
-        const s = @min(self.size, @min(n.size.w, n.size.h));
-        const scale = s / 40;
-        const x0 = (n.size.w - 27 * scale) / 2;
-        const y0 = (n.size.h - 33 * scale) / 2;
-        const c = p.canvas();
-        drawShape(c, &shadow_top, x0, y0, scale, self.color.withAlpha(0.38));
-        drawShape(c, &shadow_bottom, x0, y0, scale, self.color.withAlpha(0.38));
-        drawShape(c, &front, x0, y0, scale, self.color);
+    pub fn deinit(set: *IconSet) void {
+        if (set.os_decoded) |d| set.gpa.free(d.pixels);
+        set.os_decoded = null;
+        set.os_image = null;
+        for (&set.app_decoded, &set.app_ptrs) |*d, *p| {
+            if (d.*) |img| set.gpa.free(img.pixels);
+            d.* = null;
+            p.* = null;
+        }
     }
 
-    fn drawShape(c: *gfx.Canvas, comptime pts: []const [2]f32, x0: f32, y0: f32, scale: f32, color: gfx.Color) void {
-        var out: [pts.len]gfx.Point = undefined;
-        for (pts, &out) |pt, *o| o.* = .{ x0 + pt[0] * scale, y0 + pt[1] * scale };
-        c.fillPolygon(&out, color);
+    pub fn reload(
+        set: *IconSet,
+        os_installed_path: [:0]const u8,
+        os_server_path: [:0]const u8,
+        os_newer: bool,
+        apps_dir: []const u8,
+        icons_dir: []const u8,
+        apps: []const store.App,
+    ) void {
+        set.deinit();
+        if (loadOsIcon(set.gpa, os_installed_path, os_server_path, os_newer)) |dec| {
+            set.os_decoded = dec;
+            set.os_image = .init(dec.pixels, dec.width, dec.height);
+        }
+        const count = @min(apps.len, max_icons);
+        for (apps[0..count], 0..) |app, i| {
+            if (loadAppIcon(set.gpa, apps_dir, icons_dir, app)) |dec| {
+                set.app_decoded[i] = dec;
+                set.app_images[i] = .init(dec.pixels, dec.width, dec.height);
+                set.app_ptrs[i] = &set.app_images[i];
+            }
+        }
+    }
+
+    pub fn osIcon(set: *const IconSet) ?*const gfx.Image {
+        return if (set.os_image) |*img| img else null;
+    }
+
+    pub fn appIcons(set: *const IconSet, len: usize) []const ?*const gfx.Image {
+        return set.app_ptrs[0..@min(len, max_icons)];
     }
 };
+
+pub fn decodeIconFile(gpa: std.mem.Allocator, path: [*:0]const u8) ?gfx.png.Decoded {
+    const bytes = sys_mod.readFileAlloc(gpa, path, 256 * 1024) catch return null;
+    defer gpa.free(bytes);
+    const decoded = gfx.png.decode(gpa, bytes) catch return null;
+    if (decoded.width != store.icon_size or decoded.height != store.icon_size) {
+        gpa.free(decoded.pixels);
+        return null;
+    }
+    return decoded;
+}
+
+fn loadOsIcon(gpa: std.mem.Allocator, installed_path: [:0]const u8, server_path: [:0]const u8, newer_available: bool) ?gfx.png.Decoded {
+    const first = if (newer_available) server_path else installed_path;
+    const second = if (newer_available) installed_path else server_path;
+    return decodeIconFile(gpa, first) orelse decodeIconFile(gpa, second);
+}
+
+fn loadAppIcon(gpa: std.mem.Allocator, dir: []const u8, icons_path: []const u8, app: store.App) ?gfx.png.Decoded {
+    var installed_buf: [256]u8 = undefined;
+    var server_buf: [256]u8 = undefined;
+    const installed_path = std.fmt.bufPrintZ(&installed_buf, "{s}/{s}/icon.png", .{ dir, app.name }) catch null;
+    const server_path = std.fmt.bufPrintZ(&server_buf, "{s}/{s}.png", .{ icons_path, app.name }) catch null;
+    const installed = store.isInstalled(dir, app.name);
+    const use_installed_first = installed and !store.hasNewerVersion(dir, app);
+    if (use_installed_first) {
+        if (installed_path) |p| if (decodeIconFile(gpa, p)) |img| return img;
+    }
+    if (server_path) |p| if (decodeIconFile(gpa, p)) |img| return img;
+    if (!use_installed_first and installed) {
+        if (installed_path) |p| if (decodeIconFile(gpa, p)) |img| return img;
+    }
+    return null;
+}
 
 
 const testing = std.testing;
 const font = @import("font");
 
 const sample_app_list = [_]store.App{
-    .{ .name = "dazzle-demo", .title = "Demo", .description = "Spinning shapes, on the GPU", .icon = "view_in_ar", .file = "dazzle-demo.tar.xz", .size = 40 << 10, .sha256 = "" },
-    .{ .name = "dazzle-files", .title = "Files", .description = "Your files", .icon = "folder", .file = "dazzle-files.tar.xz", .size = 50 << 10, .sha256 = "" },
+    .{ .name = "dazzle-demo", .title = "Demo", .description = "Spinning shapes, on the GPU", .icon = "icons/dazzle-demo.png", .file = "dazzle-demo.tar.xz", .size = 40 << 10, .sha256 = "" },
+    .{ .name = "dazzle-files", .title = "Files", .description = "Your files", .icon = "icons/dazzle-files.png", .file = "dazzle-files.tar.xz", .size = 50 << 10, .sha256 = "" },
 };
 const sample_apps: Apps = .{ .list = &sample_app_list, .installed = &.{ true, false }, .source = "https://example.com/apps" };
 
@@ -1754,7 +1882,7 @@ test "everything is shown, and fits from the smallest window to the biggest" {
         "Spinning shapes, on the GPU",
         "Install",
         "Remove",
-        "From https://example.com/apps",
+        "All apps updated",
     }) |want| {
         if (std.mem.indexOf(u8, all.items, want) == null) {
             std.debug.print("missing \"{s}\" in:\n{s}\n", .{ want, all.items });
@@ -1768,8 +1896,8 @@ test "everything is shown, and fits from the smallest window to the biggest" {
     try testing.expect(findText(u.root.?, "Home") != null);
     try testing.expect(findText(u.root.?, "bad?name") == null);
     // The build is on the Software page, not beside the title; the hardware
-    // is the board alone.
-    for ([_][]const u8{ "Dazzle build", "Hardware\n", "Chip", "GPU\n", "Revision", "In use", "Up for", "Hostname" }) |gone| {
+    // is the board alone; Catalogue/2 apps/From url are gone.
+    for ([_][]const u8{ "Dazzle build", "Hardware\n", "Chip", "GPU\n", "Revision", "In use", "Up for", "Hostname", "Catalogue", "2 apps", "From https://example.com/apps" }) |gone| {
         try testing.expect(std.mem.indexOf(u8, all.items, gone) == null);
     }
 }
@@ -2035,6 +2163,8 @@ test "installing and removing apps, and getting their list again" {
     u.frame(1920, 960, 0, settings);
     u.root.?.state(Settings.State).page = .apps;
     u.frame(1920, 960, 1, settings);
+    try testing.expect(findText(u.root.?, "All apps updated") != null);
+    try testing.expect(findText(u.root.?, "Update all") == null);
     click(u, up(findText(u.root.?, "Install").?, ui.OutlinedButton).?);
     try testing.expectEqualStrings("dazzle-files", actions.install.?.slice());
     click(u, up(findText(u.root.?, "Remove").?, ui.OutlinedButton).?);
@@ -2064,15 +2194,29 @@ test "updates: offered, downloaded, installed, then a restart" {
     defer u.destroy();
     const d = sample();
     var actions: Actions = .{};
-    var settings: Settings = .{ .commit = "de14aa2 (7 October 2026)", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .update = .{ .status = .available, .available = "0123abc (8 October 2026)" } };
+    var settings: Settings = .{ .commit = "de14aa2 (7 October 2026)", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .apps = sample_apps, .update = .{ .status = .available, .available = "0123abc (8 October 2026)" } };
     u.frame(1920, 960, 0, settings);
     u.root.?.state(Settings.State).page = .apps;
     u.frame(1920, 960, 1, settings);
     try testing.expect(findText(u.root.?, "Dazzle 0123abc (8 October 2026) is available") != null);
+    try testing.expect(findText(u.root.?, "1 update available") != null);
+    // "Update all" is to the left of "Refresh".
+    const update_all_btn = up(findText(u.root.?, "Update all").?, ui.OutlinedButton).?;
+    const refresh_btn = up(findText(u.root.?, "Refresh").?, ui.OutlinedButton).?;
+    try testing.expect(update_all_btn.position()[0] < refresh_btn.position()[0]);
+    click(u, update_all_btn);
+    try testing.expect(actions.update_all);
+    actions = .{};
+
+    // With both an OS update and an app update: "2 updates available".
+    settings.apps.updatable = &.{ true, false };
+    u.frame(1920, 960, 2, settings);
+    try testing.expect(findText(u.root.?, "2 updates available") != null);
+
     // Build and kernel details are shown when Dazzle is expanded.
     try testing.expect(findText(u.root.?, "de14aa2 (7 October 2026)") == null);
     click(u, up(findText(u.root.?, "Dazzle").?, ui.Pressable).?);
-    u.frame(1920, 960, 2, settings);
+    u.frame(1920, 960, 3, settings);
     try testing.expect(findText(u.root.?, "de14aa2 (7 October 2026)") != null);
     try testing.expect(findText(u.root.?, "6.12.0 (armv6l)") != null);
     click(u, up(findText(u.root.?, "Download").?, ui.OutlinedButton).?);
@@ -2081,27 +2225,30 @@ test "updates: offered, downloaded, installed, then a restart" {
     // Under way: no update buttons.
     for ([_]update.Status{ .checking, .downloading, .installing }) |s| {
         settings.update = .{ .status = s };
-        u.frame(1920, 960, 3, settings);
+        u.frame(1920, 960, 4, settings);
         try testing.expect(up(findText(u.root.?, "Dazzle").?, ui.Row) != null);
         try testing.expect(findText(u.root.?, "Download") == null and findText(u.root.?, "Restart") == null);
     }
+    settings.apps.updatable = &.{};
     settings.update = .{ .status = .ready };
-    u.frame(1920, 960, 4, settings);
+    u.frame(1920, 960, 5, settings);
     try testing.expect(findText(u.root.?, "The update is installed: restart to use it") != null);
     click(u, up(findText(u.root.?, "Restart").?, ui.OutlinedButton).?);
     try testing.expect(actions.restart);
 
     settings.update = .{ .status = .current };
-    u.frame(1920, 960, 5, settings);
+    u.frame(1920, 960, 6, settings);
     try testing.expect(findText(u.root.?, "The operating system · 600 KB") != null);
+    try testing.expect(findText(u.root.?, "All apps updated") != null);
+    try testing.expect(findText(u.root.?, "Update all") == null);
     click(u, up(findText(u.root.?, "Refresh").?, ui.OutlinedButton).?);
     try testing.expect(actions.check_update and actions.refresh_apps);
 
     settings.update = .{ .status = .unknown, .message = "Cannot check for updates: the server could not be reached (is the network up?)" };
-    u.frame(1920, 960, 6, settings);
+    u.frame(1920, 960, 7, settings);
     try testing.expect(findText(u.root.?, "Cannot check for updates: the server could not be reached (is the network up?)") != null);
     settings.update = .{};
-    u.frame(1920, 960, 7, settings);
+    u.frame(1920, 960, 8, settings);
     try testing.expect(findText(u.root.?, "The operating system · 600 KB") != null);
 }
 
@@ -2319,3 +2466,137 @@ test "the GPIO pins: the header as it is laid out, and setting a pin up" {
     u.frame(1600, 900, 5, settings);
     try testing.expect(findText(u.root.?, "Not allowed to use the GPIO") != null);
 }
+
+test "software icons: installed when up to date, server when uninstalled, missing on disk or newer available, else fallback" {
+    const linux = std.os.linux;
+    var dir_buf: [64]u8 = undefined;
+    const root = try std.fmt.bufPrintZ(&dir_buf, "/tmp/dazzle-icons-test-{d}", .{linux.getpid()});
+    _ = linux.mkdir(root, 0o755);
+    defer sys_mod.files.removeTree(root);
+
+    var os_dir_buf: [96]u8 = undefined;
+    var apps_dir_buf: [96]u8 = undefined;
+    var icons_dir_buf: [96]u8 = undefined;
+    const os_dir = try std.fmt.bufPrintZ(&os_dir_buf, "{s}/os", .{root});
+    const apps_dir = try std.fmt.bufPrintZ(&apps_dir_buf, "{s}/apps", .{root});
+    const icons_dir = try std.fmt.bufPrintZ(&icons_dir_buf, "{s}/apps/.icons", .{root});
+    _ = linux.mkdir(os_dir, 0o755);
+    _ = linux.mkdir(apps_dir, 0o755);
+    _ = linux.mkdir(icons_dir, 0o755);
+
+    const makePng = struct {
+        fn write(gpa: std.mem.Allocator, path: [:0]const u8, argb: u32) !void {
+            var pixels: [64 * 64]u32 = undefined;
+            @memset(&pixels, argb);
+            const png = try gfx.png.encodeRgba(gpa, &pixels, 64, 64);
+            defer gpa.free(png);
+            try sys_mod.files.writeNew(path, png);
+        }
+    }.write;
+
+    var os_installed_buf: [128]u8 = undefined;
+    var os_server_buf: [128]u8 = undefined;
+    const os_installed = try std.fmt.bufPrintZ(&os_installed_buf, "{s}/icon.png", .{os_dir});
+    const os_server = try std.fmt.bufPrintZ(&os_server_buf, "{s}/server-os-icon.png", .{os_dir});
+    try makePng(testing.allocator, os_installed, 0xff112233);
+    try makePng(testing.allocator, os_server, 0xffaabbcc);
+
+    // Installed app "dazzle-demo" at version 1000 abc, with an installed icon (0x10) and server icon (0x20).
+    var path_buf: [160]u8 = undefined;
+    _ = linux.mkdir(try std.fmt.bufPrintZ(&path_buf, "{s}/dazzle-demo", .{apps_dir}), 0o755);
+    const demo_bin = try std.fmt.bufPrintZ(&path_buf, "{s}/dazzle-demo/dazzle-demo", .{apps_dir});
+    try sys_mod.files.writeNew(demo_bin, "bin");
+    _ = linux.chmod(demo_bin, 0o755);
+    try sys_mod.files.writeNew(try std.fmt.bufPrintZ(&path_buf, "{s}/dazzle-demo/version", .{apps_dir}), "1000 abc\n");
+    try makePng(testing.allocator, try std.fmt.bufPrintZ(&path_buf, "{s}/dazzle-demo/icon.png", .{apps_dir}), 0xff100000);
+    try makePng(testing.allocator, try std.fmt.bufPrintZ(&path_buf, "{s}/dazzle-demo.png", .{icons_dir}), 0xff200000);
+
+    // Installed app "dazzle-files" with NO icon on disk, only a server icon (0x30).
+    _ = linux.mkdir(try std.fmt.bufPrintZ(&path_buf, "{s}/dazzle-files", .{apps_dir}), 0o755);
+    const files_bin = try std.fmt.bufPrintZ(&path_buf, "{s}/dazzle-files/dazzle-files", .{apps_dir});
+    try sys_mod.files.writeNew(files_bin, "bin");
+    _ = linux.chmod(files_bin, 0o755);
+    try makePng(testing.allocator, try std.fmt.bufPrintZ(&path_buf, "{s}/dazzle-files.png", .{icons_dir}), 0xff300000);
+
+    // Uninstalled app "dazzle-camera" with a server icon (0x40), and "dazzle-maps" with NO icon anywhere.
+    try makePng(testing.allocator, try std.fmt.bufPrintZ(&path_buf, "{s}/dazzle-camera.png", .{icons_dir}), 0xff400000);
+
+    var list = [_]store.App{
+        .{ .name = "dazzle-demo", .title = "Demo", .version = "abc", .time = 1000, .icon = "icons/dazzle-demo.png", .file = "dazzle-demo.tar.xz", .size = 1, .sha256 = "" },
+        .{ .name = "dazzle-files", .title = "Files", .version = "abc", .time = 1000, .icon = "icons/dazzle-files.png", .file = "dazzle-files.tar.xz", .size = 1, .sha256 = "" },
+        .{ .name = "dazzle-camera", .title = "Camera", .version = "abc", .time = 1000, .icon = "icons/dazzle-camera.png", .file = "dazzle-camera.tar.xz", .size = 1, .sha256 = "" },
+        .{ .name = "dazzle-maps", .title = "Maps", .version = "abc", .time = 1000, .icon = "icons/dazzle-maps.png", .file = "dazzle-maps.tar.xz", .size = 1, .sha256 = "" },
+    };
+
+    var icons: IconSet = .init(testing.allocator);
+    defer icons.deinit();
+
+    // Up to date: OS uses installed icon (0x11); Demo uses installed icon (0x10);
+    // Files (no disk icon) uses server icon (0x30); Camera (uninstalled) uses server icon (0x40);
+    // Maps (no icon anywhere) is null (fallback icon).
+    icons.reload(os_installed, os_server, false, apps_dir, icons_dir, &list);
+    try testing.expectEqual(@as(u32, 0xff112233), icons.osIcon().?.pixels[0]);
+    const got1 = icons.appIcons(list.len);
+    try testing.expectEqual(@as(u32, 0xff100000), got1[0].?.pixels[0]);
+    try testing.expectEqual(@as(u32, 0xff300000), got1[1].?.pixels[0]);
+    try testing.expectEqual(@as(u32, 0xff400000), got1[2].?.pixels[0]);
+    try testing.expect(got1[3] == null);
+
+    // Newer version available for OS and Demo: both switch to the server icon!
+    list[0].version = "def";
+    list[0].time = 2000;
+    icons.reload(os_installed, os_server, true, apps_dir, icons_dir, &list);
+    try testing.expectEqual(@as(u32, 0xffaabbcc), icons.osIcon().?.pixels[0]);
+    const got2 = icons.appIcons(list.len);
+    try testing.expectEqual(@as(u32, 0xff200000), got2[0].?.pixels[0]);
+}
+
+test "the software list scrolls vertically while the bottom bar stays visible" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    const d = sample();
+    const many_apps = [_]store.App{
+        .{ .name = "app-1", .title = "App 1", .description = "First app", .file = "a1.tar.xz", .size = 10 << 10, .sha256 = "" },
+        .{ .name = "app-2", .title = "App 2", .description = "Second app", .file = "a2.tar.xz", .size = 10 << 10, .sha256 = "" },
+        .{ .name = "app-3", .title = "App 3", .description = "Third app", .file = "a3.tar.xz", .size = 10 << 10, .sha256 = "" },
+        .{ .name = "app-4", .title = "App 4", .description = "Fourth app", .file = "a4.tar.xz", .size = 10 << 10, .sha256 = "" },
+        .{ .name = "app-5", .title = "App 5", .description = "Fifth app", .file = "a5.tar.xz", .size = 10 << 10, .sha256 = "" },
+        .{ .name = "app-6", .title = "App 6", .description = "Sixth app", .file = "a6.tar.xz", .size = 10 << 10, .sha256 = "" },
+        .{ .name = "app-7", .title = "App 7", .description = "Seventh app", .file = "a7.tar.xz", .size = 10 << 10, .sha256 = "" },
+        .{ .name = "app-8", .title = "App 8", .description = "Eighth app", .file = "a8.tar.xz", .size = 10 << 10, .sha256 = "" },
+    };
+    const settings: Settings = .{
+        .commit = "574d538",
+        .system = &d.sys,
+        .usage = d.usage,
+        .network = &d.net,
+        .apps = .{ .list = &many_apps, .installed = &.{ true, false, false, false, false, false, false, false } },
+    };
+    u.frame(min_size[0], min_size[1], 0, settings);
+    u.root.?.state(Settings.State).page = .apps;
+    u.frame(min_size[0], min_size[1], 1, settings);
+
+    const status_before = findText(u.root.?, "All apps updated").?.position()[1];
+    const refresh_before = findText(u.root.?, "Refresh").?.position()[1];
+    const dazzle_before = findText(u.root.?, "Dazzle").?.position()[1];
+
+    // Scroll the list down with the mouse wheel over the Software list.
+    u.pointerScroll(.{ 400, 200 }, 0, 50);
+    u.frame(min_size[0], min_size[1], 2, settings);
+
+    const status_after = findText(u.root.?, "All apps updated").?.position()[1];
+    const refresh_after = findText(u.root.?, "Refresh").?.position()[1];
+    const dazzle_after = findText(u.root.?, "Dazzle").?.position()[1];
+
+    // The list scrolled up, while the bottom status and Refresh button did not move.
+    try testing.expect(dazzle_after < dazzle_before);
+    try testing.expectEqual(status_before, status_after);
+    try testing.expectEqual(refresh_before, refresh_after);
+    try testing.expect(status_after + 20 <= @as(f32, @floatFromInt(min_size[1])));
+}
+
+
+
+
+

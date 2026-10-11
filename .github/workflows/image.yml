@@ -77,10 +77,10 @@ jobs:
           mkdir dist
           xz -T0 -9 -c zig-out/dazzle.img > dist/dazzle.img.xz
           (cd dist && sha256sum dazzle.img.xz > dazzle.img.xz.sha256)
-          # The apps' archives and their catalogue, which Settings downloads
+          # The apps' archives, icons and catalogue, which Settings downloads
           # from beside the image.
-          cp zig-out/apps/* dist/
-          # The system as an update, and its manifest, which Settings
+          cp -r zig-out/apps/* dist/
+          # The system as an update, its icon and manifest, which Settings
           # checks for newer systems.
           cp zig-out/os/* dist/
           ls -l dist

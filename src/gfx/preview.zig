@@ -78,7 +78,7 @@ pub fn render(c: *const canvas_mod.Canvas, programs: *const Programs, img: Image
                 const pic = b.image orelse continue;
                 image_texture = try std.heap.page_allocator.alloc(u8, vc4.texture.imageSize(pic.width, pic.height));
                 vc4.texture.upload(image_texture, pic.pixels, pic.width, pic.height);
-                group.uniforms = textureUniforms(.{ .width = pic.width, .height = pic.height, .mag_filter = .nearest, .min_filter = .nearest, .wrap_s = .clamp, .wrap_t = .clamp }, fs, &group.uniform_buf);
+                group.uniforms = textureUniforms(.{ .width = pic.width, .height = pic.height, .wrap_s = .clamp, .wrap_t = .clamp }, fs, &group.uniform_buf);
                 group.texture = image_texture;
             },
             else => group.texture = texture.memory,

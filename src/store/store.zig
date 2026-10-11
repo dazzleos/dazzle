@@ -26,6 +26,10 @@ const linux = std.os.linux;
 const sys = @import("sys");
 
 pub const apps_dir = sys.system.apps_dir;
+pub const icons_dir = apps_dir ++ "/.icons";
+pub const os_icon_file = "/os/icon.png";
+pub const update_icon_file = sys.system.update_dir ++ "/icon.png";
+pub const icon_size = 64;
 const catalogue_file = apps_dir ++ "/.catalogue.json";
 const ca_file = "/os/certs/ca-certificates.pem";
 
@@ -36,6 +40,8 @@ pub const App = struct {
     name: []const u8,
     title: []const u8,
     description: []const u8 = "",
+    version: []const u8 = "",
+    time: u64 = 0,
     icon: []const u8 = "",
     file: []const u8,
     size: u64,
@@ -44,6 +50,7 @@ pub const App = struct {
 
 pub const Catalogue = struct {
     version: []const u8 = "",
+    time: u64 = 0,
     apps: []const App,
 };
 
@@ -62,11 +69,86 @@ pub fn validName(name: []const u8) bool {
     return true;
 }
 
+/// Whether `path` is a safe relative PNG icon path on the server ("icon.png"
+/// or "icons/<name>.png").
+pub fn validIconPath(path: []const u8) bool {
+    if (!std.mem.endsWith(u8, path, ".png")) return false;
+    const stem = path[0 .. path.len - ".png".len];
+    if (std.mem.startsWith(u8, stem, "icons/")) return validName(stem["icons/".len..]);
+    return validName(stem);
+}
+
+/// Whether `bytes` has a 64x64 PNG header.
+pub fn validIconPng(bytes: []const u8) bool {
+    if (bytes.len < 24) return false;
+    if (!std.mem.eql(u8, bytes[0..8], "\x89PNG\r\n\x1a\n")) return false;
+    if (!std.mem.eql(u8, bytes[12..16], "IHDR")) return false;
+    const w = std.mem.readInt(u32, bytes[16..20], .big);
+    const h = std.mem.readInt(u32, bytes[20..24], .big);
+    return w == icon_size and h == icon_size;
+}
+
 /// Whether app `name` is in `dir` (its folder, with its program).
 pub fn isInstalled(dir: []const u8, name: []const u8) bool {
     var buf: [256]u8 = undefined;
     const path = std.fmt.bufPrintZ(&buf, "{s}/{s}/{s}", .{ dir, name, name }) catch return false;
     return linux.errno(linux.access(path, linux.X_OK)) == .SUCCESS;
+}
+
+/// The version of app `name` installed in `dir`, from `<dir>/<name>/version`.
+pub fn installedVersion(dir: []const u8, name: []const u8) ?sys.system.Version {
+    var path_buf: [256]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}/{s}", .{ dir, name, sys.system.Version.file_name }) catch return null;
+    var buf: [96]u8 = undefined;
+    const text = sys.readFile(path, &buf) orelse return null;
+    return sys.system.Version.parse(text);
+}
+
+/// Whether `app` in the catalogue is newer than the copy installed in `dir`.
+pub fn hasNewerVersion(dir: []const u8, app: App) bool {
+    const remote = sys.system.Version.init(app.time, app.version) orelse return false;
+    const local = installedVersion(dir, app.name) orelse return false;
+    return remote.time > local.time and !remote.eql(&local);
+}
+
+fn hasValidIconFile(path: [*:0]const u8) bool {
+    var hdr: [24]u8 = undefined;
+    const bytes = sys.readFile(path, &hdr) orelse return false;
+    return validIconPng(bytes);
+}
+
+/// Resolves the icon file to show for the OS: the installed `/os/icon.png`
+/// when up to date, or the server's `icon.png` when a newer version is
+/// available or `/os/icon.png` is missing; null for the fallback icon.
+pub fn resolveOsIcon(installed_path: [:0]const u8, server_path: [:0]const u8, newer_available: bool) ?[:0]const u8 {
+    const first = if (newer_available) server_path else installed_path;
+    const second = if (newer_available) installed_path else server_path;
+    if (hasValidIconFile(first)) return first;
+    if (hasValidIconFile(second)) return second;
+    return null;
+}
+
+/// Resolves the icon file to show for `app`: the installed
+/// `<dir>/<name>/icon.png` when installed and up to date, or the server's
+/// `<icons_path>/<name>.png` when uninstalled, when no icon is on disk or
+/// when a newer version is available; null for the fallback icon.
+pub fn resolveAppIcon(buf: []u8, dir: []const u8, icons_path: []const u8, app: App) ?[:0]const u8 {
+    const installed = isInstalled(dir, app.name);
+    const use_installed_first = installed and !hasNewerVersion(dir, app);
+    if (use_installed_first) {
+        if (std.fmt.bufPrintZ(buf, "{s}/{s}/icon.png", .{ dir, app.name })) |p| {
+            if (hasValidIconFile(p)) return p;
+        } else |_| {}
+    }
+    if (std.fmt.bufPrintZ(buf, "{s}/{s}.png", .{ icons_path, app.name })) |p| {
+        if (hasValidIconFile(p)) return p;
+    } else |_| {}
+    if (!use_installed_first and installed) {
+        if (std.fmt.bufPrintZ(buf, "{s}/{s}/icon.png", .{ dir, app.name })) |p| {
+            if (hasValidIconFile(p)) return p;
+        } else |_| {}
+    }
+    return null;
 }
 
 /// Checks a downloaded archive against the catalogue.
@@ -126,36 +208,144 @@ pub fn remove(dir: []const u8, name: []const u8) !void {
 var last_url: []const u8 = "";
 var last_status: u16 = 0;
 
-/// Downloads `url` over HTTPS.
+/// An HTTP/HTTPS client that keeps its connection open across requests so
+/// os.json, icon.png, apps.json and icons/<app>.png can be fetched in one
+/// socket connection.
+pub const Client = struct {
+    gpa: std.mem.Allocator,
+    threaded: std.Io.Threaded,
+    http: ?std.http.Client = null,
+    certs_loaded: bool = false,
+
+    pub fn init(gpa: std.mem.Allocator) Client {
+        return .{ .gpa = gpa, .threaded = .init(gpa, .{}) };
+    }
+
+    pub fn deinit(c: *Client) void {
+        if (c.http) |*h| h.deinit();
+        c.threaded.deinit();
+    }
+
+    pub fn download(c: *Client, url: []const u8) ![]u8 {
+        last_url = url;
+        last_status = 0;
+        const io = c.threaded.io();
+        if (c.http == null) c.http = .{ .allocator = c.gpa, .io = io };
+        const client = &c.http.?;
+        if (std.mem.startsWith(u8, url, "https:") and !c.certs_loaded) {
+            const now = std.Io.Clock.real.now(io);
+            // A clock that was never set (1970) would make every certificate
+            // look not yet valid.
+            if (now.toSeconds() < 1_700_000_000) return error.ClockNotSet;
+            try client.ca_bundle.addCertsFromFilePathAbsolute(c.gpa, io, now, ca_file);
+            client.now = now;
+            c.certs_loaded = true;
+        }
+        var out: std.Io.Writer.Allocating = .init(c.gpa);
+        errdefer out.deinit();
+        const result = try client.fetch(.{
+            .location = .{ .url = url },
+            .response_writer = &out.writer,
+            .keep_alive = true,
+        });
+        if (result.status != .ok) {
+            last_status = @intFromEnum(result.status);
+            return error.HttpError;
+        }
+        if (out.written().len > max_download) return error.TooBig;
+        return out.toOwnedSlice();
+    }
+};
+
+/// Downloads `url` over HTTP/HTTPS.
 pub fn download(gpa: std.mem.Allocator, url: []const u8) ![]u8 {
-    last_url = url;
-    last_status = 0;
-    var threaded: std.Io.Threaded = .init(gpa, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    var client: Client = .init(gpa);
     defer client.deinit();
-    if (std.mem.startsWith(u8, url, "https:")) {
-        const now = std.Io.Clock.real.now(io);
-        // A clock that was never set (1970) would make every certificate
-        // look not yet valid.
-        if (now.toSeconds() < 1_700_000_000) return error.ClockNotSet;
-        try client.ca_bundle.addCertsFromFilePathAbsolute(gpa, io, now, ca_file);
-        client.now = now;
+    return client.download(url);
+}
+
+/// Downloads `os.json` and `icon.png` from `base_url` into `dir` using `client`.
+pub fn fetchOs(client: *Client, gpa: std.mem.Allocator, base_url: []const u8, dir: []const u8) !void {
+    const url = try std.fmt.allocPrint(gpa, "{s}/os.json", .{base_url});
+    defer gpa.free(url);
+    const json = try client.download(url);
+    defer gpa.free(json);
+    const parsed = std.json.parseFromSlice(App, gpa, json, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return error.BadManifest;
+    defer parsed.deinit();
+    const m = parsed.value;
+    if (sys.system.Version.init(m.time, m.version) == null or !(std.mem.endsWith(u8, m.file, ".tar.xz") and validName(m.file[0 .. m.file.len - ".tar.xz".len])) or m.sha256.len != 64) return error.BadManifest;
+    var man_buf: [256]u8 = undefined;
+    var tmp_buf: [256]u8 = undefined;
+    const man_path = try std.fmt.bufPrintZ(&man_buf, "{s}/os.json", .{dir});
+    const tmp = try std.fmt.bufPrintZ(&tmp_buf, "{s}/os.json.new", .{dir});
+    _ = linux.unlink(tmp);
+    try sys.files.writeNew(tmp, json);
+    _ = try sys.check(linux.rename(tmp, man_path));
+
+    const icon_rel = if (validIconPath(m.icon)) m.icon else "icon.png";
+    const icon_url = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ base_url, icon_rel });
+    defer gpa.free(icon_url);
+    if (client.download(icon_url)) |png| {
+        defer gpa.free(png);
+        if (validIconPng(png)) {
+            var icon_tmp_buf: [256]u8 = undefined;
+            var icon_dst_buf: [256]u8 = undefined;
+            if (std.fmt.bufPrintZ(&icon_tmp_buf, "{s}/icon.png.new", .{dir})) |icon_tmp| {
+                if (std.fmt.bufPrintZ(&icon_dst_buf, "{s}/icon.png", .{dir})) |icon_dst| {
+                    _ = linux.unlink(icon_tmp);
+                    if (sys.files.writeNew(icon_tmp, png)) |_| {
+                        _ = linux.rename(icon_tmp, icon_dst);
+                    } else |_| {}
+                } else |_| {}
+            } else |_| {}
+        }
+    } else |_| {}
+}
+
+/// Downloads `apps.json` and each app's `icons/<name>.png` from `base_url`
+/// into `dir` using `client`.
+pub fn fetchCatalogue(client: *Client, gpa: std.mem.Allocator, base_url: []const u8, dir: []const u8) !void {
+    const url = try std.fmt.allocPrint(gpa, "{s}/apps.json", .{base_url});
+    defer gpa.free(url);
+    const json = try client.download(url);
+    defer gpa.free(json);
+    // Only a catalogue that reads is kept.
+    const parsed = try parseCatalogue(gpa, json);
+    defer parsed.deinit();
+    var cat_buf: [256]u8 = undefined;
+    var tmp_buf: [256]u8 = undefined;
+    const cat_path = try std.fmt.bufPrintZ(&cat_buf, "{s}/.catalogue.json", .{dir});
+    const tmp = try std.fmt.bufPrintZ(&tmp_buf, "{s}/.catalogue.json.new", .{dir});
+    _ = linux.unlink(tmp);
+    try sys.files.writeNew(tmp, json);
+    _ = try sys.check(linux.rename(tmp, cat_path));
+
+    var icons_buf: [256]u8 = undefined;
+    const icons_path = try std.fmt.bufPrintZ(&icons_buf, "{s}/.icons", .{dir});
+    _ = linux.mkdir(icons_path, 0o755);
+    for (parsed.value.apps) |a| {
+        var rel_buf: [96]u8 = undefined;
+        const icon_rel = if (validIconPath(a.icon))
+            a.icon
+        else
+            std.fmt.bufPrint(&rel_buf, "icons/{s}.png", .{a.name}) catch continue;
+        const icon_url = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ base_url, icon_rel });
+        defer gpa.free(icon_url);
+        const png = client.download(icon_url) catch continue;
+        defer gpa.free(png);
+        if (!validIconPng(png)) continue;
+        var icon_tmp_buf: [256]u8 = undefined;
+        var icon_dst_buf: [256]u8 = undefined;
+        const icon_tmp = std.fmt.bufPrintZ(&icon_tmp_buf, "{s}/{s}.png.new", .{ icons_path, a.name }) catch continue;
+        const icon_dst = std.fmt.bufPrintZ(&icon_dst_buf, "{s}/{s}.png", .{ icons_path, a.name }) catch continue;
+        _ = linux.unlink(icon_tmp);
+        sys.files.writeNew(icon_tmp, png) catch continue;
+        _ = linux.rename(icon_tmp, icon_dst);
     }
-    var out: std.Io.Writer.Allocating = .init(gpa);
-    errdefer out.deinit();
-    const result = try client.fetch(.{ .location = .{ .url = url }, .response_writer = &out.writer });
-    if (result.status != .ok) {
-        last_status = @intFromEnum(result.status);
-        return error.HttpError;
-    }
-    if (out.written().len > max_download) return error.TooBig;
-    return out.toOwnedSlice();
 }
 
 pub const Job = struct {
-    pub const Kind = enum { catalogue, install, os_check, os_download };
+    pub const Kind = enum { catalogue, install, update_all, os_check, os_download };
 
     kind: Kind,
     pid: linux.pid_t,
@@ -218,6 +408,7 @@ pub const Job = struct {
             switch (kind) {
                 .catalogue => "get the list of apps",
                 .install => "install",
+                .update_all => "update apps",
                 .os_check => "check for a system update",
                 .os_download => "download the system update",
             },
@@ -250,15 +441,14 @@ pub const Job = struct {
     }
 };
 
-fn childCatalogue(gpa: std.mem.Allocator, base_url: []const u8) !void {
-    const url = try std.fmt.allocPrint(gpa, "{s}/apps.json", .{base_url});
-    const json = try download(gpa, url);
-    // Only a catalogue that reads is kept.
-    (try parseCatalogue(gpa, json)).deinit();
-    const tmp = catalogue_file ++ ".new";
-    _ = linux.unlink(tmp);
-    try sys.files.writeNew(tmp, json);
-    _ = try sys.check(linux.rename(tmp, catalogue_file));
+fn childCatalogue(gpa: std.mem.Allocator, base_url: []const u8, check_os: bool) !void {
+    var client: Client = .init(gpa);
+    defer client.deinit();
+    if (check_os) {
+        _ = linux.mkdir(sys.system.update_dir, 0o755);
+        fetchOs(&client, gpa, base_url, sys.system.update_dir) catch {};
+    }
+    try fetchCatalogue(&client, gpa, base_url, apps_dir);
 }
 
 fn childInstall(gpa: std.mem.Allocator, base_url: []const u8, app: App) !void {
@@ -268,6 +458,20 @@ fn childInstall(gpa: std.mem.Allocator, base_url: []const u8, app: App) !void {
     try unpack(gpa, archive, apps_dir, app.name);
 }
 
+fn childUpdateAll(gpa: std.mem.Allocator, base_url: []const u8, list: []const App) !void {
+    var client: Client = .init(gpa);
+    defer client.deinit();
+    for (list) |app| {
+        if (!isInstalled(apps_dir, app.name) or !hasNewerVersion(apps_dir, app)) continue;
+        const url = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ base_url, app.file });
+        defer gpa.free(url);
+        const archive = try client.download(url);
+        defer gpa.free(archive);
+        try verify(archive, app);
+        try unpack(gpa, archive, apps_dir, app.name);
+    }
+}
+
 /// Why a job failed, for people.
 pub fn describe(err: anyerror) []const u8 {
     return switch (err) {
@@ -275,7 +479,7 @@ pub fn describe(err: anyerror) []const u8 {
         error.WrongSize, error.WrongChecksum => "the download was not what the catalogue said",
         error.BadArchive, error.BadName => "the archive was not right",
         error.InstallFailed => "the system could not install it",
-        error.BadCatalogue => "the list of apps was not right",
+        error.BadCatalogue, error.BadManifest => "the list of apps was not right",
         error.HttpError => "the server did not have it",
         error.UnknownHostName, error.NameServerFailure, error.HostLacksNetworkAddresses => "the server could not be found (is the network up?)",
         error.ConnectionRefused, error.NetworkUnreachable, error.ConnectionTimedOut, error.ConnectionResetByPeer => "the server could not be reached (is the network up?)",
@@ -291,6 +495,9 @@ pub const Store = struct {
     base_url: []const u8,
     catalogue: ?std.json.Parsed(Catalogue) = null,
     job: ?Job = null,
+    /// Whether refreshing also fetches `os.json` and `icon.png` over the
+    /// same keep-alive connection.
+    check_os: bool = false,
     /// What happened last (an error, or what was done).
     message_buf: [160]u8 = undefined,
     message_len: usize = 0,
@@ -334,7 +541,7 @@ pub const Store = struct {
     pub fn refresh(s: *Store, again: bool) void {
         if (s.job != null or (s.asked and !again)) return;
         s.asked = true;
-        s.job = Job.spawn(.catalogue, "", childCatalogue, .{ s.gpa, s.base_url }) catch |err| {
+        s.job = Job.spawn(.catalogue, "", childCatalogue, .{ s.gpa, s.base_url, s.check_os }) catch |err| {
             s.setMessage("Cannot get the list of apps: {s}", .{@errorName(err)});
             return;
         };
@@ -351,6 +558,22 @@ pub const Store = struct {
             s.message_len = 0;
             return;
         };
+    }
+
+    /// Updates all installed apps that have a newer version in the catalogue.
+    pub fn updateAll(s: *Store) void {
+        if (s.job != null) return;
+        var any = false;
+        for (s.apps()) |a| if (isInstalled(apps_dir, a.name) and hasNewerVersion(apps_dir, a)) {
+            any = true;
+            break;
+        };
+        if (!any) return;
+        s.job = Job.spawn(.update_all, "*", childUpdateAll, .{ s.gpa, s.base_url, s.apps() }) catch |err| {
+            s.setMessage("Cannot update apps: {s}", .{@errorName(err)});
+            return;
+        };
+        s.message_len = 0;
     }
 
     pub fn uninstall(s: *Store, name: []const u8) void {
@@ -381,6 +604,9 @@ pub const Store = struct {
         switch (kind) {
             .catalogue => if (outcome) |why| s.setMessage("Cannot get the list of apps: {s}", .{why}) else s.loadCatalogue(),
             .install => if (outcome) |why| s.setMessage("Cannot install {s}: {s}", .{ s.title(name), why }) else s.setMessage("Installed {s}: it is in the dock", .{s.title(name)}),
+            .update_all => if (outcome) |why| s.setMessage("Cannot update apps: {s}", .{why}) else {
+                s.message_len = 0;
+            },
             .os_check, .os_download => {},
         }
         return true;
@@ -391,18 +617,26 @@ const testing = std.testing;
 
 test "the catalogue: apps, and names that are folders" {
     const json =
-        \\{"version": "abc", "apps": [
-        \\  {"name": "dazzle-demo", "title": "Demo", "description": "Spins", "icon": "view_in_ar",
+        \\{"version": "abc", "time": 1791331200, "apps": [
+        \\  {"name": "dazzle-demo", "title": "Demo", "description": "Spins",
+        \\   "version": "abc", "time": 1791331200, "icon": "icons/dazzle-demo.png",
         \\   "file": "dazzle-demo.tar.xz", "size": 10, "sha256": "00", "added": "later"}
         \\]}
     ;
     const c = try parseCatalogue(testing.allocator, json);
     defer c.deinit();
     try testing.expectEqualStrings("Demo", c.value.apps[0].title);
+    try testing.expectEqualStrings("icons/dazzle-demo.png", c.value.apps[0].icon);
+    try testing.expectEqual(@as(u64, 1791331200), c.value.apps[0].time);
     try testing.expect(validName("dazzle-demo"));
     try testing.expect(!validName("../etc"));
     try testing.expect(!validName(".hidden"));
     try testing.expect(!validName("Upper"));
+    try testing.expect(validIconPath("icon.png"));
+    try testing.expect(validIconPath("icons/dazzle-demo.png"));
+    try testing.expect(!validIconPath("../icon.png"));
+    try testing.expect(!validIconPath("icons/../x.png"));
+    try testing.expect(!validIconPath("view_in_ar"));
     const bad = "{\"apps\": [{\"name\": \"../x\", \"title\": \"X\", \"file\": \"x\", \"size\": 1, \"sha256\": \"0\"}]}";
     try testing.expectError(error.BadCatalogue, parseCatalogue(testing.allocator, bad));
 }
@@ -456,3 +690,98 @@ test "installing unpacks the app's folder into place, again replaces it, removin
     while (at < n) : (count += 1) at += std.mem.readInt(u16, dents[at + 16 ..][0..2], .little);
     try testing.expectEqual(@as(usize, 2), count); // . and ..
 }
+
+test "keep-alive fetches os.json, icon.png, apps.json and icons/<app>.png on a single socket connection" {
+    // A minimal 64x64 PNG header for the server to return.
+    const png_64 = "\x89PNG\r\n\x1a\n" ++ "\x00\x00\x00\x0dIHDR" ++ "\x00\x00\x00\x40" ++ "\x00\x00\x00\x40" ++ "\x08\x06\x00\x00\x00";
+    try testing.expect(validIconPng(png_64));
+
+    const listener: linux.fd_t = @intCast(try sys.check(linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0)));
+    defer sys.close(listener);
+    var addr: linux.sockaddr.in = .{
+        .port = 0,
+        .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
+    };
+    _ = try sys.check(linux.bind(listener, @ptrCast(&addr), @sizeOf(linux.sockaddr.in)));
+    _ = try sys.check(linux.listen(listener, 1));
+    var addr_len: linux.socklen_t = @sizeOf(linux.sockaddr.in);
+    _ = try sys.check(linux.getsockname(listener, @ptrCast(&addr), &addr_len));
+    const port = std.mem.bigToNative(u16, addr.port);
+
+    const Server = struct {
+        fn run(lfd: linux.fd_t) void {
+            const os_body =
+                \\{"name":"dazzle","title":"Dazzle","description":"The operating system","version":"0123abc","time":1791400000,"icon":"icon.png","file":"dazzle-os.tar.xz","size":10,"sha256":"f3e817e51826f4ca7b7d334af8f857d9c42416073f44c7429e1bfda7f097a753"}
+            ;
+            const apps_body =
+                \\{"version":"0123abc","time":1791400000,"apps":[{"name":"dazzle-demo","title":"Demo","description":"Spins","version":"0123abc","time":1791400000,"icon":"icons/dazzle-demo.png","file":"dazzle-demo.tar.xz","size":10,"sha256":"00"}]}
+            ;
+            // Accept only ONE socket connection: all 4 requests must arrive on it.
+            const rc = linux.accept4(lfd, null, null, linux.SOCK.CLOEXEC);
+            if (linux.errno(rc) != .SUCCESS) return;
+            const conn: linux.fd_t = @intCast(rc);
+            defer sys.close(conn);
+
+            var req_buf: [2048]u8 = undefined;
+            var filled: usize = 0;
+            for (0..4) |_| {
+                const header_end = while (true) {
+                    if (std.mem.indexOf(u8, req_buf[0..filled], "\r\n\r\n")) |idx| break idx + 4;
+                    const n = sys.check(linux.read(conn, req_buf[filled..].ptr, req_buf.len - filled)) catch return;
+                    if (n == 0) return;
+                    filled += n;
+                };
+                const req = req_buf[0..header_end];
+                const body: []const u8 = if (std.mem.startsWith(u8, req, "GET /os.json "))
+                    os_body
+                else if (std.mem.startsWith(u8, req, "GET /icon.png "))
+                    png_64 ++ "OS"
+                else if (std.mem.startsWith(u8, req, "GET /apps.json "))
+                    apps_body
+                else if (std.mem.startsWith(u8, req, "GET /icons/dazzle-demo.png "))
+                    png_64 ++ "DEMO"
+                else
+                    return;
+                var resp_buf: [1024]u8 = undefined;
+                const resp = std.fmt.bufPrint(
+                    &resp_buf,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nConnection: keep-alive\r\n\r\n{s}",
+                    .{ body.len, body },
+                ) catch return;
+                _ = linux.write(conn, resp.ptr, resp.len);
+                const rest = filled - header_end;
+                std.mem.copyForwards(u8, req_buf[0..rest], req_buf[header_end..filled]);
+                filled = rest;
+            }
+        }
+    };
+
+    const thread = try std.Thread.spawn(.{}, Server.run, .{listener});
+    defer thread.join();
+
+    var dir_buf: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrintZ(&dir_buf, "/tmp/dazzle-keepalive-test-{d}", .{linux.getpid()});
+    _ = linux.mkdir(dir, 0o755);
+    defer sys.files.removeTree(dir);
+    var os_dir_buf: [80]u8 = undefined;
+    var apps_dir_buf: [80]u8 = undefined;
+    const os_dir = try std.fmt.bufPrintZ(&os_dir_buf, "{s}/update", .{dir});
+    const app_dir = try std.fmt.bufPrintZ(&apps_dir_buf, "{s}/apps", .{dir});
+    _ = linux.mkdir(os_dir, 0o755);
+    _ = linux.mkdir(app_dir, 0o755);
+
+    var url_buf: [64]u8 = undefined;
+    const base_url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}", .{port});
+    var client: Client = .init(testing.allocator);
+    defer client.deinit();
+    try fetchOs(&client, testing.allocator, base_url, os_dir);
+    try fetchCatalogue(&client, testing.allocator, base_url, app_dir);
+
+    var path_buf: [128]u8 = undefined;
+    var read_buf: [256]u8 = undefined;
+    const os_icon = try std.fmt.bufPrintZ(&path_buf, "{s}/icon.png", .{os_dir});
+    try testing.expectEqualStrings(png_64 ++ "OS", sys.readFile(os_icon, &read_buf).?);
+    const demo_icon = try std.fmt.bufPrintZ(&path_buf, "{s}/.icons/dazzle-demo.png", .{app_dir});
+    try testing.expectEqualStrings(png_64 ++ "DEMO", sys.readFile(demo_icon, &read_buf).?);
+}
+

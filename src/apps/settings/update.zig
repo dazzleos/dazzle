@@ -26,8 +26,12 @@ const proto = sys.system;
 pub const manifest_file = proto.update_dir ++ "/os.json";
 
 pub const Manifest = struct {
+    name: []const u8 = "dazzle",
+    title: []const u8 = "Dazzle",
+    description: []const u8 = "",
     version: []const u8,
     time: u64,
+    icon: []const u8 = "",
     file: []const u8,
     size: u64,
     sha256: []const u8,
@@ -90,7 +94,7 @@ pub const Updater = struct {
         return u;
     }
 
-    fn loadManifest(u: *Updater) void {
+    pub fn loadManifest(u: *Updater) void {
         const json = sys.readFileAlloc(u.gpa, manifest_file, 64 * 1024) catch return;
         defer u.gpa.free(json);
         const parsed = Manifest.parse(u.gpa, json) catch return;
@@ -191,14 +195,10 @@ pub const Updater = struct {
 };
 
 fn childCheck(gpa: std.mem.Allocator, base_url: []const u8) !void {
-    const url = try std.fmt.allocPrint(gpa, "{s}/os.json", .{base_url});
-    const json = try store.download(gpa, url);
-    // Only a manifest that reads is kept.
-    (try Manifest.parse(gpa, json)).deinit();
-    const tmp = manifest_file ++ ".new";
-    _ = linux.unlink(tmp);
-    try sys.files.writeNew(tmp, json);
-    _ = try sys.check(linux.rename(tmp, manifest_file));
+    _ = linux.mkdir(proto.update_dir, 0o755);
+    var client: store.Client = .init(gpa);
+    defer client.deinit();
+    try store.fetchOs(&client, gpa, base_url, proto.update_dir);
 }
 
 fn childDownload(gpa: std.mem.Allocator, base_url: []const u8, m: Manifest) !void {

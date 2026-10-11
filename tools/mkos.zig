@@ -1,14 +1,19 @@
 //! Packs the system for updating: one OS slot's files (the kernel, device
 //! trees, overlays, initramfs and version, but not its command line, which
 //! says which slot it is) as a tar archive of the folder "os" (the build
-//! compresses it with xz); and the manifest describing it, os.json, both
-//! published beside the image. Settings downloads the manifest, and the
-//! archive by its "file" if the system is newer than both slots', checking
-//! its size and SHA-256; the system manager installs it (src/init/update.zig).
+//! compresses it with xz); and the manifest describing it, os.json (in the
+//! same item format as apps.json), both published beside the image with
+//! icon.png. Settings downloads the manifest and icon, and the archive by
+//! its "file" if the system is newer than both slots', checking its size
+//! and SHA-256; the system manager installs it (src/init/update.zig).
 //!
 //!     {
+//!       "name": "dazzle",
+//!       "title": "Dazzle",
+//!       "description": "The operating system",
 //!       "version": "<Dazzle's commit>-<the kernel's commit>",
 //!       "time": <the later of when they were made, in seconds since 1970>,
+//!       "icon": "icon.png",
 //!       "file": "dazzle-os.tar.xz",
 //!       "size": 4123456,
 //!       "sha256": "<64 hex digits>"
@@ -23,15 +28,10 @@ const std = @import("std");
 const mkapp = @import("mkapp.zig");
 const mkcatalogue = @import("mkcatalogue.zig");
 
-pub const Manifest = struct {
-    version: []const u8,
-    time: u64,
-    file: []const u8,
-    size: u64,
-    sha256: []const u8,
-};
+pub const Manifest = mkcatalogue.App;
 
 pub const archive_name = "dazzle-os.tar.xz";
+pub const icon_name = "icon.png";
 
 pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
@@ -54,8 +54,12 @@ pub fn main(init: std.process.Init) !void {
         var fields = std.mem.tokenizeAny(u8, version, " \n");
         const time = try std.fmt.parseInt(u64, fields.next() orelse return error.BadVersion, 10);
         const m: Manifest = .{
+            .name = "dazzle",
+            .title = "Dazzle",
+            .description = "The operating system",
             .version = fields.next() orelse return error.BadVersion,
             .time = time,
+            .icon = icon_name,
             .file = archive_name,
             .size = archive.len,
             .sha256 = try mkcatalogue.hexSha256(arena, archive),
@@ -95,6 +99,7 @@ fn writeFile(io: std.Io, path: []const u8, data: []const u8) !void {
 }
 
 test "the system's archive unpacks to the folder os, with its overlays" {
+    _ = mkcatalogue;
     const gpa = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -112,3 +117,4 @@ test "the system's archive unpacks to the folder os, with its overlays" {
     while (try it.next()) |f| : (seen += 1) try std.testing.expectEqualStrings(want[seen], std.mem.trimEnd(u8, f.name, "/"));
     try std.testing.expectEqual(want.len, seen);
 }
+

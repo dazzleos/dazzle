@@ -64,15 +64,23 @@ const App = struct {
 fn addAppArchives(b: *std.Build, apps: []const App) *std.Build.Step {
     const step = b.step("app-archives", "The apps' archives (zig-out/apps)");
     const xz = requireTools(b, &.{"xz:xz-utils"});
+    const commit = gitCommit(b);
+    const commit_time = gitCommitTime(b);
+    const version_file = b.addWriteFiles().add("version", b.fmt("{d} {s}\n", .{ commit_time, commit }));
     const catalogue = b.addRunArtifact(hostTool(b, "mkcatalogue"));
     const json = catalogue.addOutputFileArg("apps.json");
-    catalogue.addArg(gitCommit(b));
+    catalogue.addArgs(&.{ commit, b.fmt("{d}", .{commit_time}) });
     for (apps) |a| {
         const name = a.exe.name;
+        const app_dir = std.fs.path.dirname(a.exe.root_module.root_source_file.?.src_path.sub_path).?;
+        const icon_png = b.path(b.fmt("{s}/icon.png", .{app_dir}));
+        const icon_rel = b.fmt("icons/{s}.png", .{name});
         const pack = b.addRunArtifact(hostTool(b, "mkapp"));
         const tar = pack.addOutputFileArg(b.fmt("{s}.tar", .{name}));
         pack.addArg(name);
         pack.addArtifactArg(a.exe);
+        pack.addPrefixedFileArg("icon.png=", icon_png);
+        pack.addPrefixedFileArg("version=", version_file);
         pack.addPrefixedFileArg(b.fmt("{s}.icon=", .{name}), iconFile(b, name, a.icon));
         if (a.handles.len > 0) {
             var text: std.ArrayList(u8) = .empty;
@@ -86,7 +94,8 @@ fn addAppArchives(b: *std.Build, apps: []const App) *std.Build.Step {
         compress.addFileArg(tar);
         const archive = compress.captureStdOut(.{ .basename = b.fmt("{s}.tar.xz", .{name}) });
         step.dependOn(&b.addInstallFile(archive, b.fmt("apps/{s}.tar.xz", .{name})).step);
-        catalogue.addArgs(&.{ name, a.title, a.description, @tagName(a.icon) });
+        step.dependOn(&b.addInstallFile(icon_png, b.fmt("apps/{s}", .{icon_rel})).step);
+        catalogue.addArgs(&.{ name, a.title, a.description, icon_rel });
         catalogue.addFileArg(archive);
     }
     step.dependOn(&b.addInstallFile(json, "apps/apps.json").step);
@@ -768,6 +777,7 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.B
         manifest.addFileArg(archive);
         os_step.dependOn(&b.addInstallFile(archive, "os/dazzle-os.tar.xz").step);
         os_step.dependOn(&b.addInstallFile(json, "os/os.json").step);
+        os_step.dependOn(&b.addInstallFile(b.path("icon.png"), "os/icon.png").step);
     }
 
     const mkimage = b.addRunArtifact(hostTool(b, "mkimage"));
@@ -992,7 +1002,8 @@ pub fn build(b: *std.Build) void {
     // The shell's own apps, beside it in /shell (they cannot be removed).
     run_mkinitramfs.addPrefixedArtifactArg("--shell=", settings_exe);
     run_mkinitramfs.addPrefixedArtifactArg("--shell=", setup_exe);
-    // The dock's icons: a Material icon's name beside each program.
+    // Dazzle's icon in /os/icon.png, and the dock's icons beside each program.
+    run_mkinitramfs.addPrefixedFileArg("--file=os/icon.png=", b.path("icon.png"));
     addAppIcon(b, run_mkinitramfs, "os/shell/dazzle-settings", .settings);
     // The certificates of the authorities HTTPS trusts, for setup and
     // Settings to download apps and updates.
