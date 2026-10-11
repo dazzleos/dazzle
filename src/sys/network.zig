@@ -46,6 +46,7 @@ pub const socket_path = "/os/sockets/network";
 pub const allowed_program = "/os/shell/dazzle-settings";
 
 pub const max_networks = 24;
+pub const max_adapters = 4;
 
 pub const Security = enum {
     open,
@@ -158,6 +159,8 @@ pub const Connection = struct {
     ssid_buf: [32]u8 = undefined,
     ssid_len: u8 = 0,
     address: ?[4]u8 = null,
+    adapter_buf: [16]u8 = undefined,
+    adapter_len: u8 = 0,
 
     pub fn ssid(c: *const Connection) []const u8 {
         return c.ssid_buf[0..c.ssid_len];
@@ -167,12 +170,40 @@ pub const Connection = struct {
         c.ssid_len = @intCast(@min(s.len, c.ssid_buf.len));
         @memcpy(c.ssid_buf[0..c.ssid_len], s[0..c.ssid_len]);
     }
+
+    pub fn adapter(c: *const Connection) []const u8 {
+        return c.adapter_buf[0..c.adapter_len];
+    }
+
+    pub fn setAdapter(c: *Connection, name: []const u8) void {
+        c.adapter_len = @intCast(@min(name.len, c.adapter_buf.len));
+        @memcpy(c.adapter_buf[0..c.adapter_len], name[0..c.adapter_len]);
+    }
 };
+
+/// A request to scan for Wi-Fi networks (on `adapter` if given).
+pub fn scanRequest(buf: []u8, adapter: []const u8) []const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    if (adapter.len > 0) w.print("wifi scan {s}\n", .{adapter}) catch {} else w.writeAll("wifi scan\n") catch {};
+    return w.buffered();
+}
+
+/// A request to leave the Wi-Fi network (on `adapter` if given).
+pub fn disconnectRequest(buf: []u8, adapter: []const u8) []const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    if (adapter.len > 0) w.print("wifi disconnect {s}\n", .{adapter}) catch {} else w.writeAll("wifi disconnect\n") catch {};
+    return w.buffered();
+}
 
 /// A request to join a network.
 pub fn connectRequest(buf: []u8, ssid: []const u8, passphrase: []const u8) []const u8 {
+    return connectAdapterRequest(buf, "", ssid, passphrase);
+}
+
+/// A request to join a network on `adapter` (or the default adapter when empty).
+pub fn connectAdapterRequest(buf: []u8, adapter: []const u8, ssid: []const u8, passphrase: []const u8) []const u8 {
     var w: std.Io.Writer = .fixed(buf);
-    w.print("wifi connect {x} ", .{ssid}) catch {};
+    if (adapter.len > 0) w.print("wifi connect {s} {x} ", .{ adapter, ssid }) catch {} else w.print("wifi connect {x} ", .{ssid}) catch {};
     if (passphrase.len == 0) w.writeAll("-") catch {} else w.print("{x}", .{passphrase}) catch {};
     w.writeAll("\n") catch {};
     return w.buffered();
@@ -221,24 +252,65 @@ pub const Addressing = union(enum) {
 
 /// The request choosing how the wired adapter gets its address.
 pub fn ethernetRequest(buf: []u8, a: Addressing) []const u8 {
+    return ethernetAdapterRequest(buf, "", a);
+}
+
+/// The request choosing how the wired adapter `adapter` gets its address.
+pub fn ethernetAdapterRequest(buf: []u8, adapter: []const u8, a: Addressing) []const u8 {
     var w: std.Io.Writer = .fixed(buf);
+    if (adapter.len > 0) w.print("ethernet {s} ", .{adapter}) catch {} else w.writeAll("ethernet ") catch {};
     switch (a) {
-        .dhcp => w.writeAll("ethernet dhcp\n") catch {},
-        .static => |st| w.print("ethernet static {f}\n", .{st}) catch {},
+        .dhcp => w.writeAll("dhcp\n") catch {},
+        .static => |st| w.print("static {f}\n", .{st}) catch {},
     }
     return w.buffered();
 }
 
+pub const EthernetRequest = struct {
+    adapter_buf: [16]u8 = undefined,
+    adapter_len: u8 = 0,
+    addressing: Addressing,
+
+    pub fn adapter(r: *const EthernetRequest) []const u8 {
+        return r.adapter_buf[0..r.adapter_len];
+    }
+};
+
 /// A Wi-Fi request.
 pub const WifiRequest = union(enum) {
-    scan,
-    disconnect,
-    connect: struct { ssid_buf: [32]u8, ssid_len: u8, pass_buf: [63]u8, pass_len: u8 },
+    scan: struct {
+        adapter_buf: [16]u8 = undefined,
+        adapter_len: u8 = 0,
+
+        pub fn adapter(s: *const @This()) []const u8 {
+            return s.adapter_buf[0..s.adapter_len];
+        }
+    },
+    disconnect: struct {
+        adapter_buf: [16]u8 = undefined,
+        adapter_len: u8 = 0,
+
+        pub fn adapter(d: *const @This()) []const u8 {
+            return d.adapter_buf[0..d.adapter_len];
+        }
+    },
+    connect: struct {
+        adapter_buf: [16]u8 = undefined,
+        adapter_len: u8 = 0,
+        ssid_buf: [32]u8,
+        ssid_len: u8,
+        pass_buf: [63]u8,
+        pass_len: u8,
+
+        pub fn adapter(c: *const @This()) []const u8 {
+            return c.adapter_buf[0..c.adapter_len];
+        }
+    },
 };
 
 pub const Request = union(enum) {
     status,
-    ethernet: Addressing,
+    ethernet: EthernetRequest,
     wifi: WifiRequest,
 
     pub fn parse(line: []const u8) ?Request {
@@ -246,20 +318,53 @@ pub const Request = union(enum) {
         const kind = f.next() orelse return null;
         if (std.mem.eql(u8, kind, "status")) return .status;
         if (std.mem.eql(u8, kind, "ethernet")) {
-            const how = f.next() orelse return null;
-            if (std.mem.eql(u8, how, "dhcp")) return .{ .ethernet = .dhcp };
+            const first = f.next() orelse return null;
+            var er: EthernetRequest = .{ .addressing = .dhcp };
+            const how = if (std.mem.eql(u8, first, "dhcp") or std.mem.eql(u8, first, "static")) first else blk: {
+                if (first.len > er.adapter_buf.len) return null;
+                er.adapter_len = @intCast(first.len);
+                @memcpy(er.adapter_buf[0..first.len], first);
+                break :blk f.next() orelse return null;
+            };
+            if (std.mem.eql(u8, how, "dhcp")) {
+                er.addressing = .dhcp;
+                return .{ .ethernet = er };
+            }
             if (!std.mem.eql(u8, how, "static")) return null;
             const cidr = f.next() orelse return null;
-            return .{ .ethernet = .{ .static = Static.parse(cidr, f.next() orelse "-") orelse return null } };
+            er.addressing = .{ .static = Static.parse(cidr, f.next() orelse "-") orelse return null };
+            return .{ .ethernet = er };
         }
         if (!std.mem.eql(u8, kind, "wifi")) return null;
         const what = f.next() orelse return null;
-        if (std.mem.eql(u8, what, "scan")) return .{ .wifi = .scan };
-        if (std.mem.eql(u8, what, "disconnect")) return .{ .wifi = .disconnect };
+        if (std.mem.eql(u8, what, "scan")) {
+            var sc: @FieldType(WifiRequest, "scan") = .{};
+            if (f.next()) |name| {
+                if (name.len > sc.adapter_buf.len) return null;
+                sc.adapter_len = @intCast(name.len);
+                @memcpy(sc.adapter_buf[0..name.len], name);
+            }
+            return .{ .wifi = .{ .scan = sc } };
+        }
+        if (std.mem.eql(u8, what, "disconnect")) {
+            var dc: @FieldType(WifiRequest, "disconnect") = .{};
+            if (f.next()) |name| {
+                if (name.len > dc.adapter_buf.len) return null;
+                dc.adapter_len = @intCast(name.len);
+                @memcpy(dc.adapter_buf[0..name.len], name);
+            }
+            return .{ .wifi = .{ .disconnect = dc } };
+        }
         if (!std.mem.eql(u8, what, "connect")) return null;
-        const ssid_hex = f.next() orelse return null;
-        const pass_hex = f.next() orelse return null;
+        const tok1 = f.next() orelse return null;
+        const tok2 = f.next() orelse return null;
         var r: @FieldType(WifiRequest, "connect") = .{ .ssid_buf = undefined, .ssid_len = 0, .pass_buf = undefined, .pass_len = 0 };
+        const ssid_hex, const pass_hex = if (f.next()) |tok3| blk: {
+            if (tok1.len > r.adapter_buf.len) return null;
+            r.adapter_len = @intCast(tok1.len);
+            @memcpy(r.adapter_buf[0..tok1.len], tok1);
+            break :blk .{ tok2, tok3 };
+        } else .{ tok1, tok2 };
         if (ssid_hex.len > 64 or ssid_hex.len % 2 != 0) return null;
         r.ssid_len = @intCast((std.fmt.hexToBytes(&r.ssid_buf, ssid_hex) catch return null).len);
         if (!std.mem.eql(u8, pass_hex, "-")) {
@@ -286,7 +391,7 @@ pub const Adapter = struct {
     }
 };
 
-/// The wired adapter, and how it gets its address.
+/// A wired adapter, and how it gets its address.
 pub const Ethernet = struct {
     adapter: ?Adapter = null,
     addressing: Addressing = .dhcp,
@@ -294,8 +399,12 @@ pub const Ethernet = struct {
 
 pub const Report = struct {
     ethernet: Ethernet = .{},
-    /// The Wi-Fi adapter.
+    ethernets: [max_adapters]Ethernet = undefined,
+    ethernet_len: usize = 0,
+    /// The Wi-Fi adapter (or the first / active one when there are several).
     adapter: ?Adapter = null,
+    adapters: [max_adapters]Adapter = undefined,
+    adapter_len: usize = 0,
     scanning: bool = false,
     connection: Connection = .{},
     networks: [max_networks]Network = undefined,
@@ -305,6 +414,48 @@ pub const Report = struct {
 
     pub fn slice(r: *const Report) []const Network {
         return r.networks[0..r.len];
+    }
+
+    /// All Wi-Fi adapters reported: `adapters[0..adapter_len]`, or `adapter`
+    /// if `adapters` was not populated directly.
+    pub fn wifiAdapters(r: *const Report) []const Adapter {
+        if (r.adapter_len > 0) return r.adapters[0..r.adapter_len];
+        if (r.adapter) |*a| return a[0..1];
+        return &.{};
+    }
+
+    /// Adds a Wi-Fi adapter to the report.
+    pub fn addAdapter(r: *Report, a: Adapter) void {
+        if (r.adapter == null) r.adapter = a;
+        if (r.adapter_len < max_adapters) {
+            r.adapters[r.adapter_len] = a;
+            r.adapter_len += 1;
+        }
+    }
+
+    /// All Ethernet entries reported: `ethernets[0..ethernet_len]`, or
+    /// `ethernet` if `ethernets` was not populated directly.
+    pub fn ethernetAdapters(r: *const Report) []const Ethernet {
+        if (r.ethernet_len > 0) return r.ethernets[0..r.ethernet_len];
+        if (r.ethernet.adapter != null or r.ethernet.addressing != .dhcp) return (&r.ethernet)[0..1];
+        return &.{};
+    }
+
+    /// Adds a wired adapter entry to the report.
+    pub fn addEthernet(r: *Report, e: Ethernet) void {
+        if (r.ethernet_len == 0) r.ethernet = e;
+        if (r.ethernet_len < max_adapters) {
+            r.ethernets[r.ethernet_len] = e;
+            r.ethernet_len += 1;
+        }
+    }
+
+    /// How the wired adapter `name` gets its address.
+    pub fn addressingFor(r: *const Report, name: []const u8) Addressing {
+        for (r.ethernets[0..r.ethernet_len]) |*e| {
+            if (e.adapter) |*a| if (std.mem.eql(u8, a.name(), name)) return e.addressing;
+        }
+        return r.ethernet.addressing;
     }
 
     /// Adds a network, keeping one entry per SSID (its strongest access
@@ -337,21 +488,34 @@ pub const Report = struct {
 
     pub fn write(r: *const Report, buf: []u8) []const u8 {
         var w: std.Io.Writer = .fixed(buf);
-        const e = &r.ethernet;
-        w.print("ethernet {s} ", .{if (e.adapter) |*a| a.name() else "-"}) catch {};
-        switch (e.addressing) {
-            .dhcp => w.writeAll("dhcp\n") catch {},
-            .static => |st| w.print("static {f}\n", .{st}) catch {},
+        const eths = r.ethernetAdapters();
+        if (eths.len == 0) {
+            const e = &r.ethernet;
+            w.print("ethernet {s} ", .{if (e.adapter) |*a| a.name() else "-"}) catch {};
+            switch (e.addressing) {
+                .dhcp => w.writeAll("dhcp\n") catch {},
+                .static => |st| w.print("static {f}\n", .{st}) catch {},
+            }
+        } else for (eths) |*e| {
+            w.print("ethernet {s} ", .{if (e.adapter) |*a| a.name() else "-"}) catch {};
+            switch (e.addressing) {
+                .dhcp => w.writeAll("dhcp\n") catch {},
+                .static => |st| w.print("static {f}\n", .{st}) catch {},
+            }
         }
-        if (r.adapter) |*a| {
+        const wifis = r.wifiAdapters();
+        if (wifis.len == 0) {
+            w.writeAll("wifi none\n") catch {};
+        } else for (wifis) |*a| {
             const m = a.mac;
             w.print("wifi adapter {s} {x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2} {s}\n", .{ a.name(), m[0], m[1], m[2], m[3], m[4], m[5], if (a.up) "up" else "down" }) catch {};
-        } else w.writeAll("wifi none\n") catch {};
+        }
         if (r.scanning) w.writeAll("wifi scanning\n") catch {};
         const c = &r.connection;
         w.print("wifi connection {s} {s} ", .{ @tagName(c.state), @tagName(c.failure) }) catch {};
         if (c.ssid_len == 0) w.writeAll("-") catch {} else w.print("{x}", .{c.ssid()}) catch {};
-        if (c.address) |a| w.print(" {d}.{d}.{d}.{d}\n", .{ a[0], a[1], a[2], a[3] }) catch {} else w.writeAll(" -\n") catch {};
+        if (c.address) |a| w.print(" {d}.{d}.{d}.{d}", .{ a[0], a[1], a[2], a[3] }) catch {} else w.writeAll(" -") catch {};
+        if (c.adapter_len > 0) w.print(" {s}\n", .{c.adapter()}) catch {} else w.writeAll("\n") catch {};
         for (r.slice()) |*n| {
             w.print("wifi network {d} {d} {s} {x}\n", .{ n.signal_mbm, n.freq_mhz, @tagName(n.security), n.ssid() }) catch {};
         }
@@ -378,14 +542,20 @@ pub const Report = struct {
                 r.scanning = true;
             } else if (std.mem.eql(u8, kind, "ethernet")) {
                 const name = f.next() orelse continue;
+                var e: Ethernet = .{};
                 if (!std.mem.eql(u8, name, "-")) {
                     var a: Adapter = .{};
                     a.setName(name);
-                    r.ethernet.adapter = a;
+                    e.adapter = a;
                 }
                 if (std.mem.eql(u8, f.next() orelse "", "static")) {
                     const cidr = f.next() orelse continue;
-                    if (Static.parse(cidr, f.next() orelse "-")) |st| r.ethernet.addressing = .{ .static = st };
+                    if (Static.parse(cidr, f.next() orelse "-")) |st| e.addressing = .{ .static = st };
+                }
+                if (e.adapter != null or r.ethernet_len > 0) {
+                    r.addEthernet(e);
+                } else {
+                    r.ethernet = e;
                 }
             } else if (std.mem.eql(u8, kind, "connection")) {
                 var c: Connection = .{};
@@ -403,6 +573,7 @@ pub const Report = struct {
                     } else true;
                     if (ok) c.address = a;
                 };
+                if (f.next()) |ifname| if (!std.mem.eql(u8, ifname, "-")) c.setAdapter(ifname);
                 r.connection = c;
             } else if (std.mem.eql(u8, kind, "adapter")) {
                 var a: Adapter = .{};
@@ -410,7 +581,7 @@ pub const Report = struct {
                 var mac = std.mem.tokenizeScalar(u8, f.next() orelse "", ':');
                 for (&a.mac) |*b| b.* = std.fmt.parseInt(u8, mac.next() orelse "0", 16) catch 0;
                 a.up = std.mem.eql(u8, f.next() orelse "", "up");
-                r.adapter = a;
+                r.addAdapter(a);
             } else if (std.mem.eql(u8, kind, "network")) {
                 var n: Network = .{};
                 n.signal_mbm = std.fmt.parseInt(i32, f.next() orelse continue, 10) catch continue;
@@ -469,14 +640,19 @@ test "reports go through the socket as text and come back the same" {
     var r: Report = .{ .scanning = true };
     var a: Adapter = .{ .mac = .{ 0xb8, 0x27, 0xeb, 1, 2, 3 }, .up = true };
     a.setName("wlan0");
-    r.adapter = a;
+    r.addAdapter(a);
+    var a2: Adapter = .{ .mac = .{ 0xb8, 0x27, 0xeb, 4, 5, 6 }, .up = false };
+    a2.setName("wlan1");
+    r.addAdapter(a2);
     r.add(net("Home", -5400, 2437, .wpa2));
     r.add(net("Café net", -6100, 5180, .wpa3));
     var buf: [1024]u8 = undefined;
     const text = r.write(&buf);
-    try testing.expect(std.mem.startsWith(u8, text, "ethernet - dhcp\nwifi adapter wlan0 b8:27:eb:01:02:03 up\nwifi scanning\nwifi connection idle none - -\nwifi network -5400 2437 wpa2 486f6d65\n"));
+    try testing.expect(std.mem.startsWith(u8, text, "ethernet - dhcp\nwifi adapter wlan0 b8:27:eb:01:02:03 up\nwifi adapter wlan1 b8:27:eb:04:05:06 down\nwifi scanning\nwifi connection idle none - -\nwifi network -5400 2437 wpa2 486f6d65\n"));
     const back = Report.parse(text).?;
     try testing.expectEqualStrings("wlan0", back.adapter.?.name());
+    try testing.expectEqual(@as(usize, 2), back.wifiAdapters().len);
+    try testing.expectEqualStrings("wlan1", back.wifiAdapters()[1].name());
     try testing.expectEqual(a.mac, back.adapter.?.mac);
     try testing.expect(back.scanning and !back.denied);
     try testing.expectEqual(@as(usize, 2), back.len);
@@ -495,12 +671,19 @@ test "requests and the connection state go through the socket" {
     const req = connectRequest(&buf, "Home", "correct horse");
     try testing.expectEqualStrings("wifi connect 486f6d65 636f727265637420686f727365\n", req);
     const r = Request.parse(req).?.wifi.connect;
+    try testing.expectEqualStrings("", r.adapter());
     try testing.expectEqualStrings("Home", r.ssid_buf[0..r.ssid_len]);
     try testing.expectEqualStrings("correct horse", r.pass_buf[0..r.pass_len]);
+    const req_wlan1 = connectAdapterRequest(&buf, "wlan1", "Home", "correct horse");
+    const r_wlan1 = Request.parse(req_wlan1).?.wifi.connect;
+    try testing.expectEqualStrings("wlan1", r_wlan1.adapter());
+    try testing.expectEqualStrings("Home", r_wlan1.ssid_buf[0..r_wlan1.ssid_len]);
     const open = Request.parse(connectRequest(&buf, "Cafe", "")).?.wifi.connect;
     try testing.expectEqual(@as(u8, 0), open.pass_len);
     try testing.expect(Request.parse("wifi scan\n").?.wifi == .scan);
+    try testing.expectEqualStrings("wlan1", Request.parse("wifi scan wlan1\n").?.wifi.scan.adapter());
     try testing.expect(Request.parse("wifi disconnect\n").?.wifi == .disconnect);
+    try testing.expectEqualStrings("wlan1", Request.parse("wifi disconnect wlan1\n").?.wifi.disconnect.adapter());
     try testing.expect(Request.parse("wifi connect zz -\n") == null);
     try testing.expect(Request.parse("scan\n") == null);
     try testing.expect(Request.parse("wifi\n") == null);
@@ -509,10 +692,12 @@ test "requests and the connection state go through the socket" {
     var rep: Report = .{};
     rep.connection = .{ .state = .connected, .address = .{ 192, 168, 1, 50 } };
     rep.connection.setSsid("Home");
+    rep.connection.setAdapter("wlan1");
     var out: [512]u8 = undefined;
     const back = Report.parse(rep.write(&out)).?;
     try testing.expectEqual(ConnectionState.connected, back.connection.state);
     try testing.expectEqualStrings("Home", back.connection.ssid());
+    try testing.expectEqualStrings("wlan1", back.connection.adapter());
     try testing.expectEqual([4]u8{ 192, 168, 1, 50 }, back.connection.address.?);
     rep.connection = .{ .state = .failed, .failure = .wrong_password };
     const failed = Report.parse(rep.write(&out)).?;
@@ -534,21 +719,30 @@ test "the wired adapter's addressing goes through the socket" {
 
     const req = ethernetRequest(&buf, .{ .static = st });
     try testing.expectEqualStrings("ethernet static 192.168.1.50/24 192.168.1.1\n", req);
-    try testing.expectEqual(st, Request.parse(req).?.ethernet.static);
-    try testing.expect(Request.parse(ethernetRequest(&buf, .dhcp)).?.ethernet == .dhcp);
-    try testing.expect(Request.parse("ethernet static 10.0.0.2/8 -\n").?.ethernet.static.gateway == null);
+    try testing.expectEqual(st, Request.parse(req).?.ethernet.addressing.static);
+    const req_eth1 = ethernetAdapterRequest(&buf, "eth1", .{ .static = st });
+    try testing.expectEqualStrings("ethernet eth1 static 192.168.1.50/24 192.168.1.1\n", req_eth1);
+    try testing.expectEqualStrings("eth1", Request.parse(req_eth1).?.ethernet.adapter());
+    try testing.expectEqual(st, Request.parse(req_eth1).?.ethernet.addressing.static);
+    try testing.expect(Request.parse(ethernetRequest(&buf, .dhcp)).?.ethernet.addressing == .dhcp);
+    try testing.expectEqualStrings("eth1", Request.parse(ethernetAdapterRequest(&buf, "eth1", .dhcp)).?.ethernet.adapter());
+    try testing.expect(Request.parse("ethernet static 10.0.0.2/8 -\n").?.ethernet.addressing.static.gateway == null);
     try testing.expect(Request.parse("ethernet static nonsense\n") == null);
     try testing.expect(Request.parse("status\n").? == .status);
 
     var r: Report = .{};
     var a: Adapter = .{};
     a.setName("eth0");
-    r.ethernet = .{ .adapter = a, .addressing = .{ .static = Static.parse("10.0.0.2/8", "-").? } };
+    r.addEthernet(.{ .adapter = a, .addressing = .{ .static = Static.parse("10.0.0.2/8", "-").? } });
+    var a2: Adapter = .{};
+    a2.setName("eth1");
+    r.addEthernet(.{ .adapter = a2, .addressing = .dhcp });
     var out: [512]u8 = undefined;
     const text = r.write(&out);
-    try testing.expect(std.mem.startsWith(u8, text, "ethernet eth0 static 10.0.0.2/8 -\n"));
+    try testing.expect(std.mem.startsWith(u8, text, "ethernet eth0 static 10.0.0.2/8 -\nethernet eth1 dhcp\n"));
     const back = Report.parse(text).?;
     try testing.expectEqualStrings("eth0", back.ethernet.adapter.?.name());
-    try testing.expectEqual(r.ethernet.addressing.static, back.ethernet.addressing.static);
+    try testing.expectEqual(r.ethernet.addressing.static, back.addressingFor("eth0").static);
+    try testing.expect(back.addressingFor("eth1") == .dhcp);
     try testing.expect(Report.parse("ethernet - dhcp\nwifi none\nend\n").?.ethernet.adapter == null);
 }

@@ -64,6 +64,8 @@ const Join = struct {
 pub const Manager = struct {
     nl: ?nl80211.Nl80211 = null,
     station: ?nl80211.Interface = null,
+    stations: [wifi.max_adapters]nl80211.Interface = undefined,
+    station_len: usize = 0,
     report: wifi.Report = .{},
     /// When the last scan finished, and when the one under way started.
     scanned_ns: u64 = 0,
@@ -74,9 +76,9 @@ pub const Manager = struct {
     /// The network being joined (or joined), if any.
     join: ?Join = null,
 
-    /// Looks for the adapter (and nl80211 itself) if it is not known yet.
+    /// Looks for Wi-Fi adapters (and nl80211 itself).
     pub fn look(m: *Manager, now: u64) void {
-        if (m.station != null or now -| m.looked_ns < look_ns) return;
+        if (now -| m.looked_ns < look_ns) return;
         m.looked_ns = now;
         if (m.nl == null) {
             m.nl = nl80211.Nl80211.open() catch |err| {
@@ -85,26 +87,73 @@ pub const Manager = struct {
                 return;
             };
         }
-        const station = (m.nl.?.findStation() catch return) orelse return;
-        print("dazzle: wifi: found {s}\n", .{station.adapter.name()});
-        m.station = station;
-        m.station.?.adapter.up = ipv4.bringUp(station.adapter.name());
+        var found: [wifi.max_adapters]nl80211.Interface = undefined;
+        const n = m.nl.?.findStations(&found) catch return;
+        for (found[0..n]) |*ifc| {
+            const known = for (m.stations[0..m.station_len]) |old| {
+                if (std.mem.eql(u8, old.adapter.name(), ifc.adapter.name())) break true;
+            } else false;
+            if (!known) print("dazzle: wifi: found {s}\n", .{ifc.adapter.name()});
+            ifc.adapter.up = ipv4.bringUp(ifc.adapter.name());
+        }
+        m.stations = found;
+        m.station_len = n;
+        if (n == 0) {
+            m.station = null;
+        } else if (m.station) |cur| {
+            for (m.stations[0..n]) |ifc| {
+                if (std.mem.eql(u8, ifc.adapter.name(), cur.adapter.name())) {
+                    m.station = ifc;
+                    break;
+                }
+            } else m.station = m.stations[0];
+        } else {
+            m.station = m.stations[0];
+        }
+    }
+
+    fn selectStation(m: *Manager, name: []const u8) void {
+        if (name.len == 0) return;
+        if (m.station) |cur| if (std.mem.eql(u8, cur.adapter.name(), name)) return;
+        for (m.stations[0..m.station_len]) |ifc| {
+            if (std.mem.eql(u8, ifc.adapter.name(), name)) {
+                m.leave(true);
+                m.station = ifc;
+                m.scanned_ns = 0;
+                m.scan_started_ns = null;
+                m.report.len = 0;
+                if (m.nl) |*nl| nl.scanResults(ifc.index, &m.report) catch {};
+                break;
+            }
+        }
     }
 
     /// Handles a Wi-Fi request.
     pub fn handle(m: *Manager, req: wifi.WifiRequest, now: u64) void {
         switch (req) {
-            .scan => m.scan(now),
-            .disconnect => m.leave(true),
-            .connect => |c| m.connect(c.ssid_buf[0..c.ssid_len], c.pass_buf[0..c.pass_len], now),
+            .scan => |s| {
+                m.selectStation(s.adapter());
+                m.scan(now);
+            },
+            .disconnect => |d| {
+                m.selectStation(d.adapter());
+                m.leave(true);
+            },
+            .connect => |c| {
+                m.selectStation(c.adapter());
+                m.connect(c.ssid_buf[0..c.ssid_len], c.pass_buf[0..c.pass_len], now);
+            },
         }
     }
 
-    /// What to report: the adapter, the scan and the connection.
+    /// What to report: the adapters, the scan and the connection.
     pub fn fill(m: *const Manager, r: *wifi.Report) void {
         r.adapter = if (m.station) |st| st.adapter else null;
+        r.adapter_len = 0;
+        for (m.stations[0..m.station_len]) |st| r.addAdapter(st.adapter);
         r.scanning = m.scan_started_ns != null;
         r.connection = m.report.connection;
+        if (m.station) |st| r.connection.setAdapter(st.adapter.name());
         r.networks = m.report.networks;
         r.len = m.report.len;
     }

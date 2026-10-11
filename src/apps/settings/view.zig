@@ -35,8 +35,12 @@ pub const user_color = gfx.Color.argb(0xffffb68a);
 pub const Actions = struct {
     connect: ?Join = null,
     disconnect: bool = false,
-    /// How the wired adapter gets its address.
+    /// The Wi-Fi adapter chosen (when there is more than one).
+    wifi_adapter: ?info.Str(16) = null,
+    /// How the wired adapter gets its address, and which adapter (empty for
+    /// the first).
     ethernet: ?info.manager.Addressing = null,
+    ethernet_adapter: info.Str(16) = .{},
     /// The app to install, or remove; whether to get the list of apps again.
     install: ?AppName = null,
     remove: ?AppName = null,
@@ -90,6 +94,7 @@ pub const Actions = struct {
     };
 
     pub const Join = struct {
+        adapter: info.Str(16) = .{},
         ssid_buf: [32]u8 = undefined,
         ssid_len: u8 = 0,
         pass_buf: [63]u8 = undefined,
@@ -180,6 +185,10 @@ pub const Settings = struct {
     pub const State = struct {
         /// The page shown.
         page: Page = .wifi,
+        /// The Wi-Fi and Ethernet adapters picked, when there is more than
+        /// one.
+        wifi_adapter: usize = 0,
+        ethernet_adapter: usize = 0,
         /// The part of the board picked (an index into its parts), if one
         /// is.
         board_part: ?usize = null,
@@ -585,12 +594,29 @@ pub const Settings = struct {
         const cx = b.cx;
         const report = self.manager orelse return b.page(&.{b.item("Status", "The network manager is not running")});
         if (report.denied) return b.page(&.{b.item("Status", "Not allowed to scan")});
-        const adapter = report.adapter orelse return b.page(&.{b.item("Status", "No Wi-Fi adapter")});
+        const adapters = report.wifiAdapters();
+        if (adapters.len == 0) return b.page(&.{b.item("Status", "No Wi-Fi adapter")});
+        const idx = @min(state.wifi_adapter, adapters.len - 1);
+        state.wifi_adapter = idx;
+        const adapter = adapters[idx];
         var rows: std.ArrayList(ui.Widget) = .empty;
         const a = cx.ui.arena();
+        if (adapters.len > 1) {
+            var pills: std.ArrayList(ui.Widget) = .empty;
+            for (adapters, 0..) |*ad, i| {
+                pills.append(a, cx.make(PillButton{
+                    .label = ad.name(),
+                    .selected = i == idx,
+                    .first = i == 0,
+                    .last = i + 1 == adapters.len,
+                    .on_press = pickAdapter(cx, state, self.actions, .wifi, i, ad.name()),
+                })) catch {};
+            }
+            rows.append(a, cx.make(ui.Center{ .height_factor = 1, .child = cx.make(PillBar{ .children = pills.items }) })) catch {};
+        }
         const m = adapter.mac;
         rows.append(a, b.item("Adapter", cx.fmt("{s} ({x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}){s}", .{ adapter.name(), m[0], m[1], m[2], m[3], m[4], m[5], if (adapter.up) "" else ", down" }))) catch {};
-        rows.append(a, self.connectionRow(b, state, &report.connection)) catch {};
+        rows.append(a, self.connectionRow(b, state, adapter.name(), &report.connection)) catch {};
 
         const nets = report.slice();
         // The chosen network, if it is still around (and not the one joined).
@@ -603,7 +629,7 @@ pub const Settings = struct {
         // form for joining the chosen one goes under it, between two.
         const split = if (form) chosen.? - nets.ptr + 1 else nets.len;
         if (split > 0) rows.append(a, networkList(b, state, report, nets[0..split], chosen)) catch {};
-        if (form) rows.append(a, self.joinForm(b, state, chosen.?)) catch {};
+        if (form) rows.append(a, self.joinForm(b, state, adapter.name(), chosen.?)) catch {};
         if (split < nets.len) rows.append(a, networkList(b, state, report, nets[split..], chosen)) catch {};
         const footer = if (report.scanning) "Scanning…" else if (nets.len == 0) "No networks found" else "";
         if (footer.len > 0) rows.append(a, b.item("", footer)) catch {};
@@ -611,28 +637,29 @@ pub const Settings = struct {
     }
 
     /// The connection's state, with Disconnect while there is one.
-    fn connectionRow(self: *const Settings, b: Builder, state: *State, c: *const info.manager.Connection) ui.Widget {
+    fn connectionRow(self: *const Settings, b: Builder, state: *State, adapter_name: []const u8, c: *const info.manager.Connection) ui.Widget {
         const cx = b.cx;
+        const on_this = c.adapter_len == 0 or std.mem.eql(u8, c.adapter(), adapter_name);
         const name = printable(cx, c.ssid());
-        const text = switch (c.state) {
+        const text = if (!on_this) "Not connected" else switch (c.state) {
             .idle => "Not connected",
             .connected => if (c.address) |ip| cx.fmt("Connected to {s} ({d}.{d}.{d}.{d})", .{ name, ip[0], ip[1], ip[2], ip[3] }) else cx.fmt("Connected to {s}", .{name}),
             .connecting, .authenticating, .addressing => cx.fmt("{s}: {s}…", .{ name, c.state.label() }),
             .failed => cx.fmt("Could not connect to {s}: {s}", .{ name, c.failure.label() }),
         };
-        if (!connectionBusy(c)) return b.item("Connection", text);
+        if (!on_this or !connectionBusy(c)) return b.item("Connection", text);
         return cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
             b.label("Connection"),
             cx.make(ui.Expanded{ .child = b.value(text) }),
-            cx.make(ui.OutlinedButton{ .label = "Disconnect", .on_press = if (self.actions) |acts| .of(act(cx, acts, state, ""), Act.disconnect) else null }),
+            cx.make(ui.OutlinedButton{ .label = "Disconnect", .on_press = if (self.actions) |acts| .of(act(cx, acts, state, adapter_name, ""), Act.disconnect) else null }),
         } });
     }
 
     /// Joining the chosen network: a password field for WPA2, and Connect.
-    fn joinForm(self: *const Settings, b: Builder, state: *State, n: *const info.manager.Network) ui.Widget {
+    fn joinForm(self: *const Settings, b: Builder, state: *State, adapter_name: []const u8, n: *const info.manager.Network) ui.Widget {
         const cx = b.cx;
         const t = &cx.ui.theme;
-        const on_connect: ?ui.Callback = if (self.actions) |acts| .of(act(cx, acts, state, n.ssid()), Act.connect) else null;
+        const on_connect: ?ui.Callback = if (self.actions) |acts| .of(act(cx, acts, state, adapter_name, n.ssid()), Act.connect) else null;
         const field: ui.Widget = switch (n.security) {
             .open => cx.make(ui.Text{ .text = "An open network: what is sent can be seen", .style = .{ .size = 16, .color = t.on_surface_variant } }),
             .wpa2 => cx.make(ui.TextField{
@@ -657,52 +684,68 @@ pub const Settings = struct {
         const net = self.network;
         var rows: std.ArrayList(ui.Widget) = .empty;
         const a = cx.ui.arena();
-        if (net.len == 0) {
+        const ifaces = net.slice();
+        if (ifaces.len == 0) {
             rows.append(a, b.item("Status", "No adapter: plug in a USB Ethernet adapter")) catch {};
+            return b.page(rows.items);
         }
-        for (net.slice()) |*i| {
-            var b1: [32]u8 = undefined;
-            var b2: [32]u8 = undefined;
-            const status = if (!std.mem.eql(u8, i.state.slice(), "up") and !i.carrier)
-                (if (std.mem.eql(u8, i.state.slice(), "down")) "Not connected: no cable" else cx.fmt("Not connected ({s})", .{i.state.slice()}))
-            else if (i.speed) |mbps|
-                cx.fmt("Connected at {d} Mb/s", .{mbps})
-            else
-                "Connected";
-            rows.append(a, b.item(i.name.slice(), status)) catch {};
-            const method = if (self.addressing() == .static) "static" else "DHCP";
-            // An adapter without a link has no address or traffic to show.
-            if (i.carrier or i.ip != null) {
-                const address = if (i.ip) |ip|
-                    cx.fmt("{d}.{d}.{d}.{d}/{d} ({s})", .{ ip[0], ip[1], ip[2], ip[3], i.prefix, method })
-                else
-                    cx.fmt("Waiting for an address ({s})", .{method});
-                rows.append(a, b.item("Address", address)) catch {};
-                rows.append(a, b.item("Traffic", cx.fmt("{s} received, {s} sent", .{ info.formatBytes(&b1, i.rx_bytes), info.formatBytes(&b2, i.tx_bytes) }))) catch {};
+        const idx = @min(state.ethernet_adapter, ifaces.len - 1);
+        state.ethernet_adapter = idx;
+        if (ifaces.len > 1) {
+            var pills: std.ArrayList(ui.Widget) = .empty;
+            for (ifaces, 0..) |*ifc, k| {
+                pills.append(a, cx.make(PillButton{
+                    .label = ifc.name.slice(),
+                    .selected = k == idx,
+                    .first = k == 0,
+                    .last = k + 1 == ifaces.len,
+                    .on_press = pickAdapter(cx, state, self.actions, .ethernet, k, ifc.name.slice()),
+                })) catch {};
             }
-            if (i.mac.len > 0) rows.append(a, b.item("MAC address", i.mac.slice())) catch {};
+            rows.append(a, cx.make(ui.Center{ .height_factor = 1, .child = cx.make(PillBar{ .children = pills.items }) })) catch {};
         }
+        const i = &ifaces[idx];
+        var b1: [32]u8 = undefined;
+        var b2: [32]u8 = undefined;
+        const status = if (!std.mem.eql(u8, i.state.slice(), "up") and !i.carrier)
+            (if (std.mem.eql(u8, i.state.slice(), "down")) "Not connected: no cable" else cx.fmt("Not connected ({s})", .{i.state.slice()}))
+        else if (i.speed) |mbps|
+            cx.fmt("Connected at {d} Mb/s", .{mbps})
+        else
+            "Connected";
+        rows.append(a, b.item("Status", status)) catch {};
+        const method = if (self.addressing(i.name.slice()) == .static) "static" else "DHCP";
+        // An adapter without a link has no address or traffic to show.
+        if (i.carrier or i.ip != null) {
+            const address = if (i.ip) |ip|
+                cx.fmt("{d}.{d}.{d}.{d}/{d} ({s})", .{ ip[0], ip[1], ip[2], ip[3], i.prefix, method })
+            else
+                cx.fmt("Waiting for an address ({s})", .{method});
+            rows.append(a, b.item("Address", address)) catch {};
+            rows.append(a, b.item("Traffic", cx.fmt("{s} received, {s} sent", .{ info.formatBytes(&b1, i.rx_bytes), info.formatBytes(&b2, i.tx_bytes) }))) catch {};
+        }
+        if (i.mac.len > 0) rows.append(a, b.item("MAC address", i.mac.slice())) catch {};
         if (net.gateway) |g| rows.append(a, b.item("Gateway", cx.fmt("{d}.{d}.{d}.{d}", .{ g[0], g[1], g[2], g[3] }))) catch {};
         // How the adapter gets its address, if there is one and the
         // network manager can be asked.
-        if (net.len > 0 and self.manager != null) self.addressingRows(b, state, &rows);
+        if (self.manager != null) self.addressingRows(b, state, i, &rows);
         return b.page(rows.items);
     }
 
-    /// How the wired adapter gets its address, as the network manager says.
-    fn addressing(self: *const Settings) info.manager.Addressing {
-        return if (self.manager) |m| m.ethernet.addressing else .dhcp;
+    /// How the wired adapter `name` gets its address, as the network manager says.
+    fn addressing(self: *const Settings, name: []const u8) info.manager.Addressing {
+        return if (self.manager) |m| m.addressingFor(name) else .dhcp;
     }
 
     /// DHCP or a static address, and the form for a static address while
     /// that is chosen.
-    fn addressingRows(self: *const Settings, b: Builder, state: *State, rows: *std.ArrayList(ui.Widget)) void {
+    fn addressingRows(self: *const Settings, b: Builder, state: *State, iface: *const info.Interface, rows: *std.ArrayList(ui.Widget)) void {
         const cx = b.cx;
         const a = cx.ui.arena();
-        const current = self.addressing();
+        const current = self.addressing(iface.name.slice());
         const static = state.static_form or current == .static;
         const choice = cx.ui.arena().create(Addressing) catch return;
-        choice.* = .{ .actions = self.actions, .state = state, .current = current };
+        choice.* = .{ .actions = self.actions, .state = state, .current = current, .adapter = iface.name };
         const on_changed: ?ui.ValueCallback(Mode) = if (self.actions != null) .of(choice, Addressing.choose) else null;
         rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
             b.label("Addressing"),
@@ -727,10 +770,9 @@ pub const Settings = struct {
                 .dhcp => {
                     state.address.len = 0;
                     state.gateway.len = 0;
-                    for (self.network.slice()) |*i| if (i.ip) |ip| {
-                        state.address.set(std.fmt.bufPrint(&buf, "{d}.{d}.{d}.{d}/{d}", .{ ip[0], ip[1], ip[2], ip[3], i.prefix }) catch "");
-                        break;
-                    };
+                    if (iface.ip) |ip| {
+                        state.address.set(std.fmt.bufPrint(&buf, "{d}.{d}.{d}.{d}/{d}", .{ ip[0], ip[1], ip[2], ip[3], iface.prefix }) catch "");
+                    }
                     if (self.network.gateway) |g| state.gateway.set(std.fmt.bufPrint(&buf, "{d}.{d}.{d}.{d}", .{ g[0], g[1], g[2], g[3] }) catch "");
                 },
             }
@@ -774,6 +816,7 @@ const Addressing = struct {
     actions: ?*Actions,
     state: *Settings.State,
     current: info.manager.Addressing,
+    adapter: info.Str(16),
 
     fn choose(x: *Addressing, mode: Mode) void {
         const st = x.state;
@@ -783,6 +826,7 @@ const Addressing = struct {
                 st.form_filled = false;
                 if (x.current == .static) if (x.actions) |acts| {
                     acts.ethernet = .dhcp;
+                    acts.ethernet_adapter = x.adapter;
                 };
             },
             // The form opens; nothing changes until it is applied.
@@ -798,7 +842,10 @@ const Addressing = struct {
         };
         st.static_invalid = false;
         st.static_form = false;
-        if (x.actions) |acts| acts.ethernet = .{ .static = static };
+        if (x.actions) |acts| {
+            acts.ethernet = .{ .static = static };
+            acts.ethernet_adapter = x.adapter;
+        }
     }
 };
 
@@ -935,6 +982,103 @@ const Tab = struct {
     }
 };
 
+/// A connected pill button at the top of a network page, for choosing an
+/// adapter when there is more than one.
+const PillBar = struct {
+    children: []const ui.Widget,
+
+    pub fn build(self: *const PillBar, cx: *ui.Context) ui.Widget {
+        return cx.make(ui.Row{ .main_axis_size = .min, .children = self.children });
+    }
+
+    pub fn paintOver(_: *const PillBar, n: *ui.Node, p: *ui.Painter) void {
+        const t = &n.ui.theme;
+        const c = p.canvas();
+        const r: f32 = PillButton.height / 2;
+        c.strokeRoundedRect(.{ .x = 0, .y = 0, .w = n.size.w, .h = n.size.h }, .all(r), 1, t.outline);
+        if (n.children.items.len > 0) {
+            const row = n.children.items[0];
+            for (row.children.items[1..]) |seg| {
+                c.fillRect(.{ .x = seg.offset[0] - 0.5, .y = 0, .w = 1, .h = n.size.h }, t.outline);
+            }
+        }
+    }
+};
+
+/// One segment of a `PillBar`.
+const PillButton = struct {
+    label: []const u8,
+    selected: bool,
+    first: bool = false,
+    last: bool = false,
+    on_press: ?ui.Callback,
+
+    pub const State = struct {
+        interaction: ui.Interaction = .{},
+    };
+
+    pub const height = 36;
+
+    pub fn build(self: *const PillButton, cx: *ui.Context, state: *State) ui.Widget {
+        const t = cx.theme();
+        const color = if (self.selected) t.on_surface else t.on_surface_variant;
+        const bg: ?gfx.Color = if (self.selected) t.secondary_container else if (state.interaction.hovered) t.on_surface.withAlpha(0.08) else null;
+        const r: f32 = height / 2;
+        const radius: gfx.Radii = .{
+            .tl = if (self.first) r else 0,
+            .bl = if (self.first) r else 0,
+            .tr = if (self.last) r else 0,
+            .br = if (self.last) r else 0,
+        };
+        return cx.make(ui.Pressable{ .on_press = self.on_press, .interaction = &state.interaction, .child = cx.make(ui.Decorated{
+            .color = bg,
+            .radius = radius,
+            .child = cx.make(ui.SizedBox{ .height = height, .child = cx.make(ui.Padding{
+                .padding = .symmetric(18, 0),
+                .child = cx.make(ui.Center{ .width_factor = 1, .height_factor = 1, .child = cx.make(ui.Text{
+                    .text = self.label,
+                    .style = .{ .size = 16, .color = color },
+                    .wrap = false,
+                }) }),
+            }) }),
+        }) });
+    }
+};
+
+const AdapterKind = enum { wifi, ethernet };
+
+const PickAdapter = struct {
+    state: *Settings.State,
+    actions: ?*Actions,
+    kind: AdapterKind,
+    index: usize,
+    name: info.Str(16),
+
+    fn press(p: *PickAdapter) void {
+        switch (p.kind) {
+            .wifi => {
+                p.state.wifi_adapter = p.index;
+                p.state.has_selected = false;
+                if (p.actions) |acts| acts.wifi_adapter = p.name;
+            },
+            .ethernet => {
+                if (p.state.ethernet_adapter != p.index) {
+                    p.state.ethernet_adapter = p.index;
+                    p.state.static_form = false;
+                    p.state.form_filled = false;
+                    p.state.static_invalid = false;
+                }
+            },
+        }
+    }
+};
+
+fn pickAdapter(cx: *ui.Context, state: *Settings.State, actions: ?*Actions, kind: AdapterKind, index: usize, name: []const u8) ?ui.Callback {
+    const p = cx.ui.arena().create(PickAdapter) catch return null;
+    p.* = .{ .state = state, .actions = actions, .kind = kind, .index = index, .name = .of(name) };
+    return .of(p, PickAdapter.press);
+}
+
 const log_row_height = 26;
 
 /// The log's lines, to make rows of (in the frame's arena).
@@ -1058,11 +1202,12 @@ fn choose(cx: *ui.Context, state: *Settings.State, ssid: []const u8) ui.Callback
 const Act = struct {
     actions: *Actions,
     state: *Settings.State,
+    adapter: info.Str(16),
     ssid_buf: [32]u8,
     ssid_len: u8,
 
     fn connect(x: *Act) void {
-        var j: Actions.Join = .{ .ssid_len = x.ssid_len, .pass_len = x.state.password_len };
+        var j: Actions.Join = .{ .adapter = x.adapter, .ssid_len = x.ssid_len, .pass_len = x.state.password_len };
         @memcpy(j.ssid_buf[0..x.ssid_len], x.ssid_buf[0..x.ssid_len]);
         @memcpy(j.pass_buf[0..j.pass_len], x.state.password_buf[0..j.pass_len]);
         x.actions.connect = j;
@@ -1072,6 +1217,7 @@ const Act = struct {
 
     fn disconnect(x: *Act) void {
         x.actions.disconnect = true;
+        x.actions.wifi_adapter = x.adapter;
     }
 };
 
@@ -1100,9 +1246,9 @@ fn appAct(cx: *ui.Context, actions: *Actions, _: *Settings.State, name: []const 
     return x;
 }
 
-fn act(cx: *ui.Context, actions: *Actions, state: *Settings.State, ssid: []const u8) *Act {
+fn act(cx: *ui.Context, actions: *Actions, state: *Settings.State, adapter: []const u8, ssid: []const u8) *Act {
     const x = cx.ui.arena().create(Act) catch unreachable;
-    x.* = .{ .actions = actions, .state = state, .ssid_buf = undefined, .ssid_len = @intCast(ssid.len) };
+    x.* = .{ .actions = actions, .state = state, .adapter = .of(adapter), .ssid_buf = undefined, .ssid_len = @intCast(ssid.len) };
     @memcpy(x.ssid_buf[0..ssid.len], ssid);
     return x;
 }
@@ -1479,6 +1625,12 @@ test "everything is shown, and fits from the smallest window to the biggest" {
         frame_no += 1;
         u.frame(1920, 1036, frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps, .video_memory = .{ .now = 128, .next = 192 } });
         texts(u.root.?, &all);
+        if (page == .ethernet) {
+            click(u, up(findText(u.root.?, "eth1").?, PillButton).?);
+            frame_no += 1;
+            u.frame(1920, 1036, frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps, .video_memory = .{ .now = 128, .next = 192 } });
+            texts(u.root.?, &all);
+        }
         // The next page, from its tab.
         if (@as(usize, @intFromEnum(page)) + 1 < std.enums.values(Page).len) {
             const next: Page = @enumFromInt(@as(usize, @intFromEnum(page)) + 1);
@@ -1753,6 +1905,44 @@ test "choosing a static address for Ethernet, and DHCP again" {
     report.ethernet.addressing = .dhcp;
     Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
     try testing.expect(findType(u.root.?, ui.TextField) == null);
+}
+
+test "choosing between multiple Wi-Fi and Ethernet adapters with pill buttons" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    const d = sample();
+    var report = sampleWifi();
+    // With a single Wi-Fi adapter, no pill button is shown.
+    var actions: Actions = .{};
+    u.frame(1920, 960, 0, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &report });
+    try testing.expect(findType(u.root.?, PillButton) == null);
+
+    // With two Wi-Fi adapters, pill buttons appear at the top.
+    var a0: info.manager.Adapter = .{ .mac = .{ 0xb8, 0x27, 0xeb, 1, 2, 3 }, .up = true };
+    a0.setName("wlan0");
+    var a1: info.manager.Adapter = .{ .mac = .{ 0x00, 0xe0, 0x4c, 4, 5, 6 }, .up = true };
+    a1.setName("wlan1");
+    report.addAdapter(a0);
+    report.addAdapter(a1);
+    u.frame(1920, 960, 1, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &report });
+    try testing.expect(findText(u.root.?, "wlan0 (b8:27:eb:01:02:03)") != null);
+    try testing.expect(findText(u.root.?, "wlan1 (00:e0:4c:04:05:06)") == null);
+    click(u, up(findText(u.root.?, "wlan1").?, PillButton).?);
+    try testing.expectEqualStrings("wlan1", actions.wifi_adapter.?.slice());
+    u.frame(1920, 960, 2, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &report });
+    try testing.expect(findText(u.root.?, "wlan1 (00:e0:4c:04:05:06)") != null);
+    try testing.expect(findText(u.root.?, "wlan0 (b8:27:eb:01:02:03)") == null);
+
+    // Ethernet: sample() has eth0 and eth1, selectable via pill buttons.
+    click(u, up(findText(u.root.?, "Ethernet").?, Tab).?);
+    u.frame(1920, 960, 3, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &report });
+    try testing.expect(findText(u.root.?, "Connected at 100 Mb/s") != null);
+    try testing.expect(findText(u.root.?, "Not connected: no cable") == null);
+    click(u, up(findText(u.root.?, "eth1").?, PillButton).?);
+    u.frame(1920, 960, 4, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &report });
+    try testing.expect(findText(u.root.?, "Not connected: no cable") != null);
+    try testing.expect(findText(u.root.?, "Connected at 100 Mb/s") == null);
 }
 
 test "installing and removing apps, and getting their list again" {
@@ -2043,4 +2233,3 @@ test "the GPIO pins: the header as it is laid out, and setting a pin up" {
     u.frame(1600, 900, 5, settings);
     try testing.expect(findText(u.root.?, "Not allowed to use the GPIO") != null);
 }
-

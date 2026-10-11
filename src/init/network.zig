@@ -52,55 +52,17 @@ pub fn start() ?linux.pid_t {
     linux.exit(1);
 }
 
-/// The wired adapter, and how it gets its address.
-const Ethernet = struct {
-    ifc: ?ipv4.Interface = null,
+/// A wired adapter, and how it gets its address.
+const Slot = struct {
+    ifc: ipv4.Interface,
     addressing: proto.Addressing = .dhcp,
     dhcp_pid: ?linux.pid_t = null,
-    looked_ns: u64 = 0,
-    said_waiting: bool = false,
-
-    /// Finds the adapter, or notices it has gone.
-    fn look(e: *Ethernet, now: u64) void {
-        if (now -| e.looked_ns < look_ns) return;
-        e.looked_ns = now;
-        if (e.ifc) |*i| {
-            if (i.exists()) return;
-            print("dazzle: network: {s} removed\n", .{i.name()});
-            e.stopDhcp();
-            e.ifc = null;
-            return;
-        }
-        const i = ipv4.findEthernet() orelse {
-            if (!e.said_waiting) print("dazzle: network: waiting for an Ethernet adapter\n", .{});
-            e.said_waiting = true;
-            return;
-        };
-        e.said_waiting = false;
-        print("dazzle: network: found {s} ({x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2})\n", .{
-            i.name(), i.mac[0], i.mac[1], i.mac[2], i.mac[3], i.mac[4], i.mac[5],
-        });
-        e.ifc = i;
-        e.apply();
-    }
-
-    /// Chooses how the adapter gets its address.
-    fn set(e: *Ethernet, a: proto.Addressing) void {
-        e.addressing = a;
-        if (e.ifc) |*i| {
-            // From a static address, or to a new one: the old goes first
-            // (DHCP may give another).
-            e.stopDhcp();
-            ipv4.removeAddress(i.name());
-            e.apply();
-        }
-    }
 
     /// Gives the adapter its address as chosen.
-    fn apply(e: *Ethernet) void {
-        const i = &(e.ifc orelse return);
+    fn apply(s: *Slot) void {
+        const i = &s.ifc;
         _ = ipv4.bringUp(i.name());
-        switch (e.addressing) {
+        switch (s.addressing) {
             .static => |st| ipv4.setStatic(i.name(), st.address, st.prefix, st.gateway) catch |err| {
                 print(sys.log_warning ++ "dazzle: network: cannot set {s}'s address ({s})\n", .{ i.name(), @errorName(err) });
             },
@@ -108,27 +70,89 @@ const Ethernet = struct {
                 const rc = linux.fork();
                 if (linux.errno(rc) != .SUCCESS) return print(sys.log_warning ++ "dazzle: network: cannot start DHCP on {s}\n", .{i.name()});
                 if (rc == 0) ipv4.runDhcp(i.name());
-                e.dhcp_pid = @intCast(rc);
+                s.dhcp_pid = @intCast(rc);
             },
         }
     }
 
-    fn stopDhcp(e: *Ethernet) void {
-        const pid = e.dhcp_pid orelse return;
+    fn stopDhcp(s: *Slot) void {
+        const pid = s.dhcp_pid orelse return;
         _ = linux.kill(pid, .TERM);
         var status: u32 = 0;
         _ = linux.wait4(pid, &status, 0, null);
-        e.dhcp_pid = null;
+        s.dhcp_pid = null;
+    }
+};
+
+/// The wired adapters, and how each gets its address.
+const Ethernet = struct {
+    slots: [proto.max_adapters]?Slot = @splat(null),
+    default_addressing: proto.Addressing = .dhcp,
+    looked_ns: u64 = 0,
+    said_waiting: bool = false,
+
+    /// Finds wired adapters, or notices any that have gone.
+    fn look(e: *Ethernet, now: u64) void {
+        if (now -| e.looked_ns < look_ns) return;
+        e.looked_ns = now;
+        for (&e.slots) |*slot| if (slot.*) |*s| {
+            if (!s.ifc.exists()) {
+                print("dazzle: network: {s} removed\n", .{s.ifc.name()});
+                s.stopDhcp();
+                slot.* = null;
+            }
+        };
+        var found: [proto.max_adapters]ipv4.Interface = undefined;
+        const n = ipv4.findEthernetInterfaces(&found);
+        if (n == 0) {
+            if (!e.said_waiting) print("dazzle: network: waiting for an Ethernet adapter\n", .{});
+            e.said_waiting = true;
+            return;
+        }
+        e.said_waiting = false;
+        for (found[0..n]) |i| {
+            const known = for (e.slots) |slot| {
+                if (slot) |s| if (std.mem.eql(u8, s.ifc.name(), i.name())) break true;
+            } else false;
+            if (known) continue;
+            for (&e.slots) |*slot| if (slot.* == null) {
+                print("dazzle: network: found {s} ({x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2})\n", .{
+                    i.name(), i.mac[0], i.mac[1], i.mac[2], i.mac[3], i.mac[4], i.mac[5],
+                });
+                slot.* = .{ .ifc = i, .addressing = e.default_addressing };
+                slot.*.?.apply();
+                break;
+            };
+        }
+    }
+
+    /// Chooses how `req.adapter()` (or the first wired adapter) gets its address.
+    fn set(e: *Ethernet, req: proto.EthernetRequest) void {
+        const name = req.adapter();
+        var matched = false;
+        for (&e.slots) |*slot| if (slot.*) |*s| {
+            if (name.len == 0 or std.mem.eql(u8, s.ifc.name(), name)) {
+                s.addressing = req.addressing;
+                // From a static address, or to a new one: the old goes first
+                // (DHCP may give another).
+                s.stopDhcp();
+                ipv4.removeAddress(s.ifc.name());
+                s.apply();
+                matched = true;
+                if (name.len == 0) break;
+            }
+        };
+        if (!matched) e.default_addressing = req.addressing;
     }
 
     fn fill(e: *const Ethernet, r: *proto.Report) void {
-        r.ethernet.addressing = e.addressing;
-        r.ethernet.adapter = null;
-        if (e.ifc) |*i| {
-            var a: proto.Adapter = .{ .mac = i.mac, .up = i.carrier() };
-            a.setName(i.name());
-            r.ethernet.adapter = a;
-        }
+        r.ethernet = .{ .addressing = e.default_addressing };
+        r.ethernet_len = 0;
+        for (e.slots) |slot| if (slot) |*s| {
+            var a: proto.Adapter = .{ .mac = s.ifc.mac, .up = s.ifc.carrier() };
+            a.setName(s.ifc.name());
+            r.addEthernet(.{ .adapter = a, .addressing = s.addressing });
+        };
     }
 };
 
@@ -179,7 +203,7 @@ fn run() !void {
             if (linux.errno(n) == .SUCCESS and n > 0) if (proto.Request.parse(buf[0..n])) |req| {
                 switch (req) {
                     .status => {},
-                    .ethernet => |a| ethernet.set(a),
+                    .ethernet => |er| ethernet.set(er),
                     .wifi => |wr| w.handle(wr, t),
                 }
                 var report: proto.Report = .{};

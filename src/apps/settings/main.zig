@@ -111,6 +111,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
     var report: ?info.manager.Report = null;
     var next_ask: u64 = 0;
     var was_wifi_page = true;
+    var wifi_adapter: info.Str(16) = .{};
     // What the window asks of the network manager (Connect, Disconnect, an
     // Ethernet address).
     var actions: view.Actions = .{};
@@ -266,13 +267,16 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             updater.check(false);
             dirty = true;
         }
-        if (actions.connect != null or actions.disconnect or actions.ethernet != null) {
+        if (actions.wifi_adapter) |ad| wifi_adapter = ad;
+        if (actions.connect != null or actions.disconnect or actions.ethernet != null or actions.wifi_adapter != null) {
             var req_buf: [256]u8 = undefined;
-            if (actions.ethernet) |a| report = info.askManager(info.manager.ethernetRequest(&req_buf, a));
+            if (actions.ethernet) |a| report = info.askManager(info.manager.ethernetAdapterRequest(&req_buf, actions.ethernet_adapter.slice(), a));
             if (actions.connect != null or actions.disconnect) {
-                const req = if (actions.connect) |*j| info.manager.connectRequest(&req_buf, j.ssid(), j.passphrase()) else "wifi disconnect\n";
+                const req = if (actions.connect) |*j| info.manager.connectAdapterRequest(&req_buf, j.adapter.slice(), j.ssid(), j.passphrase()) else info.manager.disconnectRequest(&req_buf, wifi_adapter.slice());
                 if (actions.connect) |*j| print("dazzle-settings: joining \"{s}\"\n", .{j.ssid()});
                 report = info.askManager(req);
+            } else if (actions.wifi_adapter != null) {
+                report = info.askManager(info.manager.scanRequest(&req_buf, wifi_adapter.slice()));
             }
             actions = .{};
             next_ask = sys.nowNs() + std.time.ns_per_s;
@@ -289,7 +293,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             // found) and while joining a network, then every few seconds.
             const busy = if (report) |r| r.scanning or r.connection.state == .connecting or r.connection.state == .authenticating or r.connection.state == .addressing else true;
             next_ask = now + @as(u64, if (busy and wifi_page) 1 else 5) * std.time.ns_per_s;
-            report = info.askManager(if (wifi_page) "wifi scan\n" else "status\n");
+            var scan_buf: [64]u8 = undefined;
+            report = info.askManager(if (wifi_page) info.manager.scanRequest(&scan_buf, wifi_adapter.slice()) else "status\n");
             dirty = true;
         }
 

@@ -62,30 +62,47 @@ pub const Interface = struct {
     }
 };
 
-/// The first wired Ethernet interface (sysfs type 1, not Wi-Fi), if any.
-pub fn findEthernet() ?Interface {
-    const dir = sys.open("/sys/class/net", .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }) catch return null;
+/// All wired Ethernet interfaces (sysfs type 1, not Wi-Fi), sorted by name.
+pub fn findEthernetInterfaces(out: *[sys.network.max_adapters]Interface) usize {
+    const dir = sys.open("/sys/class/net", .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }) catch return 0;
     defer sys.close(dir);
     var buf: [2048]u8 align(8) = undefined;
-    const n = sys.check(linux.getdents64(dir, &buf, buf.len)) catch return null;
-    var at: usize = 0;
-    while (at < n) {
-        const reclen = std.mem.readInt(u16, buf[at + 16 ..][0..2], .little);
-        const entry_name = std.mem.sliceTo(buf[at + 19 .. at + reclen], 0);
-        at += reclen;
-        if (entry_name.len == 0 or entry_name[0] == '.' or entry_name.len >= linux.IFNAMESIZE) continue;
-        var i: Interface = .{ .name_len = entry_name.len };
-        @memcpy(i.name_buf[0..entry_name.len], entry_name);
-        var attr_buf: [32]u8 = undefined;
-        // ARPHRD_ETHER; this also skips the loopback interface.
-        if (!std.mem.eql(u8, i.attr("type", &attr_buf) orelse continue, "1")) continue;
-        // Wi-Fi interfaces are Ethernet-like too, but need joining a
-        // network first: they are Wi-Fi's (wifi.zig).
-        if (i.attr("phy80211/name", &attr_buf) != null) continue;
-        i.mac = parseMac(i.attr("address", &attr_buf) orelse continue) orelse continue;
-        return i;
+    var count: usize = 0;
+    while (true) {
+        const n = sys.check(linux.getdents64(dir, &buf, buf.len)) catch break;
+        if (n == 0) break;
+        var at: usize = 0;
+        while (at < n) {
+            const reclen = std.mem.readInt(u16, buf[at + 16 ..][0..2], .little);
+            const entry_name = std.mem.sliceTo(buf[at + 19 .. at + reclen], 0);
+            at += reclen;
+            if (entry_name.len == 0 or entry_name[0] == '.' or entry_name.len >= linux.IFNAMESIZE) continue;
+            var i: Interface = .{ .name_len = entry_name.len };
+            @memcpy(i.name_buf[0..entry_name.len], entry_name);
+            var attr_buf: [32]u8 = undefined;
+            // ARPHRD_ETHER; this also skips the loopback interface.
+            if (!std.mem.eql(u8, i.attr("type", &attr_buf) orelse continue, "1")) continue;
+            // Wi-Fi interfaces are Ethernet-like too, but need joining a
+            // network first: they are Wi-Fi's (wifi.zig).
+            if (i.attr("phy80211/name", &attr_buf) != null) continue;
+            i.mac = parseMac(i.attr("address", &attr_buf) orelse continue) orelse continue;
+            if (count == out.len) break;
+            out[count] = i;
+            count += 1;
+        }
     }
-    return null;
+    std.mem.sort(Interface, out[0..count], {}, struct {
+        fn lessThan(_: void, a: Interface, b: Interface) bool {
+            return std.mem.lessThan(u8, a.name(), b.name());
+        }
+    }.lessThan);
+    return count;
+}
+
+/// The first wired Ethernet interface (sysfs type 1, not Wi-Fi), if any.
+pub fn findEthernet() ?Interface {
+    var list: [sys.network.max_adapters]Interface = undefined;
+    return if (findEthernetInterfaces(&list) > 0) list[0] else null;
 }
 
 fn parseMac(s: []const u8) ?dhcp.Mac {

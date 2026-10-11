@@ -309,17 +309,32 @@ pub const Nl80211 = struct {
         return .{ .req = req, .events = events, .family = found.id };
     }
 
-    /// The first Wi-Fi interface in station (client) mode.
-    pub fn findStation(n: *Nl80211) Error!?Interface {
+    /// All Wi-Fi interfaces in station (client) mode, sorted by name.
+    pub fn findStations(n: *Nl80211, out: *[wifi.max_adapters]Interface) Error!usize {
         var m: Message = .{};
-        var out: ?Interface = null;
-        try n.req.request(&m, n.family, nlm_f_dump, cmd.get_interface, &out, struct {
-            fn on(o: *?Interface, r: Received) void {
-                if (o.* != null or r.command != cmd.new_interface) return;
-                o.* = parseInterface(r.attrs);
+        const List = struct { items: *[wifi.max_adapters]Interface, len: usize = 0 };
+        var list: List = .{ .items = out };
+        try n.req.request(&m, n.family, nlm_f_dump, cmd.get_interface, &list, struct {
+            fn on(l: *List, r: Received) void {
+                if (l.len == l.items.len or r.command != cmd.new_interface) return;
+                if (parseInterface(r.attrs)) |ifc| {
+                    l.items[l.len] = ifc;
+                    l.len += 1;
+                }
             }
         }.on);
-        return out;
+        std.mem.sort(Interface, out[0..list.len], {}, struct {
+            fn lessThan(_: void, a: Interface, b: Interface) bool {
+                return std.mem.lessThan(u8, a.adapter.name(), b.adapter.name());
+            }
+        }.lessThan);
+        return list.len;
+    }
+
+    /// The first Wi-Fi interface in station (client) mode.
+    pub fn findStation(n: *Nl80211) Error!?Interface {
+        var list: [wifi.max_adapters]Interface = undefined;
+        return if ((try n.findStations(&list)) > 0) list[0] else null;
     }
 
     pub fn triggerScan(n: *Nl80211, ifindex: u32) Error!void {
