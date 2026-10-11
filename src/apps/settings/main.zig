@@ -123,7 +123,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
     var updatable: [64]bool = undefined;
     // Updates of the system, and which system this is.
     var updater: update.Updater = .init(gpa, build_info.apps_url, sys.system.Version.init(build_info.commit_time, build_info.commit) orelse .{});
-    var icons: view.IconSet = .init(gpa);
+    var icons: view.software_view.IconSet = .init(gpa);
     defer icons.deinit();
     var icons_dirty = true;
     var video_memory_failed = false;
@@ -419,10 +419,18 @@ fn openWindow(gpa: std.mem.Allocator, init: std.process.Init.Minimal, dev: *vc4.
 test {
     _ = info;
     _ = view;
+    _ = @import("wifi_view.zig");
+    _ = @import("ethernet_view.zig");
+    _ = @import("board_view.zig");
+    _ = @import("software_view.zig");
+    _ = @import("resources_view.zig");
+    _ = @import("gpio_view.zig");
+    _ = @import("usb_view.zig");
+    _ = @import("language_view.zig");
+    _ = @import("log_view.zig");
     _ = @import("update.zig");
     _ = @import("board.zig");
     _ = usb;
     _ = gpio;
-    _ = @import("gpio_view.zig");
     _ = log;
 }

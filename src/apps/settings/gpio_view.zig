@@ -7,9 +7,53 @@ const std = @import("std");
 const ui = @import("ui");
 const gfx = @import("gfx");
 const gpio = @import("gpio.zig");
+const view = @import("view.zig");
 
 const Pin = gpio.Pin;
 const Mode = gpio.Mode;
+const Settings = view.Settings;
+const Actions = view.Actions;
+const Builder = view.Builder;
+
+pub const label = "GPIO";
+pub const icon: ui.icons.Icon = .settings_input_component;
+
+pub const State = struct {
+    /// The GPIO pin picked.
+    pin: u6 = 17,
+};
+
+/// The GPIO pins: the header as it is laid out, what each pin does,
+/// and the pin picked, to set up.
+pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
+    const cx = b.cx;
+    const pins = self.gpio orelse return b.page(&.{b.value("Reading the pins\u{2026}")});
+    return b.page(&.{cx.make(GpioPage{
+        .pins = pins,
+        .header = gpio.headerFor(self.system.model.slice()),
+        .picked = state.pin,
+        .on_pick = .of(state, struct {
+            fn set(st: *State, i: usize) void {
+                st.pin = @intCast(i);
+            }
+        }.set),
+        .on_mode = if (self.actions) |a| blk: {
+            const set = cx.ui.arena().create(GpioSet) catch break :blk null;
+            set.* = .{ .actions = a, .pin = state.pin };
+            break :blk .of(set, GpioSet.set);
+        } else null,
+    })});
+}
+
+/// Setting a GPIO pin up.
+const GpioSet = struct {
+    actions: *Actions,
+    pin: u6,
+
+    fn set(g: *GpioSet, m: gpio.Mode) void {
+        g.actions.gpio = .{ .pin = g.pin, .mode = m };
+    }
+};
 
 /// The colours of the header's pins, by what they are.
 const red: gfx.Color = .rgb(0xe53935);
@@ -220,3 +264,54 @@ const SideBySide = struct {
         return c.constrain(.{ .w = @max(a.w, b.w), .h = a.h + self.gap + b.h });
     }
 };
+
+const testing = std.testing;
+const font = @import("font");
+
+test "the GPIO pins: the header as it is laid out, and setting a pin up" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    var d = view.sample();
+    var actions: Actions = .{};
+    var pins: gpio.Pins = .{ .opened = true, .chip = .{ .fd = -1 } };
+    pins.lines[17] = .{ .function = .output, .high = true };
+    pins.lines[4] = .{ .function = .input, .high = true };
+    pins.lines[14] = .{ .function = .alt0, .used = true };
+    @memcpy(pins.lines[14].consumer_buf[0..6], "serial");
+    pins.lines[14].consumer_len = 6;
+    const settings: Settings = .{ .commit = "574d538", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .gpio = &pins };
+    u.frame(1600, 900, 0, settings);
+    u.root.?.state(Settings.State).page = .gpio;
+    for ([_][]const u8{ "Raspberry Pi 3 Model B Rev 1.2", "Raspberry Pi Model B Rev 1", "Raspberry Pi Compute Module 3 Rev 1.0" }) |model| {
+        d.sys.model = .of(model);
+        for (view.test_sizes) |size| {
+            u.frame(size[0], size[1], 1, settings);
+            try testing.expect(!view.overflows(u.root.?));
+        }
+    }
+    d.sys.model = .of("Raspberry Pi 3 Model B Rev 1.2");
+    u.frame(1600, 900, 2, settings);
+    // GPIO 17 is picked to start with: pin 11, an output, high.
+    try testing.expect(view.findText(u.root.?, "GPIO 17, pin 11") != null);
+    try testing.expect(view.findText(u.root.?, "Output, high") != null);
+    view.click(u, view.findText(u.root.?, "Output, low").?);
+    try testing.expectEqual(Actions.GpioChange{ .pin = 17, .mode = .output_low }, actions.gpio.?);
+    // A pin a driver has cannot be changed.
+    view.click(u, view.findText(u.root.?, "GPIO 14 (TXD)").?);
+    u.frame(1600, 900, 3, settings);
+    try testing.expect(view.findText(u.root.?, "GPIO 14, pin 8") != null);
+    try testing.expect(view.findText(u.root.?, "UART 0 transmit") != null);
+    try testing.expect(view.findText(u.root.?, "In use by serial, so it cannot be changed here") != null);
+    try testing.expect(view.findText(u.root.?, "Input, pulled up") == null);
+    // An input pin starts with its default pull, and can be changed.
+    view.click(u, view.findText(u.root.?, "GPIO 4 (GPCLK0)").?);
+    u.frame(1600, 900, 4, settings);
+    try testing.expect(view.findText(u.root.?, "GPIO 4, pin 7") != null);
+    view.click(u, view.findText(u.root.?, "Input, pulled down").?);
+    try testing.expectEqual(Actions.GpioChange{ .pin = 4, .mode = .input_pull_down }, actions.gpio.?);
+    // The pins cannot be read.
+    pins.read_failure = "Not allowed to use the GPIO";
+    u.frame(1600, 900, 5, settings);
+    try testing.expect(view.findText(u.root.?, "Not allowed to use the GPIO") != null);
+}
