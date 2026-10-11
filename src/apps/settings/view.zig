@@ -346,6 +346,8 @@ pub const Settings = struct {
             const x = if (self.actions) |acts| appAct(cx, acts, state, app.name) else null;
             const button: ui.Widget = if (this_busy)
                 cx.make(ui.Spinner{ .size = 28 })
+            else if (updatable)
+                cx.make(ui.OutlinedButton{ .label = "Update", .icon = .download, .on_press = if (enabled) .of(x.?, AppAct.install) else null })
             else if (installed)
                 cx.make(ui.OutlinedButton{ .label = "Remove", .icon = .delete, .on_press = if (enabled) .of(x.?, AppAct.remove) else null })
             else
@@ -414,7 +416,7 @@ pub const Settings = struct {
     }
 
     /// Dazzle itself, at the head of the Software list: how updates stand
-    /// (with Download or Restart), and an expander showing the build and
+    /// (with Update or Restart), and an expander showing the build and
     /// kernel version.
     fn dazzleRows(self: *const Settings, b: Builder, state: *State, rows: *std.ArrayList(ui.Widget)) void {
         const cx = b.cx;
@@ -430,7 +432,7 @@ pub const Settings = struct {
         const text: []const u8, const button: ?Button, const busy = switch (u.status) {
             .unknown, .current => .{ if (u.message.len > 0) u.message else detail, null, false },
             .checking => .{ "Checking for updates…", null, true },
-            .available => .{ cx.fmt("Dazzle {s} is available", .{u.available}), Button{ .label = "Download", .icon = .download, .flag = .download }, false },
+            .available => .{ cx.fmt("Dazzle {s} is available", .{u.available}), Button{ .label = "Update", .icon = .download, .flag = .download }, false },
             .downloading => .{ "Downloading the update…", null, true },
             .installing => .{ "Installing the update…", null, true },
             .ready => .{ "The update is installed: restart to use it", Button{ .label = "Restart", .icon = .restart_alt, .flag = .restart }, false },
@@ -2212,6 +2214,7 @@ test "updates: offered, downloaded, installed, then a restart" {
     settings.apps.updatable = &.{ true, false };
     u.frame(1920, 960, 2, settings);
     try testing.expect(findText(u.root.?, "2 updates available") != null);
+    try testing.expect(findText(u.root.?, "Remove") == null);
 
     // Build and kernel details are shown when Dazzle is expanded.
     try testing.expect(findText(u.root.?, "de14aa2 (7 October 2026)") == null);
@@ -2219,17 +2222,17 @@ test "updates: offered, downloaded, installed, then a restart" {
     u.frame(1920, 960, 3, settings);
     try testing.expect(findText(u.root.?, "de14aa2 (7 October 2026)") != null);
     try testing.expect(findText(u.root.?, "6.12.0 (armv6l)") != null);
-    click(u, up(findText(u.root.?, "Download").?, ui.OutlinedButton).?);
+    click(u, up(findText(u.root.?, "Update").?, ui.OutlinedButton).?);
     try testing.expect(actions.download_update);
 
-    // Under way: no update buttons.
+    // Under way: no update buttons on Dazzle.
+    settings.apps.updatable = &.{};
     for ([_]update.Status{ .checking, .downloading, .installing }) |s| {
         settings.update = .{ .status = s };
         u.frame(1920, 960, 4, settings);
         try testing.expect(up(findText(u.root.?, "Dazzle").?, ui.Row) != null);
-        try testing.expect(findText(u.root.?, "Download") == null and findText(u.root.?, "Restart") == null);
+        try testing.expect(findText(u.root.?, "Update") == null and findText(u.root.?, "Restart") == null);
     }
-    settings.apps.updatable = &.{};
     settings.update = .{ .status = .ready };
     u.frame(1920, 960, 5, settings);
     try testing.expect(findText(u.root.?, "The update is installed: restart to use it") != null);
