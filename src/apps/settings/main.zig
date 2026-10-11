@@ -220,11 +220,17 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             _ = syslog.poll();
             dirty = true;
         }
-        if (view.shownPage(window_ui) == .apps and !apps.asked) {
-            apps.refresh(false);
-            dirty = true;
+        if (view.shownPage(window_ui) == .apps) {
+            if (!apps.asked) {
+                apps.refresh(false);
+                dirty = true;
+            }
+            if (!updater.asked) {
+                updater.check(false);
+                dirty = true;
+            }
         }
-        // Updates: checked for when the System page is first shown.
+        // Updates: checked for when the Software page is first shown.
         if (!suspended and updater.poll(now)) dirty = true;
         if (actions.check_update or actions.download_update or actions.restart) {
             if (actions.check_update) updater.check(true);
@@ -261,10 +267,6 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             };
             video_memory_failed = if (r) |have| have.denied or have.video_memory_next != mib else true;
             print("dazzle-settings: video memory {d} MiB from the next start{s}\n", .{ mib, if (video_memory_failed) ": refused" else "" });
-            dirty = true;
-        }
-        if (view.shownPage(window_ui) == .system and !updater.asked) {
-            updater.check(false);
             dirty = true;
         }
         if (actions.wifi_adapter) |ad| wifi_adapter = ad;

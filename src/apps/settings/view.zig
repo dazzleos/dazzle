@@ -58,9 +58,6 @@ pub const Actions = struct {
 
     pub const GpioChange = struct { pin: u6, mode: gpio.Mode };
 
-    fn checkUpdate(a: *Actions) void {
-        a.check_update = true;
-    }
 
     fn downloadUpdate(a: *Actions) void {
         a.download_update = true;
@@ -202,6 +199,9 @@ pub const Settings = struct {
         has_selected: bool = false,
         password_buf: [63]u8 = undefined,
         password_len: u8 = 0,
+        /// Whether the Dazzle item on the Software page is expanded to show
+        /// the build and kernel version.
+        dazzle_expanded: bool = false,
         /// Ethernet: the form for a static address is open (chosen, before
         /// it is applied), what is typed in it, and whether that was not an
         /// address.
@@ -225,6 +225,10 @@ pub const Settings = struct {
                 @memcpy(f.buf[0..f.len], t[0..f.len]);
             }
         };
+
+        fn toggleDazzle(st: *State) void {
+            st.dazzle_expanded = !st.dazzle_expanded;
+        }
 
         fn setLogProblems(st: *State, on: bool) void {
             st.log_problems = on;
@@ -259,7 +263,6 @@ pub const Settings = struct {
             .gpio => self.gpioPage(b, state),
             .usb => self.usbPage(b),
             .log => self.logPage(b, state),
-            .system => self.systemPage(b),
             .apps => self.appsPage(b, state),
         };
         const t = cx.theme();
@@ -318,6 +321,7 @@ pub const Settings = struct {
             cx.make(ui.OutlinedButton{ .label = "Refresh", .icon = .refresh, .on_press = if (self.actions != null and !busy) .of(appAct(cx, self.actions.?, state, ""), AppAct.refresh) else null }),
         } })) catch {};
         if (apps.message.len > 0) rows.append(a, b.item("", apps.message)) catch {};
+        self.dazzleRows(b, state, &rows);
         for (apps.list, 0..) |app, i| {
             const installed = i < apps.installed.len and apps.installed[i];
             const this_busy = if (apps.busy) |n| std.mem.eql(u8, n, app.name) else false;
@@ -347,46 +351,71 @@ pub const Settings = struct {
         return b.page(rows.items);
     }
 
-    fn systemPage(self: *const Settings, b: Builder) ui.Widget {
+    /// Dazzle itself, at the head of the Software list: how updates stand
+    /// (with Download or Restart), and an expander showing the build and
+    /// kernel version.
+    fn dazzleRows(self: *const Settings, b: Builder, state: *State, rows: *std.ArrayList(ui.Widget)) void {
         const cx = b.cx;
-        const sys = self.system;
-        var dur: [32]u8 = undefined;
-        return b.page(&.{
-            b.item("Build", self.commit),
-            self.updateRow(b),
-            b.item("Linux", orUnknown(sys.kernel.slice())),
-            b.item("Up for", cx.fmt("{s}", .{info.formatDuration(&dur, self.usage.uptime_s)})),
-            b.item("Hostname", orUnknown(sys.hostname.slice())),
-        });
-    }
-
-    /// Updates: how they stand, and what can be done about them.
-    fn updateRow(self: *const Settings, b: Builder) ui.Widget {
-        const cx = b.cx;
+        const t = &cx.ui.theme;
+        const a = cx.ui.arena();
         const u = &self.update;
-        const Button = struct { label: []const u8, icon: ui.icons.Icon, flag: enum { check, download, restart } };
+        var size_buf: [32]u8 = undefined;
+        const detail = if (self.usage.storage.system > 0)
+            cx.fmt("The operating system · {s}", .{info.formatBytes(&size_buf, self.usage.storage.system)})
+        else
+            "The operating system";
+        const Button = struct { label: []const u8, icon: ui.icons.Icon, flag: enum { download, restart } };
         const text: []const u8, const button: ?Button, const busy = switch (u.status) {
-            .unknown => .{ if (u.message.len > 0) u.message else "Not checked yet", Button{ .label = "Check now", .icon = .refresh, .flag = .check }, false },
+            .unknown, .current => .{ if (u.message.len > 0) u.message else detail, null, false },
             .checking => .{ "Checking for updates…", null, true },
             .available => .{ cx.fmt("Dazzle {s} is available", .{u.available}), Button{ .label = "Download", .icon = .download, .flag = .download }, false },
             .downloading => .{ "Downloading the update…", null, true },
             .installing => .{ "Installing the update…", null, true },
             .ready => .{ "The update is installed: restart to use it", Button{ .label = "Restart", .icon = .restart_alt, .flag = .restart }, false },
-            .current => .{ if (u.message.len > 0) u.message else "Up to date", Button{ .label = "Check again", .icon = .refresh, .flag = .check }, false },
         };
         const end: ui.Widget = if (busy) cx.make(ui.Spinner{ .size = 28 }) else if (button) |btn| cx.make(ui.OutlinedButton{
             .label = btn.label,
             .icon = btn.icon,
             .on_press = if (self.actions) |acts| switch (btn.flag) {
-                .check => .of(acts, Actions.checkUpdate),
                 .download => .of(acts, Actions.downloadUpdate),
                 .restart => .of(acts, Actions.restartNow),
             } else null,
         }) else cx.make(ui.Empty{});
-        return cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-            b.label("Updates"),
-            cx.make(ui.Expanded{ .child = b.value(text) }),
+        const header = cx.make(ui.Pressable{
+            .on_press = .of(state, State.toggleDazzle),
+            .child = cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = &.{
+                cx.make(DazzleLogo{ .size = 32, .color = t.on_surface_variant }),
+                cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 2, .children = &.{
+                    cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 4, .children = &.{
+                        cx.make(ui.Text{ .text = "Dazzle", .style = .{ .size = 18, .color = t.on_surface }, .wrap = false }),
+                        cx.make(ui.Icon{ .icon = if (state.dazzle_expanded) .expand_more else .chevron_right, .size = 20, .color = t.on_surface_variant }),
+                    } }),
+                    cx.make(ui.Text{ .text = text, .style = .{ .size = 15, .color = t.on_surface_variant } }),
+                } }) }),
+            } }),
+        });
+        rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = &.{
+            cx.make(ui.Expanded{ .child = header }),
             end,
+        } })) catch {};
+        if (state.dazzle_expanded) {
+            rows.append(a, cx.make(ui.Padding{ .padding = .{ .left = 48 }, .child = cx.make(ui.Column{
+                .cross_axis_alignment = .stretch,
+                .main_axis_size = .min,
+                .spacing = 4,
+                .children = &.{
+                    dazzleDetail(cx, "Build", self.commit),
+                    dazzleDetail(cx, "Linux", orUnknown(self.system.kernel.slice())),
+                },
+            }) })) catch {};
+        }
+    }
+
+    fn dazzleDetail(cx: *ui.Context, name: []const u8, text: []const u8) ui.Widget {
+        const t = &cx.ui.theme;
+        return cx.make(ui.Row{ .cross_axis_alignment = .start, .spacing = 12, .children = &.{
+            cx.make(ui.SizedBox{ .width = 80, .child = cx.make(ui.Text{ .text = name, .style = .{ .size = 15, .color = t.on_surface_variant }, .wrap = false }) }),
+            cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = text, .style = .{ .size = 15, .color = t.on_surface } }) }),
         } });
     }
 
@@ -896,7 +925,6 @@ pub const Page = enum {
     usb,
     language,
     apps,
-    system,
     log,
 
     pub fn label(p: Page) []const u8 {
@@ -909,8 +937,7 @@ pub const Page = enum {
             .usb => "USB",
             .log => "Log",
             .language => "Language",
-            .apps => "Apps",
-            .system => "System",
+            .apps => "Software",
         };
     }
 
@@ -925,7 +952,6 @@ pub const Page = enum {
             .log => .article,
             .language => .language,
             .apps => .apps,
-            .system => .info,
         };
     }
 };
@@ -1237,6 +1263,7 @@ const AppAct = struct {
 
     fn refresh(x: *AppAct) void {
         x.actions.refresh_apps = true;
+        x.actions.check_update = true;
     }
 };
 
@@ -1527,6 +1554,47 @@ pub const Meter = struct {
     }
 };
 
+/// The Dazzle logo (logo.svg): a 'Z' with its shadow shifted by (+2, +5) in
+/// a 40x40 square.
+const DazzleLogo = struct {
+    size: f32 = 32,
+    color: gfx.Color,
+
+    const front = [_][2]f32{
+        .{ 0, 0 },  .{ 25, 0 },  .{ 25, 5 }, .{ 7, 23 }, .{ 25, 23 },
+        .{ 25, 28 }, .{ 0, 28 }, .{ 0, 23 }, .{ 18, 5 }, .{ 0, 5 },
+    };
+    const shadow_top = [_][2]f32{
+        .{ 2, 5 },  .{ 27, 5 },  .{ 27, 10 }, .{ 14, 23 },
+        .{ 7, 23 }, .{ 20, 10 }, .{ 2, 10 },
+    };
+    const shadow_bottom = [_][2]f32{
+        .{ 2, 28 }, .{ 27, 28 }, .{ 27, 33 }, .{ 2, 33 },
+    };
+
+    pub fn layout(self: *const DazzleLogo, _: *ui.Node, c: ui.Constraints) ui.Size {
+        return c.constrain(.{ .w = self.size, .h = self.size });
+    }
+
+    pub fn paint(self: *const DazzleLogo, n: *ui.Node, p: *ui.Painter) void {
+        const s = @min(self.size, @min(n.size.w, n.size.h));
+        const scale = s / 40;
+        const x0 = (n.size.w - 27 * scale) / 2;
+        const y0 = (n.size.h - 33 * scale) / 2;
+        const c = p.canvas();
+        drawShape(c, &shadow_top, x0, y0, scale, self.color.withAlpha(0.38));
+        drawShape(c, &shadow_bottom, x0, y0, scale, self.color.withAlpha(0.38));
+        drawShape(c, &front, x0, y0, scale, self.color);
+    }
+
+    fn drawShape(c: *gfx.Canvas, comptime pts: []const [2]f32, x0: f32, y0: f32, scale: f32, color: gfx.Color) void {
+        var out: [pts.len]gfx.Point = undefined;
+        for (pts, &out) |pt, *o| o.* = .{ x0 + pt[0] * scale, y0 + pt[1] * scale };
+        c.fillPolygon(&out, color);
+    }
+};
+
+
 const testing = std.testing;
 const font = @import("font");
 
@@ -1631,6 +1699,17 @@ test "everything is shown, and fits from the smallest window to the biggest" {
             u.frame(1920, 1036, frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps, .video_memory = .{ .now = 128, .next = 192 } });
             texts(u.root.?, &all);
         }
+        if (page == .apps) {
+            click(u, up(findText(u.root.?, "Dazzle").?, ui.Pressable).?);
+            for (test_sizes) |size| {
+                frame_no += 1;
+                u.frame(size[0], size[1], frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps, .video_memory = .{ .now = 128, .next = 192 } });
+                try testing.expect(!overflows(u.root.?));
+            }
+            frame_no += 1;
+            u.frame(1920, 1036, frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps, .video_memory = .{ .now = 128, .next = 192 } });
+            texts(u.root.?, &all);
+        }
         // The next page, from its tab.
         if (@as(usize, @intFromEnum(page)) + 1 < std.enums.values(Page).len) {
             const next: Page = @enumFromInt(@as(usize, @intFromEnum(page)) + 1);
@@ -1640,6 +1719,7 @@ test "everything is shown, and fits from the smallest window to the biggest" {
     }
     for ([_][]const u8{
         "574d538",
+        "6.12.0 (armv6l)",
         "Raspberry Pi Zero W Rev 1.1",
         "a1b2c3d4",
         "Resources",
@@ -1651,9 +1731,7 @@ test "everything is shown, and fits from the smallest window to the biggest" {
         "Apps 2.0 MB",
         "User 0 bytes",
         "Free 300 MB",
-        "Hostname",
         "Ethernet",
-        "2 h 5 min",
         "Connected at 100 Mb/s",
         "192.168.1.42/24 (DHCP)",
         "12 MB received, 3.0 MB sent",
@@ -1670,7 +1748,9 @@ test "everything is shown, and fits from the smallest window to the biggest" {
         "-48 dBm",
         "Open · 2.4 GHz",
         "Enterprise · 2.4 GHz",
-        // The apps.
+        // The software list.
+        "Software",
+        "Dazzle",
         "Spinning shapes, on the GPU",
         "Install",
         "Remove",
@@ -1687,9 +1767,9 @@ test "everything is shown, and fits from the smallest window to the biggest" {
     u.frame(min_size[0], min_size[1], frame_no + 2, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps, .video_memory = .{ .now = 128, .next = 192 } });
     try testing.expect(findText(u.root.?, "Home") != null);
     try testing.expect(findText(u.root.?, "bad?name") == null);
-    // The build is on the system page, not beside the title; the hardware
+    // The build is on the Software page, not beside the title; the hardware
     // is the board alone.
-    for ([_][]const u8{ "Dazzle build", "Hardware\n", "Chip", "GPU\n", "Revision", "In use" }) |gone| {
+    for ([_][]const u8{ "Dazzle build", "Hardware\n", "Chip", "GPU\n", "Revision", "In use", "Up for", "Hostname" }) |gone| {
         try testing.expect(std.mem.indexOf(u8, all.items, gone) == null);
     }
 }
@@ -1986,37 +2066,43 @@ test "updates: offered, downloaded, installed, then a restart" {
     var actions: Actions = .{};
     var settings: Settings = .{ .commit = "de14aa2 (7 October 2026)", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .update = .{ .status = .available, .available = "0123abc (8 October 2026)" } };
     u.frame(1920, 960, 0, settings);
-    u.root.?.state(Settings.State).page = .system;
+    u.root.?.state(Settings.State).page = .apps;
     u.frame(1920, 960, 1, settings);
     try testing.expect(findText(u.root.?, "Dazzle 0123abc (8 October 2026) is available") != null);
+    // Build and kernel details are shown when Dazzle is expanded.
+    try testing.expect(findText(u.root.?, "de14aa2 (7 October 2026)") == null);
+    click(u, up(findText(u.root.?, "Dazzle").?, ui.Pressable).?);
+    u.frame(1920, 960, 2, settings);
+    try testing.expect(findText(u.root.?, "de14aa2 (7 October 2026)") != null);
+    try testing.expect(findText(u.root.?, "6.12.0 (armv6l)") != null);
     click(u, up(findText(u.root.?, "Download").?, ui.OutlinedButton).?);
     try testing.expect(actions.download_update);
 
-    // Under way: no buttons.
+    // Under way: no update buttons.
     for ([_]update.Status{ .checking, .downloading, .installing }) |s| {
         settings.update = .{ .status = s };
-        u.frame(1920, 960, 2, settings);
-        try testing.expect(up(findText(u.root.?, "Updates").?, ui.Row) != null);
+        u.frame(1920, 960, 3, settings);
+        try testing.expect(up(findText(u.root.?, "Dazzle").?, ui.Row) != null);
         try testing.expect(findText(u.root.?, "Download") == null and findText(u.root.?, "Restart") == null);
     }
     settings.update = .{ .status = .ready };
-    u.frame(1920, 960, 3, settings);
+    u.frame(1920, 960, 4, settings);
     try testing.expect(findText(u.root.?, "The update is installed: restart to use it") != null);
     click(u, up(findText(u.root.?, "Restart").?, ui.OutlinedButton).?);
     try testing.expect(actions.restart);
 
     settings.update = .{ .status = .current };
-    u.frame(1920, 960, 4, settings);
-    try testing.expect(findText(u.root.?, "Up to date") != null);
-    click(u, up(findText(u.root.?, "Check again").?, ui.OutlinedButton).?);
-    try testing.expect(actions.check_update);
+    u.frame(1920, 960, 5, settings);
+    try testing.expect(findText(u.root.?, "The operating system · 600 KB") != null);
+    click(u, up(findText(u.root.?, "Refresh").?, ui.OutlinedButton).?);
+    try testing.expect(actions.check_update and actions.refresh_apps);
 
     settings.update = .{ .status = .unknown, .message = "Cannot check for updates: the server could not be reached (is the network up?)" };
-    u.frame(1920, 960, 5, settings);
+    u.frame(1920, 960, 6, settings);
     try testing.expect(findText(u.root.?, "Cannot check for updates: the server could not be reached (is the network up?)") != null);
     settings.update = .{};
-    u.frame(1920, 960, 6, settings);
-    try testing.expect(findText(u.root.?, "Not checked yet") != null);
+    u.frame(1920, 960, 7, settings);
+    try testing.expect(findText(u.root.?, "The operating system · 600 KB") != null);
 }
 
 test "video memory: choosing a size, then a restart" {
