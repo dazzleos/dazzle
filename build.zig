@@ -235,7 +235,7 @@ fn addGpuModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
 }
 
 /// Who embeds a shader program.
-const ShaderOwner = enum { gfx, demo, shell, blocks };
+const ShaderOwner = enum { gfx, demo, shell, blocks, maps };
 
 /// The shader programs: Zig sources compiled to SPIR-V, then for the GPU
 /// by tools/shaderc.zig (with the render state that changes their code),
@@ -262,6 +262,7 @@ const shader_programs = [_]struct { source: []const u8, name: ?[]const u8 = null
     .{ .source = "src/apps/blocks/shaders/line.zig", .owner = .blocks, .args = &.{"--depth-test"} },
     .{ .source = "src/shell/shaders/quad.zig", .owner = .shell, .args = &.{} },
     .{ .source = "src/shell/shaders/quad_rgb565.zig", .owner = .shell, .args = &.{} },
+    .{ .source = "src/apps/maps/shaders/globe.zig", .owner = .maps, .args = &.{"--depth-test"} },
 };
 
 /// Shaders the shader tests compile from SPIR-V themselves, embedded as
@@ -948,6 +949,11 @@ pub fn build(b: *std.Build) void {
         .root_module = addProgramModule(b, "src/shell/main.zig", target, optimize, pi, shaders, true),
     });
     const install_shell = b.addInstallArtifact(shell_exe, .{});
+    const maps_exe = b.addExecutable(.{
+        .name = "dazzle-maps",
+        .root_module = addProgramModule(b, "src/apps/maps/main.zig", target, optimize, pi, shaders, true),
+    });
+    const install_maps = b.addInstallArtifact(maps_exe, .{});
 
     // Host tool that packs the init binary into a cpio initramfs.
     const mkinitramfs = b.addExecutable(.{
@@ -993,13 +999,14 @@ pub fn build(b: *std.Build) void {
         .{ .exe = text_editor_exe, .icon = .edit_note, .title = "Text Editor", .description = "Write and change text files, from Files; they are saved as you type", .handles = &.{"text/plain"} },
         .{ .exe = blocks_exe, .icon = .landscape, .title = "Blocks", .description = "Build anything, a block at a time, on an island in the sea" },
         .{ .exe = logger_exe, .icon = .show_chart, .title = "Data Logger", .description = "Record GPIO pins, analog inputs, I2C devices and serial ports over time, and save them as CSV" },
+        .{ .exe = maps_exe, .icon = .public, .title = "Maps", .description = "Explore the Earth on an interactive 3D globe, with offline world maps and remote tiles" },
     };
     const apps_step = b.step("apps", "Build the apps' archives and their catalogue (zig-out/apps)");
     apps_step.dependOn(addAppArchives(b, &apps));
     b.getInstallStep().dependOn(apps_step);
     const install_initramfs = b.addInstallFile(initramfs, "initramfs.cpio");
     const programs_step = b.step("programs", "Build just the programs (zig-out/bin) and zig-out/initramfs.cpio");
-    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_settings.step, &install_files.step, &install_camera.step, &install_text_editor.step, &install_logger.step, &install_blocks.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
+    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_settings.step, &install_files.step, &install_camera.step, &install_text_editor.step, &install_logger.step, &install_blocks.step, &install_maps.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
         programs_step.dependOn(st);
         b.getInstallStep().dependOn(st);
     }
@@ -1048,6 +1055,8 @@ pub fn build(b: *std.Build) void {
     host_logger.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_setup = addProgramModule(b, "src/apps/setup/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_setup.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
+    const host_maps = addProgramModule(b, "src/apps/maps/main.zig", b.graph.host, test_optimize, host, shaders, false);
+    host_maps.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     for ([_]*std.Build.Module{
         host.sys,
         host.vc4,
@@ -1069,6 +1078,7 @@ pub fn build(b: *std.Build) void {
         host_logger,
         host_blocks,
         host_setup,
+        host_maps,
         addProgramModule(b, "src/shell/main.zig", b.graph.host, test_optimize, host, shaders, false),
     }) |m| {
         const t = b.addTest(.{ .root_module = m });

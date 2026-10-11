@@ -85,4 +85,8 @@ pub const Icon = enum {
     edit_note,
     edit,
     note_add,
+    // Maps.
+    public,
+    layers,
+    my_location,
 };
