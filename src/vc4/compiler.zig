@@ -28,12 +28,13 @@
 const std = @import("std");
 const qpu = @import("qpu.zig");
 const qpu_schedule = @import("qpu_schedule.zig");
+const v3d_qpu = @import("v3d_qpu.zig");
 
 pub const Stage = qpu.Stage;
 
 pub const max_insts = 1024;
 pub const max_code = 1024;
-pub const max_uniforms = 64;
+pub const max_uniforms = 128;
 
 /// An SSA value: the index of the instruction that defines it.
 pub const Value = enum(u16) { _ };
@@ -277,6 +278,8 @@ pub const UniformKind = union(enum) {
     tex_p0: u8,
     /// Texture config parameter 1 for a texture slot.
     tex_p1: u8,
+    /// A literal 32-bit immediate word (V3D 4.2 constant uniform).
+    constant: u32,
 };
 
 pub const Compiled = struct {
@@ -312,7 +315,7 @@ pub const Compiled = struct {
     }
 };
 
-pub const Error = qpu.EncodeError || qpu.ValidationError || qpu_schedule.Error || error{
+pub const Error = qpu.EncodeError || qpu.ValidationError || qpu_schedule.Error || v3d_qpu.EncodeError || error{
     OutOfRegisters,
     /// `Options.threaded` was true for a shader that cannot be threaded.
     CannotThread,
@@ -1192,3 +1195,808 @@ test "a sample whose place comes from another's waits for it, switching threads 
         last = ip;
     }
 }
+
+// --- VideoCore VI (V3D 4.2) Compiler -----------------------------------------
+
+pub fn compileV3d(shader: *const Shader) Error!Compiled {
+    const n = shader.len;
+
+    // On V3D 4.2, coordinate shaders only write pos[0..3] (VPM 0..3) and
+    // Xs, Ys (VPM 4..5), not Zs or 1/Wc. Ignore the Zs and 1/Wc vpm_writes
+    // in coordinate shaders before computing liveness.
+    var skip_inst: [max_insts]bool = @splat(false);
+    var cs_xy_inst: ?usize = null;
+    var vs_xy_inst: ?usize = null;
+    {
+        var vpm_w_idx: u32 = 0;
+        for (0..n) |j| {
+            if (shader.insts[j].op == .vpm_write) {
+                if (shader.stage == .coordinate) {
+                    if (vpm_w_idx == 4) cs_xy_inst = @intFromEnum(shader.insts[j].srcs[0]);
+                    if (vpm_w_idx >= 5) skip_inst[j] = true;
+                } else if (shader.stage == .vertex) {
+                    if (vpm_w_idx == 0) vs_xy_inst = @intFromEnum(shader.insts[j].srcs[0]);
+                }
+                vpm_w_idx += 1;
+            }
+        }
+    }
+
+    var live: [max_insts]bool = @splat(false);
+    var uses: [max_insts]u16 = @splat(0);
+    var first_use: [max_insts]u16 = @splat(std.math.maxInt(u16));
+    var last_use: [max_insts]u16 = @splat(0);
+    {
+        var i: usize = n;
+        while (i > 0) {
+            i -= 1;
+            if (skip_inst[i]) continue;
+            if (shader.insts[i].op.hasSideEffects()) live[i] = true;
+            if (!live[i]) continue;
+            // `pack_unorm8888` and `pack_screen_xy` emit no code at `i`; their
+            // operands are read at the consumer instruction (`tlb_color`,
+            // `tlb_color_ms`, `vpm_write`).
+            const inst = shader.insts[i];
+            if (inst.op == .tlb_color or inst.op == .tlb_color_ms or inst.op == .vpm_write) {
+                const src_idx = @intFromEnum(inst.srcs[0]);
+                const src_inst = shader.insts[src_idx];
+                if (src_inst.op == .pack_unorm8888 or src_inst.op == .pack_screen_xy) {
+                    live[src_idx] = true;
+                    for (shader.operands(src_idx)) |v| {
+                        const d = @intFromEnum(v);
+                        live[d] = true;
+                        uses[d] += 1;
+                        first_use[d] = @min(first_use[d], @as(u16, @intCast(i)));
+                        last_use[d] = @max(last_use[d], @as(u16, @intCast(i)));
+                    }
+                    continue;
+                }
+            }
+            if (inst.op == .pack_unorm8888 or inst.op == .pack_screen_xy) continue;
+            for (shader.operands(i)) |v| {
+                const d = @intFromEnum(v);
+                live[d] = true;
+                uses[d] += 1;
+                first_use[d] = @min(first_use[d], @as(u16, @intCast(i)));
+                last_use[d] = @max(last_use[d], @as(u16, @intCast(i)));
+            }
+        }
+    }
+
+    // Track per-channel liveness for `.tex` and `.tlb_color_load` results,
+    // which are unpacked via `.unpack_unorm8`.
+    var tex_ch_used: [max_insts][4]bool = @splat(.{ false, false, false, false });
+    var tex_ch_last_use: [max_insts][4]u16 = @splat(.{ 0, 0, 0, 0 });
+    var tex_ch_active: [max_insts][4]bool = @splat(.{ false, false, false, false });
+    for (0..n) |j| {
+        if (!live[j] or skip_inst[j]) continue;
+        const inst = shader.insts[j];
+        if (inst.op == .unpack_unorm8) {
+            const src_idx = @intFromEnum(inst.srcs[0]);
+            const src_op = shader.insts[src_idx].op;
+            if (src_op == .tex or src_op == .tlb_color_load) {
+                const byte: u2 = @intCast(inst.imm);
+                tex_ch_used[src_idx][byte] = true;
+                tex_ch_last_use[src_idx][byte] = @max(tex_ch_last_use[src_idx][byte], last_use[j]);
+            }
+        }
+    }
+
+    // Allocate unified RF registers (rf3..rf63; rf0=frag_w, rf2=frag_z, rf1=scratch).
+    var rf_free: [64]bool = @splat(true);
+    rf_free[0] = false;
+    rf_free[1] = false;
+    rf_free[2] = false;
+
+    const takeRf = struct {
+        fn f(free: *[64]bool) Error!u6 {
+            for (free, 0..) |*slot, idx| if (slot.*) {
+                slot.* = false;
+                return @intCast(idx);
+            };
+            return error.OutOfRegisters;
+        }
+    }.f;
+
+    const isDeferredUnifOrConst = struct {
+        fn f(s: *const Shader, d: usize) bool {
+            const op = s.insts[d].op;
+            if (op == .uniform) return true;
+            if (op == .constant) return v3d_qpu.encodeSmallImm(s.insts[d].imm) == null;
+            return false;
+        }
+    }.f;
+
+    // If a live ALU instruction `j` has a single use (`uses[j] == 1`) at the
+    // immediately following live instruction `next_live`, and `next_live` is
+    // also an ALU instruction, keep `j`'s result in accumulator `r2` instead
+    // of allocating an RF register or emitting an RF-to-accumulator move.
+    var use_r2: [max_insts]bool = @splat(false);
+    {
+        var prev_live: ?usize = null;
+        for (0..n) |j| {
+            if (!live[j] or skip_inst[j]) continue;
+            const op = shader.insts[j].op;
+            if (op == .uniform or op == .constant or op == .pack_unorm8888 or op == .pack_screen_xy or op == .unpack_unorm8) continue;
+            if (prev_live) |p| {
+                if (shader.insts[p].op.isAlu() and uses[p] == 1 and last_use[p] == j and op.isAlu()) {
+                    use_r2[p] = true;
+                }
+            }
+            prev_live = j;
+        }
+    }
+
+    var rf_reg: [max_insts]u6 = @splat(0);
+    var has_rf: [max_insts]bool = @splat(false);
+    var active_rf: [max_insts]bool = @splat(false);
+    var tex_ch_rf: [max_insts][4]u6 = @splat(.{ 0, 0, 0, 0 });
+    var has_tex_ch: [max_insts]bool = @splat(false);
+
+    for (0..n) |j| {
+        for (0..n) |d| {
+            if (active_rf[d] and last_use[d] < j) {
+                if (has_rf[d] and rf_reg[d] >= 3) {
+                    rf_free[rf_reg[d]] = true;
+                }
+                active_rf[d] = false;
+            }
+            if (has_tex_ch[d]) {
+                for (0..4) |ch| {
+                    if (tex_ch_active[d][ch] and tex_ch_last_use[d][ch] < j) {
+                        rf_free[tex_ch_rf[d][ch]] = true;
+                        tex_ch_active[d][ch] = false;
+                    }
+                }
+            }
+        }
+        if (!live[j] or skip_inst[j]) continue;
+
+        // Materialize any `.uniform` or non-small-imm `.constant` whose first
+        // use is at instruction `j`.
+        for (0..j) |d| {
+            if (live[d] and !skip_inst[d] and isDeferredUnifOrConst(shader, d) and first_use[d] == j) {
+                rf_reg[d] = try takeRf(&rf_free);
+                has_rf[d] = true;
+                active_rf[d] = true;
+            }
+        }
+
+        if (!shader.insts[j].op.hasResult()) continue;
+        const inst = shader.insts[j];
+        switch (inst.op) {
+            .frag_w => {
+                rf_reg[j] = 0;
+                has_rf[j] = true;
+            },
+            .frag_z => {
+                rf_reg[j] = 2;
+                has_rf[j] = true;
+            },
+            .uniform, .constant, .pack_unorm8888, .pack_screen_xy => {},
+            .tex, .tlb_color_load => {
+                for (0..4) |ch| {
+                    if (tex_ch_used[j][ch]) {
+                        tex_ch_rf[j][ch] = try takeRf(&rf_free);
+                        tex_ch_active[j][ch] = true;
+                    } else {
+                        tex_ch_rf[j][ch] = 1; // scratch rf1 for unused channel
+                    }
+                }
+                has_tex_ch[j] = true;
+            },
+            .unpack_unorm8 => {
+                const src_idx = @intFromEnum(inst.srcs[0]);
+                const byte: u2 = @intCast(inst.imm);
+                if (has_tex_ch[src_idx]) {
+                    rf_reg[j] = tex_ch_rf[src_idx][byte];
+                    has_rf[j] = true;
+                } else {
+                    rf_reg[j] = try takeRf(&rf_free);
+                    has_rf[j] = true;
+                    active_rf[j] = true;
+                }
+            },
+            else => {
+                if (uses[j] > 0 and !use_r2[j]) {
+                    rf_reg[j] = try takeRf(&rf_free);
+                    has_rf[j] = true;
+                    active_rf[j] = true;
+                }
+            },
+        }
+    }
+
+    var out: Compiled = .{
+        .stage = shader.stage,
+        .threaded = true,
+    };
+    var last_rf_write: ?u6 = null;
+
+    const pushRaw = struct {
+        fn f(o: *Compiled, last_w: *?u6, inst: v3d_qpu.Inst, written_rf: ?u6) Error!void {
+            if (o.code_len >= max_code) return error.ProgramTooLong;
+            o.code_buf[o.code_len] = inst;
+            o.code_len += 1;
+            last_w.* = written_rf;
+        }
+    }.f;
+
+    const pushAlu = struct {
+        fn f(o: *Compiled, last_w: *?u6, a: v3d_qpu.Alu) Error!void {
+            const reads_a = (a.add.op != .nop and (a.add.a.mux == .a or (a.add.op.numSrc() > 1 and a.add.b.mux == .a))) or
+                (a.mul.op != .nop and (a.mul.a.mux == .a or (a.mul.op.numSrc() > 1 and a.mul.b.mux == .a)));
+            if (reads_a and last_w.* != null and last_w.*.? == a.raddr_a) {
+                try pushRaw(o, last_w, v3d_qpu.nop(), null);
+            }
+            var written: ?u6 = null;
+            if (!a.add.dst.magic) written = a.add.dst.waddr;
+            if (!a.mul.dst.magic) written = a.mul.dst.waddr;
+            if (a.sig.ldunifrf or a.sig.ldtmu) {
+                if (!a.sig_magic) written = a.sig_addr;
+            }
+            try pushRaw(o, last_w, try v3d_qpu.alu(a), written);
+        }
+    }.f;
+
+    const push = struct {
+        fn f(o: *Compiled, last_w: *?u6, inst: v3d_qpu.Inst) Error!void {
+            // Check if this pre-packed instruction writes to an RF register via sig_addr
+            const sig: u5 = @truncate(inst >> 53);
+            var written: ?u6 = null;
+            if (sig == 12 or sig == 4) { // ldunifrf or ldtmu
+                const cond: u7 = @truncate(inst >> 46);
+                if (cond & (1 << 6) == 0) written = @truncate(cond);
+            }
+            try pushRaw(o, last_w, inst, written);
+        }
+    }.f;
+
+    const addUnif = struct {
+        fn f(o: *Compiled, k: UniformKind) Error!void {
+            if (o.uniform_len >= max_uniforms) return error.TooManyUniforms;
+            o.uniform_buf[o.uniform_len] = k;
+            o.uniform_len += 1;
+        }
+    }.f;
+
+    // Helper: load SSA value `v` into accumulator `acc` (0 or 1).
+    const loadToAcc = struct {
+        fn f(o: *Compiled, last_w: *?u6, s: *const Shader, r_reg: *const [max_insts]u6, r2_map: *const [max_insts]bool, v: Value, acc: u3) Error!v3d_qpu.Mux {
+            const d = @intFromEnum(v);
+            if (r2_map[d]) return .r2;
+            const def = s.insts[d];
+            if (def.op == .constant) {
+                if (v3d_qpu.encodeSmallImm(def.imm)) |imm| {
+                    try pushAlu(o, last_w, .{
+                        .sig = .{ .small_imm_b = true },
+                        .raddr_b = imm,
+                        .mul = .{
+                            .op = .mov,
+                            .dst = .r(acc),
+                            .a = .{ .mux = .b },
+                        },
+                    });
+                    return @enumFromInt(acc);
+                }
+            }
+            const rf = r_reg[d];
+            try pushAlu(o, last_w, .{
+                .raddr_a = rf,
+                .mul = .{
+                    .op = .mov,
+                    .dst = .r(acc),
+                    .a = .{ .mux = .a },
+                },
+            });
+            return @enumFromInt(acc);
+        }
+    }.f;
+
+    // Prepare single operand for an ALU instruction: returns (raddr_a, sig, raddr_b, mux).
+    const prepUnary = struct {
+        fn f(s: *const Shader, r_reg: *const [max_insts]u6, r2_map: *const [max_insts]bool, v: Value) struct { raddr_a: u6, sig: v3d_qpu.Sig, raddr_b: u6, mux: v3d_qpu.Mux } {
+            const d = @intFromEnum(v);
+            if (r2_map[d]) {
+                return .{ .raddr_a = 0, .sig = .{}, .raddr_b = 0, .mux = .r2 };
+            }
+            const def = s.insts[d];
+            if (def.op == .constant) {
+                if (v3d_qpu.encodeSmallImm(def.imm)) |imm| {
+                    return .{ .raddr_a = 0, .sig = .{ .small_imm_b = true }, .raddr_b = imm, .mux = .b };
+                }
+            }
+            return .{ .raddr_a = r_reg[d], .sig = .{}, .raddr_b = 0, .mux = .a };
+        }
+    }.f;
+
+    // Prepare two operands for a binary ALU instruction, emitting at most one `mov` to `r0` if needed.
+    const prepBinary = struct {
+        fn f(o: *Compiled, last_w: *?u6, s: *const Shader, r_reg: *const [max_insts]u6, r2_map: *const [max_insts]bool, v0: Value, v1: Value) Error!struct { raddr_a: u6, sig: v3d_qpu.Sig, raddr_b: u6, mux_a: v3d_qpu.Mux, mux_b: v3d_qpu.Mux } {
+            const op0 = prepUnary(s, r_reg, r2_map, v0);
+            if (v0 == v1) {
+                return .{ .raddr_a = op0.raddr_a, .sig = op0.sig, .raddr_b = op0.raddr_b, .mux_a = op0.mux, .mux_b = op0.mux };
+            }
+            const op1 = prepUnary(s, r_reg, r2_map, v1);
+            // If either operand is already in r2, there is no port conflict with the other operand!
+            if (op0.mux == .r2) {
+                return .{ .raddr_a = op1.raddr_a, .sig = op1.sig, .raddr_b = op1.raddr_b, .mux_a = .r2, .mux_b = op1.mux };
+            }
+            if (op1.mux == .r2) {
+                return .{ .raddr_a = op0.raddr_a, .sig = op0.sig, .raddr_b = op0.raddr_b, .mux_a = op0.mux, .mux_b = .r2 };
+            }
+            if (op0.mux == .a and op1.mux == .b) {
+                return .{ .raddr_a = op0.raddr_a, .sig = op1.sig, .raddr_b = op1.raddr_b, .mux_a = .a, .mux_b = .b };
+            }
+            if (op0.mux == .b and op1.mux == .a) {
+                return .{ .raddr_a = op1.raddr_a, .sig = op0.sig, .raddr_b = op0.raddr_b, .mux_a = .b, .mux_b = .a };
+            }
+            if (op0.mux == .a and op1.mux == .a and op0.raddr_a == op1.raddr_a) {
+                return .{ .raddr_a = op0.raddr_a, .sig = .{}, .raddr_b = 0, .mux_a = .a, .mux_b = .a };
+            }
+            if (op0.mux == .b and op1.mux == .b and op0.raddr_b == op1.raddr_b) {
+                return .{ .raddr_a = 0, .sig = op0.sig, .raddr_b = op0.raddr_b, .mux_a = .b, .mux_b = .b };
+            }
+            // If op0 was just written to RF (`last_w`), load v1 into r0 first so op0's RF write delay slot is hidden!
+            if (op0.mux == .a and last_w.* != null and op0.raddr_a == last_w.*.? and (op1.mux != .a or op1.raddr_a != last_w.*.?)) {
+                const m1 = try loadToAcc(o, last_w, s, r_reg, r2_map, v1, 0);
+                return .{ .raddr_a = op0.raddr_a, .sig = op0.sig, .raddr_b = op0.raddr_b, .mux_a = op0.mux, .mux_b = m1 };
+            }
+            const m0 = try loadToAcc(o, last_w, s, r_reg, r2_map, v0, 0);
+            return .{ .raddr_a = op1.raddr_a, .sig = op1.sig, .raddr_b = op1.raddr_b, .mux_a = m0, .mux_b = op1.mux };
+        }
+    }.f;
+
+    var vpm_read_idx: u32 = 0;
+    var vpm_write_idx: u32 = 0;
+    var tlb_locked = false;
+    var tlb_load_sample: u32 = 0;
+    var tlb_write_sample: u32 = 0;
+    const is_msaa_blend = blk: {
+        for (0..n) |j| if (live[j] and shader.insts[j].op == .tlb_color_ms) break :blk true;
+        break :blk false;
+    };
+
+    const ensureTlbLocked = struct {
+        fn f(o: *Compiled, last_w: *?u6, locked: *bool) Error!void {
+            if (locked.*) return;
+            locked.* = true;
+            // Enter final thread section (locks scoreboard on V3D 4.2):
+            // two back-to-back THRSW signals followed by two delay slots.
+            try push(o, last_w, v3d_qpu.thrsw());
+            try push(o, last_w, v3d_qpu.thrsw());
+            try push(o, last_w, v3d_qpu.nop());
+            try push(o, last_w, v3d_qpu.nop());
+        }
+    }.f;
+
+    for (0..n) |j| {
+        if (!live[j] or skip_inst[j]) continue;
+
+        // Emit deferred `.uniform` and non-small-imm `.constant` loads whose
+        // first use is at instruction `j`.
+        for (0..j) |d| {
+            if (live[d] and !skip_inst[d] and isDeferredUnifOrConst(shader, d) and first_use[d] == j) {
+                const def = shader.insts[d];
+                try push(&out, &last_rf_write, v3d_qpu.ldunifrf(.rf(rf_reg[d])));
+                if (def.op == .uniform) {
+                    try addUnif(&out, .{ .user = def.imm });
+                } else {
+                    try addUnif(&out, .{ .constant = def.imm });
+                }
+            }
+        }
+
+        const inst = shader.insts[j];
+        const dst_rf = rf_reg[j];
+        const dst: v3d_qpu.Dst = if (use_r2[j]) .r(2) else if (has_rf[j]) .rf(dst_rf) else .nop;
+
+        switch (inst.op) {
+            .frag_w, .frag_z, .uniform, .constant, .pack_unorm8888, .pack_screen_xy, .unpack_unorm8 => {},
+            .vpm_read => {
+                const imm = v3d_qpu.encodeSmallImm(vpm_read_idx) orelse blk: {
+                    try push(&out, &last_rf_write, v3d_qpu.ldunifrf(.rf(1)));
+                    try addUnif(&out, .{ .constant = vpm_read_idx });
+                    break :blk null;
+                };
+                if (imm) |enc| {
+                    try pushAlu(&out, &last_rf_write, .{
+                        .sig = .{ .small_imm_b = true },
+                        .raddr_b = enc,
+                        .add = .{
+                            .op = .ldvpmv_in,
+                            .dst = dst,
+                            .a = .{ .mux = .b },
+                        },
+                    });
+                } else {
+                    try pushAlu(&out, &last_rf_write, .{
+                        .raddr_a = 1,
+                        .add = .{
+                            .op = .ldvpmv_in,
+                            .dst = dst,
+                            .a = .{ .mux = .a },
+                        },
+                    });
+                }
+                vpm_read_idx += 1;
+                out.num_vpm_reads += 1;
+            },
+            .varying => {
+                // ldvary r3 writes (A*x + B*y) to r3 on the next cycle and C to r5
+                // after 1 instruction delay. Multiply r3 by rf0 (payload W) in that
+                // delay slot, then add r5!
+                try push(&out, &last_rf_write, v3d_qpu.ldvary(.r(3)));
+                try pushAlu(&out, &last_rf_write, .{
+                    .raddr_a = 0, // rf0 = payload W
+                    .mul = .{
+                        .op = .fmul,
+                        .dst = .r(3),
+                        .a = .{ .mux = .r3 },
+                        .b = .{ .mux = .a },
+                    },
+                });
+                try pushAlu(&out, &last_rf_write, .{
+                    .add = .{
+                        .op = .fadd,
+                        .dst = dst,
+                        .a = .{ .mux = .r3 },
+                        .b = .{ .mux = .r5 },
+                    },
+                });
+                out.num_varyings += 1;
+            },
+            .fmaxabs => {
+                const b_op = try prepBinary(&out, &last_rf_write, shader, &rf_reg, &use_r2, inst.srcs[0], inst.srcs[1]);
+                try pushAlu(&out, &last_rf_write, .{
+                    .sig = b_op.sig,
+                    .raddr_a = b_op.raddr_a,
+                    .raddr_b = b_op.raddr_b,
+                    .add = .{
+                        .op = .fmax,
+                        .dst = dst,
+                        .a = .{ .mux = b_op.mux_a, .unpack = .abs },
+                        .b = .{ .mux = b_op.mux_b, .unpack = .abs },
+                    },
+                });
+            },
+            .ftoi, .itof => {
+                const u_op = prepUnary(shader, &rf_reg, &use_r2, inst.srcs[0]);
+                try pushAlu(&out, &last_rf_write, .{
+                    .sig = u_op.sig,
+                    .raddr_a = u_op.raddr_a,
+                    .raddr_b = u_op.raddr_b,
+                    .add = .{
+                        .op = if (inst.op == .ftoi) .ftoiz else .itof,
+                        .dst = dst,
+                        .a = .{ .mux = u_op.mux },
+                    },
+                });
+            },
+            .fadd, .fsub, .fmin, .fmax, .add, .sub, .shl, .shr, .asr, .@"and", .@"or", .xor, .min, .max, .fmul => {
+                const b_op = try prepBinary(&out, &last_rf_write, shader, &rf_reg, &use_r2, inst.srcs[0], inst.srcs[1]);
+                if (inst.op == .fmul) {
+                    try pushAlu(&out, &last_rf_write, .{
+                        .sig = b_op.sig,
+                        .raddr_a = b_op.raddr_a,
+                        .raddr_b = b_op.raddr_b,
+                        .mul = .{
+                            .op = .fmul,
+                            .dst = dst,
+                            .a = .{ .mux = b_op.mux_a },
+                            .b = .{ .mux = b_op.mux_b },
+                        },
+                    });
+                } else {
+                    const v3d_op: v3d_qpu.AddOp = switch (inst.op) {
+                        .fadd => .fadd,
+                        .fsub => .fsub,
+                        .fmin => .fmin,
+                        .fmax => .fmax,
+                        .add => .add,
+                        .sub => .sub,
+                        .shl => .shl,
+                        .shr => .shr,
+                        .asr => .asr,
+                        .@"and" => .@"and",
+                        .@"or" => .@"or",
+                        .xor => .xor,
+                        .min => .min,
+                        .max => .max,
+                        else => unreachable,
+                    };
+                    try pushAlu(&out, &last_rf_write, .{
+                        .sig = b_op.sig,
+                        .raddr_a = b_op.raddr_a,
+                        .raddr_b = b_op.raddr_b,
+                        .add = .{
+                            .op = v3d_op,
+                            .dst = dst,
+                            .a = .{ .mux = b_op.mux_a },
+                            .b = .{ .mux = b_op.mux_b },
+                        },
+                    });
+                }
+            },
+            .recip, .rsqrt, .exp2, .log2 => {
+                // V3D 4.2 SFU ALU instructions write to dst after 2 delay slots.
+                const u_op = prepUnary(shader, &rf_reg, &use_r2, inst.srcs[0]);
+                const v3d_op: v3d_qpu.AddOp = switch (inst.op) {
+                    .recip => .recip,
+                    .rsqrt => .rsqrt,
+                    .exp2 => .exp,
+                    .log2 => .log,
+                    else => unreachable,
+                };
+                try pushAlu(&out, &last_rf_write, .{
+                    .sig = u_op.sig,
+                    .raddr_a = u_op.raddr_a,
+                    .raddr_b = u_op.raddr_b,
+                    .add = .{
+                        .op = v3d_op,
+                        .dst = dst,
+                        .a = .{ .mux = u_op.mux },
+                    },
+                });
+                try push(&out, &last_rf_write, v3d_qpu.nop());
+                try push(&out, &last_rf_write, v3d_qpu.nop());
+            },
+            .tex => {
+                const slot: u8 = @intCast(inst.imm);
+                const u_t = prepUnary(shader, &rf_reg, &use_r2, inst.srcs[1]);
+                // 1. Write T to W.tmut
+                try pushAlu(&out, &last_rf_write, .{
+                    .sig = u_t.sig,
+                    .raddr_a = u_t.raddr_a,
+                    .raddr_b = u_t.raddr_b,
+                    .mul = .{
+                        .op = .mov,
+                        .dst = .magicAddr(v3d_qpu.W.tmut),
+                        .a = .{ .mux = u_t.mux },
+                    },
+                });
+                // 2. Emit wrtmuc for P0 (texture state address + return_words=0xf)
+                try push(&out, &last_rf_write, v3d_qpu.wrtmuc());
+                try addUnif(&out, .{ .tex_p0 = slot });
+                // 3. Emit wrtmuc for P1 (sampler state address + output_type_32_bit + per_pixel_mask)
+                try push(&out, &last_rf_write, v3d_qpu.wrtmuc());
+                try addUnif(&out, .{ .tex_p1 = slot });
+                // 4. Write S to W.tmus (triggers 2D lookup; r4 bit 0 of per-pixel mask must be 0 -> active)
+                try pushAlu(&out, &last_rf_write, .{
+                    .sig = .{ .small_imm_b = true },
+                    .raddr_b = 0, // imm 0
+                    .add = .{
+                        .op = .nop,
+                    },
+                    .mul = .{
+                        .op = .mov,
+                        .dst = .r(4),
+                        .a = .{ .mux = .b },
+                    },
+                });
+                const u_s = prepUnary(shader, &rf_reg, &use_r2, inst.srcs[0]);
+                try pushAlu(&out, &last_rf_write, .{
+                    .sig = u_s.sig,
+                    .raddr_a = u_s.raddr_a,
+                    .raddr_b = u_s.raddr_b,
+                    .mul = .{
+                        .op = .mov,
+                        .dst = .magicAddr(v3d_qpu.W.tmus),
+                        .a = .{ .mux = u_s.mux },
+                    },
+                });
+                // 5. Thread switch to wait for TMU, plus 2 delay slots
+                try push(&out, &last_rf_write, v3d_qpu.thrsw());
+                try push(&out, &last_rf_write, v3d_qpu.nop());
+                try push(&out, &last_rf_write, v3d_qpu.nop());
+                // 6. Read 4 RGBA float32 channels via ldtmu; lower.zig maps
+                // unpack_unorm8(2)->R, (1)->G, (0)->B, (3)->A!
+                // Hardware returns R, G, B, A in order, so store R into ch[2],
+                // G into ch[1], B into ch[0], A into ch[3]!
+                const ch = tex_ch_rf[j];
+                for ([4]u6{ ch[2], ch[1], ch[0], ch[3] }) |c_rf| {
+                    try push(&out, &last_rf_write, v3d_qpu.ldtmu(.rf(c_rf)));
+                }
+                out.num_texture_samples += 1;
+            },
+            .tlb_color_load => {
+                try ensureTlbLocked(&out, &last_rf_write, &tlb_locked);
+                // On first sample, use ldtlbu if MSAA (to set PER_SAMPLE), or ldtlb if single-sample.
+                if (is_msaa_blend and tlb_load_sample == 0) {
+                    try push(&out, &last_rf_write, v3d_qpu.ldtlbu(.r(1)));
+                    // TLB config for 4xf16 color load per-sample: 0xfffffffb
+                    try addUnif(&out, .{ .constant = 0xfffffffb });
+                } else {
+                    try push(&out, &last_rf_write, v3d_qpu.ldtlb(.r(1)));
+                }
+                try push(&out, &last_rf_write, v3d_qpu.ldtlb(.r(2)));
+                // Unpack r1.l (R), r1.h (G), r2.l (B), r2.h (A) into ch[2], ch[1], ch[0], ch[3]
+                // because lower.zig expects unpack_unorm8(0)=B, (1)=G, (2)=R, (3)=A!
+                const ch = tex_ch_rf[j];
+                const unpacks = [4]struct { mux: v3d_qpu.Mux, unp: v3d_qpu.InputUnpack, rf: u6, used: bool }{
+                    .{ .mux = .r1, .unp = .l, .rf = ch[2], .used = tex_ch_used[j][2] }, // R
+                    .{ .mux = .r1, .unp = .h, .rf = ch[1], .used = tex_ch_used[j][1] }, // G
+                    .{ .mux = .r2, .unp = .l, .rf = ch[0], .used = tex_ch_used[j][0] }, // B
+                    .{ .mux = .r2, .unp = .h, .rf = ch[3], .used = tex_ch_used[j][3] }, // A
+                };
+                for (unpacks) |u| {
+                    if (!u.used) continue;
+                    try pushAlu(&out, &last_rf_write, .{
+                        .mul = .{
+                            .op = .fmov,
+                            .dst = .rf(u.rf),
+                            .a = .{ .mux = u.mux, .unpack = u.unp },
+                        },
+                    });
+                }
+                tlb_load_sample += 1;
+            },
+            .tlb_z => {
+                try ensureTlbLocked(&out, &last_rf_write, &tlb_locked);
+                try pushAlu(&out, &last_rf_write, .{
+                    .raddr_a = 2, // rf2 = payload Z
+                    .mul = .{
+                        .op = .mov,
+                        .dst = .magicAddr(v3d_qpu.W.tlbu),
+                        .a = .{ .mux = .a },
+                    },
+                });
+                try addUnif(&out, .{ .constant = 0xffffff8c });
+            },
+            .tlb_color, .tlb_color_ms => {
+                try ensureTlbLocked(&out, &last_rf_write, &tlb_locked);
+                const pack_idx = @intFromEnum(inst.srcs[0]);
+                const pack_inst = shader.insts[pack_idx];
+                // lower.zig passes (B, G, R, A) as (srcs[0], srcs[1], srcs[2], srcs[3]) to pack_unorm8888.
+                // V3D 4.2 TLB expects (R, G) in the first vfpack and (B, A) in the second vfpack!
+                const r_val: Value = if (pack_inst.op == .pack_unorm8888) pack_inst.srcs[2] else inst.srcs[0];
+                const g_val: Value = if (pack_inst.op == .pack_unorm8888) pack_inst.srcs[1] else inst.srcs[0];
+                const b_val: Value = if (pack_inst.op == .pack_unorm8888) pack_inst.srcs[0] else inst.srcs[0];
+                const a_val: Value = if (pack_inst.op == .pack_unorm8888) pack_inst.srcs[3] else inst.srcs[0];
+
+                const rg_op = try prepBinary(&out, &last_rf_write, shader, &rf_reg, &use_r2, r_val, g_val);
+                const use_tlbu = (inst.op == .tlb_color_ms and tlb_write_sample == 0 and tlb_load_sample == 0);
+                try pushAlu(&out, &last_rf_write, .{
+                    .sig = rg_op.sig,
+                    .raddr_a = rg_op.raddr_a,
+                    .raddr_b = rg_op.raddr_b,
+                    .add = .{
+                        .op = .vfpack,
+                        .dst = .magicAddr(if (use_tlbu) v3d_qpu.W.tlbu else v3d_qpu.W.tlb),
+                        .a = .{ .mux = rg_op.mux_a },
+                        .b = .{ .mux = rg_op.mux_b },
+                    },
+                });
+                if (use_tlbu) {
+                    try addUnif(&out, .{ .constant = 0xfffffffb });
+                }
+
+                const ba_op = try prepBinary(&out, &last_rf_write, shader, &rf_reg, &use_r2, b_val, a_val);
+                try pushAlu(&out, &last_rf_write, .{
+                    .sig = ba_op.sig,
+                    .raddr_a = ba_op.raddr_a,
+                    .raddr_b = ba_op.raddr_b,
+                    .add = .{
+                        .op = .vfpack,
+                        .dst = .magicAddr(v3d_qpu.W.tlb),
+                        .a = .{ .mux = ba_op.mux_a },
+                        .b = .{ .mux = ba_op.mux_b },
+                    },
+                });
+                tlb_write_sample += 1;
+            },
+            .vpm_write => {
+                const src_idx = @intFromEnum(inst.srcs[0]);
+                if (src_idx == cs_xy_inst or src_idx == vs_xy_inst) {
+                    // On V3D 4.2, Xs and Ys are written as two separate VPM words in
+                    // 24.8 fixed-point: ftoiz(ffloor(xs * 16.0)) and ftoiz(ffloor(ys * 16.0)),
+                    // since lower.zig's xs and ys are already in 1/16ths of a pixel (.4)!
+                    const xy_inst = shader.insts[src_idx];
+                    const imm16 = v3d_qpu.encodeSmallImm(@bitCast(@as(f32, 16.0))).?;
+                    for (xy_inst.srcs[0..2]) |coord_val| {
+                        const mux_c = try loadToAcc(&out, &last_rf_write, shader, &rf_reg, &use_r2, coord_val, 0);
+                        // r0 = coord * 16.0
+                        try pushAlu(&out, &last_rf_write, .{
+                            .sig = .{ .small_imm_b = true },
+                            .raddr_b = imm16,
+                            .mul = .{
+                                .op = .fmul,
+                                .dst = .r(0),
+                                .a = .{ .mux = mux_c },
+                                .b = .{ .mux = .b },
+                            },
+                        });
+                        // r0 = ffloor(r0)
+                        try pushAlu(&out, &last_rf_write, .{
+                            .add = .{
+                                .op = .ffloor,
+                                .dst = .r(0),
+                                .a = .{ .mux = .r0 },
+                            },
+                        });
+                        // r0 = ftoiz(r0)
+                        try pushAlu(&out, &last_rf_write, .{
+                            .add = .{
+                                .op = .ftoiz,
+                                .dst = .r(0),
+                                .a = .{ .mux = .r0 },
+                            },
+                        });
+                        const idx_imm = v3d_qpu.encodeSmallImm(vpm_write_idx).?;
+                        try pushAlu(&out, &last_rf_write, .{
+                            .sig = .{ .small_imm_b = true },
+                            .raddr_b = idx_imm,
+                            .add = .{
+                                .op = .stvpmv,
+                                .a = .{ .mux = .b },
+                                .b = .{ .mux = .r0 },
+                            },
+                        });
+                        vpm_write_idx += 1;
+                        out.num_vpm_writes += 1;
+                    }
+                } else {
+                    const mux_v = try loadToAcc(&out, &last_rf_write, shader, &rf_reg, &use_r2, inst.srcs[0], 0);
+                    const idx_imm = v3d_qpu.encodeSmallImm(vpm_write_idx) orelse blk: {
+                        try push(&out, &last_rf_write, v3d_qpu.ldunifrf(.rf(1)));
+                        try addUnif(&out, .{ .constant = vpm_write_idx });
+                        break :blk null;
+                    };
+                    if (idx_imm) |enc| {
+                        try pushAlu(&out, &last_rf_write, .{
+                            .sig = .{ .small_imm_b = true },
+                            .raddr_b = enc,
+                            .add = .{
+                                .op = .stvpmv,
+                                .a = .{ .mux = .b },
+                                .b = .{ .mux = mux_v },
+                            },
+                        });
+                    } else {
+                        try pushAlu(&out, &last_rf_write, .{
+                            .raddr_a = 1,
+                            .add = .{
+                                .op = .stvpmv,
+                                .a = .{ .mux = .a },
+                                .b = .{ .mux = mux_v },
+                            },
+                        });
+                    }
+                    vpm_write_idx += 1;
+                    out.num_vpm_writes += 1;
+                }
+            },
+        }
+    }
+
+    if (shader.stage != .fragment) {
+        try pushAlu(&out, &last_rf_write, .{
+            .add = .{ .op = .vpmwt },
+        });
+    }
+
+    // Program end: thrsw + 2 delay slots
+    try push(&out, &last_rf_write, v3d_qpu.thrsw());
+    try push(&out, &last_rf_write, v3d_qpu.nop());
+    try push(&out, &last_rf_write, v3d_qpu.nop());
+
+    return out;
+}
+
+test "compileV3d compiles fragment, vertex, and coordinate shaders" {
+    var fs = Shader.init(.fragment);
+    const u = fs.varying();
+    const v = fs.varying();
+    const texel = fs.texture(0, u, v);
+    const r = fs.unpackUnorm8(texel, 2);
+    const g = fs.unpackUnorm8(texel, 1);
+    const b = fs.unpackUnorm8(texel, 0);
+    const a = fs.unpackUnorm8(texel, 3);
+    fs.tlbZ(fs.fragZ());
+    fs.tlbColor(fs.packUnorm8888(b, g, r, a));
+    const c_fs = try compileV3d(&fs);
+    try std.testing.expectEqual(@as(u32, 2), c_fs.num_varyings);
+    try std.testing.expectEqual(@as(u32, 1), c_fs.num_texture_samples);
+    try std.testing.expect(c_fs.code().len > 0);
+}
+

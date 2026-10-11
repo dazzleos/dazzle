@@ -102,6 +102,7 @@ fn uniformStream(buf: []u32, c: *const compiler.Compiled, user: []const u32, tex
         .user => |idx| user[idx],
         .tex_p0 => tex[0],
         .tex_p1 => tex[1],
+        .constant => |v| v,
     };
     return buf[0..c.uniforms().len];
 }
@@ -431,6 +432,7 @@ test "three textures: the third on unit 0 with the first, each with its own conf
             .user => unreachable,
             .tex_p0 => |slot| texture.p0(t[slot].cfg) + slot * sim.texture_base,
             .tex_p1 => |slot| texture.p1(t[slot].cfg),
+            .constant => |v| v,
         };
         n += 1;
     }

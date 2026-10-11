@@ -172,8 +172,26 @@ pub const IOCTL_MODE_SETCRTC = IOWR(0xa2, ModeCrtc);
 pub const IOCTL_MODE_GETENCODER = IOWR(0xa6, ModeGetEncoder);
 pub const IOCTL_MODE_GETCONNECTOR = IOWR(0xa7, ModeGetConnector);
 pub const IOCTL_MODE_RMFB = IOWR(0xaf, c_uint);
-pub const IOCTL_MODE_ADDFB2 = IOWR(0xb8, ModeFbCmd2);
 pub const IOCTL_MODE_PAGE_FLIP = IOWR(0xb0, ModeCrtcPageFlip);
+pub const IOCTL_MODE_CREATE_DUMB = IOWR(0xb2, ModeCreateDumb);
+pub const IOCTL_MODE_MAP_DUMB = IOWR(0xb3, ModeMapDumb);
+pub const IOCTL_MODE_ADDFB2 = IOWR(0xb8, ModeFbCmd2);
+
+pub const ModeCreateDumb = extern struct {
+    height: u32,
+    width: u32,
+    bpp: u32,
+    flags: u32 = 0,
+    handle: u32 = 0,
+    pitch: u32 = 0,
+    size: u64 = 0,
+};
+
+pub const ModeMapDumb = extern struct {
+    handle: u32,
+    pad: u32 = 0,
+    offset: u64 = 0,
+};
 
 pub const ModeCrtcPageFlip = extern struct {
     crtc_id: u32,
@@ -417,6 +435,8 @@ comptime {
     std.debug.assert(@sizeOf(ModeCrtc) == 104);
     std.debug.assert(@sizeOf(ModeFbCmd2) == 104);
     std.debug.assert(@sizeOf(ModeCrtcPageFlip) == 24);
+    std.debug.assert(@sizeOf(ModeCreateDumb) == 32);
+    std.debug.assert(@sizeOf(ModeMapDumb) == 16);
 }
 
 /// Like `findOutput`, but waits a few seconds for a display to appear:

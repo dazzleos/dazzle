@@ -124,6 +124,100 @@ pub fn decodeConfig(param0: u32, param1: u32) Config {
     };
 }
 
+/// Set when opening a V3D 4.2 (`v3d`) device so textures use UIF tiling.
+pub var use_uif: bool = false;
+
+/// Hardware tiling modes on V3D 4.2 (`enum v3d_tiling_mode` in Mesa).
+pub const UifTiling = enum(u3) {
+    raster = 0,
+    lineartile = 1,
+    ublinear_1_column = 2,
+    ublinear_2_column = 3,
+    uif_no_xor = 4,
+    uif_xor = 5,
+};
+
+pub const UifSlice = struct {
+    tiling: UifTiling,
+    padded_width: u32,
+    padded_height: u32,
+    ub_pad: u8,
+    size: u32,
+};
+
+fn uifUbPad(ub_h: u32, height: u32) u8 {
+    // V3D_UIFCFG_PAGE_SIZE = 4096, V3D_UIFBLOCK_ROW_SIZE = 1024, V3D_PAGE_CACHE_SIZE = 32768.
+    const page_ub_rows_times_1_5 = 6;
+    const page_cache_ub_rows = 32;
+    const page_cache_minus_1_5_ub_rows = page_cache_ub_rows - page_ub_rows_times_1_5;
+
+    const height_ub = height / ub_h;
+    const height_offset_in_pc = height_ub % page_cache_ub_rows;
+    if (height_offset_in_pc == 0) return 0;
+    if (height_offset_in_pc < page_ub_rows_times_1_5) {
+        return if (height_ub < page_cache_ub_rows) 0 else @intCast(page_ub_rows_times_1_5 - height_offset_in_pc);
+    }
+    if (height_offset_in_pc > page_cache_minus_1_5_ub_rows) {
+        return @intCast(page_cache_ub_rows - height_offset_in_pc);
+    }
+    return 0;
+}
+
+/// Computes the V3D 4.2 slice tiling and padded dimensions (`v3d_setup_slices`).
+pub fn uifSlice(format: Format, width: u32, height: u32) UifSlice {
+    const uw = format.utileWidth();
+    const uh = format.utileHeight();
+    const ub_w = uw * 2;
+    const ub_h = uh * 2;
+    const cpp = format.bytesPerPixel();
+    if (width <= uw or height <= uh) {
+        const pw = std.mem.alignForward(u32, @max(width, 1), uw);
+        const ph = std.mem.alignForward(u32, @max(height, 1), uh);
+        return .{ .tiling = .lineartile, .padded_width = pw, .padded_height = ph, .ub_pad = 0, .size = pw * ph * cpp };
+    }
+    if (width <= ub_w) {
+        const pw = std.mem.alignForward(u32, width, ub_w);
+        const ph = std.mem.alignForward(u32, height, ub_h);
+        return .{ .tiling = .ublinear_1_column, .padded_width = pw, .padded_height = ph, .ub_pad = 0, .size = pw * ph * cpp };
+    }
+    if (width <= 2 * ub_w) {
+        const pw = std.mem.alignForward(u32, width, 2 * ub_w);
+        const ph = std.mem.alignForward(u32, height, ub_h);
+        return .{ .tiling = .ublinear_2_column, .padded_width = pw, .padded_height = ph, .ub_pad = 0, .size = pw * ph * cpp };
+    }
+    const pw = std.mem.alignForward(u32, width, 4 * ub_w);
+    var ph = std.mem.alignForward(u32, height, ub_h);
+    const ub_pad = uifUbPad(ub_h, ph);
+    ph += @as(u32, ub_pad) * ub_h;
+    const tiling: UifTiling = if ((ph / ub_h) % 32 == 0) .uif_xor else .uif_no_xor;
+    return .{ .tiling = tiling, .padded_width = pw, .padded_height = ph, .ub_pad = ub_pad, .size = pw * ph * cpp };
+}
+
+pub fn uifTexelOffsetOf(format: Format, width: u32, height: u32, x: u32, y: u32) u32 {
+    const uw = format.utileWidth();
+    const uh = format.utileHeight();
+    const ub_w = uw * 2;
+    const ub_h = uh * 2;
+    const cpp = format.bytesPerPixel();
+    const in_utile = ((y % uh) * uw + x % uw) * cpp;
+    const slice = uifSlice(format, width, height);
+    return switch (slice.tiling) {
+        .raster => y * slice.padded_width * cpp + x * cpp,
+        .lineartile => 64 * ((x / uw) + (y / uh)) + in_utile,
+        .ublinear_1_column => 256 * (y / ub_h) + (if ((x & uw) != 0) @as(u32, 64) else 0) + (if ((y & uh) != 0) @as(u32, 128) else 0) + in_utile,
+        .ublinear_2_column => 256 * ((y / ub_h) * 2 + (x / ub_w)) + (if ((x & uw) != 0) @as(u32, 64) else 0) + (if ((y & uh) != 0) @as(u32, 128) else 0) + in_utile,
+        .uif_no_xor, .uif_xor => blk: {
+            const mb_x = x / ub_w;
+            var mb_y = y / ub_h;
+            if (slice.tiling == .uif_xor and ((mb_x / 4) & 1) != 0) mb_y ^= 0x10;
+            const mb_h = slice.padded_height / ub_h;
+            const mb_id = ((mb_x / 4) * ((mb_h - 1) * 4)) + mb_x + mb_y * 4;
+            const mb_tile_offset = (if ((y % ub_h) >= uh) @as(u32, 128) else 0) + (if ((x % ub_w) >= uw) @as(u32, 64) else 0);
+            break :blk mb_id * 256 + mb_tile_offset + in_utile;
+        },
+    };
+}
+
 // --- Mipmaps --------------------------------------------------------------------
 
 /// Where a 32-bit mipmapped image goes in its buffer.
@@ -139,13 +233,33 @@ pub fn levelSize(width: u32, height: u32, level: u4) [2]u32 {
     return .{ @max(width >> level, 1), @max(height >> level, 1) };
 }
 
+fn mipSliceDims(width: u32, height: u32, level: u4) [2]u32 {
+    if (!use_uif or level < 2) return levelSize(width, height, level);
+    const pot_w = 2 * std.math.ceilPowerOfTwoAssert(u32, @max(width >> 1, 1));
+    const pot_h = 2 * std.math.ceilPowerOfTwoAssert(u32, @max(height >> 1, 1));
+    return .{ @max(pot_w >> level, 1), @max(pot_h >> level, 1) };
+}
+
+fn mipLevelBytes(width: u32, height: u32, level: u4) u32 {
+    const dims = mipSliceDims(width, height, level);
+    const sz = imageSize(dims[0], dims[1]);
+    if (use_uif and level == 1) {
+        const slice = uifSlice(.xrgb8888, dims[0], dims[1]);
+        const ub_w = Format.xrgb8888.utileWidth() * 2;
+        const ub_h = Format.xrgb8888.utileHeight() * 2;
+        if (slice.padded_width > 4 * ub_w and slice.padded_height > 26 * ub_h) {
+            return std.mem.alignForward(u32, sz, 4096);
+        }
+    }
+    return sz;
+}
+
 /// The layout of a 32-bit image with `levels` levels after level 0.
 pub fn mipmapLayout(width: u32, height: u32, levels: u4) Mipmapped {
     var below: u32 = 0;
     var i: u4 = 1;
     while (i <= levels) : (i += 1) {
-        const sz = levelSize(width, height, i);
-        below += imageSize(sz[0], sz[1]);
+        below += mipLevelBytes(width, height, i);
         if (i == 15) break;
     }
     const base = std.mem.alignForward(u32, below, 4096);
@@ -157,8 +271,7 @@ pub fn levelOffset(width: u32, height: u32, layout: Mipmapped, level: u4) u32 {
     var offset = layout.base;
     var i: u4 = 1;
     while (i <= level) : (i += 1) {
-        const sz = levelSize(width, height, i);
-        offset -= imageSize(sz[0], sz[1]);
+        offset -= mipLevelBytes(width, height, i);
         if (i == 15) break;
     }
     return offset;
@@ -193,6 +306,7 @@ pub fn uploadMipmaps(gpa: std.mem.Allocator, dst: []u8, pixels: []const u32, wid
     var level: u4 = 1;
     while (level <= levels) : (level += 1) {
         const sz = levelSize(width, height, level);
+        const dims = mipSliceDims(width, height, level);
         const next = try gpa.alloc(u32, sz[0] * sz[1]);
         for (0..sz[1]) |y| for (0..sz[0]) |x| {
             var sum: [4]f32 = .{ 0, 0, 0, 0 };
@@ -223,7 +337,7 @@ pub fn uploadMipmaps(gpa: std.mem.Allocator, dst: []u8, pixels: []const u32, wid
             };
             next[y * sz[0] + x] = out;
         };
-        upload(dst[levelOffset(width, height, layout, level)..], next, sz[0], sz[1]);
+        uploadRect(dst[levelOffset(width, height, layout, level)..], dims[0], dims[1], .{ .x = 0, .y = 0, .width = sz[0], .height = sz[1] }, next, sz[0]);
         gpa.free(prev);
         prev = next;
         pw = sz[0];
@@ -239,6 +353,7 @@ pub fn isLt(width: u32, height: u32) bool {
 }
 
 pub fn isLtOf(format: Format, width: u32, height: u32) bool {
+    if (!@inComptime() and use_uif) return width <= format.utileWidth() or height <= format.utileHeight();
     return width <= 4 * format.utileWidth() or height <= 4 * format.utileHeight();
 }
 
@@ -249,6 +364,7 @@ pub fn imageSize(width: u32, height: u32) u32 {
 }
 
 pub fn imageSizeOf(format: Format, width: u32, height: u32) u32 {
+    if (!@inComptime() and use_uif) return uifSlice(format, width, height).size;
     const uw = format.utileWidth();
     const uh = format.utileHeight();
     const cpp = format.bytesPerPixel();
@@ -263,6 +379,7 @@ pub fn imageSizeOf(format: Format, width: u32, height: u32) u32 {
 /// (micro-tiles for LT), times the bytes per pixel. For T images that is
 /// 128 bytes per tile across, whatever the format.
 pub fn tiledPitch(format: Format, width: u32, height: u32) u32 {
+    if (!@inComptime() and use_uif) return uifSlice(format, width, height).padded_width * format.bytesPerPixel();
     const uw = format.utileWidth();
     const align_w = if (isLtOf(format, width, height)) uw else 8 * uw;
     return std.mem.alignForward(u32, width, align_w) * format.bytesPerPixel();
@@ -291,6 +408,7 @@ pub fn texelOffset(width: u32, height: u32, x: u32, y: u32) u32 {
 }
 
 pub fn texelOffsetOf(format: Format, width: u32, height: u32, x: u32, y: u32) u32 {
+    if (!@inComptime() and use_uif) return uifTexelOffsetOf(format, width, height, x, y);
     const uw = format.utileWidth();
     const uh = format.utileHeight();
     const cpp = format.bytesPerPixel();
@@ -549,3 +667,31 @@ test "uploadRect matches per-texel addressing, for whole images and parts" {
         };
     }
 }
+
+test "V3D 4.2 UIF tiling: uif_xor, ublinear, and lineartile match uploadRectOf" {
+    const prev_uif = use_uif;
+    use_uif = true;
+    defer use_uif = prev_uif;
+
+    const gpa = std.testing.allocator;
+    // Test sizes covering lineartile (13x7), ublinear_1_column (40x20),
+    // ublinear_2_column (100x20), and uif_xor (192x128).
+    for ([_][2]u32{ .{ 13, 7 }, .{ 40, 20 }, .{ 100, 20 }, .{ 192, 128 } }) |size| {
+        const w = size[0];
+        const h = size[1];
+        const pixels = try gpa.alloc(u32, w * h);
+        defer gpa.free(pixels);
+        for (pixels, 0..) |*px, i| px.* = @intCast(i * 2654435761 % 0xffffffff);
+        const a = try gpa.alloc(u8, imageSize(w, h));
+        defer gpa.free(a);
+        @memset(a, 0);
+        upload(a, pixels, w, h);
+        for (0..h) |y| for (0..w) |x| {
+            const off = texelOffset(w, h, @intCast(x), @intCast(y));
+            try std.testing.expectEqual(pixels[y * w + x], std.mem.readInt(u32, a[off..][0..4], .little));
+        };
+    }
+    const m = mipmapLayout(256, 256, 8);
+    try std.testing.expect(m.base > 0 and m.base % 4096 == 0);
+}
+

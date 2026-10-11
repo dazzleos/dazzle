@@ -69,13 +69,22 @@ pub const Pipeline = struct {
         const values = try gpa.alloc(u32, p.uniform_words + 2);
         errdefer gpa.free(values);
         @memset(values, 0);
+        const Dev = switch (@typeInfo(@TypeOf(dev))) {
+            .pointer => |ptr| ptr.child,
+            else => @TypeOf(dev),
+        };
+        const is_v3d = if (@hasField(Dev, "is_v3d")) dev.is_v3d else false;
+        const fs_c = if (is_v3d) &p.v3d_fs else &p.fs;
+        const fs_ms_c = if (is_v3d) &p.v3d_fs_ms else &p.fs_ms;
+        const vs_c = if (is_v3d) &p.v3d_vs else &p.vs;
+        const cs_c = if (is_v3d) &p.v3d_cs else &p.cs;
         return .{
             .gpa = gpa,
             .program = p,
-            .fs = .{ .handle = try dev.createShaderBo(p.fs.code()), .compiled = &p.fs },
-            .fs_ms = if (p.has_fs_ms) .{ .handle = try dev.createShaderBo(p.fs_ms.code()), .compiled = &p.fs_ms } else null,
-            .vs = .{ .handle = try dev.createShaderBo(p.vs.code()), .compiled = &p.vs },
-            .cs = .{ .handle = try dev.createShaderBo(p.cs.code()), .compiled = &p.cs },
+            .fs = .{ .handle = try dev.createShaderBo(fs_c.code()), .compiled = fs_c },
+            .fs_ms = if (p.has_fs_ms) .{ .handle = try dev.createShaderBo(fs_ms_c.code()), .compiled = fs_ms_c } else null,
+            .vs = .{ .handle = try dev.createShaderBo(vs_c.code()), .compiled = vs_c },
+            .cs = .{ .handle = try dev.createShaderBo(cs_c.code()), .compiled = cs_c },
             .values = values,
             .options = options,
             .offsets = offsets,
@@ -83,8 +92,16 @@ pub const Pipeline = struct {
     }
 
     pub fn deinit(p: *Pipeline, dev: anytype) void {
-        for ([_]u32{ p.fs.handle, p.vs.handle, p.cs.handle }) |h| vc4.drm.gemClose(dev.fd, h);
-        if (p.fs_ms) |ms| vc4.drm.gemClose(dev.fd, ms.handle);
+        const Dev = switch (@typeInfo(@TypeOf(dev))) {
+            .pointer => |ptr| ptr.child,
+            else => @TypeOf(dev),
+        };
+        for ([_]u32{ p.fs.handle, p.vs.handle, p.cs.handle }) |h| {
+            if (@hasDecl(Dev, "destroyShaderBo")) dev.destroyShaderBo(h) else vc4.drm.gemClose(dev.fd, h);
+        }
+        if (p.fs_ms) |ms| {
+            if (@hasDecl(Dev, "destroyShaderBo")) dev.destroyShaderBo(ms.handle) else vc4.drm.gemClose(dev.fd, ms.handle);
+        }
         p.gpa.free(p.values);
         p.gpa.destroy(p.program);
     }

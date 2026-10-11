@@ -164,6 +164,7 @@ fn textureUniforms(cfg: vc4.texture.Config, fs: *const vc4.compiler.Compiled, bu
         .user => 0,
         .tex_p0 => vc4.texture.p0(cfg),
         .tex_p1 => vc4.texture.p1(cfg),
+        .constant => |v| v,
     };
     return buf[0..fs.uniforms().len];
 }

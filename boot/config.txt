@@ -10,6 +10,10 @@ os_prefix=slot-a/
 # The firmware picks the kernel (kernel.img on the ARMv6 boards: the Pi 1,
 # Zero and Zero W; kernel7.img on the others), and the board's device tree,
 # from the slot by itself. Both are the Raspberry Pi kernel's.
+arm_64bit=0
+[pi4]
+kernel=kernel7.img
+[all]
 initramfs initramfs.cpio followkernel
 
 # The kernel's vc4 driver drives the display and the GPU (it is off in the

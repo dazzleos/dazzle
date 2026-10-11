@@ -11,6 +11,7 @@ const compiler = @import("compiler.zig");
 const texture = @import("texture.zig");
 const Format = @import("format.zig").Format;
 const device = @import("device.zig");
+const v3d_cl = @import("v3d_cl.zig");
 
 pub const ShaderBinding = struct {
     /// GEM handle of the shader BO.
@@ -190,8 +191,35 @@ pub const Frame = struct {
     /// 4x multisampled (antialiased), each pixel's samples averaged as
     /// tiles are stored: see `beginMultisampled`.
     msaa: bool = false,
+    v3d_draws: [max_v3d_draws]V3dDraw = undefined,
 
     pub const max_regions = 4;
+    pub const max_v3d_draws = 768;
+
+    pub const V3dDraw = struct {
+        x0: u16,
+        y0: u16,
+        width: u16,
+        height: u16,
+        vp: Viewport,
+        config: cl.Bcl.Config,
+        fs_handle: u32,
+        vs_handle: u32,
+        cs_handle: u32,
+        fs_num_varyings: u8,
+        fs_layout: []const compiler.UniformKind,
+        vs_layout: []const compiler.UniformKind,
+        cs_layout: []const compiler.UniformKind,
+        uniforms_start: u32,
+        attrs: [8]Attribute,
+        attrs_len: u8,
+        cs_attribute_mask: u8,
+        primitive: cl.PrimitiveMode,
+        count: u32,
+        first: u32,
+        indices: ?Indices,
+        textures: [3]?Texture,
+    };
 
     pub fn begin(f: *Frame, target: Target, load: Load) void {
         f.beginWith(target, load, false);
@@ -281,13 +309,14 @@ pub const Frame = struct {
         return f.bin.w.len + 128 <= f.bcl_buf.len and
             f.rec.len + 128 <= f.rec_buf.len and
             f.uniforms_len + uniform_words <= f.uniforms.len and
-            f.bo_count + 12 <= max_bos;
+            f.bo_count + 12 <= max_bos and
+            f.draws < max_v3d_draws;
     }
 
     pub fn draw(f: *Frame, d: Draw) Error!void {
         std.debug.assert(d.attributes.len >= 1 and d.attributes.len <= 8);
         // Worst case control list and shader record space for one draw.
-        if (f.bin.w.len + 128 > f.bcl_buf.len or f.rec.len + 128 > f.rec_buf.len) return error.FrameFull;
+        if (f.bin.w.len + 128 > f.bcl_buf.len or f.rec.len + 128 > f.rec_buf.len or f.draws >= max_v3d_draws) return error.FrameFull;
 
         const vp = d.viewport orelse f.target.fullViewport();
         const scale = vp.scale();
@@ -335,6 +364,7 @@ pub const Frame = struct {
         });
         f.rec_count += 1;
 
+        const uniforms_start: u32 = @intCast(f.uniforms_len);
         // Uniform streams in shader record order: FS, VS, CS. Each starts
         // with the bo_handles index of every texture it samples, which the
         // kernel uses to relocate P0, followed by the uniform words.
@@ -347,6 +377,7 @@ pub const Frame = struct {
                 .user => |i| s.user[i],
                 .tex_p0 => |u| texture.p0(d.unit(u).config),
                 .tex_p1 => |u| texture.p1(d.unit(u).config),
+                .constant => |c| c,
             });
         }
 
@@ -357,6 +388,33 @@ pub const Frame = struct {
         } else {
             f.bin.glArrayPrimitive(d.primitive, d.count, d.first);
         }
+
+        var v3d_attrs: [8]Attribute = undefined;
+        @memcpy(v3d_attrs[0..d.attributes.len], d.attributes);
+        f.v3d_draws[f.draws] = .{
+            .x0 = @intCast(x0),
+            .y0 = @intCast(y0),
+            .width = @intCast(x1 - x0),
+            .height = @intCast(y1 - y0),
+            .vp = vp,
+            .config = d.config,
+            .fs_handle = d.fs.handle,
+            .vs_handle = d.vs.handle,
+            .cs_handle = d.cs.handle,
+            .fs_num_varyings = d.fs_num_varyings,
+            .fs_layout = d.fs.layout,
+            .vs_layout = d.vs.layout,
+            .cs_layout = d.cs.layout,
+            .uniforms_start = uniforms_start,
+            .attrs = v3d_attrs,
+            .attrs_len = @intCast(d.attributes.len),
+            .cs_attribute_mask = d.cs_attribute_mask,
+            .primitive = d.primitive,
+            .count = d.count,
+            .first = d.first,
+            .indices = d.indices,
+            .textures = .{ d.texture, d.texture1, d.texture2 },
+        };
         f.draws += 1;
     }
 
@@ -516,6 +574,237 @@ pub const Frame = struct {
 
     pub fn handles(f: *const Frame) []const u32 {
         return f.bo_handles[0..f.bo_count];
+    }
+
+    fn boAddr(f: *const Frame, bo_addrs: []const u32, handle: u32) u32 {
+        for (f.bo_handles[0..f.bo_count], 0..) |h, i| {
+            if (h == handle) return bo_addrs[i];
+        }
+        unreachable;
+    }
+
+    /// Translates the recorded frame into V3D 4.2 BCL, RCL, and indirect state
+    /// buffers, submits them via `DRM_IOCTL_V3D_SUBMIT_CL`, and waits for
+    /// completion.
+    pub fn submitV3dRegion(f: *Frame, dev: device.Device, job: *const device.SubmitCl) !void {
+        var bo_addrs: [max_bos]u32 = undefined;
+        for (f.bo_handles[0..f.bo_count], 0..) |h, i| {
+            bo_addrs[i] = try dev.getBoOffset(h);
+        }
+
+        const tiles = f.tileCounts();
+        const num_tiles: u32 = @as(u32, tiles[0]) * @as(u32, tiles[1]);
+        const tile_alloc_size = std.mem.alignForward(u32, @max(num_tiles * 64, 4096), 4096);
+        const tile_state_size = std.mem.alignForward(u32, @max(num_tiles * 64, 4096), 4096);
+
+        const cl_bo = try dev.createV3dBo(256 * 1024);
+        defer dev.destroyV3dBo(cl_bo);
+        const tile_alloc_bo = try dev.createV3dBo(tile_alloc_size);
+        defer dev.destroyV3dBo(tile_alloc_bo);
+        const tile_state_bo = try dev.createV3dBo(tile_state_size);
+        defer dev.destroyV3dBo(tile_state_bo);
+
+        const cl_base = try dev.getBoOffset(cl_bo.handle);
+        const tile_alloc_addr = try dev.getBoOffset(tile_alloc_bo.handle);
+        const tile_state_addr = try dev.getBoOffset(tile_state_bo.handle);
+        const target_addr = bo_addrs[0];
+
+        // 0..64: default vertex attributes (zeros).
+        @memset(cl_bo.map[0..64], 0);
+        const default_attr_addr = cl_base;
+
+        // 64..128: generic per-tile list.
+        var gen_rcl = v3d_cl.Rcl.init(cl_bo.map[64..128]);
+        gen_rcl.tileCoordinatesImplicit();
+        if (f.load == .keep) {
+            gen_rcl.loadTileBufferGeneralColor(target_addr, f.target.format, f.target.tiling, f.target.width, f.target.height);
+        }
+        gen_rcl.endOfLoads();
+        if (f.draws > 0) {
+            gen_rcl.primListFormatTriangles();
+            gen_rcl.setInstanceId(0);
+            gen_rcl.branchToImplicitTileList();
+        }
+        gen_rcl.storeTileBufferGeneralColor(target_addr, f.target.format, f.target.tiling, f.target.width, f.target.height, f.msaa);
+        gen_rcl.clearTileBuffers(true, false);
+        gen_rcl.endOfTileMarker();
+        gen_rcl.returnFromSubList();
+        const generic_start = cl_base + 64;
+        const generic_end = generic_start + @as(u32, @intCast(gen_rcl.bytes().len));
+
+        // 128..196608: indirect state (shader records, attribute records,
+        // texture/sampler states, uniforms).
+        var ind_off: u32 = 128;
+
+        // 196608..245760: BCL.
+        const bcl_off: u32 = 196608;
+        var v3d_bcl = v3d_cl.Bcl.init(cl_bo.map[bcl_off..245760]);
+        var any_early_z = false;
+        if (f.draws > 0) {
+            v3d_bcl.startBinning(f.target.width, f.target.height, f.msaa);
+            for (f.v3d_draws[0..f.draws]) |*d| {
+                if (d.config.early_z) any_early_z = true;
+                v3d_bcl.clipWindow(d.x0, d.y0, d.width, d.height);
+                v3d_bcl.cfgBits(d.config, f.msaa);
+                const scale = d.vp.scale();
+                v3d_bcl.viewport(
+                    @as(f32, @floatFromInt(d.vp.x)) + @as(f32, @floatFromInt(d.vp.width)) / 2.0,
+                    @as(f32, @floatFromInt(d.vp.y)) + @as(f32, @floatFromInt(d.vp.height)) / 2.0,
+                    scale[0],
+                    scale[1],
+                );
+
+                // Emit Texture Shader State (32-byte aligned) and Sampler State
+                // (8-byte aligned) for any bound textures.
+                var tex_state_addrs: [3]u32 = .{ 0, 0, 0 };
+                var samp_state_addrs: [3]u32 = .{ 0, 0, 0 };
+                for (d.textures, 0..) |maybe_tex, ti| {
+                    if (maybe_tex) |t| {
+                        ind_off = std.mem.alignForward(u32, ind_off, 32);
+                        const t_addr = f.boAddr(&bo_addrs, t.handle);
+                        const t_state = v3d_cl.packTextureShaderState(t_addr, t.config);
+                        @memcpy(cl_bo.map[ind_off..][0..24], std.mem.asBytes(&t_state));
+                        tex_state_addrs[ti] = cl_base + ind_off;
+                        ind_off += 24;
+
+                        ind_off = std.mem.alignForward(u32, ind_off, 8);
+                        const s_state = v3d_cl.packSamplerState(t.config);
+                        @memcpy(cl_bo.map[ind_off..][0..24], std.mem.asBytes(&s_state));
+                        samp_state_addrs[ti] = cl_base + ind_off;
+                        ind_off += 24;
+                    }
+                }
+
+                // Write FS, VS, CS uniform streams.
+                var uni_addrs: [3]u32 = .{ 0, 0, 0 };
+                var u_cursor: usize = d.uniforms_start;
+                const layouts = [3][]const compiler.UniformKind{ d.fs_layout, d.vs_layout, d.cs_layout };
+                for (layouts, 0..) |layout, si| {
+                    var tex_count: usize = 0;
+                    for (layout) |k| if (k == .tex_p0) {
+                        tex_count += 1;
+                    };
+                    u_cursor += tex_count;
+                    ind_off = std.mem.alignForward(u32, ind_off, 4);
+                    uni_addrs[si] = cl_base + ind_off;
+                    for (layout, 0..) |k, wi| {
+                        const word: u32 = switch (k) {
+                            .user, .constant => f.uniforms[u_cursor + wi],
+                            .tex_p0 => |u| v3d_cl.tmuConfigP0(tex_state_addrs[u]),
+                            .tex_p1 => |u| v3d_cl.tmuConfigP1(samp_state_addrs[u]),
+                        };
+                        std.mem.writeInt(u32, cl_bo.map[ind_off..][0..4], word, .little);
+                        ind_off += 4;
+                    }
+                    u_cursor += layout.len;
+                }
+
+                // Write GL Shader State Record + Attribute Records (32-byte aligned).
+                ind_off = std.mem.alignForward(u32, ind_off, 32);
+                const shader_rec_addr = cl_base + ind_off;
+                var attr_recs: [8]v3d_cl.AttributeRecord = undefined;
+                for (d.attrs[0..d.attrs_len], 0..) |a, ai| {
+                    attr_recs[ai] = .{
+                        .addr = f.boAddr(&bo_addrs, a.handle) + a.offset,
+                        .components = @intCast(a.size / 4),
+                        .stride = a.stride,
+                        .read_by_cs = (d.cs_attribute_mask >> @intCast(ai)) & 1 != 0,
+                    };
+                }
+                const rec_bytes_len: u32 = 36 + @as(u32, d.attrs_len) * 16;
+                var rec_w = cl.Writer.init(cl_bo.map[ind_off..][0..rec_bytes_len]);
+                v3d_cl.writeShaderStateRecord(&rec_w, .{
+                    .fs_code_addr = f.boAddr(&bo_addrs, d.fs_handle),
+                    .fs_uniforms_addr = uni_addrs[0],
+                    .vs_code_addr = f.boAddr(&bo_addrs, d.vs_handle),
+                    .vs_uniforms_addr = uni_addrs[1],
+                    .cs_code_addr = f.boAddr(&bo_addrs, d.cs_handle),
+                    .cs_uniforms_addr = uni_addrs[2],
+                    .default_attr_addr = default_attr_addr,
+                    .fs_num_varyings = d.fs_num_varyings,
+                    .attributes = attr_recs[0..d.attrs_len],
+                });
+                ind_off += rec_bytes_len;
+
+                v3d_bcl.vcmCacheSize(4, 4);
+                v3d_bcl.glShaderState(shader_rec_addr, @intCast(d.attrs_len));
+                if (d.indices) |ib| {
+                    const ib_addr = f.boAddr(&bo_addrs, ib.handle);
+                    const idx_bytes: u32 = if (ib.type == .u16) 2 else 1;
+                    v3d_bcl.indexBufferSetup(ib_addr, ib.offset + d.count * idx_bytes);
+                    v3d_bcl.indexedPrimList(d.primitive, ib.type == .u16, d.count, ib.offset);
+                } else {
+                    v3d_bcl.vertexArrayPrims(d.primitive, d.count, d.first);
+                }
+            }
+            v3d_bcl.finish();
+        }
+        const bcl_start: u32 = if (f.draws > 0) cl_base + bcl_off else 0;
+        const bcl_end: u32 = if (f.draws > 0) bcl_start + @as(u32, @intCast(v3d_bcl.bytes().len)) else 0;
+
+        // 245760..262144: RCL.
+        const rcl_off: u32 = 245760;
+        var rcl = v3d_cl.Rcl.init(cl_bo.map[rcl_off..262144]);
+        rcl.tileRenderingModeCfgCommon(f.target.width, f.target.height, f.msaa, any_early_z, true);
+        const clear_argb: u32 = switch (f.load) {
+            .clear => |c| c,
+            .keep => 0,
+        };
+        rcl.tileRenderingModeCfgClearColorsPart1(v3d_cl.Rcl.packClearColor(clear_argb));
+        const layout = v3d_cl.targetLayout(f.target.format, f.target.tiling, f.target.width, f.target.height);
+        if (layout.uif_padded_height_in_ub -| layout.implicit_padded_height_in_ub >= 15) {
+            rcl.tileRenderingModeCfgClearColorsPart3(layout.uif_padded_height_in_ub);
+        }
+        rcl.tileRenderingModeCfgColor();
+        const clear_z_f: f32 = @as(f32, @floatFromInt(f.clear_z)) / @as(f32, @floatFromInt(0xffffff));
+        rcl.tileRenderingModeCfgZsClearValues(clear_z_f, 0);
+        rcl.tileListInitialBlockSize();
+        rcl.multicoreRenderingTileListSetBase(tile_alloc_addr);
+        rcl.multicoreRenderingSupertileCfg(@intCast(tiles[0]), @intCast(tiles[1]));
+
+        // Two initial dummy stores (GFXH-1742 workaround + initial TLB clear).
+        for (0..2) |i| {
+            rcl.tileCoordinates(0, 0);
+            rcl.endOfLoads();
+            rcl.storeTileBufferGeneralNone();
+            if (i == 0) rcl.clearTileBuffers(true, false);
+            rcl.endOfTileMarker();
+        }
+        rcl.flushVcdCache();
+        rcl.startAddressOfGenericTileList(generic_start, generic_end);
+
+        var ty: u16 = job.min_y_tile;
+        while (ty <= job.max_y_tile) : (ty += 1) {
+            var tx: u16 = job.min_x_tile;
+            while (tx <= job.max_x_tile) : (tx += 1) {
+                rcl.supertileCoordinates(@intCast(tx), @intCast(ty));
+            }
+        }
+        rcl.endOfRendering();
+
+        const rcl_start = cl_base + rcl_off;
+        const rcl_end = rcl_start + @as(u32, @intCast(rcl.bytes().len));
+
+        var v3d_handles: [max_bos + 3]u32 = undefined;
+        @memcpy(v3d_handles[0..f.bo_count], f.bo_handles[0..f.bo_count]);
+        v3d_handles[f.bo_count] = cl_bo.handle;
+        v3d_handles[f.bo_count + 1] = tile_alloc_bo.handle;
+        v3d_handles[f.bo_count + 2] = tile_state_bo.handle;
+
+        var v3d_submit: device.V3dSubmitCl = .{
+            .bcl_start = bcl_start,
+            .bcl_end = bcl_end,
+            .rcl_start = rcl_start,
+            .rcl_end = rcl_end,
+            .qma = tile_alloc_addr,
+            .qms = tile_alloc_size,
+            .qts = tile_state_addr,
+            .bo_handles = @intFromPtr(&v3d_handles),
+            .bo_handle_count = f.bo_count + 3,
+            .flags = device.V3dSubmitCl.flag_flush_cache,
+        };
+        try dev.submitV3d(&v3d_submit);
+        try dev.waitBo(cl_bo.handle, std.time.ns_per_s);
     }
 };
 

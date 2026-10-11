@@ -45,6 +45,11 @@ pub const Program = struct {
     has_fs_ms: bool = false,
     vs: compiler.Compiled,
     cs: compiler.Compiled,
+    /// VideoCore VI (V3D 4.2) compiled shader stages.
+    v3d_fs: compiler.Compiled = undefined,
+    v3d_fs_ms: compiler.Compiled = undefined,
+    v3d_vs: compiler.Compiled = undefined,
+    v3d_cs: compiler.Compiled = undefined,
     attributes: [max_attributes]Attribute = undefined,
     num_attributes: u8 = 0,
     /// Scalars passed from the vertex to the fragment shader.
@@ -123,15 +128,18 @@ pub const Program = struct {
 
         try lower.lower(gpa, &m, fs_entry, fs_entry.interface, .fragment, &iface, shader, diag);
         p.fs = try compiler.compile(shader);
+        p.v3d_fs = try compiler.compileV3d(shader);
         if (options.blend != .none) {
             iface.samples = 4;
             try lower.lower(gpa, &m, fs_entry, fs_entry.interface, .fragment, &iface, shader, diag);
             p.fs_ms = try compiler.compile(shader);
+            p.v3d_fs_ms = try compiler.compileV3d(shader);
             p.has_fs_ms = true;
             iface.samples = 1;
         }
         try lower.lower(gpa, &m, vs_entry, vs_entry.interface, .vertex, &iface, shader, diag);
         p.vs = try compiler.compile(shader);
+        p.v3d_vs = try compiler.compileV3d(shader);
 
         // The coordinate shader only reads the attributes its position
         // depends on: lower it reading all, see which reads reach an
@@ -154,13 +162,14 @@ pub const Program = struct {
         iface.attributes = coord_attrs[0..n_attrs];
         try lower.lower(gpa, &m, vs_entry, vs_entry.interface, .coordinate, &iface, shader, diag);
         p.cs = try compiler.compile(shader);
+        p.v3d_cs = try compiler.compileV3d(shader);
         return p;
     }
 
     // --- Encoding ---------------------------------------------------------------
 
     const format_magic = "SDSH";
-    const format_version: u32 = 3;
+    const format_version: u32 = 4;
 
     /// The program as bytes, for embedding (see `decode`).
     pub fn encode(p: *const Program, gpa: std.mem.Allocator) ![]u8 {
@@ -179,28 +188,35 @@ pub const Program = struct {
             try putInt(&out, gpa, @intFromBool(a.in_coordinate_shader));
         }
         try putInt(&out, gpa, @intFromBool(p.has_fs_ms));
-        const stages = [_]*const compiler.Compiled{ &p.fs, &p.vs, &p.cs, &p.fs_ms };
-        for (stages[0..if (p.has_fs_ms) 4 else 3]) |c| {
-            try putInt(&out, gpa, @intFromEnum(c.stage));
-            try putInt(&out, gpa, c.num_vpm_reads);
-            try putInt(&out, gpa, c.num_vpm_writes);
-            try putInt(&out, gpa, c.num_varyings);
-            try putInt(&out, gpa, c.num_texture_samples);
-            try putInt(&out, gpa, @intFromBool(c.threaded));
-            try putInt(&out, gpa, @intCast(c.code_len));
-            for (c.code()) |inst| {
-                try putInt(&out, gpa, @truncate(inst));
-                try putInt(&out, gpa, @truncate(inst >> 32));
-            }
-            try putInt(&out, gpa, @intCast(c.uniform_len));
-            for (c.uniforms()) |u| {
-                const tag: u32, const value: u32 = switch (u) {
-                    .user => |x| .{ 0, x },
-                    .tex_p0 => |x| .{ 1, x },
-                    .tex_p1 => |x| .{ 2, x },
-                };
-                try putInt(&out, gpa, tag);
-                try putInt(&out, gpa, value);
+        const stages = [_]*const compiler.Compiled{
+            &p.fs,     &p.vs,     &p.cs,     &p.fs_ms,
+            &p.v3d_fs, &p.v3d_vs, &p.v3d_cs, &p.v3d_fs_ms,
+        };
+        for (0..2) |arch| {
+            const arch_stages = stages[arch * 4 ..][0..if (p.has_fs_ms) 4 else 3];
+            for (arch_stages) |c| {
+                try putInt(&out, gpa, @intFromEnum(c.stage));
+                try putInt(&out, gpa, c.num_vpm_reads);
+                try putInt(&out, gpa, c.num_vpm_writes);
+                try putInt(&out, gpa, c.num_varyings);
+                try putInt(&out, gpa, c.num_texture_samples);
+                try putInt(&out, gpa, @intFromBool(c.threaded));
+                try putInt(&out, gpa, @intCast(c.code_len));
+                for (c.code()) |inst| {
+                    try putInt(&out, gpa, @truncate(inst));
+                    try putInt(&out, gpa, @truncate(inst >> 32));
+                }
+                try putInt(&out, gpa, @intCast(c.uniform_len));
+                for (c.uniforms()) |u| {
+                    const tag: u32, const value: u32 = switch (u) {
+                        .user => |x| .{ 0, x },
+                        .tex_p0 => |x| .{ 1, x },
+                        .tex_p1 => |x| .{ 2, x },
+                        .constant => |x| .{ 3, x },
+                    };
+                    try putInt(&out, gpa, tag);
+                    try putInt(&out, gpa, value);
+                }
             }
         }
         return out.toOwnedSlice(gpa);
@@ -222,34 +238,41 @@ pub const Program = struct {
         p.num_attributes = @intCast(n);
         for (p.attributes[0..n]) |*a| a.* = .{ .location = try r.int(), .components = @intCast(try r.int()), .in_coordinate_shader = try r.int() != 0 };
         p.has_fs_ms = try r.int() != 0;
-        const stages = [_]*compiler.Compiled{ &p.fs, &p.vs, &p.cs, &p.fs_ms };
-        for (stages[0..if (p.has_fs_ms) 4 else 3]) |c| {
-            c.* = .{ .stage = std.enums.fromInt(compiler.Stage, try r.int()) orelse return error.BadProgram };
-            c.num_vpm_reads = try r.int();
-            c.num_vpm_writes = try r.int();
-            c.num_varyings = try r.int();
-            c.num_texture_samples = try r.int();
-            c.threaded = try r.int() != 0;
-            const code_len = try r.int();
-            if (code_len > c.code_buf.len) return error.BadProgram;
-            for (c.code_buf[0..code_len]) |*inst| {
-                const lo = try r.int();
-                inst.* = @as(u64, try r.int()) << 32 | lo;
+        const stages = [_]*compiler.Compiled{
+            &p.fs,     &p.vs,     &p.cs,     &p.fs_ms,
+            &p.v3d_fs, &p.v3d_vs, &p.v3d_cs, &p.v3d_fs_ms,
+        };
+        for (0..2) |arch| {
+            const arch_stages = stages[arch * 4 ..][0..if (p.has_fs_ms) 4 else 3];
+            for (arch_stages) |c| {
+                c.* = .{ .stage = std.enums.fromInt(compiler.Stage, try r.int()) orelse return error.BadProgram };
+                c.num_vpm_reads = try r.int();
+                c.num_vpm_writes = try r.int();
+                c.num_varyings = try r.int();
+                c.num_texture_samples = try r.int();
+                c.threaded = try r.int() != 0;
+                const code_len = try r.int();
+                if (code_len > c.code_buf.len) return error.BadProgram;
+                for (c.code_buf[0..code_len]) |*inst| {
+                    const lo = try r.int();
+                    inst.* = @as(u64, try r.int()) << 32 | lo;
+                }
+                c.code_len = code_len;
+                const unif_len = try r.int();
+                if (unif_len > c.uniform_buf.len) return error.BadProgram;
+                for (c.uniform_buf[0..unif_len]) |*u| {
+                    const tag = try r.int();
+                    const value = try r.int();
+                    u.* = switch (tag) {
+                        0 => .{ .user = value },
+                        1 => .{ .tex_p0 = @intCast(value) },
+                        2 => .{ .tex_p1 = @intCast(value) },
+                        3 => .{ .constant = value },
+                        else => return error.BadProgram,
+                    };
+                }
+                c.uniform_len = unif_len;
             }
-            c.code_len = code_len;
-            const unif_len = try r.int();
-            if (unif_len > c.uniform_buf.len) return error.BadProgram;
-            for (c.uniform_buf[0..unif_len]) |*u| {
-                const tag = try r.int();
-                const value = try r.int();
-                u.* = switch (tag) {
-                    0 => .{ .user = value },
-                    1 => .{ .tex_p0 = @intCast(value) },
-                    2 => .{ .tex_p1 = @intCast(value) },
-                    else => return error.BadProgram,
-                };
-            }
-            c.uniform_len = unif_len;
         }
         return p;
     }

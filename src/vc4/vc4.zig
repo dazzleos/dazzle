@@ -26,7 +26,9 @@ pub const display = @import("display.zig");
 pub const drm = @import("drm.zig");
 pub const kms = @import("kms.zig");
 pub const cl = @import("cl.zig");
+pub const v3d_cl = @import("v3d_cl.zig");
 pub const qpu = @import("qpu.zig");
+pub const v3d_qpu = @import("v3d_qpu.zig");
 pub const qpu_schedule = @import("qpu_schedule.zig");
 pub const qpu_sim = @import("qpu_sim.zig");
 /// Hand-written triangle shaders, known to work on hardware. Used as a
@@ -48,7 +50,9 @@ test {
     _ = drm;
     _ = kms;
     _ = cl;
+    _ = v3d_cl;
     _ = qpu;
+    _ = v3d_qpu;
     _ = qpu_schedule;
     _ = qpu_sim;
     _ = reference_shaders;

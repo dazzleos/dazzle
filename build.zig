@@ -442,13 +442,18 @@ const device_trees = [_][]const u8{
     "bcm2710-rpi-cm3.dtb",
     "bcm2710-rpi-zero-2.dtb",
     "bcm2710-rpi-zero-2-w.dtb",
+    "bcm2711-rpi-4-b.dtb",
+    "bcm2711-rpi-400.dtb",
+    "bcm2711-rpi-cm4.dtb",
+    "bcm2711-rpi-cm4s.dtb",
 };
 
 /// The device tree overlays the firmware may apply: the display driver
-/// (config.txt's dtoverlay=vc4-kms-v3d) and the cameras (camera_auto_detect
+/// (config.txt's dtoverlay=vc4-kms-v3d, which overlay_map.dtb redirects to
+/// vc4-kms-v3d-pi4 on the Pi 4) and the cameras (camera_auto_detect
 /// picks one). overlay_map.dtb tells the firmware which overlays suit
 /// which board.
-const overlays = [_][]const u8{ "vc4-kms-v3d.dtbo", "imx219.dtbo", "ov5647.dtbo", "overlay_map.dtb" };
+const overlays = [_][]const u8{ "vc4-kms-v3d.dtbo", "vc4-kms-v3d-pi4.dtbo", "imx219.dtbo", "ov5647.dtbo", "overlay_map.dtb" };
 
 /// Each slot's overlays/README. The firmware only reads overlays from
 /// `${os_prefix}overlays/` when this file is there (it says nothing
@@ -577,6 +582,8 @@ const firmware = [_]struct { name: []const u8, sha256: []const u8 }{
     .{ .name = "bootcode.bin", .sha256 = "4245ec23b58158dc3e55f3e065eb4ecc0c0705d76c8db506e9f824941feee32e" },
     .{ .name = "start.elf", .sha256 = "32f990801e7765bae6fe5cb940ba5eeff02dd0dac8dc5474db5b3fd345281790" },
     .{ .name = "fixup.dat", .sha256 = "7853f2b51e4489f8b3ce6f9c52fd0afdda38c7383961524e0883d34afcb4827b" },
+    .{ .name = "start4.elf", .sha256 = "560ead37044d849325755d3684ac1f74654b3ce6450604a42df6dd832cda9ede" },
+    .{ .name = "fixup4.dat", .sha256 = "d181d5055daebac22513d6904fa9ce21d1e99b852cc391af095ade6f0b45c400" },
     .{ .name = "LICENCE.broadcom", .sha256 = "c7283ff51f863d93a275c66e3b4cb08021a5dd4d8c1e7acc47d872fbe52d3d6b" },
 };
 
@@ -691,6 +698,8 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.B
         .{ "bootcode.bin", .{ .cwd_relative = b.pathJoin(&.{ dir, "bootcode.bin" }) } },
         .{ "start.elf", .{ .cwd_relative = b.pathJoin(&.{ dir, "start.elf" }) } },
         .{ "fixup.dat", .{ .cwd_relative = b.pathJoin(&.{ dir, "fixup.dat" }) } },
+        .{ "start4.elf", .{ .cwd_relative = b.pathJoin(&.{ dir, "start4.elf" }) } },
+        .{ "fixup4.dat", .{ .cwd_relative = b.pathJoin(&.{ dir, "fixup4.dat" }) } },
         .{ "LICENCE.broadcom", .{ .cwd_relative = b.pathJoin(&.{ dir, "LICENCE.broadcom" }) } },
         .{ "config.txt", b.path("boot/config.txt") },
     }) catch @panic("OOM");

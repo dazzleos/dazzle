@@ -107,19 +107,26 @@ fn prepareRoot() void {
 
 const max_cards = 4;
 
-/// Whether DRM card `n` is the vc4 display driver, from its sysfs driver
-/// link (".../drivers/vc4-drm").
-fn isVc4Card(n: usize) bool {
+/// Whether DRM card `n` is bound to `driver_suffix` (e.g. "/vc4-drm" or "/v3d").
+fn isDrmDriverCard(n: usize, driver_suffix: []const u8) bool {
     var path_buf: [64]u8 = undefined;
     const path = std.fmt.bufPrintZ(&path_buf, "/sys/class/drm/card{d}/device/driver", .{n}) catch return false;
     var link: [256]u8 = undefined;
     const len = sys.check(linux.readlink(path.ptr, &link, link.len)) catch return false;
-    return std.mem.endsWith(u8, link[0..len], "/vc4-drm");
+    return std.mem.endsWith(u8, link[0..len], driver_suffix);
+}
+
+/// Whether the board is a BCM2711 (Raspberry Pi 4), where 3D rendering is
+/// driven by the separate `v3d` DRM driver alongside `vc4-drm` for display.
+fn isBcm2711() bool {
+    var buf: [128]u8 = undefined;
+    const compat = sys.readFile("/sys/firmware/devicetree/base/compatible", &buf) orelse return false;
+    return std.mem.indexOf(u8, compat, "brcm,bcm2711") != null;
 }
 
 /// The display's and GPU's parts in the device tree (platform devices
-/// named for their nodes), which the vc4 driver binds together.
-const display_parts = [_][]const u8{ ".hdmi", ".hvs", ".v3d", ".txp", ".pixelvalve", ":gpu", ":firmware", ":clocks", ":power", ".i2c", ".dma", ".dma-controller", ".gpio", ".mailbox" };
+/// named for their nodes), which the vc4 and v3d drivers bind together.
+const display_parts = [_][]const u8{ ".hdmi", ".hvs", ".v3d", ".txp", ".pixelvalve", ".mop", ".moplet", ".dvp", ".cprman", ":gpu", ":firmware", ":clocks", ":power", ".i2c", ".dma", ".dma-controller", ".gpio", ".mailbox" };
 
 /// Says which of the display's parts have no driver, and what each waits
 /// for (its suppliers, by device link, that are not ready), so a log shows
@@ -128,8 +135,9 @@ fn reportDisplayDevices() void {
     // Whether the device tree has vc4 on at all: config.txt's
     // dtoverlay=vc4-kms-v3d turns it on, if the firmware applied it.
     var buf: [32]u8 = undefined;
-    const status = sys.readFile("/sys/firmware/devicetree/base/soc/gpu/status", &buf);
-    print("dazzle: device tree: vc4 (soc/gpu) is {s}\n", .{if (status) |st| std.mem.sliceTo(st, 0) else "not there"});
+    const status = sys.readFile("/sys/firmware/devicetree/base/soc/gpu/status", &buf) orelse
+        sys.readFile("/sys/firmware/devicetree/base/gpu/status", &buf);
+    print("dazzle: device tree: vc4 (gpu) is {s}\n", .{if (status) |st| std.mem.sliceTo(st, 0) else "not there"});
     const base = "/sys/bus/platform/devices";
     const dir = sys.open(base, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }) catch return;
     defer sys.close(dir);
@@ -187,20 +195,25 @@ fn reportDevice(base: []const u8, name: []const u8) void {
     }
 }
 
-/// DRM device nodes are created root-only (0600). Once the vc4 driver has
-/// probed (it may still be loading firmware or waiting for other devices
-/// when init starts), hand every DRM node to the Dazzle user. The first
-/// process to open a card becomes its DRM master, which it needs for mode
-/// setting; init itself never opens them.
+/// DRM device nodes are created root-only (0600). Once the vc4 driver (and
+/// v3d on the Pi 4) has probed (it may still be loading firmware or waiting
+/// for other devices when init starts), hand every DRM node to the Dazzle
+/// user. The first process to open a card becomes its DRM master, which it
+/// needs for mode setting; init itself never opens them.
 fn grantGpuAccess() void {
-    var found = false;
+    const needs_v3d = isBcm2711();
+    var found_vc4 = false;
+    var found_v3d = !needs_v3d;
     var attempt: u32 = 0;
-    while (!found and attempt < 100) : (attempt += 1) {
-        for (0..max_cards) |n| found = found or isVc4Card(n);
-        if (!found) sys.sleepMs(100);
+    while ((!found_vc4 or !found_v3d) and attempt < 100) : (attempt += 1) {
+        for (0..max_cards) |n| {
+            found_vc4 = found_vc4 or isDrmDriverCard(n, "/vc4-drm");
+            found_v3d = found_v3d or isDrmDriverCard(n, "/v3d");
+        }
+        if (!found_vc4 or !found_v3d) sys.sleepMs(100);
     }
-    if (!found) {
-        print(sys.log_error ++ "dazzle: no vc4 DRM device after 10 s\n", .{});
+    if (!found_vc4 or !found_v3d) {
+        print(sys.log_error ++ "dazzle: no vc4/v3d DRM device after 10 s\n", .{});
         reportDisplayDevices();
     }
 

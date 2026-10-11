@@ -195,7 +195,7 @@ pub const Renderer = struct {
     fn importDmabuf(ptr: *anyopaque, fd: linux.fd_t, width: u32, height: u32, format: vc4.Format) anyerror!server.Texture {
         const r: *Renderer = @ptrCast(@alignCast(ptr));
         defer sys.close(fd);
-        const handle = try vc4.drm.importBuffer(r.dev.fd, fd);
+        const handle = try r.dev.importBuffer(fd);
         return .{ .handle = handle, .width = width, .height = height, .format = format };
     }
 
@@ -220,7 +220,7 @@ pub const Renderer = struct {
         if (r.owned.fetchRemove(t.handle)) |kv| {
             r.dev.destroyBo(kv.value);
         } else {
-            vc4.drm.gemClose(r.dev.fd, t.handle);
+            r.dev.closeHandle(t.handle);
         }
     }
 
@@ -257,7 +257,7 @@ pub const Renderer = struct {
     /// composited instead; otherwise whether it is already on the screen,
     /// as `show` does. Only while no flip is pending.
     pub fn showDirect(r: *Renderer, t: server.Texture, x: i32, y: i32) ?bool {
-        if (r.display.kms == null) return null;
+        if (r.dev.is_v3d or r.display.kms == null) return null;
         if (vc4.render.Target.textureTiling(t.format, t.width, t.height) != .t) return null;
         const panels = r.panelLayers() orelse return null;
         const fb = r.clientFramebuffer(t, x, y, panels) orelse return null;
@@ -311,7 +311,7 @@ pub const Renderer = struct {
     fn panelPlane(r: *Renderer, p: *Panel, i: u1) ?Scanout {
         if (p.planes[i]) |plane| return plane;
         const bo = r.dev.createBo(p.width * p.height * 4) catch return null;
-        const fb = vc4.drm.addFramebuffer(r.dev.fd, bo.handle, p.width, p.height, p.width * 4, vc4.drm.format_xrgb8888) catch {
+        const fb = vc4.drm.addFramebuffer(r.dev.fd, bo.kmsHandle(), p.width, p.height, p.width * 4, vc4.drm.format_xrgb8888) catch {
             r.dev.destroyBo(bo);
             return null;
         };
@@ -333,7 +333,7 @@ pub const Renderer = struct {
             cursor.draw(std.mem.bytesAsValue([cursor.size * cursor.size]u32, bo.map[0..bytes]), shape);
             slot.* = bo;
         }
-        try vc4.drm.setCursor(r.dev.fd, r.display.output.crtc_id, slot.*.?.handle, cursor.size, cursor.size);
+        try vc4.drm.setCursor(r.dev.fd, r.display.output.crtc_id, slot.*.?.kmsHandle(), cursor.size, cursor.size);
         r.cursor_shape = shape;
     }
 
