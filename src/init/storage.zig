@@ -54,7 +54,8 @@ pub const Boot = struct {
     /// /data is mounted.
     mounted: bool = false,
     setup_done: bool = false,
-    hostname: proto.Hostname = proto.Hostname.parse("dazzle").?,
+    /// The computer's name, once setup has finished.
+    hostname: proto.Hostname = .{},
     /// Whether this start tries an update (see trial.zig).
     trial: trial.Outcome = .none,
 };
@@ -84,9 +85,12 @@ pub fn boot() Boot {
     if (!b.mounted) return b;
     makeUserDirs();
     b.setup_done = exists(proto.setup_done_file);
-    var buf: [80]u8 = undefined;
-    if (sys.readFile(proto.hostname_file, &buf)) |text| {
-        if (proto.Hostname.parse(std.mem.trim(u8, text, " \n"))) |h| b.hostname = h;
+    if (b.setup_done) {
+        b.hostname = proto.Hostname.parse("dazzle").?;
+        var buf: [80]u8 = undefined;
+        if (sys.readFile(proto.hostname_file, &buf)) |text| {
+            if (proto.Hostname.parse(std.mem.trim(u8, text, " \n"))) |h| b.hostname = h;
+        }
     }
     return b;
 }

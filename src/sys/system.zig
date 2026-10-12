@@ -10,6 +10,7 @@
 //!
 //!     status
 //!     prepare                  give the card's free space a filesystem (setup)
+//!     hostname <hostname>      name the computer (setup)
 //!     finish <hostname>        name the computer, and finish setting up (setup)
 //!     update <sha256>          install the system in update_archive, whose
 //!                              SHA-256 this is, into the slot not in use,
@@ -121,6 +122,7 @@ pub const Failure = enum {
 pub const Request = union(enum) {
     status,
     prepare,
+    hostname: Hostname,
     finish: Hostname,
     /// The archive's SHA-256, in hex.
     update: [64]u8,
@@ -134,6 +136,7 @@ pub const Request = union(enum) {
         const kind = f.next() orelse return null;
         if (std.mem.eql(u8, kind, "status")) return .status;
         if (std.mem.eql(u8, kind, "prepare")) return .prepare;
+        if (std.mem.eql(u8, kind, "hostname")) return .{ .hostname = Hostname.parse(f.next() orelse return null) orelse return null };
         if (std.mem.eql(u8, kind, "finish")) return .{ .finish = Hostname.parse(f.next() orelse return null) orelse return null };
         if (std.mem.eql(u8, kind, "restart")) return .restart;
         if (std.mem.eql(u8, kind, "locale")) return .{ .locale = .{
@@ -160,7 +163,7 @@ pub const Request = union(enum) {
     pub fn allowedFor(r: Request, client: Client) bool {
         return switch (r) {
             .status => true,
-            .prepare, .finish => client == .setup,
+            .prepare, .hostname, .finish => client == .setup,
             .update, .restart, .video_memory => client == .settings,
             .locale => true,
         };
@@ -392,6 +395,8 @@ test "hostnames" {
 test "requests and reports go through the socket" {
     try testing.expect(Request.parse("status\n").? == .status);
     try testing.expect(Request.parse("prepare\n").? == .prepare);
+    try testing.expectEqualStrings("awesome-elephant", Request.parse("hostname awesome-elephant\n").?.hostname.slice());
+    try testing.expect(Request.parse("hostname Bad!\n") == null);
     try testing.expectEqualStrings("dazzle", Request.parse("finish dazzle\n").?.finish.slice());
     try testing.expect(Request.parse("finish Bad!\n") == null);
     try testing.expect(Request.parse("reboot\n") == null);
@@ -403,6 +408,8 @@ test "requests and reports go through the socket" {
     // Who may ask what.
     try testing.expect(Request.allowedFor(.status, .settings));
     try testing.expect(!Request.allowedFor(.prepare, .settings));
+    try testing.expect(Request.allowedFor(.{ .hostname = Hostname.parse("my-pi").? }, .setup));
+    try testing.expect(!Request.allowedFor(.{ .hostname = Hostname.parse("my-pi").? }, .settings));
     try testing.expect(!Request.allowedFor(.restart, .setup));
     try testing.expect(Request.allowedFor(.restart, .settings));
     const lr = Request.parse("locale en-NZ gb\n").?.locale;

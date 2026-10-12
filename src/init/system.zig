@@ -193,6 +193,7 @@ const Manager = struct {
                 .unprepared, .failed => m.prepare(),
                 else => {},
             },
+            .hostname => |h| m.setHostname(h),
             .finish => |h| m.finish(h),
             .update => |sha256| m.startUpdate(sha256),
             .restart => m.restart = true,
@@ -380,16 +381,22 @@ const Manager = struct {
         m.fd = null;
     }
 
-    /// Names the computer and, if the card is ready, keeps the name and
-    /// marks setup finished there.
-    fn finish(m: *Manager, h: proto.Hostname) void {
+    /// Names the computer.
+    fn setHostname(m: *Manager, h: proto.Hostname) void {
         const name = h.slice();
         if (sys.check(linux.syscall2(.sethostname, @intFromPtr(name.ptr), name.len))) |_| {
             m.report.hostname = h;
             print("dazzle: system: named {s}\n", .{name});
         } else |err| print(sys.log_warning ++ "dazzle: system: cannot set the hostname: {s}\n", .{@errorName(err)});
+    }
+
+    /// Names the computer and, if the card is ready, keeps the name and
+    /// marks setup finished there.
+    fn finish(m: *Manager, h: proto.Hostname) void {
+        if (!std.mem.eql(u8, m.report.hostname.slice(), h.slice())) m.setHostname(h);
         if (m.report.storage == .ready) {
             var line: [80]u8 = undefined;
+            const name = h.slice();
             writeFile(proto.hostname_file, std.fmt.bufPrint(&line, "{s}\n", .{name}) catch name);
             m.keepLocale();
             writeFile(proto.setup_done_file, "");

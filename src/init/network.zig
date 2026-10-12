@@ -88,11 +88,23 @@ const Slot = struct {
 const Ethernet = struct {
     slots: [proto.max_adapters]?Slot = @splat(null),
     default_addressing: proto.Addressing = .dhcp,
+    hostname: sys.system.Hostname = .{},
     looked_ns: u64 = 0,
     said_waiting: bool = false,
 
-    /// Finds wired adapters, or notices any that have gone.
+    /// Finds wired adapters, or notices any that have gone, once the
+    /// computer has been named (setup names it on the first start).
     fn look(e: *Ethernet, now: u64) void {
+        const h = ipv4.hostname() orelse return;
+        if (!std.mem.eql(u8, e.hostname.slice(), h.slice())) {
+            const had_name = e.hostname.len > 0;
+            e.hostname = h;
+            e.looked_ns = 0;
+            if (had_name) for (&e.slots) |*slot| if (slot.*) |*s| if (s.addressing == .dhcp) {
+                s.stopDhcp();
+                s.apply();
+            };
+        }
         if (now -| e.looked_ns < look_ns) return;
         e.looked_ns = now;
         for (&e.slots) |*slot| if (slot.*) |*s| {

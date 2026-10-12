@@ -59,10 +59,11 @@ pub fn main() void {
     prepareRoot();
     sys.logToKmsg();
     print("dazzle: starting as init (build {s})\n", .{build_info.commit});
-    // The card's files (and the computer's name, kept there).
+    // The card's files (and the computer's name, kept there once setup has
+    // finished; until then, setup names it).
     const card = storage.boot();
     const name = card.hostname.slice();
-    _ = linux.syscall2(.sethostname, @intFromPtr(name.ptr), name.len);
+    if (name.len > 0) _ = linux.syscall2(.sethostname, @intFromPtr(name.ptr), name.len);
     const network_pid = network.start();
     logserver.start();
     const devices_pid = devices.start();

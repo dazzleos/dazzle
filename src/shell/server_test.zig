@@ -84,8 +84,9 @@ const ServerThread = struct {
     break_lock: std.atomic.Value(bool) = .init(false),
 
     fn run(st: *ServerThread) void {
-        const c = st.server.addClient(st.fd) catch return;
-        while (true) {
+        _ = st.server.addClient(st.fd) catch return;
+        while (st.server.clients.items.len > 0) {
+            const c = st.server.clients.items[0];
             var fds = [_]linux.pollfd{.{ .fd = c.conn.fd, .events = linux.POLL.IN, .revents = 0 }};
             _ = linux.poll(&fds, 1, 10);
             if (!st.server.dispatch(c)) break;
@@ -977,23 +978,21 @@ const MultiServerThread = struct {
     }
 
     fn run(st: *MultiServerThread) void {
-        var clients: [4]?*server_mod.Client = @splat(null);
         for (st.fds, 0..) |fd, i| {
-            clients[i] = st.server.addClient(fd) catch return;
-            clients[i].?.pid = @intCast(1001 + i);
+            const c = st.server.addClient(fd) catch return;
+            c.pid = @intCast(1001 + i);
         }
-        while (true) {
+        while (st.server.clients.items.len > 0) {
             var fds: [4]linux.pollfd = undefined;
-            var n: usize = 0;
-            for (clients) |c| if (c) |cl| {
-                fds[n] = .{ .fd = cl.conn.fd, .events = linux.POLL.IN, .revents = 0 };
-                n += 1;
-            };
-            if (n == 0) break;
+            const n = st.server.clients.items.len;
+            for (st.server.clients.items, 0..) |cl, i| {
+                fds[i] = .{ .fd = cl.conn.fd, .events = linux.POLL.IN, .revents = 0 };
+            }
             _ = linux.poll(&fds, n, 10);
-            for (&clients) |*c| if (c.*) |cl| {
-                if (!st.server.dispatch(cl)) c.* = null;
-            };
+            var i: usize = 0;
+            while (i < st.server.clients.items.len) {
+                if (st.server.dispatch(st.server.clients.items[i])) i += 1;
+            }
             const pid = st.raise_pid.swap(0, .monotonic);
             if (pid != 0) _ = st.server.raise(pid);
             feed(&st.server, @enumFromInt(st.input.swap(0, .monotonic)));

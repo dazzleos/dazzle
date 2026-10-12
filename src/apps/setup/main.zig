@@ -60,6 +60,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     // The apps that can be installed (once the card is ready), and those
     // chosen, left to install.
     var apps: store.Store = .init(gpa, build_info.apps_url);
+    var named = false;
+    var wait_network_until: u64 = 0;
     var retry_at: u64 = 0;
     var queue: ?u64 = null;
     var installed: usize = 0;
@@ -78,21 +80,38 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             _ = ask(std.fmt.bufPrint(&req_buf, "locale {s} {s}\n", .{ l.language.code(), l.keyboard.code() }) catch "");
             a.dirty = true;
         }
+        // The computer's name, confirmed on its page: set now so the
+        // network connects with it before the list of apps is fetched.
+        if (actions.hostname) |h| {
+            actions.hostname = null;
+            var req_buf: [96]u8 = undefined;
+            report = ask(std.fmt.bufPrint(&req_buf, "hostname {s}\n", .{h.slice()}) catch "");
+            if (!named) {
+                named = true;
+                wait_network_until = now + 10 * std.time.ns_per_s;
+                retry_at = 0;
+            }
+            a.dirty = true;
+        }
         // How preparing goes: often while it does.
         if (now >= next_ask) {
             report = ask("status\n");
             const preparing = if (report) |r| r.storage == .preparing else false;
-            next_ask = now + @as(u64, if (preparing) 250 else 1000) * std.time.ns_per_ms;
+            const waiting = preparing or (named and apps.apps().len == 0 and apps.job == null and now < wait_network_until);
+            next_ask = now + @as(u64, if (waiting) 250 else 1000) * std.time.ns_per_ms;
             a.dirty = true;
         }
         const storage_now: proto.StorageState = if (report) |r| r.storage else .none;
-        // The list of apps, kept on the card: once it is ready, and again
-        // every while until it comes (the network may come up later).
+        // The list of apps, kept on the card: once the computer is named
+        // and the card and network are ready, and again every while until
+        // it comes (the network is brought up once the name is confirmed).
         if (apps.poll()) a.dirty = true;
-        if (storage_now == .ready and apps.job == null and apps.apps().len == 0 and queue == null and now >= retry_at) {
-            apps.refresh(true);
-            retry_at = now + 10 * std.time.ns_per_s;
-            a.dirty = true;
+        if (named and storage_now == .ready and apps.job == null and apps.apps().len == 0 and queue == null and now >= retry_at) {
+            if (networkReady() or now >= wait_network_until) {
+                apps.refresh(true);
+                retry_at = now + 10 * std.time.ns_per_s;
+                a.dirty = true;
+            }
         }
         // The pages are done: finish once the card is ready (or there is
         // none, or it failed and that has been accepted), after installing
@@ -150,6 +169,14 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             .actions = &actions,
         });
     }
+}
+
+/// Whether the network manager has configured name servers (and the clock)
+/// in /etc/resolv.conf.
+fn networkReady() bool {
+    var buf: [64]u8 = undefined;
+    const text = sys.readFile("/etc/resolv.conf", &buf) orelse return false;
+    return std.mem.trim(u8, text, " \t\n").len > 0;
 }
 
 /// Sends the system manager a request (preparing the card can take it a

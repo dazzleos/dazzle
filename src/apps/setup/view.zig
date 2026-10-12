@@ -33,6 +33,8 @@ pub const max_apps = 64;
 
 /// What the window asks for; the main loop does it.
 pub const Actions = struct {
+    /// The computer's name, once confirmed on its page.
+    hostname: ?proto.Hostname = null,
     /// The pages are done: finish, with this name.
     finish: ?proto.Hostname = null,
     /// Finish even though the card could not be prepared.
@@ -288,9 +290,12 @@ const Nav = struct {
     fn next(n: *Nav) void {
         const st = n.state;
         switch (pages[st.page]) {
-            .hostname => if (proto.Hostname.parse(st.name()) == null) {
-                st.name_invalid = true;
-                return;
+            .hostname => {
+                const h = proto.Hostname.parse(st.name()) orelse {
+                    st.name_invalid = true;
+                    return;
+                };
+                if (n.actions) |a| a.hostname = h;
             },
             .language, .apps => {},
         }
@@ -391,13 +396,16 @@ test "naming the computer, then waiting for the card" {
     click(u, findText(u.root.?, "Next").?);
     Draw(u, &report, &actions, &now, .{ 1920, 1080 });
     try testing.expect(st.name_invalid and !st.finishing);
+    try testing.expect(actions.hostname == null);
     try testing.expect(actions.finish == null);
 
-    // A good one: the apps (the list still coming), then finishing, with a
-    // spinner while the card is prepared.
+    // A good one: the name is confirmed at once, then the apps (the list
+    // still coming), then finishing, with a spinner while the card is
+    // prepared.
     st.setName("my-pi");
     click(u, findText(u.root.?, "Next").?);
     Draw(u, &report, &actions, &now, .{ 1920, 1080 });
+    try testing.expectEqualStrings("my-pi", actions.hostname.?.slice());
     try testing.expect(findText(u.root.?, "Choose your apps") != null);
     try testing.expect(findText(u.root.?, "Getting the list of apps…") != null);
     try testing.expect(actions.finish == null);

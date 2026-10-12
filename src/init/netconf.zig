@@ -31,8 +31,8 @@ pub fn online(dns: []const Ip4, ntp: []const Ip4, gateway: ?Ip4) void {
     } else &.{};
     // Nothing to ask (the loopback interface, say).
     if (servers.len == 0 and ntp.len == 0) return;
-    if (servers.len > 0) writeResolvConf(servers);
     if (!synced) setClock(ntp, servers);
+    if (servers.len > 0) writeResolvConf(servers);
 }
 
 /// Set once, while the system runs (the clock keeps time after that).
