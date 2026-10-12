@@ -1250,6 +1250,35 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hostTool(b, "mkimage").root_module })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hostTool(b, "mkos").root_module })).step);
 
+    const serve_exe = b.addExecutable(.{
+        .name = "dazzle-serve",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/serve.zig"),
+            .target = b.graph.host,
+            .optimize = test_optimize,
+            .imports = &.{.{
+                .name = "tls_server",
+                .module = b.createModule(.{
+                    .root_source_file = b.path("src/store/tls_server.zig"),
+                    .target = b.graph.host,
+                    .optimize = test_optimize,
+                }),
+            }},
+        }),
+    });
+    const install_serve = b.addInstallArtifact(serve_exe, .{});
+    programs_step.dependOn(&install_serve.step);
+    b.getInstallStep().dependOn(&install_serve.step);
+    const run_serve = b.addRunArtifact(serve_exe);
+    run_serve.step.dependOn(&install_serve.step);
+    if (b.args) |args| run_serve.addArgs(args);
+    run_serve.stdio = .inherit;
+    run_serve.has_side_effects = true;
+    const serve_step = b.step("serve", "Serve zig-out/os and zig-out/apps over HTTPS for testing (arguments after -- go to dazzle-serve)");
+    serve_step.dependOn(&run_serve.step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = serve_exe.root_module })).step);
+
     const shaders_step = b.step("shaders", "Compile the shader programs (zig-out/shaders)");
     for (shaders) |s| shaders_step.dependOn(&b.addInstallFile(s.program, b.fmt("shaders/{s}.shader", .{s.name})).step);
 }
+

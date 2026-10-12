@@ -24,6 +24,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
+pub const tls_server = @import("tls_server.zig");
 
 pub const apps_dir = sys.system.apps_dir;
 pub const icons_dir = apps_dir ++ "/.icons";
@@ -293,7 +294,9 @@ pub const Client = struct {
             // A clock that was never set (1970) would make every certificate
             // look not yet valid.
             if (now.toSeconds() < 1_700_000_000) return error.ClockNotSet;
-            try client.ca_bundle.addCertsFromFilePathAbsolute(c.gpa, io, now, ca_file);
+            client.ca_bundle.addCertsFromFilePathAbsolute(c.gpa, io, now, ca_file) catch {};
+            tls_server.addTestCa(&client.ca_bundle, c.gpa, now.toSeconds()) catch {};
+            if (client.ca_bundle.map.count() == 0) return error.CertificateIssuerNotFound;
             client.now = now;
             c.certs_loaded = true;
         }
@@ -887,5 +890,99 @@ test "parsing and saving custom https software server URLs" {
     saveServerUrlTo(path, null);
     try testing.expectEqualStrings(default_url, loadServerUrlFrom(path, &buf, default_url));
 }
+
+test "HTTPS client trusts the Dazzle Test CA and fetches over TLS 1.3 keep-alive" {
+    const png_64 = "\x89PNG\r\n\x1a\n" ++ "\x00\x00\x00\x0dIHDR" ++ "\x00\x00\x00\x40" ++ "\x00\x00\x00\x40" ++ "\x08\x06\x00\x00\x00";
+    const listener: linux.fd_t = @intCast(try sys.check(linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0)));
+    defer sys.close(listener);
+    var addr: linux.sockaddr.in = .{
+        .port = 0,
+        .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
+    };
+    _ = try sys.check(linux.bind(listener, @ptrCast(&addr), @sizeOf(linux.sockaddr.in)));
+    _ = try sys.check(linux.listen(listener, 1));
+    var addr_len: linux.socklen_t = @sizeOf(linux.sockaddr.in);
+    _ = try sys.check(linux.getsockname(listener, @ptrCast(&addr), &addr_len));
+    const port = std.mem.bigToNative(u16, addr.port);
+
+    const HttpsServer = struct {
+        fn run(lfd: linux.fd_t) void {
+            const os_body =
+                \\{"name":"dazzle","title":"Dazzle","description":"The operating system","version":"0123abc","time":1791400000,"icon":"icon.png","file":"dazzle-os.tar.xz","size":10,"sha256":"f3e817e51826f4ca7b7d334af8f857d9c42416073f44c7429e1bfda7f097a753"}
+            ;
+            const apps_body =
+                \\{"version":"0123abc","time":1791400000,"apps":[{"name":"dazzle-demo","title":"Demo","description":"Spins","version":"0123abc","time":1791400000,"icon":"icons/dazzle-demo.png","file":"dazzle-demo.tar.xz","size":10,"sha256":"00"}]}
+            ;
+            const rc = linux.accept4(lfd, null, null, linux.SOCK.CLOEXEC);
+            if (linux.errno(rc) != .SUCCESS) return;
+            const fd: linux.fd_t = @intCast(rc);
+            defer sys.close(fd);
+
+            var tls_conn = tls_server.Conn.handshake(fd, "127.0.0.1") catch return;
+            var req_buf: [16384]u8 = undefined;
+            var filled: usize = 0;
+            for (0..4) |_| {
+                const header_end = while (true) {
+                    if (std.mem.indexOf(u8, req_buf[0..filled], "\r\n\r\n")) |idx| break idx + 4;
+                    var chunk: [16384]u8 = undefined;
+                    const n = tls_conn.read(&chunk) catch return;
+                    if (n == 0 or filled + n > req_buf.len) return;
+                    @memcpy(req_buf[filled .. filled + n], chunk[0..n]);
+                    filled += n;
+                };
+                const req = req_buf[0..header_end];
+                const body: []const u8 = if (std.mem.startsWith(u8, req, "GET /os.json "))
+                    os_body
+                else if (std.mem.startsWith(u8, req, "GET /icon.png "))
+                    png_64 ++ "TLS-OS"
+                else if (std.mem.startsWith(u8, req, "GET /apps.json "))
+                    apps_body
+                else if (std.mem.startsWith(u8, req, "GET /icons/dazzle-demo.png "))
+                    png_64 ++ "TLS-DEMO"
+                else
+                    return;
+                var resp_buf: [1024]u8 = undefined;
+                const resp = std.fmt.bufPrint(
+                    &resp_buf,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nConnection: keep-alive\r\n\r\n{s}",
+                    .{ body.len, body },
+                ) catch return;
+                tls_conn.writeAll(resp) catch return;
+                const rest = filled - header_end;
+                std.mem.copyForwards(u8, req_buf[0..rest], req_buf[header_end..filled]);
+                filled = rest;
+            }
+        }
+    };
+
+    const thread = try std.Thread.spawn(.{}, HttpsServer.run, .{listener});
+    defer thread.join();
+
+    var dir_buf: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrintZ(&dir_buf, "/tmp/dazzle-https-test-{d}", .{linux.getpid()});
+    _ = linux.mkdir(dir, 0o755);
+    defer sys.files.removeTree(dir);
+    var os_dir_buf: [80]u8 = undefined;
+    var apps_dir_buf: [80]u8 = undefined;
+    const os_dir = try std.fmt.bufPrintZ(&os_dir_buf, "{s}/update", .{dir});
+    const app_dir = try std.fmt.bufPrintZ(&apps_dir_buf, "{s}/apps", .{dir});
+    _ = linux.mkdir(os_dir, 0o755);
+    _ = linux.mkdir(app_dir, 0o755);
+
+    var url_buf: [64]u8 = undefined;
+    const base_url = try std.fmt.bufPrint(&url_buf, "https://127.0.0.1:{d}", .{port});
+    var client: Client = .init(testing.allocator);
+    defer client.deinit();
+    try fetchOs(&client, testing.allocator, base_url, os_dir);
+    try fetchCatalogue(&client, testing.allocator, base_url, app_dir);
+
+    var path_buf: [128]u8 = undefined;
+    var read_buf: [256]u8 = undefined;
+    const os_icon = try std.fmt.bufPrintZ(&path_buf, "{s}/icon.png", .{os_dir});
+    try testing.expectEqualStrings(png_64 ++ "TLS-OS", sys.readFile(os_icon, &read_buf).?);
+    const demo_icon = try std.fmt.bufPrintZ(&path_buf, "{s}/.icons/dazzle-demo.png", .{app_dir});
+    try testing.expectEqualStrings(png_64 ++ "TLS-DEMO", sys.readFile(demo_icon, &read_buf).?);
+}
+
 
 
