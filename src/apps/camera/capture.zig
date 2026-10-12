@@ -36,7 +36,7 @@ pub const Error = error{ NoCamera, NoMode, Unsupported } || sys.Error;
 pub const Camera = struct {
     video: linux.fd_t,
     sensor: linux.fd_t,
-    unicam: linux.fd_t,
+    unicam: ?linux.fd_t = null,
     /// The sensor's name, as its driver gives it ("imx219 10-0010").
     name: [32]u8 = @splat(0),
     name_len: usize = 0,
@@ -55,13 +55,14 @@ pub const Camera = struct {
         var c: Camera = .{
             .video = try sys.open(paths.path(.video), .{ .ACCMODE = .RDWR, .NONBLOCK = true, .CLOEXEC = true }),
             .sensor = undefined,
-            .unicam = undefined,
         };
         errdefer sys.close(c.video);
         c.sensor = try sys.open(paths.path(.sensor), .{ .ACCMODE = .RDWR, .CLOEXEC = true });
         errdefer sys.close(c.sensor);
-        c.unicam = try sys.open(paths.path(.unicam), .{ .ACCMODE = .RDWR, .CLOEXEC = true });
-        errdefer sys.close(c.unicam);
+        if (paths.unicam_n != null) {
+            c.unicam = try sys.open(paths.path(.unicam), .{ .ACCMODE = .RDWR, .CLOEXEC = true });
+        }
+        errdefer if (c.unicam) |u| sys.close(u);
         @memcpy(c.name[0..paths.sensor_name_len], paths.sensor_name[0..paths.sensor_name_len]);
         c.name_len = paths.sensor_name_len;
         try c.configure();
@@ -80,7 +81,7 @@ pub const Camera = struct {
             _ = linux.ioctl(c.video, v4l2.streamoff, @intFromPtr(&t));
         }
         c.unmap();
-        sys.close(c.unicam);
+        if (c.unicam) |u| sys.close(u);
         sys.close(c.sensor);
         sys.close(c.video);
     }
@@ -105,9 +106,13 @@ pub const Camera = struct {
         _ = try sys.check(linux.ioctl(c.sensor, v4l2.subdev_s_fmt, @intFromPtr(&sf)));
         // The sensor may have adjusted it.
         c.format = v4l2.rawFormat(sf.format.code) orelse return error.Unsupported;
-        // Unicam's input (it passes it through to its output).
-        var uf: v4l2.SubdevFormat = .{ .pad = 0, .format = sf.format };
-        _ = try sys.check(linux.ioctl(c.unicam, v4l2.subdev_s_fmt, @intFromPtr(&uf)));
+        // Unicam's input subdev, when using the upstream driver (the
+        // Raspberry Pi kernel's bcm2835-unicam links the sensor directly
+        // to unicam-image).
+        if (c.unicam) |u| {
+            var uf: v4l2.SubdevFormat = .{ .pad = 0, .format = sf.format };
+            _ = try sys.check(linux.ioctl(u, v4l2.subdev_s_fmt, @intFromPtr(&uf)));
+        }
 
         var vf: v4l2.Format = .{ .type = v4l2.buf_type_video_capture, .fmt = .{ .pix = .{
             .width = sf.format.width,
@@ -280,7 +285,7 @@ const Paths = struct {
                 p.consider(entry);
             }
         }
-        if (p.video_n == null or p.sensor_n == null or p.unicam_n == null) return error.NoCamera;
+        if (p.video_n == null or p.sensor_n == null) return error.NoCamera;
     }
 
     fn consider(p: *Paths, entry: []const u8) void {
