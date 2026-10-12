@@ -1,6 +1,6 @@
 //! The settings app's window, as widgets: pages, chosen with the tabs on
 //! the left, about the Wi-Fi networks around, Ethernet, the board,
-//! software, resources in use, GPIO, language and keyboard,
+//! software, resources in use, language and keyboard,
 //! and the system's log. What is asked of the network manager, and of the
 //! store, goes to the main loop through `Actions`.
 
@@ -19,7 +19,6 @@ pub const ethernet_view = @import("ethernet_view.zig");
 pub const board_view = @import("board_view.zig");
 pub const software_view = @import("software_view.zig");
 pub const resources_view = @import("resources_view.zig");
-pub const gpio_view = @import("gpio_view.zig");
 pub const language_view = @import("language_view.zig");
 pub const log_view = @import("log_view.zig");
 
@@ -135,7 +134,6 @@ pub const Settings = struct {
         ethernet: ethernet_view.State = .{},
         board: board_view.State = .{},
         software: software_view.State = .{},
-        gpio: gpio_view.State = .{},
         log: log_view.State = .{},
     };
 
@@ -166,7 +164,6 @@ pub const Settings = struct {
             .board => b.scroll(.board, board_view.build(self, b, &state.board)),
             .apps => software_view.build(self, b, &state.software),
             .resources => b.scroll(.resources, resources_view.build(self, b)),
-            .gpio => b.scroll(.gpio, gpio_view.build(self, b, &state.gpio)),
             .language => b.scroll(.language, language_view.build(self, b)),
             .log => b.scroll(.log, log_view.build(self, b, &state.log)),
         };
@@ -197,7 +194,6 @@ pub const Page = enum {
     board,
     apps,
     resources,
-    gpio,
     language,
     log,
 
@@ -208,7 +204,6 @@ pub const Page = enum {
             .board => board_view.label,
             .apps => software_view.label,
             .resources => resources_view.label,
-            .gpio => gpio_view.label,
             .language => language_view.label,
             .log => log_view.label,
         };
@@ -221,7 +216,6 @@ pub const Page = enum {
             .board => board_view.icon,
             .apps => software_view.icon,
             .resources => resources_view.icon,
-            .gpio => gpio_view.icon,
             .language => language_view.icon,
             .log => log_view.icon,
         };
@@ -241,6 +235,18 @@ pub fn showPage(u: *ui.Ui, p: Page) bool {
     const root = u.root orelse return false;
     if (!root.widget.is(Settings)) return false;
     root.state(Settings.State).page = p;
+    return true;
+}
+
+/// Shows the Board page with the GPIO header selected in `u` (running a
+/// `Settings`); false if the window is not built yet.
+pub fn showGpio(u: *ui.Ui) bool {
+    const root = u.root orelse return false;
+    if (!root.widget.is(Settings)) return false;
+    const st = root.state(Settings.State);
+    st.page = .board;
+    st.board.part = null;
+    st.board.select_gpio = true;
     return true;
 }
 

@@ -3,6 +3,10 @@
 //! than the connectors, and what is under the board fainter. The part
 //! under the pointer is lit, and the one picked is filled in; clicking (or
 //! tapping) a part picks it.
+//!
+//! When the GPIO header is picked, its pins are drawn horizontally below
+//! the description with a colour key, and clicking any pin shows what it
+//! is and (for configurable GPIO pins) a menu button to set its mode.
 
 const std = @import("std");
 const ui = @import("ui");
@@ -11,18 +15,37 @@ const locale = @import("locale");
 const info = @import("info.zig");
 const board = @import("board.zig");
 const usb = @import("usb.zig");
+const gpio = @import("gpio.zig");
 const view = @import("view.zig");
 
 const Color = gfx.Color;
+const Pin = gpio.Pin;
+const Mode = gpio.Mode;
 const Settings = view.Settings;
+const Actions = view.Actions;
 const Builder = view.Builder;
 
 pub const label = "Board";
 pub const icon: ui.icons.Icon = .developer_board;
 
+const default_pins: gpio.Pins = .{ .opened = true };
+
+/// The colours of the header's pins, by what they are.
+const red: Color = .rgb(0xe53935);
+const orange: Color = .rgb(0xfb8c00);
+const grey: Color = .rgb(0x616161);
+const green: Color = .rgb(0x43a047);
+const blue: Color = .rgb(0x1e88e5);
+const purple: Color = .rgb(0x8e24aa);
+
 pub const State = struct {
     /// The part of the board picked (an index into its parts), if one is.
     part: ?usize = null,
+    /// Select the GPIO header when `part` has not been picked yet.
+    select_gpio: bool = false,
+    /// The header pin picked (0-indexed into the board's header).
+    /// Pin 11 (index 10) is GPIO 17.
+    pin: usize = 10,
 };
 
 /// The board, drawn, and about the part picked on it.
@@ -38,8 +61,11 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
         rows.append(a, b.value("There is no drawing of this board")) catch {};
         return b.page(rows.items);
     };
-    // The processor, until something else is picked.
-    const picked = state.part orelse for (drawing.parts, 0..) |part, i| {
+    // The processor (or the GPIO header when asked for), until something
+    // else is picked.
+    const picked = state.part orelse if (state.select_gpio) for (drawing.parts, 0..) |part, i| {
+        if (part.kind == .gpio or part.kind == .gpio_holes) break i;
+    } else 0 else for (drawing.parts, 0..) |part, i| {
         if (part.kind == .soc or part.kind == .soc_with_ram) break i;
     } else 0;
     const part = &drawing.parts[@min(picked, drawing.parts.len - 1)];
@@ -81,8 +107,256 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
             } })) catch {};
         }
     }
+    if (part.kind == .gpio or part.kind == .gpio_holes) {
+        appendGpioSection(self, cx, state, model, &rows);
+    }
     return b.page(rows.items);
 }
+
+fn appendGpioSection(
+    self: *const Settings,
+    cx: *ui.Context,
+    state: *State,
+    model: []const u8,
+    rows: *std.ArrayList(ui.Widget),
+) void {
+    const t = cx.theme();
+    const a = cx.ui.arena();
+    const pins = self.gpio orelse &default_pins;
+    if (pins.read_failure) |why| {
+        rows.append(a, cx.make(ui.Text{ .text = why, .style = .{ .size = 16, .color = t.on_surface } })) catch {};
+        return;
+    }
+    const header = gpio.headerFor(model) orelse return;
+    const picked_idx = @min(state.pin, header.len - 1);
+    state.pin = picked_idx;
+
+    // Horizontal 2-row pin diagram (pin 1 at top-left, pin 2 below it).
+    var top_row: std.ArrayList(ui.Widget) = .empty;
+    var bottom_row: std.ArrayList(ui.Widget) = .empty;
+    var i: usize = 0;
+    while (i + 1 < header.len) : (i += 2) {
+        top_row.append(a, pinDot(cx, state, pins, header[i], i, picked_idx == i)) catch {};
+        bottom_row.append(a, pinDot(cx, state, pins, header[i + 1], i + 1, picked_idx == i + 1)) catch {};
+    }
+    rows.append(a, cx.make(ui.Padding{ .padding = .{ .top = 6 }, .child = cx.make(ui.Column{
+        .cross_axis_alignment = .start,
+        .main_axis_size = .min,
+        .spacing = 3,
+        .children = &.{
+            cx.make(ui.Row{ .main_axis_size = .min, .spacing = 3, .children = top_row.items }),
+            cx.make(ui.Row{ .main_axis_size = .min, .spacing = 3, .children = bottom_row.items }),
+        },
+    }) })) catch {};
+
+    // Key for the pin colours.
+    rows.append(a, pinColourKey(cx)) catch {};
+
+    // Selected pin description and mode menu below.
+    rows.append(a, pinDetail(self, cx, pins, header[picked_idx], picked_idx + 1)) catch {};
+}
+
+fn pinDot(
+    cx: *ui.Context,
+    state: *State,
+    pins: *const gpio.Pins,
+    pin: Pin,
+    index: usize,
+    picked: bool,
+) ui.Widget {
+    const t = cx.theme();
+    const colour: Color, const filled: bool = switch (pin) {
+        .power_5v => .{ red, true },
+        .power_3v3 => .{ orange, true },
+        .ground => .{ grey, true },
+        .gpio => |g| blk: {
+            const l = &pins.lines[g];
+            break :blk switch (l.function) {
+                .output => .{ green, l.high },
+                .input => .{ blue, l.high },
+                else => .{ purple, true },
+            };
+        },
+    };
+    const size = 20;
+    const body = cx.make(ui.SizedBox{ .width = size, .height = size, .child = cx.make(ui.Decorated{
+        .color = if (filled) colour else null,
+        .border = if (picked) .{ .width = 3, .color = t.on_surface } else .{ .width = 2, .color = colour },
+        .radius = .all(size / 2),
+        .child = cx.make(ui.Center{ .child = cx.make(ui.Text{
+            .text = cx.fmt("{d}", .{index + 1}),
+            .style = .{ .size = 9, .color = if (filled) .rgb(0xffffff) else t.on_surface },
+            .wrap = false,
+        }) }),
+    }) });
+    const pick = cx.ui.arena().create(PickHeaderPin) catch return body;
+    pick.* = .{ .state = state, .index = index };
+    return cx.make(ui.Pressable{ .on_press = .of(pick, PickHeaderPin.press), .child = body });
+}
+
+const PickHeaderPin = struct {
+    state: *State,
+    index: usize,
+
+    fn press(p: *PickHeaderPin) void {
+        p.state.pin = p.index;
+    }
+};
+
+fn pinColourKey(cx: *ui.Context) ui.Widget {
+    const t = cx.theme();
+    const a = cx.ui.arena();
+    const entries = [_]struct { Color, []const u8 }{
+        .{ red, "5V" },
+        .{ orange, "3.3V" },
+        .{ grey, "Ground" },
+        .{ blue, "Input" },
+        .{ green, "Output" },
+        .{ purple, "Other" },
+    };
+    var items: std.ArrayList(ui.Widget) = .empty;
+    for (entries) |e| {
+        items.append(a, cx.make(ui.Row{ .main_axis_size = .min, .cross_axis_alignment = .center, .spacing = 6, .children = &.{
+            cx.make(ui.SizedBox{ .width = 12, .height = 12, .child = cx.make(ui.Decorated{
+                .color = e[0],
+                .radius = .all(6),
+            }) }),
+            cx.make(ui.Text{ .text = e[1], .style = .{ .size = 14, .color = t.on_surface_variant }, .wrap = false }),
+        } })) catch {};
+    }
+    return cx.make(ui.Row{ .main_axis_size = .min, .cross_axis_alignment = .center, .spacing = 14, .children = items.items });
+}
+
+fn gpioDoing(cx: *ui.Context, pins: *const gpio.Pins, g: u6) []const u8 {
+    const l = &pins.lines[g];
+    const level = if (l.high) "high" else "low";
+    return switch (l.function) {
+        .output => cx.fmt("Output, {s}", .{level}),
+        .input => cx.fmt("Input, {s}", .{level}),
+        else => |f| if (pins.altName(g, f.alt().?)) |n| n else cx.fmt("Alternate function {d}", .{f.alt().?}),
+    };
+}
+
+fn pinDetail(
+    self: *const Settings,
+    cx: *ui.Context,
+    pins: *const gpio.Pins,
+    pin: Pin,
+    pin_num: usize,
+) ui.Widget {
+    const t = cx.theme();
+    const a = cx.ui.arena();
+    var rows: std.ArrayList(ui.Widget) = .empty;
+    switch (pin) {
+        .power_5v => {
+            rows.append(a, cx.make(ui.Text{ .text = cx.fmt("5V, pin {d}", .{pin_num}), .style = .{ .size = 18, .color = t.on_surface } })) catch {};
+            rows.append(a, cx.make(ui.Text{ .text = "5 V power from the board's power supply", .style = .{ .size = 16, .color = t.on_surface_variant } })) catch {};
+        },
+        .power_3v3 => {
+            rows.append(a, cx.make(ui.Text{ .text = cx.fmt("3.3V, pin {d}", .{pin_num}), .style = .{ .size = 18, .color = t.on_surface } })) catch {};
+            rows.append(a, cx.make(ui.Text{ .text = "3.3 V power from the board", .style = .{ .size = 16, .color = t.on_surface_variant } })) catch {};
+        },
+        .ground => {
+            rows.append(a, cx.make(ui.Text{ .text = cx.fmt("Ground, pin {d}", .{pin_num}), .style = .{ .size = 18, .color = t.on_surface } })) catch {};
+            rows.append(a, cx.make(ui.Text{ .text = "Ground (0 V)", .style = .{ .size = 16, .color = t.on_surface_variant } })) catch {};
+        },
+        .gpio => |g| {
+            const l = &pins.lines[g];
+            const title = if (gpio.usualName(g)) |u|
+                cx.fmt("GPIO {d} ({s}), pin {d}", .{ g, u, pin_num })
+            else
+                cx.fmt("GPIO {d}, pin {d}", .{ g, pin_num });
+            rows.append(a, cx.make(ui.Text{ .text = title, .style = .{ .size = 18, .color = t.on_surface } })) catch {};
+            rows.append(a, cx.make(ui.Text{ .text = gpioDoing(cx, pins, g), .style = .{ .size = 16, .color = t.on_surface } })) catch {};
+            if (l.function.alt() != null) rows.append(a, cx.make(ui.Text{
+                .text = cx.fmt("It is {s} now", .{if (l.high) "high" else "low"}),
+                .style = .{ .size = 16, .color = t.on_surface_variant },
+            })) catch {};
+            if (l.used) {
+                const who = l.consumer();
+                rows.append(a, cx.make(ui.Text{
+                    .text = if (who.len > 0) cx.fmt("In use by {s}, so it cannot be changed here", .{who}) else "In use by the system, so it cannot be changed here",
+                    .style = .{ .size = 15, .color = t.on_surface_variant },
+                })) catch {};
+            } else {
+                rows.append(a, cx.make(ui.Row{ .main_axis_size = .min, .children = &.{
+                    cx.make(PinModeMenu{
+                        .pin = g,
+                        .current = pins.mode(g),
+                        .actions = self.actions,
+                    }),
+                } })) catch {};
+                if (pins.set_failure) |why| rows.append(a, cx.make(ui.Text{ .text = why, .style = .{ .size = 15, .color = t.@"error" } })) catch {};
+            }
+            if (pins.last_pin == g) if (pins.last_error) |why| rows.append(a, cx.make(ui.Text{
+                .text = cx.fmt("It could not be set up: {s}", .{why}),
+                .style = .{ .size = 15, .color = t.@"error" },
+            })) catch {};
+        },
+    }
+    return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 6, .children = rows.items });
+}
+
+const mode_options = [_]struct { mode: Mode, label: []const u8 }{
+    .{ .mode = .input, .label = "Input" },
+    .{ .mode = .input_pull_up, .label = "Input, pulled up" },
+    .{ .mode = .input_pull_down, .label = "Input, pulled down" },
+    .{ .mode = .output_low, .label = "Output, low" },
+    .{ .mode = .output_high, .label = "Output, high" },
+};
+
+fn modeLabel(m: ?Mode) []const u8 {
+    const mode = m orelse return "Set mode";
+    for (mode_options) |opt| if (opt.mode == mode) return opt.label;
+    return "Set mode";
+}
+
+/// Menu button for configuring a GPIO pin's mode.
+pub const PinModeMenu = struct {
+    pin: u6,
+    current: ?Mode,
+    actions: ?*Actions,
+
+    pub const State = struct {
+        node: ?*ui.Node = null,
+        pin: u6 = 0,
+        actions: ?*Actions = null,
+        picks: [mode_options.len]PickMode = undefined,
+
+        const PickMode = struct {
+            actions: *Actions,
+            pin: u6,
+            mode: Mode,
+
+            fn pick(p: *PickMode) void {
+                p.actions.gpio = .{ .pin = p.pin, .mode = p.mode };
+            }
+        };
+
+        fn open(st: *@This()) void {
+            const n = st.node orelse return;
+            const acts = st.actions orelse return;
+            const pos = n.position();
+            var items: [mode_options.len]ui.MenuItem = undefined;
+            for (mode_options, 0..) |opt, i| {
+                st.picks[i] = .{ .actions = acts, .pin = st.pin, .mode = opt.mode };
+                items[i] = .{ .label = opt.label, .on_press = .of(&st.picks[i], PickMode.pick) };
+            }
+            n.ui.openMenu(n, .{ pos[0], pos[1] + n.size.h }, &items);
+        }
+    };
+
+    pub fn build(self: *const PinModeMenu, cx: *ui.Context, state: *PinModeMenu.State) ui.Widget {
+        state.node = cx.node;
+        state.pin = self.pin;
+        state.actions = self.actions;
+        return cx.make(ui.OutlinedButton{
+            .label = modeLabel(self.current),
+            .trailing_icon = .expand_more,
+            .on_press = if (self.actions != null) .of(state, PinModeMenu.State.open) else null,
+        });
+    }
+};
 
 fn usbIcon(k: usb.Kind) ui.icons.Icon {
     return switch (k) {
@@ -366,4 +640,97 @@ test "the board, drawn: picking a part says what it is" {
         }
     }
     try testing.expect(view.findText(u.root.?, "There is no drawing of this board") != null);
+}
+
+test "selecting the GPIO header shows the horizontal pin diagram, colour key, and pin mode menu" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    var d = view.sample();
+    var actions: Actions = .{};
+    var pins: gpio.Pins = .{ .opened = true, .chip = .{ .fd = -1 } };
+    pins.lines[17] = .{ .function = .output, .high = true };
+    pins.lines[4] = .{ .function = .input, .high = true };
+    pins.lines[14] = .{ .function = .alt0, .used = true };
+    @memcpy(pins.lines[14].consumer_buf[0..6], "serial");
+    pins.lines[14].consumer_len = 6;
+    const settings: Settings = .{ .commit = "574d538", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .gpio = &pins };
+
+    d.sys.model = .of("Raspberry Pi 3 Model B Plus Rev 1.3");
+    u.frame(1600, 900, 1, settings);
+    u.root.?.state(Settings.State).page = .board;
+    u.frame(1600, 900, 2, settings);
+
+    // Click the GPIO header on the board drawing.
+    const bv = view.findType(u.root.?, BoardView).?;
+    const drawing = board.forModel("Raspberry Pi 3 Model B Plus Rev 1.3").?;
+    const r = drawing.bounds();
+    const scale = @min(bv.size.w / r.w, bv.size.h / r.h);
+    const origin = bv.position();
+    const x0 = origin[0] + (bv.size.w - r.w * scale) / 2 - r.x * scale;
+    const y0 = origin[1] + (bv.size.h - r.h * scale) / 2 - r.y * scale;
+    const gpio_pt: ui.Point = .{ x0 + 32.5 * scale, y0 + 3.5 * scale };
+    u.pointerMotion(gpio_pt);
+    u.pointerButton(gpio_pt, ui.btn_left, true);
+    u.pointerButton(gpio_pt, ui.btn_left, false);
+
+    // Every board with a header fits at every window size when the GPIO header is selected.
+    for ([_][]const u8{ "Raspberry Pi 3 Model B Plus Rev 1.3", "Raspberry Pi Model B Rev 1", "Raspberry Pi Zero W Rev 1.1" }) |model| {
+        d.sys.model = .of(model);
+        _ = view.showGpio(u);
+        for (view.test_sizes) |size| {
+            u.frame(size[0], size[1], 3, settings);
+            try testing.expect(!view.overflows(u.root.?));
+        }
+    }
+    d.sys.model = .of("Raspberry Pi 3 Model B Plus Rev 1.3");
+    _ = view.showGpio(u);
+    u.frame(1600, 900, 4, settings);
+
+    // Header description and colour key are shown.
+    try testing.expect(view.findText(u.root.?, "GPIO header") != null);
+    try testing.expect(view.findText(u.root.?, "5V") != null);
+    try testing.expect(view.findText(u.root.?, "3.3V") != null);
+    try testing.expect(view.findText(u.root.?, "Ground") != null);
+    try testing.expect(view.findText(u.root.?, "Input") != null);
+    try testing.expect(view.findText(u.root.?, "Output") != null);
+    try testing.expect(view.findText(u.root.?, "Other") != null);
+
+    // Pin 11 (GPIO 17) is selected to start with, showing a menu button with "Output, high".
+    try testing.expect(view.findText(u.root.?, "GPIO 17, pin 11") != null);
+    try testing.expect(view.findType(u.root.?, PinModeMenu) != null);
+    view.click(u, view.findType(u.root.?, PinModeMenu).?);
+    u.frame(1600, 900, 5, settings);
+    try testing.expect(u.menu_root != null);
+    view.click(u, view.findText(u.menu_root.?, "Output, low").?);
+    try testing.expectEqual(Actions.GpioChange{ .pin = 17, .mode = .output_low }, actions.gpio.?);
+
+    // Selecting Pin 2 (5V) shows its description without a mode menu.
+    view.click(u, view.up(view.findText(u.root.?, "2").?, ui.Pressable).?);
+    u.frame(1600, 900, 6, settings);
+    try testing.expect(view.findText(u.root.?, "5V, pin 2") != null);
+    try testing.expect(view.findText(u.root.?, "5 V power from the board's power supply") != null);
+    try testing.expect(view.findType(u.root.?, PinModeMenu) == null);
+
+    // Selecting Pin 8 (GPIO 14, TXD, in use by serial) shows its description and cannot be configured.
+    view.click(u, view.up(view.findText(u.root.?, "8").?, ui.Pressable).?);
+    u.frame(1600, 900, 7, settings);
+    try testing.expect(view.findText(u.root.?, "GPIO 14 (TXD), pin 8") != null);
+    try testing.expect(view.findText(u.root.?, "UART 0 transmit") != null);
+    try testing.expect(view.findText(u.root.?, "In use by serial, so it cannot be changed here") != null);
+    try testing.expect(view.findType(u.root.?, PinModeMenu) == null);
+
+    // Selecting Pin 7 (GPIO 4, GPCLK0) shows its description and can be configured via the menu button.
+    view.click(u, view.up(view.findText(u.root.?, "7").?, ui.Pressable).?);
+    u.frame(1600, 900, 8, settings);
+    try testing.expect(view.findText(u.root.?, "GPIO 4 (GPCLK0), pin 7") != null);
+    view.click(u, view.findType(u.root.?, PinModeMenu).?);
+    u.frame(1600, 900, 9, settings);
+    view.click(u, view.findText(u.menu_root.?, "Input, pulled down").?);
+    try testing.expectEqual(Actions.GpioChange{ .pin = 4, .mode = .input_pull_down }, actions.gpio.?);
+
+    // When the pins cannot be read, the failure is shown.
+    pins.read_failure = "Not allowed to use the GPIO";
+    u.frame(1600, 900, 10, settings);
+    try testing.expect(view.findText(u.root.?, "Not allowed to use the GPIO") != null);
 }

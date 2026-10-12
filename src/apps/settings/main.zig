@@ -47,17 +47,21 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     var font_buf: [512]u8 = undefined;
     var font_path: [*:0]const u8 = sys.fontFile(&font_buf, font.default_font_file);
     var page: ?view.Page = null;
+    var select_gpio = false;
     while (args.next()) |arg| {
-        if (std.meta.stringToEnum(view.Page, arg)) |p| page = p else font_path = arg.ptr;
+        if (std.mem.eql(u8, arg, "gpio")) {
+            page = .board;
+            select_gpio = true;
+        } else if (std.meta.stringToEnum(view.Page, arg)) |p| page = p else font_path = arg.ptr;
     }
-    run(init, font_path, page) catch |err| {
+    run(init, font_path, page, select_gpio) catch |err| {
         print(sys.log_error ++ "dazzle-settings: error: {s}\n", .{@errorName(err)});
         return 1;
     };
     return 0;
 }
 
-fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?view.Page) !void {
+fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?view.Page, first_gpio: bool) !void {
     // The language chosen (in setup, or here).
     var chosen = locale.load();
     locale.current = chosen.language;
@@ -112,6 +116,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
     const build = std.fmt.bufPrint(&build_buf, "{s} ({s})", .{ build_info.commit, update.formatDate(&date_buf, build_info.commit_time) }) catch build_info.commit;
     // The page to show, once the window is built: the one asked for.
     var pending_page = first_page;
+    var pending_gpio = first_gpio;
     var sock_buf: [64]u8 = undefined;
     const sock_path = sys.shell.appSocket(&sock_buf, "dazzle-settings").?;
     const pages_fd: ?linux.fd_t = sys.shell.listen(sock_path) catch null;
@@ -123,8 +128,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
 
     var next_update: u64 = sys.nowNs() + std.time.ns_per_s;
     while (true) {
-        const gpio_page = view.shownPage(a.ui) == .gpio;
-        const until = if (a.suspended) sys.nowNs() + 60 * std.time.ns_per_s else if (gpio_page) @min(next_update, next_levels) else next_update;
+        const board_page = view.shownPage(a.ui) == .board;
+        const until = if (a.suspended) sys.nowNs() + 60 * std.time.ns_per_s else if (board_page) @min(next_update, next_levels) else next_update;
         if (!try a.step(@max(until -| sys.nowNs(), std.time.ns_per_ms))) return;
         // Covered by another window: nothing is read or drawn, and the
         // window in front gets the GPU memory.
@@ -137,12 +142,14 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             next_update = now + std.time.ns_per_s;
             usage = monitor.read(now);
             network = info.Network.read();
-            if (view.shownPage(a.ui) == .board) devices = usb.Devices.read();
+            if (view.shownPage(a.ui) == .board) {
+                devices = usb.Devices.read();
+                pins.readUsers();
+            }
             if (view.shownPage(a.ui) == .log) _ = syslog.poll();
-            if (view.shownPage(a.ui) == .gpio) pins.readUsers();
             a.dirty = true;
         }
-        if (!a.suspended and view.shownPage(a.ui) == .gpio and now >= next_levels) {
+        if (!a.suspended and view.shownPage(a.ui) == .board and now >= next_levels) {
             next_levels = now + gpio_poll_ns;
             const before = pins.lines;
             pins.readLevels();
@@ -267,10 +274,19 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             var line_buf: [64]u8 = undefined;
             while (sys.shell.accept(fd, &line_buf)) |got| {
                 sys.close(got.fd);
-                if (std.meta.stringToEnum(view.Page, got.line)) |p| pending_page = p;
+                if (std.mem.eql(u8, got.line, "gpio")) {
+                    pending_page = .board;
+                    pending_gpio = true;
+                } else if (std.meta.stringToEnum(view.Page, got.line)) |p| {
+                    pending_page = p;
+                }
             }
         }
         if (pending_page) |p| if (view.showPage(a.ui, p)) {
+            if (pending_gpio) {
+                _ = view.showGpio(a.ui);
+                pending_gpio = false;
+            }
             pending_page = null;
             a.dirty = true;
         };
@@ -339,7 +355,6 @@ test {
     _ = @import("board_view.zig");
     _ = @import("software_view.zig");
     _ = @import("resources_view.zig");
-    _ = @import("gpio_view.zig");
     _ = @import("language_view.zig");
     _ = @import("log_view.zig");
     _ = @import("update.zig");
