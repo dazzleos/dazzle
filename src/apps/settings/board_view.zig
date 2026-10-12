@@ -10,6 +10,7 @@ const gfx = @import("gfx");
 const locale = @import("locale");
 const info = @import("info.zig");
 const board = @import("board.zig");
+const usb = @import("usb.zig");
 const view = @import("view.zig");
 
 const Color = gfx.Color;
@@ -57,10 +58,46 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
         .soc_with_ram => if (u.cpu_busy) |busy| cx.fmt("{d:.0}% busy; {s} of {s} of memory in use", .{ busy, info.formatBytes(&b1, u.memUsed()), info.formatBytes(&b2, u.mem_total) }) else null,
         .ram => cx.fmt("{s} of {s} in use", .{ info.formatBytes(&b1, u.memUsed()), info.formatBytes(&b2, u.mem_total) }),
         .micro_sd, .sd, .emmc => if (u.storage.user + u.storage.apps > 0) cx.fmt("{s} of your files and {s} of apps", .{ info.formatBytes(&b1, u.storage.user), info.formatBytes(&b2, u.storage.apps) }) else null,
+        .usb, .usb_double, .usb_otg => if (self.usb.len == 0) "Nothing is plugged in" else null,
         else => null,
     };
     if (now) |text| rows.append(a, cx.make(ui.Text{ .text = text, .style = .{ .size = 16, .color = t.on_surface } })) catch {};
+    if (part.kind == .usb or part.kind == .usb_double or part.kind == .usb_otg) {
+        for (self.usb.slice()) |*d| {
+            var name_buf: [64]u8 = undefined;
+            var speed_buf: [16]u8 = undefined;
+            var detail: std.ArrayList(u8) = .empty;
+            detail.appendSlice(a, d.kind.label()) catch {};
+            if (d.manufacturer.len > 0) detail.print(a, "  \u{b7}  {s}", .{d.manufacturer.slice()}) catch {};
+            const speed = usb.formatSpeed(&speed_buf, d.speed_mbps);
+            if (speed.len > 0) detail.print(a, "  \u{b7}  {s}", .{speed}) catch {};
+            if (d.built_in) detail.appendSlice(a, "  \u{b7}  Part of the board") catch {};
+            rows.append(a, cx.make(ui.Row{ .spacing = 16, .cross_axis_alignment = .center, .children = &.{
+                cx.make(ui.Icon{ .icon = usbIcon(d.kind), .size = 28, .color = t.on_surface_variant }),
+                cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 2, .children = &.{
+                    cx.make(ui.Text{ .text = cx.fmt("{s}", .{d.name(&name_buf)}), .style = .{ .size = 18 }, .wrap = false, .ellipsis = true }),
+                    cx.make(ui.Text{ .text = detail.items, .style = .{ .size = 15, .color = t.on_surface_variant }, .wrap = false, .ellipsis = true }),
+                } }) }),
+            } })) catch {};
+        }
+    }
     return b.page(rows.items);
+}
+
+fn usbIcon(k: usb.Kind) ui.icons.Icon {
+    return switch (k) {
+        .keyboard => .keyboard,
+        .mouse => .mouse,
+        .input => .sports_esports,
+        .storage => .usb,
+        .hub => .device_hub,
+        .network => .lan,
+        .wireless => .wifi,
+        .audio => .headphones,
+        .camera => .videocam,
+        .printer => .print,
+        .other => .usb,
+    };
 }
 
 /// Picking a part of the board.
@@ -296,6 +333,29 @@ test "the board, drawn: picking a part says what it is" {
     draw(u, &d, &wifi, &n, .{ 1600, 900 });
     try testing.expect(view.findText(u.root.?, "Ethernet") != null);
     try testing.expect(view.findText(u.root.?, "The wired network") != null);
+
+    // Clicking a USB connector shows plugged-in USB devices, or "Nothing is plugged in".
+    const usb_pt: ui.Point = .{ x0 + 78 * scale, y0 + 9 * scale };
+    u.pointerMotion(usb_pt);
+    u.pointerButton(usb_pt, ui.btn_left, true);
+    u.pointerButton(usb_pt, ui.btn_left, false);
+    draw(u, &d, &wifi, &n, .{ 1600, 900 });
+    try testing.expect(view.findText(u.root.?, "USB") != null);
+    try testing.expect(view.findText(u.root.?, "Nothing is plugged in") != null);
+
+    var devices: usb.Devices = .{};
+    devices.items[0] = .{ .kind = .keyboard, .speed_mbps = 1.5, .vendor_id = 0x046d, .product_id = 0xc31c };
+    devices.items[0].product.set("USB Keyboard");
+    devices.items[0].manufacturer.set("Logitech");
+    devices.items[1] = .{ .kind = .storage, .speed_mbps = 480, .vendor_id = 0x0781, .product_id = 0x5567 };
+    devices.items[2] = .{ .kind = .network, .speed_mbps = 480, .built_in = true, .vendor_id = 0x0424, .product_id = 0xec00 };
+    devices.len = 3;
+    n += 1;
+    u.frame(1600, 900, n, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = view.sample_apps, .usb = &devices });
+    try testing.expect(view.findText(u.root.?, "USB Keyboard") != null);
+    try testing.expect(view.findText(u.root.?, "Keyboard  \u{b7}  Logitech  \u{b7}  1.5 Mb/s") != null);
+    try testing.expect(view.findText(u.root.?, "USB device 0781:5567") != null);
+    try testing.expect(view.findText(u.root.?, "Network adapter  \u{b7}  480 Mb/s  \u{b7}  Part of the board") != null);
 
     // Every board fits, at every size.
     for ([_][]const u8{ "Raspberry Pi Model B Rev 2", "Raspberry Pi Zero 2 W Rev 1.0", "Raspberry Pi Compute Module 3 Rev 1.0", "Raspberry Pi 4 Model B Rev 1.4", "Raspberry Pi Compute Module 4 Rev 1.0", "Raspberry Pi 5 Model B Rev 1.0", "Raspberry Pi Compute Module 5 Rev 1.0", "Something else" }) |model| {

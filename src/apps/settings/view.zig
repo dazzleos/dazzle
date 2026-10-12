@@ -1,6 +1,6 @@
 //! The settings app's window, as widgets: pages, chosen with the tabs on
 //! the left, about the Wi-Fi networks around, Ethernet, the board,
-//! software, resources in use, GPIO, USB devices, language and keyboard,
+//! software, resources in use, GPIO, language and keyboard,
 //! and the system's log. What is asked of the network manager, and of the
 //! store, goes to the main loop through `Actions`.
 
@@ -20,7 +20,6 @@ pub const board_view = @import("board_view.zig");
 pub const software_view = @import("software_view.zig");
 pub const resources_view = @import("resources_view.zig");
 pub const gpio_view = @import("gpio_view.zig");
-pub const usb_view = @import("usb_view.zig");
 pub const language_view = @import("language_view.zig");
 pub const log_view = @import("log_view.zig");
 
@@ -168,7 +167,6 @@ pub const Settings = struct {
             .apps => software_view.build(self, b, &state.software),
             .resources => b.scroll(.resources, resources_view.build(self, b)),
             .gpio => b.scroll(.gpio, gpio_view.build(self, b, &state.gpio)),
-            .usb => b.scroll(.usb, usb_view.build(self, b)),
             .language => b.scroll(.language, language_view.build(self, b)),
             .log => b.scroll(.log, log_view.build(self, b, &state.log)),
         };
@@ -200,7 +198,6 @@ pub const Page = enum {
     apps,
     resources,
     gpio,
-    usb,
     language,
     log,
 
@@ -212,7 +209,6 @@ pub const Page = enum {
             .apps => software_view.label,
             .resources => resources_view.label,
             .gpio => gpio_view.label,
-            .usb => usb_view.label,
             .language => language_view.label,
             .log => log_view.label,
         };
@@ -226,7 +222,6 @@ pub const Page = enum {
             .apps => software_view.icon,
             .resources => resources_view.icon,
             .gpio => gpio_view.icon,
-            .usb => usb_view.icon,
             .language => language_view.icon,
             .log => log_view.icon,
         };

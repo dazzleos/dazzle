@@ -70,7 +70,9 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
     const a = cx.ui.arena();
     const os_busy = self.update.status == .checking or self.update.status == .downloading or self.update.status == .installing;
     const busy = apps.busy != null or os_busy;
-    if (apps.message.len > 0) rows.append(a, b.value(apps.message)) catch {};
+    if (apps.message.len > 0 and !std.mem.startsWith(u8, apps.message, "Cannot get the list of apps")) {
+        rows.append(a, b.value(apps.message)) catch {};
+    }
     dazzleRows(self, b, state, &rows);
     var updates: usize = @intFromBool(self.update.status == .available);
     for (apps.list, 0..) |app, i| {
@@ -395,10 +397,11 @@ test "installing and removing apps, and getting their list again" {
     view.click(u, view.up(view.findText(u.root.?, "Remove").?, ui.OutlinedButton).?);
     try testing.expect(actions.remove == null);
 
-    // No list yet.
-    settings.apps = .{};
+    // No list yet: labelled at the bottom, not at the top of the page.
+    settings.apps = .{ .message = "Cannot get the list of apps: the server could not be reached (is the network up?)" };
     u.frame(1920, 960, 4, settings);
     try testing.expect(view.findText(u.root.?, "No list of apps yet: is the network up?") != null);
+    try testing.expect(view.findText(u.root.?, "Cannot get the list of apps: the server could not be reached (is the network up?)") == null);
 }
 
 test "updates: offered, downloaded, installed, then a restart" {

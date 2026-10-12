@@ -76,8 +76,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
     var monitor: info.UsageMonitor = .{};
     var usage = monitor.read(sys.nowNs());
     var network = info.Network.read();
-    // The USB devices, read while their page shows.
-    var devices: usb.Devices = .{};
+    // The USB devices, read while the board page shows.
+    var devices = usb.Devices.read();
     // The GPIO pins, read while their page shows: their levels several
     // times a second (inputs change as they like).
     var pins: gpio.Pins = .{};
@@ -137,7 +137,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             next_update = now + std.time.ns_per_s;
             usage = monitor.read(now);
             network = info.Network.read();
-            if (view.shownPage(a.ui) == .usb) devices = usb.Devices.read();
+            if (view.shownPage(a.ui) == .board) devices = usb.Devices.read();
             if (view.shownPage(a.ui) == .log) _ = syslog.poll();
             if (view.shownPage(a.ui) == .gpio) pins.readUsers();
             a.dirty = true;
@@ -340,7 +340,6 @@ test {
     _ = @import("software_view.zig");
     _ = @import("resources_view.zig");
     _ = @import("gpio_view.zig");
-    _ = @import("usb_view.zig");
     _ = @import("language_view.zig");
     _ = @import("log_view.zig");
     _ = @import("update.zig");
