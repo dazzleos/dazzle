@@ -46,6 +46,7 @@ pub const TextField = struct {
     /// Take the keyboard when it first appears (as a field to fill in that
     /// has just been asked for does).
     autofocus: bool = false,
+    enabled: bool = true,
 
     pub const capacity = 128;
 
@@ -265,7 +266,12 @@ pub const TextField = struct {
         const s = self.fontStyle(n);
         const h: f32 = if (s) |st| @max(height, @ceil(st.lineHeight() + 20)) else height;
         const st = self.remember(n);
-        if (self.autofocus and !st.autofocused) {
+        if (!self.enabled) {
+            if (st.focused) {
+                st.focused = false;
+                if (n.ui.focused == n) n.ui.focused = null;
+            }
+        } else if (self.autofocus and !st.autofocused) {
             st.autofocused = true;
             n.ui.focus(n);
         }
@@ -291,7 +297,9 @@ pub const TextField = struct {
         const st = n.state(State);
         const c = p.canvas();
         const r: gfx.Rect = .{ .x = 0, .y = 0, .w = n.size.w, .h = n.size.h };
-        if (st.focused) {
+        if (!self.enabled) {
+            c.strokeRoundedRect(r.outset(-0.5), .all(4), 1, t.on_surface.withAlpha(0.12));
+        } else if (st.focused) {
             c.strokeRoundedRect(r.outset(-1), .all(4), 2, t.primary);
         } else {
             c.strokeRoundedRect(r.outset(-0.5), .all(4), 1, if (st.hovered) t.on_surface else t.outline);
@@ -306,6 +314,11 @@ pub const TextField = struct {
         const scroll = @max(cursor_x - room, 0);
         const old = p.clipTo(.{ .x = pad - 2, .y = 0, .w = room + 4, .h = n.size.h });
         defer p.restoreClip(old);
+        if (!self.enabled) {
+            const shown_text = if (st.len == 0) self.placeholder else text;
+            _ = p.text(style.size, if (st.len == 0) pad else pad - scroll, baseline, shown_text, t.on_surface.withAlpha(0.38));
+            return;
+        }
         // The selection behind its text.
         if (st.selection()) |sel| {
             const x0 = self.xOf(style, st, sel[0]);
@@ -325,6 +338,11 @@ pub const TextField = struct {
 
     pub fn event(self: *const TextField, n: *Node, e: Event) bool {
         const st = self.remember(n);
+        if (!self.enabled) {
+            st.hovered = false;
+            st.dragging = false;
+            return false;
+        }
         switch (e) {
             .enter => st.hovered = true,
             .leave => st.hovered = false,

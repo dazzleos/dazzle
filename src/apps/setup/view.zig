@@ -148,7 +148,7 @@ pub const Setup = struct {
             body,
             cx.make(ui.Row{ .spacing = 12, .main_axis_alignment = .end, .children = &.{
                 if (state.page > 0) cx.make(ui.OutlinedButton{ .label = "Back", .icon = .arrow_back, .on_press = .of(nav, Nav.back) }) else cx.make(ui.Empty{}),
-                cx.make(ui.OutlinedButton{ .label = if (last) "Finish" else "Next", .icon = if (last) .check else .arrow_forward, .on_press = .of(nav, Nav.next) }),
+                cx.make(ui.OutlinedButton{ .label = if (last) "Finish" else "Next", .icon = if (last) .check else null, .trailing_icon = if (last) null else .arrow_forward, .on_press = .of(nav, Nav.next) }),
             } }),
         } });
     }

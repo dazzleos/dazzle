@@ -28,9 +28,11 @@ pub const log_view = @import("log_view.zig");
 /// then clears it.
 pub const Actions = struct {
     connect: ?Join = null,
+    hotspot: ?Join = null,
     disconnect: bool = false,
-    /// The Wi-Fi adapter chosen (when there is more than one).
+    /// The Wi-Fi adapter chosen (when there is more than one), and how it gets its address.
     wifi_adapter: ?info.Str(16) = null,
+    wifi_addressing: ?info.manager.Addressing = null,
     /// How the wired adapter gets its address, and which adapter (empty for
     /// the first).
     ethernet: ?info.manager.Addressing = null,
@@ -74,6 +76,8 @@ pub const Actions = struct {
         ssid_len: u8 = 0,
         pass_buf: [63]u8 = undefined,
         pass_len: u8 = 0,
+        network: info.manager.HotspotNetwork = .{},
+        upstream: info.Str(16) = .{},
 
         pub fn ssid(j: *const Join) []const u8 {
             return j.ssid_buf[0..j.ssid_len];
@@ -347,11 +351,11 @@ pub const sample_app_list = [_]store.App{
 pub const sample_apps: software_view.Apps = .{ .list = &sample_app_list, .installed = &.{ true, false }, .source = "https://example.com/apps" };
 
 pub fn sample() struct { sys: info.System, net: info.Network, usage: info.Usage } {
-    const sys: info.System = .{ .model = .of("Raspberry Pi Zero W Rev 1.1"), .cores = 1, .serial = .of("a1b2c3d4"), .kernel = .of("6.12.0 (armv6l)"), .hostname = .of("dazzle") };
+    const sys: info.System = .{ .model = .of("Raspberry Pi Zero W Rev 1.1"), .cores = 1, .serial = .of("a1b2c3d4"), .kernel = .of("6.12.0 (armv6l)"), .hostname = .of("awesome-elephant") };
     var net: info.Network = .{ .gateway = .{ 192, 168, 1, 1 } };
     net.interfaces[0] = .{ .name = .of("eth0"), .state = .of("up"), .carrier = true, .mac = .of("00:e0:4c:68:01:02"), .ip = .{ 192, 168, 1, 42 }, .prefix = 24, .speed = 100, .rx_bytes = 12 << 20, .tx_bytes = 3 << 20 };
     net.interfaces[1] = .{ .name = .of("eth1"), .state = .of("down") };
-    net.len = 2;
+    net.len = 1;
     return .{ .sys = sys, .net = net, .usage = .{
         .cpu_busy = 23,
         .temperature = 48.3,
@@ -445,7 +449,7 @@ test "everything is shown, and fits from the smallest window to the biggest" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
     const u = try ui.Ui.create(testing.allocator, &f);
     defer u.destroy();
-    const d = sample();
+    var d = sample();
     const wifi = sampleWifi();
     var all: std.ArrayList(u8) = .empty;
     defer all.deinit(testing.allocator);
@@ -463,10 +467,14 @@ test "everything is shown, and fits from the smallest window to the biggest" {
         u.frame(1920, 1036, frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps, .video_memory = .{ .now = 128, .next = 192 } });
         texts(u.root.?, &all);
         if (page == .ethernet) {
+            d.net.len = 2;
+            frame_no += 1;
+            u.frame(1920, 1036, frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps, .video_memory = .{ .now = 128, .next = 192 } });
             click(u, up(findText(u.root.?, "eth1").?, ui.PillButton).?);
             frame_no += 1;
             u.frame(1920, 1036, frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps, .video_memory = .{ .now = 128, .next = 192 } });
             texts(u.root.?, &all);
+            d.net.len = 1;
         }
         if (page == .apps) {
             click(u, up(findText(u.root.?, "Dazzle").?, ui.Pressable).?);
@@ -503,15 +511,12 @@ test "everything is shown, and fits from the smallest window to the biggest" {
         "Ethernet",
         "Connected at 100 Mb/s",
         "192.168.1.42/24 (DHCP)",
-        "12 MB received, 3.0 MB sent",
         "Not connected: no cable",
-        "192.168.1.1",
         "b8:27:eb:01:02:03",
-        "Scanning…",
+        "Not connected, scanning…",
         // Every network: the page scrolls.
         "Further",
         "bad?name",
-        "Not connected",
         "Home",
         // The software list.
         "Software",
@@ -536,7 +541,7 @@ test "everything is shown, and fits from the smallest window to the biggest" {
     try testing.expectEqual(findText(u.root.?, "Home").?.position()[0], findText(u.root.?, "Cafe").?.position()[0]);
     // The build is on the Software page, not beside the title; the hardware
     // is the board alone; Catalogue/2 apps/From url and dBm/adapter name/WPA2/GHz on Wi-Fi are gone.
-    for ([_][]const u8{ "Dazzle build", "Hardware\n", "Chip", "GPU\n", "Revision", "In use", "Up for", "Hostname", "Catalogue", "2 apps", "From https://example.com/apps", "dBm", "wlan0", "WPA2", "GHz" }) |gone| {
+    for ([_][]const u8{ "Dazzle build", "Hardware\n", "Chip", "GPU\n", "Revision", "In use", "Up for", "Hostname", "Catalogue", "2 apps", "From https://example.com/apps", "dBm", "wlan0", "WPA2", "GHz", "Traffic", "Gateway" }) |gone| {
         try testing.expect(std.mem.indexOf(u8, all.items, gone) == null);
     }
 }

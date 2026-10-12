@@ -36,14 +36,19 @@ const nla_f_nested = 0x8000;
 // nl80211.h
 pub const cmd = struct {
     pub const get_interface = 5;
+    pub const set_interface = 6;
     pub const new_interface = 7;
+    pub const set_key = 10;
+    pub const new_key = 11;
+    pub const start_ap = 15;
+    pub const stop_ap = 17;
+    pub const set_station = 18;
+    pub const new_station = 19;
+    pub const del_station = 20;
     pub const get_scan = 32;
     pub const trigger_scan = 33;
     pub const new_scan_results = 34;
     pub const scan_aborted = 35;
-    pub const set_key = 10;
-    pub const new_key = 11;
-    pub const set_station = 18;
     pub const connect = 46;
     pub const disconnect = 48;
 };
@@ -57,6 +62,10 @@ const attr = struct {
     const key_cipher = 9;
     const key_seq = 10;
     const key_default = 11;
+    const beacon_interval = 12;
+    const dtim_period = 13;
+    const beacon_head = 14;
+    const beacon_tail = 15;
     const wiphy_freq = 38;
     const ie = 42;
     const bss = 47;
@@ -73,12 +82,18 @@ const attr = struct {
     const wpa_versions = 75;
     const akm_suites = 76;
     const key_default_types = 110;
+    const hidden_ssid = 126;
+    const ie_probe_resp = 127;
+    const ie_assoc_resp = 128;
+    const channel_width = 159;
+    const center_freq1 = 160;
 };
 const key_default_type_multicast = 2;
 const keytype_group = 0;
 const keytype_pairwise = 1;
 const wpa_version_2 = 2;
 const sta_flag_authorized = 1;
+const chan_width_20 = 1;
 const bss = struct {
     const bssid = 1;
     const frequency = 2;
@@ -86,7 +101,8 @@ const bss = struct {
     const information_elements = 6;
     const signal_mbm = 7;
 };
-const iftype_station = 2;
+pub const iftype_station: u32 = 2;
+pub const iftype_ap: u32 = 3;
 
 const nlmsghdr_len = 16;
 const genlmsghdr_len = 4;
@@ -134,7 +150,7 @@ pub const Attrs = struct {
 
 /// Builds a generic netlink request.
 const Message = struct {
-    buf: [256]u8 = undefined,
+    buf: [512]u8 = undefined,
     len: usize = nlmsghdr_len + genlmsghdr_len,
 
     fn put(m: *Message, typ: u16, data: []const u8) void {
@@ -255,6 +271,9 @@ pub const Events = struct {
     connected: ?struct { status: u16, bssid: [6]u8 } = null,
     /// The connection was lost: the 802.11 reason code.
     disconnected: ?u16 = null,
+    /// In AP mode: a station associated or disassociated.
+    new_station: ?[6]u8 = null,
+    del_station: ?[6]u8 = null,
 };
 
 /// An access point found by a scan, with what connecting to it needs.
@@ -282,6 +301,14 @@ pub const ConnectParams = struct {
     /// For WPA2: our RSN element and the group cipher; null for an open
     /// network.
     wpa2: ?struct { rsn: []const u8, group_cipher: u32 } = null,
+};
+
+/// What starting an access point (hotspot) needs to say.
+pub const ApParams = struct {
+    ssid: []const u8,
+    bssid: [6]u8,
+    wpa2: bool = false,
+    channel: u8 = 1,
 };
 
 pub const Nl80211 = struct {
@@ -450,8 +477,8 @@ pub const Nl80211 = struct {
         n.req.request(&d, n.family, 0, cmd.set_key, {}, ignore) catch {};
     }
 
-    /// Marks the access point authorized (the port open for traffic), for
-    /// drivers that want to be told.
+    /// Marks the access point (or associated station) authorized (the port
+    /// open for traffic), for drivers that want to be told.
     pub fn authorize(n: *Nl80211, ifindex: u32, bssid: [6]u8) void {
         var m: Message = .{};
         m.put(attr.ifindex, std.mem.asBytes(&ifindex));
@@ -461,6 +488,70 @@ pub const Nl80211 = struct {
         std.mem.writeInt(u32, flags[4..8], 1 << sta_flag_authorized, .little);
         m.put(attr.sta_flags2, &flags);
         n.req.request(&m, n.family, 0, cmd.set_station, {}, ignore) catch {};
+    }
+
+    /// Switches an interface between station (`iftype_station`) and AP
+    /// (`iftype_ap`) mode.
+    pub fn setInterfaceType(n: *Nl80211, ifindex: u32, iftype: u32) Error!void {
+        var m: Message = .{};
+        m.put(attr.ifindex, std.mem.asBytes(&ifindex));
+        m.put(attr.iftype, std.mem.asBytes(&iftype));
+        try n.req.request(&m, n.family, 0, cmd.set_interface, {}, ignore);
+    }
+
+    /// Starts an access point (hotspot) on an interface in AP mode.
+    pub fn startAp(n: *Nl80211, ifindex: u32, p: ApParams) Error!void {
+        var m: Message = .{};
+        m.put(attr.ifindex, std.mem.asBytes(&ifindex));
+        const interval: u32 = 100;
+        const dtim: u32 = 2;
+        const hidden: u32 = 0;
+        const freq_mhz: u32 = 2407 + @as(u32, p.channel) * 5;
+        const width: u32 = chan_width_20;
+        m.put(attr.beacon_interval, std.mem.asBytes(&interval));
+        m.put(attr.dtim_period, std.mem.asBytes(&dtim));
+        m.put(attr.ssid, p.ssid);
+        m.put(attr.hidden_ssid, std.mem.asBytes(&hidden));
+        m.put(attr.wiphy_freq, std.mem.asBytes(&freq_mhz));
+        m.put(attr.channel_width, std.mem.asBytes(&width));
+        m.put(attr.center_freq1, std.mem.asBytes(&freq_mhz));
+        var head_buf: [96]u8 = undefined;
+        var tail_buf: [32]u8 = undefined;
+        const head = beaconHead(&head_buf, p);
+        const tail = beaconTail(&tail_buf, p.wpa2);
+        m.put(attr.beacon_head, head);
+        m.put(attr.beacon_tail, tail);
+        if (p.wpa2) {
+            const supplicant = @import("supplicant.zig");
+            var rsn_buf: [22]u8 = undefined;
+            const rsn = supplicant.rsnElement(&rsn_buf, supplicant.cipher_ccmp);
+            const version: u32 = wpa_version_2;
+            const cipher: u32 = supplicant.cipher_ccmp;
+            const akm: u32 = supplicant.akm_psk;
+            m.put(attr.privacy, &.{});
+            m.put(attr.wpa_versions, std.mem.asBytes(&version));
+            m.put(attr.cipher_suites_pairwise, std.mem.asBytes(&cipher));
+            m.put(attr.cipher_suite_group, std.mem.asBytes(&cipher));
+            m.put(attr.akm_suites, std.mem.asBytes(&akm));
+            m.put(attr.ie, rsn);
+            m.put(attr.ie_probe_resp, rsn);
+            m.put(attr.ie_assoc_resp, rsn);
+            m.put(attr.control_port, &.{});
+        }
+        try n.req.request(&m, n.family, 0, cmd.start_ap, {}, ignore);
+    }
+
+    pub fn stopAp(n: *Nl80211, ifindex: u32) Error!void {
+        var m: Message = .{};
+        m.put(attr.ifindex, std.mem.asBytes(&ifindex));
+        try n.req.request(&m, n.family, 0, cmd.stop_ap, {}, ignore);
+    }
+
+    pub fn delStation(n: *Nl80211, ifindex: u32, mac: [6]u8) void {
+        var m: Message = .{};
+        m.put(attr.ifindex, std.mem.asBytes(&ifindex));
+        m.put(attr.mac, &mac);
+        n.req.request(&m, n.family, 0, cmd.del_station, {}, ignore) catch {};
     }
 
     /// Reads waiting events: scans finishing, connections made and lost.
@@ -497,8 +588,59 @@ fn parseEvent(r: Received, events: *Events) void {
             events.connected = .{ .status = status, .bssid = bssid };
         },
         cmd.disconnect => events.disconnected = if (Attrs.find(r.attrs, attr.reason_code)) |a| a.int(u16) orelse 0 else 0,
+        cmd.new_station => if (Attrs.find(r.attrs, attr.mac)) |a| if (a.data.len >= 6) {
+            events.new_station = a.data[0..6].*;
+        },
+        cmd.del_station => if (Attrs.find(r.attrs, attr.mac)) |a| if (a.data.len >= 6) {
+            events.del_station = a.data[0..6].*;
+        },
         else => {},
     }
+}
+
+/// 802.11 Beacon head: 24-byte management header, 12-byte fixed parameters,
+/// SSID IE, Supported Rates IE, and DS Parameter Set IE.
+pub fn beaconHead(out: *[96]u8, p: ApParams) []const u8 {
+    @memset(out, 0);
+    out[0] = 0x80; // Beacon frame control
+    @memset(out[4..10], 0xff); // DA: broadcast
+    @memcpy(out[10..16], &p.bssid); // SA
+    @memcpy(out[16..22], &p.bssid); // BSSID
+    // Fixed parameters at 24..36: 8-byte timestamp (0), beacon interval 100, capability.
+    std.mem.writeInt(u16, out[32..34], 100, .little);
+    const cap: u16 = if (p.wpa2) 0x0411 else 0x0401; // ESS + Short Slot Time (+ Privacy)
+    std.mem.writeInt(u16, out[34..36], cap, .little);
+    var pos: usize = 36;
+    const ssid = p.ssid[0..@min(p.ssid.len, wifi.max_ssid)];
+    out[pos] = 0; // SSID IE
+    out[pos + 1] = @intCast(ssid.len);
+    @memcpy(out[pos + 2 ..][0..ssid.len], ssid);
+    pos += 2 + ssid.len;
+    // Supported Rates IE (1, 2, 5.5, 11, 6, 9, 12, 18 Mbps)
+    const rates = [_]u8{ 1, 8, 0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24 };
+    @memcpy(out[pos..][0..rates.len], &rates);
+    pos += rates.len;
+    // DS Parameter Set IE (channel)
+    const ds = [_]u8{ 3, 1, p.channel };
+    @memcpy(out[pos..][0..ds.len], &ds);
+    pos += ds.len;
+    return out[0..pos];
+}
+
+/// 802.11 Beacon tail: Extended Supported Rates IE and optional RSN IE.
+pub fn beaconTail(out: *[32]u8, wpa2: bool) []const u8 {
+    // Extended Supported Rates IE (24, 36, 48, 54 Mbps)
+    const ext_rates = [_]u8{ 50, 4, 0x30, 0x48, 0x60, 0x6c };
+    @memcpy(out[0..ext_rates.len], &ext_rates);
+    var pos: usize = ext_rates.len;
+    if (wpa2) {
+        const supplicant = @import("supplicant.zig");
+        var rsn_buf: [22]u8 = undefined;
+        const rsn = supplicant.rsnElement(&rsn_buf, supplicant.cipher_ccmp);
+        @memcpy(out[pos..][0..rsn.len], rsn);
+        pos += rsn.len;
+    }
+    return out[0..pos];
 }
 
 const Family = struct {
@@ -529,7 +671,7 @@ fn parseFamily(attrs: []const u8) Family {
 
 fn parseInterface(attrs: []const u8) ?Interface {
     const iftype = (Attrs.find(attrs, attr.iftype) orelse return null).int(u32) orelse return null;
-    if (iftype != iftype_station) return null;
+    if (iftype != iftype_station and iftype != iftype_ap) return null;
     var i: Interface = .{ .index = (Attrs.find(attrs, attr.ifindex) orelse return null).int(u32) orelse return null, .adapter = .{} };
     if (Attrs.find(attrs, attr.ifname)) |a| i.adapter.setName(a.string());
     if (Attrs.find(attrs, attr.mac)) |a| if (a.data.len >= 6) {
@@ -811,4 +953,19 @@ test "connection events" {
     try testing.expect(ev.connected.?.status != 0);
     parseEvent(.{ .type = 0x1c, .flags = 0, .seq = 0, .command = cmd.disconnect, .attrs = attrBytes(&buf, &.{.{ attr.reason_code, &.{ 15, 0 } }}) }, &ev);
     try testing.expectEqual(@as(?u16, 15), ev.disconnected);
+    parseEvent(.{ .type = 0x1c, .flags = 0, .seq = 0, .command = cmd.new_station, .attrs = attrBytes(&buf, &.{.{ attr.mac, &.{ 0xaa, 0xbb, 0xcc, 1, 2, 3 } }}) }, &ev);
+    try testing.expectEqual([6]u8{ 0xaa, 0xbb, 0xcc, 1, 2, 3 }, ev.new_station.?);
+    parseEvent(.{ .type = 0x1c, .flags = 0, .seq = 0, .command = cmd.del_station, .attrs = attrBytes(&buf, &.{.{ attr.mac, &.{ 0xaa, 0xbb, 0xcc, 1, 2, 3 } }}) }, &ev);
+    try testing.expectEqual([6]u8{ 0xaa, 0xbb, 0xcc, 1, 2, 3 }, ev.del_station.?);
 }
+
+test "beacon head and tail contain SSID and RSN security" {
+    var head_buf: [96]u8 = undefined;
+    var tail_buf: [32]u8 = undefined;
+    const head = beaconHead(&head_buf, .{ .ssid = "DazzleAP", .bssid = .{ 2, 0, 0, 1, 2, 3 }, .wpa2 = true, .channel = 6 });
+    const tail = beaconTail(&tail_buf, true);
+    try testing.expectEqualStrings("DazzleAP", ssidOf(head[36..]).?);
+    const cap = std.mem.readInt(u16, head[34..36], .little);
+    try testing.expectEqual(wifi.Security.wpa2, securityOf(cap, tail));
+}
+

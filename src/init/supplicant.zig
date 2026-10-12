@@ -415,6 +415,94 @@ fn parseKeyData(data: []const u8) KeyData {
     return out;
 }
 
+/// The access point's side of a station's WPA2 4-way handshake.
+pub const Authenticator = struct {
+    pmk: [32]u8,
+    aa: Mac,
+    spa: Mac,
+    rsn: []const u8,
+    gtk: [16]u8,
+    rsc: u8 = 0,
+    anonce: Nonce = @splat(0x5a),
+    replay: u64 = 1,
+    ptk: ?Ptk = null,
+    complete: bool = false,
+    buf: [512]u8 = undefined,
+
+    /// Picks a fresh ANonce and builds message 1 of the 4-way handshake.
+    pub fn start(a: *Authenticator, random: *const fn ([]u8) void) []const u8 {
+        random(&a.anonce);
+        a.replay = 1;
+        a.ptk = null;
+        a.complete = false;
+        return a.message1();
+    }
+
+    pub fn message1(a: *Authenticator) []const u8 {
+        return buildKeyFrame(&a.buf, 2, info.version_aes | info.pairwise | info.ack, 16, a.replay, a.anonce, &.{}, null);
+    }
+
+    /// Checks message 2 and answers with message 3 (null if the MIC is
+    /// wrong: a wrong passphrase).
+    pub fn message3(a: *Authenticator, m2: []const u8) ?[]const u8 {
+        const k = KeyFrame.parse(m2) orelse return null;
+        a.ptk = derivePtk(&a.pmk, a.aa, a.spa, a.anonce, k.nonce);
+        if (!k.micValid(&a.ptk.?.kck)) return null;
+        return a.encrypted(info.version_aes | info.pairwise | info.ack | info.mic | info.install | info.secure | info.encrypted, true);
+    }
+
+    pub fn groupMessage1(a: *Authenticator) []const u8 {
+        return a.encrypted(info.version_aes | info.ack | info.mic | info.secure | info.encrypted, false);
+    }
+
+    /// Handles an EAPOL-Key frame (message 2 or message 4) from the station.
+    pub fn handle(a: *Authenticator, frame: []const u8, actions: *Actions) void {
+        actions.* = .{};
+        const k = KeyFrame.parse(frame) orelse return;
+        if (k.info & info.version_mask != info.version_aes) return;
+        if (k.info & info.pairwise == 0 or k.info & info.mic == 0 or k.info & info.ack != 0) return;
+        if (k.replay != a.replay) return;
+        if (k.info & info.secure == 0) {
+            if (a.message3(frame)) |m3| actions.reply = m3;
+        } else {
+            const ptk = a.ptk orelse return;
+            if (!k.micValid(&ptk.kck)) return;
+            actions.pairwise = ptk.tk;
+            actions.complete = true;
+            a.complete = true;
+        }
+    }
+
+    fn encrypted(a: *Authenticator, key_info: u16, with_rsn: bool) []const u8 {
+        a.replay += 1;
+        var plain: [64]u8 = undefined;
+        var n: usize = 0;
+        if (with_rsn) {
+            @memcpy(plain[0..a.rsn.len], a.rsn);
+            n = a.rsn.len;
+        }
+        const kde = [_]u8{ 0xdd, 22, 0x00, 0x0f, 0xac, 1, 1, 0 };
+        @memcpy(plain[n..][0..kde.len], &kde);
+        n += kde.len;
+        @memcpy(plain[n..][0..16], &a.gtk);
+        n += 16;
+        // Padded to a multiple of 8 with 0xdd and zeros.
+        if (n % 8 != 0) {
+            plain[n] = 0xdd;
+            n += 1;
+            while (n % 8 != 0) : (n += 1) plain[n] = 0;
+        }
+        var wrapped: [72]u8 = undefined;
+        aesWrap(&a.ptk.?.kek, plain[0..n], wrapped[0 .. n + 8]);
+        var f = buildKeyFrame(&a.buf, 2, key_info, 16, a.replay, a.anonce, wrapped[0 .. n + 8], null);
+        const m = a.buf[0..f.len];
+        m[65] = a.rsc;
+        m[mic_at..][0..16].* = mic(&a.ptk.?.kck, m);
+        f = m;
+        return f;
+    }
+};
+
 // --- Tests ----------------------------------------------------------------------
 
 const testing = std.testing;
@@ -459,66 +547,6 @@ test "AES key wrap (RFC 3394 test vector)" {
     try testing.expectError(error.BadKeyWrap, aesUnwrap(&kek, &wrapped, &back));
 }
 
-/// The access point's side, for testing the supplicant against.
-const Authenticator = struct {
-    pmk: [32]u8,
-    aa: Mac,
-    spa: Mac,
-    rsn: []const u8,
-    gtk: [16]u8,
-    anonce: Nonce = @splat(0x5a),
-    replay: u64 = 1,
-    ptk: ?Ptk = null,
-    buf: [512]u8 = undefined,
-
-    fn message1(a: *Authenticator) []const u8 {
-        return buildKeyFrame(&a.buf, 2, info.version_aes | info.pairwise | info.ack, 16, a.replay, a.anonce, &.{}, null);
-    }
-
-    /// Checks message 2 and answers with message 3 (null if the MIC is
-    /// wrong: a wrong passphrase).
-    fn message3(a: *Authenticator, m2: []const u8) ?[]const u8 {
-        const k = KeyFrame.parse(m2) orelse return null;
-        a.ptk = derivePtk(&a.pmk, a.aa, a.spa, a.anonce, k.nonce);
-        if (!k.micValid(&a.ptk.?.kck)) return null;
-        return a.encrypted(info.version_aes | info.pairwise | info.ack | info.mic | info.install | info.secure | info.encrypted, true);
-    }
-
-    fn groupMessage1(a: *Authenticator) []const u8 {
-        return a.encrypted(info.version_aes | info.ack | info.mic | info.secure | info.encrypted, false);
-    }
-
-    fn encrypted(a: *Authenticator, key_info: u16, with_rsn: bool) []const u8 {
-        a.replay += 1;
-        var plain: [64]u8 = undefined;
-        var n: usize = 0;
-        if (with_rsn) {
-            @memcpy(plain[0..a.rsn.len], a.rsn);
-            n = a.rsn.len;
-        }
-        const kde = [_]u8{ 0xdd, 22, 0x00, 0x0f, 0xac, 1, 1, 0 };
-        @memcpy(plain[n..][0..kde.len], &kde);
-        n += kde.len;
-        @memcpy(plain[n..][0..16], &a.gtk);
-        n += 16;
-        // Padded to a multiple of 8 with 0xdd and zeros.
-        if (n % 8 != 0) {
-            plain[n] = 0xdd;
-            n += 1;
-            while (n % 8 != 0) : (n += 1) plain[n] = 0;
-        }
-        var wrapped: [72]u8 = undefined;
-        aesWrap(&a.ptk.?.kek, plain[0..n], wrapped[0 .. n + 8]);
-        var f = buildKeyFrame(&a.buf, 2, key_info, 16, a.replay, a.anonce, wrapped[0 .. n + 8], null);
-        // RSC 5 for the group key.
-        const m = a.buf[0..f.len];
-        m[65] = 5;
-        m[mic_at..][0..16].* = mic(&a.ptk.?.kck, m);
-        f = m;
-        return f;
-    }
-};
-
 fn testRandom(buf: []u8) void {
     @memset(buf, 0x77);
 }
@@ -534,7 +562,7 @@ fn pair(passphrase: []const u8) struct { Handshake, Authenticator } {
     const spa: Mac = .{ 0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee };
     return .{
         .{ .pmk = pmkFromPassphrase(passphrase, "Home"), .aa = aa, .spa = spa, .own_rsn = &S.rsn, .ap_rsn = &S.rsn, .group_cipher = cipher_ccmp },
-        .{ .pmk = pmkFromPassphrase("correct horse", "Home"), .aa = aa, .spa = spa, .rsn = &S.rsn, .gtk = @splat(0x42) },
+        .{ .pmk = pmkFromPassphrase("correct horse", "Home"), .aa = aa, .spa = spa, .rsn = &S.rsn, .gtk = @splat(0x42), .rsc = 5 },
     };
 }
 
@@ -609,3 +637,35 @@ test "TKIP group keys have their Michael keys swapped" {
     try testing.expectEqualSlices(u8, key[24..32], g.key[16..24]);
     try testing.expectEqualSlices(u8, key[16..24], g.key[24..32]);
 }
+
+test "Authenticator.start and Authenticator.handle complete the 4-way handshake" {
+    var s, var ap = pair("correct horse");
+    var sta_act: Actions = .{};
+    var ap_act: Actions = .{};
+
+    const m1 = ap.start(testRandom);
+    var m1_copy: [256]u8 = undefined;
+    @memcpy(m1_copy[0..m1.len], m1);
+    s.handle(m1_copy[0..m1.len], testRandom, &sta_act);
+    try testing.expect(sta_act.reply != null and !sta_act.complete);
+
+    var m2_copy: [256]u8 = undefined;
+    const m2_len = sta_act.reply.?.len;
+    @memcpy(m2_copy[0..m2_len], sta_act.reply.?);
+    ap.handle(m2_copy[0..m2_len], &ap_act);
+    try testing.expect(ap_act.reply != null and !ap_act.complete);
+
+    var m3_copy: [256]u8 = undefined;
+    const m3_len = ap_act.reply.?.len;
+    @memcpy(m3_copy[0..m3_len], ap_act.reply.?);
+    s.handle(m3_copy[0..m3_len], testRandom, &sta_act);
+    try testing.expect(sta_act.complete and sta_act.reply != null);
+
+    var m4_copy: [256]u8 = undefined;
+    const m4_len = sta_act.reply.?.len;
+    @memcpy(m4_copy[0..m4_len], sta_act.reply.?);
+    ap.handle(m4_copy[0..m4_len], &ap_act);
+    try testing.expect(ap_act.complete);
+    try testing.expectEqual(sta_act.pairwise.?, ap_act.pairwise.?);
+}
+

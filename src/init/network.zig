@@ -169,16 +169,18 @@ fn run() !void {
         ethernet.look(now);
         w.look(now);
 
-        var fds: [3 + max_clients]linux.pollfd = undefined;
+        var fds: [4 + max_clients]linux.pollfd = undefined;
         fds[0] = .{ .fd = listener, .events = linux.POLL.IN, .revents = 0 };
         fds[1] = .{ .fd = w.eventFd(), .events = linux.POLL.IN, .revents = 0 };
         fds[2] = .{ .fd = w.eapolFd(), .events = linux.POLL.IN, .revents = 0 };
-        for (clients, fds[3..]) |c, *f| f.* = .{ .fd = c orelse -1, .events = linux.POLL.IN, .revents = 0 };
+        fds[3] = .{ .fd = w.dhcpFd(), .events = linux.POLL.IN, .revents = 0 };
+        for (clients, fds[4..]) |c, *f| f.* = .{ .fd = c orelse -1, .events = linux.POLL.IN, .revents = 0 };
         _ = linux.poll(&fds, fds.len, 1000);
         const t = sys.nowNs();
 
         w.events(t);
         w.eapol();
+        w.dhcp();
         w.tick(t);
         if (fds[0].revents != 0) {
             const rc = linux.accept4(listener, null, null, linux.SOCK.CLOEXEC);
@@ -195,7 +197,7 @@ fn run() !void {
                 } else sys.close(fd);
             }
         }
-        for (&clients, fds[3..]) |*c, f| {
+        for (&clients, fds[4..]) |*c, f| {
             const fd = c.* orelse continue;
             if (f.revents == 0) continue;
             var buf: [256]u8 = undefined;

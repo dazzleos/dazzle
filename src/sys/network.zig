@@ -47,6 +47,7 @@ pub const allowed_program = "/os/shell/dazzle-settings";
 
 pub const max_networks = 24;
 pub const max_adapters = 4;
+pub const max_ssid = 32;
 
 pub const Security = enum {
     open,
@@ -159,6 +160,8 @@ pub const Connection = struct {
     ssid_buf: [32]u8 = undefined,
     ssid_len: u8 = 0,
     address: ?[4]u8 = null,
+    prefix: u6 = 24,
+    addressing: Addressing = .dhcp,
     adapter_buf: [16]u8 = undefined,
     adapter_len: u8 = 0,
 
@@ -178,6 +181,201 @@ pub const Connection = struct {
     pub fn setAdapter(c: *Connection, name: []const u8) void {
         c.adapter_len = @intCast(@min(name.len, c.adapter_buf.len));
         @memcpy(c.adapter_buf[0..c.adapter_len], name[0..c.adapter_len]);
+    }
+};
+
+pub const HotspotState = enum {
+    off,
+    active,
+    failed,
+};
+
+pub const max_hotspot_clients = 8;
+
+pub const HotspotClient = struct {
+    mac: [6]u8 = @splat(0),
+    address: ?[4]u8 = null,
+    name_buf: [32]u8 = undefined,
+    name_len: u8 = 0,
+
+    pub fn name(c: *const HotspotClient) []const u8 {
+        return c.name_buf[0..c.name_len];
+    }
+
+    pub fn setName(c: *HotspotClient, s: []const u8) void {
+        c.name_len = @intCast(@min(s.len, c.name_buf.len));
+        @memcpy(c.name_buf[0..c.name_len], s[0..c.name_len]);
+    }
+};
+
+pub const HotspotNetwork = struct {
+    address: Ip4 = .{ 192, 168, 4, 0 },
+    prefix: u6 = 24,
+    host_ip: ?Ip4 = null,
+
+    pub const default: HotspotNetwork = .{};
+
+    pub fn parse(cidr: []const u8) ?HotspotNetwork {
+        const slash = std.mem.indexOfScalar(u8, cidr, '/') orelse return null;
+        const ip = parseIp4(cidr[0..slash]) orelse return null;
+        const prefix = std.fmt.parseInt(u6, cidr[slash + 1 ..], 10) catch return null;
+        if (prefix < 8 or prefix > 26) return null;
+        const mask = maskBits(prefix);
+        const addr_u32 = std.mem.readInt(u32, &ip, .big);
+        const host = addr_u32 & ~mask;
+        if (host != 0 and host != 1) return null;
+        var net_ip: Ip4 = undefined;
+        std.mem.writeInt(u32, &net_ip, addr_u32 & mask, .big);
+        if (net_ip[0] == 0 or net_ip[0] >= 224) return null;
+        return .{ .address = net_ip, .prefix = prefix };
+    }
+
+    pub fn parseHost(cidr: []const u8) ?HotspotNetwork {
+        const slash = std.mem.indexOfScalar(u8, cidr, '/') orelse return null;
+        const ip = parseIp4(cidr[0..slash]) orelse return null;
+        const prefix = std.fmt.parseInt(u6, cidr[slash + 1 ..], 10) catch return null;
+        if (prefix < 8 or prefix > 26) return null;
+        const mask = maskBits(prefix);
+        const addr_u32 = std.mem.readInt(u32, &ip, .big);
+        const host = addr_u32 & ~mask;
+        if (host == 0 or host == ~mask) return null;
+        var net_ip: Ip4 = undefined;
+        std.mem.writeInt(u32, &net_ip, addr_u32 & mask, .big);
+        if (net_ip[0] == 0 or net_ip[0] >= 224) return null;
+        return .{
+            .address = net_ip,
+            .prefix = prefix,
+            .host_ip = if (host == 1) null else ip,
+        };
+    }
+
+    pub fn validHostIp(n: HotspotNetwork, ip: Ip4) bool {
+        const mask = maskBits(n.prefix);
+        const net_u32 = std.mem.readInt(u32, &n.address, .big) & mask;
+        const ip_u32 = std.mem.readInt(u32, &ip, .big);
+        if ((ip_u32 & mask) != net_u32) return false;
+        const host = ip_u32 & ~mask;
+        return host != 0 and host != ~mask;
+    }
+
+    pub fn maskBits(prefix: u6) u32 {
+        return if (prefix == 0) 0 else @as(u32, std.math.maxInt(u32)) << @intCast(32 - @as(u6, prefix));
+    }
+
+    pub fn subnetMask(n: HotspotNetwork) Ip4 {
+        var m: Ip4 = undefined;
+        std.mem.writeInt(u32, &m, maskBits(n.prefix), .big);
+        return m;
+    }
+
+    pub fn defaultServerIp(n: HotspotNetwork) Ip4 {
+        const net_u32 = std.mem.readInt(u32, &n.address, .big) & maskBits(n.prefix);
+        var out: Ip4 = undefined;
+        std.mem.writeInt(u32, &out, net_u32 | 1, .big);
+        return out;
+    }
+
+    pub fn serverIp(n: HotspotNetwork) Ip4 {
+        if (n.host_ip) |hip| if (n.validHostIp(hip)) return hip;
+        return n.defaultServerIp();
+    }
+
+    pub fn format(n: HotspotNetwork, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        const a = n.address;
+        try w.print("{d}.{d}.{d}.{d}/{d}", .{ a[0], a[1], a[2], a[3], n.prefix });
+    }
+};
+
+pub const Hotspot = struct {
+    state: HotspotState = .off,
+    failure: Failure = .none,
+    ssid_buf: [32]u8 = undefined,
+    ssid_len: u8 = 0,
+    pass_buf: [63]u8 = undefined,
+    pass_len: u8 = 0,
+    address: ?[4]u8 = null,
+    prefix: u6 = 24,
+    upstream_buf: [16]u8 = undefined,
+    upstream_len: u8 = 0,
+    adapter_buf: [16]u8 = undefined,
+    adapter_len: u8 = 0,
+    clients: [max_hotspot_clients]HotspotClient = undefined,
+    client_len: usize = 0,
+
+    pub fn upstream(h: *const Hotspot) []const u8 {
+        return h.upstream_buf[0..h.upstream_len];
+    }
+
+    pub fn setUpstream(h: *Hotspot, name: []const u8) void {
+        h.upstream_len = @intCast(@min(name.len, h.upstream_buf.len));
+        @memcpy(h.upstream_buf[0..h.upstream_len], name[0..h.upstream_len]);
+    }
+
+    pub fn network(h: *const Hotspot) HotspotNetwork {
+        const ip = h.address orelse return .{};
+        const p: u6 = if (h.prefix >= 8 and h.prefix <= 26) h.prefix else 24;
+        const mask = HotspotNetwork.maskBits(p);
+        const addr_u32 = std.mem.readInt(u32, &ip, .big);
+        var net_ip: Ip4 = undefined;
+        std.mem.writeInt(u32, &net_ip, addr_u32 & mask, .big);
+        var hn: HotspotNetwork = .{ .address = net_ip, .prefix = p };
+        if (!std.mem.eql(u8, &ip, &hn.defaultServerIp())) hn.host_ip = ip;
+        return hn;
+    }
+
+    pub fn ssid(h: *const Hotspot) []const u8 {
+        return h.ssid_buf[0..h.ssid_len];
+    }
+
+    pub fn setSsid(h: *Hotspot, s: []const u8) void {
+        h.ssid_len = @intCast(@min(s.len, h.ssid_buf.len));
+        @memcpy(h.ssid_buf[0..h.ssid_len], s[0..h.ssid_len]);
+    }
+
+    pub fn passphrase(h: *const Hotspot) []const u8 {
+        return h.pass_buf[0..h.pass_len];
+    }
+
+    pub fn setPassphrase(h: *Hotspot, p: []const u8) void {
+        h.pass_len = @intCast(@min(p.len, h.pass_buf.len));
+        @memcpy(h.pass_buf[0..h.pass_len], p[0..h.pass_len]);
+    }
+
+    pub fn adapter(h: *const Hotspot) []const u8 {
+        return h.adapter_buf[0..h.adapter_len];
+    }
+
+    pub fn setAdapter(h: *Hotspot, name: []const u8) void {
+        h.adapter_len = @intCast(@min(name.len, h.adapter_buf.len));
+        @memcpy(h.adapter_buf[0..h.adapter_len], name[0..h.adapter_len]);
+    }
+
+    pub fn clientSlice(h: *const Hotspot) []const HotspotClient {
+        return h.clients[0..h.client_len];
+    }
+
+    pub fn addClient(h: *Hotspot, c: HotspotClient) void {
+        for (h.clients[0..h.client_len]) |*existing| {
+            if (std.mem.eql(u8, &existing.mac, &c.mac)) {
+                if (c.address != null) existing.address = c.address;
+                if (c.name_len > 0) existing.setName(c.name());
+                return;
+            }
+        }
+        if (h.client_len < max_hotspot_clients) {
+            h.clients[h.client_len] = c;
+            h.client_len += 1;
+        }
+    }
+
+    pub fn removeClient(h: *Hotspot, mac: [6]u8) void {
+        for (h.clients[0..h.client_len], 0..) |*existing, i| {
+            if (std.mem.eql(u8, &existing.mac, &mac)) {
+                std.mem.copyForwards(HotspotClient, h.clients[i .. h.client_len - 1], h.clients[i + 1 .. h.client_len]);
+                h.client_len -= 1;
+                return;
+            }
+        }
     }
 };
 
@@ -205,6 +403,39 @@ pub fn connectAdapterRequest(buf: []u8, adapter: []const u8, ssid: []const u8, p
     var w: std.Io.Writer = .fixed(buf);
     if (adapter.len > 0) w.print("wifi connect {s} {x} ", .{ adapter, ssid }) catch {} else w.print("wifi connect {x} ", .{ssid}) catch {};
     if (passphrase.len == 0) w.writeAll("-") catch {} else w.print("{x}", .{passphrase}) catch {};
+    w.writeAll("\n") catch {};
+    return w.buffered();
+}
+
+/// A request to start a Wi-Fi hotspot.
+pub fn hotspotRequest(buf: []u8, ssid: []const u8, passphrase: []const u8) []const u8 {
+    return hotspotAdapterRequest(buf, "", ssid, passphrase);
+}
+
+/// A request to start a Wi-Fi hotspot on `adapter` (or the default adapter when empty).
+pub fn hotspotAdapterRequest(buf: []u8, adapter: []const u8, ssid: []const u8, passphrase: []const u8) []const u8 {
+    return hotspotNetworkRequest(buf, adapter, ssid, passphrase, .{});
+}
+
+/// A request to start a Wi-Fi hotspot with a chosen IPv4 network.
+pub fn hotspotNetworkRequest(buf: []u8, adapter: []const u8, ssid: []const u8, passphrase: []const u8, network: HotspotNetwork) []const u8 {
+    return hotspotFullRequest(buf, adapter, ssid, passphrase, network, "");
+}
+
+/// A request to start a Wi-Fi hotspot with a chosen IPv4 network and upstream interface.
+pub fn hotspotFullRequest(buf: []u8, adapter: []const u8, ssid: []const u8, passphrase: []const u8, network: HotspotNetwork, upstream: []const u8) []const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    if (adapter.len > 0) w.print("wifi hotspot {s} {x} ", .{ adapter, ssid }) catch {} else w.print("wifi hotspot {x} ", .{ssid}) catch {};
+    if (passphrase.len == 0) w.writeAll("-") catch {} else w.print("{x}", .{passphrase}) catch {};
+    if (!std.mem.eql(u8, &network.address, &HotspotNetwork.default.address) or network.prefix != HotspotNetwork.default.prefix) {
+        w.print(" {f}", .{network}) catch {};
+    }
+    if (network.host_ip) |hip| {
+        if (!std.mem.eql(u8, &hip, &network.defaultServerIp())) {
+            w.print(" ip={d}.{d}.{d}.{d}", .{ hip[0], hip[1], hip[2], hip[3] }) catch {};
+        }
+    }
+    if (upstream.len > 0) w.print(" via={s}", .{upstream}) catch {};
     w.writeAll("\n") catch {};
     return w.buffered();
 }
@@ -266,6 +497,17 @@ pub fn ethernetAdapterRequest(buf: []u8, adapter: []const u8, a: Addressing) []c
     return w.buffered();
 }
 
+/// The request choosing how the Wi-Fi adapter `adapter` gets its address in Client mode.
+pub fn wifiAddressRequest(buf: []u8, adapter: []const u8, a: Addressing) []const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    if (adapter.len > 0) w.print("wifi address {s} ", .{adapter}) catch {} else w.writeAll("wifi address ") catch {};
+    switch (a) {
+        .dhcp => w.writeAll("dhcp\n") catch {},
+        .static => |st| w.print("static {f}\n", .{st}) catch {},
+    }
+    return w.buffered();
+}
+
 pub const EthernetRequest = struct {
     adapter_buf: [16]u8 = undefined,
     adapter_len: u8 = 0,
@@ -294,18 +536,37 @@ pub const WifiRequest = union(enum) {
             return d.adapter_buf[0..d.adapter_len];
         }
     },
-    connect: struct {
+    address: EthernetRequest,
+    connect: Connect,
+    hotspot: Connect,
+
+    pub const Connect = struct {
         adapter_buf: [16]u8 = undefined,
         adapter_len: u8 = 0,
         ssid_buf: [32]u8,
         ssid_len: u8,
         pass_buf: [63]u8,
         pass_len: u8,
+        network: HotspotNetwork = .{},
+        upstream_buf: [16]u8 = undefined,
+        upstream_len: u8 = 0,
 
         pub fn adapter(c: *const @This()) []const u8 {
             return c.adapter_buf[0..c.adapter_len];
         }
-    },
+
+        pub fn ssid(c: *const @This()) []const u8 {
+            return c.ssid_buf[0..c.ssid_len];
+        }
+
+        pub fn passphrase(c: *const @This()) []const u8 {
+            return c.pass_buf[0..c.pass_len];
+        }
+
+        pub fn upstream(c: *const @This()) []const u8 {
+            return c.upstream_buf[0..c.upstream_len];
+        }
+    };
 };
 
 pub const Request = union(enum) {
@@ -355,23 +616,75 @@ pub const Request = union(enum) {
             }
             return .{ .wifi = .{ .disconnect = dc } };
         }
-        if (!std.mem.eql(u8, what, "connect")) return null;
-        const tok1 = f.next() orelse return null;
-        const tok2 = f.next() orelse return null;
-        var r: @FieldType(WifiRequest, "connect") = .{ .ssid_buf = undefined, .ssid_len = 0, .pass_buf = undefined, .pass_len = 0 };
-        const ssid_hex, const pass_hex = if (f.next()) |tok3| blk: {
+        if (std.mem.eql(u8, what, "address")) {
+            const first = f.next() orelse return null;
+            var er: EthernetRequest = .{ .addressing = .dhcp };
+            const how = if (std.mem.eql(u8, first, "dhcp") or std.mem.eql(u8, first, "static")) first else blk: {
+                if (first.len > er.adapter_buf.len) return null;
+                er.adapter_len = @intCast(first.len);
+                @memcpy(er.adapter_buf[0..first.len], first);
+                break :blk f.next() orelse return null;
+            };
+            if (std.mem.eql(u8, how, "dhcp")) {
+                er.addressing = .dhcp;
+                return .{ .wifi = .{ .address = er } };
+            }
+            if (!std.mem.eql(u8, how, "static")) return null;
+            const cidr = f.next() orelse return null;
+            er.addressing = .{ .static = Static.parse(cidr, f.next() orelse "-") orelse return null };
+            return .{ .wifi = .{ .address = er } };
+        }
+        const is_connect = std.mem.eql(u8, what, "connect");
+        const is_hotspot = std.mem.eql(u8, what, "hotspot");
+        if (!is_connect and !is_hotspot) return null;
+        var toks: [6][]const u8 = undefined;
+        var tok_len: usize = 0;
+        while (f.next()) |t| {
+            if (tok_len >= toks.len) return null;
+            toks[tok_len] = t;
+            tok_len += 1;
+        }
+        var r: WifiRequest.Connect = .{ .ssid_buf = undefined, .ssid_len = 0, .pass_buf = undefined, .pass_len = 0 };
+        var host_ip_override: ?Ip4 = null;
+        var net_cidr: ?[]const u8 = null;
+        while (is_hotspot and tok_len > 2) {
+            const last = toks[tok_len - 1];
+            if (std.mem.startsWith(u8, last, "via=")) {
+                const via = last[4..];
+                if (via.len > r.upstream_buf.len) return null;
+                r.upstream_len = @intCast(via.len);
+                @memcpy(r.upstream_buf[0..via.len], via);
+                tok_len -= 1;
+            } else if (std.mem.startsWith(u8, last, "ip=")) {
+                host_ip_override = parseIp4(last[3..]) orelse return null;
+                tok_len -= 1;
+            } else if (std.mem.indexOfScalar(u8, last, '/') != null) {
+                net_cidr = last;
+                tok_len -= 1;
+            } else break;
+        }
+        const ssid_hex, const pass_hex = if (tok_len == 3) blk: {
+            const tok1 = toks[0];
             if (tok1.len > r.adapter_buf.len) return null;
             r.adapter_len = @intCast(tok1.len);
             @memcpy(r.adapter_buf[0..tok1.len], tok1);
-            break :blk .{ tok2, tok3 };
-        } else .{ tok1, tok2 };
+            break :blk .{ toks[1], toks[2] };
+        } else if (tok_len == 2) .{ toks[0], toks[1] } else return null;
         if (ssid_hex.len > 64 or ssid_hex.len % 2 != 0) return null;
         r.ssid_len = @intCast((std.fmt.hexToBytes(&r.ssid_buf, ssid_hex) catch return null).len);
         if (!std.mem.eql(u8, pass_hex, "-")) {
             if (pass_hex.len > 126 or pass_hex.len % 2 != 0) return null;
             r.pass_len = @intCast((std.fmt.hexToBytes(&r.pass_buf, pass_hex) catch return null).len);
         }
-        return .{ .wifi = .{ .connect = r } };
+        if (net_cidr) |cidr| {
+            if (!is_hotspot) return null;
+            r.network = HotspotNetwork.parse(cidr) orelse return null;
+        }
+        if (host_ip_override) |hip| {
+            if (!is_hotspot or !r.network.validHostIp(hip)) return null;
+            r.network.host_ip = hip;
+        }
+        return if (is_hotspot) .{ .wifi = .{ .hotspot = r } } else .{ .wifi = .{ .connect = r } };
     }
 };
 
@@ -407,6 +720,7 @@ pub const Report = struct {
     adapter_len: usize = 0,
     scanning: bool = false,
     connection: Connection = .{},
+    hotspot: Hotspot = .{},
     networks: [max_networks]Network = undefined,
     len: usize = 0,
     /// The manager refused the client.
@@ -514,8 +828,41 @@ pub const Report = struct {
         const c = &r.connection;
         w.print("wifi connection {s} {s} ", .{ @tagName(c.state), @tagName(c.failure) }) catch {};
         if (c.ssid_len == 0) w.writeAll("-") catch {} else w.print("{x}", .{c.ssid()}) catch {};
-        if (c.address) |a| w.print(" {d}.{d}.{d}.{d}", .{ a[0], a[1], a[2], a[3] }) catch {} else w.writeAll(" -") catch {};
-        if (c.adapter_len > 0) w.print(" {s}\n", .{c.adapter()}) catch {} else w.writeAll("\n") catch {};
+        if (c.address) |a| {
+            if (c.prefix != 24) {
+                w.print(" {d}.{d}.{d}.{d}/{d}", .{ a[0], a[1], a[2], a[3], c.prefix }) catch {};
+            } else {
+                w.print(" {d}.{d}.{d}.{d}", .{ a[0], a[1], a[2], a[3] }) catch {};
+            }
+        } else w.writeAll(" -") catch {};
+        if (c.adapter_len > 0) w.print(" {s}", .{c.adapter()}) catch {};
+        switch (c.addressing) {
+            .dhcp => {},
+            .static => |st| w.print(" static {f}", .{st}) catch {},
+        }
+        w.writeAll("\n") catch {};
+        const h = &r.hotspot;
+        if (h.state != .off) {
+            w.print("wifi hotspot {s} {s} ", .{ @tagName(h.state), @tagName(h.failure) }) catch {};
+            if (h.ssid_len == 0) w.writeAll("-") catch {} else w.print("{x}", .{h.ssid()}) catch {};
+            if (h.pass_len == 0) w.writeAll(" -") catch {} else w.print(" {x}", .{h.passphrase()}) catch {};
+            if (h.address) |a| {
+                if (h.prefix != 24) {
+                    w.print(" {d}.{d}.{d}.{d}/{d}", .{ a[0], a[1], a[2], a[3], h.prefix }) catch {};
+                } else {
+                    w.print(" {d}.{d}.{d}.{d}", .{ a[0], a[1], a[2], a[3] }) catch {};
+                }
+            } else w.writeAll(" -") catch {};
+            if (h.adapter_len > 0) w.print(" {s}", .{h.adapter()}) catch {};
+            if (h.upstream_len > 0) w.print(" via={s}", .{h.upstream()}) catch {};
+            w.writeAll("\n") catch {};
+            for (h.clientSlice()) |*cl| {
+                const m = cl.mac;
+                w.print("wifi client {x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2} ", .{ m[0], m[1], m[2], m[3], m[4], m[5] }) catch {};
+                if (cl.address) |a| w.print("{d}.{d}.{d}.{d} ", .{ a[0], a[1], a[2], a[3] }) catch {} else w.writeAll("- ") catch {};
+                if (cl.name_len == 0) w.writeAll("-\n") catch {} else w.print("{x}\n", .{cl.name()}) catch {};
+            }
+        }
         for (r.slice()) |*n| {
             w.print("wifi network {d} {d} {s} {x}\n", .{ n.signal_mbm, n.freq_mhz, @tagName(n.security), n.ssid() }) catch {};
         }
@@ -566,15 +913,63 @@ pub const Report = struct {
                     c.ssid_len = @intCast((std.fmt.hexToBytes(&c.ssid_buf, hex) catch continue).len);
                 }
                 if (f.next()) |addr| if (!std.mem.eql(u8, addr, "-")) {
-                    var a: [4]u8 = undefined;
-                    var parts = std.mem.tokenizeScalar(u8, addr, '.');
-                    const ok = for (&a) |*b| {
-                        b.* = std.fmt.parseInt(u8, parts.next() orelse break false, 10) catch break false;
-                    } else true;
-                    if (ok) c.address = a;
+                    if (std.mem.indexOfScalar(u8, addr, '/')) |slash| {
+                        c.address = parseIp4(addr[0..slash]);
+                        c.prefix = std.fmt.parseInt(u6, addr[slash + 1 ..], 10) catch 24;
+                    } else {
+                        c.address = parseIp4(addr);
+                    }
                 };
-                if (f.next()) |ifname| if (!std.mem.eql(u8, ifname, "-")) c.setAdapter(ifname);
+                while (f.next()) |tok| {
+                    if (std.mem.eql(u8, tok, "static")) {
+                        const cidr = f.next() orelse break;
+                        if (Static.parse(cidr, f.next() orelse "-")) |st| c.addressing = .{ .static = st };
+                    } else if (std.mem.eql(u8, tok, "dhcp")) {
+                        c.addressing = .dhcp;
+                    } else if (!std.mem.eql(u8, tok, "-")) {
+                        c.setAdapter(tok);
+                    }
+                }
                 r.connection = c;
+            } else if (std.mem.eql(u8, kind, "hotspot")) {
+                var h: Hotspot = .{};
+                h.state = std.meta.stringToEnum(HotspotState, f.next() orelse continue) orelse .off;
+                h.failure = std.meta.stringToEnum(Failure, f.next() orelse continue) orelse .none;
+                const ssid_hex = f.next() orelse continue;
+                if (!std.mem.eql(u8, ssid_hex, "-") and ssid_hex.len <= 64 and ssid_hex.len % 2 == 0) {
+                    h.ssid_len = @intCast((std.fmt.hexToBytes(&h.ssid_buf, ssid_hex) catch continue).len);
+                }
+                const pass_hex = f.next() orelse continue;
+                if (!std.mem.eql(u8, pass_hex, "-") and pass_hex.len <= 126 and pass_hex.len % 2 == 0) {
+                    h.pass_len = @intCast((std.fmt.hexToBytes(&h.pass_buf, pass_hex) catch continue).len);
+                }
+                if (f.next()) |addr| if (!std.mem.eql(u8, addr, "-")) {
+                    if (std.mem.indexOfScalar(u8, addr, '/')) |slash| {
+                        h.address = parseIp4(addr[0..slash]);
+                        h.prefix = std.fmt.parseInt(u6, addr[slash + 1 ..], 10) catch 24;
+                    } else {
+                        h.address = parseIp4(addr);
+                    }
+                };
+                while (f.next()) |tok| {
+                    if (std.mem.startsWith(u8, tok, "via=")) {
+                        h.setUpstream(tok[4..]);
+                    } else if (!std.mem.eql(u8, tok, "-")) {
+                        h.setAdapter(tok);
+                    }
+                }
+                r.hotspot = h;
+            } else if (std.mem.eql(u8, kind, "client")) {
+                var cl: HotspotClient = .{};
+                var mac = std.mem.tokenizeScalar(u8, f.next() orelse continue, ':');
+                for (&cl.mac) |*b| b.* = std.fmt.parseInt(u8, mac.next() orelse "0", 16) catch 0;
+                if (f.next()) |addr| if (!std.mem.eql(u8, addr, "-")) {
+                    cl.address = parseIp4(addr);
+                };
+                if (f.next()) |name_hex| if (!std.mem.eql(u8, name_hex, "-") and name_hex.len <= 64 and name_hex.len % 2 == 0) {
+                    cl.name_len = @intCast((std.fmt.hexToBytes(&cl.name_buf, name_hex) catch continue).len);
+                };
+                r.hotspot.addClient(cl);
             } else if (std.mem.eql(u8, kind, "adapter")) {
                 var a: Adapter = .{};
                 a.setName(f.next() orelse continue);
@@ -703,6 +1098,31 @@ test "requests and the connection state go through the socket" {
     const failed = Report.parse(rep.write(&out)).?;
     try testing.expectEqual(Failure.wrong_password, failed.connection.failure);
     try testing.expect(failed.connection.address == null and failed.connection.ssid_len == 0);
+
+    const hreq = hotspotAdapterRequest(&buf, "wlan0", "dazzle", "hunter22");
+    try testing.expectEqualStrings("wifi hotspot wlan0 64617a7a6c65 68756e7465723232\n", hreq);
+    const hr = Request.parse(hreq).?.wifi.hotspot;
+    try testing.expectEqualStrings("wlan0", hr.adapter());
+    try testing.expectEqualStrings("dazzle", hr.ssid());
+    try testing.expectEqualStrings("hunter22", hr.passphrase());
+
+    rep.hotspot = .{ .state = .active, .address = .{ 192, 168, 4, 1 } };
+    rep.hotspot.setSsid("dazzle");
+    rep.hotspot.setPassphrase("hunter22");
+    rep.hotspot.setAdapter("wlan0");
+    var cl: HotspotClient = .{ .mac = .{ 0xa4, 0x5e, 0x60, 0x12, 0x34, 0x56 }, .address = .{ 192, 168, 4, 10 } };
+    cl.setName("laptop");
+    rep.hotspot.addClient(cl);
+    const hback = Report.parse(rep.write(&out)).?;
+    try testing.expectEqual(HotspotState.active, hback.hotspot.state);
+    try testing.expectEqualStrings("dazzle", hback.hotspot.ssid());
+    try testing.expectEqualStrings("hunter22", hback.hotspot.passphrase());
+    try testing.expectEqualStrings("wlan0", hback.hotspot.adapter());
+    try testing.expectEqual([4]u8{ 192, 168, 4, 1 }, hback.hotspot.address.?);
+    try testing.expectEqual(@as(usize, 1), hback.hotspot.clientSlice().len);
+    try testing.expectEqual(cl.mac, hback.hotspot.clientSlice()[0].mac);
+    try testing.expectEqual([4]u8{ 192, 168, 4, 10 }, hback.hotspot.clientSlice()[0].address.?);
+    try testing.expectEqualStrings("laptop", hback.hotspot.clientSlice()[0].name());
 }
 
 test "the wired adapter's addressing goes through the socket" {

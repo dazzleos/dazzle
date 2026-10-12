@@ -311,7 +311,7 @@ test "video memory: choosing a size, then a restart" {
     view.click(u, view.findType(u.root.?, VideoMemoryMenu).?);
     u.frame(1280, 720, 2, settings);
     // 434 MB of memory: no more than half of it.
-    const menu = u.menu.?.items;
+    const menu = u.menu.?.content.items;
     try testing.expectEqualStrings("128 MB (chosen)", menu[2].label);
     try testing.expect(!menu[2].enabled);
     try testing.expect(menu[3].enabled and !menu[4].enabled);

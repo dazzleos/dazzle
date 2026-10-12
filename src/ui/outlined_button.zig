@@ -24,6 +24,8 @@ pub const OutlinedButton = struct {
     label: []const u8 = "",
     /// An icon before the label (or alone, without one).
     icon: ?@import("icons").Icon = null,
+    /// An icon after the label (for menu or forward buttons).
+    trailing_icon: ?@import("icons").Icon = null,
     child: ?Widget = null,
     /// Without it the button is disabled.
     on_press: ?Callback = null,
@@ -52,6 +54,9 @@ pub const OutlinedButton = struct {
         const content = self.child orelse if (self.icon) |which| blk: {
             const glyph = cx.make(Icon{ .icon = which, .size = icon_size, .color = label_color });
             break :blk if (self.label.len == 0) glyph else cx.make(Row{ .spacing = 8, .main_axis_size = .min, .cross_axis_alignment = .center, .children = &.{ glyph, label } });
+        } else if (self.trailing_icon) |which| blk: {
+            const glyph = cx.make(Icon{ .icon = which, .size = icon_size, .color = label_color });
+            break :blk if (self.label.len == 0) glyph else cx.make(Row{ .spacing = 8, .main_axis_size = .min, .cross_axis_alignment = .center, .children = &.{ label, glyph } });
         } else label;
         return cx.make(Pressable{
             .on_press = self.on_press,

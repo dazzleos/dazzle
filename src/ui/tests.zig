@@ -702,19 +702,20 @@ test "icons are drawn from the icon font, in their box" {
                 cx.make(ui.Icon{ .icon = .folder, .size = 48, .color = red }),
                 cx.make(ui.OutlinedButton{ .label = "Up", .icon = .arrow_upward }),
                 cx.make(ui.OutlinedButton{ .icon = .close }),
+                cx.make(ui.OutlinedButton{ .label = "More", .trailing_icon = .expand_more }),
             } }) });
         }
     }.f;
-    u.frame(300, 100, 0, Root(build){});
+    u.frame(400, 100, 0, Root(build){});
     const icon = find(u.root.?, ui.Icon).?;
     try testing.expectEqual(ui.Size{ .w = 48, .h = 48 }, icon.size);
-    var img = try Image.init(u, 300, 100);
+    var img = try Image.init(u, 400, 100);
     defer img.deinit();
     // The folder fills the middle of its box, and nothing is below it.
     try testing.expectEqual(@as(u32, 0xffff0000), img.at(24, 28));
     try testing.expectEqual(@as(u32, 0xff000000), img.at(24, 60));
-    // A button's icon goes before its label, in the label's colour; one
-    // with only an icon is round.
+    // A button's icon goes before its label (or after, for trailing_icon),
+    // in the label's colour; one with only an icon is round.
     var buttons: std.ArrayList(*Node) = .empty;
     defer buttons.deinit(testing.allocator);
     try findAll(u.root.?, ui.OutlinedButton, &buttons);
@@ -725,6 +726,8 @@ test "icons are drawn from the icon font, in their box" {
     try testing.expectEqual(label.widget.as(ui.Text).?.style.color.?, glyph.widget.as(ui.Icon).?.color.?);
     try testing.expectEqual(@as(f32, 40), buttons.items[1].size.h);
     try testing.expect(find(buttons.items[1], ui.Text) == null);
+    const with_trailing = buttons.items[2];
+    try testing.expect(find(with_trailing, ui.Text).?.position()[0] < find(with_trailing, ui.Icon).?.position()[0]);
 }
 
 test "images fit the space given, keeping their shape, and text can have its own font" {

@@ -132,10 +132,18 @@ pub const Ui = struct {
     /// A paste under way: the widget that asked (whose going drops it),
     /// and where the text goes.
     paste: ?struct { owner: *Node, on_text: widget.ValueCallback([]const u8) } = null,
-    /// The menu shown, if any: its items (with their own copy), where it
-    /// was asked for (in the window), and the widget that asked (which
-    /// takes it away if it goes). Its nodes are made at the next frame.
-    menu: ?struct { items: []menu_mod.Item, at: Point, owner: *Node } = null,
+    /// The menu or popup shown, if any: its items (with their own copy) or
+    /// builder, where it was asked for (in the window), and the widget that
+    /// asked (which takes it away if it goes). Its nodes are made at the
+    /// next frame.
+    menu: ?struct {
+        content: union(enum) {
+            items: []menu_mod.Item,
+            popup: PopupBuilder,
+        },
+        at: Point,
+        owner: *Node,
+    } = null,
     menu_root: ?*Node = null,
     /// What is being dragged, if anything (see drag.zig), and the chip
     /// that follows the pointer.
@@ -162,6 +170,20 @@ pub const Ui = struct {
     /// How many scroll views are laying out their children: what in them
     /// shows is known only after (see `Node.realizeIn`).
     scrolling: u32 = 0,
+
+    /// A builder that creates a popup widget each frame while open.
+    pub const PopupBuilder = struct {
+        ctx: *const anyopaque,
+        f: *const fn (ctx: *const anyopaque, cx: *Context) Widget,
+
+        pub fn of(ptr: anytype, comptime f: fn (@TypeOf(ptr), *Context) Widget) PopupBuilder {
+            return .{ .ctx = ptr, .f = struct {
+                fn call(raw: *const anyopaque, cx: *Context) Widget {
+                    return f(@ptrCast(@alignCast(@constCast(raw))), cx);
+                }
+            }.call };
+        }
+    };
 
     pub fn create(gpa: std.mem.Allocator, f: ?*const font.Font) !*Ui {
         const ui = try gpa.create(Ui);
@@ -293,7 +315,14 @@ pub const Ui = struct {
             return null;
         };
         var cx: Context = .{ .ui = ui, .arena = ui.arena(), .node = undefined };
-        const w = cx.make(menu_mod.Menu{ .items = menu.items });
+        const w = switch (menu.content) {
+            .items => |items| cx.make(menu_mod.Menu{ .items = items }),
+            .popup => |popup| popup.f(popup.ctx, &cx),
+        };
+        if (ui.menu_root) |m| if (m.widget.vtable != w.vtable) {
+            m.destroy();
+            ui.menu_root = null;
+        };
         if (ui.menu_root == null) ui.menu_root = Node.create(ui, w);
         const n = ui.menu_root orelse return null;
         n.build(w);
@@ -343,14 +372,26 @@ pub const Ui = struct {
     pub fn openMenu(ui: *Ui, owner: *Node, at: Point, items: []const menu_mod.Item) void {
         ui.closeMenu();
         const copy = ui.gpa.dupe(menu_mod.Item, items) catch return;
-        ui.menu = .{ .items = copy, .at = at, .owner = owner };
+        ui.menu = .{ .content = .{ .items = copy }, .at = at, .owner = owner };
         ui.needs_frame = true;
     }
 
-    /// Closes the menu, if one is shown.
+    /// Shows a custom popup built by `popup` at `at` (in the window), for
+    /// `owner` (whose going closes it). Clicking outside or pressing Escape
+    /// closes it.
+    pub fn openPopup(ui: *Ui, owner: *Node, at: Point, popup: PopupBuilder) void {
+        ui.closeMenu();
+        ui.menu = .{ .content = .{ .popup = popup }, .at = at, .owner = owner };
+        ui.needs_frame = true;
+    }
+
+    /// Closes the menu or popup, if one is shown.
     pub fn closeMenu(ui: *Ui) void {
         const menu = ui.menu orelse return;
-        ui.gpa.free(menu.items);
+        switch (menu.content) {
+            .items => |items| ui.gpa.free(items),
+            .popup => {},
+        }
         ui.menu = null;
         ui.needs_frame = true;
     }

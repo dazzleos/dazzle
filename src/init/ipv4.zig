@@ -232,6 +232,36 @@ pub fn runDhcp(name: []const u8) noreturn {
     linux.exit(0);
 }
 
+/// Opens a UDP socket bound to the DHCP server port on `name` for clients
+/// joining a Wi-Fi hotspot.
+pub fn openDhcpServer(name: []const u8) Error!linux.fd_t {
+    const ifc = Interface.named(name);
+    const sock: linux.fd_t = @intCast(try sys.check(linux.socket(linux.AF.INET, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0)));
+    errdefer sys.close(sock);
+    const one: c_int = 1;
+    _ = linux.setsockopt(sock, linux.SOL.SOCKET, linux.SO.REUSEADDR, std.mem.asBytes(&one), @sizeOf(c_int));
+    _ = linux.setsockopt(sock, linux.SOL.SOCKET, linux.SO.BROADCAST, std.mem.asBytes(&one), @sizeOf(c_int));
+    _ = linux.setsockopt(sock, linux.SOL.SOCKET, linux.SO.BINDTODEVICE, &ifc.name_buf, @intCast(ifc.name_len));
+    const addr: linux.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, dhcp.server_port), .addr = 0 };
+    _ = try sys.check(linux.bind(sock, @ptrCast(&addr), @sizeOf(@TypeOf(addr))));
+    return sock;
+}
+
+/// Reads and answers one DHCP packet on `sock` (non-blocking), returning
+/// the client's MAC address if a message was handled.
+pub fn stepDhcpServer(sock: linux.fd_t, pool: *dhcp.Pool) ?[6]u8 {
+    var in_buf: [1500]u8 = undefined;
+    var out_buf: [dhcp.max_message_size]u8 = undefined;
+    const n = linux.recvfrom(sock, &in_buf, in_buf.len, linux.MSG.DONTWAIT, null, null);
+    if (linux.errno(n) != .SUCCESS or n == 0) return null;
+    const req = dhcp.parseRequest(in_buf[0..n]) orelse return null;
+    if (pool.handle(in_buf[0..n], &out_buf)) |reply| {
+        const dest: linux.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, dhcp.client_port), .addr = @bitCast(broadcast) };
+        _ = linux.sendto(sock, reply.ptr, reply.len, 0, @ptrCast(&dest), @sizeOf(@TypeOf(dest)));
+    }
+    return req.mac;
+}
+
 /// Gives the interface called `name` a fixed address (and default route,
 /// if there is a gateway), replacing any other.
 pub fn setStatic(name: []const u8, address: Ip4, prefix: u6, gateway: ?Ip4) Error!void {
@@ -392,6 +422,19 @@ pub fn interfaceAddress(name: []const u8) ?Ip4 {
     return if (std.mem.allEqual(u8, &a, 0)) null else a;
 }
 
+/// The interface's IPv4 prefix length, defaulting to 24.
+pub fn interfacePrefix(name: []const u8) u6 {
+    const sock: linux.fd_t = @intCast(sys.check(linux.socket(linux.AF.INET, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0)) catch return 24);
+    defer sys.close(sock);
+    var req: linux.ifreq = std.mem.zeroes(linux.ifreq);
+    const n = @min(name.len, req.ifrn.name.len - 1);
+    @memcpy(req.ifrn.name[0..n], name[0..n]);
+    if (linux.errno(linux.ioctl(sock, linux.SIOCGIFNETMASK, @intFromPtr(&req))) != .SUCCESS) return 24;
+    const mask: *const linux.sockaddr.in = @ptrCast(@alignCast(&req.ifru.addr));
+    const p: u8 = @popCount(mask.addr);
+    return if (p > 0 and p <= 30) @intCast(p) else 24;
+}
+
 /// Brings an interface up. Returns whether it is up.
 pub fn bringUp(name: []const u8) bool {
     const sock: linux.fd_t = @intCast(sys.check(linux.socket(linux.AF.INET, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0)) catch return false);
@@ -407,6 +450,20 @@ pub fn bringUp(name: []const u8) bool {
         return false;
     }
     return true;
+}
+
+/// Brings an interface down (needed by some Wi-Fi drivers before changing
+/// interface type between station and AP).
+pub fn bringDown(name: []const u8) void {
+    const sock: linux.fd_t = @intCast(sys.check(linux.socket(linux.AF.INET, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0)) catch return);
+    defer sys.close(sock);
+    var req: linux.ifreq = std.mem.zeroes(linux.ifreq);
+    const n = @min(name.len, req.ifrn.name.len - 1);
+    @memcpy(req.ifrn.name[0..n], name[0..n]);
+    if (linux.errno(linux.ioctl(sock, linux.SIOCGIFFLAGS, @intFromPtr(&req))) != .SUCCESS) return;
+    if (!req.ifru.flags.UP) return;
+    req.ifru.flags.UP = false;
+    _ = linux.ioctl(sock, linux.SIOCSIFFLAGS, @intFromPtr(&req));
 }
 
 const testing = std.testing;

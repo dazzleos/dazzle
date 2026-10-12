@@ -228,14 +228,18 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             a.dirty = true;
         }
         if (actions.wifi_adapter) |ad| wifi_adapter = ad;
-        if (actions.connect != null or actions.disconnect or actions.ethernet != null or actions.wifi_adapter != null) {
+        if (actions.connect != null or actions.hotspot != null or actions.disconnect or actions.ethernet != null or actions.wifi_addressing != null or actions.wifi_adapter != null) {
             var req_buf: [256]u8 = undefined;
             if (actions.ethernet) |eth| report = info.askManager(info.manager.ethernetAdapterRequest(&req_buf, actions.ethernet_adapter.slice(), eth));
-            if (actions.connect != null or actions.disconnect) {
+            if (actions.wifi_addressing) |addr| report = info.askManager(info.manager.wifiAddressRequest(&req_buf, wifi_adapter.slice(), addr));
+            if (actions.hotspot) |*h| {
+                print("dazzle-settings: starting access point \"{s}\"\n", .{h.ssid()});
+                report = info.askManager(info.manager.hotspotFullRequest(&req_buf, h.adapter.slice(), h.ssid(), h.passphrase(), h.network, h.upstream.slice()));
+            } else if (actions.connect != null or actions.disconnect) {
                 const req = if (actions.connect) |*j| info.manager.connectAdapterRequest(&req_buf, j.adapter.slice(), j.ssid(), j.passphrase()) else info.manager.disconnectRequest(&req_buf, wifi_adapter.slice());
                 if (actions.connect) |*j| print("dazzle-settings: joining \"{s}\"\n", .{j.ssid()});
                 report = info.askManager(req);
-            } else if (actions.wifi_adapter != null) {
+            } else if (actions.wifi_adapter != null and actions.wifi_addressing == null) {
                 report = info.askManager(info.manager.scanRequest(&req_buf, wifi_adapter.slice()));
             }
             actions = .{};

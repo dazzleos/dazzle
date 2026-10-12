@@ -240,6 +240,228 @@ pub fn broadcastAddress(ip: Ip4, prefix: u6) Ip4 {
     return out;
 }
 
+/// A parsed client message for the DHCP server.
+pub const ClientMessage = struct {
+    type: MessageType,
+    xid: u32,
+    mac: Mac,
+    ciaddr: Ip4 = .{ 0, 0, 0, 0 },
+    requested_ip: ?Ip4 = null,
+    server_id: ?Ip4 = null,
+    hostname: []const u8 = "",
+};
+
+/// Parses a client BOOTREQUEST message.
+pub fn parseRequest(msg: []const u8) ?ClientMessage {
+    if (msg.len < header_size + 4) return null;
+    if (msg[0] != 1 or msg[1] != 1 or msg[2] != 6) return null; // BOOTREQUEST, Ethernet
+    if (!std.mem.eql(u8, msg[header_size..][0..4], &magic_cookie)) return null;
+    var r: ClientMessage = .{
+        .type = @enumFromInt(0),
+        .xid = std.mem.readInt(u32, msg[4..8], .big),
+        .mac = msg[28..34].*,
+        .ciaddr = msg[12..16].*,
+    };
+    var have_type = false;
+    var at: usize = header_size + 4;
+    while (at < msg.len) {
+        const code = msg[at];
+        if (code == Option.end) break;
+        if (code == Option.pad) {
+            at += 1;
+            continue;
+        }
+        if (at + 1 >= msg.len) return null;
+        const len = msg[at + 1];
+        if (at + 2 + len > msg.len) return null;
+        const data = msg[at + 2 ..][0..len];
+        at += 2 + len;
+        switch (code) {
+            Option.message_type => if (len == 1) {
+                r.type = @enumFromInt(data[0]);
+                have_type = true;
+            },
+            Option.requested_ip => if (len == 4) {
+                r.requested_ip = data[0..4].*;
+            },
+            Option.server_id => if (len == 4) {
+                r.server_id = data[0..4].*;
+            },
+            Option.hostname => r.hostname = data[0..@min(data.len, 63)],
+            else => {},
+        }
+    }
+    return if (have_type) r else null;
+}
+
+pub const ServerReply = struct {
+    type: MessageType,
+    xid: u32,
+    mac: Mac,
+    yiaddr: Ip4,
+    server_id: Ip4,
+    subnet_mask: Ip4 = .{ 255, 255, 255, 0 },
+    lease_time: u32 = 3600,
+    share_internet: bool = true,
+    dns: ?Ip4 = null,
+};
+
+/// Builds a server BOOTREPLY (OFFER, ACK, or NAK) into `buf`.
+pub fn buildReply(buf: *[max_message_size]u8, r: ServerReply) []const u8 {
+    @memset(buf, 0);
+    buf[0] = 2; // BOOTREPLY
+    buf[1] = 1; // Ethernet
+    buf[2] = 6; // hardware address length
+    std.mem.writeInt(u32, buf[4..8], r.xid, .big);
+    std.mem.writeInt(u16, buf[10..12], 0x8000, .big); // broadcast
+    if (r.type != .nak) {
+        buf[16..20].* = r.yiaddr;
+        buf[20..24].* = r.server_id;
+    }
+    buf[28..34].* = r.mac;
+    buf[header_size..][0..4].* = magic_cookie;
+
+    var at: usize = header_size + 4;
+    const put = struct {
+        fn f(b: []u8, pos: *usize, code: u8, data: []const u8) void {
+            b[pos.*] = code;
+            b[pos.* + 1] = @intCast(data.len);
+            @memcpy(b[pos.* + 2 ..][0..data.len], data);
+            pos.* += 2 + data.len;
+        }
+    }.f;
+    put(buf, &at, Option.message_type, &.{@intFromEnum(r.type)});
+    put(buf, &at, Option.server_id, &r.server_id);
+    if (r.type != .nak) {
+        var lease_bytes: [4]u8 = undefined;
+        std.mem.writeInt(u32, &lease_bytes, r.lease_time, .big);
+        put(buf, &at, Option.lease_time, &lease_bytes);
+        put(buf, &at, Option.subnet_mask, &r.subnet_mask);
+        if (r.share_internet) {
+            put(buf, &at, Option.router, &r.server_id);
+            const dns_ip = r.dns orelse r.server_id;
+            put(buf, &at, Option.dns, &dns_ip);
+        }
+    }
+    buf[at] = Option.end;
+    at += 1;
+    return buf[0..@max(at, min_message_size)];
+}
+
+/// A small DHCP address pool for the hotspot (`192.168.4.10`..`192.168.4.41`).
+pub const Pool = struct {
+    server_ip: Ip4 = .{ 192, 168, 4, 1 },
+    subnet_mask: Ip4 = .{ 255, 255, 255, 0 },
+    share_internet: bool = true,
+    dns: ?Ip4 = null,
+    first_host: u8 = 10,
+    macs: [32]?Mac = @splat(null),
+    names: [32][32]u8 = undefined,
+    name_lens: [32]u8 = @splat(0),
+
+    fn indexOf(p: *Pool, mac: Mac) usize {
+        for (p.macs, 0..) |entry, i| {
+            if (entry) |m| if (std.mem.eql(u8, &m, &mac)) return i;
+        }
+        for (&p.macs, 0..) |*entry, i| {
+            if (entry.* == null) {
+                entry.* = mac;
+                p.name_lens[i] = 0;
+                return i;
+            }
+        }
+        p.macs[0] = mac;
+        p.name_lens[0] = 0;
+        return 0;
+    }
+
+    fn hostIp(p: *const Pool, index: usize) Ip4 {
+        const srv = std.mem.readInt(u32, &p.server_ip, .big);
+        const mask = std.mem.readInt(u32, &p.subnet_mask, .big);
+        const net = srv & mask;
+        const srv_host = srv & ~mask;
+        var host = @as(u32, p.first_host) + @as(u32, @intCast(index));
+        if (srv_host >= p.first_host and host >= srv_host) host += 1;
+        var out: Ip4 = undefined;
+        std.mem.writeInt(u32, &out, net | host, .big);
+        return out;
+    }
+
+    pub fn assign(p: *Pool, mac: Mac) Ip4 {
+        const i = p.indexOf(mac);
+        return p.hostIp(i);
+    }
+
+    pub fn clientInfo(p: *const Pool, mac: Mac) ?struct { ip: Ip4, hostname: []const u8 } {
+        for (p.macs, 0..) |entry, i| {
+            if (entry) |m| if (std.mem.eql(u8, &m, &mac)) {
+                return .{
+                    .ip = p.hostIp(i),
+                    .hostname = p.names[i][0..p.name_lens[i]],
+                };
+            };
+        }
+        return null;
+    }
+
+    pub fn handle(p: *Pool, msg: []const u8, buf: *[max_message_size]u8) ?[]const u8 {
+        const req = parseRequest(msg) orelse return null;
+        switch (req.type) {
+            .discover => {
+                const idx = p.indexOf(req.mac);
+                if (req.hostname.len > 0) {
+                    const n: u8 = @intCast(@min(req.hostname.len, 32));
+                    @memcpy(p.names[idx][0..n], req.hostname[0..n]);
+                    p.name_lens[idx] = n;
+                }
+                const ip = p.assign(req.mac);
+                return buildReply(buf, .{
+                    .type = .offer,
+                    .xid = req.xid,
+                    .mac = req.mac,
+                    .yiaddr = ip,
+                    .server_id = p.server_ip,
+                    .subnet_mask = p.subnet_mask,
+                    .share_internet = p.share_internet,
+                    .dns = p.dns,
+                });
+            },
+            .request => {
+                if (req.server_id) |sid| if (!std.mem.eql(u8, &sid, &p.server_ip)) return null;
+                const idx = p.indexOf(req.mac);
+                if (req.hostname.len > 0) {
+                    const n: u8 = @intCast(@min(req.hostname.len, 32));
+                    @memcpy(p.names[idx][0..n], req.hostname[0..n]);
+                    p.name_lens[idx] = n;
+                }
+                const ip = p.assign(req.mac);
+                const wanted = req.requested_ip orelse if (!std.mem.allEqual(u8, &req.ciaddr, 0)) req.ciaddr else ip;
+                const ok = std.mem.eql(u8, &wanted, &ip);
+                return buildReply(buf, .{
+                    .type = if (ok) .ack else .nak,
+                    .xid = req.xid,
+                    .mac = req.mac,
+                    .yiaddr = ip,
+                    .server_id = p.server_ip,
+                    .subnet_mask = p.subnet_mask,
+                    .share_internet = p.share_internet,
+                    .dns = p.dns,
+                });
+            },
+            .release, .decline => {
+                for (&p.macs, 0..) |*entry, i| {
+                    if (entry.*) |m| if (std.mem.eql(u8, &m, &req.mac)) {
+                        entry.* = null;
+                        p.name_lens[i] = 0;
+                    };
+                }
+                return null;
+            },
+            else => return null,
+        }
+    }
+};
+
 // --- Tests ------------------------------------------------------------------
 
 const testing = std.testing;
@@ -325,3 +547,29 @@ test "masks and prefixes" {
     try testing.expectEqual(Ip4{ 0, 0, 0, 0 }, maskFromPrefix(0));
     try testing.expectEqual(Ip4{ 192, 168, 1, 255 }, broadcastAddress(.{ 192, 168, 1, 42 }, 24));
 }
+
+test "DHCP server pool answers discover and request" {
+    var pool: Pool = .{};
+    var req_buf: [max_message_size]u8 = undefined;
+    var rep_buf: [max_message_size]u8 = undefined;
+
+    const disc = build(&req_buf, .{ .type = .discover, .xid = 0x11223344, .mac = test_mac });
+    const offer_bytes = pool.handle(disc, &rep_buf).?;
+    const offer = parse(offer_bytes, test_mac).?;
+    try testing.expectEqual(MessageType.offer, offer.type);
+    try testing.expectEqual(Ip4{ 192, 168, 4, 10 }, offer.yiaddr);
+    try testing.expectEqual(Ip4{ 192, 168, 4, 1 }, offer.server_id.?);
+
+    const req = build(&req_buf, .{
+        .type = .request,
+        .xid = 0x11223344,
+        .mac = test_mac,
+        .requested_ip = offer.yiaddr,
+        .server_id = offer.server_id,
+    });
+    const ack_bytes = pool.handle(req, &rep_buf).?;
+    const ack = parse(ack_bytes, test_mac).?;
+    try testing.expectEqual(MessageType.ack, ack.type);
+    try testing.expectEqual(Ip4{ 192, 168, 4, 10 }, ack.yiaddr);
+}
+

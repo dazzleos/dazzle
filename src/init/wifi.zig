@@ -23,6 +23,7 @@ const sys = @import("sys");
 const nl80211 = @import("nl80211.zig");
 const supplicant = @import("supplicant.zig");
 const ipv4 = @import("ipv4.zig");
+const dhcp = @import("dhcp.zig");
 
 const wifi = sys.network;
 const print = sys.print;
@@ -61,6 +62,58 @@ const Join = struct {
     }
 };
 
+const StationAuth = struct {
+    mac: [6]u8,
+    auth: supplicant.Authenticator,
+};
+
+/// Running an access point (hotspot).
+const Hotspot = struct {
+    ssid_buf: [32]u8 = undefined,
+    ssid_len: u8 = 0,
+    pmk: ?[32]u8 = null,
+    gtk: [16]u8 = undefined,
+    rsn_buf: [22]u8 = undefined,
+    eapol: ?linux.fd_t = null,
+    dhcp_fd: ?linux.fd_t = null,
+    pool: dhcp.Pool = .{},
+    stations: [8]?StationAuth = @splat(null),
+
+    fn ssid(h: *const Hotspot) []const u8 {
+        return h.ssid_buf[0..h.ssid_len];
+    }
+
+    fn stationFor(h: *Hotspot, mac: [6]u8, ap_mac: [6]u8) ?*StationAuth {
+        const pmk = h.pmk orelse return null;
+        for (&h.stations) |*entry| {
+            if (entry.*) |*s| if (std.mem.eql(u8, &s.mac, &mac)) return s;
+        }
+        const rsn = supplicant.rsnElement(&h.rsn_buf, supplicant.cipher_ccmp);
+        for (&h.stations) |*entry| {
+            if (entry.* == null) {
+                entry.* = .{
+                    .mac = mac,
+                    .auth = .{ .pmk = pmk, .aa = ap_mac, .spa = mac, .gtk = h.gtk, .rsn = rsn },
+                };
+                return &entry.*.?;
+            }
+        }
+        h.stations[0] = .{
+            .mac = mac,
+            .auth = .{ .pmk = pmk, .aa = ap_mac, .spa = mac, .gtk = h.gtk, .rsn = rsn },
+        };
+        return &h.stations[0].?;
+    }
+
+    fn removeStation(h: *Hotspot, mac: [6]u8) void {
+        for (&h.stations) |*entry| {
+            if (entry.*) |s| if (std.mem.eql(u8, &s.mac, &mac)) {
+                entry.* = null;
+            };
+        }
+    }
+};
+
 pub const Manager = struct {
     nl: ?nl80211.Nl80211 = null,
     station: ?nl80211.Interface = null,
@@ -75,6 +128,10 @@ pub const Manager = struct {
     said_no_wifi: bool = false,
     /// The network being joined (or joined), if any.
     join: ?Join = null,
+    /// The active hotspot, if any.
+    hotspot: ?Hotspot = null,
+    /// How the Wi-Fi client gets its address (DHCP or static).
+    addressing: wifi.Addressing = .dhcp,
 
     /// Looks for Wi-Fi adapters (and nl80211 itself).
     pub fn look(m: *Manager, now: u64) void {
@@ -118,6 +175,7 @@ pub const Manager = struct {
         for (m.stations[0..m.station_len]) |ifc| {
             if (std.mem.eql(u8, ifc.adapter.name(), name)) {
                 m.leave(true);
+                m.stopHotspot();
                 m.station = ifc;
                 m.scanned_ns = 0;
                 m.scan_started_ns = null;
@@ -138,22 +196,44 @@ pub const Manager = struct {
             .disconnect => |d| {
                 m.selectStation(d.adapter());
                 m.leave(true);
+                m.stopHotspot();
+            },
+            .address => |a| {
+                m.selectStation(a.adapter());
+                m.addressing = a.addressing;
+                m.report.connection.addressing = a.addressing;
+                if (m.join != null and m.report.connection.state.joined()) {
+                    m.stopDhcp();
+                    if (m.station) |st| ipv4.removeAddress(st.adapter.name());
+                    m.report.connection.address = null;
+                    m.startDhcp();
+                }
             },
             .connect => |c| {
                 m.selectStation(c.adapter());
+                m.stopHotspot();
                 m.connect(c.ssid_buf[0..c.ssid_len], c.pass_buf[0..c.pass_len], now);
+            },
+            .hotspot => |h| {
+                m.selectStation(h.adapter());
+                m.startHotspot(h.ssid_buf[0..h.ssid_len], h.pass_buf[0..h.pass_len], h.network, h.upstream());
             },
         }
     }
 
-    /// What to report: the adapters, the scan and the connection.
+    /// What to report: the adapters, the scan, the connection, and the hotspot.
     pub fn fill(m: *const Manager, r: *wifi.Report) void {
         r.adapter = if (m.station) |st| st.adapter else null;
         r.adapter_len = 0;
         for (m.stations[0..m.station_len]) |st| r.addAdapter(st.adapter);
         r.scanning = m.scan_started_ns != null;
         r.connection = m.report.connection;
-        if (m.station) |st| r.connection.setAdapter(st.adapter.name());
+        r.connection.addressing = m.addressing;
+        r.hotspot = m.report.hotspot;
+        if (m.station) |st| {
+            r.connection.setAdapter(st.adapter.name());
+            r.hotspot.setAdapter(st.adapter.name());
+        }
         r.networks = m.report.networks;
         r.len = m.report.len;
     }
@@ -164,13 +244,22 @@ pub const Manager = struct {
     }
 
     pub fn eapolFd(m: *const Manager) linux.fd_t {
-        return if (m.join) |j| j.eapol orelse -1 else -1;
+        if (m.join) |j| if (j.eapol) |fd| return fd;
+        if (m.hotspot) |h| if (h.eapol) |fd| return fd;
+        return -1;
+    }
+
+    pub fn dhcpFd(m: *const Manager) linux.fd_t {
+        if (m.hotspot) |h| if (h.dhcp_fd) |fd| return fd;
+        return -1;
     }
 
     /// Starts a scan if the last is old.
     fn scan(m: *Manager, now: u64) void {
         const st = m.station orelse return;
-        // Not while joining: scanning takes the radio off the channel.
+        // Not while a hotspot is active or while joining: scanning takes the
+        // radio off the channel.
+        if (m.hotspot != null or m.report.hotspot.state == .active) return;
         switch (m.report.connection.state) {
             .connecting, .authenticating, .addressing => return,
             else => {},
@@ -196,15 +285,119 @@ pub const Manager = struct {
         m.report.connection.failure = why;
     }
 
+    fn failHotspot(m: *Manager, why: wifi.Failure) void {
+        print(sys.log_warning ++ "dazzle: wifi: could not start hotspot \"{s}\": {s}\n", .{ m.report.hotspot.ssid(), @tagName(why) });
+        const saved = m.report.hotspot;
+        m.stopHotspot();
+        m.report.hotspot = saved;
+        m.report.hotspot.state = .failed;
+        m.report.hotspot.failure = why;
+        m.report.hotspot.address = null;
+    }
+
     fn setState(m: *Manager, state: wifi.ConnectionState) void {
         m.report.connection.state = state;
         m.report.connection.failure = .none;
     }
 
+    fn switchIfType(nl: *nl80211.Nl80211, st: nl80211.Interface, iftype: u32) !void {
+        nl.setInterfaceType(st.index, iftype) catch {
+            ipv4.bringDown(st.adapter.name());
+            try nl.setInterfaceType(st.index, iftype);
+        };
+        _ = ipv4.bringUp(st.adapter.name());
+    }
+
+    /// Starts an access point (hotspot) on the selected adapter.
+    fn startHotspot(m: *Manager, ssid: []const u8, passphrase: []const u8, net: wifi.HotspotNetwork, upstream: []const u8) void {
+        m.leave(true);
+        m.stopHotspot();
+        m.report.hotspot = .{ .prefix = net.prefix };
+        m.report.hotspot.setSsid(ssid);
+        m.report.hotspot.setPassphrase(passphrase);
+        m.report.hotspot.setUpstream(upstream);
+        if (ssid.len == 0 or ssid.len > wifi.max_ssid) return m.failHotspot(.rejected);
+        if (passphrase.len > 0 and !supplicant.validPassphrase(passphrase)) return m.failHotspot(.bad_passphrase);
+        const st = m.station orelse return m.failHotspot(.not_found);
+        const nl = &(m.nl orelse return m.failHotspot(.not_found));
+
+        const ap_ip = net.serverIp();
+        const share = upstream.len > 0 and !std.mem.eql(u8, upstream, "none");
+        var h: Hotspot = .{
+            .ssid_len = @intCast(ssid.len),
+            .pool = .{
+                .server_ip = ap_ip,
+                .subnet_mask = net.subnetMask(),
+                .share_internet = share,
+                .dns = if (share) readResolvConfDns() else null,
+            },
+        };
+        @memcpy(h.ssid_buf[0..ssid.len], ssid);
+        if (passphrase.len > 0) {
+            h.pmk = supplicant.pmkFromPassphrase(passphrase, ssid);
+            random(&h.gtk);
+            _ = supplicant.rsnElement(&h.rsn_buf, supplicant.cipher_ccmp);
+        }
+
+        switchIfType(nl, st, nl80211.iftype_ap) catch |err| {
+            print(sys.log_warning ++ "dazzle: wifi: cannot switch {s} to AP mode ({s})\n", .{ st.adapter.name(), @errorName(err) });
+            return m.failHotspot(.unsupported);
+        };
+        if (h.pmk != null) {
+            h.eapol = openEapol(st.index) catch |err| {
+                print(sys.log_warning ++ "dazzle: wifi: cannot open EAPOL socket ({s})\n", .{@errorName(err)});
+                return m.failHotspot(.rejected);
+            };
+        }
+        nl.startAp(st.index, .{ .ssid = ssid, .bssid = st.adapter.mac, .wpa2 = h.pmk != null }) catch |err| {
+            if (h.eapol) |fd| sys.close(fd);
+            print(sys.log_warning ++ "dazzle: wifi: cannot start AP on {s} ({s})\n", .{ st.adapter.name(), @errorName(err) });
+            return m.failHotspot(.rejected);
+        };
+        if (h.pmk != null) {
+            nl.setGroupKey(st.index, supplicant.cipher_ccmp, 1, &h.gtk, @splat(0)) catch |err| {
+                print(sys.log_warning ++ "dazzle: wifi: cannot install AP group key ({s})\n", .{@errorName(err)});
+            };
+        }
+        ipv4.setStatic(st.adapter.name(), ap_ip, net.prefix, null) catch |err| {
+            print(sys.log_warning ++ "dazzle: wifi: cannot configure hotspot address ({s})\n", .{@errorName(err)});
+            m.hotspot = h;
+            return m.failHotspot(.rejected);
+        };
+        setIpForward(share);
+        h.dhcp_fd = ipv4.openDhcpServer(st.adapter.name()) catch null;
+        m.hotspot = h;
+        m.report.hotspot.state = .active;
+        m.report.hotspot.failure = .none;
+        m.report.hotspot.address = ap_ip;
+        m.report.hotspot.prefix = net.prefix;
+        m.scan_started_ns = null;
+        print("dazzle: wifi: hotspot \"{s}\" active on {s} ({d}.{d}.{d}.{d}/{d})\n", .{ ssid, st.adapter.name(), ap_ip[0], ap_ip[1], ap_ip[2], ap_ip[3], net.prefix });
+    }
+
+    fn stopHotspot(m: *Manager) void {
+        if (m.hotspot) |*h| {
+            if (h.dhcp_fd) |fd| sys.close(fd);
+            h.dhcp_fd = null;
+            if (h.eapol) |fd| sys.close(fd);
+            h.eapol = null;
+            setIpForward(false);
+            if (m.station) |st| {
+                if (m.nl) |*nl| {
+                    nl.stopAp(st.index) catch {};
+                    switchIfType(nl, st, nl80211.iftype_station) catch {};
+                }
+                ipv4.removeAddress(st.adapter.name());
+            }
+            m.hotspot = null;
+        }
+        m.report.hotspot = .{};
+    }
+
     /// Starts joining a network.
     fn connect(m: *Manager, ssid: []const u8, passphrase: []const u8, now: u64) void {
         m.leave(true);
-        m.report.connection = .{};
+        m.report.connection = .{ .addressing = m.addressing };
         m.report.connection.setSsid(ssid);
         const st = m.station orelse return m.fail(.not_found);
         const bss = (m.nl.?.findBss(st.index, ssid) catch null) orelse return m.fail(.not_found);
@@ -257,7 +450,7 @@ pub const Manager = struct {
         }
         if (forget) {
             m.join = null;
-            m.report.connection = .{};
+            m.report.connection = .{ .addressing = m.addressing };
         }
     }
 
@@ -273,12 +466,25 @@ pub const Manager = struct {
     /// The handshake is done (or the network is open): get an address.
     fn startDhcp(m: *Manager) void {
         const j = &m.join.?;
-        m.setState(.addressing);
         const name = m.station.?.adapter.name();
-        const rc = linux.fork();
-        if (linux.errno(rc) != .SUCCESS) return m.fail(.rejected);
-        if (rc == 0) ipv4.runDhcp(name);
-        j.dhcp_pid = @intCast(rc);
+        switch (m.addressing) {
+            .static => |st| {
+                ipv4.setStatic(name, st.address, st.prefix, st.gateway) catch |err| {
+                    print(sys.log_warning ++ "dazzle: wifi: cannot set {s}'s static address ({s})\n", .{ name, @errorName(err) });
+                    return m.fail(.rejected);
+                };
+                m.report.connection.address = st.address;
+                m.report.connection.prefix = st.prefix;
+                m.setState(.connected);
+            },
+            .dhcp => {
+                m.setState(.addressing);
+                const rc = linux.fork();
+                if (linux.errno(rc) != .SUCCESS) return m.fail(.rejected);
+                if (rc == 0) ipv4.runDhcp(name);
+                j.dhcp_pid = @intCast(rc);
+            },
+        }
     }
 
     /// Handles nl80211's events.
@@ -298,6 +504,25 @@ pub const Manager = struct {
         } else if (m.scan_started_ns) |t| if (now -| t > scan_timeout_ns) {
             m.scan_started_ns = null;
         };
+
+        if (m.hotspot) |*h| {
+            if (ev.new_station) |mac| {
+                if (h.pmk == null) {
+                    nl.authorize(st.index, mac);
+                    m.authorizeHotspotClient(mac);
+                } else if (h.eapol) |fd| {
+                    if (h.stationFor(mac, st.adapter.mac)) |s| {
+                        const m1 = s.auth.start(random);
+                        sendEapol(fd, st.index, mac, m1);
+                    }
+                }
+            }
+            if (ev.del_station) |mac| {
+                h.removeStation(mac);
+                m.report.hotspot.removeClient(mac);
+            }
+            return;
+        }
 
         const j = &(m.join orelse return);
         const state = m.report.connection.state;
@@ -332,8 +557,32 @@ pub const Manager = struct {
         };
     }
 
-    /// Handles EAPOL frames for the supplicant.
+    /// Handles EAPOL frames for the supplicant or hotspot authenticator.
     pub fn eapol(m: *Manager) void {
+        if (m.hotspot) |*h| {
+            const fd = h.eapol orelse return;
+            const st = m.station orelse return;
+            var buf: [2048]u8 = undefined;
+            while (true) {
+                var from: SockaddrLl = undefined;
+                var from_len: linux.socklen_t = @sizeOf(SockaddrLl);
+                const n = linux.recvfrom(fd, &buf, buf.len, linux.MSG.DONTWAIT, @ptrCast(&from), &from_len);
+                if (linux.errno(n) != .SUCCESS or n == 0) return;
+                const sta_mac: [6]u8 = from.addr[0..6].*;
+                const s = h.stationFor(sta_mac, st.adapter.mac) orelse continue;
+                var actions: supplicant.Actions = .{};
+                s.auth.handle(buf[0..n], &actions);
+                if (actions.reply) |reply| sendEapol(fd, st.index, sta_mac, reply);
+                if (actions.pairwise) |tk| {
+                    m.nl.?.setPairwiseKey(st.index, sta_mac, tk) catch |err| {
+                        print(sys.log_warning ++ "dazzle: wifi: cannot install station pairwise key ({s})\n", .{@errorName(err)});
+                        continue;
+                    };
+                    m.nl.?.authorize(st.index, sta_mac);
+                    m.authorizeHotspotClient(sta_mac);
+                }
+            }
+        }
         const j = &(m.join orelse return);
         const fd = j.eapol orelse return;
         var buf: [2048]u8 = undefined;
@@ -362,6 +611,28 @@ pub const Manager = struct {
         }
     }
 
+    fn authorizeHotspotClient(m: *Manager, mac: [6]u8) void {
+        var cl: wifi.HotspotClient = .{ .mac = mac };
+        if (m.hotspot) |*h| if (h.pool.clientInfo(mac)) |info| {
+            cl.address = info.ip;
+            cl.setName(info.hostname);
+        };
+        m.report.hotspot.addClient(cl);
+    }
+
+    /// Handles DHCP requests from hotspot clients.
+    pub fn dhcp(m: *Manager) void {
+        const h = &(m.hotspot orelse return);
+        const fd = h.dhcp_fd orelse return;
+        while (ipv4.stepDhcpServer(fd, &h.pool)) |mac| {
+            if (h.pool.clientInfo(mac)) |info| {
+                var cl: wifi.HotspotClient = .{ .mac = mac, .address = info.ip };
+                cl.setName(info.hostname);
+                m.report.hotspot.addClient(cl);
+            }
+        }
+    }
+
     /// Timeouts, retries and noticing the address DHCP got.
     pub fn tick(m: *Manager, now: u64) void {
         const j = &(m.join orelse return);
@@ -375,6 +646,7 @@ pub const Manager = struct {
                 if (addr) |a| {
                     if (m.report.connection.state == .addressing) print("dazzle: wifi: \"{s}\" gave {d}.{d}.{d}.{d}\n", .{ j.ssid(), a[0], a[1], a[2], a[3] });
                     m.setState(.connected);
+                    m.report.connection.prefix = ipv4.interfacePrefix(m.station.?.adapter.name());
                 }
                 m.report.connection.address = addr;
             },
@@ -421,3 +693,24 @@ fn sendEapol(fd: linux.fd_t, ifindex: u32, to: [6]u8, frame: []const u8) void {
     @memcpy(addr.addr[0..6], &to);
     _ = linux.sendto(fd, frame.ptr, frame.len, 0, @ptrCast(&addr), @sizeOf(SockaddrLl));
 }
+
+fn setIpForward(enable: bool) void {
+    const fd = sys.open("/proc/sys/net/ipv4/ip_forward", .{ .ACCMODE = .WRONLY, .TRUNC = true, .CLOEXEC = true }) catch return;
+    defer sys.close(fd);
+    const val = if (enable) "1\n" else "0\n";
+    _ = linux.write(fd, val.ptr, val.len);
+}
+
+fn readResolvConfDns() ?wifi.Ip4 {
+    var buf: [256]u8 = undefined;
+    const text = sys.readFile("/etc/resolv.conf", &buf) orelse return null;
+    var lines = std.mem.tokenizeScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        var words = std.mem.tokenizeAny(u8, line, " \t");
+        if (std.mem.eql(u8, words.next() orelse continue, "nameserver")) {
+            if (words.next()) |ip_str| if (wifi.parseIp4(ip_str)) |ip| return ip;
+        }
+    }
+    return null;
+}
+
