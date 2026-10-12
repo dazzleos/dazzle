@@ -995,3 +995,223 @@ test "dragging onto a target that takes it drops it there; a click is still a cl
     u.pointerButton(.{ 200, 40 }, ui.btn_left, false);
     try testing.expect(dropped == null);
 }
+
+test "sliders, dropdowns, dialogs, tooltips, chips, badges, tabs and rails" {
+    const fira = try font.Font.init(fira_data);
+    const u = try ui.Ui.create(testing.allocator, &fira);
+    defer u.destroy();
+
+    const Mode = enum { one, two, three };
+    const Gallery = struct {
+        pub const State = struct {
+            slider_val: f32 = 0.25,
+            discrete_val: f32 = 20,
+            mode: Mode = .one,
+            chip_selected: bool = false,
+            chip_removed: bool = false,
+            tab: usize = 0,
+            rail: usize = 0,
+            dialog_open: bool = false,
+            confirmed: u32 = 0,
+            dismissed: u32 = 0,
+            snack_actions: u32 = 0,
+
+            fn setSlider(s: *State, v: f32) void {
+                s.slider_val = v;
+            }
+            fn setDiscrete(s: *State, v: f32) void {
+                s.discrete_val = v;
+            }
+            fn setMode(s: *State, m: Mode) void {
+                s.mode = m;
+            }
+            fn toggleChip(s: *State) void {
+                s.chip_selected = !s.chip_selected;
+            }
+            fn removeChip(s: *State) void {
+                s.chip_removed = true;
+            }
+            fn setTab(s: *State, idx: usize) void {
+                s.tab = idx;
+            }
+            fn setRail(s: *State, idx: usize) void {
+                s.rail = idx;
+            }
+            fn confirm(s: *State) void {
+                s.confirmed += 1;
+                s.dialog_open = false;
+            }
+            fn dismiss(s: *State) void {
+                s.dismissed += 1;
+                s.dialog_open = false;
+            }
+            fn snackAct(s: *State) void {
+                s.snack_actions += 1;
+            }
+        };
+
+        pub fn build(_: *const @This(), cx: *Context, state: *State) Widget {
+            const opts = [_]ui.Select(Mode).Option{
+                .{ .value = .one, .label = "One" },
+                .{ .value = .two, .label = "Two" },
+                .{ .value = .three, .label = "Three" },
+            };
+            const rail_items = [_]ui.NavigationRail.Item{
+                .{ .label = "First", .icon = .folder },
+                .{ .label = "Second", .icon = .settings, .badge = 4 },
+            };
+            const tabs = [_]ui.Tab{
+                .{ .label = "Alpha", .icon = .apps },
+                .{ .label = "Beta", .badge = 2 },
+            };
+            const main_col = cx.make(ui.Row{
+                .children = &.{
+                    cx.make(ui.NavigationRail{
+                        .items = &rail_items,
+                        .selected = state.rail,
+                        .on_select = .of(state, State.setRail),
+                        .extended = false,
+                    }),
+                    cx.make(ui.Divider{ .axis = .vertical }),
+                    cx.make(ui.Expanded{
+                        .child = cx.make(ui.Column{
+                            .cross_axis_alignment = .stretch,
+                            .spacing = 8,
+                            .children = &.{
+                                cx.make(ui.TabBar{
+                                    .tabs = &tabs,
+                                    .selected = state.tab,
+                                    .on_select = .of(state, State.setTab),
+                                }),
+                                cx.make(ui.Slider{
+                                    .value = state.slider_val,
+                                    .on_changed = .of(state, State.setSlider),
+                                }),
+                                cx.make(ui.Slider{
+                                    .value = state.discrete_val,
+                                    .min = 0,
+                                    .max = 100,
+                                    .divisions = 4,
+                                    .on_changed = .of(state, State.setDiscrete),
+                                }),
+                                cx.make(ui.ProgressBar{ .value = state.slider_val }),
+                                cx.make(ui.Select(Mode){
+                                    .options = &opts,
+                                    .value = state.mode,
+                                    .on_changed = .of(state, State.setMode),
+                                }),
+                                cx.make(ui.Row{
+                                    .spacing = 8,
+                                    .children = &.{
+                                        cx.make(ui.FilledButton{ .label = "Filled", .on_press = .of(state, State.toggleChip) }),
+                                        cx.make(ui.TonalButton{ .label = "Tonal", .on_press = .of(state, State.toggleChip) }),
+                                        cx.make(ui.TextButton{ .label = "Text", .on_press = .of(state, State.toggleChip) }),
+                                        cx.make(ui.Tooltip{
+                                            .text = "Settings tip",
+                                            .child = cx.make(ui.IconButton{ .icon = .settings, .variant = .tonal, .on_press = .of(state, State.toggleChip) }),
+                                        }),
+                                        cx.make(ui.Chip{
+                                            .label = "Tag",
+                                            .selected = state.chip_selected,
+                                            .on_press = .of(state, State.toggleChip),
+                                            .on_remove = .of(state, State.removeChip),
+                                        }),
+                                        cx.make(ui.Badge{ .count = 150, .child = cx.make(ui.Icon{ .icon = .wifi }) }),
+                                    },
+                                }),
+                                cx.make(ui.Card{
+                                    .variant = .outlined,
+                                    .child = cx.make(ui.ListItem{
+                                        .headline = "Row title",
+                                        .supporting_text = "Details",
+                                        .leading_icon = .folder,
+                                        .trailing_icon = .chevron_right,
+                                    }),
+                                }),
+                            },
+                        }),
+                    }),
+                },
+            });
+            const with_snack = cx.make(ui.Snackbar{
+                .message = "Saved",
+                .action_label = "Undo",
+                .on_action = .of(state, State.snackAct),
+                .child = main_col,
+            });
+            return cx.make(ui.Dialog{
+                .open = state.dialog_open,
+                .title = "Confirm?",
+                .description = "Are you sure?",
+                .dismiss_label = "No",
+                .on_dismiss = .of(state, State.dismiss),
+                .confirm_label = "Yes",
+                .on_confirm = .of(state, State.confirm),
+                .child = with_snack,
+            });
+        }
+    };
+
+    u.frame(900, 700, 0, Gallery{});
+    const st = u.root.?.state(Gallery.State);
+
+    // Drag continuous slider to 75% and discrete slider (4 divisions) near 70% -> snaps to 75.
+    var sliders: std.ArrayList(*Node) = .empty;
+    defer sliders.deinit(testing.allocator);
+    try findAll(u.root.?, ui.Slider, &sliders);
+    try testing.expectEqual(@as(usize, 2), sliders.items.len);
+    {
+        const s0 = sliders.items[0];
+        const pos = s0.position();
+        const x0 = pos[0] + ui.Slider.halo_radius;
+        const x1 = pos[0] + s0.size.w - ui.Slider.halo_radius;
+        u.pointerMotion(.{ x0 + (x1 - x0) * 0.5, pos[1] + 10 });
+        u.pointerButton(.{ x0 + (x1 - x0) * 0.5, pos[1] + 10 }, ui.btn_left, true);
+        u.pointerMotion(.{ x0 + (x1 - x0) * 0.75, pos[1] + 10 });
+        u.pointerButton(.{ x0 + (x1 - x0) * 0.75, pos[1] + 10 }, ui.btn_left, false);
+        try testing.expectApproxEqAbs(@as(f32, 0.75), st.slider_val, 0.01);
+
+        const s1 = sliders.items[1];
+        const p1 = s1.position();
+        const d0 = p1[0] + ui.Slider.halo_radius;
+        const d1 = p1[0] + s1.size.w - ui.Slider.halo_radius;
+        clickAt(u, .{ d0 + (d1 - d0) * 0.70, p1[1] + 10 });
+        try testing.expectEqual(@as(f32, 75), st.discrete_val);
+    }
+
+    // Hovering the Tooltip shows tooltip_root on the next frame.
+    const tt_node = find(u.root.?, ui.Tooltip).?;
+    const tt_pos = tt_node.position();
+    u.pointerMotion(.{ tt_pos[0] + 10, tt_pos[1] + 10 });
+    u.frame(900, 700, 1, Gallery{});
+    try testing.expect(u.tooltip_root != null);
+    try testing.expectEqualStrings("Settings tip", find(u.tooltip_root.?, ui.Text).?.widget.as(ui.Text).?.text);
+
+    // DropdownMenu opens a menu and picks an option.
+    const dd = find(u.root.?, ui.DropdownMenu).?;
+    click(u, dd);
+    u.frame(900, 700, 2, Gallery{});
+    try testing.expect(u.menu_root != null);
+    const mpos = u.menu_root.?.offset;
+    clickAt(u, .{ mpos[0] + 30, mpos[1] + ui.menu.padding + ui.menu.item_height * 2.5 });
+    try testing.expectEqual(Mode.three, st.mode);
+
+    // Dialog blocks background clicks, confirms via FilledButton, and dismisses via scrim.
+    st.dialog_open = true;
+    u.frame(900, 700, 3, Gallery{});
+    clickAt(u, .{ 10, 10 });
+    try testing.expectEqual(@as(u32, 1), st.dismissed);
+    try testing.expect(!st.dialog_open);
+
+    st.dialog_open = true;
+    u.frame(900, 700, 4, Gallery{});
+    const dialog_node = find(u.root.?, ui.Dialog).?;
+    var filled_btns: std.ArrayList(*Node) = .empty;
+    defer filled_btns.deinit(testing.allocator);
+    try findAll(dialog_node, ui.FilledButton, &filled_btns);
+    // The last FilledButton in the tree is the dialog's Confirm button.
+    click(u, filled_btns.items[filled_btns.items.len - 1]);
+    try testing.expectEqual(@as(u32, 1), st.confirmed);
+    try testing.expect(!st.dialog_open);
+}
+

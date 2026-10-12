@@ -284,8 +284,13 @@ pub const Context = struct {
         const T = @TypeOf(value);
         const p = cx.arena.create(T) catch return Widget.of(Missing, &missing);
         p.* = value;
-        if (@hasField(T, "children") and @FieldType(T, "children") == []const Widget) {
-            p.children = cx.arena.dupe(Widget, value.children) catch &.{};
+        inline for (@typeInfo(T).@"struct".fields) |field| {
+            switch (@typeInfo(field.type)) {
+                .pointer => |ptr| if (ptr.size == .slice and ptr.is_const and ptr.child != u8) {
+                    @field(p, field.name) = cx.arena.dupe(ptr.child, @field(value, field.name)) catch &.{};
+                },
+                else => {},
+            }
         }
         return Widget.of(T, p);
     }

@@ -35,6 +35,7 @@ const damage_mod = @import("damage.zig");
 const keymap = @import("keymap.zig");
 const menu_mod = @import("menu.zig");
 const drag_mod = @import("drag.zig");
+const tooltip_mod = @import("tooltip.zig");
 const locale = @import("locale");
 
 const Point = geometry.Point;
@@ -150,6 +151,7 @@ pub const Ui = struct {
     drag: ?drag_mod.Drag = null,
     drag_root: ?*Node = null,
     drag_scratch: std.ArrayList(*Node) = .empty,
+    tooltip_root: ?*Node = null,
     /// A touch held down on a widget, which becomes a long press
     /// (`Event.context`) if it stays there: where it went down, and when
     /// the first frame after saw it.
@@ -224,6 +226,7 @@ pub const Ui = struct {
         ui.endDrag(false);
         if (ui.menu_root) |m| m.destroy();
         if (ui.drag_root) |d| d.destroy();
+        if (ui.tooltip_root) |t| t.destroy();
         ui.drag_scratch.deinit(ui.gpa);
         if (ui.root) |r| r.destroy();
         ui.local_clipboard.deinit(ui.gpa);
@@ -296,10 +299,12 @@ pub const Ui = struct {
         r.offset = .{ 0, 0 };
         const m = ui.buildMenu(window);
         const d = ui.buildDrag(window);
-        ui.paint(r, d, m, width, height);
+        const tt = ui.buildTooltip(window);
+        ui.paint(r, d, m, tt, width, height);
         ui.damage.sweep(r);
         if (d) |n| ui.damage.sweep(n);
         if (m) |n| ui.damage.sweep(n);
+        if (tt) |n| ui.damage.sweep(n);
         // The layout may have moved things under the pointer.
         if (ui.pointer) |p| ui.updateHover(p);
         // A long press is waited for frame by frame.
@@ -352,7 +357,30 @@ pub const Ui = struct {
         return n;
     }
 
-    fn paint(ui: *Ui, r: *Node, drag: ?*Node, menu: ?*Node, width: u32, height: u32) void {
+    /// The tooltip bubble for the hovered `Tooltip` widget, if any.
+    fn buildTooltip(ui: *Ui, window: Size) ?*Node {
+        if (ui.menu == null and ui.drag == null) {
+            for (ui.hovered.items) |target| {
+                if (target.laid_out != ui.frame_no) continue;
+                const tt = target.widget.as(tooltip_mod.Tooltip) orelse continue;
+                if (tt.text.len == 0) continue;
+                var cx: Context = .{ .ui = ui, .arena = ui.arena(), .node = undefined };
+                const w = cx.make(tooltip_mod.Bubble{ .text = tt.text });
+                if (ui.tooltip_root == null) ui.tooltip_root = Node.create(ui, w);
+                const n = ui.tooltip_root orelse return null;
+                n.build(w);
+                const size = n.layout(.{ .max_w = window.w, .max_h = window.h });
+                const at = target.position();
+                n.offset = tooltip_mod.place(window, .{ .x = at[0], .y = at[1], .w = target.size.w, .h = target.size.h }, size);
+                return n;
+            }
+        }
+        if (ui.tooltip_root) |n| n.destroy();
+        ui.tooltip_root = null;
+        return null;
+    }
+
+    fn paint(ui: *Ui, r: *Node, drag: ?*Node, menu: ?*Node, tooltip: ?*Node, width: u32, height: u32) void {
         ui.atlas.beginFrame();
         ui.canvases_used = 0;
         ui.segments.clearRetainingCapacity();
@@ -361,8 +389,9 @@ pub const Ui = struct {
         var p: Painter = .{ .ui = ui, .node = r };
         p.paintNode(r);
         if (drag) |d| p.paintNode(d);
-        // The menu above everything.
+        // The menu or tooltip above everything.
         if (menu) |m| p.paintNode(m);
+        if (tooltip) |tt| p.paintNode(tt);
     }
 
     // --- Menus ------------------------------------------------------------------

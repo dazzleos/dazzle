@@ -1009,6 +1009,11 @@ pub fn build(b: *std.Build) void {
         .root_module = addProgramModule(b, "src/apps/demo/main.zig", target, optimize, pi, shaders, true),
     });
     const install_demo = b.addInstallArtifact(demo_exe, .{});
+    const showcase_exe = b.addExecutable(.{
+        .name = "dazzle-showcase",
+        .root_module = addProgramModule(b, "src/apps/showcase/main.zig", target, optimize, pi, shaders, true),
+    });
+    const install_showcase = b.addInstallArtifact(showcase_exe, .{});
     const settings_exe = b.addExecutable(.{
         .name = "dazzle-settings",
         .root_module = addProgramModule(b, "src/apps/settings/main.zig", target, optimize, pi, shaders, true),
@@ -1136,7 +1141,7 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(apps_step);
     const install_initramfs = b.addInstallFile(initramfs, "initramfs.cpio");
     const programs_step = b.step("programs", "Build just the programs (zig-out/bin) and zig-out/initramfs.cpio");
-    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_settings.step, &install_files.step, &install_camera.step, &install_text_editor.step, &install_logger.step, &install_blocks.step, &install_maps.step, &install_terminal.step, &install_develop.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
+    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_showcase.step, &install_settings.step, &install_files.step, &install_camera.step, &install_text_editor.step, &install_logger.step, &install_blocks.step, &install_maps.step, &install_terminal.step, &install_develop.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
         programs_step.dependOn(st);
         b.getInstallStep().dependOn(st);
     }
@@ -1171,6 +1176,8 @@ pub fn build(b: *std.Build) void {
     // The demo's layout is tested with its real font.
     const host_demo = addProgramModule(b, "src/apps/demo/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_demo.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
+    const host_showcase = addProgramModule(b, "src/apps/showcase/main.zig", b.graph.host, test_optimize, host, shaders, false);
+    host_showcase.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_settings = addProgramModule(b, "src/apps/settings/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_settings.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_files = addProgramModule(b, "src/apps/files/main.zig", b.graph.host, test_optimize, host, shaders, false);
@@ -1205,6 +1212,7 @@ pub fn build(b: *std.Build) void {
         host.locale,
         addProgramModule(b, "src/init/main.zig", b.graph.host, test_optimize, host, shaders, false),
         host_demo,
+        host_showcase,
         host_settings,
         host_files,
         host_camera,
