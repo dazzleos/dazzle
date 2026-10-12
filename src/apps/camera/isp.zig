@@ -18,7 +18,8 @@
 //!   them (bilinear).
 
 const std = @import("std");
-const v4l2 = @import("v4l2.zig");
+const sys = @import("sys");
+const v4l2 = sys.v4l2;
 
 pub const Bayer = v4l2.Bayer;
 

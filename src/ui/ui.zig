@@ -104,6 +104,8 @@ pub const scroll_view = @import("scroll_view.zig");
 pub const lazy_grid = @import("lazy_grid.zig");
 pub const icon = @import("icon.zig");
 pub const image = @import("image.zig");
+pub const video_player = @import("video_player.zig");
+pub const video = @import("video");
 /// The icons there are (`icons.Icon`), and their font.
 pub const icons = @import("icons");
 pub const keymap = @import("keymap.zig");
@@ -194,6 +196,8 @@ pub const ScrollView = scroll_view.ScrollView;
 pub const LazyGrid = lazy_grid.LazyGrid;
 pub const Icon = icon.Icon;
 pub const Image = image.Image;
+pub const VideoPlayer = video_player.VideoPlayer;
+pub const SeekBar = video_player.SeekBar;
 
 pub const Painter = painter.Painter;
 pub const GpuArea = painter.GpuArea;
@@ -249,6 +253,7 @@ test {
     _ = lazy_grid;
     _ = icon;
     _ = image;
+    _ = video_player;
     _ = keymap;
     _ = painter;
     _ = damage;

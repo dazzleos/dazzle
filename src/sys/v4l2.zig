@@ -1,9 +1,10 @@
 //! The parts of Video4Linux2 (videodev2.h) and its sub-device interface
-//! (v4l2-subdev.h) the camera uses: structures laid out as the kernel's,
-//! ioctl numbers, and the codes for raw Bayer formats. The layouts differ
+//! (v4l2-subdev.h) used by the camera and the hardware video decoder:
+//! structures laid out as the kernel's, ioctl numbers, raw Bayer formats,
+//! and multiplanar memory-to-memory queue structures. The layouts differ
 //! between 32-bit ARM (where Dazzle runs) and 64-bit hosts (where the
 //! tests run); the tests check both against the numbers the kernel's own
-//! headers give (a program built from them for each).
+//! headers give.
 //!
 //! Buffers use the 64-bit time layout (the kernel's native one on 32-bit
 //! ARM since Linux 5.6), so their ioctls are the ones without _TIME32.
@@ -21,6 +22,16 @@ pub const Capability = extern struct {
     reserved: [3]u32,
 };
 
+pub const FmtDesc = extern struct {
+    index: u32 = 0,
+    type: u32 = 0,
+    flags: u32 = 0,
+    description: [32]u8 = @splat(0),
+    pixelformat: u32 = 0,
+    mbus_code: u32 = 0,
+    reserved: [3]u32 = @splat(0),
+};
+
 pub const PixFormat = extern struct {
     width: u32,
     height: u32,
@@ -36,10 +47,32 @@ pub const PixFormat = extern struct {
     xfer_func: u32 = 0,
 };
 
+pub const PlanePixFormat = extern struct {
+    sizeimage: u32 = 0,
+    bytesperline: u32 = 0,
+    reserved: [6]u16 = @splat(0),
+};
+
+pub const PixFormatMplane = extern struct {
+    width: u32 = 0,
+    height: u32 = 0,
+    pixelformat: u32 = 0,
+    field: u32 = field_none,
+    colorspace: u32 = 0,
+    plane_fmt: [8]PlanePixFormat = @splat(.{}),
+    num_planes: u8 = 1,
+    flags: u8 = 0,
+    ycbcr_enc: u8 = 0,
+    quantization: u8 = 0,
+    xfer_func: u8 = 0,
+    reserved: [7]u8 = @splat(0),
+};
+
 pub const Format = extern struct {
     type: u32,
     fmt: extern union {
         pix: PixFormat,
+        pix_mp: PixFormatMplane,
         raw_data: [200]u8,
         // Some of the kernel's members hold pointers.
         _align: usize,
@@ -53,6 +86,18 @@ pub const RequestBuffers = extern struct {
     capabilities: u32 = 0,
     flags: u8 = 0,
     reserved: [3]u8 = @splat(0),
+};
+
+pub const Plane = extern struct {
+    bytesused: u32 = 0,
+    length: u32 = 0,
+    m: extern union {
+        mem_offset: u32,
+        userptr: usize,
+        fd: i32,
+    } = .{ .mem_offset = 0 },
+    data_offset: u32 = 0,
+    reserved: [11]u32 = @splat(0),
 };
 
 pub const Timecode = extern struct {
@@ -75,10 +120,57 @@ pub const Buffer = extern struct {
     timecode: Timecode = std.mem.zeroes(Timecode),
     sequence: u32 = 0,
     memory: u32 = 0,
-    m: extern union { offset: u32, userptr: usize, fd: i32 } = .{ .userptr = 0 },
+    m: extern union {
+        offset: u32,
+        userptr: usize,
+        planes: ?[*]Plane,
+        fd: i32,
+    } = .{ .userptr = 0 },
     length: u32 = 0,
     reserved2: u32 = 0,
     request_fd: i32 = 0,
+};
+
+pub const Rect = extern struct {
+    left: i32 = 0,
+    top: i32 = 0,
+    width: u32 = 0,
+    height: u32 = 0,
+};
+
+pub const Selection = extern struct {
+    type: u32 = 0,
+    target: u32 = 0,
+    flags: u32 = 0,
+    r: Rect = .{},
+    reserved: [9]u32 = @splat(0),
+};
+
+pub const Event = extern struct {
+    type: u32 = 0,
+    u: extern union {
+        src_change: u32,
+        data: [64]u8,
+        _align: i64,
+    } = .{ .data = @splat(0) },
+    pending: u32 = 0,
+    sequence: u32 = 0,
+    timestamp: extern struct { sec: i64, nsec: i64 } = .{ .sec = 0, .nsec = 0 },
+    id: u32 = 0,
+    reserved: [8]u32 = @splat(0),
+};
+
+pub const EventSubscription = extern struct {
+    type: u32 = 0,
+    id: u32 = 0,
+    flags: u32 = 0,
+    reserved: [5]u32 = @splat(0),
+};
+
+pub const DecoderCmd = extern struct {
+    cmd: u32 = 0,
+    flags: u32 = 0,
+    raw: [16]u32 = @splat(0),
 };
 
 pub const Control = extern struct {
@@ -145,6 +237,7 @@ pub const SubdevFrameSizeEnum = extern struct {
 const IOCTL = linux.IOCTL;
 
 pub const querycap = IOCTL.IOR('V', 0, Capability);
+pub const enum_fmt = IOCTL.IOWR('V', 2, FmtDesc);
 pub const g_fmt = IOCTL.IOWR('V', 4, Format);
 pub const s_fmt = IOCTL.IOWR('V', 5, Format);
 pub const reqbufs = IOCTL.IOWR('V', 8, RequestBuffers);
@@ -156,17 +249,37 @@ pub const streamoff = IOCTL.IOW('V', 19, c_int);
 pub const g_ctrl = IOCTL.IOWR('V', 27, Control);
 pub const s_ctrl = IOCTL.IOWR('V', 28, Control);
 pub const queryctrl = IOCTL.IOWR('V', 36, QueryControl);
+pub const dqevent = IOCTL.IOR('V', 89, Event);
+pub const subscribe_event = IOCTL.IOW('V', 90, EventSubscription);
+pub const g_selection = IOCTL.IOWR('V', 94, Selection);
+pub const decoder_cmd = IOCTL.IOWR('V', 96, DecoderCmd);
 pub const subdev_g_fmt = IOCTL.IOWR('V', 4, SubdevFormat);
 pub const subdev_s_fmt = IOCTL.IOWR('V', 5, SubdevFormat);
 pub const subdev_enum_mbus_code = IOCTL.IOWR('V', 2, SubdevMbusCodeEnum);
 pub const subdev_enum_frame_size = IOCTL.IOWR('V', 74, SubdevFrameSizeEnum);
 
 pub const buf_type_video_capture = 1;
+pub const buf_type_video_capture_mplane = 9;
+pub const buf_type_video_output_mplane = 10;
 pub const memory_mmap = 1;
 pub const field_none = 1;
 pub const format_active = 1;
 pub const cap_video_capture = 0x1;
+pub const cap_video_m2m_mplane = 0x00004000;
+pub const cap_streaming = 0x04000000;
 pub const ctrl_flag_disabled = 0x1;
+pub const buf_flag_keyframe = 0x00000008;
+pub const buf_flag_error = 0x00000040;
+pub const buf_flag_last = 0x00100000;
+pub const event_eos = 2;
+pub const event_source_change = 5;
+pub const sel_tgt_compose = 0x0100;
+pub const dec_cmd_stop = 1;
+
+pub const pix_fmt_yuv420 = fourcc("YU12");
+pub const pix_fmt_yvu420 = fourcc("YV12");
+pub const pix_fmt_nv12 = fourcc("NV12");
+pub const pix_fmt_nv21 = fourcc("NV21");
 
 /// Controls (v4l2-controls.h).
 pub const cid = struct {
@@ -209,7 +322,7 @@ pub fn rawFormat(code: u32) ?RawFormat {
     return null;
 }
 
-fn fourcc(comptime s: *const [4]u8) u32 {
+pub fn fourcc(comptime s: *const [4]u8) u32 {
     return std.mem.readInt(u32, s, .little);
 }
 
@@ -218,15 +331,23 @@ const testing = std.testing;
 test "structures and ioctls are laid out as the kernel's" {
     const arm = @import("builtin").cpu.arch == .arm;
     try testing.expectEqual(@as(usize, 104), @sizeOf(Capability));
+    try testing.expectEqual(@as(usize, 64), @sizeOf(FmtDesc));
     try testing.expectEqual(@as(usize, 48), @sizeOf(PixFormat));
+    try testing.expectEqual(@as(usize, 20), @sizeOf(PlanePixFormat));
+    try testing.expectEqual(@as(usize, 192), @sizeOf(PixFormatMplane));
     try testing.expectEqual(@as(usize, if (arm) 204 else 208), @sizeOf(Format));
     try testing.expectEqual(@as(usize, if (arm) 4 else 8), @offsetOf(Format, "fmt"));
     try testing.expectEqual(@as(usize, 20), @sizeOf(RequestBuffers));
+    try testing.expectEqual(@as(usize, if (arm) 60 else 64), @sizeOf(Plane));
     try testing.expectEqual(@as(usize, if (arm) 80 else 88), @sizeOf(Buffer));
     try testing.expectEqual(@as(usize, 24), @offsetOf(Buffer, "timestamp"));
     try testing.expectEqual(@as(usize, 56), @offsetOf(Buffer, "sequence"));
     try testing.expectEqual(@as(usize, 64), @offsetOf(Buffer, "m"));
     try testing.expectEqual(@as(usize, if (arm) 68 else 72), @offsetOf(Buffer, "length"));
+    try testing.expectEqual(@as(usize, 64), @sizeOf(Selection));
+    try testing.expectEqual(@as(usize, 136), @sizeOf(Event));
+    try testing.expectEqual(@as(usize, 32), @sizeOf(EventSubscription));
+    try testing.expectEqual(@as(usize, 72), @sizeOf(DecoderCmd));
     try testing.expectEqual(@as(usize, 68), @sizeOf(QueryControl));
     try testing.expectEqual(@as(usize, 40), @offsetOf(QueryControl, "minimum"));
     try testing.expectEqual(@as(usize, 48), @sizeOf(MbusFramefmt));

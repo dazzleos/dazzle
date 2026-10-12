@@ -23,6 +23,7 @@ pub const serial = @import("serial.zig");
 pub const shell = @import("shell.zig");
 pub const files = @import("files.zig");
 pub const archive = @import("archive.zig");
+pub const v4l2 = @import("v4l2.zig");
 
 test {
     _ = network;
@@ -36,6 +37,7 @@ test {
     _ = shell;
     _ = files;
     _ = archive;
+    _ = v4l2;
 }
 
 pub const Error = error{

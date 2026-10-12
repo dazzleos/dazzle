@@ -14,6 +14,7 @@ const Modules = struct {
     build_info: *std.Build.Module,
     store: *std.Build.Module,
     locale: *std.Build.Module,
+    video: *std.Build.Module,
 };
 
 /// Puts `<program>.icon` in the initramfs: the name of the program's icon
@@ -193,6 +194,15 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
             .{ .name = "locale", .module = locale },
         },
     });
+    const video = b.createModule(.{
+        .root_source_file = b.path("src/video/video.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sys", .module = sys },
+            .{ .name = "gfx", .module = gfx },
+        },
+    });
     const ui = b.createModule(.{
         .root_source_file = b.path("src/ui/ui.zig"),
         .target = target,
@@ -205,6 +215,7 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
             .{ .name = "font", .module = font },
             .{ .name = "icons", .module = icons },
             .{ .name = "app", .module = app },
+            .{ .name = "video", .module = video },
         },
     });
     const info = b.addOptions();
@@ -217,7 +228,7 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         .optimize = optimize,
         .imports = &.{.{ .name = "sys", .module = sys }},
     });
-    return .{ .sys = sys, .vc4 = vc4, .shader = shader, .app = app, .gfx = gfx, .ui = ui, .font = font, .icons = icons, .wayland = wayland, .build_info = info.createModule(), .store = store, .locale = locale };
+    return .{ .sys = sys, .vc4 = vc4, .shader = shader, .app = app, .gfx = gfx, .ui = ui, .font = font, .icons = icons, .wayland = wayland, .build_info = info.createModule(), .store = store, .locale = locale, .video = video };
 }
 
 /// `sys`, `vc4` and `shader`: what the GPU's users need, and what the
@@ -401,6 +412,7 @@ fn addProgramModule(b: *std.Build, path: []const u8, target: std.Build.ResolvedT
             .{ .name = "build_info", .module = m.build_info },
             .{ .name = "store", .module = m.store },
             .{ .name = "locale", .module = m.locale },
+            .{ .name = "video", .module = m.video },
         },
     });
     // src/<owner>/main.zig embeds its shader programs.
@@ -1210,6 +1222,7 @@ pub fn build(b: *std.Build) void {
         host.wayland,
         host.store,
         host.locale,
+        host.video,
         addProgramModule(b, "src/init/main.zig", b.graph.host, test_optimize, host, shaders, false),
         host_demo,
         host_showcase,

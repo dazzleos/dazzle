@@ -47,6 +47,7 @@ Shared code lives in modules linked into each program:
 | `app` | Application window setup, buffers, input and clipboard |
 | `store` | Installing, updating and removing apps |
 | `locale` | Languages, keyboard layouts, and date/time/temperature formatting |
+| `video` | Container demuxing, hardware video decoding and playback |
 
 ## A single-user system
 

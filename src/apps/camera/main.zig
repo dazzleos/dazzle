@@ -23,7 +23,7 @@ const gfx = @import("gfx");
 const capture = @import("capture.zig");
 const isp = @import("isp.zig");
 const exposure = @import("exposure.zig");
-const v4l2 = @import("v4l2.zig");
+const v4l2 = sys.v4l2;
 const view = @import("view.zig");
 
 const print = sys.print;
@@ -266,7 +266,6 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
 }
 
 test {
-    _ = v4l2;
     _ = capture;
     _ = isp;
     _ = exposure;

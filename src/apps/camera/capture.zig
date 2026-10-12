@@ -15,7 +15,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
-const v4l2 = @import("v4l2.zig");
+const v4l2 = sys.v4l2;
 
 const print = sys.print;
 
