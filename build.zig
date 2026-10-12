@@ -1127,8 +1127,8 @@ pub fn build(b: *std.Build) void {
     const apps = [_]App{
         .{ .exe = demo_exe, .icon = .view_in_ar, .title = "Demo" },
         .{ .exe = showcase_exe, .icon = .widgets, .title = "Widget Showcase" },
-        .{ .exe = files_exe, .icon = .folder, .title = "Files", .description = "Browse your files, and look inside them: text, pictures and fonts" },
-        .{ .exe = camera_exe, .icon = .photo_camera, .title = "Camera", .description = "See what a Raspberry Pi Camera Module sees, and take photos" },
+        .{ .exe = files_exe, .icon = .folder, .title = "Files", .description = "Browse your files, and look inside them: text, pictures, videos and fonts" },
+        .{ .exe = camera_exe, .icon = .photo_camera, .title = "Camera", .description = "See what a Raspberry Pi Camera Module sees, and take photos and videos" },
         .{ .exe = text_editor_exe, .icon = .edit_note, .title = "Text Editor", .description = "Write and change text files, from Files; they are saved as you type", .handles = &.{"text/plain"} },
         .{ .exe = blocks_exe, .icon = .landscape, .title = "Blocks", .description = "Build anything, a block at a time, on an island in the sea" },
         .{ .exe = logger_exe, .icon = .show_chart, .title = "Data Logger", .description = "Record GPIO pins, analog inputs, I2C devices and serial ports over time, and save them as CSV" },

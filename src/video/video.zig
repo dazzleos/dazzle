@@ -1,15 +1,15 @@
-//! Hardware-accelerated video decoding and playback on the Raspberry Pi:
-//! `bcm2835-codec` (/dev/video10), a Video4Linux2 memory-to-memory device
-//! that sends compressed frames over VCHIQ to the VideoCore GPU's
-//! `ril.video_decode` service and writes decoded YUV 4:2:0 frames into
-//! CMA memory.
+//! Hardware-accelerated video decoding, playback, encoding and MP4
+//! recording on the Raspberry Pi: `bcm2835-codec` (/dev/video10 for
+//! decoding, /dev/video11 for encoding), Video4Linux2 memory-to-memory
+//! devices that send frames over VCHIQ to the VideoCore GPU's
+//! `ril.video_decode` and `ril.video_encode` services using CMA memory.
 //!
 //! `Stream` reads the container (MP4/MOV `ftyp`/`moov`, or raw Annex-B
 //! H.264) from an open file descriptor without loading the whole file
 //! into memory, so large videos stream directly from the card or USB
-//! drive. `Decoder` drives the V4L2 M2M queues, and `Player` paces frames
-//! against the monotonic clock, decodes the first frame when opened, and
-//! supports pausing, resuming and seeking to any keyframe.
+//! drive. `Decoder` and `Player` drive playback, while `Encoder`,
+//! `Mp4Muxer` and `Recorder` encode YUV 4:2:0 frames to H.264 and stream
+//! them directly into an `.mp4` file on disk.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -1433,6 +1433,836 @@ fn yuvPixel(y: i32, u: i32, v: i32) u32 {
     return 0xff000000 | (r << 16) | (g << 8) | b;
 }
 
+/// Converts a `width` by `height` `0xffRRGGBB` picture into planar YUV
+/// 4:2:0 (`YU12`: `stride × slice_h` luma plane followed by `(stride/2) ×
+/// (slice_h/2)` Cb and Cr planes) in `dst`, using BT.601 studio swing.
+/// Returns the number of bytes written in `dst`.
+pub fn argbToYuv420(
+    src: []const u32,
+    width: u32,
+    height: u32,
+    dst: []u8,
+    stride: u32,
+    slice_h: u32,
+) usize {
+    const w: usize = width;
+    const h: usize = height;
+    const bpl: usize = @max(stride, width);
+    const sh: usize = @max(slice_h, height);
+    const y_plane_len = bpl * sh;
+    const uv_stride = bpl / 2;
+    const u_plane_len = uv_stride * (sh / 2);
+    const total_len = y_plane_len + 2 * u_plane_len;
+    if (src.len < w * h or dst.len < total_len) return 0;
+
+    const y_plane = dst[0..y_plane_len];
+    const u_plane = dst[y_plane_len..][0..u_plane_len];
+    const v_plane = dst[y_plane_len + u_plane_len ..][0..u_plane_len];
+
+    var y: usize = 0;
+    while (y + 1 < h) : (y += 2) {
+        const src_row0 = src[y * w ..][0..w];
+        const src_row1 = src[(y + 1) * w ..][0..w];
+        const y_row0 = y_plane[y * bpl ..][0..w];
+        const y_row1 = y_plane[(y + 1) * bpl ..][0..w];
+        const u_row = u_plane[(y >> 1) * uv_stride ..][0 .. w / 2];
+        const v_row = v_plane[(y >> 1) * uv_stride ..][0 .. w / 2];
+
+        var x: usize = 0;
+        while (x + 1 < w) : (x += 2) {
+            const p00 = src_row0[x];
+            const p01 = src_row0[x + 1];
+            const p10 = src_row1[x];
+            const p11 = src_row1[x + 1];
+
+            const r00: i32 = @intCast((p00 >> 16) & 0xff);
+            const g00: i32 = @intCast((p00 >> 8) & 0xff);
+            const b00: i32 = @intCast(p00 & 0xff);
+
+            const r01: i32 = @intCast((p01 >> 16) & 0xff);
+            const g01: i32 = @intCast((p01 >> 8) & 0xff);
+            const b01: i32 = @intCast(p01 & 0xff);
+
+            const r10: i32 = @intCast((p10 >> 16) & 0xff);
+            const g10: i32 = @intCast((p10 >> 8) & 0xff);
+            const b10: i32 = @intCast(p10 & 0xff);
+
+            const r11: i32 = @intCast((p11 >> 16) & 0xff);
+            const g11: i32 = @intCast((p11 >> 8) & 0xff);
+            const b11: i32 = @intCast(p11 & 0xff);
+
+            y_row0[x] = @intCast(std.math.clamp(((66 * r00 + 129 * g00 + 25 * b00 + 128) >> 8) + 16, 16, 235));
+            y_row0[x + 1] = @intCast(std.math.clamp(((66 * r01 + 129 * g01 + 25 * b01 + 128) >> 8) + 16, 16, 235));
+            y_row1[x] = @intCast(std.math.clamp(((66 * r10 + 129 * g10 + 25 * b10 + 128) >> 8) + 16, 16, 235));
+            y_row1[x + 1] = @intCast(std.math.clamp(((66 * r11 + 129 * g11 + 25 * b11 + 128) >> 8) + 16, 16, 235));
+
+            const r_avg = (r00 + r01 + r10 + r11 + 2) >> 2;
+            const g_avg = (g00 + g01 + g10 + g11 + 2) >> 2;
+            const b_avg = (b00 + b01 + b10 + b11 + 2) >> 2;
+
+            u_row[x >> 1] = @intCast(std.math.clamp(((-38 * r_avg - 74 * g_avg + 112 * b_avg + 128) >> 8) + 128, 16, 240));
+            v_row[x >> 1] = @intCast(std.math.clamp(((112 * r_avg - 94 * g_avg - 18 * b_avg + 128) >> 8) + 128, 16, 240));
+        }
+    }
+    return total_len;
+}
+
+// --- V4L2 M2M hardware H.264 video encoder & MP4 recorder --------------------
+
+pub const EncodedPacket = struct {
+    index: u32,
+    data: []const u8,
+    pts_us: u64,
+    keyframe: bool,
+    last: bool,
+};
+
+pub const Encoder = struct {
+    fd: linux.fd_t,
+    out_bufs: [max_buffers]MappedBuf = @splat(.{}),
+    out_count: u32 = 0,
+    cap_bufs: [max_buffers]MappedBuf = @splat(.{}),
+    cap_count: u32 = 0,
+    out_streaming: bool = false,
+    cap_streaming: bool = false,
+    width: u32,
+    height: u32,
+    stride: u32 = 0,
+    slice_height: u32 = 0,
+    eos: bool = false,
+
+    pub const Options = struct {
+        fps: u32 = 30,
+        bitrate: i32 = 2_500_000,
+        gop_size: i32 = 30,
+    };
+
+    pub fn open(width: u32, height: u32, opts: Options) !Encoder {
+        const w = std.mem.alignBackward(u32, width, 16);
+        const h = std.mem.alignBackward(u32, height, 16);
+        if (w == 0 or h == 0) return error.InvalidDimensions;
+
+        const fd = try openEncoderDevice(Codec.h264.fourcc());
+        errdefer sys.close(fd);
+
+        var sub: v4l2.EventSubscription = .{ .type = v4l2.event_eos };
+        _ = linux.ioctl(fd, v4l2.subscribe_event, @intFromPtr(&sub));
+
+        setControl(fd, v4l2.cid.mpeg_video_bitrate, opts.bitrate);
+        setControl(fd, v4l2.cid.mpeg_video_gop_size, opts.gop_size);
+        setControl(fd, v4l2.cid.mpeg_video_h264_i_period, opts.gop_size);
+        setControl(fd, v4l2.cid.mpeg_video_repeat_seq_header, 1);
+
+        var parm: v4l2.StreamParm = .{
+            .type = v4l2.buf_type_video_output_mplane,
+            .parm = .{ .output = .{
+                .timeperframe = .{ .numerator = 1, .denominator = @max(opts.fps, 1) },
+            } },
+        };
+        _ = linux.ioctl(fd, v4l2.s_parm, @intFromPtr(&parm));
+
+        // bcm2835-codec-encode aligns YUV420 output stride to 64 bytes.
+        const wanted_stride = std.mem.alignForward(u32, w, 64);
+        var out_fmt: v4l2.Format = .{
+            .type = v4l2.buf_type_video_output_mplane,
+            .fmt = .{ .pix_mp = .{
+                .width = w,
+                .height = h,
+                .pixelformat = v4l2.pix_fmt_yuv420,
+                .num_planes = 1,
+                .plane_fmt = blk: {
+                    var p: [8]v4l2.PlanePixFormat = @splat(.{});
+                    p[0] = .{
+                        .bytesperline = wanted_stride,
+                        .sizeimage = wanted_stride * h * 3 / 2,
+                    };
+                    break :blk p;
+                },
+            } },
+        };
+        try ioctl(fd, v4l2.s_fmt, &out_fmt);
+
+        var cap_fmt: v4l2.Format = .{
+            .type = v4l2.buf_type_video_capture_mplane,
+            .fmt = .{ .pix_mp = .{
+                .width = w,
+                .height = h,
+                .pixelformat = Codec.h264.fourcc(),
+                .num_planes = 1,
+                .plane_fmt = blk: {
+                    var p: [8]v4l2.PlanePixFormat = @splat(.{});
+                    p[0] = .{ .sizeimage = 512 * 1024 };
+                    break :blk p;
+                },
+            } },
+        };
+        try ioctl(fd, v4l2.s_fmt, &cap_fmt);
+
+        var e: Encoder = .{
+            .fd = fd,
+            .width = w,
+            .height = h,
+            .stride = @max(out_fmt.fmt.pix_mp.plane_fmt[0].bytesperline, w),
+            .slice_height = @max(out_fmt.fmt.pix_mp.height, h),
+        };
+        errdefer e.deinit();
+
+        try allocMmapBuffers(fd, v4l2.buf_type_video_output_mplane, 4, &e.out_bufs, &e.out_count);
+        try allocMmapBuffers(fd, v4l2.buf_type_video_capture_mplane, 4, &e.cap_bufs, &e.cap_count);
+        for (0..e.cap_count) |i| try e.queueCapture(@intCast(i));
+
+        var out_type: c_int = v4l2.buf_type_video_output_mplane;
+        try ioctl(fd, v4l2.streamon, &out_type);
+        e.out_streaming = true;
+
+        var cap_type: c_int = v4l2.buf_type_video_capture_mplane;
+        try ioctl(fd, v4l2.streamon, &cap_type);
+        e.cap_streaming = true;
+
+        return e;
+    }
+
+    pub fn deinit(e: *Encoder) void {
+        if (e.out_streaming) {
+            var out_type: c_int = v4l2.buf_type_video_output_mplane;
+            _ = linux.ioctl(e.fd, v4l2.streamoff, @intFromPtr(&out_type));
+            e.out_streaming = false;
+        }
+        if (e.cap_streaming) {
+            var cap_type: c_int = v4l2.buf_type_video_capture_mplane;
+            _ = linux.ioctl(e.fd, v4l2.streamoff, @intFromPtr(&cap_type));
+            e.cap_streaming = false;
+        }
+        Decoder.freeBuffers(e.fd, v4l2.buf_type_video_output_mplane, &e.out_bufs, &e.out_count);
+        Decoder.freeBuffers(e.fd, v4l2.buf_type_video_capture_mplane, &e.cap_bufs, &e.cap_count);
+        sys.close(e.fd);
+    }
+
+    pub fn queueCapture(e: *Encoder, index: u32) !void {
+        var plane: v4l2.Plane = .{ .length = @intCast(e.cap_bufs[index].data.len) };
+        var b: v4l2.Buffer = .{
+            .index = index,
+            .type = v4l2.buf_type_video_capture_mplane,
+            .memory = v4l2.memory_mmap,
+            .m = .{ .planes = @ptrCast(&plane) },
+            .length = 1,
+        };
+        try ioctl(e.fd, v4l2.qbuf, &b);
+        e.cap_bufs[index].queued = true;
+    }
+
+    /// Reclaims finished output buffers and returns the index of a free
+    /// output buffer, if one is available.
+    pub fn acquireOutput(e: *Encoder) ?u32 {
+        while (true) {
+            var plane: v4l2.Plane = .{};
+            var b: v4l2.Buffer = .{
+                .type = v4l2.buf_type_video_output_mplane,
+                .memory = v4l2.memory_mmap,
+                .m = .{ .planes = @ptrCast(&plane) },
+                .length = 1,
+            };
+            if (linux.errno(linux.ioctl(e.fd, v4l2.dqbuf, @intFromPtr(&b))) != .SUCCESS) break;
+            if (b.index < e.out_count) e.out_bufs[b.index].queued = false;
+        }
+        for (0..e.out_count) |i| {
+            if (!e.out_bufs[i].queued) return @intCast(i);
+        }
+        return null;
+    }
+
+    pub fn outputBuffer(e: *Encoder, index: u32) []u8 {
+        return e.out_bufs[index].data;
+    }
+
+    pub fn submitOutput(e: *Encoder, index: u32, used: usize, pts_us: u64, force_keyframe: bool) !void {
+        if (force_keyframe) setControl(e.fd, v4l2.cid.mpeg_video_force_key_frame, 1);
+        var plane: v4l2.Plane = .{
+            .bytesused = @intCast(used),
+            .length = @intCast(e.out_bufs[index].data.len),
+        };
+        var b: v4l2.Buffer = .{
+            .index = index,
+            .type = v4l2.buf_type_video_output_mplane,
+            .field = v4l2.field_none,
+            .timestamp = .{
+                .sec = @intCast(pts_us / 1_000_000),
+                .usec = @intCast(pts_us % 1_000_000),
+            },
+            .memory = v4l2.memory_mmap,
+            .m = .{ .planes = @ptrCast(&plane) },
+            .length = 1,
+        };
+        try ioctl(e.fd, v4l2.qbuf, &b);
+        e.out_bufs[index].queued = true;
+    }
+
+    pub fn sendEos(e: *Encoder) void {
+        var cmd: v4l2.EncoderCmd = .{ .cmd = v4l2.enc_cmd_stop };
+        _ = linux.ioctl(e.fd, v4l2.encoder_cmd, @intFromPtr(&cmd));
+    }
+
+    /// Dequeues the next encoded H.264 packet, if one is ready.
+    pub fn nextPacket(e: *Encoder) !?EncodedPacket {
+        while (true) {
+            var ev: v4l2.Event = .{};
+            if (linux.errno(linux.ioctl(e.fd, v4l2.dqevent, @intFromPtr(&ev))) != .SUCCESS) break;
+            if (ev.type == v4l2.event_eos) e.eos = true;
+        }
+        if (!e.cap_streaming) return null;
+
+        var plane: v4l2.Plane = .{};
+        var b: v4l2.Buffer = .{
+            .type = v4l2.buf_type_video_capture_mplane,
+            .memory = v4l2.memory_mmap,
+            .m = .{ .planes = @ptrCast(&plane) },
+            .length = 1,
+        };
+        switch (linux.errno(linux.ioctl(e.fd, v4l2.dqbuf, @intFromPtr(&b)))) {
+            .SUCCESS => {},
+            .AGAIN, .PIPE => return null,
+            else => return error.EncodeFailed,
+        }
+        if (b.index >= e.cap_count) return null;
+        e.cap_bufs[b.index].queued = false;
+        const last = (b.flags & v4l2.buf_flag_last) != 0;
+        if (last) e.eos = true;
+        if (plane.bytesused == 0 or (b.flags & v4l2.buf_flag_error) != 0) {
+            if (!last) e.queueCapture(b.index) catch {};
+            return null;
+        }
+        const pts_us: u64 = @as(u64, @intCast(@max(b.timestamp.sec, 0))) * 1_000_000 +
+            @as(u64, @intCast(@max(b.timestamp.usec, 0)));
+        return .{
+            .index = b.index,
+            .data = e.cap_bufs[b.index].data[0..@min(plane.bytesused, e.cap_bufs[b.index].data.len)],
+            .pts_us = pts_us,
+            .keyframe = (b.flags & v4l2.buf_flag_keyframe) != 0,
+            .last = last,
+        };
+    }
+};
+
+fn allocMmapBuffers(fd: linux.fd_t, buf_type: u32, wanted: u32, bufs: *[max_buffers]MappedBuf, count_out: *u32) !void {
+    var req: v4l2.RequestBuffers = .{ .count = wanted, .type = buf_type, .memory = v4l2.memory_mmap };
+    try ioctl(fd, v4l2.reqbufs, &req);
+    if (req.count == 0) return error.NoBuffers;
+    const count = @min(req.count, max_buffers);
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        var plane: v4l2.Plane = .{};
+        var b: v4l2.Buffer = .{
+            .index = i,
+            .type = buf_type,
+            .memory = v4l2.memory_mmap,
+            .m = .{ .planes = @ptrCast(&plane) },
+            .length = 1,
+        };
+        try ioctl(fd, v4l2.querybuf, &b);
+        if (plane.length == 0) return error.NoBuffers;
+        const addr = try sys.check(linux.mmap(null, plane.length, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, fd, plane.m.mem_offset));
+        bufs[i] = .{ .data = @as([*]align(std.heap.page_size_min) u8, @ptrFromInt(addr))[0..plane.length], .queued = false };
+        count_out.* = i + 1;
+    }
+}
+
+fn setControl(fd: linux.fd_t, id: u32, value: i32) void {
+    var ctrl: v4l2.Control = .{ .id = id, .value = value };
+    _ = linux.ioctl(fd, v4l2.s_ctrl, @intFromPtr(&ctrl));
+}
+
+fn openEncoderDevice(wanted_fourcc: u32) !linux.fd_t {
+    // Check /dev/video11 (bcm2835-codec-encode's default number) first.
+    if (tryEncoderDevice(11, wanted_fourcc)) |fd| return fd;
+    for (0..32) |n| {
+        if (n == 11) continue;
+        if (tryEncoderDevice(n, wanted_fourcc)) |fd| return fd;
+    }
+    return error.NoHardwareEncoder;
+}
+
+fn tryEncoderDevice(n: usize, wanted_fourcc: u32) ?linux.fd_t {
+    var path_buf: [32]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&path_buf, "/dev/video{d}", .{n}) catch return null;
+    const fd = sys.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true, .CLOEXEC = true }) catch return null;
+    var cap: v4l2.Capability = undefined;
+    if (linux.errno(linux.ioctl(fd, v4l2.querycap, @intFromPtr(&cap))) != .SUCCESS) {
+        sys.close(fd);
+        return null;
+    }
+    const caps = if (cap.device_caps != 0) cap.device_caps else cap.capabilities;
+    if (caps & v4l2.cap_video_m2m_mplane == 0 or caps & v4l2.cap_streaming == 0) {
+        sys.close(fd);
+        return null;
+    }
+    var has_yuv_out = false;
+    var i: u32 = 0;
+    while (i < 64) : (i += 1) {
+        var desc: v4l2.FmtDesc = .{ .index = i, .type = v4l2.buf_type_video_output_mplane };
+        if (linux.errno(linux.ioctl(fd, v4l2.enum_fmt, @intFromPtr(&desc))) != .SUCCESS) break;
+        if (desc.pixelformat == v4l2.pix_fmt_yuv420) {
+            has_yuv_out = true;
+            break;
+        }
+    }
+    if (has_yuv_out) {
+        i = 0;
+        while (i < 64) : (i += 1) {
+            var desc: v4l2.FmtDesc = .{ .index = i, .type = v4l2.buf_type_video_capture_mplane };
+            if (linux.errno(linux.ioctl(fd, v4l2.enum_fmt, @intFromPtr(&desc))) != .SUCCESS) break;
+            if (desc.pixelformat == wanted_fourcc) return fd;
+        }
+    }
+    sys.close(fd);
+    return null;
+}
+
+/// Streams encoded Annex-B H.264 packets into an ISO Base Media File Format
+/// (`.mp4`) file on disk without buffering frame payloads in memory.
+pub const Mp4Muxer = struct {
+    gpa: std.mem.Allocator,
+    fd: linux.fd_t,
+    width: u32,
+    height: u32,
+    fps: u32,
+    mdat_offset: u64 = 20,
+    write_offset: u64 = 28,
+    sps: [256]u8 = undefined,
+    sps_len: usize = 0,
+    pps: [256]u8 = undefined,
+    pps_len: usize = 0,
+    samples: std.ArrayList(MuxSample) = .empty,
+
+    const MuxSample = struct {
+        size: u32,
+        pts_us: u64,
+        keyframe: bool,
+    };
+
+    pub fn init(gpa: std.mem.Allocator, fd: linux.fd_t, width: u32, height: u32, fps: u32) !Mp4Muxer {
+        // 20-byte `ftyp` box followed by an 8-byte `mdat` box header whose
+        // 32-bit size is patched in `finish`.
+        const header = "\x00\x00\x00\x14ftypisom\x00\x00\x02\x00isom\x00\x00\x00\x00mdat";
+        try pwriteAll(fd, header, 0);
+        return .{
+            .gpa = gpa,
+            .fd = fd,
+            .width = width,
+            .height = height,
+            .fps = @max(fps, 1),
+        };
+    }
+
+    pub fn deinit(m: *Mp4Muxer) void {
+        m.samples.deinit(m.gpa);
+    }
+
+    /// Parses an Annex-B H.264 buffer from the encoder, captures SPS/PPS
+    /// NALs for the `avcC` box, and writes 4-byte length-prefixed slice
+    /// NALs to `mdat`.
+    pub fn writePacket(m: *Mp4Muxer, annexb: []const u8, pts_us: u64, keyframe_hint: bool) !void {
+        var sample_bytes: u32 = 0;
+        var is_keyframe = keyframe_hint;
+
+        var sc_opt = nextStartCode(annexb, 0);
+        if (sc_opt == null and annexb.len > 0) {
+            try m.writeNal(annexb, &sample_bytes, &is_keyframe);
+        } else {
+            while (sc_opt) |sc| {
+                const next_sc = nextStartCode(annexb, sc.end);
+                const nal_end = if (next_sc) |n| n.pos else annexb.len;
+                if (sc.end < nal_end) {
+                    try m.writeNal(annexb[sc.end..nal_end], &sample_bytes, &is_keyframe);
+                }
+                sc_opt = next_sc;
+            }
+        }
+
+        if (sample_bytes > 0 and m.samples.items.len < max_samples) {
+            try m.samples.append(m.gpa, .{
+                .size = sample_bytes,
+                .pts_us = pts_us,
+                .keyframe = is_keyframe or m.samples.items.len == 0,
+            });
+        }
+    }
+
+    fn writeNal(m: *Mp4Muxer, nal: []const u8, sample_bytes: *u32, is_keyframe: *bool) !void {
+        if (nal.len == 0) return;
+        const nal_type = nal[0] & 0x1f;
+        if (nal_type == 7) {
+            if (m.sps_len == 0 and nal.len <= m.sps.len) {
+                @memcpy(m.sps[0..nal.len], nal);
+                m.sps_len = nal.len;
+            }
+            return;
+        }
+        if (nal_type == 8) {
+            if (m.pps_len == 0 and nal.len <= m.pps.len) {
+                @memcpy(m.pps[0..nal.len], nal);
+                m.pps_len = nal.len;
+            }
+            return;
+        }
+        if (nal_type == 9) return;
+        if (nal_type == 5) is_keyframe.* = true;
+
+        var len_be: [4]u8 = undefined;
+        std.mem.writeInt(u32, &len_be, @intCast(nal.len), .big);
+        try pwriteAll(m.fd, &len_be, m.write_offset);
+        m.write_offset += 4;
+        try pwriteAll(m.fd, nal, m.write_offset);
+        m.write_offset += nal.len;
+        sample_bytes.* += @intCast(4 + nal.len);
+    }
+
+    /// Patches the `mdat` box size and writes the trailing `moov` box.
+    pub fn finish(m: *Mp4Muxer) !void {
+        if (m.samples.items.len == 0 or m.sps_len < 4 or m.pps_len == 0) return error.EmptyRecording;
+
+        const mdat_size: u32 = @intCast(m.write_offset - m.mdat_offset);
+        var mdat_sz_be: [4]u8 = undefined;
+        std.mem.writeInt(u32, &mdat_sz_be, mdat_size, .big);
+        try pwriteAll(m.fd, &mdat_sz_be, m.mdat_offset);
+
+        const sps = m.sps[0..m.sps_len];
+        const pps = m.pps[0..m.pps_len];
+        const timescale: u32 = 1000; // 1 tick = 1 ms
+        const default_delta_ms: u32 = @max(1000 / m.fps, 1);
+
+        const W = struct {
+            fn u32be(list: *std.ArrayList(u8), a: std.mem.Allocator, v: u32) !void {
+                var b: [4]u8 = undefined;
+                std.mem.writeInt(u32, &b, v, .big);
+                try list.appendSlice(a, &b);
+            }
+            fn u16be(list: *std.ArrayList(u8), a: std.mem.Allocator, v: u16) !void {
+                var b: [2]u8 = undefined;
+                std.mem.writeInt(u16, &b, v, .big);
+                try list.appendSlice(a, &b);
+            }
+        };
+
+        // avcC
+        var avcc: std.ArrayList(u8) = .empty;
+        defer avcc.deinit(m.gpa);
+        try W.u32be(&avcc, m.gpa, @intCast(8 + 6 + 2 + sps.len + 1 + 2 + pps.len));
+        try avcc.appendSlice(m.gpa, "avcC");
+        try avcc.appendSlice(m.gpa, &.{ 1, sps[1], sps[2], sps[3], 0xff, 0xe1 });
+        try W.u16be(&avcc, m.gpa, @intCast(sps.len));
+        try avcc.appendSlice(m.gpa, sps);
+        try avcc.append(m.gpa, 1);
+        try W.u16be(&avcc, m.gpa, @intCast(pps.len));
+        try avcc.appendSlice(m.gpa, pps);
+
+        // avc1 (8 + 78 + avcc)
+        var avc1: std.ArrayList(u8) = .empty;
+        defer avc1.deinit(m.gpa);
+        try W.u32be(&avc1, m.gpa, @intCast(8 + 78 + avcc.items.len));
+        try avc1.appendSlice(m.gpa, "avc1");
+        try avc1.appendNTimes(m.gpa, 0, 6);
+        try W.u16be(&avc1, m.gpa, 1); // data_reference_index
+        try avc1.appendNTimes(m.gpa, 0, 16);
+        try W.u16be(&avc1, m.gpa, @intCast(m.width));
+        try W.u16be(&avc1, m.gpa, @intCast(m.height));
+        try W.u32be(&avc1, m.gpa, 0x00480000); // horizresolution 72 dpi
+        try W.u32be(&avc1, m.gpa, 0x00480000); // vertresolution 72 dpi
+        try W.u32be(&avc1, m.gpa, 0);
+        try W.u16be(&avc1, m.gpa, 1); // frame_count
+        try avc1.appendNTimes(m.gpa, 0, 32); // compressorname
+        try W.u16be(&avc1, m.gpa, 0x0018); // depth = 24
+        try W.u16be(&avc1, m.gpa, 0xffff); // pre_defined = -1
+        try avc1.appendSlice(m.gpa, avcc.items);
+
+        // stsd
+        var stsd: std.ArrayList(u8) = .empty;
+        defer stsd.deinit(m.gpa);
+        try W.u32be(&stsd, m.gpa, @intCast(16 + avc1.items.len));
+        try stsd.appendSlice(m.gpa, "stsd\x00\x00\x00\x00\x00\x00\x00\x01");
+        try stsd.appendSlice(m.gpa, avc1.items);
+
+        // stts (per-sample duration in milliseconds)
+        var stts: std.ArrayList(u8) = .empty;
+        defer stts.deinit(m.gpa);
+        const n_samples = m.samples.items.len;
+        try W.u32be(&stts, m.gpa, @intCast(16 + n_samples * 8));
+        try stts.appendSlice(m.gpa, "stts\x00\x00\x00\x00");
+        try W.u32be(&stts, m.gpa, @intCast(n_samples));
+        var total_ticks: u32 = 0;
+        for (m.samples.items, 0..) |sp, i| {
+            const delta_ms: u32 = if (i + 1 < n_samples) blk: {
+                const next_pts = m.samples.items[i + 1].pts_us;
+                break :blk @intCast(@max((next_pts -| sp.pts_us + 500) / 1000, 1));
+            } else default_delta_ms;
+            try W.u32be(&stts, m.gpa, 1);
+            try W.u32be(&stts, m.gpa, delta_ms);
+            total_ticks +|= delta_ms;
+        }
+
+        // stsc (1 chunk containing all samples)
+        var stsc: std.ArrayList(u8) = .empty;
+        defer stsc.deinit(m.gpa);
+        try W.u32be(&stsc, m.gpa, 28);
+        try stsc.appendSlice(m.gpa, "stsc\x00\x00\x00\x00\x00\x00\x00\x01");
+        try W.u32be(&stsc, m.gpa, 1);
+        try W.u32be(&stsc, m.gpa, @intCast(n_samples));
+        try W.u32be(&stsc, m.gpa, 1);
+
+        // stsz
+        var stsz: std.ArrayList(u8) = .empty;
+        defer stsz.deinit(m.gpa);
+        try W.u32be(&stsz, m.gpa, @intCast(20 + n_samples * 4));
+        try stsz.appendSlice(m.gpa, "stsz\x00\x00\x00\x00\x00\x00\x00\x00");
+        try W.u32be(&stsz, m.gpa, @intCast(n_samples));
+        for (m.samples.items) |sp| try W.u32be(&stsz, m.gpa, sp.size);
+
+        // stco (single chunk starting right after the 8-byte mdat header)
+        var stco: std.ArrayList(u8) = .empty;
+        defer stco.deinit(m.gpa);
+        try W.u32be(&stco, m.gpa, 20);
+        try stco.appendSlice(m.gpa, "stco\x00\x00\x00\x00\x00\x00\x00\x01");
+        try W.u32be(&stco, m.gpa, @intCast(m.mdat_offset + 8));
+
+        // stss (1-based sync sample indices)
+        var sync_count: u32 = 0;
+        for (m.samples.items) |sp| if (sp.keyframe) {
+            sync_count += 1;
+        };
+        var stss: std.ArrayList(u8) = .empty;
+        defer stss.deinit(m.gpa);
+        try W.u32be(&stss, m.gpa, 16 + sync_count * 4);
+        try stss.appendSlice(m.gpa, "stss\x00\x00\x00\x00");
+        try W.u32be(&stss, m.gpa, sync_count);
+        for (m.samples.items, 0..) |sp, i| if (sp.keyframe) {
+            try W.u32be(&stss, m.gpa, @intCast(i + 1));
+        };
+
+        // stbl
+        var stbl: std.ArrayList(u8) = .empty;
+        defer stbl.deinit(m.gpa);
+        const stbl_len = 8 + stsd.items.len + stts.items.len + stsc.items.len + stsz.items.len + stco.items.len + stss.items.len;
+        try W.u32be(&stbl, m.gpa, @intCast(stbl_len));
+        try stbl.appendSlice(m.gpa, "stbl");
+        try stbl.appendSlice(m.gpa, stsd.items);
+        try stbl.appendSlice(m.gpa, stts.items);
+        try stbl.appendSlice(m.gpa, stsc.items);
+        try stbl.appendSlice(m.gpa, stsz.items);
+        try stbl.appendSlice(m.gpa, stco.items);
+        try stbl.appendSlice(m.gpa, stss.items);
+
+        // vmhd + dinf + stbl -> minf
+        const vmhd = "\x00\x00\x00\x14vmhd\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00";
+        const dinf = "\x00\x00\x00\x24dinf\x00\x00\x00\x1cdref\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x0curl \x00\x00\x00\x01";
+        var minf: std.ArrayList(u8) = .empty;
+        defer minf.deinit(m.gpa);
+        try W.u32be(&minf, m.gpa, @intCast(8 + vmhd.len + dinf.len + stbl.items.len));
+        try minf.appendSlice(m.gpa, "minf");
+        try minf.appendSlice(m.gpa, vmhd);
+        try minf.appendSlice(m.gpa, dinf);
+        try minf.appendSlice(m.gpa, stbl.items);
+
+        // mdhd (version 0: 32 bytes)
+        var mdhd: std.ArrayList(u8) = .empty;
+        defer mdhd.deinit(m.gpa);
+        try W.u32be(&mdhd, m.gpa, 32);
+        try mdhd.appendSlice(m.gpa, "mdhd");
+        try mdhd.appendNTimes(m.gpa, 0, 12);
+        try W.u32be(&mdhd, m.gpa, timescale);
+        try W.u32be(&mdhd, m.gpa, total_ticks);
+        try W.u32be(&mdhd, m.gpa, 0x55c40000); // language = und
+
+        // hdlr (vide: 33 bytes)
+        const hdlr = "\x00\x00\x00\x21hdlr\x00\x00\x00\x00\x00\x00\x00\x00vide\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+
+        // mdia
+        var mdia: std.ArrayList(u8) = .empty;
+        defer mdia.deinit(m.gpa);
+        try W.u32be(&mdia, m.gpa, @intCast(8 + mdhd.items.len + hdlr.len + minf.items.len));
+        try mdia.appendSlice(m.gpa, "mdia");
+        try mdia.appendSlice(m.gpa, mdhd.items);
+        try mdia.appendSlice(m.gpa, hdlr);
+        try mdia.appendSlice(m.gpa, minf.items);
+
+        // tkhd (version 0: 92 bytes)
+        var tkhd: std.ArrayList(u8) = .empty;
+        defer tkhd.deinit(m.gpa);
+        try W.u32be(&tkhd, m.gpa, 92);
+        try tkhd.appendSlice(m.gpa, "tkhd\x00\x00\x00\x03"); // flags: enabled | in_movie
+        try tkhd.appendNTimes(m.gpa, 0, 8);
+        try W.u32be(&tkhd, m.gpa, 1); // track_ID = 1
+        try W.u32be(&tkhd, m.gpa, 0);
+        try W.u32be(&tkhd, m.gpa, total_ticks);
+        try tkhd.appendNTimes(m.gpa, 0, 16);
+        try W.u32be(&tkhd, m.gpa, 0x00010000); // identity matrix
+        try tkhd.appendNTimes(m.gpa, 0, 12);
+        try W.u32be(&tkhd, m.gpa, 0x00010000);
+        try tkhd.appendNTimes(m.gpa, 0, 12);
+        try W.u32be(&tkhd, m.gpa, 0x40000000);
+        try W.u32be(&tkhd, m.gpa, m.width << 16);
+        try W.u32be(&tkhd, m.gpa, m.height << 16);
+
+        // trak
+        var trak: std.ArrayList(u8) = .empty;
+        defer trak.deinit(m.gpa);
+        try W.u32be(&trak, m.gpa, @intCast(8 + tkhd.items.len + mdia.items.len));
+        try trak.appendSlice(m.gpa, "trak");
+        try trak.appendSlice(m.gpa, tkhd.items);
+        try trak.appendSlice(m.gpa, mdia.items);
+
+        // mvhd (version 0: 108 bytes)
+        var mvhd: std.ArrayList(u8) = .empty;
+        defer mvhd.deinit(m.gpa);
+        try W.u32be(&mvhd, m.gpa, 108);
+        try mvhd.appendSlice(m.gpa, "mvhd\x00\x00\x00\x00");
+        try mvhd.appendNTimes(m.gpa, 0, 8);
+        try W.u32be(&mvhd, m.gpa, timescale);
+        try W.u32be(&mvhd, m.gpa, total_ticks);
+        try W.u32be(&mvhd, m.gpa, 0x00010000); // rate = 1.0
+        try W.u16be(&mvhd, m.gpa, 0x0100); // volume = 1.0
+        try mvhd.appendNTimes(m.gpa, 0, 10);
+        try W.u32be(&mvhd, m.gpa, 0x00010000); // identity matrix
+        try mvhd.appendNTimes(m.gpa, 0, 12);
+        try W.u32be(&mvhd, m.gpa, 0x00010000);
+        try mvhd.appendNTimes(m.gpa, 0, 12);
+        try W.u32be(&mvhd, m.gpa, 0x40000000);
+        try mvhd.appendNTimes(m.gpa, 0, 24);
+        try W.u32be(&mvhd, m.gpa, 2); // next_track_ID
+
+        // moov
+        var moov: std.ArrayList(u8) = .empty;
+        defer moov.deinit(m.gpa);
+        try W.u32be(&moov, m.gpa, @intCast(8 + mvhd.items.len + trak.items.len));
+        try moov.appendSlice(m.gpa, "moov");
+        try moov.appendSlice(m.gpa, mvhd.items);
+        try moov.appendSlice(m.gpa, trak.items);
+
+        try pwriteAll(m.fd, moov.items, m.write_offset);
+        m.write_offset += moov.items.len;
+    }
+};
+
+fn pwriteAll(fd: linux.fd_t, data: []const u8, offset: u64) !void {
+    var done: usize = 0;
+    while (done < data.len) {
+        const rc = linux.pwrite(fd, data[done..].ptr, data.len - done, @bitCast(offset + done));
+        switch (linux.errno(rc)) {
+            .SUCCESS => done += rc,
+            .INTR => continue,
+            else => return error.WriteError,
+        }
+    }
+}
+
+/// Records `0xffRRGGBB` frames into an `.mp4` file using the hardware
+/// H.264 encoder.
+pub const Recorder = struct {
+    encoder: Encoder,
+    muxer: Mp4Muxer,
+    fd: linux.fd_t,
+    path_buf: [512]u8 = undefined,
+    path_len: usize = 0,
+    start_ns: ?u64 = null,
+    frames_submitted: u32 = 0,
+
+    pub fn start(gpa: std.mem.Allocator, path: [:0]const u8, width: u32, height: u32, opts: Encoder.Options) !Recorder {
+        if (path.len >= 512) return error.NameTooLong;
+        var enc = try Encoder.open(width, height, opts);
+        errdefer enc.deinit();
+
+        const fd: linux.fd_t = @intCast(try sys.check(linux.open(
+            path,
+            .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true, .CLOEXEC = true },
+            0o644,
+        )));
+        errdefer {
+            sys.close(fd);
+            _ = linux.unlink(path);
+        }
+
+        var mux = try Mp4Muxer.init(gpa, fd, enc.width, enc.height, opts.fps);
+        errdefer mux.deinit();
+
+        var r: Recorder = .{
+            .encoder = enc,
+            .muxer = mux,
+            .fd = fd,
+            .path_len = path.len,
+        };
+        @memcpy(r.path_buf[0..path.len], path);
+        r.path_buf[path.len] = 0;
+        return r;
+    }
+
+    pub fn name(r: *const Recorder) []const u8 {
+        return std.fs.path.basename(r.path_buf[0..r.path_len]);
+    }
+
+    pub fn pathZ(r: *const Recorder) [:0]const u8 {
+        return r.path_buf[0..r.path_len :0];
+    }
+
+    pub fn elapsedUs(r: *const Recorder, now_ns: u64) u64 {
+        const s = r.start_ns orelse return 0;
+        return (now_ns -| s) / std.time.ns_per_us;
+    }
+
+    /// Drains ready encoded packets to disk and submits a `width × height`
+    /// `0xffRRGGBB` frame to the hardware encoder if an input buffer is free.
+    pub fn addFrame(r: *Recorder, argb: []const u32, now_ns: u64) !void {
+        try r.drainPackets();
+        if (r.encoder.acquireOutput()) |buf_idx| {
+            if (r.start_ns == null) r.start_ns = now_ns;
+            const pts_us = (now_ns -| r.start_ns.?) / std.time.ns_per_us;
+            const out = r.encoder.outputBuffer(buf_idx);
+            const used = argbToYuv420(argb, r.encoder.width, r.encoder.height, out, r.encoder.stride, r.encoder.slice_height);
+            if (used > 0) {
+                try r.encoder.submitOutput(buf_idx, used, pts_us, r.frames_submitted == 0);
+                r.frames_submitted += 1;
+            }
+        }
+        try r.drainPackets();
+    }
+
+    fn drainPackets(r: *Recorder) !void {
+        while (try r.encoder.nextPacket()) |pkt| {
+            const is_last = pkt.last;
+            const idx = pkt.index;
+            defer if (!is_last) r.encoder.queueCapture(idx) catch {};
+            try r.muxer.writePacket(pkt.data, pkt.pts_us, pkt.keyframe);
+            if (is_last) break;
+        }
+    }
+
+    /// Flushes the hardware encoder, writes the MP4 `moov` index and closes
+    /// the file. If no frames were recorded, removes the empty file and
+    /// returns `error.EmptyRecording`.
+    pub fn stop(r: *Recorder) !void {
+        defer {
+            r.muxer.deinit();
+            r.encoder.deinit();
+            sys.close(r.fd);
+        }
+        errdefer _ = linux.unlink(r.pathZ());
+
+        if (r.frames_submitted > 0) {
+            r.encoder.sendEos();
+            var tries: u32 = 0;
+            while (tries < 60 and !r.encoder.eos) : (tries += 1) {
+                try r.drainPackets();
+                if (r.encoder.eos) break;
+                var fds = [1]linux.pollfd{.{
+                    .fd = r.encoder.fd,
+                    .events = linux.POLL.IN | linux.POLL.PRI,
+                    .revents = 0,
+                }};
+                _ = linux.poll(&fds, 1, 5);
+            }
+            try r.drainPackets();
+        }
+        try r.muxer.finish();
+    }
+};
+
 // --- Video player ------------------------------------------------------------
 
 pub const Player = struct {
@@ -1746,6 +2576,69 @@ test "YUV420 and NV12 conversion produces opaque ARGB pixels" {
     };
     yuvToArgb(&nv12, 2, 2, 2, 2, v4l2.pix_fmt_nv12, &dst, 2, 2);
     for (dst) |px| try testing.expectEqual(@as(u32, 0xff000000), px);
+
+    // Round-trip ARGB -> YUV420 (with 64-byte stride alignment) -> ARGB.
+    const src_px = [4]u32{ 0xffffffff, 0xffffffff, 0xff000000, 0xff000000 };
+    var yuv_buf: [64 * 2 * 3 / 2]u8 = @splat(0);
+    const written = argbToYuv420(&src_px, 2, 2, &yuv_buf, 64, 2);
+    try testing.expectEqual(yuv_buf.len, written);
+    var roundtrip: [4]u32 = undefined;
+    yuvToArgb(&yuv_buf, 2, 2, 64, 2, v4l2.pix_fmt_yuv420, &roundtrip, 2, 2);
+    try testing.expectEqual(@as(u32, 0xffffffff), roundtrip[0]);
+    try testing.expectEqual(@as(u32, 0xffffffff), roundtrip[1]);
+    try testing.expectEqual(@as(u32, 0xff000000), roundtrip[2]);
+    try testing.expectEqual(@as(u32, 0xff000000), roundtrip[3]);
+}
+
+test "Mp4Muxer streams Annex-B H.264 packets into a valid playable MP4" {
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "/tmp/dazzle-mux-test-{d}.mp4", .{linux.getpid()});
+    defer _ = linux.unlink(path);
+
+    const fd: linux.fd_t = @intCast(try sys.check(linux.open(
+        path,
+        .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true, .CLOEXEC = true },
+        0o644,
+    )));
+    defer sys.close(fd);
+
+    var mux = try Mp4Muxer.init(testing.allocator, fd, 320, 240, 25);
+    defer mux.deinit();
+
+    const sps = [_]u8{ 0x67, 0x42, 0xc0, 0x1e, 0xd9, 0x01, 0x41, 0xfb, 0x80 };
+    const pps = [_]u8{ 0x68, 0xce, 0x3c, 0x80 };
+    // Packet 0: separate SPS+PPS header buffer (as bcm2835-codec-encode emits first).
+    const hdr_pkt = [_]u8{ 0, 0, 0, 1 } ++ sps ++ [_]u8{ 0, 0, 0, 1 } ++ pps;
+    try mux.writePacket(&hdr_pkt, 0, false);
+    try testing.expectEqual(@as(usize, 0), mux.samples.items.len);
+
+    // Packet 1: IDR slice at t = 0.
+    const idr_pkt = [_]u8{ 0, 0, 0, 1, 0x65, 0x88, 0x84, 0x21 };
+    try mux.writePacket(&idr_pkt, 0, true);
+
+    // Packet 2: non-IDR P slice at t = 40ms.
+    const p_pkt = [_]u8{ 0, 0, 0, 1, 0x41, 0x9a, 0x24, 0x6c };
+    try mux.writePacket(&p_pkt, 40_000, false);
+
+    try mux.finish();
+
+    var stream = try Stream.open(testing.allocator, fd, mux.write_offset, false);
+    defer stream.deinit();
+
+    try testing.expectEqual(Codec.h264, stream.codec);
+    try testing.expectEqual(@as(u32, 320), stream.width);
+    try testing.expectEqual(@as(u32, 240), stream.height);
+    try testing.expectEqual(@as(usize, 2), stream.samples.len);
+    try testing.expectEqual(@as(u64, 80_000), stream.duration_us);
+    try testing.expect(stream.samples[0].keyframe);
+    try testing.expect(!stream.samples[1].keyframe);
+
+    var sample_buf: [128]u8 = undefined;
+    const s0 = try stream.readSample(0, true, &sample_buf);
+    try testing.expectEqual(4 + sps.len + 4 + pps.len + idr_pkt.len, s0);
+    const s1 = try stream.readSample(1, false, &sample_buf);
+    try testing.expectEqual(p_pkt.len, s1);
+    try testing.expectEqualSlices(u8, &p_pkt, sample_buf[0..s1]);
 }
 
 pub fn buildTestMp4(gpa: std.mem.Allocator, sps: []const u8, pps: []const u8, frame0: []const u8, frame1: []const u8) ![]u8 {

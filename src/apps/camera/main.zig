@@ -1,14 +1,16 @@
 //! Dazzle's Camera app: shows what the Raspberry Pi Camera Module sees,
-//! and takes photos, saved with the user's files as "Photo 1.png",
-//! "Photo 2.png" and so on.
+//! takes photos ("Photo 1.png", "Photo 2.png", ...) and records H.264
+//! videos ("Video 1.mp4", "Video 2.mp4", ...) with the hardware video
+//! encoder, saved with the user's files.
 //!
 //! Frames come raw from the sensor (capture.zig) and are made pictures of
 //! here, on the CPU (isp.zig): a preview the size of the window for each
 //! frame, with the white balance worked out from it (the grey world) and
 //! the exposure too (exposure.zig) for a sensor without its own (the
 //! IMX219; the OV5647's own is turned on). A photo is the latest frame
-//! developed at its full size, which a child process does, compresses and
-//! writes, so the preview goes on meanwhile.
+//! developed at its full size on a background thread; a video streams
+//! developed frames through `bcm2835-codec-encode` (`/dev/video11`) into an
+//! `.mp4` file while the preview goes on.
 //!
 //!     dazzle-camera [font.ttf]
 //!
@@ -20,6 +22,7 @@ const locale = @import("locale");
 const font = @import("font");
 const ui = @import("ui");
 const gfx = @import("gfx");
+const video = @import("video");
 const capture = @import("capture.zig");
 const isp = @import("isp.zig");
 const exposure = @import("exposure.zig");
@@ -59,17 +62,27 @@ const Viewer = struct {
     shoot: bool = false,
     /// The photo being saved, on a thread.
     saving: ?*Saving = null,
+    /// Active hardware H.264 video recording, if recording.
+    recorder: ?video.Recorder = null,
+    rec_width: u32,
+    rec_height: u32,
+    rec_pixels: []u32,
     /// Under the picture (`status`).
     status_buf: [128]u8 = undefined,
     status_len: usize = 0,
 
     fn init(gpa: std.mem.Allocator, cam: capture.Camera) !Viewer {
         const most = @as(usize, cam.width / 2) * (cam.height / 2);
+        const rec_w = @max(std.mem.alignBackward(u32, cam.width / 2, 16), 16);
+        const rec_h = @max(std.mem.alignBackward(u32, cam.height / 2, 16), 16);
         var v: Viewer = .{
             .gpa = gpa,
             .cam = cam,
             .tables = .init(.{}),
             .pixels = .{ try gpa.alloc(u32, most), try gpa.alloc(u32, most) },
+            .rec_width = rec_w,
+            .rec_height = rec_h,
+            .rec_pixels = try gpa.alloc(u32, @as(usize, rec_w) * rec_h),
         };
         v.setUpExposure();
         v.setStatus("{s}, {d}×{d}", .{ cam.sensorName(), cam.width, cam.height });
@@ -102,7 +115,7 @@ const Viewer = struct {
 
     /// Makes a picture of the newest frame (older ones are dropped), at
     /// most `max_width` by `max_height`. Returns whether there is a new one.
-    fn update(v: *Viewer, max_width: u32, max_height: u32) !bool {
+    fn update(v: *Viewer, max_width: u32, max_height: u32, now_ns: u64) !bool {
         var latest: ?capture.Frame = null;
         while (try v.cam.next()) |f| {
             if (latest) |old| v.cam.release(old);
@@ -126,6 +139,10 @@ const Viewer = struct {
         v.image = .init(out, size.width, size.height);
         v.shown = next;
 
+        if (v.recorder != null) {
+            v.recordFrame(raw, out, size.width, size.height, size.step, now_ns);
+        }
+
         // White balance and exposure for the frames to come.
         v.params.gains = isp.greyWorld(v.params.gains, stats);
         v.tables = .init(v.params);
@@ -138,6 +155,66 @@ const Viewer = struct {
             }
         }
         return true;
+    }
+
+    fn recordFrame(v: *Viewer, raw: isp.Raw, preview_px: []const u32, pw: u32, ph: u32, step: u32, now_ns: u64) void {
+        const rec = &(v.recorder orelse return);
+        const rw = v.rec_width;
+        const rh = v.rec_height;
+        const frame_px: []const u32 = if (step == 1 and pw == rw and ph >= rh)
+            preview_px[0 .. @as(usize, rw) * rh]
+        else if (step == 1 and pw >= rw and ph >= rh) blk: {
+            for (0..rh) |y| {
+                @memcpy(v.rec_pixels[y * rw ..][0..rw], preview_px[y * pw ..][0..rw]);
+            }
+            break :blk v.rec_pixels;
+        } else blk: {
+            _ = isp.preview(raw, &v.tables, v.params.black, v.rec_pixels, rw, rh, 1);
+            break :blk v.rec_pixels;
+        };
+
+        rec.addFrame(frame_px, now_ns) catch {
+            v.stopRecording();
+            return;
+        };
+        if (v.saving == null) {
+            var dur_buf: [32]u8 = undefined;
+            v.setStatus("Recording {s} · {s}", .{ rec.name(), video.formatDuration(&dur_buf, rec.elapsedUs(now_ns)) });
+        }
+    }
+
+    fn toggleRecord(v: *Viewer) void {
+        if (v.recorder != null) {
+            v.stopRecording();
+        } else {
+            v.startRecording();
+        }
+    }
+
+    fn startRecording(v: *Viewer) void {
+        var path_buf: [512]u8 = undefined;
+        const path = sys.files.numberedName(&path_buf, sys.system.user_dir, "Video", "mp4") orelse {
+            v.setStatus("Cannot save a video here", .{});
+            return;
+        };
+        v.recorder = video.Recorder.start(v.gpa, path, v.rec_width, v.rec_height, .{}) catch |err| {
+            print(sys.log_warning ++ "dazzle-camera: cannot start video encoder: {s}\n", .{@errorName(err)});
+            v.setStatus("Cannot record video ({s})", .{@errorName(err)});
+            return;
+        };
+        v.setStatus("Recording {s} · 0:00", .{v.recorder.?.name()});
+    }
+
+    fn stopRecording(v: *Viewer) void {
+        var rec = v.recorder orelse return;
+        v.recorder = null;
+        if (rec.stop()) |_| {
+            print("dazzle-camera: saved {s}\n", .{rec.pathZ()});
+            v.setStatus("Saved {s} with your files", .{rec.name()});
+        } else |err| {
+            print(sys.log_warning ++ "dazzle-camera: cannot save {s}: {s}\n", .{ rec.pathZ(), @errorName(err) });
+            v.setStatus("{s} could not be saved", .{rec.name()});
+        }
     }
 
     fn requestPhoto(v: *Viewer) void {
@@ -238,8 +315,11 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         break :blk try Viewer.init(gpa, cam);
     };
     if (viewer) |*v| a.win.wake_fd = v.cam.fd();
-    // A photo being saved is finished first when closing.
-    defer if (viewer) |*v| if (v.saving) |sv| sv.thread.join();
+    // Any active video recording or photo being saved is finished first when closing.
+    defer if (viewer) |*v| {
+        if (v.recorder != null) v.stopRecording();
+        if (v.saving) |sv| sv.thread.join();
+    };
 
     // Frames wake the window (`wake_fd`); otherwise wait for input.
     while (try a.step(if (viewer != null) std.time.ns_per_s else 60 * std.time.ns_per_s)) {
@@ -252,7 +332,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             if (v.checkSaving()) a.dirty = true;
             // Covered: frames are still taken (and dropped), not shown.
             const picture_h = a.height -| view.chrome_height;
-            if (try v.update(a.width, picture_h) and !a.suspended) a.dirty = true;
+            if (try v.update(a.width, picture_h, now) and !a.suspended) a.dirty = true;
         }
 
         const v: ?*Viewer = if (viewer) |*vw| vw else null;
@@ -261,6 +341,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             .message = if (v) |vw| (if (vw.image == null) "Starting the camera…" else "") else no_camera,
             .status = if (v) |vw| vw.status() else "",
             .on_shoot = if (v) |vw| (if (vw.saving == null) ui.Callback.of(vw, Viewer.requestPhoto) else null) else null,
+            .on_record = if (v) |vw| ui.Callback.of(vw, Viewer.toggleRecord) else null,
+            .recording = if (v) |vw| vw.recorder != null else false,
         });
     }
 }

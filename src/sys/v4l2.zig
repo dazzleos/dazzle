@@ -173,6 +173,44 @@ pub const DecoderCmd = extern struct {
     raw: [16]u32 = @splat(0),
 };
 
+pub const EncoderCmd = extern struct {
+    cmd: u32 = 0,
+    flags: u32 = 0,
+    raw: [8]u32 = @splat(0),
+};
+
+pub const Fract = extern struct {
+    numerator: u32 = 0,
+    denominator: u32 = 0,
+};
+
+pub const CaptureParm = extern struct {
+    capability: u32 = 0,
+    capturemode: u32 = 0,
+    timeperframe: Fract = .{},
+    extendedmode: u32 = 0,
+    readbuffers: u32 = 0,
+    reserved: [4]u32 = @splat(0),
+};
+
+pub const OutputParm = extern struct {
+    capability: u32 = 0,
+    outputmode: u32 = 0,
+    timeperframe: Fract = .{},
+    extendedmode: u32 = 0,
+    writebuffers: u32 = 0,
+    reserved: [4]u32 = @splat(0),
+};
+
+pub const StreamParm = extern struct {
+    type: u32,
+    parm: extern union {
+        capture: CaptureParm,
+        output: OutputParm,
+        raw_data: [200]u8,
+    },
+};
+
 pub const Control = extern struct {
     id: u32,
     value: i32,
@@ -246,9 +284,12 @@ pub const qbuf = IOCTL.IOWR('V', 15, Buffer);
 pub const dqbuf = IOCTL.IOWR('V', 17, Buffer);
 pub const streamon = IOCTL.IOW('V', 18, c_int);
 pub const streamoff = IOCTL.IOW('V', 19, c_int);
+pub const g_parm = IOCTL.IOWR('V', 21, StreamParm);
+pub const s_parm = IOCTL.IOWR('V', 22, StreamParm);
 pub const g_ctrl = IOCTL.IOWR('V', 27, Control);
 pub const s_ctrl = IOCTL.IOWR('V', 28, Control);
 pub const queryctrl = IOCTL.IOWR('V', 36, QueryControl);
+pub const encoder_cmd = IOCTL.IOWR('V', 77, EncoderCmd);
 pub const dqevent = IOCTL.IOR('V', 89, Event);
 pub const subscribe_event = IOCTL.IOW('V', 90, EventSubscription);
 pub const g_selection = IOCTL.IOWR('V', 94, Selection);
@@ -275,6 +316,7 @@ pub const event_eos = 2;
 pub const event_source_change = 5;
 pub const sel_tgt_compose = 0x0100;
 pub const dec_cmd_stop = 1;
+pub const enc_cmd_stop = 1;
 
 pub const pix_fmt_yuv420 = fourcc("YU12");
 pub const pix_fmt_yvu420 = fourcc("YV12");
@@ -288,6 +330,15 @@ pub const cid = struct {
     pub const autogain = 0x00980912;
     pub const hflip = 0x00980914;
     pub const vflip = 0x00980915;
+    pub const mpeg_video_gop_size = 0x009909cb;
+    pub const mpeg_video_bitrate_mode = 0x009909ce;
+    pub const mpeg_video_bitrate = 0x009909cf;
+    pub const mpeg_video_header_mode = 0x009909d8;
+    pub const mpeg_video_repeat_seq_header = 0x009909e2;
+    pub const mpeg_video_force_key_frame = 0x009909e5;
+    pub const mpeg_video_h264_i_period = 0x00990a66;
+    pub const mpeg_video_h264_level = 0x00990a67;
+    pub const mpeg_video_h264_profile = 0x00990a6b;
     pub const exposure_auto = 0x009a0901;
     pub const camera_sensor_rotation = 0x009a0923;
     pub const vblank = 0x009e0901;
@@ -348,6 +399,9 @@ test "structures and ioctls are laid out as the kernel's" {
     try testing.expectEqual(@as(usize, 136), @sizeOf(Event));
     try testing.expectEqual(@as(usize, 32), @sizeOf(EventSubscription));
     try testing.expectEqual(@as(usize, 72), @sizeOf(DecoderCmd));
+    try testing.expectEqual(@as(usize, 40), @sizeOf(EncoderCmd));
+    try testing.expectEqual(@as(usize, 40), @sizeOf(OutputParm));
+    try testing.expectEqual(@as(usize, 204), @sizeOf(StreamParm));
     try testing.expectEqual(@as(usize, 68), @sizeOf(QueryControl));
     try testing.expectEqual(@as(usize, 40), @offsetOf(QueryControl, "minimum"));
     try testing.expectEqual(@as(usize, 48), @sizeOf(MbusFramefmt));
@@ -362,8 +416,10 @@ test "structures and ioctls are laid out as the kernel's" {
     try testing.expectEqual(@as(u32, if (arm) 0xc050560f else 0xc058560f), qbuf);
     try testing.expectEqual(@as(u32, if (arm) 0xc0505611 else 0xc0585611), dqbuf);
     try testing.expectEqual(@as(u32, 0x40045612), streamon);
+    try testing.expectEqual(@as(u32, 0xc0cc5616), s_parm);
     try testing.expectEqual(@as(u32, 0xc008561c), s_ctrl);
     try testing.expectEqual(@as(u32, 0xc0445624), queryctrl);
+    try testing.expectEqual(@as(u32, 0xc028564d), encoder_cmd);
     try testing.expectEqual(@as(u32, 0xc0585605), subdev_s_fmt);
     try testing.expectEqual(@as(u32, 0xc0305602), subdev_enum_mbus_code);
     try testing.expectEqual(@as(u32, 0xc040564a), subdev_enum_frame_size);
