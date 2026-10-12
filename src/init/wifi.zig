@@ -52,6 +52,12 @@ const Join = struct {
     rsn_buf: [22]u8 = undefined,
     handshake: supplicant.Handshake = undefined,
     eapol: ?linux.fd_t = null,
+    /// Message 1 can arrive from the radio before the driver's connect
+    /// event (and before the netdev transmit path is ready for message 2);
+    /// it is held until `events` sees `connected`.
+    pending_eapol_buf: [512]u8 = undefined,
+    pending_eapol_len: u16 = 0,
+    pending_eapol_src: [6]u8 = @splat(0),
     started_ns: u64 = 0,
     dhcp_pid: ?linux.pid_t = null,
     /// When to try again after losing the connection.
@@ -423,6 +429,7 @@ pub const Manager = struct {
         const st = m.station.?;
         j.started_ns = now;
         j.retry_at = null;
+        j.pending_eapol_len = 0;
         var params: nl80211.ConnectParams = .{ .ssid = j.ssid(), .bssid = j.bss.bssid, .freq_mhz = j.bss.network.freq_mhz };
         if (j.pmk) |pmk| {
             const rsn = supplicant.rsnElement(&j.rsn_buf, j.bss.group_cipher);
@@ -529,10 +536,29 @@ pub const Manager = struct {
         if (ev.connected) |c| if (state == .connecting) {
             if (c.status != 0) return m.fail(.rejected);
             if (!std.mem.allEqual(u8, &c.bssid, 0)) {
-                j.bss.bssid = c.bssid;
-                j.handshake.aa = c.bssid;
+                if (!std.mem.eql(u8, &j.bss.bssid, &c.bssid)) {
+                    if (nl.findBssByBssid(st.index, j.ssid(), c.bssid) catch null) |actual| {
+                        j.bss = actual;
+                    } else {
+                        j.bss.bssid = c.bssid;
+                    }
+                }
+                j.handshake.setAp(j.bss.bssid, j.bss.rsn());
             }
-            if (j.pmk == null) m.startDhcp() else m.setState(.authenticating);
+            if (j.pmk == null) {
+                m.startDhcp();
+            } else {
+                m.setState(.authenticating);
+                if (j.pending_eapol_len > 0) {
+                    const len = j.pending_eapol_len;
+                    const src = j.pending_eapol_src;
+                    j.pending_eapol_len = 0;
+                    var frame: [512]u8 = undefined;
+                    @memcpy(frame[0..len], j.pending_eapol_buf[0..len]);
+                    m.handleEapolFrame(frame[0..len], src);
+                    if (m.join == null) return;
+                }
+            }
         };
         if (ev.disconnected) |reason| switch (state) {
             // A failed association comes as a connect result; a
@@ -583,31 +609,54 @@ pub const Manager = struct {
                 }
             }
         }
-        const j = &(m.join orelse return);
-        const fd = j.eapol orelse return;
         var buf: [2048]u8 = undefined;
         while (true) {
-            const n = linux.recvfrom(fd, &buf, buf.len, linux.MSG.DONTWAIT, null, null);
+            const j = &(m.join orelse return);
+            const fd = j.eapol orelse return;
+            var from: SockaddrLl = undefined;
+            var from_len: linux.socklen_t = @sizeOf(SockaddrLl);
+            const n = linux.recvfrom(fd, &buf, buf.len, linux.MSG.DONTWAIT, @ptrCast(&from), &from_len);
             if (linux.errno(n) != .SUCCESS or n == 0) return;
-            // Message 1 may come before the connection event is read.
+            const src_mac: [6]u8 = from.addr[0..6].*;
             const state = m.report.connection.state;
-            if (state != .connecting and state != .authenticating and !j.handshake.complete) continue;
-            var actions: supplicant.Actions = .{};
-            j.handshake.handle(buf[0..n], random, &actions);
-            const st = m.station.?;
-            if (actions.reply) |reply| sendEapol(fd, st.index, j.bss.bssid, reply);
-            if (actions.pairwise) |tk| m.nl.?.setPairwiseKey(st.index, j.bss.bssid, tk) catch |err| {
-                print(sys.log_warning ++ "dazzle: wifi: cannot install the pairwise key ({s})\n", .{@errorName(err)});
-                return m.fail(.rejected);
-            };
-            if (actions.group) |g| m.nl.?.setGroupKey(st.index, j.bss.group_cipher, g.index, g.key[0..g.len], g.rsc) catch |err| {
-                print(sys.log_warning ++ "dazzle: wifi: cannot install the group key ({s})\n", .{@errorName(err)});
-            };
-            if (actions.complete and !m.report.connection.state.joined()) {
-                print("dazzle: wifi: joined \"{s}\" (WPA2)\n", .{j.ssid()});
-                m.nl.?.authorize(st.index, j.bss.bssid);
-                m.startDhcp();
+            // Message 1 may arrive from the radio before the driver has
+            // finished its post-association setup and sent `connected`;
+            // hold it until `events` sees `connected`.
+            if (state == .connecting) {
+                if (n <= j.pending_eapol_buf.len) {
+                    @memcpy(j.pending_eapol_buf[0..n], buf[0..n]);
+                    j.pending_eapol_len = @intCast(n);
+                    j.pending_eapol_src = src_mac;
+                }
+                continue;
             }
+            if (state != .authenticating and !j.handshake.complete) continue;
+            m.handleEapolFrame(buf[0..n], src_mac);
+        }
+    }
+
+    fn handleEapolFrame(m: *Manager, frame: []const u8, src_mac: [6]u8) void {
+        const j = &(m.join orelse return);
+        const fd = j.eapol orelse return;
+        const st = m.station orelse return;
+        if (!std.mem.allEqual(u8, &src_mac, 0) and !std.mem.eql(u8, &j.bss.bssid, &src_mac)) {
+            j.bss.bssid = src_mac;
+            j.handshake.setAp(src_mac, j.bss.rsn());
+        }
+        var actions: supplicant.Actions = .{};
+        j.handshake.handle(frame, random, &actions);
+        if (actions.reply) |reply| sendEapol(fd, st.index, j.bss.bssid, reply);
+        if (actions.pairwise) |tk| m.nl.?.setPairwiseKey(st.index, j.bss.bssid, tk) catch |err| {
+            print(sys.log_warning ++ "dazzle: wifi: cannot install the pairwise key ({s})\n", .{@errorName(err)});
+            return m.fail(.rejected);
+        };
+        if (actions.group) |g| m.nl.?.setGroupKey(st.index, j.bss.group_cipher, g.index, g.key[0..g.len], g.rsc) catch |err| {
+            print(sys.log_warning ++ "dazzle: wifi: cannot install the group key ({s})\n", .{@errorName(err)});
+        };
+        if (actions.complete and !m.report.connection.state.joined()) {
+            print("dazzle: wifi: joined \"{s}\" (WPA2)\n", .{j.ssid()});
+            m.nl.?.authorize(st.index, j.bss.bssid);
+            m.startDhcp();
         }
     }
 
@@ -713,4 +762,3 @@ fn readResolvConfDns() ?wifi.Ip4 {
     }
     return null;
 }
-

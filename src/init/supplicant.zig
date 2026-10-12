@@ -304,6 +304,17 @@ pub const Handshake = struct {
     /// Frames are built here.
     out: [256]u8 = undefined,
 
+    /// Updates the access point's address and RSN element; drops any PTK
+    /// derived for another address.
+    pub fn setAp(h: *Handshake, aa: Mac, ap_rsn: []const u8) void {
+        if (!std.mem.eql(u8, &h.aa, &aa)) {
+            h.aa = aa;
+            h.anonce = null;
+            h.ptk = null;
+        }
+        if (ap_rsn.len > 0) h.ap_rsn = ap_rsn;
+    }
+
     /// Handles an EAPOL frame from the access point; fills in what to do.
     /// Frames that are not for us, or fail their checks, are dropped (as
     /// the standard says), leaving `actions` empty.
@@ -669,3 +680,24 @@ test "Authenticator.start and Authenticator.handle complete the 4-way handshake"
     try testing.expectEqual(sta_act.pairwise.?, ap_act.pairwise.?);
 }
 
+test "setAp invalidates cached PTK when the access point BSSID changes" {
+    var s, var ap = pair("correct horse");
+    // Suppose the station initially had a different BSSID from the scan,
+    // processed message 1 early, and then learned the real BSSID.
+    s.aa = .{ 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff };
+    var act: Actions = .{};
+    const m1 = ap.message1();
+    var m1_copy: [256]u8 = undefined;
+    @memcpy(m1_copy[0..m1.len], m1);
+    s.handle(m1_copy[0..m1.len], testRandom, &act);
+    try testing.expect(ap.message3(act.reply.?) == null);
+
+    s.setAp(ap.aa, ap.rsn);
+    s.handle(m1_copy[0..m1.len], testRandom, &act);
+    var m2_copy: [256]u8 = undefined;
+    const m2_len = act.reply.?.len;
+    @memcpy(m2_copy[0..m2_len], act.reply.?);
+    const m3 = ap.message3(m2_copy[0..m2_len]).?;
+    s.handle(m3, testRandom, &act);
+    try testing.expect(act.complete);
+}

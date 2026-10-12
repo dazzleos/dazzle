@@ -405,6 +405,23 @@ pub const Nl80211 = struct {
         return found.best;
     }
 
+    /// The access point with this BSSID and SSID in the last scan.
+    pub fn findBssByBssid(n: *Nl80211, ifindex: u32, ssid: []const u8, bssid: [6]u8) Error!?Bss {
+        var m: Message = .{};
+        m.put(attr.ifindex, std.mem.asBytes(&ifindex));
+        const Found = struct { ssid: []const u8, bssid: [6]u8, match: ?Bss = null };
+        var found: Found = .{ .ssid = ssid, .bssid = bssid };
+        try n.req.request(&m, n.family, nlm_f_dump, cmd.get_scan, &found, struct {
+            fn on(f: *Found, msg: Received) void {
+                if (msg.command != cmd.new_scan_results) return;
+                const b = Attrs.find(msg.attrs, attr.bss) orelse return;
+                const info = parseBssDetail(b.data) orelse return;
+                if (std.mem.eql(u8, &info.bssid, &f.bssid) and std.mem.eql(u8, info.network.ssid(), f.ssid)) f.match = info;
+            }
+        }.on);
+        return found.match;
+    }
+
     /// Starts connecting; an event says how it went.
     pub fn connect(n: *Nl80211, ifindex: u32, p: ConnectParams) Error!void {
         var m: Message = .{};
@@ -968,4 +985,3 @@ test "beacon head and tail contain SSID and RSN security" {
     const cap = std.mem.readInt(u16, head[34..36], .little);
     try testing.expectEqual(wifi.Security.wpa2, securityOf(cap, tail));
 }
-

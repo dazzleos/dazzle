@@ -140,8 +140,9 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             a.dirty = true;
         }
         const on_wifi_page = if (a.ui.root) |root| view.pages[root.state(view.Setup.State).page] == .wifi else false;
+        const wifi_selected = if (a.ui.root) |root| root.state(view.Setup.State).has_selected else false;
         if (now >= next_net_ask) {
-            const need_scan = on_wifi_page or if (net_report) |r| r.len == 0 else true;
+            const need_scan = (on_wifi_page and !wifi_selected) or if (net_report) |r| r.len == 0 else true;
             net_report = net.ask(if (need_scan) "wifi scan\n" else "status\n");
             const busy = if (net_report) |r| r.scanning or r.connection.state == .connecting or r.connection.state == .authenticating or r.connection.state == .addressing else false;
             next_net_ask = now + @as(u64, if (busy or on_wifi_page) 1000 else 3000) * std.time.ns_per_ms;

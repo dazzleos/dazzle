@@ -990,8 +990,10 @@ fn joinForm(self: *const Settings, b: Builder, state: *State, adapter_name: []co
     const field: ui.Widget = switch (n.security) {
         .open => cx.make(ui.Text{ .text = "An open network: what is sent can be seen", .style = .{ .size = 16, .color = t.on_surface_variant } }),
         .wpa2 => cx.make(ui.TextField{
+            .initial = state.password_buf[0..state.password_len],
             .placeholder = "Password",
             .obscure = true,
+            .autofocus = true,
             .size = 18,
             .on_changed = .of(state, State.setPassword),
             .on_submit = on_connect,
@@ -1619,4 +1621,3 @@ test "switching to Access Point mode, applying configuration, and returning to C
     Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
     try testing.expect(view.findText(u.root.?, "Home") != null);
 }
-

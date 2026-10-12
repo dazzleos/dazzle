@@ -265,7 +265,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             const busy = if (report) |r| r.scanning or r.connection.state == .connecting or r.connection.state == .authenticating or r.connection.state == .addressing else true;
             next_ask = now + @as(u64, if (busy and wifi_page) 1 else 5) * std.time.ns_per_s;
             var scan_buf: [64]u8 = undefined;
-            report = info.askManager(if (wifi_page) info.manager.scanRequest(&scan_buf, wifi_adapter.slice()) else "status\n");
+            const scan = wifi_page and !view.wifiNetworkSelected(a.ui);
+            report = info.askManager(if (scan) info.manager.scanRequest(&scan_buf, wifi_adapter.slice()) else "status\n");
             a.dirty = true;
         }
 

@@ -229,6 +229,13 @@ pub fn shownPage(u: *ui.Ui) Page {
     return root.state(Settings.State).page;
 }
 
+/// Whether a Wi-Fi network is selected in `u` (so its join form is open).
+pub fn wifiNetworkSelected(u: *ui.Ui) bool {
+    const root = u.root orelse return false;
+    if (!root.widget.is(Settings)) return false;
+    return root.state(Settings.State).wifi.has_selected;
+}
+
 /// Shows page `p` in `u` (running a `Settings`); false if the window is
 /// not built yet.
 pub fn showPage(u: *ui.Ui, p: Page) bool {
