@@ -37,6 +37,8 @@ const server_mod = @import("server.zig");
 const render = @import("render.zig");
 const input = @import("input.zig");
 const dock_mod = @import("dock.zig");
+const perf_mod = @import("perf.zig");
+const keyboard = @import("keyboard.zig");
 const screenshot = @import("screenshot.zig");
 const build_info = @import("build_info");
 
@@ -100,6 +102,13 @@ fn run(init: std.process.Init.Minimal) !void {
     var dock = try dock_mod.Dock.init(gpa, ui_font, apps, renderer.width, renderer.height);
     const dock_y: u32 = renderer.height - dock.height;
     const with_dock: server_mod.Rect = .{ .x = 0, .y = 0, .width = renderer.width, .height = dock_y };
+    var perf = try perf_mod.Overlay.init(gpa, ui_font, renderer.width, renderer.height);
+    var perf_monitor: perf_mod.Monitor = .{};
+    var perf_shown = false;
+    var perf_key_down = false;
+    var perf_frames: u32 = 0;
+    var perf_gpu_ns: u64 = 0;
+    renderer.setPanelHidden(.perf, true);
 
     // On the first run (--setup), the setup app has the whole screen, and
     // the dock shows once it has finished.
@@ -243,6 +252,29 @@ fn run(init: std.process.Init.Minimal) !void {
                     if (e.key.pressed) screenshot_wanted = true;
                     continue;
                 }
+                // Super+I toggles the performance overlay.
+                if (e == .key and e.key.code == perf_mod.key_i) {
+                    if (e.key.pressed and (server.modifiers.depressed() & keyboard.mod4) != 0) {
+                        perf_key_down = true;
+                        perf_shown = !perf_shown;
+                        renderer.setPanelHidden(.perf, !perf_shown);
+                        if (perf_shown) {
+                            const now_ns = sys.nowNs();
+                            perf_monitor.reset(now_ns);
+                            perf_frames = 0;
+                            perf_gpu_ns = 0;
+                            var pids: [max_clients]linux.pid_t = undefined;
+                            perf.draw(perf_monitor.sample(now_ns, 0, 0, clientPids(&server, &pids)));
+                            renderer.setPanelAt(.perf, perf.pixels, perf.width, perf.height, perf.x, perf.y);
+                        }
+                        panels_damaged = true;
+                        continue;
+                    }
+                    if (!e.key.pressed and perf_key_down) {
+                        perf_key_down = false;
+                        continue;
+                    }
+                }
                 // Touches go to the window they go down on, but those on
                 // the dock are the shell's (a tap there is a click).
                 var dock_tap: ?[2]f64 = null;
@@ -356,6 +388,14 @@ fn run(init: std.process.Init.Minimal) !void {
                     }
                 } else |err| print(sys.log_warning ++ "dazzle-shell: cannot list the apps: {s}\n", .{@errorName(err)});
             }
+            if (perf_shown) {
+                var pids: [max_clients]linux.pid_t = undefined;
+                perf.draw(perf_monitor.sample(t_now, perf_frames, perf_gpu_ns, clientPids(&server, &pids)));
+                perf_frames = 0;
+                perf_gpu_ns = 0;
+                renderer.setPanelAt(.perf, perf.pixels, perf.width, perf.height, perf.x, perf.y);
+                panels_damaged = true;
+            }
         }
 
         // Draw while the previous frame is on the screen; it is shown at
@@ -368,10 +408,12 @@ fn run(init: std.process.Init.Minimal) !void {
         if ((server.damaged or dock_due) and !renderer.flipPending()) {
             const draw_start = sys.nowNs();
             defer stats.display_ns += sys.nowNs() - draw_start;
+            const count_frame = server.damaged;
             panels_damaged = false;
             server.frameDrawn();
             // A fullscreen window on top hides the dock.
-            renderer.hidePanels(server.fullscreenTop());
+            renderer.setPanelHidden(.dock, !dock_shown or server.fullscreenTop());
+            renderer.setPanelHidden(.perf, !perf_shown);
             // A maximized, full-size window on top goes straight onto the
             // display, with the dock on a plane below it; a fullscreen one,
             // alone. Otherwise (or if the display cannot show it) the frame
@@ -383,6 +425,7 @@ fn run(init: std.process.Init.Minimal) !void {
                     server.holdBuffer(b);
                     scanout.queued = b;
                     stats.direct += 1;
+                    if (count_frame) perf_frames += 1;
                     on_screen = at_once;
                 }
             };
@@ -390,6 +433,8 @@ fn run(init: std.process.Init.Minimal) !void {
                 var windows: [render.max_windows]render.Window = undefined;
                 if (renderer.composite(frameWindows(&server, &windows))) |timing| {
                     stats.composited(timing);
+                    if (count_frame) perf_frames += 1;
+                    perf_gpu_ns += timing.gpu_ns;
                     on_screen = renderer.show() catch |err| blk: {
                         print(sys.log_warning ++ "dazzle-shell: cannot show the frame: {s}\n", .{@errorName(err)});
                         server.framePresented(@truncate(sys.nowNs() / std.time.ns_per_ms));
@@ -750,12 +795,25 @@ fn reapChildren(apps: []dock_mod.App, setup_pid: *?linux.pid_t) bool {
     }
 }
 
+/// The process IDs of connected clients, for reading their DRM fdinfo.
+fn clientPids(server: *const server_mod.Server, out: *[max_clients]linux.pid_t) []const linux.pid_t {
+    var n: usize = 0;
+    for (server.clients.items) |c| {
+        const pid = c.pid orelse continue;
+        if (n >= out.len) break;
+        out[n] = pid;
+        n += 1;
+    }
+    return out[0..n];
+}
+
 test {
     _ = @import("server.zig");
     _ = @import("server_test.zig");
     _ = @import("input.zig");
     _ = @import("cursor.zig");
     _ = @import("dock.zig");
+    _ = @import("perf.zig");
     _ = @import("screenshot.zig");
     _ = @import("keyboard.zig");
     _ = @import("protocol_test.zig");

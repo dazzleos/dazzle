@@ -42,8 +42,8 @@ pub const Window = struct {
 /// the vertex buffer holds this many quads besides the panels').
 pub const max_windows = 48;
 
-/// A panel's picture, drawn across the screen at `y`.
-pub const PanelQuad = struct { texture: server.Texture, y: i32 };
+/// A panel's picture, drawn at (`x`, `y`) on the screen.
+pub const PanelQuad = struct { texture: server.Texture, x: i32 = 0, y: i32 };
 
 /// The shaders that draw textures as quads: for 32-bit textures, and for
 /// RGB565 ones.
@@ -56,20 +56,20 @@ pub const QuadPipelines = struct {
     }
 };
 
-/// Records a frame (after `frame.begin`): the panels and the windows
-/// (bottom first, at most `max_windows`) as quads. `vbo` holds the quads'
-/// vertices and must stay untouched until the frame has rendered.
+/// Records a frame (after `frame.begin`): the windows (bottom first, at
+/// most `max_windows`) and the panels above them as quads. `vbo` holds the
+/// quads' vertices and must stay untouched until the frame has rendered.
 pub fn recordFrame(frame: *render.Frame, pipelines: QuadPipelines, vbo: vc4.Bo, panels: []const ?PanelQuad, windows: []const Window) !void {
     std.debug.assert(windows.len <= max_windows);
     var quads: usize = 0;
-    for (panels) |panel| if (panel) |pq| {
-        try quad(frame, pipelines.forTexture(pq.texture), vbo, quads, pq.texture, 0, pq.y, null);
-        quads += 1;
-    };
     for (windows) |w| {
         try quad(frame, pipelines.forTexture(w.texture), vbo, quads, w.texture, w.x, w.y, .{ .x = w.clip.x, .y = w.clip.y, .width = w.clip.width, .height = w.clip.height });
         quads += 1;
     }
+    for (panels) |panel| if (panel) |pq| {
+        try quad(frame, pipelines.forTexture(pq.texture), vbo, quads, pq.texture, pq.x, pq.y, null);
+        quads += 1;
+    };
 }
 
 /// Draws a texture 1:1 with its top left at (x, y).
@@ -114,8 +114,8 @@ comptime {
 /// A buffer the display can show.
 const Scanout = struct { bo: vc4.Bo, fb_id: u32 };
 
-/// The shell's own strips across the screen, drawn on the CPU.
-pub const PanelId = enum { dock };
+/// The shell's own panels on the screen, drawn on the CPU.
+pub const PanelId = enum { dock, perf };
 const n_panels = @typeInfo(PanelId).@"enum".fields.len;
 
 /// A panel's picture, copied where it is needed when a frame is drawn: into
@@ -125,6 +125,7 @@ const Panel = struct {
     pixels: []const u32 = &.{},
     width: u32 = 0,
     height: u32 = 0,
+    x: i32 = 0,
     y: i32 = 0,
     texture: ?server.Texture = null,
     /// `texture` does not have the latest picture yet.
@@ -135,7 +136,7 @@ const Panel = struct {
     /// other is on the screen.
     planes: [2]?Scanout = .{ null, null },
     shown: u1 = 0,
-    /// Not shown (under a fullscreen window).
+    /// Not shown (under a fullscreen window, or toggled off).
     hidden: bool = false,
 };
 
@@ -227,13 +228,25 @@ pub const Renderer = struct {
     /// Replaces a panel's picture, `width` by `height` pixels shown with
     /// its top at `y`. The pixels must stay until the next call.
     pub fn setPanel(r: *Renderer, id: PanelId, pixels: []const u32, width: u32, height: u32, y: i32) void {
+        r.setPanelAt(id, pixels, width, height, 0, y);
+    }
+
+    /// Replaces a panel's picture, `width` by `height` pixels shown with
+    /// its top left at (`x`, `y`). The pixels must stay until the next call.
+    pub fn setPanelAt(r: *Renderer, id: PanelId, pixels: []const u32, width: u32, height: u32, x: i32, y: i32) void {
         const p = &r.panels[@intFromEnum(id)];
         p.pixels = pixels;
         p.width = width;
         p.height = height;
+        p.x = x;
         p.y = y;
         p.dirty = true;
         p.texture_stale = true;
+    }
+
+    /// Hides a panel, or shows it again.
+    pub fn setPanelHidden(r: *Renderer, id: PanelId, hidden: bool) void {
+        r.panels[@intFromEnum(id)].hidden = hidden;
     }
 
     /// Hides the panels (under a fullscreen window), or shows them again.
@@ -242,9 +255,11 @@ pub const Renderer = struct {
     }
 
     fn panelLayers(r: *Renderer) ?vc4.kms.Overlays {
+        const kms = r.display.kms orelse return null;
         var out: vc4.kms.Overlays = @splat(null);
         for (&r.panels, 0..) |*p, i| {
             if (p.width == 0 or p.height == 0 or p.hidden) continue;
+            if (kms.overlays[i] == null) return null;
             out[i] = r.panelLayer(p) orelse return null;
         }
         return out;
@@ -305,7 +320,7 @@ pub const Renderer = struct {
             p.dirty = false;
         }
         const plane = r.panelPlane(p, p.shown) orelse return null;
-        return .{ .fb_id = plane.fb_id, .src_width = p.width, .src_height = p.height, .x = 0, .y = p.y, .width = p.width, .height = p.height };
+        return .{ .fb_id = plane.fb_id, .src_width = p.width, .src_height = p.height, .x = p.x, .y = p.y, .width = p.width, .height = p.height };
     }
 
     fn panelPlane(r: *Renderer, p: *Panel, i: u1) ?Scanout {
@@ -381,7 +396,7 @@ pub const Renderer = struct {
                 p.texture = try uploadPixels(r, p.texture, std.mem.sliceAsBytes(p.pixels), p.width, p.height, p.width * 4, .xrgb8888);
                 p.texture_stale = false;
             }
-            q.* = .{ .texture = p.texture.?, .y = p.y };
+            q.* = .{ .texture = p.texture.?, .x = p.x, .y = p.y };
         }
         return quads;
     }
