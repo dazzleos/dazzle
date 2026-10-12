@@ -48,12 +48,13 @@ fn noticesFile(b: *std.Build, what: []const u8, sections: []const []const u8) st
 const CardFile = struct { []const u8, std.Build.LazyPath };
 
 /// An app: its program, its icon in the dock, and what the catalogue says
-/// of it.
+/// of it (when `description` is given; otherwise it is built as an archive
+/// for sideloading, not listed in `apps.json`).
 const App = struct {
     exe: *std.Build.Step.Compile,
     icon: Icon,
     title: []const u8,
-    description: []const u8,
+    description: ?[]const u8 = null,
     /// The kinds of files it opens (MIME types), for Files to offer it:
     /// <name>.handles in its folder (see src/sys/apps.zig).
     handles: []const []const u8 = &.{},
@@ -102,9 +103,11 @@ fn addAppArchives(b: *std.Build, apps: []const App) *std.Build.Step {
         compress.addFileArg(tar);
         const archive = compress.captureStdOut(.{ .basename = b.fmt("{s}.tar.xz", .{name}) });
         step.dependOn(&b.addInstallFile(archive, b.fmt("apps/{s}.tar.xz", .{name})).step);
-        step.dependOn(&b.addInstallFile(icon_png, b.fmt("apps/{s}", .{icon_rel})).step);
-        catalogue.addArgs(&.{ name, a.title, a.description, icon_rel });
-        catalogue.addFileArg(archive);
+        if (a.description) |desc| {
+            step.dependOn(&b.addInstallFile(icon_png, b.fmt("apps/{s}", .{icon_rel})).step);
+            catalogue.addArgs(&.{ name, a.title, desc, icon_rel });
+            catalogue.addFileArg(archive);
+        }
     }
     step.dependOn(&b.addInstallFile(json, "apps/apps.json").step);
     return step;
@@ -1122,6 +1125,8 @@ pub fn build(b: *std.Build) void {
     // the catalogue).
     const zig_root = b.pathFromRoot("build/zig/zig-arm-linux-" ++ zig_version);
     const apps = [_]App{
+        .{ .exe = demo_exe, .icon = .view_in_ar, .title = "Demo" },
+        .{ .exe = showcase_exe, .icon = .widgets, .title = "Widget Showcase" },
         .{ .exe = files_exe, .icon = .folder, .title = "Files", .description = "Browse your files, and look inside them: text, pictures and fonts" },
         .{ .exe = camera_exe, .icon = .photo_camera, .title = "Camera", .description = "See what a Raspberry Pi Camera Module sees, and take photos" },
         .{ .exe = text_editor_exe, .icon = .edit_note, .title = "Text Editor", .description = "Write and change text files, from Files; they are saved as you type", .handles = &.{"text/plain"} },

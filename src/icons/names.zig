@@ -94,4 +94,6 @@ pub const Icon = enum {
     my_location,
     // Develop.
     code,
+    // Showcase.
+    widgets,
 };

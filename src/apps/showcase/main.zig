@@ -1,6 +1,7 @@
 //! The Dazzle widget showcase: an interactive gallery showing all of the
 //! `ui` toolkit's Material 3 widgets in use. Like `dazzle-demo`, it is built
-//! into `zig-out/bin/dazzle-showcase` and is not distributed as an app.
+//! into a `.tar.xz` bundle (`zig-out/apps/dazzle-showcase.tar.xz`) for
+//! sideloading rather than listed in the store catalogue.
 //!
 //!     dazzle-showcase [font.ttf]
 //!
