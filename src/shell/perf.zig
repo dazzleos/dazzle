@@ -21,6 +21,7 @@ const fps_low_color = 0xffe8b33f;
 const cpu_color = 0xff3f7ee8;
 const gpu_color = 0xff3fb8c4;
 const mem_color = 0xffb04fd6;
+const gpu_mem_color = 0xffe8883f;
 const high_color = 0xffe84f6a;
 
 pub const Stats = struct {
@@ -47,6 +48,8 @@ pub const Lines = struct {
     gpu_len: usize = 0,
     mem: [48]u8 = undefined,
     mem_len: usize = 0,
+    gpu_mem: [48]u8 = undefined,
+    gpu_mem_len: usize = 0,
 
     pub fn fpsText(l: *const Lines) []const u8 {
         return l.fps[0..l.fps_len];
@@ -63,13 +66,17 @@ pub const Lines = struct {
     pub fn memText(l: *const Lines) []const u8 {
         return l.mem[0..l.mem_len];
     }
+
+    pub fn gpuMemText(l: *const Lines) []const u8 {
+        return l.gpu_mem[0..l.gpu_mem_len];
+    }
 };
 
 fn printLen(buf: []u8, comptime fmt: []const u8, args: anytype) usize {
     return (std.fmt.bufPrint(buf, fmt, args) catch return 0).len;
 }
 
-/// Formats the four value strings shown in the overlay.
+/// Formats the five value strings shown in the overlay.
 pub fn formatLines(s: Stats) Lines {
     var out: Lines = .{};
     out.fps_len = printLen(&out.fps, "{d:.0}", .{@max(s.fps, 0)});
@@ -78,23 +85,13 @@ pub fn formatLines(s: Stats) Lines {
     else
         printLen(&out.cpu, "—", .{});
 
+    out.gpu_len = if (s.gpu_busy) |busy|
+        printLen(&out.gpu, "{d:.0}%", .{std.math.clamp(busy, 0, 100)})
+    else
+        printLen(&out.gpu, "—", .{});
+
     var b1: [24]u8 = undefined;
     var b2: [24]u8 = undefined;
-    if (s.gpu_total > 0) {
-        const used_s = formatBytes(&b1, s.gpu_used);
-        const total_s = formatBytes(&b2, s.gpu_total);
-        if (s.gpu_busy) |busy| {
-            out.gpu_len = printLen(&out.gpu, "{d:.0}%  ·  {s} / {s}", .{ std.math.clamp(busy, 0, 100), used_s, total_s });
-        } else {
-            const pct = 100 * @as(f32, @floatFromInt(s.gpu_used)) / @as(f32, @floatFromInt(s.gpu_total));
-            out.gpu_len = printLen(&out.gpu, "{d:.0}%  ·  {s} / {s}", .{ std.math.clamp(pct, 0, 100), used_s, total_s });
-        }
-    } else if (s.gpu_busy) |busy| {
-        out.gpu_len = printLen(&out.gpu, "{d:.0}%", .{std.math.clamp(busy, 0, 100)});
-    } else {
-        out.gpu_len = printLen(&out.gpu, "0%", .{});
-    }
-
     if (s.mem_total > 0) {
         const pct = 100 * @as(f32, @floatFromInt(s.mem_used)) / @as(f32, @floatFromInt(s.mem_total));
         const used_s = formatBytes(&b1, s.mem_used);
@@ -102,6 +99,15 @@ pub fn formatLines(s: Stats) Lines {
         out.mem_len = printLen(&out.mem, "{d:.0}%  ·  {s} / {s}", .{ std.math.clamp(pct, 0, 100), used_s, total_s });
     } else {
         out.mem_len = printLen(&out.mem, "—", .{});
+    }
+
+    if (s.gpu_total > 0) {
+        const pct = 100 * @as(f32, @floatFromInt(s.gpu_used)) / @as(f32, @floatFromInt(s.gpu_total));
+        const used_s = formatBytes(&b1, s.gpu_used);
+        const total_s = formatBytes(&b2, s.gpu_total);
+        out.gpu_mem_len = printLen(&out.gpu_mem, "{d:.0}%  ·  {s} / {s}", .{ std.math.clamp(pct, 0, 100), used_s, total_s });
+    } else {
+        out.gpu_mem_len = printLen(&out.gpu_mem, "—", .{});
     }
     return out;
 }
@@ -206,10 +212,8 @@ pub const Monitor = struct {
                 s.gpu_busy = std.math.clamp(100 * @as(f32, @floatFromInt(busy_ns)) / @as(f32, @floatFromInt(elapsed_ns)), 0, 100);
             };
             m.last_drm_ns = drm_ns;
-        } else if (elapsed_ns > 0 and shell_gpu_ns > 0) {
+        } else if (elapsed_ns > 0) {
             s.gpu_busy = std.math.clamp(100 * @as(f32, @floatFromInt(shell_gpu_ns)) / @as(f32, @floatFromInt(elapsed_ns)), 0, 100);
-        } else if (s.gpu_total == 0) {
-            s.gpu_busy = 0;
         }
 
         return s;
@@ -283,7 +287,7 @@ pub const Overlay = struct {
         const raw_scale = @min(@as(f32, @floatFromInt(screen_width)) / 1920, @as(f32, @floatFromInt(screen_height)) / 1080);
         const scale = @max(raw_scale, 0.5);
         const width: u32 = @min(screen_width, @as(u32, @intFromFloat(@round(280 * scale))));
-        const height: u32 = @min(screen_height, @as(u32, @intFromFloat(@round(148 * scale))));
+        const height: u32 = @min(screen_height, @as(u32, @intFromFloat(@round(180 * scale))));
         const margin_x: i32 = @intFromFloat(@round(16 * scale));
         const margin_y: i32 = @intFromFloat(@round(56 * scale));
         const x: i32 = @max(0, @as(i32, @intCast(screen_width)) - @as(i32, @intCast(width)) - margin_x);
@@ -314,14 +318,13 @@ pub const Overlay = struct {
         }
 
         const lines = formatLines(stats);
-        const gpu_frac: f32 = if (stats.gpu_busy) |busy|
-            busy / 100
-        else if (stats.gpu_total > 0)
-            @as(f32, @floatFromInt(stats.gpu_used)) / @as(f32, @floatFromInt(stats.gpu_total))
-        else
-            0;
+        const gpu_frac: f32 = (stats.gpu_busy orelse 0) / 100;
         const mem_frac: f32 = if (stats.mem_total > 0)
             @as(f32, @floatFromInt(stats.mem_used)) / @as(f32, @floatFromInt(stats.mem_total))
+        else
+            0;
+        const gpu_mem_frac: f32 = if (stats.gpu_total > 0)
+            @as(f32, @floatFromInt(stats.gpu_used)) / @as(f32, @floatFromInt(stats.gpu_total))
         else
             0;
         const cpu_frac: f32 = (stats.cpu_busy orelse 0) / 100;
@@ -333,7 +336,7 @@ pub const Overlay = struct {
             fraction: f32,
             color: u32,
         };
-        const rows = [4]Row{
+        const rows = [5]Row{
             .{
                 .label = "FPS",
                 .value = lines.fpsText(),
@@ -358,6 +361,12 @@ pub const Overlay = struct {
                 .fraction = mem_frac,
                 .color = if (mem_frac >= 0.9) high_color else mem_color,
             },
+            .{
+                .label = "GPU Memory",
+                .value = lines.gpuMemText(),
+                .fraction = gpu_mem_frac,
+                .color = if (gpu_mem_frac >= 0.9) high_color else gpu_mem_color,
+            },
         };
 
         const pad_x = 14 * o.scale;
@@ -374,8 +383,9 @@ pub const Overlay = struct {
                 const value_style: font.Style = .{ .font = f, .size = text_size, .color = value_color };
                 const baseline = @round(y0 + label_style.ascent());
                 _ = font.draw(canvas, &o.cache, label_style, @round(pad_x), baseline, r.label) catch {};
+                const lw = font.measure(label_style, r.label);
                 const vw = font.measure(value_style, r.value);
-                const vx = @max(pad_x + 48 * o.scale, @as(f32, @floatFromInt(o.width)) - pad_x - vw);
+                const vx = @max(pad_x + lw + 8 * o.scale, @as(f32, @floatFromInt(o.width)) - pad_x - vw);
                 _ = font.draw(canvas, &o.cache, value_style, @round(vx), baseline, r.value) catch {};
             }
             const bar_y = @round(y0 + 21 * o.scale);
@@ -431,7 +441,7 @@ test "CPU ticks and DRM fdinfo parsing" {
     try testing.expect(parseDrmFdinfo("pos:\t0\ndrm-driver:\tvc4\ndrm-client-id:\t3\n") == null);
 }
 
-test "formatting FPS, CPU, GPU and memory lines" {
+test "formatting FPS, CPU, GPU, memory and GPU memory lines" {
     const lines = formatLines(.{
         .fps = 59.8,
         .cpu_busy = 24.4,
@@ -443,8 +453,9 @@ test "formatting FPS, CPU, GPU and memory lines" {
     });
     try testing.expectEqualStrings("60", lines.fpsText());
     try testing.expectEqualStrings("24%", lines.cpuText());
-    try testing.expectEqualStrings("38%  ·  32 MB / 128 MB", lines.gpuText());
+    try testing.expectEqualStrings("38%", lines.gpuText());
     try testing.expectEqualStrings("22%  ·  96 MB / 434 MB", lines.memText());
+    try testing.expectEqualStrings("25%  ·  32 MB / 128 MB", lines.gpuMemText());
 
     const cma_only = formatLines(.{
         .fps = 0,
@@ -457,15 +468,16 @@ test "formatting FPS, CPU, GPU and memory lines" {
     });
     try testing.expectEqualStrings("0", cma_only.fpsText());
     try testing.expectEqualStrings("—", cma_only.cpuText());
-    try testing.expectEqualStrings("25%  ·  16 MB / 64 MB", cma_only.gpuText());
+    try testing.expectEqualStrings("—", cma_only.gpuText());
     try testing.expectEqualStrings("—", cma_only.memText());
+    try testing.expectEqualStrings("25%  ·  16 MB / 64 MB", cma_only.gpuMemText());
 }
 
 test "overlay draws background, border and meter bars in the top right" {
     var o = try Overlay.init(testing.allocator, null, 1920, 1080);
     defer o.deinit(testing.allocator);
     try testing.expectEqual(@as(u32, 280), o.width);
-    try testing.expectEqual(@as(u32, 148), o.height);
+    try testing.expectEqual(@as(u32, 180), o.height);
     try testing.expectEqual(@as(i32, 1920 - 280 - 16), o.x);
     try testing.expectEqual(@as(i32, 56), o.y);
 
@@ -475,6 +487,8 @@ test "overlay draws background, border and meter bars in the top right" {
         .gpu_busy = 95,
         .mem_used = 256 * 1024 * 1024,
         .mem_total = 512 * 1024 * 1024,
+        .gpu_used = 64 * 1024 * 1024,
+        .gpu_total = 128 * 1024 * 1024,
     });
     // Border at (0, 0) and background inside.
     try testing.expectEqual(@as(u32, border_color), o.pixels[0]);
@@ -486,6 +500,9 @@ test "overlay draws background, border and meter bars in the top right" {
     try testing.expectEqual(@as(u32, track_color), o.pixels[65 * o.width + o.width - 30]);
     // Third row (GPU = 95% >= 90%, high_color) at y = 10 + 64 + 21 + 2 = 97.
     try testing.expectEqual(@as(u32, high_color), o.pixels[97 * o.width + 30]);
+    // Fifth row (GPU Memory = 50%, gpu_mem_color) at y = 10 + 128 + 21 + 2 = 161.
+    try testing.expectEqual(@as(u32, gpu_mem_color), o.pixels[161 * o.width + 30]);
+    try testing.expectEqual(@as(u32, track_color), o.pixels[161 * o.width + o.width - 30]);
 }
 
 test "monitor samples this machine" {

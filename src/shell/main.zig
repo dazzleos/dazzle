@@ -167,7 +167,6 @@ fn run(init: std.process.Init.Minimal) !void {
     var cursor_shown = false;
 
     const start = sys.nowNs();
-    var stats: FrameStats = .{ .since = start, .period_us = renderer.display.refreshPeriodUs() };
     // A client buffer the display shows directly is held until a later
     // frame replaces it on the screen.
     var scanout: Scanout = .{};
@@ -196,7 +195,6 @@ fn run(init: std.process.Init.Minimal) !void {
             server.setWorkArea(with_dock);
             panels_damaged = true;
         }
-        stats.wakeups += 1;
 
         // Wait for clients, input, the display (a page flip completing), or
         // the next clock tick; or not at all if a frame is due and can be
@@ -224,18 +222,13 @@ fn run(init: std.process.Init.Minimal) !void {
                 panels_damaged = true;
             }
         };
-        const work_start = sys.nowNs();
-
         // The last frame reached the screen: its frame callbacks fire, and
         // the next one can be drawn.
         if (fds[1].revents != 0) {
-            const flip_start = sys.nowNs();
-            defer stats.flips_ns += sys.nowNs() - flip_start;
             if (renderer.handleEvents() catch |err| blk: {
                 print("dazzle-shell: display events: {s}\n", .{@errorName(err)});
                 break :blk null;
             }) |vblank_us| {
-                stats.flipped(vblank_us);
                 scanout.presented(&server);
                 server.framePresented(@truncate(vblank_us / std.time.us_per_ms));
             }
@@ -343,7 +336,6 @@ fn run(init: std.process.Init.Minimal) !void {
             }
         }
         // Clients may disconnect (and leave the list) while being handled.
-        const clients_start = sys.nowNs();
         var i: usize = 0;
         while (i < server.clients.items.len) {
             const c = server.clients.items[i];
@@ -358,7 +350,6 @@ fn run(init: std.process.Init.Minimal) !void {
         }
 
         if (server.damaged) client_frame_ns = sys.nowNs();
-        stats.clients_ns += sys.nowNs() - clients_start;
 
         // The window under the pointer, and the one with the keyboard, may
         // have changed.
@@ -406,8 +397,6 @@ fn run(init: std.process.Init.Minimal) !void {
         // late.
         const dock_due = panels_damaged and sys.nowNs() >= client_frame_ns + panel_grace_ns;
         if ((server.damaged or dock_due) and !renderer.flipPending()) {
-            const draw_start = sys.nowNs();
-            defer stats.display_ns += sys.nowNs() - draw_start;
             const count_frame = server.damaged;
             panels_damaged = false;
             server.frameDrawn();
@@ -424,7 +413,6 @@ fn run(init: std.process.Init.Minimal) !void {
                 if (renderer.showDirect(b.dmabuf.?, at.x, at.y)) |at_once| {
                     server.holdBuffer(b);
                     scanout.queued = b;
-                    stats.direct += 1;
                     if (count_frame) perf_frames += 1;
                     on_screen = at_once;
                 }
@@ -432,7 +420,6 @@ fn run(init: std.process.Init.Minimal) !void {
             if (on_screen == null) {
                 var windows: [render.max_windows]render.Window = undefined;
                 if (renderer.composite(frameWindows(&server, &windows))) |timing| {
-                    stats.composited(timing);
                     if (count_frame) perf_frames += 1;
                     perf_gpu_ns += timing.gpu_ns;
                     on_screen = renderer.show() catch |err| blk: {
@@ -469,13 +456,6 @@ fn run(init: std.process.Init.Minimal) !void {
             } else |err| print(sys.log_warning ++ "dazzle-shell: cannot change the cursor: {s}\n", .{@errorName(err)});
         };
         server.flushClients();
-        const work_end = sys.nowNs();
-        stats.work_ns += work_end - work_start;
-        if (renderer.display.kms) |*k| {
-            stats.commit_ns += k.commit_ns;
-            k.commit_ns = 0;
-        }
-        stats.maybeLog(work_end);
     }
 }
 
@@ -499,81 +479,6 @@ const Scanout = struct {
     }
 };
 
-/// Frame statistics, logged every 5 seconds while frames are drawn.
-const FrameStats = struct {
-    since: u64,
-    period_us: u64,
-    /// Frames composited by the GPU, and shown directly.
-    frames: u32 = 0,
-    direct: u32 = 0,
-    /// The shell's own work (not waiting): in all, handling clients'
-    /// requests, and drawing or showing frames.
-    work_ns: u64 = 0,
-    clients_ns: u64 = 0,
-    display_ns: u64 = 0,
-    /// Handling page flips: frame callbacks and buffer releases.
-    flips_ns: u64 = 0,
-    /// Times round the main loop.
-    wakeups: u32 = 0,
-    /// Of `display_ns`, the display commit system calls (kernel time).
-    commit_ns: u64 = 0,
-    cpu_ns: u64 = 0,
-    gpu_ns: u64 = 0,
-    /// Vertical blanks without a new frame between two flips. While a
-    /// client animates, these are frames it (or the shell) missed.
-    skipped: u64 = 0,
-    last_flip_us: u64 = 0,
-
-    fn composited(s: *FrameStats, t: render.Renderer.Timing) void {
-        s.frames += 1;
-        s.cpu_ns += t.cpu_ns;
-        s.gpu_ns += t.gpu_ns;
-    }
-
-    fn flipped(s: *FrameStats, vblank_us: u64) void {
-        if (s.last_flip_us != 0 and vblank_us > s.last_flip_us) {
-            // Rounded to whole refreshes.
-            const refreshes = (vblank_us - s.last_flip_us + s.period_us / 2) / s.period_us;
-            if (refreshes > 1) s.skipped += refreshes - 1;
-        }
-        s.last_flip_us = vblank_us;
-    }
-
-    fn maybeLog(s: *FrameStats, now: u64) void {
-        const elapsed = now - s.since;
-        if (elapsed < 5 * std.time.ns_per_s) return;
-        const seconds = @as(f64, @floatFromInt(elapsed)) / std.time.ns_per_s;
-        const ms: f64 = std.time.ns_per_ms;
-        if (s.frames > 0) {
-            const n: f64 = @floatFromInt(s.frames);
-            print("dazzle-shell: {d:.1} frames/s composited (CPU {d:.2} ms, GPU {d:.2} ms per frame), {d:.1} frames/s direct, {d} refreshes skipped\n", .{
-                n / seconds,
-                @as(f64, @floatFromInt(s.cpu_ns)) / n / ms,
-                @as(f64, @floatFromInt(s.gpu_ns)) / n / ms,
-                @as(f64, @floatFromInt(s.direct)) / seconds,
-                s.skipped,
-            });
-        } else if (s.direct > 0) {
-            print("dazzle-shell: {d:.1} frames/s, all shown directly, {d} refreshes skipped\n", .{ @as(f64, @floatFromInt(s.direct)) / seconds, s.skipped });
-        }
-        const shown = s.frames + s.direct;
-        if (shown > 0) {
-            const n: f64 = @floatFromInt(shown);
-            const other = s.work_ns -| (s.clients_ns + s.display_ns + s.flips_ns);
-            print("dazzle-shell: work {d:.2} ms per frame (clients {d:.2}, display {d:.2} of which commits {d:.2}, flips {d:.2}, other {d:.2}), {d:.1} wakeups per frame, {d:.1}% of the time\n", .{
-                @as(f64, @floatFromInt(s.work_ns)) / n / ms,
-                @as(f64, @floatFromInt(s.clients_ns)) / n / ms,
-                @as(f64, @floatFromInt(s.display_ns)) / n / ms,
-                @as(f64, @floatFromInt(s.commit_ns)) / n / ms,
-                @as(f64, @floatFromInt(s.flips_ns)) / n / ms,
-                @as(f64, @floatFromInt(other)) / n / ms,
-                @as(f64, @floatFromInt(s.wakeups)) / n,
-                100 * @as(f64, @floatFromInt(s.work_ns)) / @as(f64, @floatFromInt(elapsed)),
-            });
-        }
-        s.* = .{ .since = now, .period_us = s.period_us, .last_flip_us = s.last_flip_us };
-    }
-};
 
 const max_clients = 32;
 

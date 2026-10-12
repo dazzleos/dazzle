@@ -244,8 +244,6 @@ pub const Kms = struct {
     /// what differs, so the kernel re-checks as little as it can.
     shown_primary: ?Layer = null,
     shown_overlays: Overlays = @splat(null),
-    /// Time spent in commit system calls, for statistics.
-    commit_ns: u64 = 0,
 
     /// Switches the DRM file to atomic mode setting and finds the CRTC's
     /// planes. Fails (and the caller should use the legacy API) if the
@@ -347,8 +345,6 @@ pub const Kms = struct {
     /// follows).
     pub fn commit(k: *Kms, primary: Layer, overlays: Overlays) !bool {
         var r = k.request(primary, overlays, false);
-        const t0 = sys.nowNs();
-        defer k.commit_ns += sys.nowNs() - t0;
         const at_once = !k.mode_set;
         if (at_once) {
             try k.submit(&r, atomic_allow_modeset);
