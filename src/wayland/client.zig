@@ -47,7 +47,7 @@ pub const Display = struct {
         return d.error_buf[0..d.error_len];
     }
 
-    /// Connects to `path`, or to $WAYLAND_DISPLAY in $XDG_RUNTIME_DIR.
+    /// Connects to `path`.
     pub fn connect(gpa: std.mem.Allocator, path: []const u8) Error!*Display {
         const fd: linux.fd_t = @intCast(sysCheck(linux.socket(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0)) catch return error.ConnectFailed);
         var addr: linux.sockaddr.un = .{ .path = @splat(0) };
@@ -58,6 +58,13 @@ pub const Display = struct {
             return error.ConnectFailed;
         }
         return fromFd(gpa, fd);
+    }
+
+    /// Connects to the compositor named in `environ` ($WAYLAND_DISPLAY in
+    /// $XDG_RUNTIME_DIR, or Dazzle's default socket if neither is set).
+    pub fn connectEnviron(gpa: std.mem.Allocator, environ: std.process.Environ) Error!*Display {
+        var buf: [128]u8 = undefined;
+        return connect(gpa, try environSocketPath(&buf, environ));
     }
 
     /// Uses an already connected socket.
@@ -189,6 +196,13 @@ pub fn socketPath(buf: []u8, runtime_dir: ?[]const u8, wayland_display: ?[]const
     return std.fmt.bufPrint(buf, "{s}/{s}", .{ dir, name }) catch error.NoRuntimeDir;
 }
 
+/// The socket path for `environ`'s $XDG_RUNTIME_DIR and $WAYLAND_DISPLAY
+/// (or Dazzle's default socket if neither is set).
+pub fn environSocketPath(buf: []u8, environ: std.process.Environ) Error![]const u8 {
+    const Environ = std.process.Environ;
+    return socketPath(buf, Environ.getPosix(environ, "XDG_RUNTIME_DIR"), Environ.getPosix(environ, "WAYLAND_DISPLAY"));
+}
+
 /// The globals a registry announced.
 pub const Globals = struct {
     pub const Global = struct { name: u32, interface: [64]u8, interface_len: usize, version: u32 };
@@ -239,4 +253,5 @@ test "socket paths" {
     try std.testing.expectEqualStrings("/tmp/w", try socketPath(&buf, null, "/tmp/w"));
     try std.testing.expectError(error.NoRuntimeDir, socketPath(&buf, null, "wayland-1"));
     try std.testing.expectEqualStrings("/os/sockets/wayland-0", try socketPath(&buf, null, null));
+    try std.testing.expectEqualStrings("/os/sockets/wayland-0", try environSocketPath(&buf, .empty));
 }

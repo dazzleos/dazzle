@@ -25,10 +25,7 @@ const linux = std.os.linux;
 const sys = @import("sys");
 const locale = @import("locale");
 const font = @import("font");
-const vc4 = @import("vc4");
-const app = @import("app");
 const ui = @import("ui");
-const wayland = @import("wayland");
 const build_info = @import("build_info");
 const info = @import("info.zig");
 const usb = @import("usb.zig");
@@ -42,11 +39,6 @@ const update = @import("update.zig");
 const gpio_poll_ns = 100 * std.time.ns_per_ms;
 
 const print = sys.print;
-
-/// The clear colour: the dark theme's surface.
-const background = 0xff141218;
-
-var frame: vc4.render.Frame = undefined;
 
 pub fn main(init: std.process.Init.Minimal) u8 {
     sys.logToKmsgIfStderr();
@@ -70,25 +62,14 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
     var chosen = locale.load();
     locale.current = chosen.language;
     const gpa = std.heap.page_allocator;
-    var dev = vc4.device.openRender() catch |err| {
-        print(sys.log_error ++ "dazzle-settings: no GPU ({s})\n", .{@errorName(err)});
-        return err;
-    };
-    const win = try openWindow(gpa, init, &dev);
-    var width = win.width;
-    var height = win.height;
-
-    var f: ?font.Font = blk: {
-        const data = sys.readFileAlloc(gpa, font_path, 32 * 1024 * 1024) catch |err| {
-            print(sys.log_warning ++ "dazzle-settings: cannot read the font {s} ({s}); no text\n", .{ font_path, @errorName(err) });
-            break :blk null;
-        };
-        break :blk font.Font.init(data) catch null;
-    };
-    const window_ui = try ui.Ui.create(gpa, if (f) |*fnt| fnt else null);
-    // Copying and pasting go through the system's clipboard.
-    window_ui.clipboard = .of(&win.clipboard);
-    try window_ui.attachGpu(dev);
+    const a = try ui.App.open(gpa, init.environ, .{
+        .title = "Settings",
+        .app_id = "dazzle-settings",
+        .size = view.open_size,
+        .min_size = view.min_size,
+        .font_path = font_path,
+    });
+    defer a.close();
 
     const system = info.System.read();
     print("dazzle-settings: {s}, {d} {s}\n", .{ system.model.slice(), system.cores, if (system.cores == 1) "core" else "cores" });
@@ -115,7 +96,6 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
     // What the window asks of the network manager (Connect, Disconnect, an
     // Ethernet address).
     var actions: view.Actions = .{};
-    // What the title bar's buttons do, and how small the window may be.
     // The apps that can be installed, and which are.
     var apps: store.Store = .init(gpa, build_info.apps_url);
     apps.check_os = true;
@@ -130,8 +110,6 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
     var date_buf: [32]u8 = undefined;
     var build_buf: [64]u8 = undefined;
     const build = std.fmt.bufPrint(&build_buf, "{s} ({s})", .{ build_info.commit, update.formatDate(&date_buf, build_info.commit_time) }) catch build_info.commit;
-    var controls: app.Controls = .{ .win = win };
-    win.setMinSize(view.min_size[0], view.min_size[1]);
     // The page to show, once the window is built: the one asked for.
     var pending_page = first_page;
     var sock_buf: [64]u8 = undefined;
@@ -141,79 +119,48 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
         sys.close(fd);
         _ = linux.unlink(sock_path);
     };
-    win.wake_fd = pages_fd;
+    a.win.wake_fd = pages_fd;
 
     var next_update: u64 = sys.nowNs() + std.time.ns_per_s;
-    var dirty = true;
-    var idle = false;
-    var suspended = false;
     while (true) {
-        const waited = if (idle) blk: {
-            const gpio_page = view.shownPage(window_ui) == .gpio;
-            const until = if (suspended) sys.nowNs() + 60 * std.time.ns_per_s else if (window_ui.needs_frame) sys.nowNs() + 16 * std.time.ns_per_ms else if (gpio_page) @min(next_update, next_levels) else next_update;
-            break :blk win.wait(@max(until -| sys.nowNs(), std.time.ns_per_ms));
-        } else win.poll();
-        waited catch |err| {
-            if (err == error.ServerError) print(sys.log_error ++ "dazzle-settings: compositor error: {s}\n", .{win.conn.errorMessage()});
-            return err;
-        };
-        if (win.closed or controls.quit) return;
-        if (try win.applyConfigure()) |size| {
-            width = size[0];
-            height = size[1];
-            dirty = true;
-        }
+        const gpio_page = view.shownPage(a.ui) == .gpio;
+        const until = if (a.suspended) sys.nowNs() + 60 * std.time.ns_per_s else if (gpio_page) @min(next_update, next_levels) else next_update;
+        if (!try a.step(@max(until -| sys.nowNs(), std.time.ns_per_ms))) return;
         // Covered by another window: nothing is read or drawn, and the
         // window in front gets the GPU memory.
-        if (win.suspended != suspended) {
-            suspended = win.suspended;
-            if (suspended) win.releaseSpareBuffers() else next_update = 0;
-        }
+        if (a.suspended_changed and !a.suspended) next_update = 0;
         const now = sys.nowNs();
-        // The keyboard's layout, as the shell says.
-        window_ui.keyboard = win.layout;
-        for (win.takeInput()) |e| switch (e) {
-            .motion => |pos| window_ui.pointerMotion(pos),
-            .button => |b| window_ui.pointerButton(b.pos, b.code, b.pressed),
-            .key => |k| window_ui.keyEvent(k.code, k.pressed),
-            .scroll => |sc| window_ui.pointerScroll(sc.pos, sc.dx, sc.dy),
-            .leave => window_ui.pointerLeave(),
-            .touch_down => |t| window_ui.touchDown(t.id, t.pos),
-            .touch_motion => |t| window_ui.touchMotion(t.id, t.pos),
-            .touch_up => |id| window_ui.touchUp(id),
-            .touch_cancel => window_ui.touchCancel(),
-            .relative_motion, .pointer_locked => {},
-        };
+        a.takeInput();
 
         // The figures change every second.
-        if (!suspended and now >= next_update) {
+        if (!a.suspended and now >= next_update) {
             next_update = now + std.time.ns_per_s;
             usage = monitor.read(now);
             network = info.Network.read();
-            if (view.shownPage(window_ui) == .usb) devices = usb.Devices.read();
-            if (view.shownPage(window_ui) == .log) _ = syslog.poll();
-            if (view.shownPage(window_ui) == .gpio) pins.readUsers();
-            dirty = true;
+            if (view.shownPage(a.ui) == .usb) devices = usb.Devices.read();
+            if (view.shownPage(a.ui) == .log) _ = syslog.poll();
+            if (view.shownPage(a.ui) == .gpio) pins.readUsers();
+            a.dirty = true;
         }
-        if (!suspended and view.shownPage(window_ui) == .gpio and now >= next_levels) {
+        if (!a.suspended and view.shownPage(a.ui) == .gpio and now >= next_levels) {
             next_levels = now + gpio_poll_ns;
             const before = pins.lines;
             pins.readLevels();
             if (!pins_read) pins.readUsers();
-            if (!pins_read or !std.mem.eql(u8, std.mem.asBytes(&before), std.mem.asBytes(&pins.lines))) dirty = true;
+            if (!pins_read or !std.mem.eql(u8, std.mem.asBytes(&before), std.mem.asBytes(&pins.lines))) a.dirty = true;
             pins_read = true;
         }
         if (actions.gpio) |g| {
             actions.gpio = null;
             pins.set(g.pin, g.mode);
-            dirty = true;
+            a.dirty = true;
         }
         // Installing, or getting the list of apps (and os.json, over the
         // same keep-alive connection).
         if (apps.poll()) {
             updater.loadManifest();
             icons_dirty = true;
-            dirty = true;
+            a.dirty = true;
         }
         if (actions.install != null or actions.remove != null or actions.refresh_apps or actions.check_update) {
             if (actions.install) |*n| apps.install(n.slice());
@@ -226,22 +173,22 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             actions.remove = null;
             actions.refresh_apps = false;
             actions.check_update = false;
-            dirty = true;
+            a.dirty = true;
         }
         // The list is got when the page is first shown.
         // The log is read as soon as its page shows.
-        if (view.shownPage(window_ui) == .log and syslog.fd == null and !syslog.failed) {
+        if (view.shownPage(a.ui) == .log and syslog.fd == null and !syslog.failed) {
             _ = syslog.poll();
-            dirty = true;
+            a.dirty = true;
         }
-        if (view.shownPage(window_ui) == .apps and !apps.asked) {
+        if (view.shownPage(a.ui) == .apps and !apps.asked) {
             apps.refresh(false);
-            dirty = true;
+            a.dirty = true;
         }
         // Updates: checked for when the Software page is first shown.
-        if (!suspended and updater.poll(now)) {
+        if (!a.suspended and updater.poll(now)) {
             icons_dirty = true;
-            dirty = true;
+            a.dirty = true;
         }
         if (actions.download_update or actions.update_all or actions.restart) {
             if (actions.download_update or actions.update_all) updater.download();
@@ -250,7 +197,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             actions.download_update = false;
             actions.update_all = false;
             actions.restart = false;
-            dirty = true;
+            a.dirty = true;
         }
         // A language or keyboard picked: the system manager keeps it (and
         // the shell sends the apps the keyboard's layout).
@@ -264,7 +211,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
                     locale.current = l.language;
                 }
             } else print(sys.log_warning ++ "dazzle-settings: the system did not answer\n", .{});
-            dirty = true;
+            a.dirty = true;
         }
         // Video memory chosen: the system manager has the next start use
         // it, and says what that now is.
@@ -278,12 +225,12 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             };
             video_memory_failed = if (r) |have| have.denied or have.video_memory_next != mib else true;
             print("dazzle-settings: video memory {d} MiB from the next start{s}\n", .{ mib, if (video_memory_failed) ": refused" else "" });
-            dirty = true;
+            a.dirty = true;
         }
         if (actions.wifi_adapter) |ad| wifi_adapter = ad;
         if (actions.connect != null or actions.disconnect or actions.ethernet != null or actions.wifi_adapter != null) {
             var req_buf: [256]u8 = undefined;
-            if (actions.ethernet) |a| report = info.askManager(info.manager.ethernetAdapterRequest(&req_buf, actions.ethernet_adapter.slice(), a));
+            if (actions.ethernet) |eth| report = info.askManager(info.manager.ethernetAdapterRequest(&req_buf, actions.ethernet_adapter.slice(), eth));
             if (actions.connect != null or actions.disconnect) {
                 const req = if (actions.connect) |*j| info.manager.connectAdapterRequest(&req_buf, j.adapter.slice(), j.ssid(), j.passphrase()) else info.manager.disconnectRequest(&req_buf, wifi_adapter.slice());
                 if (actions.connect) |*j| print("dazzle-settings: joining \"{s}\"\n", .{j.ssid()});
@@ -293,22 +240,22 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             }
             actions = .{};
             next_ask = sys.nowNs() + std.time.ns_per_s;
-            dirty = true;
+            a.dirty = true;
         }
         // Wi-Fi networks are scanned for only while their page is shown
         // (at once when it is chosen); other pages only ask how things
         // are.
-        const wifi_page = view.shownPage(window_ui) == .wifi;
+        const wifi_page = view.shownPage(a.ui) == .wifi;
         if (wifi_page and !was_wifi_page) next_ask = 0;
         was_wifi_page = wifi_page;
-        if (!suspended and now >= next_ask) {
+        if (!a.suspended and now >= next_ask) {
             // Soon after the first answer (to show what the first scan
             // found) and while joining a network, then every few seconds.
             const busy = if (report) |r| r.scanning or r.connection.state == .connecting or r.connection.state == .authenticating or r.connection.state == .addressing else true;
             next_ask = now + @as(u64, if (busy and wifi_page) 1 else 5) * std.time.ns_per_s;
             var scan_buf: [64]u8 = undefined;
             report = info.askManager(if (wifi_page) info.manager.scanRequest(&scan_buf, wifi_adapter.slice()) else "status\n");
-            dirty = true;
+            a.dirty = true;
         }
 
         // Another app asked (through the shell) for a page to be shown.
@@ -319,19 +266,17 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
                 if (std.meta.stringToEnum(view.Page, got.line)) |p| pending_page = p;
             }
         }
-        if (pending_page) |p| if (view.showPage(window_ui, p)) {
+        if (pending_page) |p| if (view.showPage(a.ui, p)) {
             pending_page = null;
-            dirty = true;
+            a.dirty = true;
         };
 
-        idle = true;
-        if (!suspended and (dirty or window_ui.needs_frame)) {
-            dirty = false;
+        if (!a.suspended and (a.dirty or a.ui.needs_frame)) {
             const catalogue = apps.apps()[0..@min(apps.apps().len, installed.len)];
             var available_buf: [64]u8 = undefined;
-            for (catalogue, installed[0..catalogue.len], updatable[0..catalogue.len]) |a, *i, *u| {
-                i.* = store.isInstalled(store.apps_dir, a.name);
-                u.* = i.* and store.hasNewerVersion(store.apps_dir, a);
+            for (catalogue, installed[0..catalogue.len], updatable[0..catalogue.len]) |item, *i, *u| {
+                i.* = store.isInstalled(store.apps_dir, item.name);
+                u.* = i.* and store.hasNewerVersion(store.apps_dir, item);
             }
             if (icons_dirty) {
                 icons_dirty = false;
@@ -344,8 +289,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
                     catalogue,
                 );
             }
-            window_ui.fullscreen = win.fullscreen;
-            window_ui.frame(width, height, now, view.Settings{
+            try a.draw(now, view.Settings{
                 .commit = build,
                 .locale = chosen,
                 .system = &system,
@@ -376,44 +320,11 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
                     .message = updater.message(),
                     .icon = icons.osIcon(),
                 },
-                .on_close = .of(&controls, app.Controls.close),
-                .on_maximize = .of(&controls, app.Controls.toggleMaximized),
-                .on_drag = .of(&controls, app.Controls.drag),
-                .maximized = win.maximized,
             });
-            if (window_ui.changed()) {
-                idle = false;
-                const target = try win.beginFrame();
-                const region = window_ui.repaint(win.bufferAge());
-                frame.begin(target, .{ .clear = background });
-                ui.Ui.limit(&frame, &region);
-                try window_ui.render(&frame, win.flusher());
-                try win.render(&frame);
-                var damage: [ui.damage.Region.max_rects]vc4.render.Viewport = undefined;
-                const changed = window_ui.damaged();
-                for (changed, damage[0..changed.len]) |r, *v| v.* = .{ .x = @intFromFloat(r.x), .y = @intFromFloat(r.y), .width = @intFromFloat(r.w), .height = @intFromFloat(r.h) };
-                try win.showDamaged(damage[0..changed.len]);
-            }
+        } else {
+            a.idle = true;
         }
     }
-}
-
-/// Opens a window on the Wayland compositor.
-fn openWindow(gpa: std.mem.Allocator, init: std.process.Init.Minimal, dev: *vc4.Device) !*app.Window {
-    const Environ = std.process.Environ;
-    // Dazzle's compositor listens on /os/sockets/wayland-0; elsewhere, where
-    // WAYLAND_DISPLAY and XDG_RUNTIME_DIR say.
-    var path_buf: [128]u8 = undefined;
-    const path = wayland.client.socketPath(&path_buf, Environ.getPosix(init.environ, "XDG_RUNTIME_DIR"), Environ.getPosix(init.environ, "WAYLAND_DISPLAY")) catch {
-        print("dazzle-settings: WAYLAND_DISPLAY needs XDG_RUNTIME_DIR\n", .{});
-        return error.NoCompositor;
-    };
-    const win = app.Window.open(gpa, .device(dev), path, .{ .title = "Settings", .size = view.open_size }) catch |err| {
-        print(sys.log_warning ++ "dazzle-settings: cannot open a window on {s} ({s})\n", .{ path, @errorName(err) });
-        return err;
-    };
-    try win.setAppId("dazzle-settings");
-    return win;
 }
 
 test {

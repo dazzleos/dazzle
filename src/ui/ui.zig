@@ -164,6 +164,7 @@ pub const Image = image.Image;
 pub const Painter = painter.Painter;
 pub const GpuArea = painter.GpuArea;
 pub const Ui = runtime.Ui;
+pub const App = runtime.App;
 pub const Clipboard = runtime.Clipboard;
 
 test {

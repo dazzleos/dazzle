@@ -329,6 +329,11 @@ pub const Device = struct {
         return dev.v3d_fd orelse dev.fd;
     }
 
+    pub fn close(dev: Device) void {
+        if (dev.v3d_fd) |vfd| sys.close(vfd);
+        sys.close(dev.fd);
+    }
+
     pub fn getParam(dev: Device, param: Param) !u64 {
         var arg: GetParam = .{ .param = @intFromEnum(param) };
         try drm.ioctl(dev.fd, IOCTL_GET_PARAM, &arg);

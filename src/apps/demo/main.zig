@@ -19,14 +19,12 @@ const sys = @import("sys");
 const locale = @import("locale");
 const font = @import("font");
 const vc4 = @import("vc4");
-const app = @import("app");
 const solids = @import("solids.zig");
 const rings_mod = @import("rings.zig");
 const view = @import("view.zig");
 const ui = @import("ui");
 const sysinfo = @import("sysinfo.zig");
 const build_info = @import("build_info");
-const wayland = @import("wayland");
 
 const print = sys.print;
 
@@ -48,57 +46,22 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     return 0;
 }
 
-fn loadFont(gpa: std.mem.Allocator, path: [*:0]const u8) ?font.Font {
-    const data = sys.readFileAlloc(gpa, path, 32 * 1024 * 1024) catch |err| {
-        print(sys.log_warning ++ "dazzle: cannot read the font {s} ({s}); no text\n", .{ path, @errorName(err) });
-        return null;
-    };
-    return font.Font.init(data) catch |err| {
-        print("dazzle: {s} is not a usable font ({s}); no text\n", .{ path, @errorName(err) });
-        return null;
-    };
-}
-
-/// Opens a window on the Wayland compositor.
-fn openWindow(gpa: std.mem.Allocator, init: std.process.Init.Minimal, dev: *vc4.Device) !*app.Window {
-    const Environ = std.process.Environ;
-    // Dazzle's compositor listens on /os/sockets/wayland-0; elsewhere, where
-    // WAYLAND_DISPLAY and XDG_RUNTIME_DIR say.
-    var path_buf: [128]u8 = undefined;
-    const path = wayland.client.socketPath(&path_buf, Environ.getPosix(init.environ, "XDG_RUNTIME_DIR"), Environ.getPosix(init.environ, "WAYLAND_DISPLAY")) catch {
-        print("dazzle: WAYLAND_DISPLAY needs XDG_RUNTIME_DIR\n", .{});
-        return error.NoCompositor;
-    };
-    const win = app.Window.open(gpa, .device(dev), path, .{ .title = "Dazzle demo", .size = view.open_size }) catch |err| {
-        print(sys.log_warning ++ "dazzle: cannot open a window on {s} ({s})\n", .{ path, @errorName(err) });
-        return err;
-    };
-    try win.setAppId("dazzle-demo");
-    return win;
-}
-
-/// Frames are large; the demo records one at a time.
-var frame: vc4.render.Frame = undefined;
-
 fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     // The language chosen (in setup, or Settings).
     locale.current = locale.load().language;
     const gpa = std.heap.page_allocator;
-    var dev = vc4.device.openRender() catch |err| {
-        print(sys.log_error ++ "dazzle: no GPU ({s}); look for vc4 or v3d errors earlier in the log\n", .{@errorName(err)});
-        return err;
-    };
-    const win = try openWindow(gpa, init, &dev);
-    var width = win.width;
-    var height = win.height;
-    print("dazzle: drawing with the vc4 API, window {d}x{d}\n", .{ width, height });
+    const a = try ui.App.open(gpa, init.environ, .{
+        .title = "Dazzle demo",
+        .app_id = "dazzle-demo",
+        .size = view.open_size,
+        .min_size = view.min_size,
+        .font_path = font_path,
+        .clear_color = background,
+    });
+    defer a.close();
+    print("dazzle: drawing with the vc4 API, window {d}x{d}\n", .{ a.width, a.height });
 
-    var all_solids = try solids.Solids.init(gpa, dev);
-    var f = loadFont(gpa, font_path);
-    const window_ui = try ui.Ui.create(gpa, if (f) |*fnt| fnt else null);
-    // Copying and pasting go through the system's clipboard.
-    window_ui.clipboard = .of(&win.clipboard);
-    try window_ui.attachGpu(dev);
+    var all_solids = try solids.Solids.init(gpa, a.dev);
     var rings: rings_mod.Rings = .{};
     var status_bufs: [view.lines][96]u8 = undefined;
     var status: [view.lines][]const u8 = @splat("");
@@ -115,103 +78,62 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     // Something outside the UI changed (the size, the statistics): build a
     // frame. Otherwise frames are built only while a widget asks (for an
     // animation, or after input), and shown only if they changed.
-    var dirty = true;
-    var idle = false;
-    var suspended = false;
-    // What the title bar's buttons do, and how small the window may be.
-    var controls: app.Controls = .{ .win = win };
-    win.setMinSize(view.min_size[0], view.min_size[1]);
-    while (true) {
-        const waited = if (idle) blk: {
-            // Nothing to draw: sleep until the statistics change, or
-            // something happens (input, a configure). While covered there
-            // is nothing to animate.
-            const until = if (window_ui.needs_frame and !win.suspended) sys.nowNs() + 16 * std.time.ns_per_ms else next_update;
-            break :blk win.wait(@max(until -| sys.nowNs(), std.time.ns_per_ms));
-        } else win.poll();
-        waited catch |err| {
-            if (err == error.ServerError) print(sys.log_error ++ "dazzle: compositor error: {s}\n", .{win.conn.errorMessage()});
-            return err;
-        };
-        if (win.closed or controls.quit) return;
-        if (try win.applyConfigure()) |size| {
-            // The next frame is rendered at the new size.
-            width = size[0];
-            height = size[1];
-            next_update = 0;
-            dirty = true;
-        }
-        // Covered by another window: draw nothing, and let the window in
-        // front have the GPU memory; draw again when uncovered.
-        if (win.suspended != suspended) {
-            suspended = win.suspended;
-            if (suspended) win.releaseSpareBuffers() else dirty = true;
-            print("dazzle: {s}\n", .{if (suspended) "covered: not drawing" else "in front: drawing"});
+    while (try a.step(@max(next_update -| sys.nowNs(), std.time.ns_per_ms))) {
+        if (a.resized) next_update = 0;
+        if (a.suspended_changed) {
+            print("dazzle: {s}\n", .{if (a.suspended) "covered: not drawing" else "in front: drawing"});
         }
         const frame_start = sys.nowNs();
-        for (win.takeInput()) |e| switch (e) {
+        for (a.win.takeInput()) |e| switch (e) {
             .motion => |pos| {
                 input.pointer = pos;
-                window_ui.pointerMotion(pos);
+                a.ui.pointerMotion(pos);
             },
             .button => |b| {
-                window_ui.pointerButton(b.pos, b.code, b.pressed);
-                dirty = true;
+                a.ui.pointerButton(b.pos, b.code, b.pressed);
+                a.dirty = true;
             },
             .key => |k| if (k.pressed) {
                 input.key = k.code;
                 next_update = 0;
             },
-            .scroll => |sc| window_ui.pointerScroll(sc.pos, sc.dx, sc.dy),
-            .leave => window_ui.pointerLeave(),
-            .touch_down => |t| window_ui.touchDown(t.id, t.pos),
-            .touch_motion => |t| window_ui.touchMotion(t.id, t.pos),
-            .touch_up => |id| window_ui.touchUp(id),
-            .touch_cancel => window_ui.touchCancel(),
-            .relative_motion, .pointer_locked => {},
+            else => a.ui.handleInput(e),
         };
 
         // The statistics change twice a second.
         if (frame_start >= next_update) {
             next_update = frame_start + std.time.ns_per_s / 2;
-            status = statusLines(&status_bufs, shown, width, height, win.bufferFormat(), input, health);
-            dirty = true;
+            status = statusLines(&status_bufs, shown, a.width, a.height, a.win.bufferFormat(), input, health);
+            a.dirty = true;
         }
 
-        idle = true;
-        if (!suspended and (dirty or window_ui.needs_frame)) {
-            dirty = false;
-            window_ui.fullscreen = win.fullscreen;
-            window_ui.frame(width, height, frame_start, view.Demo{
+        a.idle = true;
+        if (!a.suspended and (a.dirty or a.ui.needs_frame)) {
+            a.dirty = false;
+            a.ui.frame(a.width, a.height, frame_start, view.Demo{
                 .solids = &all_solids,
                 .rings = &rings,
                 .status = status,
-                .on_close = .of(&controls, app.Controls.close),
-                .on_maximize = .of(&controls, app.Controls.toggleMaximized),
-                .on_drag = .of(&controls, app.Controls.drag),
-                .maximized = win.maximized,
             });
             // The buffers' format, as the switch says (new buffers take it).
-            if (window_ui.root) |root| win.setFormat(if (root.state(view.Demo.State).colour_16) .rgb565 else .xrgb8888);
-            if (window_ui.changed()) {
-                idle = false;
+            if (a.ui.root) |root| a.win.setFormat(if (root.state(view.Demo.State).colour_16) .rgb565 else .xrgb8888);
+            if (a.ui.changed()) {
+                a.idle = false;
                 // Only what changed since the buffer was last drawn is drawn
                 // again; the rest of it already shows this frame.
-                const target = try win.beginFrame();
-                const region = window_ui.repaint(win.bufferAge());
-                frame.begin(target, .{ .clear = background });
-                ui.Ui.limit(&frame, &region);
-                try window_ui.render(&frame, win.flusher());
+                const target = try a.win.beginFrame();
+                const region = a.ui.repaint(a.win.bufferAge());
+                a.frame.begin(target, .{ .clear = background });
+                ui.Ui.limit(&a.frame, &region);
+                try a.ui.render(&a.frame, a.win.flusher());
                 const issued = sys.nowNs();
                 // Render, then hand the frame to the shell (which may wait
                 // for the previous one to be shown), so the GPU's time is
                 // measured alone.
-                try win.render(&frame);
+                try a.win.render(&a.frame);
                 const rendered = sys.nowNs();
                 var damage: [ui.damage.Region.max_rects]vc4.render.Viewport = undefined;
-                const changed = window_ui.damaged();
-                for (changed, damage[0..changed.len]) |r, *v| v.* = .{ .x = @intFromFloat(r.x), .y = @intFromFloat(r.y), .width = @intFromFloat(r.w), .height = @intFromFloat(r.h) };
-                try win.showDamaged(damage[0..changed.len]);
+                try a.win.showDamaged(a.ui.damagedViewports(&damage));
                 stats_window.add(issued - frame_start, rendered - issued, region.slice());
                 log_window.add(issued - frame_start, rendered - issued, region.slice());
             }
@@ -219,12 +141,12 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
 
         const now = sys.nowNs();
         if (now - stats_window.since >= std.time.ns_per_s / 2) {
-            shown = stats_window.summary(now, width, height);
+            shown = stats_window.summary(now, a.width, a.height);
             stats_window = .{ .since = now };
         }
         // Also log every 5 seconds, for the network log.
         if (now - log_window.since >= 5 * std.time.ns_per_s) {
-            const s = log_window.summary(now, width, height);
+            const s = log_window.summary(now, a.width, a.height);
             health = monitor.sample();
             var temp_buf: [16]u8 = undefined;
             print("dazzle: {d:.1} fps ({d:.0}% of the window redrawn), GPU {d:.2} ms, CPU {d:.2} ms per frame; SoC {s}, CPU speed {d:.0}%, CPU busy {d:.0}% (demo {d:.0}%, shell {d:.0}%)\n", .{

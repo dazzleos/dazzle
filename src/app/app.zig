@@ -7,15 +7,18 @@
 //!   tests)
 //! * `Controls`: what the title bar's buttons (and dragging it) do
 //! * `Clipboard`: the system's clipboard, for text (`Window.clipboard`)
+//! * `ChildEnv`: the environment a child app needs to find the compositor
 //!
-//!     const dev = try vc4.device.openRender();
-//!     const win = try app.Window.open(gpa, .device(&dev), socket_path, .{ .title = "Hello", .size = .{ 640, 480 } });
+//!     var dev = try vc4.device.openRender();
+//!     const win = try app.Window.open(gpa, .device(&dev), init.environ, .{ .title = "Hello", .size = .{ 640, 480 } });
 //!     while (!win.closed) {
 //!         try win.poll();
 //!         frame.begin(try win.beginFrame(), .{ .clear = 0xff000000 });
 //!         // ... frame.draw(...)
 //!         try win.present(&frame);
 //!     }
+
+const std = @import("std");
 
 pub const window = @import("window.zig");
 pub const clipboard = @import("clipboard.zig");
@@ -47,6 +50,51 @@ pub const Controls = struct {
         if (!c.win.maximized) c.win.startMove();
     }
 };
+
+/// The environment variables a child app needs to find the compositor
+/// (`XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY`) and, if `default_home` is
+/// given, its home folder (`HOME`, from `environ` or `default_home`).
+pub const ChildEnv = struct {
+    bufs: [3][160]u8 = undefined,
+    vars: [3][*:0]const u8 = undefined,
+    len: usize = 0,
+
+    pub fn init(env: *ChildEnv, environ: std.process.Environ, default_home: ?[]const u8) []const [*:0]const u8 {
+        env.len = 0;
+        if (default_home) |fallback| {
+            const home = std.process.Environ.getPosix(environ, "HOME") orelse fallback;
+            if (std.fmt.bufPrintZ(&env.bufs[env.len], "HOME={s}", .{home})) |s| {
+                env.vars[env.len] = s.ptr;
+                env.len += 1;
+            } else |_| {}
+        }
+        for ([_][]const u8{ "XDG_RUNTIME_DIR", "WAYLAND_DISPLAY" }) |name| {
+            const value = std.process.Environ.getPosix(environ, name) orelse continue;
+            if (std.fmt.bufPrintZ(&env.bufs[env.len], "{s}={s}", .{ name, value })) |s| {
+                env.vars[env.len] = s.ptr;
+                env.len += 1;
+            } else |_| {}
+        }
+        return env.vars[0..env.len];
+    }
+};
+
+test "child environment carries the compositor's socket" {
+    const vars = [_:null]?[*:0]const u8{ "XDG_RUNTIME_DIR=/run", "WAYLAND_DISPLAY=wayland-1" };
+    const environ: std.process.Environ = .{ .block = .{ .slice = @ptrCast((&vars)[0..vars.len]) } };
+
+    var env: ChildEnv = undefined;
+    const with_home = env.init(environ, "/data/user");
+    try std.testing.expectEqual(@as(usize, 3), with_home.len);
+    try std.testing.expectEqualStrings("HOME=/data/user", std.mem.span(with_home[0]));
+    try std.testing.expectEqualStrings("XDG_RUNTIME_DIR=/run", std.mem.span(with_home[1]));
+    try std.testing.expectEqualStrings("WAYLAND_DISPLAY=wayland-1", std.mem.span(with_home[2]));
+
+    const wayland_only = env.init(environ, null);
+    try std.testing.expectEqual(@as(usize, 2), wayland_only.len);
+    try std.testing.expectEqualStrings("XDG_RUNTIME_DIR=/run", std.mem.span(wayland_only[0]));
+    try std.testing.expectEqualStrings("WAYLAND_DISPLAY=wayland-1", std.mem.span(wayland_only[1]));
+}
 
 test {
     _ = window;

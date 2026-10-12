@@ -4,11 +4,12 @@
 //! shell draws none), so it goes at the top of the app's widgets:
 //!
 //!     cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &.{
-//!         cx.make(ui.TitleBar{ .title = "Settings", .on_close = .of(app, App.quit) }),
+//!         cx.make(ui.TitleBar{ .title = "Settings" }),
 //!         cx.make(ui.Expanded{ .child = content }),
 //!     } })
 
 const std = @import("std");
+const Controls = @import("app").Controls;
 const geometry = @import("geometry.zig");
 const widget = @import("widget.zig");
 const Align = @import("align.zig").Align;
@@ -28,13 +29,16 @@ const Widget = widget.Widget;
 
 pub const TitleBar = struct {
     title: []const u8,
-    /// Pressing the close button; without it there is none.
+    /// Pressing the close button (defaults to `cx.ui.controls` when set);
+    /// without it there is none.
     on_close: ?widget.Callback = null,
-    /// Pressing the maximize button (which shows whether the window fills
-    /// the screen); without it there is none.
+    /// Pressing the maximize button, which shows whether the window fills
+    /// the screen (defaults to `cx.ui.controls` when set); without it
+    /// there is none.
     on_maximize: ?widget.Callback = null,
     maximized: bool = true,
-    /// A press on the bar itself, to start moving the window.
+    /// A press on the bar itself, to start moving the window (defaults to
+    /// `cx.ui.controls` when set).
     on_drag: ?widget.Callback = null,
 
     pub const height = 44;
@@ -42,17 +46,22 @@ pub const TitleBar = struct {
     pub fn build(self: *const TitleBar, cx: *Context) Widget {
         // A fullscreen window has none.
         if (cx.ui.fullscreen) return cx.make(@import("empty.zig").Empty{});
+        const controls = cx.ui.controls;
+        const on_maximize = self.on_maximize orelse if (controls) |c| widget.Callback.of(c, Controls.toggleMaximized) else null;
+        const on_close = self.on_close orelse if (controls) |c| widget.Callback.of(c, Controls.close) else null;
+        const on_drag = self.on_drag orelse if (controls) |c| widget.Callback.of(c, Controls.drag) else null;
+        const maximized = if (self.on_maximize != null) self.maximized else cx.ui.maximized;
         const t = cx.theme();
         const size = 34;
         var buttons: [2]Widget = undefined;
         var n: usize = 0;
-        if (self.on_maximize) |f| {
+        if (on_maximize) |f| {
             // A square fills the screen; two, one behind the other, go back
             // to the window's own size.
-            buttons[n] = cx.make(BarButton{ .on_press = f, .size = size, .icon = if (self.maximized) .filter_none else .crop_square });
+            buttons[n] = cx.make(BarButton{ .on_press = f, .size = size, .icon = if (maximized) .filter_none else .crop_square });
             n += 1;
         }
-        if (self.on_close) |f| {
+        if (on_close) |f| {
             buttons[n] = cx.make(BarButton{ .on_press = f, .size = size, .icon = .close });
             n += 1;
         }
@@ -60,7 +69,7 @@ pub const TitleBar = struct {
             .padding = .{ .right = 8 },
             .child = cx.make(Row{ .spacing = 4, .main_axis_size = .min, .children = cx.ui.arena().dupe(Widget, buttons[0..n]) catch &.{} }),
         }) });
-        return cx.make(DragArea{ .on_drag = self.on_drag, .child = cx.make(Decorated{ .color = t.surface_container, .child = cx.make(SizedBox{
+        return cx.make(DragArea{ .on_drag = on_drag, .child = cx.make(Decorated{ .color = t.surface_container, .child = cx.make(SizedBox{
             .height = height,
             .child = cx.make(Overlay{ .children = &.{
                 cx.make(Center{ .child = cx.make(@import("text.zig").Text{ .text = self.title, .style = .{ .size = 22, .color = t.on_surface }, .wrap = false }) }),
@@ -176,3 +185,27 @@ test "a fullscreen window has no title bar" {
     u.pointerButton(at, btn_left, false);
     try testing.expect(closed);
 }
+
+test "the title bar defaults to the UI's window controls" {
+    const Ui = @import("runtime.zig").Ui;
+    const font = @import("font");
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    var controls: Controls = .{ .win = undefined };
+    u.controls = &controls;
+    const Root = struct {
+        pub fn build(_: *const @This(), cx: *Context) Widget {
+            return cx.make(Column{ .cross_axis_alignment = .stretch, .children = &.{
+                cx.make(TitleBar{ .title = "Settings" }),
+            } });
+        }
+    };
+    u.frame(800, 600, 0, Root{});
+    const at: geometry.Point = .{ 800 - 8 - 17, 22 };
+    u.pointerMotion(at);
+    u.pointerButton(at, btn_left, true);
+    u.pointerButton(at, btn_left, false);
+    try testing.expect(controls.quit);
+}
+

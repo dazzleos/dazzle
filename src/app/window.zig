@@ -283,8 +283,24 @@ pub const Window = struct {
     input: [64]InputEvent = undefined,
     input_len: usize = 0,
 
+    /// Connects to the compositor named in `environ` (`WAYLAND_DISPLAY`
+    /// under `XDG_RUNTIME_DIR`) and opens a window, logging why if it
+    /// cannot.
+    pub fn open(gpa: std.mem.Allocator, gpu: Gpu, environ: std.process.Environ, options: Options) !*Window {
+        const name = options.app_id orelse options.title;
+        var path_buf: [256]u8 = undefined;
+        const path = client.environSocketPath(&path_buf, environ) catch |err| {
+            sys.print(sys.log_error ++ "{s}: WAYLAND_DISPLAY needs XDG_RUNTIME_DIR\n", .{name});
+            return err;
+        };
+        return openPath(gpa, gpu, path, options) catch |err| {
+            sys.print(sys.log_error ++ "{s}: cannot open a window on {s} ({s})\n", .{ name, path, @errorName(err) });
+            return err;
+        };
+    }
+
     /// Connects to the compositor listening on `path` and opens a window.
-    pub fn open(gpa: std.mem.Allocator, gpu: Gpu, path: []const u8, options: Options) !*Window {
+    pub fn openPath(gpa: std.mem.Allocator, gpu: Gpu, path: []const u8, options: Options) !*Window {
         const conn = try client.Display.connect(gpa, path);
         errdefer conn.disconnect();
         return openOn(gpa, gpu, conn, options);
@@ -293,10 +309,14 @@ pub const Window = struct {
     /// How a window opens.
     pub const Options = struct {
         title: []const u8,
+        /// The app's name, as the shell and its dock know it.
+        app_id: ?[]const u8 = null,
         /// The size it opens at: the best for what the app shows. The
         /// shell lets the app choose (it places the window in the middle
         /// of its work area), and makes it smaller if it does not fit.
         size: [2]u32 = default_size,
+        /// How small the window may be made (see `setMinSize`).
+        min_size: ?[2]u32 = null,
         /// Open maximized instead.
         maximized: bool = false,
     };
@@ -335,6 +355,14 @@ pub const Window = struct {
         m.uint(w.toplevel.id).end();
         m = try w.toplevel.request(p.xdg_toplevel.request.set_title);
         m.string(title).end();
+        if (options.app_id) |app_id| {
+            m = try w.toplevel.request(p.xdg_toplevel.request.set_app_id);
+            m.string(app_id).end();
+        }
+        if (options.min_size) |min_size| {
+            m = try w.toplevel.request(p.xdg_toplevel.request.set_min_size);
+            m.int(@intCast(min_size[0])).int(@intCast(min_size[1])).end();
+        }
         if (options.maximized) {
             m = try w.toplevel.request(p.xdg_toplevel.request.set_maximized);
             m.end();

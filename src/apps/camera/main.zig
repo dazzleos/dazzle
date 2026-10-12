@@ -15,15 +15,11 @@
 //! It runs until it is stopped or its window is closed.
 
 const std = @import("std");
-const linux = std.os.linux;
 const sys = @import("sys");
 const locale = @import("locale");
 const font = @import("font");
-const vc4 = @import("vc4");
-const app = @import("app");
 const ui = @import("ui");
 const gfx = @import("gfx");
-const wayland = @import("wayland");
 const capture = @import("capture.zig");
 const isp = @import("isp.zig");
 const exposure = @import("exposure.zig");
@@ -32,12 +28,7 @@ const view = @import("view.zig");
 
 const print = sys.print;
 
-/// The clear colour: the dark theme's surface.
-const background = 0xff141218;
-
 const no_camera = "No camera found. Connect a Raspberry Pi Camera Module (v1 or v2) to the camera connector while the Pi is off, then start it again.";
-
-var frame: vc4.render.Frame = undefined;
 
 pub fn main(init: std.process.Init.Minimal) u8 {
     sys.logToKmsgIfStderr();
@@ -230,24 +221,14 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     // The language chosen (in setup, or Settings).
     locale.current = locale.load().language;
     const gpa = std.heap.page_allocator;
-    var dev = vc4.device.openRender() catch |err| {
-        print(sys.log_error ++ "dazzle-camera: no GPU ({s})\n", .{@errorName(err)});
-        return err;
-    };
-    const win = try openWindow(gpa, init, &dev);
-    var width = win.width;
-    var height = win.height;
-
-    var f: ?font.Font = blk: {
-        const data = sys.readFileAlloc(gpa, font_path, 32 * 1024 * 1024) catch |err| {
-            print(sys.log_warning ++ "dazzle-camera: cannot read the font {s} ({s}); no text\n", .{ font_path, @errorName(err) });
-            break :blk null;
-        };
-        break :blk font.Font.init(data) catch null;
-    };
-    const window_ui = try ui.Ui.create(gpa, if (f) |*fnt| fnt else null);
-    window_ui.clipboard = .of(&win.clipboard);
-    try window_ui.attachGpu(dev);
+    const a = try ui.App.open(gpa, init.environ, .{
+        .title = "Camera",
+        .app_id = "dazzle-camera",
+        .size = view.open_size,
+        .min_size = view.min_size,
+        .font_path = font_path,
+    });
+    defer a.close();
 
     var viewer: ?Viewer = blk: {
         const cam = capture.Camera.open() catch |err| {
@@ -256,103 +237,32 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         };
         break :blk try Viewer.init(gpa, cam);
     };
-    if (viewer) |*v| win.wake_fd = v.cam.fd();
+    if (viewer) |*v| a.win.wake_fd = v.cam.fd();
+    // A photo being saved is finished first when closing.
+    defer if (viewer) |*v| if (v.saving) |sv| sv.thread.join();
 
-    var controls: app.Controls = .{ .win = win };
-    win.setMinSize(view.min_size[0], view.min_size[1]);
-
-    var dirty = true;
-    var idle = false;
-    var suspended = false;
-    while (true) {
-        const waited = if (idle) blk: {
-            // Frames wake the window (`wake_fd`); otherwise wait for input.
-            const timeout: u64 = if (window_ui.needs_frame and !suspended) 16 * std.time.ns_per_ms else if (viewer != null) std.time.ns_per_s else 60 * std.time.ns_per_s;
-            break :blk win.wait(timeout);
-        } else win.poll();
-        waited catch |err| {
-            if (err == error.ServerError) print(sys.log_error ++ "dazzle-camera: compositor error: {s}\n", .{win.conn.errorMessage()});
-            return err;
-        };
-        if (win.closed or controls.quit) {
-            // A photo being saved is finished first.
-            if (viewer) |*v| if (v.saving) |sv| sv.thread.join();
-            return;
-        }
-        if (try win.applyConfigure()) |size| {
-            width = size[0];
-            height = size[1];
-            dirty = true;
-        }
-        if (win.suspended != suspended) {
-            suspended = win.suspended;
-            if (suspended) win.releaseSpareBuffers() else dirty = true;
-        }
+    // Frames wake the window (`wake_fd`); otherwise wait for input.
+    while (try a.step(if (viewer != null) std.time.ns_per_s else 60 * std.time.ns_per_s)) {
         const now = sys.nowNs();
-        for (win.takeInput()) |e| switch (e) {
-            .motion => |pos| window_ui.pointerMotion(pos),
-            .button => |b| window_ui.pointerButton(b.pos, b.code, b.pressed),
+        for (a.win.takeInput()) |e| switch (e) {
             .key => {},
-            .scroll => |sc| window_ui.pointerScroll(sc.pos, sc.dx, sc.dy),
-            .leave => window_ui.pointerLeave(),
-            .touch_down => |t| window_ui.touchDown(t.id, t.pos),
-            .touch_motion => |t| window_ui.touchMotion(t.id, t.pos),
-            .touch_up => |id| window_ui.touchUp(id),
-            .touch_cancel => window_ui.touchCancel(),
-            .relative_motion, .pointer_locked => {},
+            else => a.ui.handleInput(e),
         };
         if (viewer) |*v| {
-            if (v.checkSaving()) dirty = true;
+            if (v.checkSaving()) a.dirty = true;
             // Covered: frames are still taken (and dropped), not shown.
-            const picture_h = height -| view.chrome_height;
-            if (try v.update(width, picture_h) and !suspended) dirty = true;
+            const picture_h = a.height -| view.chrome_height;
+            if (try v.update(a.width, picture_h) and !a.suspended) a.dirty = true;
         }
 
-        idle = true;
-        if (!suspended and (dirty or window_ui.needs_frame)) {
-            dirty = false;
-            const v: ?*Viewer = if (viewer) |*vw| vw else null;
-            window_ui.fullscreen = win.fullscreen;
-            window_ui.frame(width, height, now, view.Camera{
-                .preview = if (v) |vw| if (vw.image) |*img| img else null else null,
-                .message = if (v) |vw| (if (vw.image == null) "Starting the camera…" else "") else no_camera,
-                .status = if (v) |vw| vw.status() else "",
-                .on_shoot = if (v) |vw| (if (vw.saving == null) ui.Callback.of(vw, Viewer.requestPhoto) else null) else null,
-                .on_close = .of(&controls, app.Controls.close),
-                .on_maximize = .of(&controls, app.Controls.toggleMaximized),
-                .on_drag = .of(&controls, app.Controls.drag),
-                .maximized = win.maximized,
-            });
-            if (window_ui.changed()) {
-                idle = false;
-                const target = try win.beginFrame();
-                const region = window_ui.repaint(win.bufferAge());
-                frame.begin(target, .{ .clear = background });
-                ui.Ui.limit(&frame, &region);
-                try window_ui.render(&frame, win.flusher());
-                try win.render(&frame);
-                var damage: [ui.damage.Region.max_rects]vc4.render.Viewport = undefined;
-                const changed = window_ui.damaged();
-                for (changed, damage[0..changed.len]) |r, *dv| dv.* = .{ .x = @intFromFloat(r.x), .y = @intFromFloat(r.y), .width = @intFromFloat(r.w), .height = @intFromFloat(r.h) };
-                try win.showDamaged(damage[0..changed.len]);
-            }
-        }
+        const v: ?*Viewer = if (viewer) |*vw| vw else null;
+        try a.draw(now, view.Camera{
+            .preview = if (v) |vw| if (vw.image) |*img| img else null else null,
+            .message = if (v) |vw| (if (vw.image == null) "Starting the camera…" else "") else no_camera,
+            .status = if (v) |vw| vw.status() else "",
+            .on_shoot = if (v) |vw| (if (vw.saving == null) ui.Callback.of(vw, Viewer.requestPhoto) else null) else null,
+        });
     }
-}
-
-fn openWindow(gpa: std.mem.Allocator, init: std.process.Init.Minimal, dev: *vc4.Device) !*app.Window {
-    const Environ = std.process.Environ;
-    var path_buf: [128]u8 = undefined;
-    const path = wayland.client.socketPath(&path_buf, Environ.getPosix(init.environ, "XDG_RUNTIME_DIR"), Environ.getPosix(init.environ, "WAYLAND_DISPLAY")) catch {
-        print("dazzle-camera: WAYLAND_DISPLAY needs XDG_RUNTIME_DIR\n", .{});
-        return error.NoCompositor;
-    };
-    const win = app.Window.open(gpa, .device(dev), path, .{ .title = "Camera", .size = view.open_size }) catch |err| {
-        print(sys.log_warning ++ "dazzle-camera: cannot open a window on {s} ({s})\n", .{ path, @errorName(err) });
-        return err;
-    };
-    try win.setAppId("dazzle-camera");
-    return win;
 }
 
 test {

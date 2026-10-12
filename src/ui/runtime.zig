@@ -22,6 +22,8 @@
 //!     try ui.render(&frame, window.flusher());
 
 const std = @import("std");
+const app = @import("app");
+const sys = @import("sys");
 const gfx = @import("gfx");
 const vc4 = @import("vc4");
 const font = @import("font");
@@ -82,6 +84,8 @@ pub const Ui = struct {
     gpa: std.mem.Allocator,
     /// Text is drawn in it; without one, text takes no space.
     font: ?*const font.Font,
+    owned_font: ?font.Font = null,
+    font_data: ?[]const u8 = null,
     /// Icons are drawn with it (see `Icon`).
     icon_font: font.Font,
     theme: Theme = .dark,
@@ -117,6 +121,10 @@ pub const Ui = struct {
     /// The window fills the screen: title bars are not drawn (set from
     /// the app's window, as `keyboard` is).
     fullscreen: bool = false,
+    /// Whether the window fills the work area (for `TitleBar`).
+    maximized: bool = true,
+    /// What the window's title bar buttons do (set by `attachWindow`).
+    controls: ?*app.Controls = null,
     /// The system's clipboard (the app gives it); without one, text is
     /// copied within the app (`local_clipboard`).
     clipboard: ?Clipboard = null,
@@ -162,6 +170,33 @@ pub const Ui = struct {
         return ui;
     }
 
+    /// Creates a `Ui` with the font at `path` (or the system's default font
+    /// when null), logging a warning if the font cannot be read.
+    pub fn createWithFont(gpa: std.mem.Allocator, name: []const u8, path: ?[*:0]const u8) !*Ui {
+        var font_buf: [512]u8 = undefined;
+        const font_path: [:0]const u8 = if (path) |p| std.mem.span(p) else sys.fontFile(&font_buf, font.default_font_file);
+        var font_data: ?[]const u8 = null;
+        const owned_font: ?font.Font = blk: {
+            const data = sys.readFileAlloc(gpa, font_path, 32 * 1024 * 1024) catch |err| {
+                sys.print(sys.log_warning ++ "{s}: cannot read the font {s} ({s}); no text\n", .{ name, font_path, @errorName(err) });
+                break :blk null;
+            };
+            if (font.Font.init(data)) |f| {
+                font_data = data;
+                break :blk f;
+            } else |_| {
+                gpa.free(data);
+                break :blk null;
+            }
+        };
+        errdefer if (font_data) |d| gpa.free(d);
+        const ui = try create(gpa, null);
+        ui.font_data = font_data;
+        ui.owned_font = owned_font;
+        if (ui.owned_font) |*f| ui.font = f;
+        return ui;
+    }
+
     pub fn destroy(ui: *Ui) void {
         ui.closeMenu();
         ui.endDrag(false);
@@ -181,7 +216,23 @@ pub const Ui = struct {
         if (ui.renderer) |*r| r.deinit();
         ui.atlas.deinit();
         for (&ui.arenas) |*a| a.deinit();
+        if (ui.font_data) |d| ui.gpa.free(d);
         ui.gpa.destroy(ui);
+    }
+
+    /// Connects the UI's clipboard, keyboard layout, and window state to
+    /// `win` (and its title bar's buttons to `controls`, if given).
+    pub fn attachWindow(ui: *Ui, win: *app.Window, controls: ?*app.Controls) void {
+        ui.clipboard = .of(&win.clipboard);
+        ui.controls = controls;
+        ui.syncWindow(win);
+    }
+
+    /// Updates the UI's keyboard layout and window state from `win`.
+    pub fn syncWindow(ui: *Ui, win: *const app.Window) void {
+        ui.keyboard = win.layout;
+        ui.fullscreen = win.fullscreen;
+        ui.maximized = win.maximized;
     }
 
     /// Lets `render` draw with the GPU.
@@ -441,6 +492,19 @@ pub const Ui = struct {
         return ui.damage.frame.slice();
     }
 
+    /// What changed in the last frame, as `vc4.render.Viewport` rectangles
+    /// for `app.Window.showDamaged` or `app.Window.submit`.
+    pub fn damagedViewports(ui: *const Ui, out: *[damage_mod.Region.max_rects]vc4.render.Viewport) []const vc4.render.Viewport {
+        const rects = ui.damaged();
+        for (rects, out[0..rects.len]) |r, *v| v.* = .{
+            .x = @intFromFloat(r.x),
+            .y = @intFromFloat(r.y),
+            .width = @intFromFloat(r.w),
+            .height = @intFromFloat(r.h),
+        };
+        return out[0..rects.len];
+    }
+
     /// What must be drawn into a buffer last drawn `age` frames ago (1 for
     /// the frame before; 0 if never, or unknown) to show the last frame.
     pub fn repaint(ui: *const Ui, age: u32) damage_mod.Region {
@@ -471,6 +535,20 @@ pub const Ui = struct {
         };
     }
 
+    /// If the last `frame` changed anything, renders only the damaged parts
+    /// into `win` and submits it.
+    pub fn present(ui: *Ui, win: *app.Window, frame_: *vc4.render.Frame, clear: u32) !bool {
+        if (!ui.changed()) return false;
+        const target = try win.beginFrame();
+        const repaint_region = ui.repaint(win.bufferAge());
+        frame_.begin(target, .{ .clear = clear });
+        limit(frame_, &repaint_region);
+        try ui.render(frame_, win.flusher());
+        var damage: [damage_mod.Region.max_rects]vc4.render.Viewport = undefined;
+        try win.submit(frame_, ui.damagedViewports(&damage));
+        return true;
+    }
+
     /// Draws the last frame painted into `img` on the CPU, with the real
     /// shaders in the QPU simulator; GPU draws are left out.
     pub fn preview(ui: *Ui, img: gfx.preview.Image) !void {
@@ -482,6 +560,28 @@ pub const Ui = struct {
     }
 
     // --- Input ------------------------------------------------------------------
+
+    /// Sends a window input event to the widget tree.
+    pub fn handleInput(ui: *Ui, e: app.InputEvent) void {
+        switch (e) {
+            .motion => |pos| ui.pointerMotion(pos),
+            .button => |b| ui.pointerButton(b.pos, b.code, b.pressed),
+            .scroll => |s| ui.pointerScroll(s.pos, s.dx, s.dy),
+            .key => |k| ui.keyEvent(k.code, k.pressed),
+            .leave => ui.pointerLeave(),
+            .touch_down => |t| ui.touchDown(t.id, t.pos),
+            .touch_motion => |t| ui.touchMotion(t.id, t.pos),
+            .touch_up => |id| ui.touchUp(id),
+            .touch_cancel => ui.touchCancel(),
+            .relative_motion, .pointer_locked => {},
+        }
+    }
+
+    /// Sends all pending input events from `win` to the widget tree.
+    pub fn takeInput(ui: *Ui, win: *app.Window) void {
+        ui.syncWindow(win);
+        for (win.takeInput()) |e| ui.handleInput(e);
+    }
 
     pub fn pointerMotion(ui: *Ui, pos: Point) void {
         ui.pointer = pos;
@@ -725,5 +825,145 @@ pub const Ui = struct {
         };
         if (ui.focused == n) ui.focused = null;
         if (std.mem.indexOfScalar(*Node, ui.hovered.items, n)) |i| _ = ui.hovered.orderedRemove(i);
+    }
+};
+
+/// A native toolkit app: owns the GPU device, the Wayland `app.Window`,
+/// `app.Controls`, `Ui`, and the `vc4.render.Frame` used to draw it.
+pub const App = struct {
+    gpa: std.mem.Allocator,
+    name: []const u8,
+    dev: vc4.Device,
+    win: *app.Window,
+    controls: app.Controls,
+    ui: *Ui,
+    frame: vc4.render.Frame = undefined,
+    clear_color: u32 = 0xff141218,
+    width: u32,
+    height: u32,
+    dirty: bool = true,
+    idle: bool = false,
+    suspended: bool = false,
+    sync_keyboard: bool = true,
+    /// Set by `step` when the window's size changed in the last configure.
+    resized: bool = false,
+    /// Set by `step` when `suspended` changed in the last configure.
+    suspended_changed: bool = false,
+
+    pub const Options = struct {
+        title: []const u8,
+        app_id: ?[]const u8 = null,
+        size: [2]u32 = .{ 1280, 720 },
+        min_size: ?[2]u32 = null,
+        maximized: bool = false,
+        font_path: ?[*:0]const u8 = null,
+        pipelined: bool = false,
+        clear_color: u32 = 0xff141218,
+    };
+
+    /// Opens the GPU, connects to the compositor in `environ`, opens the
+    /// window, loads the font, and attaches the toolkit to the window.
+    pub fn open(gpa: std.mem.Allocator, environ: std.process.Environ, options: Options) !*App {
+        const name = options.app_id orelse options.title;
+        const a = try gpa.create(App);
+        errdefer gpa.destroy(a);
+        a.gpa = gpa;
+        a.name = name;
+        a.dev = vc4.device.openRender() catch |err| {
+            sys.print(sys.log_error ++ "{s}: no GPU ({s})\n", .{ name, @errorName(err) });
+            return err;
+        };
+        errdefer a.dev.close();
+        a.win = try app.Window.open(gpa, .device(&a.dev), environ, .{
+            .title = options.title,
+            .app_id = options.app_id,
+            .size = options.size,
+            .min_size = options.min_size,
+            .maximized = options.maximized,
+        });
+        errdefer a.win.close();
+        a.controls = .{ .win = a.win };
+        a.ui = try Ui.createWithFont(gpa, name, options.font_path);
+        errdefer a.ui.destroy();
+        a.ui.attachWindow(a.win, &a.controls);
+        try a.ui.attachGpu(a.dev);
+        if (options.pipelined) {
+            try a.win.setPipelined(true);
+            a.ui.setPipelined(a.win.pipelined);
+        }
+        a.clear_color = options.clear_color;
+        a.width = a.win.width;
+        a.height = a.win.height;
+        a.dirty = true;
+        a.idle = false;
+        a.suspended = false;
+        a.sync_keyboard = true;
+        a.resized = false;
+        a.suspended_changed = false;
+        return a;
+    }
+
+    pub fn close(a: *App) void {
+        a.ui.destroy();
+        a.win.close();
+        a.dev.close();
+        a.gpa.destroy(a);
+    }
+
+    /// Waits (when `idle`) or polls for window events, applies any pending
+    /// configure, and updates `suspended`. Returns `false` when the window
+    /// has been closed.
+    pub fn step(a: *App, idle_timeout_ns: u64) !bool {
+        const waited = if (a.idle) blk: {
+            try a.win.finishInFlight();
+            const timeout: u64 = if (a.ui.needs_frame and !a.suspended) 16 * std.time.ns_per_ms else idle_timeout_ns;
+            break :blk a.win.wait(timeout);
+        } else a.win.poll();
+        waited catch |err| {
+            if (err == error.ServerError) sys.print(sys.log_error ++ "{s}: compositor error: {s}\n", .{ a.name, a.win.conn.errorMessage() });
+            return err;
+        };
+        if (a.win.closed or a.controls.quit) return false;
+        a.resized = false;
+        if (try a.win.applyConfigure()) |size| {
+            a.width = size[0];
+            a.height = size[1];
+            a.dirty = true;
+            a.resized = true;
+        }
+        a.suspended_changed = a.win.suspended != a.suspended;
+        if (a.suspended_changed) {
+            a.suspended = a.win.suspended;
+            if (a.suspended) {
+                try a.win.finishInFlight();
+                a.win.releaseSpareBuffers();
+            } else {
+                a.dirty = true;
+            }
+        }
+        if (a.sync_keyboard) a.ui.keyboard = a.win.layout;
+        a.ui.fullscreen = a.win.fullscreen;
+        a.ui.maximized = a.win.maximized;
+        return true;
+    }
+
+    /// Forwards all pending input events from `win` to `ui`.
+    pub fn takeInput(a: *App) void {
+        if (a.sync_keyboard) a.ui.keyboard = a.win.layout;
+        a.ui.fullscreen = a.win.fullscreen;
+        a.ui.maximized = a.win.maximized;
+        for (a.win.takeInput()) |e| a.ui.handleInput(e);
+    }
+
+    /// If the window is not suspended and the UI needs a frame (`dirty` or
+    /// `ui.needs_frame`), builds `root` and presents any changed regions;
+    /// `idle` is cleared when a frame is shown, and set otherwise.
+    pub fn draw(a: *App, now_ns: u64, root: anytype) !void {
+        a.idle = true;
+        if (!a.suspended and (a.dirty or a.ui.needs_frame)) {
+            a.dirty = false;
+            a.ui.frame(a.width, a.height, now_ns, root);
+            if (try a.ui.present(a.win, &a.frame, a.clear_color)) a.idle = false;
+        }
     }
 };

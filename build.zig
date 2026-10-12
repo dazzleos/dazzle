@@ -182,18 +182,6 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     });
     addShaderImports(gfx, shaders, .gfx);
     const locale = sys.import_table.get("locale").?;
-    const ui = b.createModule(.{
-        .root_source_file = b.path("src/ui/ui.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "locale", .module = locale },
-            .{ .name = "vc4", .module = vc4 },
-            .{ .name = "gfx", .module = gfx },
-            .{ .name = "font", .module = font },
-            .{ .name = "icons", .module = icons },
-        },
-    });
     const app = b.createModule(.{
         .root_source_file = b.path("src/app/app.zig"),
         .target = target,
@@ -203,6 +191,20 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
             .{ .name = "sys", .module = sys },
             .{ .name = "wayland", .module = wayland },
             .{ .name = "locale", .module = locale },
+        },
+    });
+    const ui = b.createModule(.{
+        .root_source_file = b.path("src/ui/ui.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sys", .module = sys },
+            .{ .name = "locale", .module = locale },
+            .{ .name = "vc4", .module = vc4 },
+            .{ .name = "gfx", .module = gfx },
+            .{ .name = "font", .module = font },
+            .{ .name = "icons", .module = icons },
+            .{ .name = "app", .module = app },
         },
     });
     const info = b.addOptions();
