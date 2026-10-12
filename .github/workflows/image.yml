@@ -32,7 +32,7 @@ jobs:
       - name: Install the kernel's build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-arm-linux-gnueabihf flex bison bc
+          sudo apt-get install -y --no-install-recommends gcc-arm-linux-gnueabihf gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu flex bison bc
 
       # The kernel is the Raspberry Pi kernel's latest commit (its default
       # branch), which the build fetches.

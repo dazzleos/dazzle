@@ -8,7 +8,7 @@ Dazzle builds on Linux (x86-64 or ARM64).
   compiler. On Debian or Ubuntu:
 
   ```sh
-  sudo apt install make flex bison bc git curl xz-utils gcc-arm-linux-gnueabihf
+  sudo apt install make flex bison bc git curl xz-utils gcc-arm-linux-gnueabihf gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
   ```
 
 - Zig 0.16.0. `scripts/zig` downloads it on first use if it is not on your
