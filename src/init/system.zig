@@ -76,22 +76,6 @@ pub fn start(card: bool, mounted: bool, slot: ?u8, setup_done: bool) ?linux.pid_
     };
     sys.ignoreBrokenPipes();
     var m: Manager = .{ .report = .{ .storage = if (mounted) .ready else if (card) .unprepared else .none, .slot = if (card) slot orelse 'a' else null }, .finished = setup_done };
-    m.readSlots();
-    var cmdline: [1024]u8 = undefined;
-    if (sys.readFile("/proc/cmdline", &cmdline)) |text| m.report.video_memory_now = slots.cmaMiB(text);
-    m.report.locale = locale.load();
-    // The last update did not work (and the system before is running).
-    if (storage.exists(trial.failed_marker)) {
-        m.report.update = .failed;
-        m.report.update_failure = .did_not_start;
-    }
-    var uts: linux.utsname = undefined;
-    if (linux.errno(linux.uname(&uts)) == .SUCCESS) m.report.hostname = proto.Hostname.parse(std.mem.sliceTo(&uts.nodename, 0)) orelse .{};
-    if (card) m.copier = slots.Copier.start(slot orelse 'a') catch |err| blk: {
-        print(sys.log_warning ++ "dazzle: system: cannot copy the OS slot: {s}\n", .{@errorName(err)});
-        break :blk null;
-    };
-    if (m.copier != null) m.startCopying();
     m.run() catch |err| print("dazzle: system: {s}\n", .{@errorName(err)});
     linux.exit(1);
 }
@@ -105,6 +89,7 @@ const Manager = struct {
     /// Copying the OS slot (on `copying`'s thread).
     copier: ?slots.Copier = null,
     copying: ?Work = null,
+    copier_started: bool = false,
     /// Installing an update.
     installer: ?update.Installer = null,
     /// Setup has finished.
@@ -132,13 +117,25 @@ const Manager = struct {
             sys.close(listener);
             _ = linux.unlink(path);
         }
+        m.readSlots();
+        var cmdline: [1024]u8 = undefined;
+        if (sys.readFile("/proc/cmdline", &cmdline)) |text| m.report.video_memory_now = slots.cmaMiB(text);
+        m.report.locale = locale.load();
+        // The last update did not work (and the system before is running).
+        if (storage.exists(trial.failed_marker)) {
+            m.report.update = .failed;
+            m.report.update_failure = .did_not_start;
+        }
+        var uts: linux.utsname = undefined;
+        if (linux.errno(linux.uname(&uts)) == .SUCCESS) m.report.hostname = proto.Hostname.parse(std.mem.sliceTo(&uts.nodename, 0)) orelse .{};
         const Conn = struct { fd: linux.fd_t, who: proto.Client };
         var clients: [max_clients]?Conn = @splat(null);
         while (true) {
             // While formatting or copying, see how it goes now and then.
-            const busy = m.formatting != null or m.copying != null;
             if (m.formatting != null) m.checkFormatting();
             if (m.copying != null) m.checkCopying();
+            m.maybeStartCopying();
+            const busy = m.formatting != null or m.copying != null;
             if (m.installer) |*i| if (i.finished()) |how| {
                 m.installer = null;
                 m.report.update = if (how == .none) .ready else .failed;
@@ -330,7 +327,15 @@ const Manager = struct {
         };
     }
 
-    fn startCopying(m: *Manager) void {
+    fn maybeStartCopying(m: *Manager) void {
+        if (m.copier_started or m.report.slot == null) return;
+        if (m.report.storage == .unprepared or m.report.storage == .preparing) return;
+        m.copier_started = true;
+        m.copier = slots.Copier.start(m.report.slot.?) catch |err| {
+            print(sys.log_warning ++ "dazzle: system: cannot copy the OS slot: {s}\n", .{@errorName(err)});
+            return;
+        };
+        if (m.copier == null) return;
         m.copying = .{ .thread = undefined };
         m.copying.?.thread = std.Thread.spawn(.{ .stack_size = 256 * 1024 }, copyAll, .{m}) catch |err| {
             print(sys.log_warning ++ "dazzle: system: cannot copy the OS slot: {s}\n", .{@errorName(err)});

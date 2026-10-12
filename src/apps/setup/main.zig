@@ -132,8 +132,9 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         }
         // How preparing goes: often while it does.
         if (now >= next_ask) {
-            report = ask("status\n");
-            const preparing = if (report) |r| r.storage == .preparing else false;
+            const need_prepare = report == null or report.?.storage == .unprepared;
+            report = ask(if (need_prepare) "prepare\n" else "status\n");
+            const preparing = if (report) |r| r.storage == .preparing or r.storage == .unprepared else true;
             const waiting = preparing or (named and apps.apps().len == 0 and apps.job == null and now < wait_network_until);
             next_ask = now + @as(u64, if (waiting) 250 else 1000) * std.time.ns_per_ms;
             a.dirty = true;
