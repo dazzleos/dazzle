@@ -16,6 +16,8 @@ pub const Icon = enum {
     arrow_upward,
     chevron_right,
     expand_more,
+    visibility,
+    visibility_off,
     // Files.
     person,
     folder,

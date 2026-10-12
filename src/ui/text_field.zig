@@ -79,6 +79,10 @@ pub const TextField = struct {
         node: ?*Node = null,
         max_len: usize = capacity,
         obscure: bool = false,
+        /// Whether an `obscure` password field has been toggled visible.
+        revealed: bool = false,
+        toggle_hovered: bool = false,
+        toggle_pressed: bool = false,
         on_changed: ?widget.ValueCallback([]const u8) = null,
 
         pub fn text(s: *const State) []const u8 {
@@ -244,6 +248,9 @@ pub const TextField = struct {
 
     const height = 44;
     const pad = 14;
+    const toggle_pad = 40;
+    const toggle_radius = 16;
+    const toggle_icon_size = 20;
     const dot = "•";
 
     fn fontStyle(self: *const TextField, n: *const Node) ?font.Style {
@@ -258,6 +265,11 @@ pub const TextField = struct {
         st.node = n;
         st.max_len = self.max_len;
         st.obscure = self.obscure;
+        if (!self.obscure) {
+            st.revealed = false;
+            st.toggle_hovered = false;
+            st.toggle_pressed = false;
+        }
         st.on_changed = self.on_changed;
         return st;
     }
@@ -267,6 +279,8 @@ pub const TextField = struct {
         const h: f32 = if (s) |st| @max(height, @ceil(st.lineHeight() + 20)) else height;
         const st = self.remember(n);
         if (!self.enabled) {
+            st.toggle_hovered = false;
+            st.toggle_pressed = false;
             if (st.focused) {
                 st.focused = false;
                 if (n.ui.focused == n) n.ui.focused = null;
@@ -278,9 +292,21 @@ pub const TextField = struct {
         return c.constrain(.{ .w = self.width, .h = h });
     }
 
+    /// Whether the field is currently hiding its characters as dots.
+    pub fn isObscured(self: *const TextField, st: *const State) bool {
+        return self.obscure and !st.revealed;
+    }
+
+    /// Whether `pos` (relative to the widget) is over the right-hand
+    /// visibility toggle button.
+    fn inToggle(self: *const TextField, n: *const Node, pos: geometry.Point) bool {
+        if (!self.obscure or n.size.w < toggle_pad) return false;
+        return pos[0] >= n.size.w - toggle_pad and pos[0] < n.size.w and pos[1] >= 0 and pos[1] < n.size.h;
+    }
+
     /// What is shown for `text`: it, or a dot for each character.
-    fn shown(self: *const TextField, buf: []u8, text: []const u8) []const u8 {
-        if (!self.obscure) return text;
+    fn shown(self: *const TextField, st: *const State, buf: []u8, text: []const u8) []const u8 {
+        if (!self.isObscured(st)) return text;
         const count = @min(std.unicode.utf8CountCodepoints(text) catch text.len, buf.len / dot.len);
         for (0..count) |i| @memcpy(buf[i * dot.len ..][0..dot.len], dot);
         return buf[0 .. count * dot.len];
@@ -289,7 +315,7 @@ pub const TextField = struct {
     /// How far into the text (as shown) byte `i` is.
     fn xOf(self: *const TextField, style: font.Style, st: *const State, i: usize) f32 {
         var buf: [capacity * dot.len]u8 = undefined;
-        return font.measure(style, self.shown(&buf, st.text()[0..i]));
+        return font.measure(style, self.shown(st, &buf, st.text()[0..i]));
     }
 
     pub fn paint(self: *const TextField, n: *Node, p: *Painter) void {
@@ -304,13 +330,24 @@ pub const TextField = struct {
         } else {
             c.strokeRoundedRect(r.outset(-0.5), .all(4), 1, if (st.hovered) t.on_surface else t.outline);
         }
+        if (self.obscure and n.size.w >= toggle_pad) {
+            const cx_btn = n.size.w - toggle_pad / 2;
+            const cy_btn = n.size.h / 2;
+            if (self.enabled and (st.toggle_hovered or st.toggle_pressed)) {
+                c.fillCircle(.{ cx_btn, cy_btn }, toggle_radius, t.on_surface.withAlpha(if (st.toggle_pressed) 0.16 else 0.08));
+            }
+            const ic: @import("icons").Icon = if (st.revealed) .visibility_off else .visibility;
+            const ic_color = if (self.enabled) t.on_surface_variant else t.on_surface.withAlpha(0.38);
+            p.icon(ic, @round(cx_btn - toggle_icon_size / 2), @round(cy_btn - toggle_icon_size / 2), toggle_icon_size, ic_color);
+        }
         const style = self.fontStyle(n) orelse return;
         const baseline = @round((n.size.h - style.lineHeight()) / 2 + style.ascent());
         var buf: [capacity * dot.len]u8 = undefined;
-        const text = self.shown(&buf, st.text());
+        const text = self.shown(st, &buf, st.text());
         const cursor_x = self.xOf(style, st, st.cursor);
         // Long text scrolls to keep the cursor in view.
-        const room = n.size.w - 2 * pad;
+        const right_pad: f32 = if (self.obscure) toggle_pad else pad;
+        const room = @max(n.size.w - pad - right_pad, 0);
         const scroll = @max(cursor_x - room, 0);
         const old = p.clipTo(.{ .x = pad - 2, .y = 0, .w = room + 4, .h = n.size.h });
         defer p.restoreClip(old);
@@ -341,13 +378,27 @@ pub const TextField = struct {
         if (!self.enabled) {
             st.hovered = false;
             st.dragging = false;
+            st.toggle_hovered = false;
+            st.toggle_pressed = false;
             return false;
         }
         switch (e) {
             .enter => st.hovered = true,
-            .leave => st.hovered = false,
+            .leave => {
+                st.hovered = false;
+                if (st.toggle_hovered) {
+                    st.toggle_hovered = false;
+                    n.ui.needs_frame = true;
+                }
+            },
             .press => |pr| {
                 if (pr.button != btn_left) return false;
+                if (self.inToggle(n, pr.pos)) {
+                    st.toggle_pressed = true;
+                    st.toggle_hovered = true;
+                    n.ui.needs_frame = true;
+                    return true;
+                }
                 n.ui.focus(n);
                 // Dragging selects from where it went down.
                 st.moveTo(self.cursorAt(n, pr.pos[0]), false);
@@ -355,11 +406,26 @@ pub const TextField = struct {
                 st.dragging = true;
                 return true;
             },
-            .motion => |pos| if (st.dragging) {
-                st.cursor = self.cursorAt(n, pos[0]);
-                n.ui.needs_frame = true;
+            .motion => |pos| {
+                const over_toggle = self.inToggle(n, pos);
+                if (over_toggle != st.toggle_hovered) {
+                    st.toggle_hovered = over_toggle;
+                    n.ui.needs_frame = true;
+                }
+                if (st.dragging) {
+                    st.cursor = self.cursorAt(n, pos[0]);
+                    n.ui.needs_frame = true;
+                }
             },
-            .release => {
+            .release => |rel| {
+                if (st.toggle_pressed) {
+                    st.toggle_pressed = false;
+                    const over_toggle = rel.inside and self.inToggle(n, rel.pos);
+                    st.toggle_hovered = over_toggle;
+                    if (over_toggle) st.revealed = !st.revealed;
+                    n.ui.needs_frame = true;
+                    return true;
+                }
                 st.dragging = false;
                 if (st.selection() == null) st.anchor = null;
                 return true;
@@ -376,6 +442,7 @@ pub const TextField = struct {
                 return true;
             },
             .context => |pos| {
+                if (self.inToggle(n, pos)) return false;
                 n.ui.focus(n);
                 st.dragging = false;
                 // Outside the selection, the cursor goes where it was asked.
@@ -813,3 +880,51 @@ test "a UK keyboard types £ and €, and characters are edited whole" {
     u.keyEvent(keymap.left_shift, false);
     try testing.expectEqualStrings("#@#", text[0..len]);
 }
+
+test "a password field has a visibility toggle button on the right hand side" {
+    const Ui = @import("runtime.zig").Ui;
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    const App = struct {
+        pub fn build(_: *const @This(), cx: *widget.Context) widget.Widget {
+            return cx.make(Padding{ .padding = .all(20), .child = cx.make(TextField{
+                .initial = "secret",
+                .obscure = true,
+            }) });
+        }
+    };
+    u.frame(400, 200, 0, App{});
+    var field_node = u.root.?;
+    while (field_node.children.items.len > 0) field_node = field_node.children.items[0];
+    const tf = field_node.widget.as(TextField).?;
+    const st = field_node.state(TextField.State);
+    var buf: [TextField.capacity * TextField.dot.len]u8 = undefined;
+
+    // Hidden by default: shows dots.
+    try testing.expect(!st.revealed);
+    try testing.expect(tf.isObscured(st));
+    try testing.expectEqualStrings("••••••", tf.shown(st, &buf, st.text()));
+
+    // Clicking the toggle button on the right-hand side reveals the password.
+    const pos = field_node.position();
+    const toggle_at: geometry.Point = .{ pos[0] + field_node.size.w - 20, pos[1] + field_node.size.h / 2 };
+    u.pointerMotion(toggle_at);
+    try testing.expect(st.toggle_hovered);
+    u.pointerButton(toggle_at, btn_left, true);
+    try testing.expect(st.toggle_pressed);
+    u.pointerButton(toggle_at, btn_left, false);
+    try testing.expect(!st.toggle_pressed);
+    try testing.expect(st.revealed);
+    try testing.expect(!tf.isObscured(st));
+    try testing.expectEqualStrings("secret", tf.shown(st, &buf, st.text()));
+    u.frame(400, 200, 1, App{});
+
+    // Clicking the toggle button again hides the password back to dots.
+    u.pointerButton(toggle_at, btn_left, true);
+    u.pointerButton(toggle_at, btn_left, false);
+    try testing.expect(!st.revealed);
+    try testing.expect(tf.isObscured(st));
+    try testing.expectEqualStrings("••••••", tf.shown(st, &buf, st.text()));
+}
+
