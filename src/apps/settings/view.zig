@@ -44,6 +44,9 @@ pub const Actions = struct {
     download_update: bool = false,
     update_all: bool = false,
     restart: bool = false,
+    /// The software server URL (`https://...`), or empty (`""`) to revert to
+    /// the default server.
+    software_server: ?info.Str(store.max_url_len) = null,
     /// The language and keyboard to use.
     locale: ?locale.Settings = null,
     /// A GPIO pin to set up, and how.
@@ -303,7 +306,7 @@ pub const sample_app_list = [_]store.App{
     .{ .name = "dazzle-demo", .title = "Demo", .description = "Spinning shapes, on the GPU", .icon = "icons/dazzle-demo.png", .file = "dazzle-demo.tar.xz", .size = 40 << 10, .sha256 = "" },
     .{ .name = "dazzle-files", .title = "Files", .description = "Your files", .icon = "icons/dazzle-files.png", .file = "dazzle-files.tar.xz", .size = 50 << 10, .sha256 = "" },
 };
-pub const sample_apps: software_view.Apps = .{ .list = &sample_app_list, .installed = &.{ true, false }, .source = "https://example.com/apps" };
+pub const sample_apps: software_view.Apps = .{ .list = &sample_app_list, .installed = &.{ true, false }, .source = "https://example.com/apps", .default_source = "https://example.com/apps" };
 
 pub fn sample() struct { sys: info.System, net: info.Network, usage: info.Usage } {
     const sys: info.System = .{ .model = .of("Raspberry Pi Zero W Rev 1.1"), .cores = 1, .serial = .of("a1b2c3d4"), .kernel = .of("6.12.0 (armv6l)"), .hostname = .of("awesome-elephant") };

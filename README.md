@@ -17,7 +17,7 @@ You will need:
 - optionally, a USB Ethernet adapter (for boards without built-in networking)
 - optionally, a Raspberry Pi Camera Module v1 or v2
 
-**[Download Dazzle (dazzle.img.xz)](https://github.com/robert-ancell/dazzle/releases/latest/download/dazzle.img.xz)**
+**[Download Dazzle (dazzle.img.xz)](https://github.com/dazzleos/dazzle/releases/latest/download/dazzle.img.xz)**
 
 Use [Raspberry Pi Imager](https://www.raspberrypi.com/software/) to write
 Dazzle to your microSD card:

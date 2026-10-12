@@ -30,6 +30,9 @@ pub const icons_dir = apps_dir ++ "/.icons";
 pub const os_icon_file = "/os/icon.png";
 pub const update_icon_file = sys.system.update_dir ++ "/icon.png";
 pub const icon_size = 64;
+pub const default_url = "https://github.com/dazzleos/dazzle/releases/latest/download";
+pub const max_url_len = 255;
+pub const server_file = apps_dir ++ "/.server";
 const catalogue_file = apps_dir ++ "/.catalogue.json";
 const ca_file = "/os/certs/ca-certificates.pem";
 
@@ -67,6 +70,59 @@ pub fn validName(name: []const u8) bool {
     if (name.len == 0 or name.len > 48 or name[0] == '-') return false;
     for (name) |c| if (!(std.ascii.isLower(c) or std.ascii.isDigit(c) or c == '-')) return false;
     return true;
+}
+
+/// Validates a software server URL (`https://...`), trimming surrounding
+/// whitespace and trailing slashes; null if it is not a valid HTTPS URL.
+pub fn parseHttpsUrl(text: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trimEnd(u8, std.mem.trim(u8, text, " \t\r\n"), "/");
+    if (!std.mem.startsWith(u8, trimmed, "https://")) return null;
+    if (trimmed.len <= "https://".len or trimmed.len > max_url_len) return null;
+    for (trimmed) |c| if (c <= ' ' or c == 0x7f) return null;
+    const after_scheme = trimmed["https://".len];
+    if (after_scheme == '/' or after_scheme == ':' or after_scheme == '?' or after_scheme == '#') return null;
+    const uri = std.Uri.parse(trimmed) catch return null;
+    if (uri.host == null) return null;
+    return trimmed;
+}
+
+/// Reads the custom software server URL from `/data/apps/.server` into
+/// `buf`, or returns `fallback` when none (or an invalid one) is stored.
+pub fn loadServerUrl(buf: *[max_url_len]u8, fallback: []const u8) []const u8 {
+    return loadServerUrlFrom(server_file, buf, fallback);
+}
+
+pub fn loadServerUrlFrom(path: [:0]const u8, buf: *[max_url_len]u8, fallback: []const u8) []const u8 {
+    var raw: [max_url_len + 16]u8 = undefined;
+    const text = sys.readFile(path, &raw) orelse return fallback;
+    const valid = parseHttpsUrl(text) orelse return fallback;
+    @memcpy(buf[0..valid.len], valid);
+    return buf[0..valid.len];
+}
+
+/// Saves a custom `https://` software server URL to `/data/apps/.server`,
+/// or removes the file when `url` is null or empty (reverting to the
+/// default server).
+pub fn saveServerUrl(url: ?[]const u8) void {
+    _ = linux.mkdir(apps_dir, 0o755);
+    saveServerUrlTo(server_file, url);
+}
+
+pub fn saveServerUrlTo(path: [:0]const u8, url: ?[]const u8) void {
+    const raw = url orelse {
+        _ = linux.unlink(path);
+        return;
+    };
+    if (raw.len == 0) {
+        _ = linux.unlink(path);
+        return;
+    }
+    const valid = parseHttpsUrl(raw) orelse return;
+    var line_buf: [max_url_len + 1]u8 = undefined;
+    @memcpy(line_buf[0..valid.len], valid);
+    line_buf[valid.len] = '\n';
+    _ = linux.unlink(path);
+    sys.files.writeNew(path, line_buf[0 .. valid.len + 1]) catch {};
 }
 
 /// Whether `path` is a safe relative PNG icon path on the server ("icon.png"
@@ -510,6 +566,19 @@ pub const Store = struct {
         return s;
     }
 
+    pub fn setBaseUrl(s: *Store, base_url: []const u8) void {
+        if (s.job) |*j| if (j.kind == .catalogue) {
+            var status: u32 = 0;
+            _ = linux.kill(j.pid, .KILL);
+            _ = linux.wait4(j.pid, &status, 0, null);
+            sys.close(j.result);
+            s.job = null;
+        };
+        s.base_url = base_url;
+        s.asked = false;
+        s.message_len = 0;
+    }
+
     fn loadCatalogue(s: *Store) void {
         const json = sys.readFileAlloc(s.gpa, catalogue_file, max_download) catch return;
         defer s.gpa.free(json);
@@ -784,4 +853,39 @@ test "keep-alive fetches os.json, icon.png, apps.json and icons/<app>.png on a s
     const demo_icon = try std.fmt.bufPrintZ(&path_buf, "{s}/.icons/dazzle-demo.png", .{app_dir});
     try testing.expectEqualStrings(png_64 ++ "DEMO", sys.readFile(demo_icon, &read_buf).?);
 }
+
+test "parsing and saving custom https software server URLs" {
+    try testing.expectEqualStrings(
+        "https://github.com/dazzleos/dazzle/releases/latest/download",
+        parseHttpsUrl(default_url).?,
+    );
+    try testing.expectEqualStrings(
+        "https://example.com/dazzle",
+        parseHttpsUrl("  https://example.com/dazzle/  ").?,
+    );
+    try testing.expectEqualStrings(
+        "https://192.168.1.10:8443/releases",
+        parseHttpsUrl("https://192.168.1.10:8443/releases///").?,
+    );
+    try testing.expect(parseHttpsUrl("") == null);
+    try testing.expect(parseHttpsUrl("http://example.com/dazzle") == null);
+    try testing.expect(parseHttpsUrl("https://") == null);
+    try testing.expect(parseHttpsUrl("https:///path") == null);
+    try testing.expect(parseHttpsUrl("https://:443/path") == null);
+    try testing.expect(parseHttpsUrl("https://example.com/has space") == null);
+
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "/tmp/dazzle-server-test-{d}", .{linux.getpid()});
+    defer _ = linux.unlink(path);
+
+    var buf: [max_url_len]u8 = undefined;
+    try testing.expectEqualStrings(default_url, loadServerUrlFrom(path, &buf, default_url));
+
+    saveServerUrlTo(path, "https://staging.example.com/dazzle/");
+    try testing.expectEqualStrings("https://staging.example.com/dazzle", loadServerUrlFrom(path, &buf, default_url));
+
+    saveServerUrlTo(path, null);
+    try testing.expectEqualStrings(default_url, loadServerUrlFrom(path, &buf, default_url));
+}
+
 

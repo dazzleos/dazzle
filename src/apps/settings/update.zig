@@ -94,6 +94,19 @@ pub const Updater = struct {
         return u;
     }
 
+    pub fn setBaseUrl(u: *Updater, base_url: []const u8) void {
+        if (u.job) |*j| if (j.kind == .os_check) {
+            var wstatus: u32 = 0;
+            _ = linux.kill(j.pid, .KILL);
+            _ = linux.wait4(j.pid, &wstatus, 0, null);
+            sys.close(j.result);
+            u.job = null;
+        };
+        u.base_url = base_url;
+        u.asked = false;
+        u.message_len = 0;
+    }
+
     pub fn loadManifest(u: *Updater) void {
         const json = sys.readFileAlloc(u.gpa, manifest_file, 64 * 1024) catch return;
         defer u.gpa.free(json);

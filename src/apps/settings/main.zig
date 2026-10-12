@@ -101,12 +101,14 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
     // Ethernet address).
     var actions: view.Actions = .{};
     // The apps that can be installed, and which are.
-    var apps: store.Store = .init(gpa, build_info.apps_url);
+    var server_url_buf: [store.max_url_len]u8 = undefined;
+    var server_url: []const u8 = store.loadServerUrl(&server_url_buf, build_info.apps_url);
+    var apps: store.Store = .init(gpa, server_url);
     apps.check_os = true;
     var installed: [64]bool = undefined;
     var updatable: [64]bool = undefined;
     // Updates of the system, and which system this is.
-    var updater: update.Updater = .init(gpa, build_info.apps_url, sys.system.Version.init(build_info.commit_time, build_info.commit) orelse .{});
+    var updater: update.Updater = .init(gpa, server_url, sys.system.Version.init(build_info.commit_time, build_info.commit) orelse .{});
     var icons: view.software_view.IconSet = .init(gpa);
     defer icons.deinit();
     var icons_dirty = true;
@@ -167,6 +169,22 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
         if (apps.poll()) {
             updater.loadManifest();
             icons_dirty = true;
+            a.dirty = true;
+        }
+        if (actions.software_server) |*srv| {
+            const raw = srv.slice();
+            if (raw.len == 0) {
+                store.saveServerUrl(null);
+                server_url = build_info.apps_url;
+            } else if (store.parseHttpsUrl(raw)) |valid| {
+                store.saveServerUrl(valid);
+                @memcpy(server_url_buf[0..valid.len], valid);
+                server_url = server_url_buf[0..valid.len];
+            }
+            apps.setBaseUrl(server_url);
+            updater.setBaseUrl(server_url);
+            apps.refresh(true);
+            actions.software_server = null;
             a.dirty = true;
         }
         if (actions.install != null or actions.remove != null or actions.refresh_apps or actions.check_update) {
@@ -328,7 +346,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
                     .icons = icons.appIcons(catalogue.len),
                     .busy = apps.busy(),
                     .message = apps.message(),
-                    .source = build_info.apps_url,
+                    .source = server_url,
+                    .default_source = build_info.apps_url,
                 },
                 .video_memory = .{
                     .now = if (updater.report) |r| r.video_memory_now else null,

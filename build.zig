@@ -370,7 +370,7 @@ fn appsUrl(b: *std.Build) []const u8 {
     };
     if (State.url) |u| return u;
     State.url = b.option([]const u8, "apps-url", "Where Settings downloads apps and their catalogue (apps.json) from") orelse
-        "https://github.com/robert-ancell/dazzle/releases/latest/download";
+        "https://github.com/dazzleos/dazzle/releases/latest/download";
     return State.url.?;
 }
 

@@ -36,8 +36,9 @@ pub const Apps = struct {
     busy: ?[]const u8 = null,
     /// What happened last.
     message: []const u8 = "",
-    /// Where they come from.
-    source: []const u8 = "",
+    /// Where they come from, and the default server URL.
+    source: []const u8 = store.default_url,
+    default_source: []const u8 = store.default_url,
 };
 
 /// What the Software page shows of OS updates.
@@ -52,13 +53,40 @@ pub const Update = struct {
     icon: ?*const gfx.Image = null,
 };
 
+const PageState = State;
+
 pub const State = struct {
     /// Whether the Dazzle item on the Software page is expanded to show
     /// the build and kernel version.
     dazzle_expanded: bool = false,
+    /// Whether the form for a custom software server URL is open in the
+    /// popup, what is typed in it, and whether it was not an `https://` URL.
+    custom_form: bool = false,
+    form_filled: bool = false,
+    form_id: u32 = 0,
+    server_url: Field = .{},
+    server_invalid: bool = false,
+
+    pub const Field = struct {
+        buf: [store.max_url_len]u8 = undefined,
+        len: u8 = 0,
+
+        pub fn text(f: *const Field) []const u8 {
+            return f.buf[0..f.len];
+        }
+
+        pub fn set(f: *Field, t: []const u8) void {
+            f.len = @intCast(@min(t.len, f.buf.len));
+            @memcpy(f.buf[0..f.len], t[0..f.len]);
+        }
+    };
 
     pub fn toggleDazzle(st: *State) void {
         st.dazzle_expanded = !st.dazzle_expanded;
+    }
+
+    pub fn setServerUrl(st: *State, t: []const u8) void {
+        st.server_url.set(t);
     }
 };
 
@@ -132,6 +160,12 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
         .label = "Refresh",
         .icon = .refresh,
         .on_press = if (self.actions != null and !busy) .of(appAct(cx, self.actions.?, ""), AppAct.refresh) else null,
+    })) catch {};
+    footer_children.append(a, cx.make(ServerConfigButton{
+        .state = state,
+        .actions = if (!busy) self.actions else null,
+        .source = if (apps.source.len > 0) apps.source else store.default_url,
+        .default_source = if (apps.default_source.len > 0) apps.default_source else store.default_url,
     })) catch {};
     const footer = cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = footer_children.items });
     return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &.{
@@ -258,6 +292,150 @@ fn appAct(cx: *ui.Context, actions: *Actions, name: []const u8) *AppAct {
     x.* = .{ .actions = actions, .name = .init(name) };
     return x;
 }
+
+/// An icon button in the Software footer bar: pressing it opens a popup to
+/// switch the software server between the default (`build_info.apps_url`)
+/// and a custom `https://` URL.
+pub const ServerConfigButton = struct {
+    state: *PageState,
+    actions: ?*Actions,
+    source: []const u8,
+    default_source: []const u8,
+
+    pub const State = BtnState;
+    pub const BtnState = struct {
+        node: ?*ui.Node = null,
+        state: ?*PageState = null,
+        actions: ?*Actions = null,
+        source: []const u8 = store.default_url,
+        default_source: []const u8 = store.default_url,
+
+        fn isCustom(st: *const BtnState) bool {
+            return !std.mem.eql(u8, st.source, st.default_source);
+        }
+
+        fn open(st: *BtnState) void {
+            const n = st.node orelse return;
+            const page_st = st.state orelse return;
+            page_st.server_invalid = false;
+            page_st.custom_form = st.isCustom();
+            if (!st.isCustom()) page_st.form_filled = false;
+            const pos = n.position();
+            n.ui.openPopup(n, .{ pos[0], pos[1] }, .of(st, BtnState.buildPopup));
+        }
+
+        fn chooseDefault(st: *BtnState) void {
+            const page_st = st.state orelse return;
+            page_st.custom_form = false;
+            page_st.form_filled = false;
+            page_st.server_invalid = false;
+            if (st.isCustom()) if (st.actions) |acts| {
+                acts.software_server = .{};
+            };
+        }
+
+        fn chooseCustom(st: *BtnState) void {
+            const page_st = st.state orelse return;
+            page_st.custom_form = true;
+        }
+
+        fn apply(st: *BtnState) void {
+            const page_st = st.state orelse return;
+            const url = store.parseHttpsUrl(page_st.server_url.text()) orelse {
+                page_st.server_invalid = true;
+                return;
+            };
+            page_st.server_invalid = false;
+            page_st.custom_form = false;
+            if (st.actions) |acts| {
+                acts.software_server = if (std.mem.eql(u8, url, st.default_source)) .{} else .of(url);
+            }
+            if (st.node) |n| n.ui.closeMenu();
+        }
+
+        fn buildPopup(st: *BtnState, cx: *ui.Context) ui.Widget {
+            const page_st = st.state orelse return cx.make(ui.Empty{});
+            const t = cx.theme();
+            const a = cx.ui.arena();
+            const custom = page_st.custom_form or st.isCustom();
+            var rows: std.ArrayList(ui.Widget) = .empty;
+            rows.append(a, cx.make(ui.Center{ .height_factor = 1, .child = cx.make(ui.PillBar{ .children = &.{
+                cx.make(ui.PillButton{
+                    .label = "Default",
+                    .selected = !custom,
+                    .first = true,
+                    .last = false,
+                    .on_press = if (st.actions != null) .of(st, BtnState.chooseDefault) else null,
+                }),
+                cx.make(ui.PillButton{
+                    .label = "Custom",
+                    .selected = custom,
+                    .first = false,
+                    .last = true,
+                    .on_press = if (st.actions != null) .of(st, BtnState.chooseCustom) else null,
+                }),
+            } }) })) catch {};
+
+            if (!custom) {
+                rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
+                    cx.make(ui.SizedBox{ .width = 70, .child = cx.make(ui.Text{ .text = "Server", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
+                    cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = st.default_source, .style = .{ .size = 16, .color = t.on_surface } }) }),
+                } })) catch {};
+            } else {
+                if (!page_st.form_filled) {
+                    page_st.form_filled = true;
+                    page_st.form_id +%= 1;
+                    page_st.server_invalid = false;
+                    page_st.server_url.set(if (st.isCustom()) st.source else "https://");
+                }
+                const on_apply: ?ui.Callback = if (st.actions != null) .of(st, BtnState.apply) else null;
+                const key = @as(u64, page_st.form_id);
+                rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
+                    cx.make(ui.SizedBox{ .width = 70, .child = cx.make(ui.Text{ .text = "Server", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
+                    cx.make(ui.Expanded{ .child = cx.make(ui.TextField{
+                        .placeholder = "https://example.com/dazzle",
+                        .initial = page_st.server_url.text(),
+                        .max_len = page_st.server_url.buf.len,
+                        .size = 16,
+                        .on_changed = .of(page_st, PageState.setServerUrl),
+                        .on_submit = on_apply,
+                    }).withKey(key) }),
+                } })) catch {};
+                if (page_st.server_invalid) rows.append(a, cx.make(ui.Text{
+                    .text = "Give an https:// URL",
+                    .style = .{ .size = 15, .color = t.@"error" },
+                })) catch {};
+                rows.append(a, cx.make(ui.Row{ .main_axis_alignment = .end, .children = &.{
+                    cx.make(ui.OutlinedButton{ .label = "Apply", .on_press = on_apply }),
+                } })) catch {};
+            }
+
+            return cx.make(ui.Decorated{
+                .color = t.surface_container,
+                .border = .{ .width = 1, .color = t.outline_variant },
+                .radius = .all(8),
+                .child = cx.make(ui.SizedBox{ .width = 420, .child = cx.make(ui.Padding{
+                    .padding = .all(16),
+                    .child = cx.make(ui.Column{ .main_axis_size = .min, .cross_axis_alignment = .stretch, .spacing = 12, .children = rows.items }),
+                }) }),
+            });
+        }
+    };
+
+    pub fn build(self: *const ServerConfigButton, cx: *ui.Context, state: *BtnState) ui.Widget {
+        state.node = cx.node;
+        state.state = self.state;
+        state.actions = self.actions;
+        state.source = self.source;
+        state.default_source = self.default_source;
+        return cx.make(ui.IconButton{
+            .icon = .settings,
+            .size = 36,
+            .icon_size = 20,
+            .on_press = if (self.actions != null) .of(state, BtnState.open) else null,
+        });
+    }
+};
 
 /// Renders a 64x64 PNG icon, or the fallback `.apps` icon when no icon
 /// can be found.
@@ -597,3 +775,72 @@ test "the software list scrolls vertically while the bottom bar stays visible" {
     try testing.expectEqual(refresh_before, refresh_after);
     try testing.expect(status_after + 20 <= @as(f32, @floatFromInt(view.min_size[1])));
 }
+
+test "changing the software server to a custom https URL and back to default" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    const d = view.sample();
+    var actions: Actions = .{};
+    var settings: Settings = .{
+        .commit = "x",
+        .actions = &actions,
+        .system = &d.sys,
+        .usage = d.usage,
+        .network = &d.net,
+        .apps = view.sample_apps,
+    };
+    var frame_no: u64 = 0;
+    const draw = struct {
+        fn call(uu: *ui.Ui, s: Settings, n: *u64) void {
+            n.* += 1;
+            uu.frame(1920, 960, n.*, s);
+        }
+    }.call;
+
+    draw(u, settings, &frame_no);
+    u.root.?.state(Settings.State).page = .apps;
+    draw(u, settings, &frame_no);
+    try testing.expect(view.findType(u.root.?, ServerConfigButton) != null);
+    try testing.expect(u.menu_root == null);
+
+    // Clicking the configure icon opens the popup showing Default, Custom, and the default server URL.
+    view.click(u, view.findType(u.root.?, ServerConfigButton).?);
+    draw(u, settings, &frame_no);
+    try testing.expect(u.menu_root != null);
+    try testing.expect(view.findText(u.menu_root.?, "Default") != null);
+    try testing.expect(view.findText(u.menu_root.?, "Custom") != null);
+    try testing.expect(view.findText(u.menu_root.?, "https://example.com/apps") != null);
+
+    // Choosing Custom shows the URL text field starting with "https://".
+    view.click(u, view.findText(u.menu_root.?, "Custom").?);
+    draw(u, settings, &frame_no);
+    const field = view.findType(u.menu_root.?, ui.TextField).?;
+    try testing.expectEqualStrings("https://", field.state(ui.TextField.State).text());
+    try testing.expect(!view.overflows(u.menu_root.?));
+
+    // Non-https URL is rejected with an error message.
+    var st = &u.root.?.state(Settings.State).software;
+    st.server_url.set("http://staging.example.com/dazzle");
+    view.click(u, view.findText(u.menu_root.?, "Apply").?);
+    draw(u, settings, &frame_no);
+    try testing.expect(actions.software_server == null);
+    try testing.expect(view.findText(u.menu_root.?, "Give an https:// URL") != null);
+
+    // Valid https URL is accepted (stripping trailing slash) and closes the popup.
+    st = &u.root.?.state(Settings.State).software;
+    st.server_url.set("https://staging.example.com/dazzle/");
+    view.click(u, view.findText(u.menu_root.?, "Apply").?);
+    try testing.expectEqualStrings("https://staging.example.com/dazzle", actions.software_server.?.slice());
+    actions = .{};
+
+    // Reopening when using a custom server opens on Custom; clicking Default resets to default.
+    settings.apps.source = "https://staging.example.com/dazzle";
+    draw(u, settings, &frame_no);
+    view.click(u, view.findType(u.root.?, ServerConfigButton).?);
+    draw(u, settings, &frame_no);
+    try testing.expect(view.findType(u.menu_root.?, ui.TextField) != null);
+    view.click(u, view.findText(u.menu_root.?, "Default").?);
+    try testing.expectEqualStrings("", actions.software_server.?.slice());
+}
+

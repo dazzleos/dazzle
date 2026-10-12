@@ -63,7 +63,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     var actions: view.Actions = .{};
     // The apps that can be installed (once the card is ready), and those
     // chosen, left to install.
-    var apps: store.Store = .init(gpa, build_info.apps_url);
+    var server_url_buf: [store.max_url_len]u8 = undefined;
+    var apps: store.Store = .init(gpa, store.loadServerUrl(&server_url_buf, build_info.apps_url));
     var named = false;
     var wait_network_until: u64 = 0;
     var retry_at: u64 = 0;
