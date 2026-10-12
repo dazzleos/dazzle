@@ -26,10 +26,10 @@
 //!    user (with --setup until setup has finished), with its output going
 //!    to the kernel log; its dock starts the apps;
 //! 8. reaps exited processes forever (PID 1 must never exit), restarting the
-//!    network, device, media and system managers if they ever stop; and, when this
-//!    start tries an update, keeps it once the shell has run for a minute,
-//!    or restarts into the system before if the shell stops first (see
-//!    trial.zig).
+//!    shell and the network, device, media and system managers if they ever
+//!    stop; and, when this start tries an update, keeps it once the shell has
+//!    run for a minute, or restarts into the system before if the shell stops
+//!    first (see trial.zig).
 //!
 //! The Dazzle user is just a user ID (see `sys.user`): there are no
 //! accounts, passwords or logins.
@@ -282,9 +282,11 @@ fn startTimer(ns: u64) ?linux.pid_t {
     return @intCast(rc);
 }
 
-/// Waits for child processes, logging how the shell ends. Processes whose
-/// parent exits are re-parented to init, so this also collects those.
-fn reapForever(shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, first_devices_pid: ?linux.pid_t, first_media_pid: ?linux.pid_t, first_system_pid: ?linux.pid_t, card: storage.Boot, t: *Trying) noreturn {
+/// Waits for child processes, logging how the shell ends and restarting it.
+/// Processes whose parent exits are re-parented to init, so this also
+/// collects those.
+fn reapForever(first_shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, first_devices_pid: ?linux.pid_t, first_media_pid: ?linux.pid_t, first_system_pid: ?linux.pid_t, card: storage.Boot, t: *Trying) noreturn {
+    var shell_pid = first_shell_pid;
     var network_pid = first_network_pid;
     var devices_pid = first_devices_pid;
     var media_pid = first_media_pid;
@@ -348,6 +350,9 @@ fn reapForever(shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, first_d
             print(sys.log_error ++ "dazzle: the update did not work\n", .{});
             trial.restart();
         }
+        print("dazzle: restarting the shell in 1 s\n", .{});
+        sys.sleepMs(1000);
+        shell_pid = startShell(!storage.state(card).setup_done);
     }
 }
 
