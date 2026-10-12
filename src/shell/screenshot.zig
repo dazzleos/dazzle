@@ -21,7 +21,7 @@ pub const folder = sys.system.user_dir;
 /// "Screenshot N.png", on a thread. Takes `pixels` (allocated with `gpa`,
 /// which must be thread-safe).
 pub fn save(gpa: std.mem.Allocator, dir: []const u8, pixels: []u32, width: u32, height: u32) void {
-    const t = std.Thread.spawn(.{ .stack_size = 256 * 1024 }, saveNow, .{ gpa, dir, pixels, width, height }) catch |err| {
+    const t = std.Thread.spawn(.{ .stack_size = 1 << 20 }, saveNow, .{ gpa, dir, pixels, width, height }) catch |err| {
         sys.print(sys.log_warning ++ "dazzle-shell: cannot save a screenshot ({s})\n", .{@errorName(err)});
         gpa.free(pixels);
         return;
@@ -56,3 +56,26 @@ fn saveNow(gpa: std.mem.Allocator, dir: []const u8, pixels: []u32, width: u32, h
 pub fn nextName(buf: []u8, dir: []const u8) ?[:0]const u8 {
     return sys.files.numberedName(buf, dir, "Screenshot", "png");
 }
+
+test "saving a screenshot on a 1 MiB thread stack" {
+    const gpa = std.testing.allocator;
+    var dir_buf: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrintZ(&dir_buf, "/tmp/dazzle-screenshot-test-{d}", .{linux.getpid()});
+    _ = linux.mkdir(dir, 0o755);
+    defer sys.files.removeTree(dir);
+
+    const pixels = try gpa.alloc(u32, 4 * 3);
+    @memset(pixels, 0xff224466);
+    const t = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, saveNow, .{ gpa, dir, pixels, 4, 3 });
+    t.join();
+
+    var path_buf: [512]u8 = undefined;
+    const saved = try std.fmt.bufPrintZ(&path_buf, "{s}/Screenshot 1.png", .{dir});
+    const data = try sys.readFileAlloc(gpa, saved, 64 * 1024);
+    defer gpa.free(data);
+    const decoded = try png.decode(gpa, data);
+    defer gpa.free(decoded.pixels);
+    try std.testing.expectEqual(@as(u32, 4), decoded.width);
+    try std.testing.expectEqual(@as(u32, 3), decoded.height);
+}
+

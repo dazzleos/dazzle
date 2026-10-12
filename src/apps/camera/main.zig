@@ -235,7 +235,7 @@ const Viewer = struct {
             return false;
         };
         s.path_len = path.len;
-        s.thread = std.Thread.spawn(.{ .stack_size = 256 * 1024 }, Saving.run, .{s}) catch {
+        s.thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, Saving.run, .{s}) catch {
             v.gpa.destroy(s);
             v.setStatus("Cannot save a photo", .{});
             return false;
