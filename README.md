@@ -8,19 +8,13 @@ Zero.
 
 ## Installation
 
-You will need a Raspberry Pi computer, i.e. one of:
-- Raspberry Pi Zero 1-2
-- Raspberry Pi 1-3
+You will need:
 
-(Raspberry Pi 4 and 5 are not supported at this time).
-
-You will also need:
-
-- a microSD card (256 MB or bigger; everything on it is erased),
-- a screen with HDMI (with a mini-HDMI adapter for the Zero),
-- a USB keyboard and mouse, or a USB touchscreen
-- for the Zero a micro-USB OTG adapter and a USB hub,
-- optionally, a USB Ethernet adapter,
+- a Raspberry Pi (Raspberry Pi 1–5, or Raspberry Pi Zero / Zero W / Zero 2 W)
+- a microSD card (256 MB or larger; everything on it will be erased)
+- an HDMI display (with a mini-HDMI or micro-HDMI adapter if your board needs one)
+- a USB keyboard and mouse, or a USB touchscreen (with a micro-USB OTG adapter and hub for the Zero)
+- optionally, a USB Ethernet adapter (for boards without built-in networking)
 - optionally, a Raspberry Pi Camera Module v1 or v2
 
 **[Download Dazzle (dazzle.img.xz)](https://github.com/robert-ancell/dazzle/releases/latest/download/dazzle.img.xz)**

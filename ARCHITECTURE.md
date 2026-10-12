@@ -151,11 +151,11 @@ alongside a manifest (`os.json`) containing the version, size and SHA-256:
 
 ## Rendering
 
-Dazzle renders directly on the GPU via the `vc4` module without OpenGL or
-Mesa. Shaders are written in Zig, compiled to SPIR-V at build time, and
-translated into VideoCore IV QPU machine code by Dazzle's shader compiler
-(`src/shader/`). A QPU and texture-unit simulator executes these shaders
-during host unit tests.
+Dazzle renders directly on the GPU via the `vc4` module (talking to the
+kernel's `vc4` and `v3d` DRM drivers) without OpenGL or Mesa. Shaders are
+written in Zig, compiled to SPIR-V at build time, and translated into QPU
+machine code by Dazzle's shader compiler (`src/shader/`). A QPU and
+texture-unit simulator executes these shaders during host unit tests.
 
 Each app renders its window into tiled GPU buffers shared with the shell as
 `dma-buf` file descriptors (16-bit `BGR565` by default, or 32-bit `BGRA8888`
@@ -174,11 +174,11 @@ CMA memory is free).
 
 ## Memory
 
-Because the VideoCore IV GPU has no MMU, GPU buffers (screen scanout,
-window buffers, textures and glyph atlases) are allocated from the kernel's
-Contiguous Memory Allocator (CMA). `cmdline.txt` reserves `cma=128M` by
-default, and the system manager can adjust `cma=` across both OS slots
-(between 64 MB and 384 MB, up to half of RAM) for the next boot.
+Display scanout and GPU buffers (window buffers, textures and glyph
+atlases) are allocated from the kernel's Contiguous Memory Allocator (CMA).
+`cmdline.txt` reserves `cma=128M` by default, and the system manager can
+adjust `cma=` across both OS slots (between 64 MB and 384 MB, up to half of
+RAM) for the next boot.
 
 To keep GPU memory use low:
 
