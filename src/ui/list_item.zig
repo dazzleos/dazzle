@@ -123,7 +123,7 @@ pub const ListItem = struct {
             .child = cx.make(ConstrainedBox{
                 .constraints = .{ .min_h = min_h },
                 .child = cx.make(Padding{
-                    .padding = .symmetric(16, 8),
+                    .padding = .symmetric(16, 6),
                     .child = cx.make(Row{
                         .spacing = 16,
                         .cross_axis_alignment = .center,

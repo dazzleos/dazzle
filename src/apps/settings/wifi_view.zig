@@ -157,16 +157,32 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
     const split = if (form) chosen.? - nets.ptr + 1 else nets.len;
     if (split > 0) list_rows.append(a, networkList(self, b, state, adapter.name(), report, nets[0..split], chosen)) catch {};
     if (form) list_rows.append(a, joinForm(self, b, state, adapter.name(), chosen.?)) catch {};
-    if (split < nets.len) list_rows.append(a, networkList(self, b, state, adapter.name(), report, nets[split..], chosen)) catch {};
-    if (!report.scanning and nets.len == 0) list_rows.append(a, b.value("No networks found")) catch {};
+    if (split < nets.len) {
+        if (form) list_rows.append(a, cx.make(ui.Divider{ .inset = 16 })) catch {};
+        list_rows.append(a, networkList(self, b, state, adapter.name(), report, nets[split..], chosen)) catch {};
+    }
 
     const net_label = if (nets.len > 0)
-        cx.make(ui.Padding{ .padding = .{ .top = 9 }, .child = b.label("Network") })
+        cx.make(ui.Padding{ .padding = .{ .top = 19 }, .child = b.label("Network") })
     else
         b.label("Network");
+    const net_content = if (nets.len > 0)
+        cx.make(ui.Card{
+            .variant = .outlined,
+            .padding = .all(4),
+            .child = cx.make(ui.Column{
+                .main_axis_size = .min,
+                .cross_axis_alignment = .stretch,
+                .children = list_rows.items,
+            }),
+        })
+    else if (!report.scanning)
+        b.value("No networks found")
+    else
+        cx.make(ui.Empty{});
     rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .start, .spacing = 12, .children = &.{
         net_label,
-        cx.make(ui.Expanded{ .child = b.page(list_rows.items) }),
+        cx.make(ui.Expanded{ .child = net_content }),
     } })) catch {};
 
     return b.scroll(.wifi, b.page(rows.items));
@@ -498,8 +514,6 @@ pub const AddressConfigButton = struct {
     };
 
     pub fn build(self: *const AddressConfigButton, cx: *ui.Context, state: *BtnState) ui.Widget {
-        const t = cx.theme();
-        const enabled = self.actions != null;
         state.node = cx.node;
         state.state = self.state;
         state.actions = self.actions;
@@ -509,19 +523,11 @@ pub const AddressConfigButton = struct {
         state.ip = self.ip;
         state.prefix = self.prefix;
         state.gateway = self.gateway;
-        const size = 24;
-        return cx.make(ui.Pressable{
-            .on_press = if (enabled) .of(state, BtnState.open) else null,
-            .interaction = &state.interaction,
-            .child = cx.make(ui.Decorated{
-                .color = if (enabled and state.interaction.hovered) t.on_surface.withAlpha(0.08) else null,
-                .radius = .all(size / 2),
-                .child = cx.make(ui.SizedBox{ .width = size, .height = size, .child = cx.make(ui.Center{ .child = cx.make(ui.Icon{
-                    .icon = .settings,
-                    .size = 18,
-                    .color = if (enabled) t.on_surface_variant else t.on_surface.withAlpha(0.38),
-                }) }) }),
-            }),
+        return cx.make(ui.IconButton{
+            .icon = .settings,
+            .size = 24,
+            .icon_size = 18,
+            .on_press = if (self.actions != null) .of(state, BtnState.open) else null,
         });
     }
 };
@@ -627,23 +633,6 @@ fn modeRow(
     const a = cx.ui.arena();
     const mode: Mode = if (is_hotspot) .hotspot else .join;
     const default_upstream = if (upstreams.len > 0) upstreams.items[0].name else info.Str(16){};
-    const mode_menu = cx.make(ModeMenu{
-        .mode = mode,
-        .wifi_state = state,
-        .actions = self.actions,
-        .current_hs = current_hs,
-        .adapter = .of(adapter_name),
-        .hostname = self.system.hostname,
-        .default_upstream = default_upstream,
-    });
-    if (!is_hotspot) {
-        return cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-            b.label("Mode"),
-            mode_menu,
-        } });
-    }
-    const active = current_hs and hs.state == .active;
-    const can_start = state.validHotspotNameAndPassword();
     const choice = a.create(ModeChoice) catch return cx.make(ui.Empty{});
     choice.* = .{
         .actions = self.actions,
@@ -653,6 +642,19 @@ fn modeRow(
         .hostname = self.system.hostname,
         .default_upstream = default_upstream,
     };
+    const mode_menu = cx.make(ModeMenu{
+        .options = &mode_options,
+        .value = mode,
+        .on_changed = if (self.actions != null) .of(choice, ModeChoice.choose) else null,
+    });
+    if (!is_hotspot) {
+        return cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
+            b.label("Mode"),
+            mode_menu,
+        } });
+    }
+    const active = current_hs and hs.state == .active;
+    const can_start = state.validHotspotNameAndPassword();
     const on_start: ?ui.Callback = if (self.actions != null and can_start) .of(choice, ModeChoice.start) else null;
     const on_stop: ?ui.Callback = if (self.actions != null) .of(choice, ModeChoice.stop) else null;
     return cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
@@ -726,10 +728,22 @@ fn hotspotRows(
         (if (opt.ethernet and !opt.connected) "Connect an Ethernet cable to share the internet" else null)
     else
         null;
+    const sel = state.hotspot_upstream.slice();
+    const upstream_opts = a.alloc([]const u8, 1 + upstreams.len) catch return;
+    upstream_opts[0] = "None";
+    var selected_upstream: usize = 0;
+    for (upstreams.slice(), 0..) |opt, i| {
+        upstream_opts[i + 1] = cx.fmt("{s}", .{opt.label.slice()});
+        if (!std.mem.eql(u8, sel, "none") and std.mem.eql(u8, opt.name.slice(), sel)) {
+            selected_upstream = i + 1;
+        }
+    }
+    const up_pick = a.create(UpstreamPick) catch return;
+    up_pick.* = .{ .wifi_state = state, .upstreams = upstreams.* };
     const internet_menu = cx.make(InternetMenu{
-        .wifi_state = state,
-        .upstreams = upstreams.*,
-        .enabled = !active and self.actions != null and upstreams.len > 0,
+        .options = upstream_opts,
+        .selected = selected_upstream,
+        .on_selected = if (!active and self.actions != null and upstreams.len > 0) .of(up_pick, UpstreamPick.select) else null,
     });
     rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
         b.label("Upstream"),
@@ -779,136 +793,37 @@ fn hotspotRows(
 
 /// The Wi-Fi mode as a menu button: pressing it offers "Client" and
 /// "Access Point" in a menu.
-pub const ModeMenu = struct {
-    mode: Mode,
-    wifi_state: *PageState,
-    actions: ?*Actions,
-    current_hs: bool,
-    adapter: info.Str(16),
-    hostname: info.Str(64),
-    default_upstream: info.Str(16) = .{},
+pub const ModeMenu = ui.Select(Mode);
 
-    pub const State = struct {
-        node: ?*ui.Node = null,
-        wifi_state: ?*PageState = null,
-        actions: ?*Actions = null,
-        current_hs: bool = false,
-        adapter: info.Str(16) = .{},
-        hostname: info.Str(64) = .{},
-        default_upstream: info.Str(16) = .{},
-
-        fn open(st: *@This()) void {
-            const n = st.node orelse return;
-            const pos = n.position();
-            n.ui.openMenu(n, .{ pos[0], pos[1] + n.size.h }, &.{
-                .{ .label = "Client", .on_press = .of(st, @This().chooseJoin) },
-                .{ .label = "Access Point", .on_press = .of(st, @This().chooseHotspot) },
-            });
-        }
-
-        fn chooseJoin(st: *@This()) void {
-            var c: ModeChoice = .{
-                .actions = st.actions,
-                .state = st.wifi_state orelse return,
-                .current_hs = st.current_hs,
-                .adapter = st.adapter,
-                .hostname = st.hostname,
-                .default_upstream = st.default_upstream,
-            };
-            c.choose(.join);
-        }
-
-        fn chooseHotspot(st: *@This()) void {
-            var c: ModeChoice = .{
-                .actions = st.actions,
-                .state = st.wifi_state orelse return,
-                .current_hs = st.current_hs,
-                .adapter = st.adapter,
-                .hostname = st.hostname,
-                .default_upstream = st.default_upstream,
-            };
-            c.choose(.hotspot);
-        }
-    };
-
-    pub fn build(self: *const ModeMenu, cx: *ui.Context, state: *ModeMenu.State) ui.Widget {
-        state.node = cx.node;
-        state.wifi_state = self.wifi_state;
-        state.actions = self.actions;
-        state.current_hs = self.current_hs;
-        state.adapter = self.adapter;
-        state.hostname = self.hostname;
-        state.default_upstream = self.default_upstream;
-        const text = switch (self.mode) {
-            .join => "Client",
-            .hotspot => "Access Point",
-        };
-        return cx.make(ui.OutlinedButton{
-            .label = text,
-            .trailing_icon = .expand_more,
-            .on_press = if (self.actions != null) .of(state, ModeMenu.State.open) else null,
-        });
-    }
+const mode_options = [_]ModeMenu.Option{
+    .{ .value = .join, .label = "Client" },
+    .{ .value = .hotspot, .label = "Access Point" },
 };
 
 /// The interface whose internet connection is shared over the access point.
 pub const InternetMenu = struct {
+    options: []const []const u8,
+    selected: ?usize = 0,
+    on_selected: ?ui.ValueCallback(usize) = null,
+
+    pub fn build(self: *const InternetMenu, cx: *ui.Context) ui.Widget {
+        return cx.make(ui.DropdownMenu{
+            .options = self.options,
+            .selected = self.selected,
+            .on_selected = self.on_selected,
+        });
+    }
+};
+
+const UpstreamPick = struct {
     wifi_state: *PageState,
     upstreams: UpstreamList,
-    enabled: bool = true,
 
-    pub const State = struct {
-        node: ?*ui.Node = null,
-        wifi_state: ?*PageState = null,
-        upstreams: UpstreamList = .{},
-        picks: [8]PickUpstream = undefined,
-
-        const PickUpstream = struct {
-            wifi_state: *PageState,
-            name: info.Str(16),
-
-            fn pick(p: *PickUpstream) void {
-                p.wifi_state.hotspot_upstream = p.name;
-            }
-        };
-
-        fn chooseNone(st: *@This()) void {
-            const ws = st.wifi_state orelse return;
-            ws.hotspot_upstream = .of("none");
-        }
-
-        fn open(st: *@This()) void {
-            const n = st.node orelse return;
-            const ws = st.wifi_state orelse return;
-            const pos = n.position();
-            var items: [9]ui.MenuItem = undefined;
-            items[0] = .{ .label = "None", .on_press = .of(st, @This().chooseNone) };
-            var count: usize = 1;
-            for (st.upstreams.slice(), 0..) |*opt, i| {
-                st.picks[i] = .{ .wifi_state = ws, .name = opt.name };
-                items[count] = .{ .label = opt.label.slice(), .on_press = .of(&st.picks[i], PickUpstream.pick) };
-                count += 1;
-            }
-            n.ui.openMenu(n, .{ pos[0], pos[1] + n.size.h }, items[0..count]);
-        }
-    };
-
-    pub fn build(self: *const InternetMenu, cx: *ui.Context, state: *InternetMenu.State) ui.Widget {
-        state.node = cx.node;
-        state.wifi_state = self.wifi_state;
-        state.upstreams = self.upstreams;
-        const sel = self.wifi_state.hotspot_upstream.slice();
-        const label_text = if (self.upstreams.len == 0 or std.mem.eql(u8, sel, "none"))
-            "None"
-        else if (self.upstreams.find(sel)) |opt|
-            cx.fmt("{s}", .{opt.label.slice()})
+    fn select(p: *UpstreamPick, idx: usize) void {
+        p.wifi_state.hotspot_upstream = if (idx == 0 or idx - 1 >= p.upstreams.len)
+            .of("none")
         else
-            "None";
-        return cx.make(ui.OutlinedButton{
-            .label = label_text,
-            .trailing_icon = .expand_more,
-            .on_press = if (self.enabled) .of(state, InternetMenu.State.open) else null,
-        });
+            p.upstreams.items[idx - 1].name;
     }
 };
 
@@ -1001,10 +916,17 @@ fn joinForm(self: *const Settings, b: Builder, state: *State, adapter_name: []co
         else => cx.make(ui.Text{ .text = cx.fmt("{s} networks are not supported yet", .{n.security.label()}), .style = .{ .size = 16, .color = t.on_surface_variant } }),
     };
     const supported = n.security == .open or n.security == .wpa2;
-    return cx.make(NetworkItemRow{ .children = &.{
-        field,
-        cx.make(ui.OutlinedButton{ .label = "Connect", .on_press = if (supported) on_connect else null }),
-    } });
+    return cx.make(ui.Padding{
+        .padding = .symmetric(16, 8),
+        .child = cx.make(ui.Row{
+            .cross_axis_alignment = .center,
+            .spacing = 12,
+            .children = &.{
+                cx.make(ui.Expanded{ .child = field }),
+                cx.make(ui.OutlinedButton{ .label = "Connect", .on_press = if (supported) on_connect else null }),
+            },
+        }),
+    });
 }
 
 /// Wi-Fi networks, a row each; rows are made only for those that show.
@@ -1033,13 +955,13 @@ fn networkList(
     return cx.make(ui.LazyGrid{
         .count = nets.len,
         .cell = .{ .w = std.math.inf(f32), .h = network_row_height },
-        .spacing = 8,
+        .spacing = 0,
         .item = .of(list, Networks.row),
     });
 }
 
-/// How tall a network's row is.
-const network_row_height = 40;
+/// How tall a network's row is (including the 1px divider below it).
+const network_row_height = ui.ListItem.one_line_height + 1;
 
 /// Networks to make rows of (in the frame's arena).
 const Networks = struct {
@@ -1059,46 +981,25 @@ const Networks = struct {
             (if (l.actions) |acts| .of(act(cx, acts, l.state, l.adapter_name, ""), Act.disconnect) else null)
         else
             null;
-        return networkRow(cx, n, is_chosen, joined, choose(cx, l.state, n.ssid()), on_disconnect);
-    }
-};
-
-/// How wide a network button (or join password field) may be.
-const max_network_width: f32 = 280;
-
-/// A network card (or join field) capped at `max_network_width`, with an
-/// optional action button ("Disconnect" or "Connect") beside it.
-const NetworkItemRow = struct {
-    children: []const ui.Widget = &.{},
-
-    pub fn layout(_: *const NetworkItemRow, n: *ui.Node, c: ui.Constraints) ui.Size {
-        if (n.childCount() == 0) return c.smallest();
-        const spacing: f32 = 12;
-        var trail_w: f32 = 0;
-        var trail_size: ui.Size = .{};
-        if (n.childCount() > 1) {
-            trail_size = n.child(1).layout(.{ .max_w = c.max_w, .max_h = c.max_h });
-            trail_w = trail_size.w + spacing;
-        }
-        const avail_w = if (c.boundedWidth()) @max(c.max_w - trail_w, 0) else max_network_width;
-        const lead_w = @min(max_network_width, avail_w);
-        const lead_size = n.child(0).layout(.{
-            .min_w = lead_w,
-            .max_w = lead_w,
-            .min_h = c.min_h,
-            .max_h = c.max_h,
+        const item = networkRow(cx, n, is_chosen, joined, choose(cx, l.state, n.ssid()), on_disconnect);
+        if (i + 1 >= l.nets.len) return cx.make(ui.Column{
+            .main_axis_size = .min,
+            .cross_axis_alignment = .stretch,
+            .children = &.{item},
         });
-        const h = @max(lead_size.h, trail_size.h);
-        n.child(0).place(0, (h - lead_size.h) / 2);
-        if (n.childCount() > 1) {
-            n.child(1).place(lead_size.w + spacing, (h - trail_size.h) / 2);
-        }
-        return c.constrain(.{ .w = lead_size.w + trail_w, .h = h });
+        return cx.make(ui.Column{
+            .main_axis_size = .min,
+            .cross_axis_alignment = .stretch,
+            .children = &.{
+                item,
+                cx.make(ui.Divider{ .inset = 16 }),
+            },
+        });
     }
 };
 
-/// A Wi-Fi network: its signal and its name inside a clickable card
-/// (`network_row_height`), with a Disconnect button beside it when connected.
+/// A Wi-Fi network: its signal, its name, and a Disconnect button when
+/// connected, inside a clickable `ListItem`.
 fn networkRow(
     cx: *ui.Context,
     n: *const info.manager.Network,
@@ -1107,72 +1008,14 @@ fn networkRow(
     on_press: ui.Callback,
     on_disconnect: ?ui.Callback,
 ) ui.Widget {
-    const card = cx.make(NetworkCard{
-        .bars = n.bars(),
-        .locked = n.security != .open,
-        .name = printable(cx, n.ssid()),
-        .chosen = chosen,
-        .joined = joined,
+    return cx.make(ui.ListItem{
+        .headline = printable(cx, n.ssid()),
+        .leading = cx.make(Signal{ .bars = n.bars(), .locked = n.security != .open, .size = 20 }),
+        .trailing = if (joined) cx.make(ui.OutlinedButton{ .label = "Disconnect", .on_press = on_disconnect }) else null,
+        .selected = chosen or joined,
         .on_press = on_press,
     });
-    if (!joined) return cx.make(NetworkItemRow{ .children = &.{card} });
-    return cx.make(NetworkItemRow{ .children = &.{
-        card,
-        cx.make(ui.OutlinedButton{ .label = "Disconnect", .on_press = on_disconnect }),
-    } });
 }
-
-const NetworkCard = struct {
-    bars: u8,
-    locked: bool,
-    name: []const u8,
-    chosen: bool,
-    joined: bool,
-    on_press: ui.Callback,
-
-    pub const State = struct {
-        interaction: ui.Interaction = .{},
-    };
-
-    pub fn build(self: *const NetworkCard, cx: *ui.Context, state: *NetworkCard.State) ui.Widget {
-        const t = cx.theme();
-        const i = state.interaction;
-        const bg = if (self.chosen)
-            t.secondary_container
-        else if (i.pressed or i.hovered)
-            t.surface_container_highest
-        else
-            t.surface_container;
-        const border_color = if (self.chosen or self.joined)
-            t.primary
-        else if (i.hovered)
-            t.outline
-        else
-            t.outline_variant;
-        const row = cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-            cx.make(Signal{ .bars = self.bars, .locked = self.locked, .size = 20 }),
-            cx.make(ui.Expanded{ .child = cx.make(ui.Text{
-                .text = self.name,
-                .style = .{ .size = 18, .color = if (self.joined) t.primary else t.on_surface },
-                .wrap = false,
-                .ellipsis = true,
-            }) }),
-        } });
-        return cx.make(ui.Pressable{
-            .on_press = self.on_press,
-            .interaction = &state.interaction,
-            .child = cx.make(ui.Decorated{
-                .color = bg,
-                .border = .{ .width = 1, .color = border_color },
-                .radius = .all(8),
-                .child = cx.make(ui.SizedBox{
-                    .height = network_row_height,
-                    .child = cx.make(ui.Padding{ .padding = .symmetric(14, 0), .child = row }),
-                }),
-            }),
-        });
-    }
-};
 
 /// An SSID as text: bytes that are not UTF-8 (SSIDs need not be) become
 /// "?".
@@ -1456,7 +1299,7 @@ test "switching to Access Point mode, applying configuration, and returning to C
     const status_x = view.findText(u.root.?, "Not connected, scanning…").?.position()[0];
     const addr_x = view.findText(u.root.?, "Not assigned").?.position()[0];
     const mac_x = view.findText(u.root.?, "b8:27:eb:01:02:03").?.position()[0];
-    const net_x = view.up(view.findText(u.root.?, "Home").?, ui.Pressable).?.position()[0];
+    const net_x = view.findType(u.root.?, ui.Card).?.position()[0];
     try testing.expectEqual(status_x, addr_x);
     try testing.expectEqual(status_x, mac_x);
     try testing.expectEqual(status_x, net_x);
@@ -1524,13 +1367,13 @@ test "switching to Access Point mode, applying configuration, and returning to C
     d.net.len = 1;
     Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
     try testing.expect(view.findText(view.findType(u.root.?, InternetMenu).?, "Ethernet") != null);
-    try testing.expect(view.findType(u.root.?, InternetMenu).?.children.items[0].widget.as(ui.OutlinedButton).?.on_press != null);
+    try testing.expect(view.findType(view.findType(u.root.?, InternetMenu).?, ui.OutlinedButton).?.widget.as(ui.OutlinedButton).?.on_press != null);
 
     // Without any other network connection, the Upstream menu is disabled with the reason.
     d.net.len = 0;
     Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
     try testing.expect(view.findText(u.root.?, "No other network connection is available") != null);
-    try testing.expect(view.findType(u.root.?, InternetMenu).?.children.items[0].widget.as(ui.OutlinedButton).?.on_press == null);
+    try testing.expect(view.findType(view.findType(u.root.?, InternetMenu).?, ui.OutlinedButton).?.widget.as(ui.OutlinedButton).?.on_press == null);
     d.net.len = 1;
     Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
 
@@ -1596,7 +1439,7 @@ test "switching to Access Point mode, applying configuration, and returning to C
     try testing.expect(view.findText(u.root.?, "Stop") != null);
     try testing.expect(view.findText(u.root.?, "Start") == null);
     try testing.expect(!view.findType(u.root.?, ui.TextField).?.widget.as(ui.TextField).?.enabled);
-    try testing.expect(view.findType(u.root.?, InternetMenu).?.children.items[0].widget.as(ui.OutlinedButton).?.on_press == null);
+    try testing.expect(view.findType(view.findType(u.root.?, InternetMenu).?, ui.OutlinedButton).?.widget.as(ui.OutlinedButton).?.on_press == null);
     try testing.expect(view.findText(u.root.?, "laptop (10.42.0.10, a4:5e:60:12:34:56)") != null);
     // Clicking AddressConfigButton while active does not open the popup.
     view.click(u, view.findType(u.root.?, AddressConfigButton).?);
@@ -1621,3 +1464,7 @@ test "switching to Access Point mode, applying configuration, and returning to C
     Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
     try testing.expect(view.findText(u.root.?, "Home") != null);
 }
+
+
+
+

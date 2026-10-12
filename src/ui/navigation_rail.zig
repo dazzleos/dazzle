@@ -54,6 +54,7 @@ pub const NavigationRail = struct {
     };
 
     pub fn build(self: *const NavigationRail, cx: *Context, state: *State) Widget {
+        const t = cx.theme();
         state.on_select = self.on_select;
         const count = @min(self.items.len, max_items);
         const rows = cx.arena.alloc(Widget, count) catch return cx.make(@import("empty.zig").Empty{});
@@ -66,16 +67,21 @@ pub const NavigationRail = struct {
                 .on_press = if (self.on_select != null) .of(pick, Pick.press) else null,
             }).withKey(i);
         }
-        const w = self.width orelse if (self.extended) @as(f32, 200) else @as(f32, 80);
+        const w = self.width orelse if (self.extended) @as(f32, 190) else @as(f32, 80);
         return cx.make(SizedBox{
             .width = w,
-            .child = cx.make(Padding{
-                .padding = .all(8),
-                .child = cx.make(Column{
-                    .main_axis_size = .min,
-                    .cross_axis_alignment = .stretch,
-                    .spacing = 4,
-                    .children = rows,
+            .child = cx.make(Decorated{
+                .color = t.surface_container,
+                .child = cx.make(@import("scroll_view.zig").ScrollView{
+                    .child = cx.make(Padding{
+                        .padding = if (self.extended) .all(12) else .all(8),
+                        .child = cx.make(Column{
+                            .main_axis_size = .min,
+                            .cross_axis_alignment = .stretch,
+                            .spacing = 4,
+                            .children = rows,
+                        }),
+                    }),
                 }),
             }),
         });
@@ -110,7 +116,7 @@ const RailDestination = struct {
             raw_icon;
 
         if (self.extended) {
-            const height = 44;
+            const height = 48;
             return cx.make(Pressable{
                 .on_press = self.on_press,
                 .interaction = &state.interaction,
@@ -128,7 +134,7 @@ const RailDestination = struct {
                                     icon_widget,
                                     cx.make(Expanded{ .child = cx.make(Text{
                                         .text = self.item.label,
-                                        .style = .{ .size = 15, .color = color },
+                                        .style = .{ .size = 18, .color = color },
                                         .wrap = false,
                                         .ellipsis = true,
                                     }) }),

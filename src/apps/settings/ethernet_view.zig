@@ -312,8 +312,6 @@ pub const AddressConfigButton = struct {
     };
 
     pub fn build(self: *const AddressConfigButton, cx: *ui.Context, state: *BtnState) ui.Widget {
-        const t = cx.theme();
-        const enabled = self.actions != null;
         state.node = cx.node;
         state.state = self.state;
         state.actions = self.actions;
@@ -322,19 +320,11 @@ pub const AddressConfigButton = struct {
         state.ip = self.ip;
         state.prefix = self.prefix;
         state.gateway = self.gateway;
-        const size = 24;
-        return cx.make(ui.Pressable{
-            .on_press = if (enabled) .of(state, BtnState.open) else null,
-            .interaction = &state.interaction,
-            .child = cx.make(ui.Decorated{
-                .color = if (enabled and state.interaction.hovered) t.on_surface.withAlpha(0.08) else null,
-                .radius = .all(size / 2),
-                .child = cx.make(ui.SizedBox{ .width = size, .height = size, .child = cx.make(ui.Center{ .child = cx.make(ui.Icon{
-                    .icon = .settings,
-                    .size = 18,
-                    .color = if (enabled) t.on_surface_variant else t.on_surface.withAlpha(0.38),
-                }) }) }),
-            }),
+        return cx.make(ui.IconButton{
+            .icon = .settings,
+            .size = 24,
+            .icon_size = 18,
+            .on_press = if (self.actions != null) .of(state, BtnState.open) else null,
         });
     }
 };

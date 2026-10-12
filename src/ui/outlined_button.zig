@@ -51,7 +51,14 @@ pub const OutlinedButton = struct {
             .style = .{ .size = t.label_size, .color = label_color },
             .wrap = false,
         });
-        const content = self.child orelse if (self.icon) |which| blk: {
+        const content = self.child orelse if (self.icon != null and self.trailing_icon != null) blk: {
+            const lead = cx.make(Icon{ .icon = self.icon.?, .size = icon_size, .color = label_color });
+            const trail = cx.make(Icon{ .icon = self.trailing_icon.?, .size = icon_size, .color = label_color });
+            break :blk if (self.label.len == 0)
+                cx.make(Row{ .spacing = 8, .main_axis_size = .min, .cross_axis_alignment = .center, .children = &.{ lead, trail } })
+            else
+                cx.make(Row{ .spacing = 8, .main_axis_size = .min, .cross_axis_alignment = .center, .children = &.{ lead, label, trail } });
+        } else if (self.icon) |which| blk: {
             const glyph = cx.make(Icon{ .icon = which, .size = icon_size, .color = label_color });
             break :blk if (self.label.len == 0) glyph else cx.make(Row{ .spacing = 8, .main_axis_size = .min, .cross_axis_alignment = .center, .children = &.{ glyph, label } });
         } else if (self.trailing_icon) |which| blk: {

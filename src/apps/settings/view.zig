@@ -135,26 +135,25 @@ pub const Settings = struct {
         board: board_view.State = .{},
         software: software_view.State = .{},
         log: log_view.State = .{},
+
+        fn selectPage(st: *State, idx: usize) void {
+            if (idx < std.meta.fields(Page).len) st.page = @enumFromInt(idx);
+        }
     };
 
     pub fn build(self: *const Settings, cx: *ui.Context, state: *State) ui.Widget {
         const b: Builder = .{ .cx = cx };
         const t = cx.theme();
-        var tabs: [std.meta.fields(Page).len]ui.Widget = undefined;
-        inline for (&tabs, std.meta.fields(Page)) |*w, field| {
+        var rail_items: [std.meta.fields(Page).len]ui.NavigationRail.Item = undefined;
+        inline for (&rail_items, std.meta.fields(Page)) |*item, field| {
             const p: Page = @enumFromInt(field.value);
-            w.* = cx.make(Tab{ .label = p.label(), .icon = p.icon(), .selected = state.page == p, .on_press = pick(cx, state, p) });
+            item.* = .{ .label = p.label(), .icon = p.icon() };
         }
-        // The tabs scroll in a window too short for them all.
-        const sidebar = cx.make(ui.SizedBox{ .width = 190, .child = cx.make(ui.Decorated{
-            .color = t.surface_container,
-            .child = cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(12), .child = cx.make(ui.Column{
-                .cross_axis_alignment = .stretch,
-                .main_axis_size = .min,
-                .spacing = 4,
-                .children = &tabs,
-            }) }) }),
-        }) });
+        const sidebar = cx.make(ui.NavigationRail{
+            .items = &rail_items,
+            .selected = @intFromEnum(state.page),
+            .on_select = .of(state, State.selectPage),
+        });
         // A page longer than the window scrolls; another page starts at
         // its top. In a wide window the page is no wider than reads well,
         // in the middle.
@@ -255,58 +254,6 @@ pub fn showGpio(u: *ui.Ui) bool {
     st.board.part = null;
     st.board.select_gpio = true;
     return true;
-}
-
-/// A tab: pressing it shows its page.
-const Tab = struct {
-    label: []const u8,
-    icon: ui.icons.Icon,
-    selected: bool,
-    on_press: ?ui.Callback,
-
-    pub const State = struct {
-        interaction: ui.Interaction = .{},
-    };
-
-    pub fn build(self: *const Tab, cx: *ui.Context, state: *State) ui.Widget {
-        const t = cx.theme();
-        const height = 48;
-        const color = if (self.selected) t.on_surface else t.on_surface_variant;
-        const highlight: ?gfx.Color = if (self.selected) t.secondary_container else if (state.interaction.hovered) t.on_surface.withAlpha(0.08) else null;
-        return cx.make(ui.Pressable{ .on_press = self.on_press, .interaction = &state.interaction, .child = cx.make(ui.Decorated{
-            .color = highlight,
-            .radius = .all(height / 2),
-            .child = cx.make(ui.SizedBox{ .height = height, .child = cx.make(ui.Padding{ .padding = .symmetric(16, 0), .child = cx.make(ui.Row{
-                .cross_axis_alignment = .center,
-                .spacing = 12,
-                .children = &.{
-                    cx.make(ui.Icon{ .icon = self.icon, .size = 22, .color = color }),
-                    cx.make(ui.Expanded{ .child = cx.make(ui.Text{
-                        .text = self.label,
-                        .style = .{ .size = 18, .color = color },
-                        .wrap = false,
-                        .ellipsis = true,
-                    }) }),
-                },
-            }) }) }),
-        }) });
-    }
-};
-
-/// Pressing a tab shows its page.
-const Pick = struct {
-    state: *Settings.State,
-    page: Page,
-
-    fn press(p: *Pick) void {
-        p.state.page = p.page;
-    }
-};
-
-fn pick(cx: *ui.Context, state: *Settings.State, page: Page) ?ui.Callback {
-    const p = cx.ui.arena().create(Pick) catch return null;
-    p.* = .{ .state = state, .page = page };
-    return .of(p, Pick.press);
 }
 
 pub fn orUnknown(s: []const u8) []const u8 {
@@ -498,7 +445,7 @@ test "everything is shown, and fits from the smallest window to the biggest" {
         // The next page, from its tab.
         if (@as(usize, @intFromEnum(page)) + 1 < std.enums.values(Page).len) {
             const next: Page = @enumFromInt(@as(usize, @intFromEnum(page)) + 1);
-            click(u, up(findText(u.root.?, next.label()).?, Tab).?);
+            click(u, up(findText(u.root.?, next.label()).?, ui.Pressable).?);
             try testing.expectEqual(next, shownPage(u));
         }
     }

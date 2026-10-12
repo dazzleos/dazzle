@@ -334,12 +334,19 @@ pub const Setup = struct {
         var list_rows: std.ArrayList(ui.Widget) = .empty;
         if (split > 0) list_rows.append(a, self.networkList(cx, state, report, nets[0..split], chosen)) catch {};
         if (form) list_rows.append(a, self.joinForm(cx, state, chosen.?)) catch {};
-        if (split < nets.len) list_rows.append(a, self.networkList(cx, state, report, nets[split..], chosen)) catch {};
+        if (split < nets.len) {
+            if (form) list_rows.append(a, cx.make(ui.Divider{ .inset = 16 })) catch {};
+            list_rows.append(a, self.networkList(cx, state, report, nets[split..], chosen)) catch {};
+        }
 
         rows.append(a, cx.make(ui.ConstrainedBox{
             .constraints = .{ .max_h = 180 },
             .child = cx.make(ui.ScrollView{
-                .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 8, .children = list_rows.items }),
+                .child = cx.make(ui.Card{
+                    .variant = .outlined,
+                    .padding = .all(4),
+                    .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .children = list_rows.items }),
+                }),
             }),
         })) catch {};
         return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 12, .children = rows.items });
@@ -364,7 +371,7 @@ pub const Setup = struct {
         return cx.make(ui.LazyGrid{
             .count = nets.len,
             .cell = .{ .w = std.math.inf(f32), .h = network_row_height },
-            .spacing = 8,
+            .spacing = 0,
             .item = .of(list, Networks.row),
         });
     }
@@ -386,10 +393,17 @@ pub const Setup = struct {
             else => cx.make(ui.Text{ .text = cx.fmt("{s} networks are not supported yet", .{n.security.label()}), .style = .{ .size = 16, .color = t.on_surface_variant } }),
         };
         const supported = n.security == .open or n.security == .wpa2;
-        return cx.make(NetworkItemRow{ .children = &.{
-            field,
-            cx.make(ui.OutlinedButton{ .label = "Connect", .on_press = if (supported) on_connect else null }),
-        } });
+        return cx.make(ui.Padding{
+            .padding = .symmetric(16, 8),
+            .child = cx.make(ui.Row{
+                .cross_axis_alignment = .center,
+                .spacing = 12,
+                .children = &.{
+                    cx.make(ui.Expanded{ .child = field }),
+                    cx.make(ui.OutlinedButton{ .label = "Connect", .on_press = if (supported) on_connect else null }),
+                },
+            }),
+        });
     }
 
     fn appsPage(self: *const Setup, cx: *ui.Context, state: *State) ui.Widget {
@@ -462,11 +476,8 @@ pub const Setup = struct {
     }
 };
 
-/// How tall a network's row is.
-const network_row_height = 40;
-
-/// How wide a network button (or join password field) may be.
-const max_network_width: f32 = 280;
+/// How tall a network's row is (including the 1px divider below it).
+const network_row_height = ui.ListItem.one_line_height + 1;
 
 /// Networks to make rows of (in the frame's arena).
 const Networks = struct {
@@ -484,36 +495,20 @@ const Networks = struct {
             (if (l.actions) |acts| .of(act(cx, acts, l.state, ""), Act.disconnect) else null)
         else
             null;
-        return networkRow(cx, n, is_chosen, joined, choose(cx, l.state, n.ssid()), on_disconnect);
-    }
-};
-
-const NetworkItemRow = struct {
-    children: []const ui.Widget = &.{},
-
-    pub fn layout(_: *const NetworkItemRow, n: *ui.Node, c: ui.Constraints) ui.Size {
-        if (n.childCount() == 0) return c.smallest();
-        const spacing: f32 = 12;
-        var trail_w: f32 = 0;
-        var trail_size: ui.Size = .{};
-        if (n.childCount() > 1) {
-            trail_size = n.child(1).layout(.{ .max_w = c.max_w, .max_h = c.max_h });
-            trail_w = trail_size.w + spacing;
-        }
-        const avail_w = if (c.boundedWidth()) @max(c.max_w - trail_w, 0) else max_network_width;
-        const lead_w = @min(max_network_width, avail_w);
-        const lead_size = n.child(0).layout(.{
-            .min_w = lead_w,
-            .max_w = lead_w,
-            .min_h = c.min_h,
-            .max_h = c.max_h,
+        const item = networkRow(cx, n, is_chosen, joined, choose(cx, l.state, n.ssid()), on_disconnect);
+        if (i + 1 >= l.nets.len) return cx.make(ui.Column{
+            .main_axis_size = .min,
+            .cross_axis_alignment = .stretch,
+            .children = &.{item},
         });
-        const h = @max(lead_size.h, trail_size.h);
-        n.child(0).place(0, (h - lead_size.h) / 2);
-        if (n.childCount() > 1) {
-            n.child(1).place(lead_size.w + spacing, (h - trail_size.h) / 2);
-        }
-        return c.constrain(.{ .w = lead_size.w + trail_w, .h = h });
+        return cx.make(ui.Column{
+            .main_axis_size = .min,
+            .cross_axis_alignment = .stretch,
+            .children = &.{
+                item,
+                cx.make(ui.Divider{ .inset = 16 }),
+            },
+        });
     }
 };
 
@@ -525,72 +520,14 @@ fn networkRow(
     on_press: ui.Callback,
     on_disconnect: ?ui.Callback,
 ) ui.Widget {
-    const card = cx.make(NetworkCard{
-        .bars = n.bars(),
-        .locked = n.security != .open,
-        .name = printable(cx, n.ssid()),
-        .chosen = chosen,
-        .joined = joined,
+    return cx.make(ui.ListItem{
+        .headline = printable(cx, n.ssid()),
+        .leading = cx.make(Signal{ .bars = n.bars(), .locked = n.security != .open, .size = 20 }),
+        .trailing = if (joined) cx.make(ui.OutlinedButton{ .label = "Disconnect", .on_press = on_disconnect }) else null,
+        .selected = chosen or joined,
         .on_press = on_press,
     });
-    if (!joined) return cx.make(NetworkItemRow{ .children = &.{card} });
-    return cx.make(NetworkItemRow{ .children = &.{
-        card,
-        cx.make(ui.OutlinedButton{ .label = "Disconnect", .on_press = on_disconnect }),
-    } });
 }
-
-const NetworkCard = struct {
-    bars: u8,
-    locked: bool,
-    name: []const u8,
-    chosen: bool,
-    joined: bool,
-    on_press: ui.Callback,
-
-    pub const State = struct {
-        interaction: ui.Interaction = .{},
-    };
-
-    pub fn build(self: *const NetworkCard, cx: *ui.Context, state: *NetworkCard.State) ui.Widget {
-        const t = cx.theme();
-        const i = state.interaction;
-        const bg = if (self.chosen)
-            t.secondary_container
-        else if (i.pressed or i.hovered)
-            t.surface_container_highest
-        else
-            t.surface_container;
-        const border_color = if (self.chosen or self.joined)
-            t.primary
-        else if (i.hovered)
-            t.outline
-        else
-            t.outline_variant;
-        const row = cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-            cx.make(Signal{ .bars = self.bars, .locked = self.locked, .size = 20 }),
-            cx.make(ui.Expanded{ .child = cx.make(ui.Text{
-                .text = self.name,
-                .style = .{ .size = 18, .color = if (self.joined) t.primary else t.on_surface },
-                .wrap = false,
-                .ellipsis = true,
-            }) }),
-        } });
-        return cx.make(ui.Pressable{
-            .on_press = self.on_press,
-            .interaction = &state.interaction,
-            .child = cx.make(ui.Decorated{
-                .color = bg,
-                .border = .{ .width = 1, .color = border_color },
-                .radius = .all(8),
-                .child = cx.make(ui.SizedBox{
-                    .height = network_row_height,
-                    .child = cx.make(ui.Padding{ .padding = .symmetric(14, 0), .child = row }),
-                }),
-            }),
-        });
-    }
-};
 
 const Signal = struct {
     bars: u8,

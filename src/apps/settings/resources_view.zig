@@ -69,9 +69,18 @@ fn meterRow(b: Builder, name: []const u8, text: []const u8, used: f32) ui.Widget
         b.label(name),
         cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 6, .children = &.{
             b.value(text),
-            cx.make(Meter{ .fraction = used, .height = @max(8, 4) }),
+            meter(cx, used),
         } }) }),
     } });
+}
+
+fn meter(cx: *ui.Context, used: f32) ui.Widget {
+    const t = cx.theme();
+    return cx.make(ui.ProgressBar{
+        .value = used,
+        .height = 8,
+        .color = if (used >= 0.9) t.@"error" else t.primary,
+    });
 }
 
 /// Storage: what the system, the apps and the user take, and what is
@@ -138,7 +147,7 @@ fn gpuMemoryRow(self: *const Settings, b: Builder) ui.Widget {
     var col: std.ArrayList(ui.Widget) = .empty;
     col.appendSlice(a, &.{
         b.value(gpu),
-        cx.make(Meter{ .fraction = fraction(u.gpuUsed(), u.gpu_total), .height = @max(8, 4) }),
+        meter(cx, fraction(u.gpuUsed(), u.gpu_total)),
     }) catch {};
     if (vm.failed) {
         col.append(a, cx.make(ui.Text{ .text = "It could not be changed", .style = .{ .size = 15, .color = t.@"error" } })) catch {};
@@ -194,25 +203,15 @@ pub const VideoMemoryMenu = struct {
     };
 
     pub fn build(self: *const VideoMemoryMenu, cx: *ui.Context, state: *State) ui.Widget {
-        const t = cx.theme();
-        const enabled = self.actions != null;
         state.node = cx.node;
         state.actions = self.actions;
         state.chosen = self.chosen;
         state.ram_mib = self.ram_mib;
-        const size = 24;
-        return cx.make(ui.Pressable{
-            .on_press = if (enabled) .of(state, State.open) else null,
-            .interaction = &state.interaction,
-            .child = cx.make(ui.Decorated{
-                .color = if (enabled and state.interaction.hovered) t.on_surface.withAlpha(0.08) else null,
-                .radius = .all(size / 2),
-                .child = cx.make(ui.SizedBox{ .width = size, .height = size, .child = cx.make(ui.Center{ .child = cx.make(ui.Icon{
-                    .icon = .settings,
-                    .size = 18,
-                    .color = if (enabled) t.on_surface_variant else t.on_surface.withAlpha(0.38),
-                }) }) }),
-            }),
+        return cx.make(ui.IconButton{
+            .icon = .settings,
+            .size = 24,
+            .icon_size = 18,
+            .on_press = if (self.actions != null) .of(state, State.open) else null,
         });
     }
 };
@@ -255,31 +254,7 @@ pub const SegmentBar = struct {
     }
 };
 
-/// A bar filled by `fraction` (0 to 1), in the error colour when nearly
-/// full.
-pub const Meter = struct {
-    fraction: f32,
-    height: f32,
 
-    pub const warning = 0.9;
-
-    pub fn layout(self: *const Meter, _: *ui.Node, c: ui.Constraints) ui.Size {
-        return c.constrain(.{ .w = if (std.math.isFinite(c.max_w)) c.max_w else 200, .h = self.height });
-    }
-
-    pub fn paint(self: *const Meter, n: *ui.Node, p: *ui.Painter) void {
-        const t = &n.ui.theme;
-        const c = p.canvas();
-        const r: gfx.Rect = .{ .x = 0, .y = 0, .w = n.size.w, .h = n.size.h };
-        const radius: gfx.Radii = .all(n.size.h / 2);
-        c.fillRoundedRect(r, radius, t.surface_container_highest);
-        const f = std.math.clamp(if (std.math.isFinite(self.fraction)) self.fraction else 0, 0, 1);
-        if (f <= 0) return;
-        // At least a round end's width, so a little use still shows.
-        const w = @max(n.size.w * f, n.size.h);
-        c.fillRoundedRect(.{ .x = 0, .y = 0, .w = w, .h = n.size.h }, radius, if (f >= warning) t.@"error" else t.primary);
-    }
-};
 
 const testing = std.testing;
 const font = @import("font");

@@ -279,11 +279,17 @@ fn pinDetail(
                     .style = .{ .size = 15, .color = t.on_surface_variant },
                 })) catch {};
             } else {
+                const pick: ?*PinPick = if (self.actions) |acts| blk: {
+                    const p = a.create(PinPick) catch break :blk null;
+                    p.* = .{ .actions = acts, .pin = g };
+                    break :blk p;
+                } else null;
                 rows.append(a, cx.make(ui.Row{ .main_axis_size = .min, .children = &.{
                     cx.make(PinModeMenu{
-                        .pin = g,
-                        .current = pins.mode(g),
-                        .actions = self.actions,
+                        .options = &mode_options,
+                        .value = pins.mode(g),
+                        .placeholder = "Set mode",
+                        .on_changed = if (pick) |p| .of(p, PinPick.set) else null,
                     }),
                 } })) catch {};
                 if (pins.set_failure) |why| rows.append(a, cx.make(ui.Text{ .text = why, .style = .{ .size = 15, .color = t.@"error" } })) catch {};
@@ -297,64 +303,23 @@ fn pinDetail(
     return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 6, .children = rows.items });
 }
 
-const mode_options = [_]struct { mode: Mode, label: []const u8 }{
-    .{ .mode = .input, .label = "Input" },
-    .{ .mode = .input_pull_up, .label = "Input, pulled up" },
-    .{ .mode = .input_pull_down, .label = "Input, pulled down" },
-    .{ .mode = .output_low, .label = "Output, low" },
-    .{ .mode = .output_high, .label = "Output, high" },
+/// Menu button for configuring a GPIO pin's mode.
+pub const PinModeMenu = ui.Select(Mode);
+
+const mode_options = [_]PinModeMenu.Option{
+    .{ .value = .input, .label = "Input" },
+    .{ .value = .input_pull_up, .label = "Input, pulled up" },
+    .{ .value = .input_pull_down, .label = "Input, pulled down" },
+    .{ .value = .output_low, .label = "Output, low" },
+    .{ .value = .output_high, .label = "Output, high" },
 };
 
-fn modeLabel(m: ?Mode) []const u8 {
-    const mode = m orelse return "Set mode";
-    for (mode_options) |opt| if (opt.mode == mode) return opt.label;
-    return "Set mode";
-}
-
-/// Menu button for configuring a GPIO pin's mode.
-pub const PinModeMenu = struct {
+const PinPick = struct {
+    actions: *Actions,
     pin: u6,
-    current: ?Mode,
-    actions: ?*Actions,
 
-    pub const State = struct {
-        node: ?*ui.Node = null,
-        pin: u6 = 0,
-        actions: ?*Actions = null,
-        picks: [mode_options.len]PickMode = undefined,
-
-        const PickMode = struct {
-            actions: *Actions,
-            pin: u6,
-            mode: Mode,
-
-            fn pick(p: *PickMode) void {
-                p.actions.gpio = .{ .pin = p.pin, .mode = p.mode };
-            }
-        };
-
-        fn open(st: *@This()) void {
-            const n = st.node orelse return;
-            const acts = st.actions orelse return;
-            const pos = n.position();
-            var items: [mode_options.len]ui.MenuItem = undefined;
-            for (mode_options, 0..) |opt, i| {
-                st.picks[i] = .{ .actions = acts, .pin = st.pin, .mode = opt.mode };
-                items[i] = .{ .label = opt.label, .on_press = .of(&st.picks[i], PickMode.pick) };
-            }
-            n.ui.openMenu(n, .{ pos[0], pos[1] + n.size.h }, &items);
-        }
-    };
-
-    pub fn build(self: *const PinModeMenu, cx: *ui.Context, state: *PinModeMenu.State) ui.Widget {
-        state.node = cx.node;
-        state.pin = self.pin;
-        state.actions = self.actions;
-        return cx.make(ui.OutlinedButton{
-            .label = modeLabel(self.current),
-            .trailing_icon = .expand_more,
-            .on_press = if (self.actions != null) .of(state, PinModeMenu.State.open) else null,
-        });
+    fn set(p: *PinPick, m: Mode) void {
+        p.actions.gpio = .{ .pin = p.pin, .mode = m };
     }
 };
 

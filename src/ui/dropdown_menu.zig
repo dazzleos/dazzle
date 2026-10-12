@@ -1,21 +1,13 @@
 //! DropdownMenu and Select: Material 3's dropdown selector, showing the
-//! chosen option in an outlined field with an arrow and opening a `Menu`
-//! below it when pressed.
+//! chosen option in an `OutlinedButton` with a trailing arrow and opening
+//! a `Menu` below it when pressed.
 
 const std = @import("std");
 const icons = @import("icons");
 const widget = @import("widget.zig");
 const ConstrainedBox = @import("constrained_box.zig").ConstrainedBox;
-const Decorated = @import("decorated.zig").Decorated;
-const Expanded = @import("expanded.zig").Expanded;
-const Icon = @import("icon.zig").Icon;
-const Interaction = @import("pressable.zig").Interaction;
 const MenuItem = @import("menu.zig").Item;
-const Padding = @import("padding.zig").Padding;
-const Pressable = @import("pressable.zig").Pressable;
-const Row = @import("flex.zig").Row;
-const SizedBox = @import("sized_box.zig").SizedBox;
-const Text = @import("text.zig").Text;
+const OutlinedButton = @import("outlined_button.zig").OutlinedButton;
 
 const Widget = widget.Widget;
 const Context = widget.Context;
@@ -24,14 +16,16 @@ const ValueCallback = widget.ValueCallback;
 
 pub const DropdownMenu = struct {
     options: []const []const u8,
-    selected: usize = 0,
+    selected: ?usize = 0,
+    /// Optional button label override (for example, a shorter summary).
+    label: ?[]const u8 = null,
     /// Called with the chosen index; without it the dropdown is disabled.
     on_selected: ?ValueCallback(usize) = null,
     placeholder: []const u8 = "",
     icon: ?icons.Icon = null,
     width: ?f32 = null,
 
-    pub const height = 40;
+    pub const height = OutlinedButton.height;
     pub const max_options = 32;
 
     const Pick = struct {
@@ -44,7 +38,6 @@ pub const DropdownMenu = struct {
     };
 
     pub const State = struct {
-        interaction: Interaction = .{},
         node: ?*Node = null,
         on_selected: ?ValueCallback(usize) = null,
         labels: [max_options][]const u8 = undefined,
@@ -65,77 +58,27 @@ pub const DropdownMenu = struct {
     };
 
     pub fn build(self: *const DropdownMenu, cx: *Context, state: *State) Widget {
-        const t = cx.theme();
         const enabled = self.on_selected != null and self.options.len > 0;
         state.node = cx.node;
         state.on_selected = self.on_selected;
         state.len = @min(self.options.len, max_options);
         for (self.options[0..state.len], state.labels[0..state.len]) |opt, *dst| dst.* = opt;
 
-        const i = state.interaction;
-        const layer: f32 = if (!enabled) 0 else if (i.pressed) 0.12 else if (i.hovered) 0.08 else 0;
-        const fg = if (enabled) t.on_surface else t.on_surface.withAlpha(0.38);
-        const icon_color = if (enabled) t.on_surface_variant else t.on_surface.withAlpha(0.38);
-        const border = if (enabled) t.outline else t.on_surface.withAlpha(0.12);
-        const current_label = if (self.selected < self.options.len) self.options[self.selected] else self.placeholder;
-
-        const label_widget = if (self.width != null)
-            cx.make(Expanded{ .child = cx.make(Text{
-                .text = current_label,
-                .style = .{ .size = t.label_size, .color = fg },
-                .wrap = false,
-                .ellipsis = true,
-            }) })
+        const current_label = self.label orelse if (self.selected) |sel|
+            (if (sel < self.options.len) self.options[sel] else self.placeholder)
         else
-            cx.make(Text{
-                .text = current_label,
-                .style = .{ .size = t.label_size, .color = fg },
-                .wrap = false,
-            });
-        const arrow = cx.make(Icon{ .icon = .expand_more, .size = 20, .color = icon_color });
+            self.placeholder;
 
-        const row = if (self.icon) |leading|
-            cx.make(Row{
-                .spacing = 8,
-                .main_axis_size = if (self.width != null) .max else .min,
-                .cross_axis_alignment = .center,
-                .children = &.{
-                    cx.make(Icon{ .icon = leading, .size = 18, .color = icon_color }),
-                    label_widget,
-                    arrow,
-                },
-            })
-        else
-            cx.make(Row{
-                .spacing = 8,
-                .main_axis_size = if (self.width != null) .max else .min,
-                .cross_axis_alignment = .center,
-                .children = &.{ label_widget, arrow },
-            });
-
-        const padded = cx.make(Padding{
-            .padding = .{ .left = 16, .right = 12 },
-            .child = cx.make(@import("center.zig").Center{
-                .width_factor = if (self.width != null) null else 1,
-                .height_factor = 1,
-                .child = row,
-            }),
-        });
-        const box = if (self.width) |w|
-            cx.make(ConstrainedBox{ .constraints = .{ .min_w = w, .max_w = w, .min_h = height }, .child = padded })
-        else
-            cx.make(ConstrainedBox{ .constraints = .{ .min_w = 96, .min_h = height }, .child = padded });
-
-        return cx.make(Pressable{
+        const btn = cx.make(OutlinedButton{
+            .label = current_label,
+            .icon = self.icon,
+            .trailing_icon = .expand_more,
             .on_press = if (enabled) .of(state, State.open) else null,
-            .interaction = &state.interaction,
-            .child = cx.make(Decorated{
-                .color = if (layer > 0) t.on_surface.withAlpha(layer) else null,
-                .border = .{ .width = 1, .color = border },
-                .radius = .all(8),
-                .child = box,
-            }),
         });
+        return if (self.width) |w|
+            cx.make(ConstrainedBox{ .constraints = .{ .min_w = w }, .child = btn })
+        else
+            btn;
     }
 };
 
@@ -148,7 +91,9 @@ pub fn Select(comptime T: type) type {
         };
 
         options: []const Option,
-        value: T,
+        value: ?T = null,
+        label: ?[]const u8 = null,
+        placeholder: []const u8 = "",
         on_changed: ?ValueCallback(T) = null,
         icon: ?icons.Icon = null,
         width: ?f32 = null,
@@ -169,15 +114,19 @@ pub fn Select(comptime T: type) type {
             state.len = @min(self.options.len, DropdownMenu.max_options);
             state.on_changed = self.on_changed;
             const labels = cx.arena.alloc([]const u8, state.len) catch return cx.make(@import("empty.zig").Empty{});
-            var selected: usize = 0;
+            var selected: ?usize = null;
             for (self.options[0..state.len], labels, 0..) |opt, *lbl, i| {
                 lbl.* = opt.label;
                 state.values[i] = opt.value;
-                if (std.meta.eql(opt.value, self.value)) selected = i;
+                if (self.value) |v| {
+                    if (std.meta.eql(opt.value, v)) selected = i;
+                }
             }
             return cx.make(DropdownMenu{
                 .options = labels,
                 .selected = selected,
+                .label = self.label,
+                .placeholder = self.placeholder,
                 .on_selected = if (self.on_changed != null) .of(state, State.pick) else null,
                 .icon = self.icon,
                 .width = self.width,
