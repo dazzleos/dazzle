@@ -669,7 +669,16 @@ fn fetchPinned(b: *std.Build, dir: []const u8, files: anytype, comptime url_of: 
     for (files) |f| {
         const path = b.pathJoin(&.{ dir, f.name });
         if (exists(b, path)) continue;
-        const curl = b.addSystemCommand(&.{ "curl", "-fsSL", "--create-dirs", "-o", path, url_of(b, f) });
+        const part = b.fmt("{s}.part", .{path});
+        const curl = b.addSystemCommand(&.{
+            "sh",
+            "-c",
+            "curl -fsSL --retry 3 --create-dirs -o \"$1\" \"$2\" && mv \"$1\" \"$3\"",
+            "fetch",
+            part,
+            url_of(b, f),
+            path,
+        });
         curl.has_side_effects = true;
         if (fetch == null) {
             const tools = requireTools(b, &.{"curl:curl"});
