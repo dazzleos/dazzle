@@ -14,8 +14,9 @@
 //! Wi-Fi: see wifi.zig.
 //!
 //! It listens on /os/sockets/network (see `sys.network` for the
-//! protocol) and answers only the settings app: the program the connecting
-//! process runs must be /os/shell/dazzle-settings. Every
+//! protocol) and answers only the setup and settings apps: the program the
+//! connecting process runs must be /os/shell/dazzle-setup or
+//! /os/shell/dazzle-settings. Every
 //! app runs as the same user, so the socket's permissions alone could not
 //! tell them apart. Nothing is remembered across a reboot: the system lives
 //! in RAM.
@@ -59,14 +60,14 @@ const Slot = struct {
     dhcp_pid: ?linux.pid_t = null,
 
     /// Gives the adapter its address as chosen.
-    fn apply(s: *Slot) void {
+    fn apply(s: *Slot, named: bool) void {
         const i = &s.ifc;
         _ = ipv4.bringUp(i.name());
         switch (s.addressing) {
             .static => |st| ipv4.setStatic(i.name(), st.address, st.prefix, st.gateway) catch |err| {
                 print(sys.log_warning ++ "dazzle: network: cannot set {s}'s address ({s})\n", .{ i.name(), @errorName(err) });
             },
-            .dhcp => {
+            .dhcp => if (named) {
                 const rc = linux.fork();
                 if (linux.errno(rc) != .SUCCESS) return print(sys.log_warning ++ "dazzle: network: cannot start DHCP on {s}\n", .{i.name()});
                 if (rc == 0) ipv4.runDhcp(i.name());
@@ -92,19 +93,16 @@ const Ethernet = struct {
     looked_ns: u64 = 0,
     said_waiting: bool = false,
 
-    /// Finds wired adapters, or notices any that have gone, once the
-    /// computer has been named (setup names it on the first start).
+    /// Finds wired adapters, or notices any that have gone. DHCP starts
+    /// once the computer has been named (setup names it on the first start).
     fn look(e: *Ethernet, now: u64) void {
-        const h = ipv4.hostname() orelse return;
-        if (!std.mem.eql(u8, e.hostname.slice(), h.slice())) {
-            const had_name = e.hostname.len > 0;
+        if (ipv4.hostname()) |h| if (!std.mem.eql(u8, e.hostname.slice(), h.slice())) {
             e.hostname = h;
-            e.looked_ns = 0;
-            if (had_name) for (&e.slots) |*slot| if (slot.*) |*s| if (s.addressing == .dhcp) {
+            for (&e.slots) |*slot| if (slot.*) |*s| if (s.addressing == .dhcp) {
                 s.stopDhcp();
-                s.apply();
+                s.apply(true);
             };
-        }
+        };
         if (now -| e.looked_ns < look_ns) return;
         e.looked_ns = now;
         for (&e.slots) |*slot| if (slot.*) |*s| {
@@ -132,7 +130,7 @@ const Ethernet = struct {
                     i.name(), i.mac[0], i.mac[1], i.mac[2], i.mac[3], i.mac[4], i.mac[5],
                 });
                 slot.* = .{ .ifc = i, .addressing = e.default_addressing };
-                slot.*.?.apply();
+                slot.*.?.apply(e.hostname.len > 0);
                 break;
             };
         }
@@ -149,7 +147,7 @@ const Ethernet = struct {
                 // (DHCP may give another).
                 s.stopDhcp();
                 ipv4.removeAddress(s.ifc.name());
-                s.apply();
+                s.apply(e.hostname.len > 0);
                 matched = true;
                 if (name.len == 0) break;
             }
@@ -215,6 +213,7 @@ fn run() !void {
             var buf: [256]u8 = undefined;
             const n = linux.read(fd, &buf, buf.len);
             if (linux.errno(n) == .SUCCESS and n > 0) if (proto.Request.parse(buf[0..n])) |req| {
+                ethernet.look(t);
                 switch (req) {
                     .status => {},
                     .ethernet => |er| ethernet.set(er),
@@ -250,7 +249,7 @@ fn allowed(fd: linux.fd_t) bool {
 }
 
 pub fn isAllowedProgram(exe: []const u8) bool {
-    return std.mem.eql(u8, exe, proto.allowed_program);
+    return std.mem.eql(u8, exe, proto.allowed_program) or std.mem.eql(u8, exe, proto.setup_program);
 }
 
 /// The listening socket, replacing a stale one; only the user can connect.
@@ -267,8 +266,9 @@ fn listen(path: [:0]const u8) !linux.fd_t {
     return fd;
 }
 
-test "only the settings app is answered" {
+test "only the setup and settings apps are answered" {
     try std.testing.expect(isAllowedProgram("/os/shell/dazzle-settings"));
+    try std.testing.expect(isAllowedProgram("/os/shell/dazzle-setup"));
     try std.testing.expect(!isAllowedProgram("/apps/dazzle-demo/dazzle-demo"));
     try std.testing.expect(!isAllowedProgram("/os/shell/dazzle-settings (deleted)"));
     try std.testing.expect(!isAllowedProgram("/tmp/dazzle-settings"));

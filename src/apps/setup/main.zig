@@ -11,6 +11,7 @@
 //!     dazzle-setup [font.ttf]
 
 const std = @import("std");
+const linux = std.os.linux;
 const sys = @import("sys");
 const locale = @import("locale");
 const font = @import("font");
@@ -21,6 +22,7 @@ const names = @import("names.zig");
 const view = @import("view.zig");
 
 const proto = sys.system;
+const net = sys.network;
 const print = sys.print;
 
 pub fn main(init: std.process.Init.Minimal) u8 {
@@ -51,11 +53,13 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     const suggestion = names.random(&name_buf);
     // Preparing the card starts now, while the pages are filled in.
     var report: ?proto.Report = ask("prepare\n");
+    var net_report: ?net.Report = net.ask("wifi scan\n");
     // The language and keyboard, as they are (until others are picked).
     const start_locale: locale.Settings = if (report) |r| r.locale else .{};
     locale.current = start_locale.language;
     a.ui.keyboard = start_locale.keyboard;
     var next_ask: u64 = sys.nowNs() + 500 * std.time.ns_per_ms;
+    var next_net_ask: u64 = sys.nowNs() + std.time.ns_per_s;
     var actions: view.Actions = .{};
     // The apps that can be installed (once the card is ready), and those
     // chosen, left to install.
@@ -67,7 +71,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     var installed: usize = 0;
     var total: usize = 0;
 
-    while (try a.step(@max(next_ask -| sys.nowNs(), std.time.ns_per_ms))) {
+    while (try a.step(@max(@min(next_ask, next_net_ask) -| sys.nowNs(), std.time.ns_per_ms))) {
         const now = sys.nowNs();
         a.takeInput();
 
@@ -86,11 +90,44 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             actions.hostname = null;
             var req_buf: [96]u8 = undefined;
             report = ask(std.fmt.bufPrint(&req_buf, "hostname {s}\n", .{h.slice()}) catch "");
+            net_report = net.ask("wifi scan\n");
+            // If an Ethernet cable is plugged in, give DHCP a moment to get
+            // an address before deciding whether to show the Wi-Fi page.
+            if (ethernetCarrier(net_report) and !ethernetConnected(net_report)) {
+                const deadline = sys.nowNs() + 3 * std.time.ns_per_s;
+                while (sys.nowNs() < deadline and !ethernetConnected(net_report)) {
+                    sys.sleepMs(100);
+                }
+            }
             if (!named) {
                 named = true;
-                wait_network_until = now + 10 * std.time.ns_per_s;
+                wait_network_until = sys.nowNs() + 10 * std.time.ns_per_s;
                 retry_at = 0;
             }
+            next_net_ask = sys.nowNs() + std.time.ns_per_s;
+            a.dirty = true;
+        }
+        if (actions.connect) |*j| {
+            var req_buf: [256]u8 = undefined;
+            print("dazzle-setup: joining \"{s}\"\n", .{j.ssid()});
+            net_report = net.ask(net.connectRequest(&req_buf, j.ssid(), j.passphrase()));
+            actions.connect = null;
+            wait_network_until = now + 10 * std.time.ns_per_s;
+            retry_at = 0;
+            next_net_ask = now + 500 * std.time.ns_per_ms;
+            a.dirty = true;
+        }
+        if (actions.disconnect) {
+            actions.disconnect = false;
+            var req_buf: [64]u8 = undefined;
+            net_report = net.ask(net.disconnectRequest(&req_buf, ""));
+            next_net_ask = now + 500 * std.time.ns_per_ms;
+            a.dirty = true;
+        }
+        if (actions.skip_wifi) {
+            actions.skip_wifi = false;
+            wait_network_until = 0;
+            retry_at = 0;
             a.dirty = true;
         }
         // How preparing goes: often while it does.
@@ -101,13 +138,21 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             next_ask = now + @as(u64, if (waiting) 250 else 1000) * std.time.ns_per_ms;
             a.dirty = true;
         }
+        const on_wifi_page = if (a.ui.root) |root| view.pages[root.state(view.Setup.State).page] == .wifi else false;
+        if (now >= next_net_ask) {
+            const need_scan = on_wifi_page or if (net_report) |r| r.len == 0 else true;
+            net_report = net.ask(if (need_scan) "wifi scan\n" else "status\n");
+            const busy = if (net_report) |r| r.scanning or r.connection.state == .connecting or r.connection.state == .authenticating or r.connection.state == .addressing else false;
+            next_net_ask = now + @as(u64, if (busy or on_wifi_page) 1000 else 3000) * std.time.ns_per_ms;
+            a.dirty = true;
+        }
         const storage_now: proto.StorageState = if (report) |r| r.storage else .none;
         // The list of apps, kept on the card: once the computer is named
         // and the card and network are ready, and again every while until
         // it comes (the network is brought up once the name is confirmed).
         if (apps.poll()) a.dirty = true;
         if (named and storage_now == .ready and apps.job == null and apps.apps().len == 0 and queue == null and now >= retry_at) {
-            if (networkReady() or now >= wait_network_until) {
+            if (networkReady() or (!on_wifi_page and now >= wait_network_until)) {
                 apps.refresh(true);
                 retry_at = now + 10 * std.time.ns_per_s;
                 a.dirty = true;
@@ -154,10 +199,12 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             }
         }
 
-        try a.draw(now, view.Setup{
+        try a.draw(sys.nowNs(), view.Setup{
             .suggestion = suggestion,
             .locale = start_locale,
             .report = if (report) |*r| r else null,
+            .wifi = if (net_report) |*r| r else null,
+            .ethernet_connected = ethernetConnected(net_report),
             .apps = .{
                 .list = apps.apps(),
                 .loading = apps.job != null,
@@ -169,6 +216,39 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             .actions = &actions,
         });
     }
+}
+
+/// Whether any wired Ethernet adapter has a carrier (a cable plugged in).
+fn ethernetCarrier(report: ?net.Report) bool {
+    const r = report orelse return false;
+    for (r.ethernetAdapters()) |*e| {
+        const a = e.adapter orelse continue;
+        var path_buf: [64]u8 = undefined;
+        const path = std.fmt.bufPrintZ(&path_buf, "/sys/class/net/{s}/carrier", .{a.name()}) catch continue;
+        var buf: [8]u8 = undefined;
+        const text = sys.readFile(path.ptr, &buf) orelse continue;
+        if (std.mem.eql(u8, std.mem.trim(u8, text, " \n"), "1")) return true;
+    }
+    return false;
+}
+
+/// Whether any wired Ethernet adapter has an IPv4 address.
+fn ethernetConnected(report: ?net.Report) bool {
+    const r = report orelse return false;
+    const sock: linux.fd_t = @intCast(sys.check(linux.socket(linux.AF.INET, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0)) catch return false);
+    defer sys.close(sock);
+    for (r.ethernetAdapters()) |*e| {
+        const a = e.adapter orelse continue;
+        const name = a.name();
+        var req: linux.ifreq = std.mem.zeroes(linux.ifreq);
+        const n = @min(name.len, req.ifrn.name.len - 1);
+        @memcpy(req.ifrn.name[0..n], name[0..n]);
+        if (linux.errno(linux.ioctl(sock, linux.SIOCGIFADDR, @intFromPtr(&req))) != .SUCCESS) continue;
+        const in: *const linux.sockaddr.in = @ptrCast(@alignCast(&req.ifru.addr));
+        const ip: [4]u8 = @bitCast(in.addr);
+        if (!std.mem.allEqual(u8, &ip, 0)) return true;
+    }
+    return false;
 }
 
 /// Whether the network manager has configured name servers (and the clock)
