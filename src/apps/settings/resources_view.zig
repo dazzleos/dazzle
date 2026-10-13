@@ -39,6 +39,7 @@ pub const State = struct {
 
 pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
     const cx = b.cx;
+    const t = cx.theme();
     const u = self.usage;
     if (!self.video_memory.failed) state.dismissed = false;
     var b1: [32]u8 = undefined;
@@ -46,16 +47,34 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
     const cores = self.system.cores;
     const cpu = if (u.cpu_busy) |busy| cx.fmt("{d:.0}% busy ({d} {s})", .{ busy, cores, if (cores == 1) "core" else "cores" }) else "Measuring…";
     const mem = cx.fmt("{s} of {s} in use", .{ info.formatBytes(&b1, u.memUsed()), info.formatBytes(&b2, u.mem_total) });
-    return cx.make(ui.Snackbar{
-        .message = if (self.video_memory.failed and !state.dismissed) "It could not be changed" else "",
-        .on_dismiss = .of(state, State.dismiss),
-        .child = b.scroll(.resources, b.page(&.{
-            meterRow(b, "CPU", cpu, (u.cpu_busy orelse 0) / 100),
-            meterRow(b, "CPU Memory", mem, fraction(u.memUsed(), u.mem_total)),
-            gpuMemoryRow(self, b, state),
-            storageRow(b, u.storage),
-        })),
-    });
+    return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &.{
+        cx.make(ui.Expanded{ .child = cx.make(ui.Snackbar{
+            .message = if (self.video_memory.failed and !state.dismissed) "It could not be changed" else "",
+            .on_dismiss = .of(state, State.dismiss),
+            .child = b.scroll(.resources, b.page(&.{
+                meterRow(b, "CPU", cpu, (u.cpu_busy orelse 0) / 100),
+                meterRow(b, "CPU Memory", mem, fraction(u.memUsed(), u.mem_total)),
+                gpuMemoryRow(self, b, state),
+                storageRow(b, u.storage),
+            })),
+        }) }),
+        cx.make(ui.Padding{
+            .padding = .{ .left = 24, .top = 12, .right = 24, .bottom = 24 },
+            .child = cx.make(ui.Align{
+                .alignment = .center,
+                .height_factor = 1,
+                .child = cx.make(ui.ConstrainedBox{
+                    .constraints = .{ .max_w = view.max_page_width },
+                    .child = cx.make(ui.Row{ .children = &.{
+                        cx.make(ui.Expanded{ .child = cx.make(ui.Text{
+                            .text = "Press Meta+I to toggle the resource overlay",
+                            .style = .{ .size = 16, .color = t.on_surface_variant },
+                        }) }),
+                    } }),
+                }),
+            }),
+        }),
+    } });
 }
 
 fn fraction(part: u64, whole: u64) f32 {

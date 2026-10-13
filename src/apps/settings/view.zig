@@ -467,6 +467,7 @@ test "everything is shown, and fits from the smallest window to the biggest" {
         "Apps 2.0 MB",
         "User 0 bytes",
         "Free 300 MB",
+        "Press Meta+I to toggle the resource overlay",
         "Ethernet",
         "Connected at 100 Mb/s",
         "192.168.1.42/24 (DHCP)",
