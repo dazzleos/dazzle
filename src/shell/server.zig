@@ -436,8 +436,11 @@ pub const Server = struct {
     /// The surfaces with pointer and keyboard focus.
     pointer_focus: ?*Surface = null,
     keyboard_focus: ?*Surface = null,
-    /// The serial of the last button press, and how many buttons are down.
+    /// The serial and position of the last button press, and the bitmask
+    /// of buttons currently down.
     press_serial: u32 = 0,
+    press_x: f64 = 0,
+    press_y: f64 = 0,
     buttons_down: u32 = 0,
     /// The window the pointer is moving (with the pointer's offset from
     /// its corner) or resizing. The pointer focuses on no surface
@@ -473,7 +476,7 @@ pub const Server = struct {
     /// A touch on a surface: its events go to the surface it went down on
     /// (null once that has gone, or the touch is the shell's, moving a
     /// window).
-    pub const TouchPoint = struct { id: i32, surface: ?*Surface, x: f64, y: f64 };
+    pub const TouchPoint = struct { id: i32, surface: ?*Surface, press_x: f64, press_y: f64, x: f64, y: f64 };
 
     /// A resize: the edges dragged (xdg_toplevel.resize_edge's bits), and
     /// where the pointer and the window were when it started.
@@ -979,8 +982,10 @@ pub const Server = struct {
     fn startMove(s: *Server, t: *Toplevel, serial: u32) void {
         const by = s.clientGrabAllowed(t, serial) orelse return;
         s.settle(t, true);
-        s.grab = .{ .t = t, .dx = by.x - @as(f64, @floatFromInt(t.x)), .dy = by.y - @as(f64, @floatFromInt(t.y)), .touch = by.touch };
+        const g: Grab = .{ .t = t, .dx = by.press_x - @as(f64, @floatFromInt(t.x)), .dy = by.press_y - @as(f64, @floatFromInt(t.y)), .touch = by.touch };
+        s.grab = g;
         s.takeInput(by.touch);
+        s.grabTo(g, by.x, by.y);
     }
 
     /// A client asked to resize its window by `edges` with the pointer, as
@@ -993,16 +998,16 @@ pub const Server = struct {
     }
 
     /// What drives a move or resize: the pointer, or a touch.
-    const GrabBy = struct { x: f64, y: f64, touch: ?i32 = null };
+    const GrabBy = struct { press_x: f64, press_y: f64, x: f64, y: f64, touch: ?i32 = null };
 
     /// Whether a client may move or resize its window from the input with
     /// `serial`: a button press it is still holding on the window, or a
     /// touch still down on it; and from where.
     fn clientGrabAllowed(s: *const Server, t: *const Toplevel, serial: u32) ?GrabBy {
-        if (t.maximized or !t.shown() or s.grab != null) return null;
+        if (t.maximized or t.fullscreen or !t.shown() or s.grab != null) return null;
         const surf = t.xdg.surface orelse return null;
-        if (s.buttons_down > 0 and serial == s.press_serial and s.pointer_focus == surf) return .{ .x = s.pointer_x, .y = s.pointer_y };
-        if (serial == s.touch_serial) if (s.touchPoint(s.touch_serial_id)) |tp| if (tp.surface == surf) return .{ .x = tp.x, .y = tp.y, .touch = tp.id };
+        if (s.buttons_down != 0 and serial == s.press_serial and s.pointer_focus == surf) return .{ .press_x = s.press_x, .press_y = s.press_y, .x = s.pointer_x, .y = s.pointer_y };
+        if (serial == s.touch_serial) if (s.touchPoint(s.touch_serial_id)) |tp| if (tp.surface == surf) return .{ .press_x = tp.press_x, .press_y = tp.press_y, .x = tp.x, .y = tp.y, .touch = tp.id };
         return null;
     }
 
@@ -1011,13 +1016,15 @@ pub const Server = struct {
     fn startResize(s: *Server, t: *Toplevel, edges: u32, by: GrabBy) void {
         s.settle(t, true);
         const size = s.configuredSize(t);
-        s.grab = .{ .t = t, .dx = 0, .dy = 0, .touch = by.touch, .resize = .{
+        const g: Grab = .{ .t = t, .dx = 0, .dy = 0, .touch = by.touch, .resize = .{
             .edges = edges,
-            .x = by.x,
-            .y = by.y,
+            .x = by.press_x,
+            .y = by.press_y,
             .rect = .{ .x = t.x, .y = t.y, .width = size[0], .height = size[1] },
         } };
+        s.grab = g;
         s.takeInput(by.touch);
+        s.grabTo(g, by.x, by.y);
     }
 
     /// The input driving a move or resize is the shell's until it ends:
@@ -2146,7 +2153,7 @@ pub const Server = struct {
             s.raiseToplevel(t);
             s.updateFocus();
         };
-        free.* = .{ .id = id, .surface = surf, .x = x, .y = y };
+        free.* = .{ .id = id, .surface = surf, .press_x = x, .press_y = y, .x = x, .y = y };
         const sf = surf orelse return;
         const serial = s.nextSerial();
         s.touch_serial = serial;
@@ -2287,12 +2294,19 @@ pub const Server = struct {
         s.gpa.destroy(lock);
     }
 
+    fn buttonBit(button: u32) u32 {
+        const idx = button -% p.input.btn_left;
+        return @as(u32, 1) << @intCast(@min(idx, 31));
+    }
+
     /// `button` is a Linux button code (BTN_LEFT, ...).
     pub fn pointerButton(s: *Server, time_ms: u32, button: u32, pressed: bool) void {
+        const bit = buttonBit(button);
         if (pressed) {
-            s.buttons_down += 1;
-        } else if (s.buttons_down > 0) {
-            s.buttons_down -= 1;
+            s.buttons_down |= bit;
+        } else {
+            if (s.buttons_down & bit == 0) return;
+            s.buttons_down &= ~bit;
         }
         if (s.grab) |g| {
             // The move ends when the buttons are released, which are not
@@ -2317,8 +2331,13 @@ pub const Server = struct {
         const surf = s.pointer_focus orelse return;
         const state: u32 = if (pressed) p.wl_pointer.button_state.pressed else p.wl_pointer.button_state.released;
         const serial = s.nextSerial();
-        if (pressed) s.press_serial = serial;
+        if (pressed) {
+            s.press_serial = serial;
+            s.press_x = s.pointer_x;
+            s.press_y = s.pointer_y;
+        }
         broadcast(surf.client, .pointer, p.wl_pointer.event.button, 1, .{ serial, time_ms, button, state });
+        if (!pressed and s.buttons_down == 0) _ = s.updatePointerFocus();
     }
 
     /// Scrolls by `value` (in surface pixels) along `axis`.
@@ -2445,9 +2464,15 @@ pub const Server = struct {
 
     /// Sends leave and enter events if the pointer is over a different
     /// surface. Returns whether it is. While a window is moved, the pointer
-    /// is over none.
+    /// is over none; while a button is held down, the surface it was
+    /// pressed on keeps the pointer until the button is released.
     fn updatePointerFocus(s: *Server) bool {
-        const under = if (s.grab != null) null else s.surfaceUnderPointer();
+        const under = if (s.grab != null)
+            null
+        else if (s.buttons_down != 0)
+            (if (s.pointer_focus) |surf| if (surf.texture() != null and s.surfaceOrigin(surf) != null) surf else null else null)
+        else
+            s.surfaceUnderPointer();
         if (under == s.pointer_focus) return false;
         if (s.pointer_focus) |old| {
             broadcast(old.client, .pointer, p.wl_pointer.event.leave, 1, .{ s.nextSerial(), old.id });

@@ -994,6 +994,17 @@ test "dragging onto a target that takes it drops it there; a click is still a cl
     try testing.expect(u.drag.?.target == null);
     u.pointerButton(.{ 200, 40 }, ui.btn_left, false);
     try testing.expect(dropped == null);
+
+    // If the pointer leaves the window during a press or drag, it is cancelled
+    // cleanly so later clicks still work.
+    u.pointerMotion(.{ 40, 40 });
+    u.pointerButton(.{ 40, 40 }, ui.btn_left, true);
+    try testing.expect(u.captured != null);
+    u.pointerLeave();
+    try testing.expect(u.captured == null);
+    try testing.expectEqual(@as(u32, 1), clicked);
+    clickAt(u, .{ 40, 40 });
+    try testing.expectEqual(@as(u32, 2), clicked);
 }
 
 test "sliders, dropdowns, dialogs, tooltips, chips, badges, tabs and rails" {

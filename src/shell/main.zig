@@ -290,12 +290,10 @@ fn run(init: std.process.Init.Minimal) !void {
                     }
                     if (dock_tap == null) continue;
                 }
-                // Buttons over the dock are the shell's.
-                if (dock_tap != null or (dock_visible and e == .button and pointer.y >= @as(f64, @floatFromInt(dock_y)))) {
-                    if (dock_tap == null) {
-                        pointer.flushMotion(&server, time_ms);
-                        if (!e.button.pressed or e.button.code != btn_left) continue;
-                    }
+                if (e == .button) pointer.flushMotion(&server, time_ms);
+                // Buttons pressed over the dock (when not dragging) are the shell's.
+                if (dock_tap != null or (dock_visible and e == .button and e.button.pressed and server.grab == null and server.buttons_down == 0 and pointer.y >= @as(f64, @floatFromInt(dock_y)))) {
+                    if (dock_tap == null and e.button.code != btn_left) continue;
                     const at = dock_tap orelse [2]f64{ pointer.x, pointer.y };
                     const i = dock.hit(at[0], at[1] - @as(f64, @floatFromInt(dock_y))) orelse continue;
                     const app = &apps[i];
@@ -315,12 +313,12 @@ fn run(init: std.process.Init.Minimal) !void {
             if (pointer.moved) {
                 pointer.moved = false;
                 renderer.moveCursor(@intFromFloat(pointer.x), @intFromFloat(pointer.y));
-                const in_dock = dock_visible and pointer.y >= @as(f64, @floatFromInt(dock_y));
-                if (dock.pointerAt(if (in_dock) pointer.x else null, pointer.y - @as(f64, @floatFromInt(dock_y)))) {
-                    dock.draw();
-                    renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
-                    panels_damaged = true;
-                }
+            }
+            const in_dock = dock_visible and server.grab == null and server.buttons_down == 0 and pointer.y >= @as(f64, @floatFromInt(dock_y));
+            if (dock.pointerAt(if (in_dock) pointer.x else null, pointer.y - @as(f64, @floatFromInt(dock_y)))) {
+                dock.draw();
+                renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+                panels_damaged = true;
             }
         };
 

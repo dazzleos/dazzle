@@ -836,6 +836,9 @@ pub const Ui = struct {
 
     /// The pointer left the window.
     pub fn pointerLeave(ui: *Ui) void {
+        ui.cancelPress();
+        ui.hold = null;
+        ui.swallow_release = false;
         ui.pointer = null;
         for (ui.hovered.items) |n| _ = send(n, .leave);
         ui.hovered.clearRetainingCapacity();
@@ -893,6 +896,7 @@ pub const Ui = struct {
         if (ui.hold) |h| if (h.node == n) {
             ui.hold = null;
         };
+        if (ui.captured == n) ui.captured = null;
         if (ui.focused == n) ui.focused = null;
         if (std.mem.indexOfScalar(*Node, ui.hovered.items, n)) |i| _ = ui.hovered.orderedRemove(i);
     }

@@ -155,7 +155,7 @@ pub const SeekTrack = struct {
             },
             .release => |rel| if (self.state.dragging) {
                 self.state.dragging = false;
-                self.seekAt(n, rel.pos[0]);
+                if (!(rel.pos[0] == -1 and rel.pos[1] == -1 and !rel.inside)) self.seekAt(n, rel.pos[0]);
                 return true;
             },
             else => {},

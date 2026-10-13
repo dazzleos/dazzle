@@ -640,3 +640,82 @@ test "touches go to the surface they went down on, and can move its window" {
     try testing.expect(w.server.grab == null);
     try testing.expectEqual(@as(u32, 1), touch_heard.counts[p.wl_touch.event.up]);
 }
+
+test "pressing in a window keeps the pointer when dragging and releasing outside it, or moving quickly" {
+    var w: World = .{};
+    w.init();
+    defer w.deinit();
+    const a = try w.connect();
+    const compositor = try a.bind(p.wl_compositor.name, 4, null);
+    const wm_base = try a.bind(p.xdg_wm_base.name, 6, null);
+    const shm = try a.bind(p.wl_shm.name, 1, null);
+    const seat = try a.bind(p.wl_seat.name, 5, null);
+    var pointer_heard: Heard = .{};
+    const pointer = try a.d.newObject(pointer_heard.listener());
+    var m = try seat.request(p.wl_seat.request.get_pointer);
+    m.uint(pointer.id).end();
+    var win: Window = .{ .surface = undefined, .xdg = undefined, .toplevel = undefined };
+    try win.open(a, compositor, wm_base, shm, null);
+
+    // Restore to 400x280 at 200,180.
+    m = try win.toplevel.request(p.xdg_toplevel.request.unset_maximized);
+    m.end();
+    try w.pump();
+
+    // Press inside the window (at 250,200), drag outside the window and
+    // below the work area (into the dock area at y=580), and release there.
+    w.server.pointerMotion(1, 250, 200);
+    w.server.pointerFrame();
+    w.server.pointerButton(2, p.input.btn_left, true);
+    w.server.pointerFrame();
+    try w.pump();
+    try testing.expectEqual(w.server.pointer_focus.?.id, win.surface.id);
+
+    const motions_before = pointer_heard.counts[p.wl_pointer.event.motion];
+    const leaves_before = pointer_heard.counts[p.wl_pointer.event.leave];
+    w.server.pointerMotion(3, 50, 580);
+    w.server.pointerFrame();
+    try w.pump();
+    // Still focused on the window while the button is held down.
+    try testing.expectEqual(w.server.pointer_focus.?.id, win.surface.id);
+    try testing.expectEqual(motions_before + 1, pointer_heard.counts[p.wl_pointer.event.motion]);
+    try testing.expectEqual(leaves_before, pointer_heard.counts[p.wl_pointer.event.leave]);
+
+    // Releasing outside delivers the button release and then leaves the window.
+    w.server.pointerButton(4, p.input.btn_left, false);
+    w.server.pointerFrame();
+    try w.pump();
+    try testing.expect(w.server.pointer_focus == null);
+    try testing.expectEqual(@as(u32, 0), w.server.buttons_down);
+    try testing.expectEqual(@as(u32, 2), pointer_heard.counts[p.wl_pointer.event.button]);
+    try testing.expectEqual(leaves_before + 1, pointer_heard.counts[p.wl_pointer.event.leave]);
+
+    // An unmatched button release (e.g. a click that started on the dock) is ignored.
+    w.server.pointerButton(5, p.input.btn_left, false);
+    try testing.expectEqual(@as(u32, 0), w.server.buttons_down);
+
+    // Pressing on the title bar and moving off the window before xdg_toplevel.move
+    // arrives still starts the move anchored at the press position, and releasing
+    // ends the grab.
+    w.server.pointerMotion(6, 250, 190);
+    w.server.pointerFrame();
+    w.server.pointerButton(7, p.input.btn_left, true);
+    w.server.pointerFrame();
+    try w.pump();
+    const press_serial = w.server.press_serial;
+    // Pointer moves quickly above the window before the client's move request arrives.
+    w.server.pointerMotion(8, 300, 100);
+    w.server.pointerFrame();
+    m = try win.toplevel.request(p.xdg_toplevel.request.move);
+    m.uint(seat.id).uint(press_serial).end();
+    try w.pump();
+    try testing.expect(w.server.grab != null);
+    const t = w.server.topWindow().?;
+    // dx was 250 - 200 = 50, so at pointer_x = 300 the window moved to x = 250.
+    try testing.expectEqual(@as(i32, 250), t.x);
+    w.server.pointerButton(9, p.input.btn_left, false);
+    w.server.pointerFrame();
+    try w.pump();
+    try testing.expect(w.server.grab == null);
+}
+

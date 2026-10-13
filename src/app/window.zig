@@ -235,9 +235,10 @@ pub const Window = struct {
     maximized: bool = false,
     /// On the whole screen, over the shell's dock (see `setFullscreen`).
     fullscreen: bool = false,
-    /// The serial of the last pointer button press, for asking the shell
-    /// to move the window from it.
+    /// The serial of the last active pointer/touch press, for asking the
+    /// shell to move the window from it (0 once released).
     press_serial: u32 = 0,
+    buttons_down: u32 = 0,
     /// The serial of the pointer entering, for choosing its picture.
     enter_serial: u32 = 0,
     /// The shell's cursor shapes, the pointer's device for them, and the
@@ -485,6 +486,7 @@ pub const Window = struct {
         const height: f32 = @floatFromInt(w.height);
         const x = pos[0];
         const y = pos[1];
+        if (x < 0 or y < 0 or x >= width or y >= height) return 0;
         var edges: u32 = 0;
         if (x < resize_border) edges |= edge_left else if (x >= width - resize_border) edges |= edge_right;
         if (y < resize_border) edges |= edge_top else if (y >= height - resize_border) edges |= edge_bottom;
@@ -500,6 +502,7 @@ pub const Window = struct {
 
     /// Shows the pointer as a resize over the edges (an arrow elsewhere).
     fn updateCursor(w: *Window) void {
+        if (w.buttons_down != 0) return;
         const edges = w.edgesAt(w.pointer_pos);
         if (w.cursor_edges == edges) return;
         const device = w.cursor_device orelse return;
@@ -517,6 +520,7 @@ pub const Window = struct {
     /// Asks the shell to move the window with the pointer, from the button
     /// press just handled (dragging the title bar), until it is released.
     pub fn startMove(w: *Window) void {
+        if (w.press_serial == 0) return;
         const seat = w.seat orelse return;
         var m = w.toplevel.request(p.xdg_toplevel.request.move) catch return;
         m.uint(seat.id).uint(w.press_serial).end();
@@ -914,6 +918,7 @@ pub const Window = struct {
                 if (opcode == p.wl_pointer.event.enter) {
                     _ = r.uint() catch return;
                     w.enter_serial = first;
+                    w.buttons_down = 0;
                     // The shell shows an arrow until told otherwise.
                     w.cursor_edges = 0;
                 }
@@ -932,6 +937,8 @@ pub const Window = struct {
                 if (pressed) {
                     w.press_serial = serial;
                     w.clipboard.serial = serial;
+                } else {
+                    w.press_serial = 0;
                 }
                 // Pressing an edge resizes the window; the app does not
                 // see it (nor its release: the shell has the pointer).
@@ -940,9 +947,13 @@ pub const Window = struct {
                     if (edges != 0) if (w.seat) |seat| {
                         var m = w.toplevel.request(p.xdg_toplevel.request.resize) catch return;
                         m.uint(seat.id).uint(serial).uint(edges).end();
+                        w.conn.flush() catch {};
                         return;
                     };
                 }
+                const bit = @as(u32, 1) << @intCast(@min(code -% p.input.btn_left, 31));
+                w.buttons_down = if (pressed) w.buttons_down | bit else w.buttons_down & ~bit;
+                if (!pressed and w.buttons_down == 0) w.updateCursor();
                 w.pushInput(.{ .button = .{ .pos = w.pointer_pos, .code = code, .pressed = pressed } });
             },
             p.wl_pointer.event.axis => {
@@ -953,6 +964,8 @@ pub const Window = struct {
                 w.pushInput(.{ .scroll = .{ .pos = w.pointer_pos, .dx = if (vertical) 0 else value, .dy = if (vertical) value else 0 } });
             },
             p.wl_pointer.event.leave => {
+                w.buttons_down = 0;
+                w.press_serial = 0;
                 w.cursor_edges = null;
                 w.pushInput(.leave);
             },
@@ -977,6 +990,7 @@ pub const Window = struct {
                 if (edges != 0) if (w.seat) |seat| {
                     var m = w.toplevel.request(p.xdg_toplevel.request.resize) catch return;
                     m.uint(seat.id).uint(serial).uint(edges).end();
+                    w.conn.flush() catch {};
                     return;
                 };
                 w.pushInput(.{ .touch_down = .{ .id = id, .pos = pos } });
@@ -990,9 +1004,13 @@ pub const Window = struct {
             p.wl_touch.event.up => {
                 _ = r.uint() catch return; // serial
                 _ = r.uint() catch return; // time
+                w.press_serial = 0;
                 w.pushInput(.{ .touch_up = @bitCast(r.uint() catch return) });
             },
-            p.wl_touch.event.cancel => w.pushInput(.touch_cancel),
+            p.wl_touch.event.cancel => {
+                w.press_serial = 0;
+                w.pushInput(.touch_cancel);
+            },
             else => {},
         }
     }
