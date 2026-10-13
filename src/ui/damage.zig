@@ -125,13 +125,19 @@ pub const Tracker = struct {
         const size = [2]f32{ @floatFromInt(width), @floatFromInt(height) };
         if (size[0] != t.size[0] or size[1] != t.size[1]) {
             t.size = size;
-            t.frame.add(t.window());
-            // Older frames were another size: buffers from then are no use.
-            t.known = 0;
+            t.invalidate();
         }
     }
 
+    /// Marks the entire window as damaged and invalidates older buffers
+    /// (e.g. when the window's size or surface clear colour changes).
+    pub fn invalidate(t: *Tracker) void {
+        t.frame.add(t.window());
+        t.known = 0;
+    }
+
     pub fn add(t: *Tracker, area: ?Rect) void {
+
         const a = area orelse return;
         if (a.intersect(t.window())) |c| t.frame.add(c);
     }

@@ -30,7 +30,8 @@ const font = @import("font");
 const geometry = @import("geometry.zig");
 const widget = @import("widget.zig");
 const painter_mod = @import("painter.zig");
-const Theme = @import("theme.zig").Theme;
+const theme_mod = @import("theme.zig");
+const Theme = theme_mod.Theme;
 const damage_mod = @import("damage.zig");
 const keymap = @import("keymap.zig");
 const menu_mod = @import("menu.zig");
@@ -90,6 +91,7 @@ pub const Ui = struct {
     /// Icons are drawn with it (see `Icon`).
     icon_font: font.Font,
     theme: Theme = .dark,
+    last_surface: ?gfx.Color = null,
     atlas: gfx.Atlas,
     renderer: ?gfx.Renderer = null,
     root: ?*Node = null,
@@ -294,6 +296,10 @@ pub const Ui = struct {
         if (ui.root == null) ui.root = Node.create(ui, w);
         const r = ui.root orelse return;
         r.build(w);
+        if (ui.last_surface == null or !std.meta.eql(ui.last_surface.?, ui.theme.surface)) {
+            ui.last_surface = ui.theme.surface;
+            ui.damage.invalidate();
+        }
         const window: Size = .{ .w = @floatFromInt(width), .h = @floatFromInt(height) };
         _ = r.layout(.tight(window));
         r.offset = .{ 0, 0 };
@@ -914,7 +920,9 @@ pub const App = struct {
     controls: app.Controls,
     ui: *Ui,
     frame: vc4.render.Frame = undefined,
-    clear_color: u32 = 0xff141218,
+    clear_color: ?u32 = null,
+    appearance: theme_mod.Settings = .{},
+    theme_watch: theme_mod.Watch = .{},
     width: u32,
     height: u32,
     dirty: bool = true,
@@ -934,7 +942,7 @@ pub const App = struct {
         maximized: bool = false,
         font_path: ?[*:0]const u8 = null,
         pipelined: bool = false,
-        clear_color: u32 = 0xff141218,
+        clear_color: ?u32 = null,
     };
 
     /// Opens the GPU, connects to the compositor in `environ`, opens the
@@ -968,6 +976,10 @@ pub const App = struct {
             a.ui.setPipelined(a.win.pipelined);
         }
         a.clear_color = options.clear_color;
+        a.appearance = theme_mod.loadSettings();
+        a.theme_watch = .{};
+        _ = a.theme_watch.changed();
+        a.ui.theme = a.appearance.theme.scheme();
         a.width = a.win.width;
         a.height = a.win.height;
         a.dirty = true;
@@ -984,6 +996,14 @@ pub const App = struct {
         a.win.close();
         a.dev.close();
         a.gpa.destroy(a);
+    }
+
+    /// Updates the app's theme immediately and syncs `theme_watch`.
+    pub fn setTheme(a: *App, mode: theme_mod.Mode) void {
+        a.appearance.theme = mode;
+        a.ui.theme = mode.scheme();
+        _ = a.theme_watch.changed();
+        a.dirty = true;
     }
 
     /// Waits (when `idle`) or polls for window events, applies any pending
@@ -1017,6 +1037,11 @@ pub const App = struct {
                 a.dirty = true;
             }
         }
+        if (a.theme_watch.changed()) {
+            a.appearance = theme_mod.loadSettings();
+            a.ui.theme = a.appearance.theme.scheme();
+            a.dirty = true;
+        }
         if (a.sync_keyboard) a.ui.keyboard = a.win.layout;
         a.ui.fullscreen = a.win.fullscreen;
         a.ui.maximized = a.win.maximized;
@@ -1039,7 +1064,8 @@ pub const App = struct {
         if (!a.suspended and (a.dirty or a.ui.needs_frame)) {
             a.dirty = false;
             a.ui.frame(a.width, a.height, now_ns, root);
-            if (try a.ui.present(a.win, &a.frame, a.clear_color)) a.idle = false;
+            const clear = a.clear_color orelse a.ui.theme.surface.toArgb();
+            if (try a.ui.present(a.win, &a.frame, clear)) a.idle = false;
         }
     }
 };

@@ -101,6 +101,8 @@ fn run(init: std.process.Init.Minimal) !void {
     _ = locale_watch.changed();
     var sound_watch: dock_mod.Watch = .{ .path = audio.settings_file };
     _ = sound_watch.changed();
+    var appearance_watch: dock_mod.Watch = .{ .path = dock_mod.appearance_file };
+    _ = appearance_watch.changed();
     for (apps) |app| print("dazzle-shell: app {s} ({s})\n", .{ app.label, app.path });
     var dock = try dock_mod.Dock.init(gpa, ui_font, apps, renderer.width, renderer.height);
     var net_sub: sys.network.Subscription = .{};
@@ -408,6 +410,9 @@ fn run(init: std.process.Init.Minimal) !void {
                     panels_damaged = true;
                 }
             }
+        }
+        if ((server.damaged or t_now >= next_tick) and appearance_watch.changed()) {
+            server.wakeAll();
         }
         if (t_now >= next_tick) {
             next_tick = start + ((t_now - start) / std.time.ns_per_s + 1) * std.time.ns_per_s;

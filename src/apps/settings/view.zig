@@ -18,6 +18,7 @@ const audio = @import("audio");
 pub const wifi_view = @import("wifi_view.zig");
 pub const ethernet_view = @import("ethernet_view.zig");
 pub const sound_view = @import("sound_view.zig");
+pub const appearance_view = @import("appearance_view.zig");
 pub const board_view = @import("board_view.zig");
 pub const software_view = @import("software_view.zig");
 pub const resources_view = @import("resources_view.zig");
@@ -58,6 +59,8 @@ pub const Actions = struct {
     /// Sound settings (volume, mute, output device) and test chime trigger.
     sound: ?audio.Settings = null,
     test_sound: bool = false,
+    /// Appearance settings (Dark or Light colour scheme).
+    appearance: ?ui.theme.Settings = null,
 
     pub const GpioChange = struct { pin: u6, mode: gpio.Mode };
 
@@ -130,6 +133,7 @@ pub const Settings = struct {
     video_memory: resources_view.VideoMemory = .{},
     sound: audio.Settings = .{},
     audio_devices: *const audio.Devices = &empty_audio_devices,
+    appearance: ui.theme.Settings = .{},
     /// The title bar's buttons (close, and maximize, which shows whether
     /// the window is), and pressing the bar (to move the window).
     on_close: ?ui.Callback = null,
@@ -143,6 +147,7 @@ pub const Settings = struct {
         wifi: wifi_view.State = .{},
         ethernet: ethernet_view.State = .{},
         sound: sound_view.State = .{},
+        appearance: appearance_view.State = .{},
         board: board_view.State = .{},
         software: software_view.State = .{},
         resources: resources_view.State = .{},
@@ -173,6 +178,7 @@ pub const Settings = struct {
             .wifi => wifi_view.build(self, b, &state.wifi),
             .ethernet => b.scroll(.ethernet, ethernet_view.build(self, b, &state.ethernet)),
             .sound => b.scroll(.sound, sound_view.build(self, b, &state.sound)),
+            .appearance => b.scroll(.appearance, appearance_view.build(self, b, &state.appearance)),
             .board => board_view.build(self, b, &state.board),
             .apps => software_view.build(self, b, &state.software),
             .resources => resources_view.build(self, b, &state.resources),
@@ -206,6 +212,7 @@ pub const Page = enum {
     wifi,
     ethernet,
     sound,
+    appearance,
     board,
     apps,
     resources,
@@ -217,6 +224,7 @@ pub const Page = enum {
             .wifi => wifi_view.label,
             .ethernet => ethernet_view.label,
             .sound => sound_view.label,
+            .appearance => appearance_view.label,
             .board => board_view.label,
             .apps => software_view.label,
             .resources => resources_view.label,
@@ -230,6 +238,7 @@ pub const Page = enum {
             .wifi => wifi_view.icon,
             .ethernet => ethernet_view.icon,
             .sound => sound_view.icon,
+            .appearance => appearance_view.icon,
             .board => board_view.icon,
             .apps => software_view.icon,
             .resources => resources_view.icon,
@@ -509,6 +518,10 @@ test "everything is shown, and fits from the smallest window to the biggest" {
         "Volume",
         "Headphones",
         "Test sound",
+        "Appearance",
+        "Theme",
+        "Dark",
+        "Light",
     }) |want| {
         if (std.mem.indexOf(u8, all.items, want) == null) {
             std.debug.print("missing \"{s}\" in:\n{s}\n", .{ want, all.items });

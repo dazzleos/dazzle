@@ -107,4 +107,9 @@ pub const Icon = enum {
     tv,
     music_note,
     audio_file,
+    // Appearance.
+    palette,
+    dark_mode,
+    light_mode,
 };
+

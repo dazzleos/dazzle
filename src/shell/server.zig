@@ -805,6 +805,17 @@ pub const Server = struct {
         s.damaged = true;
     }
 
+    /// Wakes all configured toplevels by sending a configure event (e.g. when
+    /// a system-wide appearance setting changes).
+    pub fn wakeAll(s: *Server) void {
+        for (s.toplevels.items) |t| {
+            if (!t.xdg.configured) continue;
+            const surf = t.xdg.surface orelse continue;
+            s.configure(surf.client, t);
+        }
+    }
+
+
     /// The whole screen.
     pub fn screen(s: *const Server) Rect {
         return .{ .x = 0, .y = 0, .width = s.output.width, .height = s.output.height };

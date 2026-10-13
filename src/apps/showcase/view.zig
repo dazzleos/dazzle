@@ -35,6 +35,7 @@ pub const Showcase = struct {
         sub_tab: usize = 0,
         extended_rail: bool = true,
         light_theme: bool = false,
+        system_light: ?bool = null,
 
         // Buttons & Chips state.
         button_clicks: u32 = 0,
@@ -219,8 +220,17 @@ pub const Showcase = struct {
     };
 
     pub fn build(self: *const Showcase, cx: *ui.Context, state: *State) ui.Widget {
+        const ui_light = cx.ui.theme.surface.r > 0.5;
+        if (state.system_light == null) {
+            state.system_light = ui_light;
+            if (ui_light) state.light_theme = true;
+        } else if (ui_light != state.light_theme and ui_light != state.system_light.?) {
+            state.system_light = ui_light;
+            state.light_theme = ui_light;
+        }
         cx.ui.theme = if (state.light_theme) .light else .dark;
         const t = cx.theme();
+
 
         const rail_items = [_]ui.NavigationRail.Item{
             .{ .label = "Actions", .icon = .apps },

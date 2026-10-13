@@ -52,6 +52,15 @@ pub const Color = struct {
         out.a = a;
         return out;
     }
+
+    /// As 0xAARRGGBB.
+    pub fn toArgb(c: Color) u32 {
+        const a: u32 = @intFromFloat(@round(std.math.clamp(c.a, 0, 1) * 255));
+        const r: u32 = @intFromFloat(@round(std.math.clamp(c.r, 0, 1) * 255));
+        const g: u32 = @intFromFloat(@round(std.math.clamp(c.g, 0, 1) * 255));
+        const b: u32 = @intFromFloat(@round(std.math.clamp(c.b, 0, 1) * 255));
+        return (a << 24) | (r << 16) | (g << 8) | b;
+    }
 };
 
 pub const Rect = struct {

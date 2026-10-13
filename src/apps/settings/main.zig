@@ -192,6 +192,12 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             test_player = audio.Player.openTestTone(sound);
             a.dirty = true;
         }
+        if (actions.appearance) |ap| {
+            actions.appearance = null;
+            ui.theme.saveSettings(ap);
+            a.setTheme(ap.theme);
+            a.dirty = true;
+        }
         if (test_player) |*p| {
             if (p.step(now) == null) {
                 p.close();
@@ -398,6 +404,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
                 },
                 .sound = sound,
                 .audio_devices = &audio_devices,
+                .appearance = a.appearance,
                 .update = .{
                     .status = updater.status(),
                     .available = if (updater.available()) |m| std.fmt.bufPrint(&available_buf, "{s} ({s})", .{ m.version, update.formatDate(&date_buf, m.time) }) catch m.version else "",
@@ -418,6 +425,7 @@ test {
     _ = @import("wifi_view.zig");
     _ = @import("ethernet_view.zig");
     _ = @import("sound_view.zig");
+    _ = @import("appearance_view.zig");
     _ = @import("board_view.zig");
     _ = @import("software_view.zig");
     _ = @import("resources_view.zig");

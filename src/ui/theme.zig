@@ -1,9 +1,117 @@
 //! Theme: a Material 3 colour scheme (the baseline light and dark ones),
-//! and text sizes.
+//! text sizes, and persistent appearance settings (`/data/apps/.appearance`).
 
+const std = @import("std");
+const linux = std.os.linux;
+const sys = @import("sys");
 const gfx = @import("gfx");
 
 const Color = gfx.Color;
+
+/// Where the chosen appearance settings are kept (writable by Settings and
+/// readable by all apps and the shell).
+pub const settings_file = sys.system.apps_dir ++ "/.appearance";
+
+/// Whether the system uses the dark or light Material 3 colour scheme.
+pub const Mode = enum {
+    dark,
+    light,
+
+    pub fn name(m: Mode) []const u8 {
+        return switch (m) {
+            .dark => "Dark",
+            .light => "Light",
+        };
+    }
+
+    pub fn code(m: Mode) []const u8 {
+        return @tagName(m);
+    }
+
+    pub fn fromCode(text: []const u8) ?Mode {
+        return std.meta.stringToEnum(Mode, text);
+    }
+
+    pub fn scheme(m: Mode) Theme {
+        return switch (m) {
+            .dark => .dark,
+            .light => .light,
+        };
+    }
+};
+
+/// Persistent appearance settings stored in `settings_file`.
+pub const Settings = struct {
+    theme: Mode = .dark,
+
+    pub fn parse(text: []const u8) Settings {
+        var s: Settings = .{};
+        var lines = std.mem.tokenizeScalar(u8, text, '\n');
+        while (lines.next()) |line| {
+            var tok = std.mem.tokenizeAny(u8, line, " \t\r");
+            const key = tok.next() orelse continue;
+            const val = tok.next() orelse continue;
+            if (std.mem.eql(u8, key, "theme")) {
+                if (Mode.fromCode(val)) |m| s.theme = m;
+            }
+        }
+        return s;
+    }
+
+    pub fn formatBuf(s: Settings, buf: []u8) []const u8 {
+        return std.fmt.bufPrint(buf, "theme {s}\n", .{s.theme.code()}) catch "";
+    }
+};
+
+pub fn loadSettings() Settings {
+    return loadSettingsFrom(settings_file);
+}
+
+pub fn loadSettingsFrom(path: [:0]const u8) Settings {
+    var buf: [128]u8 = undefined;
+    const text = sys.readFile(path, &buf) orelse return .{};
+    return Settings.parse(text);
+}
+
+pub fn saveSettings(s: Settings) void {
+    _ = linux.mkdir(sys.system.apps_dir, 0o755);
+    saveSettingsTo(settings_file, s);
+}
+
+pub fn saveSettingsTo(path: [:0]const u8, s: Settings) void {
+    var buf: [128]u8 = undefined;
+    const content = s.formatBuf(&buf);
+    if (content.len == 0) return;
+    _ = linux.unlink(path);
+    sys.files.writeNew(path, content) catch {};
+}
+
+/// Notices `path` (defaulting to `settings_file`) being created, replaced, or
+/// modified.
+pub const Watch = struct {
+    path: [*:0]const u8 = settings_file,
+    stamp: ?[5]u64 = null,
+    initialized: bool = false,
+
+    /// Whether `path` changed since the last call (false on the first call).
+    pub fn changed(w: *Watch) bool {
+        var stx: linux.Statx = undefined;
+        const mask: linux.STATX = .{ .INO = true, .MTIME = true };
+        const now: ?[5]u64 = if (linux.errno(linux.statx(linux.AT.FDCWD, w.path, 0, mask, &stx)) == .SUCCESS)
+            .{ stx.dev_major, stx.dev_minor, stx.ino, @bitCast(stx.mtime.sec), stx.mtime.nsec }
+        else
+            null;
+        defer {
+            w.stamp = now;
+            w.initialized = true;
+        }
+        if (!w.initialized) return false;
+        if (w.stamp == null and now == null) return false;
+        const before = w.stamp orelse return true;
+        const after = now orelse return true;
+        return !std.mem.eql(u64, &before, &after);
+    }
+};
 
 /// A Material 3 colour scheme, and text sizes in pixels.
 pub const Theme = struct {
@@ -119,3 +227,31 @@ pub const Syntax = struct {
         };
     }
 };
+
+const testing = std.testing;
+
+test "appearance settings parse, format, save and load" {
+    try testing.expectEqual(Mode.dark, Settings.parse("").theme);
+    try testing.expectEqual(Mode.light, Settings.parse("theme light\n").theme);
+    try testing.expectEqual(Mode.dark, Settings.parse("theme dark\n").theme);
+    try testing.expectEqual(Mode.dark, Settings.parse("theme invalid\n").theme);
+
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "/tmp/dazzle-appearance-test-{d}", .{linux.getpid()});
+    defer _ = linux.unlink(path);
+
+    var watch: Watch = .{ .path = path };
+    try testing.expect(!watch.changed());
+    try testing.expectEqual(Mode.dark, loadSettingsFrom(path).theme);
+
+    saveSettingsTo(path, .{ .theme = .light });
+    try testing.expect(watch.changed());
+    try testing.expect(!watch.changed());
+    try testing.expectEqual(Mode.light, loadSettingsFrom(path).theme);
+
+    sys.sleepMs(20);
+    saveSettingsTo(path, .{ .theme = .dark });
+    try testing.expect(watch.changed());
+    try testing.expectEqual(Mode.dark, loadSettingsFrom(path).theme);
+}
+

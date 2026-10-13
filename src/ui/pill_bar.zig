@@ -2,9 +2,11 @@
 //! for choosing between options.
 
 const gfx = @import("gfx");
+const icons = @import("icons");
 const widget = @import("widget.zig");
 const Center = @import("center.zig").Center;
 const Decorated = @import("decorated.zig").Decorated;
+const Icon = @import("icon.zig").Icon;
 const Interaction = @import("pressable.zig").Interaction;
 const Padding = @import("padding.zig").Padding;
 const Painter = @import("painter.zig").Painter;
@@ -44,6 +46,7 @@ pub const PillBar = struct {
 /// One segment of a `PillBar`.
 pub const PillButton = struct {
     label: []const u8,
+    icon: ?icons.Icon = null,
     selected: bool,
     first: bool = false,
     last: bool = false,
@@ -66,17 +69,31 @@ pub const PillButton = struct {
             .tr = if (self.last) r else 0,
             .br = if (self.last) r else 0,
         };
+        const label_text = cx.make(Text{
+            .text = self.label,
+            .style = .{ .size = 16, .color = color },
+            .wrap = false,
+        });
+        const inner = if (self.icon) |ic|
+            cx.make(Row{
+                .main_axis_size = .min,
+                .cross_axis_alignment = .center,
+                .spacing = 8,
+                .children = &.{
+                    cx.make(Icon{ .icon = ic, .size = 18, .color = color }),
+                    label_text,
+                },
+            })
+        else
+            label_text;
         return cx.make(Pressable{ .on_press = self.on_press, .interaction = &state.interaction, .child = cx.make(Decorated{
             .color = bg,
             .radius = radius,
             .child = cx.make(SizedBox{ .height = height, .child = cx.make(Padding{
                 .padding = .symmetric(18, 0),
-                .child = cx.make(Center{ .width_factor = 1, .height_factor = 1, .child = cx.make(Text{
-                    .text = self.label,
-                    .style = .{ .size = 16, .color = color },
-                    .wrap = false,
-                }) }),
+                .child = cx.make(Center{ .width_factor = 1, .height_factor = 1, .child = inner }),
             }) }),
         }) });
     }
 };
+
