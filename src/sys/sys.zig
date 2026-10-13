@@ -4,10 +4,16 @@
 //! through a C library, so this module provides error mapping and a few
 //! wrappers used throughout the program.
 //!
-//! * `network`: the network manager's protocol, shared by init and settings
-//! * `system`: the system manager's protocol, shared by init and setup
+//! * `network`: the network manager's protocol, shared by init, setup, settings and the shell
+//! * `system`: the system manager's protocol, shared by init, setup and settings
 //! * `media`: the media manager's protocol, shared by init and files
-//! * `files`: saving the user's files (numbered names, new files)
+//! * `log`: reading the system log, shared by settings and the log server
+//! * `apps`: reading and managing installed apps in /data/apps
+//! * `gpio`, `i2c`, `serial`: Linux character device interfaces for the 40-pin header
+//! * `shell`: the shell's IPC socket protocol (`/os/sockets/shell`)
+//! * `files`: saving the user's files (numbered names, atomic writes)
+//! * `archive`: tar and xz unpacking
+//! * `v4l2`: Video4Linux2 ioctls for cameras and hardware video codecs
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -419,8 +425,8 @@ pub fn fontFile(buf: []u8, name: []const u8) [:0]const u8 {
 }
 
 /// The path of a file in the running program's own directory. Each app
-/// lives in a directory of its own with everything it needs (the system
-/// provides no shared files).
+/// lives in a directory of its own with the assets it needs (besides the
+/// shared fonts in /os/fonts).
 pub fn appFile(buf: []u8, name: []const u8) ![:0]const u8 {
     var exe: [512]u8 = undefined;
     const n = try check(linux.readlink("/proc/self/exe", &exe, exe.len));

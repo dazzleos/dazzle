@@ -20,7 +20,7 @@ library; programs make Linux system calls directly.
   access to the GPU, and starts the shell. It also runs small helper
   managers as child processes, each keeping only the privileges it needs:
   - **network**: Ethernet, Wi-Fi, hotspot, DHCP, DNS and NTP clock sync
-  - **devices**: grants access to input, camera and GPIO devices as they appear
+  - **devices**: grants access to input, camera, audio, GPIO, I2C and serial devices as they appear
   - **media**: mounts and ejects USB drives
   - **system**: partitions the SD card, manages OS slots, installs updates and restarts
   - **logserver**: serves the system log over HTTP
@@ -47,6 +47,7 @@ Shared code lives in modules linked into each program:
 | `app` | Application window setup, buffers, input and clipboard |
 | `store` | Installing, updating and removing apps |
 | `locale` | Languages, keyboard layouts, and date/time/temperature formatting |
+| `audio` | Audio output enumeration, ALSA mixer/playback, WAV and AAC-LC decoding |
 | `video` | Container demuxing and muxing, hardware video decoding and encoding |
 
 ## A single-user system
@@ -70,7 +71,7 @@ top:
 /boot/        the card's FAT boot partition (read-only): firmware,
               config.txt, and the two OS slots (slot-a/ and slot-b/)
 /data/        the card's ext4 data partition, created on first boot:
-  system/     system settings (hostname, locale)
+  system/     system settings (hostname, locale, network)
   user/       user files
   apps/       installed apps (/data/apps/<name>/<name>)
   update/     staging directory for OS updates
@@ -115,6 +116,7 @@ access to:
 
 - **Input devices** (`/dev/input/event*`) for keyboards, mice and touchscreens.
 - **Cameras** (`/dev/video*`, `/dev/v4l-subdev*`, `/dev/media*`).
+- **Audio** (`/dev/snd/controlC*`, `/dev/snd/pcmC*D*`, `/dev/snd/timer`).
 - **GPIO** (`/dev/gpiomem` and `/dev/gpiochip*`) and **I2C / serial**
   (`/dev/i2c-*`, `/dev/ttyAMA*`, `/dev/ttyS*`, `/dev/ttyUSB*`, `/dev/ttyACM*`).
 
@@ -204,7 +206,8 @@ as a tree of Zig structs rebuilt from application state when state changes:
 Layout passes constraints down the tree and sizes back up; overflowing
 content is clipped rather than failing. Only dirty subtrees are repainted.
 The toolkit provides layout containers (rows, columns, grids, scrolling,
-lazy lists), OpenType text rendering, Material icons, images, and Material 3
-controls (buttons, checkboxes, radio buttons, switches, text fields, menus,
-drag-and-drop and window title bars).
+lazy lists), OpenType text rendering, Material icons, images, QR codes,
+audio and video players, and Material 3 controls (buttons, checkboxes,
+radio buttons, switches, sliders, text fields, menus, drag-and-drop and
+window title bars).
 

@@ -36,14 +36,22 @@
 //! * `geometry`: sizes, constraints, insets, alignment
 //! * a file each for the basic widgets: `flex` (Row and Column),
 //!   `expanded`, `padding`, `align`, `center`, `sized_box`,
-//!   `constrained_box`, `grid`, `overlay`, `decorated`, `pressable`, `empty`
+//!   `constrained_box`, `grid`, `overlay`, `decorated`, `pressable`, `drag`
+//!   (Draggable and DropTarget), `empty`
 //! * `scroll_view`: ScrollView
 //! * `lazy_grid`: LazyGrid, a grid that makes only the items that show
 //! * `icon`: Icon, a Material icon
 //! * `image`: Image, pixels shown as big as they fit
+//! * `qr_code`: QrCode, ISO/IEC 18004 QR code encoder and widget
+//! * `audio_player`, `video_player`: AudioPlayer and VideoPlayer
 //! * `text`: Text
 //! * `theme`: Theme, Material 3's colours and text sizes
-//! * `outlined_button`, `spinner`: OutlinedButton, Spinner
+//! * `button`, `outlined_button`, `icon_button`, `pill_bar`: FilledButton,
+//!   TonalButton, TextButton, OutlinedButton, IconButton, PillBar
+//! * `spinner`, `progress_bar`, `slider`: Spinner, ProgressBar, Slider
+//! * `dropdown_menu`, `divider`, `card`, `list_item`, `chip`, `badge`,
+//!   `navigation_rail`, `tabs`, `dialog`, `snackbar`, `tooltip`: Material 3
+//!   containers, navigation and feedback widgets
 //! * `checkbox`, `radio`, `switch`: Checkbox, Radio, Switch (and `control`,
 //!   what they share)
 //! * `text_field`: TextField, with selection, and copying and pasting

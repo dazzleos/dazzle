@@ -14,12 +14,13 @@
 //! Wi-Fi: see wifi.zig.
 //!
 //! It listens on /os/sockets/network (see `sys.network` for the
-//! protocol) and answers only the setup and settings apps: the program the
-//! connecting process runs must be /os/shell/dazzle-setup or
-//! /os/shell/dazzle-settings. Every
-//! app runs as the same user, so the socket's permissions alone could not
-//! tell them apart. Nothing is remembered across a reboot: the system lives
-//! in RAM.
+//! protocol) and answers only the setup app, the settings app, and the
+//! shell (for the dock's status icon): the program the connecting process
+//! runs must be /os/shell/dazzle-setup, /os/shell/dazzle-settings, or
+//! /os/shell/dazzle-shell. Every app runs as the same user, so the
+//! socket's permissions alone could not tell them apart. Network settings
+//! and saved Wi-Fi credentials are persisted in `/data/system/network` and
+//! restored across reboots.
 
 const std = @import("std");
 const linux = std.os.linux;

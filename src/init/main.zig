@@ -12,9 +12,9 @@
 //!    drops to the Dazzle user once it has bound its port); boot never
 //!    waits for the network;
 //! 4. starts the device manager (see devices.zig), which gives the Dazzle
-//!    user the input devices (USB keyboards and mice), now and when they
-//!    are plugged in; waits for the vc4 GPU and gives the Dazzle user access
-//!    to its device nodes;
+//!    user the input, camera, audio, GPIO, I2C and serial devices, now and
+//!    when they are plugged in; waits for the vc4/v3d GPU and gives the
+//!    Dazzle user access to its device nodes;
 //! 5. starts the media manager (see media.zig), which mounts USB drives
 //!    in /media as they are plugged in, and unmounts them when they are
 //!    ejected;

@@ -1,41 +1,50 @@
 //! The network manager's protocol. Init runs the manager
 //! (src/init/network.zig), the one process that configures the network
 //! (Ethernet and Wi-Fi: that needs CAP_NET_ADMIN); it listens on a socket,
-//! /os/sockets/network, and answers only the setup and settings apps, checked by the program the
-//! connecting process runs.
+//! /os/sockets/network, and answers only the setup app, the settings app,
+//! and the shell, checked by the program the connecting process runs.
 //!
 //! A client connects, sends a request and reads the report until the
 //! manager closes the connection. The requests are:
 //!
 //!     status
-//!     ethernet dhcp
-//!     ethernet static <address>/<prefix> <gateway, or ->
-//!     wifi scan
-//!     wifi connect <SSID in hex> <passphrase in hex, or - for an open network>
-//!     wifi disconnect
+//!     ethernet [<adapter>] dhcp
+//!     ethernet [<adapter>] static <address>/<prefix> <gateway, or ->
+//!     wifi [<adapter>] scan
+//!     wifi [<adapter>] address dhcp
+//!     wifi [<adapter>] address static <address>/<prefix> <gateway, or ->
+//!     wifi [<adapter>] connect <SSID in hex> <passphrase in hex, or - for open/saved>
+//!     wifi [<adapter>] hotspot <SSID in hex> <passphrase in hex, or -> [<address>/<prefix> [<upstream, or ->]]
+//!     wifi [<adapter>] disconnect
 //!
 //! and the report:
 //!
-//!     ethernet eth0 static 192.168.1.50/24 192.168.1.1
+//!     ethernet eth0 b8:27:eb:01:02:03 up carrier 100 static 192.168.1.50/24 192.168.1.1 192.168.1.50 24 192.168.1.1 1024 2048
 //!     wifi adapter wlan0 b8:27:eb:01:02:03 up
+//!     wifi address dhcp - -
 //!     wifi scanning
-//!     wifi connection connected none 486f6d65 192.168.1.50
-//!     wifi network -5400 2437 wpa2 486f6d65
+//!     wifi connection connected none 486f6d65 192.168.1.50 24
+//!     wifi hotspot off none 44617a7a6c65 - 10.42.0.1 24 -
+//!     wifi hotspot_client aa:bb:cc:dd:ee:ff 10.42.0.10 6c6170746f70
+//!     wifi network -5400 2437 wpa2 486f6d65 736563726574313233
 //!     end
 //!
-//! Each line after "status" and before "end" starts with what it is about:
-//! "ethernet" or "wifi". "status" only reports; "wifi scan" also scans for
-//! Wi-Fi networks if the last scan is old. "ethernet" is how the wired adapter (or "-" while there is
-//! none) gets its address: "dhcp", or "static" with the address, prefix
-//! length and gateway (or "-"); the choice is kept until the system stops.
-//! "wifi adapter" names the Wi-Fi adapter (or "wifi none" says there is
-//! none); "wifi scanning" says a scan is under way; each "network" is one network: its
-//! signal in mBm (hundredths of dBm), the frequency in MHz of its strongest
-//! access point, its security and its SSID in hexadecimal (SSIDs are bytes,
-//! not necessarily text). "wifi connection" is the state of joining a network:
-//! the state, why it failed (or "none"), the network's SSID in hexadecimal
-//! and the address DHCP gave (or "-"). A client the manager does not serve
-//! gets "denied\n".
+//! Each line before "end" starts with what it is about: "ethernet" or
+//! "wifi". "status" only reports; "wifi scan" also scans for Wi-Fi networks
+//! if the last scan is old. "ethernet" reports each wired adapter (or "-"
+//! while there is none), its link state, how it gets its address ("dhcp" or
+//! "static"), its current IPv4 address, prefix and gateway, and its RX/TX
+//! byte counters. "wifi adapter" names each Wi-Fi adapter (or "wifi none"
+//! says there is none); "wifi address" reports how the Wi-Fi client gets
+//! its address; "wifi scanning" says a scan is under way; each "wifi
+//! network" is one scanned network: its signal in mBm (hundredths of dBm),
+//! the frequency in MHz of its strongest access point, its security
+//! (open/wep/wpa/wpa2/wpa3/enterprise), its SSID in hexadecimal, and any
+//! saved passphrase in hexadecimal. "wifi connection" is the state of
+//! joining a network, and "wifi hotspot" (plus any "wifi hotspot_client"
+//! lines) reports access point mode. Persistent settings and saved Wi-Fi
+//! credentials are stored in `/data/system/network`. A client the manager
+//! does not serve gets "denied\n".
 
 const std = @import("std");
 const linux = std.os.linux;

@@ -1,17 +1,19 @@
-//! The device manager: hands input devices, the camera, the GPIO, I2C and
-//! serial ports to the Dazzle user.
+//! The device manager: hands input devices, the camera, audio, the GPIO,
+//! I2C and serial ports to the Dazzle user.
 //!
 //! The kernel creates /dev/input/eventN (one per keyboard, mouse or other
 //! input device) owned by root, so the unprivileged shell could not read
 //! them; likewise the camera's nodes (/dev/videoN, /dev/v4l-subdevN,
-//! /dev/mediaN), which the Camera app uses, and the GPIO's (/dev/gpiochipN,
-//! and /dev/gpiomem, its registers), which Settings uses, and the I2C
-//! buses and serial ports (/dev/i2c-N, /dev/ttyUSBN, /dev/ttyACMN and the
-//! header's UART), which the Data Logger reads. Init forks this process, which
-//! drops to the user keeping only CAP_CHOWN, gives the user every such
-//! node there already is, and then does the same for each one that comes
-//! later (plugged in, or probed late), as the kernel announces it with a
-//! uevent.
+//! /dev/mediaN), which the Camera app uses, the ALSA audio nodes
+//! (/dev/snd/controlCN, /dev/snd/pcmCNDNp, /dev/snd/pcmCNDNc,
+//! /dev/snd/timer), which Settings and media playback use, the GPIO's
+//! (/dev/gpiochipN, and /dev/gpiomem, its registers), which Settings uses,
+//! and the I2C buses and serial ports (/dev/i2c-N, /dev/ttyUSBN,
+//! /dev/ttyACMN and the header's UART), which the Data Logger reads. Init
+//! forks this process, which drops to the user keeping only CAP_CHOWN,
+//! gives the user every such node there already is, and then does the same
+//! for each one that comes later (plugged in, or probed late), as the
+//! kernel announces it with a uevent.
 
 const std = @import("std");
 const linux = std.os.linux;

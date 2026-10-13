@@ -1,10 +1,11 @@
-//! Dazzle's low-level graphics API for the VideoCore IV (BCM2835 V3D),
-//! through the kernel's vc4 DRM driver.
+//! Dazzle's low-level graphics API for the VideoCore IV (BCM2835 V3D) and
+//! VideoCore VI/VII (BCM2711/BCM2712 V3D), through the kernel's `vc4` and
+//! `v3d` DRM drivers.
 //!
 //! The shell and native apps draw with it directly (with shaders built with
 //! the compiler API, or written in Zig with the `shader` module):
 //!
-//! * `device`: GPU buffers, shader upload and job submission
+//! * `device`: GPU buffers, shader upload and job submission (`vc4` and `v3d`)
 //! * `compiler`: build shaders as SSA values and compile them to QPU code
 //! * `render`: assemble a draw job (control list, shader record, uniforms)
 //! * `texture`: texture memory layout and sampler configuration
@@ -13,9 +14,9 @@
 //! * `drm`: mode setting and other DRM core ioctls
 //! * `kms`: atomic mode setting, showing buffers on the display's planes
 //!
-//! Lower-level pieces (`qpu` instruction encoding, `qpu_schedule`, the
-//! `qpu_sim` simulator and `cl` control list packets) are exported for
-//! tools and tests.
+//! Lower-level pieces (`qpu` and `v3d_qpu` instruction encoding,
+//! `qpu_schedule`, the `qpu_sim` simulator, and `cl` and `v3d_cl` control
+//! list packets) are exported for tools and tests.
 
 pub const device = @import("device.zig");
 pub const compiler = @import("compiler.zig");

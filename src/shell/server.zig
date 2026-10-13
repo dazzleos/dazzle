@@ -5,9 +5,11 @@
 //! wl_shm (ARGB8888, XRGB8888 and RGB565, copied to the GPU at commit),
 //! zwp_linux_dmabuf_v1 (buffers in the VideoCore IV's T-tiled layout, in
 //! the same formats, used by the GPU directly), xdg_wm_base (toplevel windows, and popups above
-//! them: see `Popup`), wl_output (the screen), wl_seat (a pointer, and a
-//! keyboard with a US XKB keymap: see keyboard.zig), wp_cursor_shape_manager_v1
-//! (the pointer's picture, by name) and wl_data_device_manager (copy and
+//! them: see `Popup`), wl_output (the screen), wl_seat (a pointer, a
+//! touch device, and a keyboard with an XKB keymap for the chosen layout:
+//! see keyboard.zig), wp_cursor_shape_manager_v1 (the pointer's picture, by
+//! name), zwp_pointer_constraints_v1 and zwp_relative_pointer_manager_v1
+//! (pointer lock and relative motion), and wl_data_device_manager (copy and
 //! paste: see `setSelection`; drag and drop: see `startDrag`).
 //!
 //! Windows go in the work area above the shell's dock: restored (as they

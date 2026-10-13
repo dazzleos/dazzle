@@ -1,21 +1,26 @@
-//! Wi-Fi, for the network manager (network.zig): finds the Wi-Fi adapter,
-//! brings it up, scans for networks, joins the one the settings app asks
-//! for (open, or WPA2 with the supplicant in supplicant.zig), and gets an
-//! address for it by DHCP. nl80211 needs CAP_NET_ADMIN to scan, connect
-//! and install keys; the supplicant's EAPOL frames go through a packet
-//! socket (CAP_NET_RAW).
+//! Wi-Fi, for the network manager (network.zig): finds Wi-Fi adapters,
+//! brings the chosen one up, scans for networks, joins the one the settings
+//! or setup app asks for (open, WPA2 or WPA3 with the supplicant in
+//! supplicant.zig) or runs an access point (hotspot) with DHCP and NAT, and
+//! configures the interface's IPv4 address by DHCP or static settings.
+//! nl80211 needs CAP_NET_ADMIN to scan, connect, start an access point and
+//! install keys; the supplicant's EAPOL frames go through a packet socket
+//! (CAP_NET_RAW).
 //!
 //! A scan request answers at once with what the last scan found, and starts
 //! a new scan if that one is older than `rescan_ns` (the settings app asks
 //! every few seconds while it is open, so nothing scans while it is not).
 //!
 //! Joining: the network's strongest access point from the last scan is
-//! asked to connect; the driver associates (the chips' firmware does that
-//! itself). For WPA2 the supplicant then does the 4-way handshake over
-//! EAPOL frames and its keys are installed. A child process then runs the
-//! network manager's DHCP client on the interface (see `network.runDhcp`)
-//! until the connection ends. A lost connection is tried again. Nothing is
-//! remembered across a reboot: the system lives in RAM.
+//! asked to connect (or, if that network is not in range after scanning,
+//! any remembered network from `saved_networks` that is in range). For
+//! WPA3-Personal the supplicant first performs SAE authentication over
+//! nl80211 management frames; after association, for WPA2 and WPA3 it
+//! completes the 4-way handshake over EAPOL frames and installs the keys.
+//! A child process then runs the DHCP client on the interface (see
+//! `ipv4.runDhcp`) unless a static address was chosen. A lost connection is
+//! tried again. Settings and saved Wi-Fi credentials are stored in
+//! `/data/system/network` and restored on startup (`loadConfig`).
 
 const std = @import("std");
 const linux = std.os.linux;

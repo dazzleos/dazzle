@@ -123,7 +123,7 @@ pub fn keymapFile(k: locale.Keyboard) !linux.fd_t {
 }
 
 /// The keymap's modifiers, as wl_keyboard.modifiers masks (XKB's real
-/// modifiers: us.xkb maps the keys to them).
+/// modifiers: keymap.xkb and keys.xkb map the keys to them).
 pub const shift = 1 << 0;
 pub const lock = 1 << 1;
 pub const control = 1 << 2;
