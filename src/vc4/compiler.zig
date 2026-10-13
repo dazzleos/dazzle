@@ -1552,10 +1552,77 @@ pub fn compileV3d(shader: *const Shader) Error!Compiled {
     var tlb_locked = false;
     var tlb_load_sample: u32 = 0;
     var tlb_write_sample: u32 = 0;
+    var r4_zeroed = false;
+    var tex_requested: [max_insts]bool = @splat(false);
+    var tex_covered: [max_insts]bool = @splat(false);
+    var tex_outstanding: u8 = 0;
     const is_msaa_blend = blk: {
         for (0..n) |j| if (live[j] and shader.insts[j].op == .tlb_color_ms) break :blk true;
         break :blk false;
     };
+
+    const requestTex42 = struct {
+        fn f(
+            o: *Compiled,
+            last_w: *?u6,
+            s: *const Shader,
+            r_reg: *const [max_insts]u6,
+            r2_map: *const [max_insts]bool,
+            r4_zero: *bool,
+            req: *[max_insts]bool,
+            out_cnt: *u8,
+            idx: usize,
+        ) Error!void {
+            const t_inst = s.insts[idx];
+            const slot: u8 = @intCast(t_inst.imm);
+            if (!r4_zero.*) {
+                // r4 bit 0 of per-pixel mask must be 0 -> active.
+                try pushAlu(o, last_w, .{
+                    .sig = .{ .small_imm_b = true },
+                    .raddr_b = 0,
+                    .mul = .{
+                        .op = .mov,
+                        .dst = .r(4),
+                        .a = .{ .mux = .b },
+                    },
+                });
+                r4_zero.* = true;
+            }
+            // Emit wrtmuc for P0 first (also hides any RF write delay on u_t).
+            try push(o, last_w, v3d_qpu.wrtmuc());
+            try addUnif(o, .{ .tex_p0 = slot });
+            const u_t = prepUnary(s, r_reg, r2_map, t_inst.srcs[1]);
+            const fold_p1 = u_t.sig == (v3d_qpu.Sig{});
+            try pushAlu(o, last_w, .{
+                .sig = if (fold_p1) .{ .wrtmuc = true } else u_t.sig,
+                .raddr_a = u_t.raddr_a,
+                .raddr_b = u_t.raddr_b,
+                .mul = .{
+                    .op = .mov,
+                    .dst = .magicAddr(v3d_qpu.W.tmut),
+                    .a = .{ .mux = u_t.mux },
+                },
+            });
+            if (!fold_p1) {
+                try push(o, last_w, v3d_qpu.wrtmuc());
+            }
+            try addUnif(o, .{ .tex_p1 = slot });
+            const u_s = prepUnary(s, r_reg, r2_map, t_inst.srcs[0]);
+            try pushAlu(o, last_w, .{
+                .sig = u_s.sig,
+                .raddr_a = u_s.raddr_a,
+                .raddr_b = u_s.raddr_b,
+                .mul = .{
+                    .op = .mov,
+                    .dst = .magicAddr(v3d_qpu.W.tmus),
+                    .a = .{ .mux = u_s.mux },
+                },
+            });
+            req[idx] = true;
+            out_cnt.* += 1;
+            o.num_texture_samples += 1;
+        }
+    }.f;
 
     const ensureTlbLocked = struct {
         fn f(o: *Compiled, last_w: *?u6, locked: *bool) Error!void {
@@ -1742,54 +1809,33 @@ pub fn compileV3d(shader: *const Shader) Error!Compiled {
                 try push(&out, &last_rf_write, v3d_qpu.nop());
             },
             .tex => {
-                const slot: u8 = @intCast(inst.imm);
-                const u_t = prepUnary(shader, &rf_reg, &use_r2, inst.srcs[1]);
-                // 1. Write T to W.tmut
-                try pushAlu(&out, &last_rf_write, .{
-                    .sig = u_t.sig,
-                    .raddr_a = u_t.raddr_a,
-                    .raddr_b = u_t.raddr_b,
-                    .mul = .{
-                        .op = .mov,
-                        .dst = .magicAddr(v3d_qpu.W.tmut),
-                        .a = .{ .mux = u_t.mux },
-                    },
-                });
-                // 2. Emit wrtmuc for P0 (texture state address + return_words=0xf)
-                try push(&out, &last_rf_write, v3d_qpu.wrtmuc());
-                try addUnif(&out, .{ .tex_p0 = slot });
-                // 3. Emit wrtmuc for P1 (sampler state address + output_type_32_bit + per_pixel_mask)
-                try push(&out, &last_rf_write, v3d_qpu.wrtmuc());
-                try addUnif(&out, .{ .tex_p1 = slot });
-                // 4. Write S to W.tmus (triggers 2D lookup; r4 bit 0 of per-pixel mask must be 0 -> active)
-                try pushAlu(&out, &last_rf_write, .{
-                    .sig = .{ .small_imm_b = true },
-                    .raddr_b = 0, // imm 0
-                    .add = .{
-                        .op = .nop,
-                    },
-                    .mul = .{
-                        .op = .mov,
-                        .dst = .r(4),
-                        .a = .{ .mux = .b },
-                    },
-                });
-                const u_s = prepUnary(shader, &rf_reg, &use_r2, inst.srcs[0]);
-                try pushAlu(&out, &last_rf_write, .{
-                    .sig = u_s.sig,
-                    .raddr_a = u_s.raddr_a,
-                    .raddr_b = u_s.raddr_b,
-                    .mul = .{
-                        .op = .mov,
-                        .dst = .magicAddr(v3d_qpu.W.tmus),
-                        .a = .{ .mux = u_s.mux },
-                    },
-                });
-                // 5. Thread switch to wait for TMU, plus 2 delay slots
-                try push(&out, &last_rf_write, v3d_qpu.thrsw());
-                try push(&out, &last_rf_write, v3d_qpu.nop());
-                try push(&out, &last_rf_write, v3d_qpu.nop());
-                // 6. Read 4 RGBA float32 channels via ldtmu; lower.zig maps
+                // In 4-way threaded mode, the per-thread TMU result FIFO holds
+                // up to 2 four-component RGBA lookups (8 words). Queue a second
+                // ready lookup before switching threads so both fetch in parallel.
+                if (!tex_requested[j]) {
+                    try requestTex42(&out, &last_rf_write, shader, &rf_reg, &use_r2, &r4_zeroed, &tex_requested, &tex_outstanding, j);
+                }
+                for (j + 1..n) |k| {
+                    if (tex_outstanding >= 2) break;
+                    const later = shader.insts[k];
+                    if (!live[k] or skip_inst[k] or later.op != .tex or tex_requested[k]) continue;
+                    var ready = true;
+                    for (later.srcs[0..2]) |v| {
+                        const vi = @intFromEnum(v);
+                        if (vi >= j or use_r2[vi] or (isDeferredUnifOrConst(shader, vi) and first_use[vi] > j)) ready = false;
+                    }
+                    if (!ready) break;
+                    try requestTex42(&out, &last_rf_write, shader, &rf_reg, &use_r2, &r4_zeroed, &tex_requested, &tex_outstanding, k);
+                }
+                if (!tex_covered[j]) {
+                    try push(&out, &last_rf_write, v3d_qpu.thrsw());
+                    try push(&out, &last_rf_write, v3d_qpu.nop());
+                    try push(&out, &last_rf_write, v3d_qpu.nop());
+                    for (0..n) |k| if (tex_requested[k]) {
+                        tex_covered[k] = true;
+                    };
+                }
+                // Read 4 RGBA float32 channels via ldtmu; lower.zig maps
                 // unpack_unorm8(2)->R, (1)->G, (0)->B, (3)->A!
                 // Hardware returns R, G, B, A in order, so store R into ch[2],
                 // G into ch[1], B into ch[0], A into ch[3]!
@@ -1797,7 +1843,7 @@ pub fn compileV3d(shader: *const Shader) Error!Compiled {
                 for ([4]u6{ ch[2], ch[1], ch[0], ch[3] }) |c_rf| {
                     try push(&out, &last_rf_write, v3d_qpu.ldtmu(.rf(c_rf)));
                 }
-                out.num_texture_samples += 1;
+                tex_outstanding -= 1;
             },
             .tlb_color_load => {
                 try ensureTlbLocked(&out, &last_rf_write, &tlb_locked);
@@ -2302,10 +2348,71 @@ pub fn compileV3d71(shader: *const Shader) Error!Compiled {
     var tlb_locked = false;
     var tlb_load_sample: u32 = 0;
     var tlb_write_sample: u32 = 0;
+    var rf0_zeroed = false;
+    var tex_requested: [max_insts]bool = @splat(false);
+    var tex_covered: [max_insts]bool = @splat(false);
+    var tex_outstanding: u8 = 0;
+    const PendingVary = struct { tmp_rf: u6, dst: v3d_qpu.Dst };
+    var pending_vary: ?PendingVary = null;
     const is_msaa_blend = blk: {
         for (0..n) |j| if (live[j] and shader.insts[j].op == .tlb_color_ms) break :blk true;
         break :blk false;
     };
+
+    const requestTex71 = struct {
+        fn f(
+            o: *Compiled,
+            last_w: *?u6,
+            s: *const Shader,
+            r_reg: *const [max_insts]u6,
+            rf0_zero: *bool,
+            req: *[max_insts]bool,
+            out_cnt: *u8,
+            idx: usize,
+        ) Error!void {
+            const t_inst = s.insts[idx];
+            const slot: u8 = @intCast(t_inst.imm);
+            if (!rf0_zero.*) {
+                // Clear rf0 (per-pixel TMU mask on V3D 7.1, bit 0 = 0 -> active).
+                try pushAlu(o, last_w, .{
+                    .mul = .{
+                        .op = .mov,
+                        .dst = .rf(0),
+                        .a = .immVal(0),
+                    },
+                });
+                rf0_zero.* = true;
+            }
+            // Emit wrtmuc for P0 first (also hides any RF write delay on u_t).
+            try push(o, last_w, v3d_qpu.wrtmuc71());
+            try addUnif(o, .{ .tex_p0 = slot });
+            const u_t = prepUnary(s, r_reg, t_inst.srcs[1]);
+            const fold_p1 = !u_t.imm;
+            try pushAlu(o, last_w, .{
+                .sig = if (fold_p1) .{ .wrtmuc = true } else .{},
+                .mul = .{
+                    .op = .mov,
+                    .dst = .magicAddr(v3d_qpu.W.tmut),
+                    .a = u_t,
+                },
+            });
+            if (!fold_p1) {
+                try push(o, last_w, v3d_qpu.wrtmuc71());
+            }
+            try addUnif(o, .{ .tex_p1 = slot });
+            const u_s = prepUnary(s, r_reg, t_inst.srcs[0]);
+            try pushAlu(o, last_w, .{
+                .mul = .{
+                    .op = .mov,
+                    .dst = .magicAddr(v3d_qpu.W.tmus),
+                    .a = u_s,
+                },
+            });
+            req[idx] = true;
+            out_cnt.* += 1;
+            o.num_texture_samples += 1;
+        }
+    }.f;
 
     const ensureTlbLocked = struct {
         fn f(o: *Compiled, last_w: *?u6, locked: *bool) Error!void {
@@ -2337,6 +2444,23 @@ pub fn compileV3d71(shader: *const Shader) Error!Compiled {
         const dst_rf = rf_reg[j];
         const dst: v3d_qpu.Dst = if (has_rf[j]) .rf(dst_rf) else .nop;
 
+        if (inst.op != .varying and inst.op != .frag_w and inst.op != .frag_z and
+            inst.op != .uniform and inst.op != .constant and inst.op != .pack_unorm8888 and
+            inst.op != .pack_screen_xy and inst.op != .unpack_unorm8)
+        {
+            if (pending_vary) |pv| {
+                try pushAlu(&out, &last_rf_write, .{
+                    .add = .{
+                        .op = .fadd,
+                        .dst = pv.dst,
+                        .a = .rf(pv.tmp_rf),
+                        .b = .rf(0),
+                    },
+                });
+                pending_vary = null;
+            }
+        }
+
         switch (inst.op) {
             .frag_w, .frag_z, .uniform, .constant, .pack_unorm8888, .pack_screen_xy, .unpack_unorm8 => {},
             .vpm_read => {
@@ -2363,26 +2487,44 @@ pub fn compileV3d71(shader: *const Shader) Error!Compiled {
                 out.num_vpm_reads += 1;
             },
             .varying => {
-                // On V3D 7.1, ldvary rf1 writes (A*x + B*y) to rf1 and C to rf0
-                // after a 1-instruction delay.
-                try push(&out, &last_rf_write, v3d_qpu.ldvary71(.rf(1)));
-                try push(&out, &last_rf_write, v3d_qpu.nop71());
-                try pushAlu(&out, &last_rf_write, .{
-                    .mul = .{
-                        .op = .fmul,
-                        .dst = .rf(1),
-                        .a = .rf(1),
-                        .b = .rf(3), // rf3 = payload W on V3D 7.1
-                    },
-                });
-                try pushAlu(&out, &last_rf_write, .{
-                    .add = .{
-                        .op = .fadd,
-                        .dst = dst,
-                        .a = .rf(1),
-                        .b = .rf(0), // rf0 = C from ldvary
-                    },
-                });
+                // On V3D 7.1, ldvary rf_tmp writes (A*x + B*y) to rf_tmp and C
+                // to rf0 after a 1-instruction delay. When consecutive varyings
+                // run, issue the next ldvary in the previous fmul's delay slot
+                // and the previous fadd in the new ldvary's delay slot.
+                rf0_zeroed = false;
+                if (pending_vary) |pv| {
+                    const cur_tmp: u6 = if (pv.tmp_rf == 1) 4 else 1;
+                    try push(&out, &last_rf_write, v3d_qpu.ldvary71(.rf(cur_tmp)));
+                    try pushAlu(&out, &last_rf_write, .{
+                        .add = .{
+                            .op = .fadd,
+                            .dst = pv.dst,
+                            .a = .rf(pv.tmp_rf),
+                            .b = .rf(0),
+                        },
+                    });
+                    try pushAlu(&out, &last_rf_write, .{
+                        .mul = .{
+                            .op = .fmul,
+                            .dst = .rf(cur_tmp),
+                            .a = .rf(cur_tmp),
+                            .b = .rf(3), // rf3 = payload W on V3D 7.1
+                        },
+                    });
+                    pending_vary = .{ .tmp_rf = cur_tmp, .dst = dst };
+                } else {
+                    try push(&out, &last_rf_write, v3d_qpu.ldvary71(.rf(1)));
+                    try push(&out, &last_rf_write, v3d_qpu.nop71());
+                    try pushAlu(&out, &last_rf_write, .{
+                        .mul = .{
+                            .op = .fmul,
+                            .dst = .rf(1),
+                            .a = .rf(1),
+                            .b = .rf(3), // rf3 = payload W on V3D 7.1
+                        },
+                    });
+                    pending_vary = .{ .tmp_rf = 1, .dst = dst };
+                }
                 out.num_varyings += 1;
             },
             .fmaxabs => {
@@ -2468,49 +2610,35 @@ pub fn compileV3d71(shader: *const Shader) Error!Compiled {
                 });
             },
             .tex => {
-                const slot: u8 = @intCast(inst.imm);
-                const u_t = prepUnary(shader, &rf_reg, inst.srcs[1]);
-                // 1. Write T to W.tmut
-                try pushAlu(&out, &last_rf_write, .{
-                    .mul = .{
-                        .op = .mov,
-                        .dst = .magicAddr(v3d_qpu.W.tmut),
-                        .a = u_t,
-                    },
-                });
-                // 2. Emit wrtmuc for P0
-                try push(&out, &last_rf_write, v3d_qpu.wrtmuc71());
-                try addUnif(&out, .{ .tex_p0 = slot });
-                // 3. Emit wrtmuc for P1
-                try push(&out, &last_rf_write, v3d_qpu.wrtmuc71());
-                try addUnif(&out, .{ .tex_p1 = slot });
-                // 4. Clear rf0 (per-pixel TMU mask on V3D 7.1, bit 0 = 0 -> active)
-                // and write S to W.tmus to trigger the 2D lookup.
-                try pushAlu(&out, &last_rf_write, .{
-                    .mul = .{
-                        .op = .mov,
-                        .dst = .rf(0),
-                        .a = .immVal(0),
-                    },
-                });
-                const u_s = prepUnary(shader, &rf_reg, inst.srcs[0]);
-                try pushAlu(&out, &last_rf_write, .{
-                    .mul = .{
-                        .op = .mov,
-                        .dst = .magicAddr(v3d_qpu.W.tmus),
-                        .a = u_s,
-                    },
-                });
-                // 5. Thread switch to wait for TMU, plus 2 delay slots
-                try push(&out, &last_rf_write, v3d_qpu.thrsw71());
-                try push(&out, &last_rf_write, v3d_qpu.nop71());
-                try push(&out, &last_rf_write, v3d_qpu.nop71());
-                // 6. Read 4 RGBA float32 channels via ldtmu
+                if (!tex_requested[j]) {
+                    try requestTex71(&out, &last_rf_write, shader, &rf_reg, &rf0_zeroed, &tex_requested, &tex_outstanding, j);
+                }
+                for (j + 1..n) |k| {
+                    if (tex_outstanding >= 2) break;
+                    const later = shader.insts[k];
+                    if (!live[k] or skip_inst[k] or later.op != .tex or tex_requested[k]) continue;
+                    var ready = true;
+                    for (later.srcs[0..2]) |v| {
+                        const vi = @intFromEnum(v);
+                        if (vi >= j or (isDeferredUnifOrConst(shader, vi) and first_use[vi] > j)) ready = false;
+                    }
+                    if (!ready) break;
+                    try requestTex71(&out, &last_rf_write, shader, &rf_reg, &rf0_zeroed, &tex_requested, &tex_outstanding, k);
+                }
+                if (!tex_covered[j]) {
+                    try push(&out, &last_rf_write, v3d_qpu.thrsw71());
+                    try push(&out, &last_rf_write, v3d_qpu.nop71());
+                    try push(&out, &last_rf_write, v3d_qpu.nop71());
+                    for (0..n) |k| if (tex_requested[k]) {
+                        tex_covered[k] = true;
+                    };
+                }
+                // Read 4 RGBA float32 channels via ldtmu
                 const ch = tex_ch_rf[j];
                 for ([4]u6{ ch[2], ch[1], ch[0], ch[3] }) |c_rf| {
                     try push(&out, &last_rf_write, v3d_qpu.ldtmu71(.rf(c_rf)));
                 }
-                out.num_texture_samples += 1;
+                tex_outstanding -= 1;
             },
             .tlb_color_load => {
                 try ensureTlbLocked(&out, &last_rf_write, &tlb_locked);
@@ -2674,6 +2802,17 @@ pub fn compileV3d71(shader: *const Shader) Error!Compiled {
                 }
             },
         }
+    }
+
+    if (pending_vary) |pv| {
+        try pushAlu(&out, &last_rf_write, .{
+            .add = .{
+                .op = .fadd,
+                .dst = pv.dst,
+                .a = .rf(pv.tmp_rf),
+                .b = .rf(0),
+            },
+        });
     }
 
     if (shader.stage != .fragment) {

@@ -583,10 +583,10 @@ pub const Frame = struct {
         unreachable;
     }
 
-    /// Translates the recorded frame into V3D 4.2 BCL, RCL, and indirect state
-    /// buffers, submits them via `DRM_IOCTL_V3D_SUBMIT_CL`, and waits for
-    /// completion.
-    pub fn submitV3dRegion(f: *Frame, dev: device.Device, job: *const device.SubmitCl) !void {
+    /// Translates the recorded frame into V3D 4.2/7.1 BCL, RCL, and indirect
+    /// state buffers, submits them via `DRM_IOCTL_V3D_SUBMIT_CL`, and returns
+    /// the command list BO handle to wait on.
+    pub fn submitV3dRegion(f: *Frame, dev: device.Device, job: *const device.SubmitCl) !u32 {
         var bo_addrs: [max_bos]u32 = undefined;
         for (f.bo_handles[0..f.bo_count], 0..) |h, i| {
             bo_addrs[i] = try dev.getBoOffset(h);
@@ -597,12 +597,37 @@ pub const Frame = struct {
         const tile_alloc_size = std.mem.alignForward(u32, @max(num_tiles * 64, 4096), 4096);
         const tile_state_size = std.mem.alignForward(u32, @max(num_tiles * 64, 4096), 4096);
 
-        const cl_bo = try dev.createV3dBo(256 * 1024);
-        defer dev.destroyV3dBo(cl_bo);
-        const tile_alloc_bo = try dev.createV3dBo(tile_alloc_size);
-        defer dev.destroyV3dBo(tile_alloc_bo);
-        const tile_state_bo = try dev.createV3dBo(tile_state_size);
-        defer dev.destroyV3dBo(tile_state_bo);
+        const slot = &v3d_scratch[v3d_scratch_next];
+        v3d_scratch_next = (v3d_scratch_next + 1) % v3d_scratch_slots;
+        if (slot.in_use) {
+            try dev.waitBo(slot.cl_bo.?.handle, std.time.ns_per_s);
+            slot.in_use = false;
+        }
+        if (slot.cl_bo == null) {
+            slot.cl_bo = try dev.createV3dBo(256 * 1024);
+        }
+        if (slot.tile_alloc_bo) |bo| {
+            if (bo.map.len < tile_alloc_size) {
+                dev.destroyV3dBo(bo);
+                slot.tile_alloc_bo = null;
+            }
+        }
+        if (slot.tile_alloc_bo == null) {
+            slot.tile_alloc_bo = try dev.createV3dBo(tile_alloc_size);
+        }
+        if (slot.tile_state_bo) |bo| {
+            if (bo.map.len < tile_state_size) {
+                dev.destroyV3dBo(bo);
+                slot.tile_state_bo = null;
+            }
+        }
+        if (slot.tile_state_bo == null) {
+            slot.tile_state_bo = try dev.createV3dBo(tile_state_size);
+        }
+
+        const cl_bo = slot.cl_bo.?;
+        const tile_alloc_bo = slot.tile_alloc_bo.?;
+        const tile_state_bo = slot.tile_state_bo.?;
 
         const cl_base = try dev.getBoOffset(cl_bo.handle);
         const tile_alloc_addr = try dev.getBoOffset(tile_alloc_bo.handle);
@@ -663,6 +688,11 @@ pub const Frame = struct {
                 var samp_state_addrs: [3]u32 = .{ 0, 0, 0 };
                 for (d.textures, 0..) |maybe_tex, ti| {
                     if (maybe_tex) |t| {
+                        if (ti > 0 and d.textures[0] != null and std.meta.eql(t, d.textures[0].?)) {
+                            tex_state_addrs[ti] = tex_state_addrs[0];
+                            samp_state_addrs[ti] = samp_state_addrs[0];
+                            continue;
+                        }
                         ind_off = std.mem.alignForward(u32, ind_off, 32);
                         const t_addr = f.boAddr(&bo_addrs, t.handle);
                         const t_state = v3d_cl.packTextureShaderState(t_addr, t.config);
@@ -811,16 +841,59 @@ pub const Frame = struct {
             .rcl_start = rcl_start,
             .rcl_end = rcl_end,
             .qma = tile_alloc_addr,
-            .qms = tile_alloc_size,
+            .qms = @intCast(tile_alloc_bo.map.len),
             .qts = tile_state_addr,
             .bo_handles = @intFromPtr(&v3d_handles),
             .bo_handle_count = f.bo_count + 3,
             .flags = device.V3dSubmitCl.flag_flush_cache,
         };
         try dev.submitV3d(&v3d_submit);
-        try dev.waitBo(cl_bo.handle, std.time.ns_per_s);
+        v3d_scratch_seq += 1;
+        slot.seq = v3d_scratch_seq;
+        slot.in_use = true;
+        return cl_bo.handle;
     }
 };
+
+const V3dScratchSlot = struct {
+    cl_bo: ?device.Bo = null,
+    tile_alloc_bo: ?device.Bo = null,
+    tile_state_bo: ?device.Bo = null,
+    seq: u64 = 0,
+    in_use: bool = false,
+};
+
+const v3d_scratch_slots = Frame.max_regions * 2;
+var v3d_scratch: [v3d_scratch_slots]V3dScratchSlot = @splat(.{});
+var v3d_scratch_next: usize = 0;
+var v3d_scratch_seq: u64 = 0;
+
+pub fn markV3dCompleted(handle: u32) void {
+    var done_seq: u64 = 0;
+    for (v3d_scratch) |slot| {
+        if (slot.cl_bo) |bo| {
+            if (bo.handle == handle) {
+                done_seq = slot.seq;
+                break;
+            }
+        }
+    }
+    if (done_seq == 0) return;
+    for (&v3d_scratch) |*slot| {
+        if (slot.in_use and slot.seq <= done_seq) slot.in_use = false;
+    }
+}
+
+pub fn freeV3dScratch(dev: device.Device) void {
+    for (&v3d_scratch) |*slot| {
+        if (slot.cl_bo) |bo| dev.destroyV3dBo(bo);
+        if (slot.tile_alloc_bo) |bo| dev.destroyV3dBo(bo);
+        if (slot.tile_state_bo) |bo| dev.destroyV3dBo(bo);
+        slot.* = .{};
+    }
+    v3d_scratch_next = 0;
+    v3d_scratch_seq = 0;
+}
 
 const testing = std.testing;
 

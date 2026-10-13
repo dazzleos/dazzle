@@ -330,6 +330,10 @@ pub const Device = struct {
     }
 
     pub fn close(dev: Device) void {
+        if (dev.is_v3d) {
+            render.freeV3dScratch(dev);
+            clearBoOffsetCache();
+        }
         if (dev.v3d_fd) |vfd| sys.close(vfd);
         sys.close(dev.fd);
     }
@@ -358,10 +362,12 @@ pub const Device = struct {
             @intCast(mmap_arg.offset),
         ));
         const ptr: [*]align(std.heap.page_size_min) u8 = @ptrFromInt(addr);
+        putBoOffsetCache(create.handle, create.offset);
         return .{ .handle = create.handle, .map = ptr[0..size] };
     }
 
     pub fn destroyV3dBo(dev: Device, bo: Bo) void {
+        invalidateBoOffsetCache(bo.handle);
         _ = linux.munmap(bo.map.ptr, bo.map.len);
         drm.gemClose(dev.renderFd(), bo.handle);
     }
@@ -420,6 +426,7 @@ pub const Device = struct {
     }
 
     pub fn destroyBo(dev: Device, bo: Bo) void {
+        if (dev.is_v3d) invalidateBoOffsetCache(bo.handle);
         _ = linux.munmap(bo.map.ptr, bo.map.len);
         drm.gemClose(dev.renderFd(), bo.handle);
         if (bo.kms_handle != 0 and bo.kms_handle != bo.handle) {
@@ -447,6 +454,7 @@ pub const Device = struct {
     }
 
     pub fn destroyShaderBo(dev: Device, handle: u32) void {
+        if (dev.is_v3d) invalidateBoOffsetCache(handle);
         drm.gemClose(dev.renderFd(), handle);
     }
 
@@ -455,12 +463,15 @@ pub const Device = struct {
     }
 
     pub fn closeHandle(dev: Device, handle: u32) void {
+        if (dev.is_v3d) invalidateBoOffsetCache(handle);
         drm.gemClose(dev.renderFd(), handle);
     }
 
     pub fn getBoOffset(dev: Device, handle: u32) !u32 {
+        if (getBoOffsetCached(handle)) |off| return off;
         var arg: V3dGetBoOffset = .{ .handle = handle };
         try drm.ioctl(dev.renderFd(), IOCTL_V3D_GET_BO_OFFSET, &arg);
+        putBoOffsetCache(handle, arg.offset);
         return arg.offset;
     }
 
@@ -477,8 +488,7 @@ pub const Device = struct {
     pub fn submit(dev: Device, job: *SubmitCl) !u64 {
         if (dev.is_v3d) {
             const frame: *render.Frame = @fieldParentPtr("submit", job);
-            try frame.submitV3dRegion(dev, job);
-            return 0;
+            return try frame.submitV3dRegion(dev, job);
         }
         try drm.ioctl(dev.fd, IOCTL_SUBMIT_CL, job);
         return job.seqno;
@@ -486,10 +496,42 @@ pub const Device = struct {
 
     pub fn waitSeqno(dev: Device, seqno: u64, timeout_ns: u64) !void {
         if (dev.is_v3d) {
-            if (seqno != 0) try dev.waitBo(@intCast(seqno), timeout_ns);
+            if (seqno != 0) {
+                const handle: u32 = @intCast(seqno);
+                try dev.waitBo(handle, timeout_ns);
+                render.markV3dCompleted(handle);
+            }
             return;
         }
         var arg: WaitSeqno = .{ .seqno = seqno, .timeout_ns = timeout_ns };
         try drm.ioctl(dev.fd, IOCTL_WAIT_SEQNO, &arg);
     }
 };
+
+const bo_offset_cache_size = 512;
+var bo_offset_handles: [bo_offset_cache_size]u32 = @splat(0);
+var bo_offset_values: [bo_offset_cache_size]u32 = @splat(0);
+
+fn getBoOffsetCached(handle: u32) ?u32 {
+    if (handle == 0) return null;
+    const slot = handle % bo_offset_cache_size;
+    if (bo_offset_handles[slot] == handle) return bo_offset_values[slot];
+    return null;
+}
+
+fn putBoOffsetCache(handle: u32, offset: u32) void {
+    if (handle == 0) return;
+    const slot = handle % bo_offset_cache_size;
+    bo_offset_handles[slot] = handle;
+    bo_offset_values[slot] = offset;
+}
+
+fn invalidateBoOffsetCache(handle: u32) void {
+    if (handle == 0) return;
+    const slot = handle % bo_offset_cache_size;
+    if (bo_offset_handles[slot] == handle) bo_offset_handles[slot] = 0;
+}
+
+fn clearBoOffsetCache() void {
+    @memset(&bo_offset_handles, 0);
+}
