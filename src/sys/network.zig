@@ -1091,8 +1091,8 @@ pub const Subscription = struct {
     }
 
     /// Connects and subscribes if not already connected.
-    pub fn connect(s: *Subscription) ?linux.fd_t {
-        return s.connectTo(socket_path);
+    pub fn connect(s: *Subscription) void {
+        _ = s.connectTo(socket_path);
     }
 
     pub fn connectTo(s: *Subscription, path: []const u8) ?linux.fd_t {
@@ -1350,4 +1350,3 @@ test "the wired adapter's addressing goes through the socket" {
     const got = sub.poll().?;
     try testing.expect(got.ready and got.ethernetConnected());
 }
-

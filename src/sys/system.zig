@@ -412,8 +412,8 @@ pub const Subscription = struct {
     }
 
     /// Connects and subscribes if not already connected.
-    pub fn connect(s: *Subscription) ?linux.fd_t {
-        return s.connectTo(socket_path);
+    pub fn connect(s: *Subscription) void {
+        _ = s.connectTo(socket_path);
     }
 
     pub fn connectTo(s: *Subscription, path: []const u8) ?linux.fd_t {
@@ -580,4 +580,3 @@ test "requests and reports go through the socket" {
     const got = sub.poll().?;
     try testing.expectEqual(@as(?u16, 256), got.video_memory_next);
 }
-

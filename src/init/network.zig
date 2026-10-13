@@ -204,7 +204,7 @@ fn run() !void {
         const fd: linux.fd_t = @intCast(sys.check(linux.socket(linux.AF.NETLINK, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK, linux.NETLINK.ROUTE)) catch break :blk null);
         // RTMGRP_LINK (1) | RTMGRP_IPV4_IFADDR (0x10) | RTMGRP_IPV4_ROUTE (0x40)
         var addr: linux.sockaddr.nl = .{ .pid = 0, .groups = 0x51 };
-        sys.check(linux.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.nl))) catch {
+        _ = sys.check(linux.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.nl))) catch {
             sys.close(fd);
             break :blk null;
         };
