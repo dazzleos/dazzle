@@ -122,7 +122,26 @@ pub const Keyboard = enum {
             const up = if (letter) shift != caps else shift;
             return if (up) key.shifted else key.plain;
         };
-        return null;
+        if (altgr) return null;
+        return switch (key_code) {
+            55 => '*',
+            71 => '7',
+            72 => '8',
+            73 => '9',
+            74 => '-',
+            75 => '4',
+            76 => '5',
+            77 => '6',
+            78 => '+',
+            79 => '1',
+            80 => '2',
+            81 => '3',
+            82 => '0',
+            83 => '.',
+            98 => '/',
+            117 => '=',
+            else => null,
+        };
     }
 };
 
@@ -337,6 +356,11 @@ test "keyboards" {
     try testing.expectEqual(@as(?u21, '~'), Keyboard.gb.char(43, true, false, false));
     try testing.expectEqual(@as(?u21, '\\'), Keyboard.gb.char(86, false, false, false));
     try testing.expectEqual(@as(?u21, 'q'), Keyboard.gb.char(16, false, false, false));
+    // Numeric keypad.
+    for ([_]u32{ 82, 79, 80, 81, 75, 76, 77, 71, 72, 73, 83, 78, 74, 55, 98, 117 }, "0123456789.+-*/=") |code, expected| {
+        try testing.expectEqual(@as(?u21, expected), Keyboard.us.char(code, false, false, false));
+        try testing.expectEqual(@as(?u21, expected), Keyboard.gb.char(code, false, false, false));
+    }
 }
 
 test "settings, kept as text" {
