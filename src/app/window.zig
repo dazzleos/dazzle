@@ -279,6 +279,12 @@ pub const Window = struct {
     wake_fd: ?linux.fd_t = null,
     pointer: ?client.Proxy = null,
     keyboard: ?client.Proxy = null,
+    /// Keys per second (`wl_keyboard.repeat_info`, 0 disables repeat) and
+    /// milliseconds before repeating starts.
+    repeat_rate: u32 = 25,
+    repeat_delay_ms: u32 = 600,
+    repeat: ?struct { code: u32, next_ns: u64 } = null,
+    keys_down: std.StaticBitSet(256) = .initEmpty(),
     pointer_pos: [2]f32 = .{ 0, 0 },
     /// Input since the last `takeInput`.
     input: [64]InputEvent = undefined,
@@ -396,6 +402,7 @@ pub const Window = struct {
     pub fn poll(w: *Window) !void {
         _ = try w.conn.dispatchPending();
         w.clipboard.service();
+        w.serviceRepeat(sys.nowNs());
     }
 
     /// Asks the shell to show the window on the whole screen, over its
@@ -531,10 +538,15 @@ pub const Window = struct {
     /// text) for up to `timeout_ns`, and handles them: for when there is
     /// nothing to draw.
     pub fn wait(w: *Window, timeout_ns: u64) !void {
-        const timeout_ms: u64 = std.math.divCeil(u64, timeout_ns, std.time.ns_per_ms) catch 0;
+        const now = sys.nowNs();
+        const caller_ms: u64 = std.math.divCeil(u64, timeout_ns, std.time.ns_per_ms) catch 0;
+        const timeout_ms = @min(caller_ms, w.repeatTimeoutMs(now) orelse caller_ms);
         const paste_fd = w.clipboard.pasteFd();
-        if (paste_fd == null and w.wake_fd == null)
-            return w.conn.dispatchTimeout(@intCast(@min(timeout_ms, std.math.maxInt(i32))));
+        if (paste_fd == null and w.wake_fd == null) {
+            try w.conn.dispatchTimeout(@intCast(@min(timeout_ms, std.math.maxInt(i32))));
+            w.serviceRepeat(sys.nowNs());
+            return;
+        }
         // A paste under way: its pipe is waited on too (no longer than
         // until it gives up); and the app's own file, if it has one.
         try w.conn.flush();
@@ -550,6 +562,26 @@ pub const Window = struct {
             _ = try w.conn.dispatchPending();
         }
         w.clipboard.service();
+        w.serviceRepeat(sys.nowNs());
+    }
+
+    fn repeatTimeoutMs(w: *const Window, now_ns: u64) ?u64 {
+        const rep = w.repeat orelse return null;
+        if (w.repeat_rate == 0) return null;
+        if (now_ns >= rep.next_ns) return 0;
+        return std.math.divCeil(u64, rep.next_ns - now_ns, std.time.ns_per_ms) catch 0;
+    }
+
+    fn serviceRepeat(w: *Window, now_ns: u64) void {
+        const rep = &(w.repeat orelse return);
+        if (w.repeat_rate == 0) {
+            w.repeat = null;
+            return;
+        }
+        if (now_ns < rep.next_ns) return;
+        const step = std.time.ns_per_s / @as(u64, w.repeat_rate);
+        rep.next_ns = if (now_ns - rep.next_ns < step) rep.next_ns + step else now_ns + step;
+        w.pushInput(.{ .key = .{ .code = rep.code, .pressed = true } });
     }
 
     /// Acknowledges a pending configure. Returns the new size if it changed;
@@ -1033,12 +1065,46 @@ pub const Window = struct {
                 _ = r.uint() catch return; // time
                 const code = r.uint() catch return;
                 const state = r.uint() catch return;
+                const pressed = state == p.wl_keyboard.key_state.pressed;
                 // Copying (Ctrl+C) needs the key's serial.
-                if (state == p.wl_keyboard.key_state.pressed) w.clipboard.serial = serial;
-                w.pushInput(.{ .key = .{ .code = code, .pressed = state == p.wl_keyboard.key_state.pressed } });
+                if (pressed) w.clipboard.serial = serial;
+                if (code < 256) w.keys_down.setValue(code, pressed);
+                if (pressed) {
+                    if (!isModifierKey(code) and w.repeat_rate > 0) {
+                        w.repeat = .{
+                            .code = code,
+                            .next_ns = sys.nowNs() + @as(u64, w.repeat_delay_ms) * std.time.ns_per_ms,
+                        };
+                    }
+                } else if (w.repeat) |rep| {
+                    if (rep.code == code) w.repeat = null;
+                }
+                w.pushInput(.{ .key = .{ .code = code, .pressed = pressed } });
+            },
+            p.wl_keyboard.event.leave => {
+                w.repeat = null;
+                var it = w.keys_down.iterator(.{});
+                while (it.next()) |code| {
+                    w.pushInput(.{ .key = .{ .code = @intCast(code), .pressed = false } });
+                }
+                w.keys_down = .initEmpty();
+            },
+            p.wl_keyboard.event.repeat_info => {
+                const rate = r.int() catch return;
+                const delay = r.int() catch return;
+                w.repeat_rate = @intCast(@max(rate, 0));
+                w.repeat_delay_ms = @intCast(@max(delay, 0));
+                if (w.repeat_rate == 0) w.repeat = null;
             },
             else => {},
         }
+    }
+
+    fn isModifierKey(code: u32) bool {
+        return switch (code) {
+            29, 42, 54, 56, 58, 97, 100, 125, 126 => true,
+            else => false,
+        };
     }
 
     fn wmBaseEvent(ptr: ?*anyopaque, _: *client.Display, _: u32, opcode: u16, r: *wire.Reader) void {
@@ -1070,6 +1136,7 @@ pub const Window = struct {
                     p.xdg_toplevel.state.fullscreen => fullscreen = true,
                     else => {},
                 };
+                if (suspended) w.repeat = null;
                 w.suspended = suspended;
                 w.maximized = maximized;
                 w.fullscreen = fullscreen;
@@ -1104,3 +1171,65 @@ test "the layout is named in the keymap" {
     try std.testing.expect(layoutNamed("xkb_symbols \"pc+us+inet(evdev)\" {") == null);
     try std.testing.expect(layoutNamed("nothing") == null);
 }
+
+test "held keys repeat after the delay, except modifiers, and stop on release or leave" {
+    var win: Window = .{
+        .gpa = std.testing.allocator,
+        .gpu = undefined,
+        .conn = undefined,
+        .clipboard = .{ .gpa = std.testing.allocator },
+    };
+    var disp: client.Display = undefined;
+
+    // repeat_info: 25 keys/s (40 ms), 200 ms initial delay.
+    const repeat_msg = [_]u32{ 25, 200 };
+    var r_info = wire.Reader{ .data = std.mem.sliceAsBytes(&repeat_msg), .c = undefined };
+    Window.keyboardEvent(&win, &disp, 1, p.wl_keyboard.event.repeat_info, &r_info);
+    try std.testing.expectEqual(@as(u32, 25), win.repeat_rate);
+    try std.testing.expectEqual(@as(u32, 200), win.repeat_delay_ms);
+
+    // Modifiers (e.g. Shift = 42) do not arm key repeat.
+    const shift_down = [_]u32{ 1, 0, 42, p.wl_keyboard.key_state.pressed };
+    var r_shift = wire.Reader{ .data = std.mem.sliceAsBytes(&shift_down), .c = undefined };
+    Window.keyboardEvent(&win, &disp, 1, p.wl_keyboard.event.key, &r_shift);
+    try std.testing.expect(win.repeat == null);
+    _ = win.takeInput();
+
+    // Pressing a non-modifier key ('a' = 30) arms key repeat.
+    const a_down = [_]u32{ 2, 0, 30, p.wl_keyboard.key_state.pressed };
+    var r_a_down = wire.Reader{ .data = std.mem.sliceAsBytes(&a_down), .c = undefined };
+    Window.keyboardEvent(&win, &disp, 1, p.wl_keyboard.event.key, &r_a_down);
+    try std.testing.expectEqual(@as(u32, 30), win.repeat.?.code);
+    try std.testing.expectEqual(@as(usize, 1), win.takeInput().len);
+
+    // Before the delay expires, serviceRepeat emits nothing.
+    const first_due = win.repeat.?.next_ns;
+    win.serviceRepeat(first_due - 1);
+    try std.testing.expectEqual(@as(usize, 0), win.takeInput().len);
+    try std.testing.expectEqual(@as(?u64, 1), win.repeatTimeoutMs(first_due - 1));
+
+    // At the delay, it emits a press and schedules the next repeat 40 ms later.
+    win.serviceRepeat(first_due);
+    const rep1 = win.takeInput();
+    try std.testing.expectEqual(@as(usize, 1), rep1.len);
+    try std.testing.expectEqual(@as(u32, 30), rep1[0].key.code);
+    try std.testing.expect(rep1[0].key.pressed);
+    try std.testing.expectEqual(first_due + 40 * std.time.ns_per_ms, win.repeat.?.next_ns);
+
+    // Releasing the key stops repeat.
+    const a_up = [_]u32{ 3, 0, 30, p.wl_keyboard.key_state.released };
+    var r_a_up = wire.Reader{ .data = std.mem.sliceAsBytes(&a_up), .c = undefined };
+    Window.keyboardEvent(&win, &disp, 1, p.wl_keyboard.event.key, &r_a_up);
+    try std.testing.expect(win.repeat == null);
+    _ = win.takeInput();
+
+    // Losing keyboard focus releases any held keys (such as Shift).
+    const leave_msg = [_]u32{ 4, 1 };
+    var r_leave = wire.Reader{ .data = std.mem.sliceAsBytes(&leave_msg), .c = undefined };
+    Window.keyboardEvent(&win, &disp, 1, p.wl_keyboard.event.leave, &r_leave);
+    const left = win.takeInput();
+    try std.testing.expectEqual(@as(usize, 1), left.len);
+    try std.testing.expectEqual(@as(u32, 42), left[0].key.code);
+    try std.testing.expect(!left[0].key.pressed);
+}
+
