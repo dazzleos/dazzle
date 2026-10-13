@@ -44,6 +44,11 @@ pub const Controls = struct {
         c.win.setMaximized(!c.win.maximized);
     }
 
+    /// Toggle whether the window fills the entire display (fullscreen).
+    pub fn toggleFullscreen(c: *Controls) void {
+        c.win.setFullscreen(!c.win.fullscreen);
+    }
+
     /// The title bar was pressed: drag the window (unless it fills the
     /// screen).
     pub fn drag(c: *Controls) void {

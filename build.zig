@@ -131,6 +131,15 @@ fn addIconFont(b: *std.Build) IconFont {
     return .{ .ttf = ttf, .codepoints = run.addOutputFileArg("icon_codepoints.zig") };
 }
 
+/// The Natural Earth 110m Admin-0 Countries vector dataset, triangulated
+/// and subdivided at build time by `tools/mkmap.zig`.
+fn addMapData(b: *std.Build) std.Build.LazyPath {
+    const tool = hostTool(b, "mkmap");
+    const run = b.addRunArtifact(tool);
+    run.addFileArg(b.path("src/apps/maps/data/ne_110m_admin_0_countries.geojson"));
+    return run.addOutputFileArg("map_data.zig");
+}
+
 /// The library modules, built for one target:
 ///
 /// * `sys`: Linux system call helpers shared by everything
@@ -1010,6 +1019,7 @@ pub fn build(b: *std.Build) void {
 
     const shaders = addShaders(b);
     const icon_font = addIconFont(b);
+    const map_data = addMapData(b);
     const pi = addModules(b, target, optimize, shaders, icon_font);
     // init runs as root; the shell and the apps (its Wayland clients) run
     // as the unprivileged Dazzle user.
@@ -1068,9 +1078,11 @@ pub fn build(b: *std.Build) void {
         .root_module = addProgramModule(b, "src/shell/main.zig", target, optimize, pi, shaders, true),
     });
     const install_shell = b.addInstallArtifact(shell_exe, .{});
+    const maps_mod = addProgramModule(b, "src/apps/maps/main.zig", target, optimize, pi, shaders, true);
+    maps_mod.addImport("map_data", b.createModule(.{ .root_source_file = map_data, .target = target, .optimize = optimize }));
     const maps_exe = b.addExecutable(.{
         .name = "dazzle-maps",
-        .root_module = addProgramModule(b, "src/apps/maps/main.zig", target, optimize, pi, shaders, true),
+        .root_module = maps_mod,
     });
     const install_maps = b.addInstallArtifact(maps_exe, .{});
     const terminal_exe = b.addExecutable(.{
@@ -1209,6 +1221,7 @@ pub fn build(b: *std.Build) void {
     const host_setup = addProgramModule(b, "src/apps/setup/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_setup.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_maps = addProgramModule(b, "src/apps/maps/main.zig", b.graph.host, test_optimize, host, shaders, false);
+    host_maps.addImport("map_data", b.createModule(.{ .root_source_file = map_data, .target = b.graph.host, .optimize = test_optimize }));
     host_maps.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_terminal = addProgramModule(b, "src/apps/terminal/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_terminal.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
@@ -1247,6 +1260,7 @@ pub fn build(b: *std.Build) void {
     }
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hostTool(b, "mkapp").root_module })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hostTool(b, "mkimage").root_module })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hostTool(b, "mkmap").root_module })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hostTool(b, "mkos").root_module })).step);
 
     const serve_exe = b.addExecutable(.{
@@ -1280,4 +1294,3 @@ pub fn build(b: *std.Build) void {
     const shaders_step = b.step("shaders", "Compile the shader programs (zig-out/shaders)");
     for (shaders) |s| shaders_step.dependOn(&b.addInstallFile(s.program, b.fmt("shaders/{s}.shader", .{s.name})).step);
 }
-

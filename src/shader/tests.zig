@@ -253,31 +253,24 @@ test "polyhedron fragment shader tints and shades the texture (or white), and ke
     }
 }
 
-test "globe fragment shader samples blue ocean texture as blue" {
+test "globe fragment shader shades vertex color with limb factor" {
     const p = try load("globe");
     var m = try @import("spirv.zig").Module.parse(testing.allocator, @embedFile("globe.spv"));
     defer m.deinit();
     var diag: program_mod.Diagnostic = .{};
     _ = try Program.compile(testing.allocator, @embedFile("globe.spv"), p.options, &diag);
 
-    var tex: TestTexture = undefined;
-    tex.init();
-    for (&tex.pixels) |*px| px.* = 0xff102a46; // deep blue ocean (R=0x10, G=0x2a, B=0x46)
-    texture.upload(&tex.memory, &tex.pixels, TestTexture.w, TestTexture.h);
-    var user: [42]u32 = @splat(0);
-    user[31] = f2u(1.0); // sun[3] = day_night_on = 1.0
-    user[35] = f2u(1.0); // camera[3] = atmo_on = 1.0
-    user[36] = f2u(1.0); // options[0] = tex_on = 1.0
+    const user: [36]u32 = @splat(0);
     const varyings = [_]sim.Vec{
-        lane(0.5, 0.0), // uv.u
-        lane(0.5, 0.0), // uv.v
-        lane(1.0, 0.0), // f_diffuse = 1.0
-        lane(0.0, 0.0), // f_rim = 0.0
+        lane(216.0 / 255.0, 0.0), // f_color.r (#D8)
+        lane(242.0 / 255.0, 0.0), // f_color.g (#F2)
+        lane(255.0 / 255.0, 0.0), // f_color.b (#FF)
+        lane(1.0, 0.0), // f_shade = 1.0
     };
     var buf: [64]u32 = undefined;
-    const stream = uniformStream(&buf, &p.fs, &user, .{ texture.p0(tex.cfg), texture.p1(tex.cfg) });
-    const r = try sim.run(p.fs.code(), .{ .uniforms = stream, .varyings = &varyings, .frag_w = sim.splatF(1.0), .frag_z = sim.splat(0x123456), .texture_memory = &tex.memory });
-    try testing.expectEqual(@as(u32, 0xff102a46), r.tlb_color.?[0]);
+    const stream = uniformStream(&buf, &p.fs, &user, .{ 0, 0 });
+    const r = try sim.run(p.fs.code(), .{ .uniforms = stream, .varyings = &varyings, .frag_w = sim.splatF(1.0), .frag_z = sim.splat(0x123456) });
+    try testing.expectEqual(@as(u32, 0xffd8f2ff), r.tlb_color.?[0]);
 }
 
 test "the shell's textured quads copy texels exactly" {

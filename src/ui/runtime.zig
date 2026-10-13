@@ -656,9 +656,11 @@ pub const Ui = struct {
     pub fn pointerMotion(ui: *Ui, pos: Point) void {
         ui.pointer = pos;
         ui.updateHover(pos);
-        for (ui.hovered.items) |n| _ = send(n, .{ .motion = local(n, pos) });
+        for (ui.hovered.items) |n| if (send(n, .{ .motion = local(n, pos) })) {
+            ui.needs_frame = true;
+        };
         if (ui.captured) |n| if (std.mem.indexOfScalar(*Node, ui.hovered.items, n) == null) {
-            _ = send(n, .{ .motion = local(n, pos) });
+            if (send(n, .{ .motion = local(n, pos) })) ui.needs_frame = true;
         };
     }
 

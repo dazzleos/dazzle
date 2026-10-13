@@ -92,6 +92,8 @@ pub const Icon = enum {
     public,
     layers,
     my_location,
+    fullscreen,
+    fullscreen_exit,
     // Develop.
     code,
     // Showcase.
