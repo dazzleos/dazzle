@@ -46,6 +46,8 @@ pub const Update = struct {
     status: update.Status = .unknown,
     /// The system offered: "0123abc (8 October 2026)".
     available: []const u8 = "",
+    /// The archive's size in bytes, when an update is offered.
+    size: u64 = 0,
     /// What went wrong last.
     message: []const u8 = "",
     /// Dazzle's 64x64 icon (installed, or from the server when a newer
@@ -213,13 +215,19 @@ fn dazzleRows(self: *const Settings, b: Builder, state: *State, rows: *std.Array
     else
         "The operating system";
     const Button = struct { label: []const u8, icon: ui.icons.Icon, flag: enum { download, restart } };
+    const available_text = if (u.message.len > 0)
+        u.message
+    else if (u.size > 0)
+        cx.fmt("Dazzle {s} is available · {s}", .{ u.available, info.formatBytes(&size_buf, u.size) })
+    else
+        cx.fmt("Dazzle {s} is available", .{u.available});
     const text: []const u8, const button: ?Button, const busy = switch (u.status) {
         .unknown, .current => .{ if (u.message.len > 0) u.message else detail, null, false },
         .checking => .{ "Checking for updates…", null, true },
-        .available => .{ cx.fmt("Dazzle {s} is available", .{u.available}), Button{ .label = "Update", .icon = .download, .flag = .download }, false },
+        .available => .{ available_text, Button{ .label = "Update", .icon = .download, .flag = .download }, false },
         .downloading => .{ "Downloading the update…", null, true },
         .installing => .{ "Installing the update…", null, true },
-        .ready => .{ "The update is installed: restart to use it", Button{ .label = "Restart", .icon = .restart_alt, .flag = .restart }, false },
+        .ready => .{ if (u.message.len > 0) u.message else "The update is installed: restart to use it", Button{ .label = "Restart", .icon = .restart_alt, .flag = .restart }, false },
     };
     const end: ui.Widget = if (busy) cx.make(ui.Spinner{ .size = 28 }) else if (button) |btn| cx.make(ui.OutlinedButton{
         .label = btn.label,
@@ -588,11 +596,11 @@ test "updates: offered, downloaded, installed, then a restart" {
     defer u.destroy();
     const d = view.sample();
     var actions: Actions = .{};
-    var settings: Settings = .{ .commit = "de14aa2 (7 October 2026)", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .apps = view.sample_apps, .update = .{ .status = .available, .available = "0123abc (8 October 2026)" } };
+    var settings: Settings = .{ .commit = "de14aa2 (7 October 2026)", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .apps = view.sample_apps, .update = .{ .status = .available, .available = "0123abc (8 October 2026)", .size = 4 << 20 } };
     u.frame(1920, 960, 0, settings);
     u.root.?.state(Settings.State).page = .apps;
     u.frame(1920, 960, 1, settings);
-    try testing.expect(view.findText(u.root.?, "Dazzle 0123abc (8 October 2026) is available") != null);
+    try testing.expect(view.findText(u.root.?, "Dazzle 0123abc (8 October 2026) is available · 4.0 MB") != null);
     try testing.expect(view.findText(u.root.?, "1 update available") != null);
     // "Update all" is to the left of "Refresh".
     const update_all_btn = view.up(view.findText(u.root.?, "Update all").?, ui.OutlinedButton).?;

@@ -103,7 +103,7 @@ fn install(gpa: std.mem.Allocator, sha256: []const u8, running: u8) !void {
     errdefer sys.files.removeTree(new);
     try sys.archive.extract(gpa, archive, "os", new);
     var path_buf: [128]u8 = undefined;
-    for ([_][]const u8{ "zImage", "initramfs.cpio", proto.Version.file_name }) |name| {
+    for ([_][]const u8{ "kernel.img", "kernel7.img", "kernel8.img", "initramfs.cpio", proto.Version.file_name }) |name| {
         const path = try std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ new, name });
         if (!storage.exists(path)) return error.Incomplete;
     }

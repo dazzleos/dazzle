@@ -193,7 +193,10 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
                 apps.uninstall(n.slice());
                 icons_dirty = true;
             }
-            if (actions.refresh_apps or actions.check_update) apps.refresh(true);
+            if (actions.refresh_apps or actions.check_update) {
+                updater.message_len = 0;
+                apps.refresh(true);
+            }
             actions.install = null;
             actions.remove = null;
             actions.refresh_apps = false;
@@ -357,6 +360,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
                 .update = .{
                     .status = updater.status(),
                     .available = if (updater.available()) |m| std.fmt.bufPrint(&available_buf, "{s} ({s})", .{ m.version, update.formatDate(&date_buf, m.time) }) catch m.version else "",
+                    .size = if (updater.available()) |m| m.size else 0,
                     .message = updater.message(),
                     .icon = icons.osIcon(),
                 },

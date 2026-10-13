@@ -139,7 +139,7 @@ const Manager = struct {
             if (m.formatting != null) m.checkFormatting();
             if (m.copying != null) m.checkCopying();
             m.maybeStartCopying();
-            const busy = m.formatting != null or m.copying != null;
+            const busy = m.formatting != null or m.copying != null or m.installer != null;
             if (m.installer) |*i| if (i.finished()) |how| {
                 m.installer = null;
                 m.report.update = if (how == .none) .ready else .failed;
