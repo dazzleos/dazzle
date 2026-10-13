@@ -137,6 +137,7 @@ pub const Settings = struct {
         ethernet: ethernet_view.State = .{},
         board: board_view.State = .{},
         software: software_view.State = .{},
+        resources: resources_view.State = .{},
         log: log_view.State = .{},
 
         fn selectPage(st: *State, idx: usize) void {
@@ -163,9 +164,9 @@ pub const Settings = struct {
         const right = switch (state.page) {
             .wifi => wifi_view.build(self, b, &state.wifi),
             .ethernet => b.scroll(.ethernet, ethernet_view.build(self, b, &state.ethernet)),
-            .board => b.scroll(.board, board_view.build(self, b, &state.board)),
+            .board => board_view.build(self, b, &state.board),
             .apps => software_view.build(self, b, &state.software),
-            .resources => b.scroll(.resources, resources_view.build(self, b)),
+            .resources => resources_view.build(self, b, &state.resources),
             .language => b.scroll(.language, language_view.build(self, b)),
             .log => b.scroll(.log, log_view.build(self, b, &state.log)),
         };

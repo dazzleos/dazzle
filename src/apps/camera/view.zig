@@ -20,8 +20,11 @@ pub const Camera = struct {
     /// The latest picture; null if there is none (`message` says why).
     preview: ?*const gfx.Image,
     message: []const u8 = "",
-    /// Under the picture: the camera, or the last photo or video taken.
+    /// Under the picture: the camera, or active recording/saving state.
     status: []const u8 = "",
+    /// Brief notification or error shown in a snackbar over the picture.
+    notice: []const u8 = "",
+    on_dismiss: ?ui.Callback = null,
     /// Takes a photo; null while one cannot be (no camera, or one is being
     /// saved).
     on_shoot: ?ui.Callback = null,
@@ -57,7 +60,11 @@ pub const Camera = struct {
                 .on_drag = self.on_drag,
                 .maximized = self.maximized,
             }),
-            cx.make(ui.Expanded{ .child = cx.make(ui.Decorated{ .color = .rgb(0x000000), .child = picture }) }),
+            cx.make(ui.Expanded{ .child = cx.make(ui.Snackbar{
+                .message = self.notice,
+                .on_dismiss = self.on_dismiss,
+                .child = cx.make(ui.Decorated{ .color = .rgb(0x000000), .child = picture }),
+            }) }),
             cx.make(ui.SizedBox{ .height = 72, .child = cx.make(ui.Padding{ .padding = .{ .left = 16, .right = 16 }, .child = cx.make(ui.Row{
                 .spacing = 16,
                 .children = &.{

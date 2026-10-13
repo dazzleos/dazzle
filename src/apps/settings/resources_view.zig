@@ -29,19 +29,32 @@ pub const VideoMemory = struct {
     failed: bool = false,
 };
 
-pub fn build(self: *const Settings, b: Builder) ui.Widget {
+pub const State = struct {
+    dismissed: bool = false,
+
+    pub fn dismiss(st: *State) void {
+        st.dismissed = true;
+    }
+};
+
+pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
     const cx = b.cx;
     const u = self.usage;
+    if (!self.video_memory.failed) state.dismissed = false;
     var b1: [32]u8 = undefined;
     var b2: [32]u8 = undefined;
     const cores = self.system.cores;
     const cpu = if (u.cpu_busy) |busy| cx.fmt("{d:.0}% busy ({d} {s})", .{ busy, cores, if (cores == 1) "core" else "cores" }) else "Measuring…";
     const mem = cx.fmt("{s} of {s} in use", .{ info.formatBytes(&b1, u.memUsed()), info.formatBytes(&b2, u.mem_total) });
-    return b.page(&.{
-        meterRow(b, "CPU", cpu, (u.cpu_busy orelse 0) / 100),
-        meterRow(b, "CPU Memory", mem, fraction(u.memUsed(), u.mem_total)),
-        gpuMemoryRow(self, b),
-        storageRow(b, u.storage),
+    return cx.make(ui.Snackbar{
+        .message = if (self.video_memory.failed and !state.dismissed) "It could not be changed" else "",
+        .on_dismiss = .of(state, State.dismiss),
+        .child = b.scroll(.resources, b.page(&.{
+            meterRow(b, "CPU", cpu, (u.cpu_busy orelse 0) / 100),
+            meterRow(b, "CPU Memory", mem, fraction(u.memUsed(), u.mem_total)),
+            gpuMemoryRow(self, b, state),
+            storageRow(b, u.storage),
+        })),
     });
 }
 
@@ -54,10 +67,11 @@ fn restartNow(a: *Actions) void {
     a.restart = true;
 }
 
-fn videoMemorySetter(comptime mib: u16) fn (*Actions) void {
+fn videoMemorySetter(comptime mib: u16) fn (*VideoMemoryMenu.State) void {
     return struct {
-        fn set(a: *Actions) void {
-            a.video_memory = mib;
+        fn set(st: *VideoMemoryMenu.State) void {
+            if (st.page_state) |ps| ps.dismissed = false;
+            if (st.actions) |a| a.video_memory = mib;
         }
     }.set;
 }
@@ -132,7 +146,7 @@ fn storageRow(b: Builder, st: info.Storage) ui.Widget {
 /// GPU memory: how much is in use (with a meter), and an icon beside the
 /// label that opens a menu of the sizes to choose from for the next
 /// start (with Restart when a change is waiting).
-fn gpuMemoryRow(self: *const Settings, b: Builder) ui.Widget {
+fn gpuMemoryRow(self: *const Settings, b: Builder, page_state: *State) ui.Widget {
     const cx = b.cx;
     const t = cx.theme();
     const u = self.usage;
@@ -149,9 +163,7 @@ fn gpuMemoryRow(self: *const Settings, b: Builder) ui.Widget {
         b.value(gpu),
         meter(cx, fraction(u.gpuUsed(), u.gpu_total)),
     }) catch {};
-    if (vm.failed) {
-        col.append(a, cx.make(ui.Text{ .text = "It could not be changed", .style = .{ .size = 15, .color = t.@"error" } })) catch {};
-    } else if (pending) {
+    if (!vm.failed and pending) {
         col.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
             cx.make(ui.Expanded{ .child = cx.make(ui.Text{
                 .text = cx.fmt("{s} after a restart", .{info.formatBytes(&b3, @as(u64, vm.next.?) << 20)}),
@@ -163,11 +175,13 @@ fn gpuMemoryRow(self: *const Settings, b: Builder) ui.Widget {
     return cx.make(ui.Row{ .cross_axis_alignment = .start, .spacing = 12, .children = &.{
         cx.make(ui.SizedBox{ .width = 150, .child = cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 4, .children = &.{
             cx.make(ui.Text{ .text = "GPU memory", .style = .{ .size = 18, .color = t.on_surface_variant }, .wrap = false }),
-            cx.make(VideoMemoryMenu{ .chosen = vm.next, .ram_mib = ram_mib, .actions = if (vm.next != null) self.actions else null }),
+            cx.make(VideoMemoryMenu{ .chosen = vm.next, .ram_mib = ram_mib, .actions = if (vm.next != null) self.actions else null, .page_state = page_state }),
         } }) }),
         cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 6, .children = col.items }) }),
     } });
 }
+
+const PageState = State;
 
 /// An icon beside "GPU memory": pressing it offers the sizes in a menu
 /// (those too big for the computer's memory dimmed).
@@ -176,17 +190,19 @@ pub const VideoMemoryMenu = struct {
     ram_mib: u64,
     /// None if it cannot be changed (the system manager has not said).
     actions: ?*Actions,
+    page_state: ?*PageState = null,
 
     pub const State = struct {
         node: ?*ui.Node = null,
         actions: ?*Actions = null,
+        page_state: ?*PageState = null,
         chosen: ?u16 = null,
         ram_mib: u64 = 0,
         interaction: ui.Interaction = .{},
 
-        fn open(st: *State) void {
+        fn open(st: *VideoMemoryMenu.State) void {
             const n = st.node orelse return;
-            const acts = st.actions orelse return;
+            if (st.actions == null) return;
             var items: [proto.video_memory_sizes.len]ui.menu.Item = undefined;
             inline for (proto.video_memory_sizes, &items) |mib, *item| {
                 const chosen = st.chosen == mib;
@@ -194,7 +210,7 @@ pub const VideoMemoryMenu = struct {
                 item.* = .{
                     .label = if (chosen) std.fmt.comptimePrint("{d} MB (chosen)", .{mib}) else std.fmt.comptimePrint("{d} MB", .{mib}),
                     .enabled = !chosen and proto.videoMemoryAllowed(mib, st.ram_mib),
-                    .on_press = .of(acts, videoMemorySetter(mib)),
+                    .on_press = .of(st, videoMemorySetter(mib)),
                 };
             }
             const pos = n.position();
@@ -202,16 +218,17 @@ pub const VideoMemoryMenu = struct {
         }
     };
 
-    pub fn build(self: *const VideoMemoryMenu, cx: *ui.Context, state: *State) ui.Widget {
+    pub fn build(self: *const VideoMemoryMenu, cx: *ui.Context, state: *VideoMemoryMenu.State) ui.Widget {
         state.node = cx.node;
         state.actions = self.actions;
+        state.page_state = self.page_state;
         state.chosen = self.chosen;
         state.ram_mib = self.ram_mib;
         return cx.make(ui.IconButton{
             .icon = .settings,
             .size = 24,
             .icon_size = 18,
-            .on_press = if (self.actions != null) .of(state, State.open) else null,
+            .on_press = if (self.actions != null) .of(state, VideoMemoryMenu.State.open) else null,
         });
     }
 };

@@ -46,6 +46,13 @@ pub const State = struct {
     /// The header pin picked (0-indexed into the board's header).
     /// Pin 11 (index 10) is GPIO 17.
     pin: usize = 10,
+    dismissed: bool = false,
+    last_err_buf: [128]u8 = undefined,
+    last_err_len: u8 = 0,
+
+    pub fn dismiss(st: *State) void {
+        st.dismissed = true;
+    }
 };
 
 /// The board, drawn, and about the part picked on it.
@@ -59,7 +66,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
     if (self.system.serial.len > 0) rows.append(a, cx.make(ui.Text{ .text = cx.fmt("Serial: {s}", .{self.system.serial.slice()}), .style = .{ .size = 16, .color = t.on_surface_variant } })) catch {};
     const drawing = board.forModel(model) orelse {
         rows.append(a, b.value("There is no drawing of this board")) catch {};
-        return b.page(rows.items);
+        return b.scroll(.board, b.page(rows.items));
     };
     // The processor (or the GPIO header when asked for), until something
     // else is picked.
@@ -107,10 +114,30 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
             } })) catch {};
         }
     }
+    var err_msg: []const u8 = "";
     if (part.kind == .gpio or part.kind == .gpio_holes) {
         appendGpioSection(self, cx, state, model, &rows);
+        const pins = self.gpio orelse &default_pins;
+        if (pins.set_failure) |why| {
+            err_msg = why;
+        } else if (pins.last_error) |why| {
+            err_msg = cx.fmt("It could not be set up: {s}", .{why});
+        }
     }
-    return b.page(rows.items);
+    if (err_msg.len == 0) {
+        state.dismissed = false;
+        state.last_err_len = 0;
+    } else if (!std.mem.eql(u8, state.last_err_buf[0..state.last_err_len], err_msg)) {
+        const n: u8 = @intCast(@min(err_msg.len, state.last_err_buf.len));
+        @memcpy(state.last_err_buf[0..n], err_msg[0..n]);
+        state.last_err_len = n;
+        state.dismissed = false;
+    }
+    return cx.make(ui.Snackbar{
+        .message = if (state.dismissed) "" else err_msg,
+        .on_dismiss = .of(state, State.dismiss),
+        .child = b.scroll(.board, b.page(rows.items)),
+    });
 }
 
 fn appendGpioSection(
@@ -153,7 +180,7 @@ fn appendGpioSection(
     rows.append(a, pinColourKey(cx)) catch {};
 
     // Selected pin description and mode menu below.
-    rows.append(a, pinDetail(self, cx, pins, header[picked_idx], picked_idx + 1)) catch {};
+    rows.append(a, pinDetail(self, cx, state, pins, header[picked_idx], picked_idx + 1)) catch {};
 }
 
 fn pinDot(
@@ -240,6 +267,7 @@ fn gpioDoing(cx: *ui.Context, pins: *const gpio.Pins, g: u6) []const u8 {
 fn pinDetail(
     self: *const Settings,
     cx: *ui.Context,
+    state: *State,
     pins: *const gpio.Pins,
     pin: Pin,
     pin_num: usize,
@@ -281,7 +309,7 @@ fn pinDetail(
             } else {
                 const pick: ?*PinPick = if (self.actions) |acts| blk: {
                     const p = a.create(PinPick) catch break :blk null;
-                    p.* = .{ .actions = acts, .pin = g };
+                    p.* = .{ .actions = acts, .state = state, .pin = g };
                     break :blk p;
                 } else null;
                 rows.append(a, cx.make(ui.Row{ .main_axis_size = .min, .children = &.{
@@ -292,12 +320,7 @@ fn pinDetail(
                         .on_changed = if (pick) |p| .of(p, PinPick.set) else null,
                     }),
                 } })) catch {};
-                if (pins.set_failure) |why| rows.append(a, cx.make(ui.Text{ .text = why, .style = .{ .size = 15, .color = t.@"error" } })) catch {};
             }
-            if (pins.last_pin == g) if (pins.last_error) |why| rows.append(a, cx.make(ui.Text{
-                .text = cx.fmt("It could not be set up: {s}", .{why}),
-                .style = .{ .size = 15, .color = t.@"error" },
-            })) catch {};
         },
     }
     return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 6, .children = rows.items });
@@ -316,9 +339,11 @@ const mode_options = [_]PinModeMenu.Option{
 
 const PinPick = struct {
     actions: *Actions,
+    state: *State,
     pin: u6,
 
     fn set(p: *PinPick, m: Mode) void {
+        p.state.dismissed = false;
         p.actions.gpio = .{ .pin = p.pin, .mode = m };
     }
 };

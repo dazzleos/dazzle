@@ -70,6 +70,9 @@ const Viewer = struct {
     /// Under the picture (`status`).
     status_buf: [128]u8 = undefined,
     status_len: usize = 0,
+    /// Brief notification or error shown in a snackbar (`notice`).
+    notice_buf: [128]u8 = undefined,
+    notice_len: usize = 0,
 
     fn init(gpa: std.mem.Allocator, cam: capture.Camera) !Viewer {
         const most = @as(usize, cam.width / 2) * (cam.height / 2);
@@ -85,7 +88,7 @@ const Viewer = struct {
             .rec_pixels = try gpa.alloc(u32, @as(usize, rec_w) * rec_h),
         };
         v.setUpExposure();
-        v.setStatus("{s}, {d}×{d}", .{ cam.sensorName(), cam.width, cam.height });
+        v.resetStatus();
         return v;
     }
 
@@ -93,8 +96,28 @@ const Viewer = struct {
         v.status_len = if (std.fmt.bufPrint(&v.status_buf, fmt, args)) |t| t.len else |_| 0;
     }
 
+    fn resetStatus(v: *Viewer) void {
+        if (v.saving) |s| {
+            v.setStatus("Saving {s}…", .{s.name()});
+        } else if (v.recorder == null) {
+            v.setStatus("{s}, {d}×{d}", .{ v.cam.sensorName(), v.cam.width, v.cam.height });
+        }
+    }
+
     fn status(v: *const Viewer) []const u8 {
         return v.status_buf[0..v.status_len];
+    }
+
+    fn setNotice(v: *Viewer, comptime fmt: []const u8, args: anytype) void {
+        v.notice_len = if (std.fmt.bufPrint(&v.notice_buf, fmt, args)) |t| t.len else |_| 0;
+    }
+
+    fn notice(v: *const Viewer) []const u8 {
+        return v.notice_buf[0..v.notice_len];
+    }
+
+    fn dismissNotice(v: *Viewer) void {
+        v.notice_len = 0;
     }
 
     /// The sensor's own automatic exposure and white balance, if it has
@@ -194,26 +217,28 @@ const Viewer = struct {
     fn startRecording(v: *Viewer) void {
         var path_buf: [512]u8 = undefined;
         const path = sys.files.numberedName(&path_buf, sys.system.user_dir, "Video", "mp4") orelse {
-            v.setStatus("Cannot save a video here", .{});
+            v.setNotice("Cannot save a video here", .{});
             return;
         };
         v.recorder = video.Recorder.start(v.gpa, path, v.rec_width, v.rec_height, .{}) catch |err| {
             print(sys.log_warning ++ "dazzle-camera: cannot start video encoder: {s}\n", .{@errorName(err)});
-            v.setStatus("Cannot record video ({s})", .{@errorName(err)});
+            v.setNotice("Cannot record video ({s})", .{@errorName(err)});
             return;
         };
+        v.notice_len = 0;
         v.setStatus("Recording {s} · 0:00", .{v.recorder.?.name()});
     }
 
     fn stopRecording(v: *Viewer) void {
         var rec = v.recorder orelse return;
         v.recorder = null;
+        v.resetStatus();
         if (rec.stop()) |_| {
             print("dazzle-camera: saved {s}\n", .{rec.pathZ()});
-            v.setStatus("Saved {s} with your files", .{rec.name()});
+            v.setNotice("Saved {s} with your files", .{rec.name()});
         } else |err| {
             print(sys.log_warning ++ "dazzle-camera: cannot save {s}: {s}\n", .{ rec.pathZ(), @errorName(err) });
-            v.setStatus("{s} could not be saved", .{rec.name()});
+            v.setNotice("{s} could not be saved", .{rec.name()});
         }
     }
 
@@ -225,22 +250,23 @@ const Viewer = struct {
     /// the next "Photo N.png", on a thread. Returns whether it is being.
     fn savePhoto(v: *Viewer, raw: isp.Raw, f: capture.Frame) bool {
         const s = v.gpa.create(Saving) catch {
-            v.setStatus("Cannot save a photo", .{});
+            v.setNotice("Cannot save a photo", .{});
             return false;
         };
         s.* = .{ .gpa = v.gpa, .raw = raw, .frame = f, .tables = v.tables, .thread = undefined };
         const path = sys.files.numberedName(&s.path_buf, sys.system.user_dir, "Photo", "png") orelse {
             v.gpa.destroy(s);
-            v.setStatus("Cannot save a photo here", .{});
+            v.setNotice("Cannot save a photo here", .{});
             return false;
         };
         s.path_len = path.len;
         s.thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, Saving.run, .{s}) catch {
             v.gpa.destroy(s);
-            v.setStatus("Cannot save a photo", .{});
+            v.setNotice("Cannot save a photo", .{});
             return false;
         };
         v.saving = s;
+        v.notice_len = 0;
         v.setStatus("Saving {s}…", .{s.name()});
         return true;
     }
@@ -252,7 +278,8 @@ const Viewer = struct {
         s.thread.join();
         v.cam.release(s.frame);
         v.saving = null;
-        if (s.ok) v.setStatus("Saved {s} with your files", .{s.name()}) else v.setStatus("{s} could not be saved", .{s.name()});
+        v.resetStatus();
+        if (s.ok) v.setNotice("Saved {s} with your files", .{s.name()}) else v.setNotice("{s} could not be saved", .{s.name()});
         v.gpa.destroy(s);
         return true;
     }
@@ -340,6 +367,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             .preview = if (v) |vw| if (vw.image) |*img| img else null else null,
             .message = if (v) |vw| (if (vw.image == null) "Starting the camera…" else "") else no_camera,
             .status = if (v) |vw| vw.status() else "",
+            .notice = if (v) |vw| vw.notice() else "",
+            .on_dismiss = if (v) |vw| ui.Callback.of(vw, Viewer.dismissNotice) else null,
             .on_shoot = if (v) |vw| (if (vw.saving == null) ui.Callback.of(vw, Viewer.requestPhoto) else null) else null,
             .on_record = if (v) |vw| ui.Callback.of(vw, Viewer.toggleRecord) else null,
             .recording = if (v) |vw| vw.recorder != null else false,
