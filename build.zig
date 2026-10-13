@@ -131,12 +131,13 @@ fn addIconFont(b: *std.Build) IconFont {
     return .{ .ttf = ttf, .codepoints = run.addOutputFileArg("icon_codepoints.zig") };
 }
 
-/// The Natural Earth 110m Admin-0 Countries vector dataset, triangulated
-/// and subdivided at build time by `tools/mkmap.zig`.
+/// The Natural Earth 110m and 50m Admin-0 Countries vector datasets,
+/// triangulated and subdivided at build time by `tools/mkmap.zig`.
 fn addMapData(b: *std.Build) std.Build.LazyPath {
     const tool = hostTool(b, "mkmap");
     const run = b.addRunArtifact(tool);
     run.addFileArg(b.path("src/apps/maps/data/ne_110m_admin_0_countries.geojson"));
+    run.addFileArg(b.path("src/apps/maps/data/ne_50m_admin_0_countries.geojson"));
     return run.addOutputFileArg("map_data.zig");
 }
 
