@@ -8,9 +8,7 @@
 //! Window contents are textures: clients' dma-bufs used in place (they
 //! render in the GPU's T-tiled layout, which the texture unit reads), or
 //! copies of shared-memory buffers, in 32-bit or RGB565 pixels. The quad
-//! shaders are shaders/quad.zig, and shaders/quad_rgb565.zig for RGB565
-//! textures (whose red and blue the texture unit returns the other way
-//! round).
+//! shader is shaders/quad.zig.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -45,29 +43,18 @@ pub const max_windows = 48;
 /// A panel's picture, drawn at (`x`, `y`) on the screen.
 pub const PanelQuad = struct { texture: server.Texture, x: i32 = 0, y: i32 };
 
-/// The shaders that draw textures as quads: for 32-bit textures, and for
-/// RGB565 ones.
-pub const QuadPipelines = struct {
-    rgba: *shader.Pipeline,
-    rgb565: *shader.Pipeline,
-
-    fn forTexture(q: QuadPipelines, t: server.Texture) *shader.Pipeline {
-        return if (t.format.textureSwapsRedBlue()) q.rgb565 else q.rgba;
-    }
-};
-
 /// Records a frame (after `frame.begin`): the windows (bottom first, at
 /// most `max_windows`) and the panels above them as quads. `vbo` holds the
 /// quads' vertices and must stay untouched until the frame has rendered.
-pub fn recordFrame(frame: *render.Frame, pipelines: QuadPipelines, vbo: vc4.Bo, panels: []const ?PanelQuad, windows: []const Window) !void {
+pub fn recordFrame(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, panels: []const ?PanelQuad, windows: []const Window) !void {
     std.debug.assert(windows.len <= max_windows);
     var quads: usize = 0;
     for (windows) |w| {
-        try quad(frame, pipelines.forTexture(w.texture), vbo, quads, w.texture, w.x, w.y, .{ .x = w.clip.x, .y = w.clip.y, .width = w.clip.width, .height = w.clip.height });
+        try quad(frame, pipeline, vbo, quads, w.texture, w.x, w.y, .{ .x = w.clip.x, .y = w.clip.y, .width = w.clip.width, .height = w.clip.height });
         quads += 1;
     }
     for (panels) |panel| if (panel) |pq| {
-        try quad(frame, pipelines.forTexture(pq.texture), vbo, quads, pq.texture, pq.x, pq.y, null);
+        try quad(frame, pipeline, vbo, quads, pq.texture, pq.x, pq.y, null);
         quads += 1;
     };
 }
@@ -148,9 +135,8 @@ pub const Renderer = struct {
     display: vc4.display.Display,
     width: u32,
     height: u32,
-    /// Draws textures as quads: 32-bit ones, and RGB565 ones.
+    /// Draws textures as quads.
     quads: shader.Pipeline,
-    quads_rgb565: shader.Pipeline,
     /// Vertices for this frame's quads.
     vbo: vc4.Bo,
     /// Buffers backing the textures the renderer allocated (shm copies), by
@@ -180,7 +166,6 @@ pub const Renderer = struct {
             .width = display.width,
             .height = display.height,
             .quads = try shader.Pipeline.init(gpa, dev, shader.Program.decode(@embedFile("quad.shader")) catch unreachable, layout),
-            .quads_rgb565 = try shader.Pipeline.init(gpa, dev, shader.Program.decode(@embedFile("quad_rgb565.shader")) catch unreachable, layout),
             .vbo = try dev.createBo(vbo_size),
         };
     }
@@ -362,10 +347,6 @@ pub const Renderer = struct {
         };
     }
 
-    fn quadPipelines(r: *Renderer) QuadPipelines {
-        return .{ .rgba = &r.quads, .rgb565 = &r.quads_rgb565 };
-    }
-
     /// How long composing a frame took.
     pub const Timing = struct {
         /// Recording the GPU job.
@@ -380,7 +361,7 @@ pub const Renderer = struct {
         const t0 = sys.nowNs();
         const quads = try r.panelQuads();
         static_frame.begin(r.display.backTarget(), .{ .clear = background });
-        try recordFrame(&static_frame, r.quadPipelines(), r.vbo, &quads, windows);
+        try recordFrame(&static_frame, &r.quads, r.vbo, &quads, windows);
         const t1 = sys.nowNs();
         const seqno = try r.dev.submit(static_frame.finish());
         try r.dev.waitSeqno(seqno, std.time.ns_per_s);
@@ -411,7 +392,7 @@ pub const Renderer = struct {
         const bo = try r.dev.createBo(pitch * r.height);
         defer r.dev.destroyBo(bo);
         capture_frame.begin(.{ .handle = bo.handle, .width = @intCast(r.width), .height = @intCast(r.height), .tiling = .linear }, .{ .clear = background });
-        try recordFrame(&capture_frame, r.quadPipelines(), r.vbo, &quads, windows);
+        try recordFrame(&capture_frame, &r.quads, r.vbo, &quads, windows);
         const seqno = try r.dev.submit(capture_frame.finish());
         try r.dev.waitSeqno(seqno, std.time.ns_per_s);
         const pixels = try gpa.alloc(u32, @as(usize, r.width) * r.height);

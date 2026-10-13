@@ -467,10 +467,9 @@ pub const texture_base: u32 = 1 << 28;
 
 /// Sampling of an RGBA8888, RGB565 or ALPHA texture, with repeat or
 /// clamp wrapping. A 32-bit texel comes back as it is in memory; an RGB565
-/// one with red in the low byte, then green and blue (each widened to 8
-/// bits), and opaque: the order Mesa's vc4 driver expects (its B5G6R5
-/// swizzle is XYZ1); an ALPHA one in the top byte, with the rest 0 (its A8
-/// swizzle is 000W).
+/// one with its top 5 bits (blue) in the low byte, then green and red (each
+/// widened to 8 bits), and opaque, in the same order as a 32-bit texel; an
+/// ALPHA one in the top byte, with the rest 0 (its A8 swizzle is 000W).
 ///
 /// Only level 0 is sampled (which mipmap level the hardware picks depends
 /// on the neighbouring pixels, which the simulator does not have), with the
@@ -514,9 +513,7 @@ fn fetch(memory: []const u8, p: texture.Config, cpp: u32, x: u32, y: u32) Error!
     if (offset + cpp > memory.len) return error.Unsupported;
     if (cpp == 4) return std.mem.readInt(u32, memory[offset..][0..4], .little);
     if (cpp == 1) return @as(u32, memory[offset]) << 24;
-    const argb = pixel.fromRgb565(std.mem.readInt(u16, memory[offset..][0..2], .little));
-    // 0xffRRGGBB to bytes R, G, B, A.
-    return 0xff000000 | (argb & 0xff) << 16 | (argb & 0xff00) | ((argb >> 16) & 0xff);
+    return pixel.fromRgb565(std.mem.readInt(u16, memory[offset..][0..2], .little));
 }
 
 /// A texel's column (or row), wrapped into the texture.

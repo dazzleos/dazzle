@@ -21,7 +21,7 @@ const programs = [_]struct { name: []const u8, program: []const u8, spirv: []con
     .{ .name = "text", .program = @embedFile("text.shader"), .spirv = @embedFile("text.spv") },
     .{ .name = "polyhedron", .program = @embedFile("polyhedron.shader"), .spirv = @embedFile("polyhedron.spv") },
     .{ .name = "quad", .program = @embedFile("quad.shader"), .spirv = @embedFile("quad.spv") },
-    .{ .name = "quad_rgb565", .program = @embedFile("quad_rgb565.shader"), .spirv = @embedFile("quad_rgb565.spv") },
+    .{ .name = "globe", .program = @embedFile("globe.shader"), .spirv = @embedFile("globe.spv") },
 };
 
 fn load(comptime name: []const u8) !Program {
@@ -253,6 +253,33 @@ test "polyhedron fragment shader tints and shades the texture (or white), and ke
     }
 }
 
+test "globe fragment shader samples blue ocean texture as blue" {
+    const p = try load("globe");
+    var m = try @import("spirv.zig").Module.parse(testing.allocator, @embedFile("globe.spv"));
+    defer m.deinit();
+    var diag: program_mod.Diagnostic = .{};
+    _ = try Program.compile(testing.allocator, @embedFile("globe.spv"), p.options, &diag);
+
+    var tex: TestTexture = undefined;
+    tex.init();
+    for (&tex.pixels) |*px| px.* = 0xff102a46; // deep blue ocean (R=0x10, G=0x2a, B=0x46)
+    texture.upload(&tex.memory, &tex.pixels, TestTexture.w, TestTexture.h);
+    var user: [42]u32 = @splat(0);
+    user[31] = f2u(1.0); // sun[3] = day_night_on = 1.0
+    user[35] = f2u(1.0); // camera[3] = atmo_on = 1.0
+    user[36] = f2u(1.0); // options[0] = tex_on = 1.0
+    const varyings = [_]sim.Vec{
+        lane(0.5, 0.0), // uv.u
+        lane(0.5, 0.0), // uv.v
+        lane(1.0, 0.0), // f_diffuse = 1.0
+        lane(0.0, 0.0), // f_rim = 0.0
+    };
+    var buf: [64]u32 = undefined;
+    const stream = uniformStream(&buf, &p.fs, &user, .{ texture.p0(tex.cfg), texture.p1(tex.cfg) });
+    const r = try sim.run(p.fs.code(), .{ .uniforms = stream, .varyings = &varyings, .frag_w = sim.splatF(1.0), .frag_z = sim.splat(0x123456), .texture_memory = &tex.memory });
+    try testing.expectEqual(@as(u32, 0xff102a46), r.tlb_color.?[0]);
+}
+
 test "the shell's textured quads copy texels exactly" {
     var tex: TestTexture = undefined;
     tex.init();
@@ -276,7 +303,7 @@ test "the shell's RGB565 quads give the tile buffer each texel's colour, blue fi
     var memory: [texture.imageSizeOf(.rgb565, w, h)]u8 = undefined;
     texture.uploadRectOf(.rgb565, &memory, w, h, .{ .x = 0, .y = 0, .width = w, .height = h }, std.mem.sliceAsBytes(&pixels), w * 2);
     const cfg: texture.Config = .{ .type = .rgb565, .width = w, .height = h, .mag_filter = .nearest, .min_filter = .nearest };
-    const p = try load("quad_rgb565");
+    const p = try load("quad");
     var buf: [8]u32 = undefined;
     const stream = uniformStream(&buf, &p.fs, &.{}, .{ texture.p0(cfg), texture.p1(cfg) });
     const varyings = [_]sim.Vec{ lane(TestTexture.u[0], TestTexture.u[1]), lane(TestTexture.v[0], TestTexture.v[1]) };

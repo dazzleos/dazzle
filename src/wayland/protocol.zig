@@ -372,7 +372,7 @@ pub const fourcc = struct {
     }
     pub const xrgb8888 = code("XR24");
     pub const argb8888 = code("AR24");
-    pub const rgb565 = code("RG16");
+    pub const rgb565 = code("BG16");
 };
 
 /// DRM format modifiers (drm_fourcc.h).

@@ -293,7 +293,6 @@ const shader_programs = [_]struct { source: []const u8, name: ?[]const u8 = null
     .{ .source = "src/apps/blocks/shaders/sky.zig", .owner = .blocks, .args = &.{"--depth-test"} },
     .{ .source = "src/apps/blocks/shaders/line.zig", .owner = .blocks, .args = &.{"--depth-test"} },
     .{ .source = "src/shell/shaders/quad.zig", .owner = .shell, .args = &.{} },
-    .{ .source = "src/shell/shaders/quad_rgb565.zig", .owner = .shell, .args = &.{} },
     .{ .source = "src/apps/maps/shaders/globe.zig", .owner = .maps, .args = &.{"--depth-test"} },
 };
 

@@ -133,8 +133,9 @@ pub fn outputFormat(format: Format) struct { fmt: OutputImageFormat, rb_swap: bo
         // converts between the two.
         .xrgb8888, .argb8888 => .{ .fmt = .rgba8, .rb_swap = true },
         // V3D_OUTPUT_IMAGE_FORMAT_BGR565 has B in bits 0..4, G in 5..10, and
-        // R in 11..15, which matches DRM_FORMAT_RGB565.
-        .rgb565 => .{ .fmt = .bgr565, .rb_swap = false },
+        // R in 11..15; R/B swap puts B in bits 11..15 and R in 0..4 (DRM_FORMAT_BGR565),
+        // matching VC4.
+        .rgb565 => .{ .fmt = .bgr565, .rb_swap = true },
         .a8 => unreachable,
     };
 }
@@ -754,10 +755,9 @@ pub fn packTextureShaderState(tex_base_addr: u32, cfg: texture.Config) [6]u32 {
         //         `ch[2]` (word 0 / R output) = byte 2 (Blue=4),
         //         `ch[3]` (word 3 / A output) = byte 3 (Alpha=5).
         .rgba8888, .rgbx8888 => .{ .r = 4, .g = 3, .b = 2, .a = 5 },
-        // RGB565 has B in low bits, R in high bits. In Dazzle's shaders
-        // (`quad_rgb565.zig`), `sample()` swaps `raw[0]` (`ch[0]` = word 2) and
-        // `raw[2]` (`ch[2]` = word 0) because VC4's TMU swapped R and B on RGB565.
-        // Matching that layout: `ch[0]` (B output) = Red(2), `ch[1]` = Green(3),
+        // Format.rgb565 (DRM_FORMAT_BGR565) has R in bits 0..4 (which V3D's
+        // RGB565 texture format reads as Blue(4)), G in bits 5..10 (Green(3)),
+        // and B in bits 11..15 (Red(2)): `ch[0]` (B output) = Red(2), `ch[1]` = Green(3),
         // `ch[2]` (R output) = Blue(4), `ch[3]` = One(1).
         .rgb565 => .{ .r = 4, .g = 3, .b = 2, .a = 1 },
         // Alpha textures (`.alpha`, R8) are read by shaders via `unpack_unorm8(3)`
