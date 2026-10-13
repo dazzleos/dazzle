@@ -177,15 +177,19 @@ pub const TextField = struct {
             s.cursor = s.len;
         }
 
+        pub fn isObscured(s: *const State) bool {
+            return s.obscure and !s.revealed;
+        }
+
         /// Copies the selection (not from an obscured field).
         pub fn copy(s: *State) void {
             const sel = s.selection() orelse return;
-            if (s.obscure) return;
+            if (s.isObscured()) return;
             if (s.ui) |u| u.copyText(s.buf[sel[0]..sel[1]]);
         }
 
         pub fn cut(s: *State) void {
-            if (s.obscure or s.selection() == null) return;
+            if (s.isObscured() or s.selection() == null) return;
             s.copy();
             if (s.deleteSelection()) s.notifyChanged();
         }
@@ -211,7 +215,7 @@ pub const TextField = struct {
                 switch (k.code) {
                     keymap.key_a => s.selectAll(),
                     keymap.key_c => s.copy(),
-                    keymap.key_x => if (!s.obscure and s.selection() != null) {
+                    keymap.key_x => if (!s.isObscured() and s.selection() != null) {
                         s.copy();
                         return s.deleteSelection();
                     },
@@ -454,7 +458,7 @@ pub const TextField = struct {
                 const at = self.cursorAt(n, pos[0]);
                 const inside = if (st.selection()) |sel| at >= sel[0] and at <= sel[1] else false;
                 if (!inside) st.moveTo(at, false);
-                const can_copy = st.selection() != null and !self.obscure;
+                const can_copy = st.selection() != null and !self.isObscured(st);
                 const origin = n.position();
                 n.ui.openMenu(n, .{ origin[0] + pos[0], origin[1] + pos[1] }, &.{
                     .{ .label = "Cut", .shortcut = "Ctrl+X", .enabled = can_copy, .on_press = .of(st, State.cut) },
@@ -928,12 +932,21 @@ test "a password field has a visibility toggle button on the right hand side" {
     try testing.expectEqualStrings("secret", tf.shown(st, &buf, st.text()));
     u.frame(400, 200, 1, App{});
 
-    // Clicking the toggle button again hides the password back to dots.
+    // While revealed, selecting and copying works.
+    st.selectAll();
+    st.copy();
+    try testing.expectEqualStrings("secret", u.local_clipboard.items);
+
+    // Clicking the toggle button again hides the password back to dots, blocking copy.
+    u.local_clipboard.clearRetainingCapacity();
     u.pointerButton(toggle_at, btn_left, true);
     u.pointerButton(toggle_at, btn_left, false);
     try testing.expect(!st.revealed);
     try testing.expect(tf.isObscured(st));
     try testing.expectEqualStrings("••••••", tf.shown(st, &buf, st.text()));
+    st.selectAll();
+    st.copy();
+    try testing.expectEqual(@as(usize, 0), u.local_clipboard.items.len);
 }
 
 test "initial text and max_len never split a multi-byte UTF-8 character" {
