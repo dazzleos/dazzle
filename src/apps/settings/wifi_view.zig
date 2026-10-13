@@ -622,7 +622,8 @@ fn ensureHotspotDefaults(
         } else {
             const default_ssid = if (self.system.hostname.len > 0) self.system.hostname.slice() else "dazzle";
             state.hotspot_ssid.set(default_ssid);
-            state.hotspot_password.len = 0;
+            var pass_buf: [12]u8 = undefined;
+            state.hotspot_password.set(randomHotspotPassword(&pass_buf));
             state.hotspot_network = .{};
             state.hotspot_upstream = default_upstream;
         }
@@ -632,6 +633,21 @@ fn ensureHotspotDefaults(
     } else if (!std.mem.eql(u8, state.hotspot_upstream.slice(), "none") and upstreams.find(state.hotspot_upstream.slice()) == null) {
         state.hotspot_upstream = default_upstream;
     }
+}
+
+const hotspot_password_alphabet = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+fn randomHotspotPassword(buf: *[12]u8) []const u8 {
+    var raw: [12]u8 = @splat(0);
+    var at: usize = 0;
+    while (at < raw.len) {
+        const rc = std.os.linux.getrandom(raw[at..].ptr, raw.len - at, 0);
+        if (std.os.linux.errno(rc) == .SUCCESS) at += rc else break;
+    }
+    for (buf, raw) |*dst, b| {
+        dst.* = hotspot_password_alphabet[b % hotspot_password_alphabet.len];
+    }
+    return buf[0..];
 }
 
 /// The first row on the Wi-Fi page: Client or Access Point mode, with Start/Stop
@@ -873,7 +889,8 @@ const ModeChoice = struct {
                     st.hotspot_invalid = false;
                     const default_ssid = if (x.hostname.len > 0) x.hostname.slice() else "dazzle";
                     st.hotspot_ssid.set(default_ssid);
-                    st.hotspot_password.len = 0;
+                    var pass_buf: [12]u8 = undefined;
+                    st.hotspot_password.set(randomHotspotPassword(&pass_buf));
                     st.hotspot_network = .{};
                     st.hotspot_upstream = x.default_upstream;
                 }
@@ -1403,6 +1420,8 @@ test "switching to Access Point mode, applying configuration, and returning to C
     const field = view.findType(u.root.?, ui.TextField).?;
     try testing.expect(field.widget.as(ui.TextField).?.enabled);
     try testing.expectEqualStrings("awesome-elephant", field.state(ui.TextField.State).text());
+    try testing.expectEqual(@as(usize, 12), u.root.?.state(Settings.State).wifi.hotspot_password.text().len);
+    try testing.expect(view.up(view.findText(u.root.?, "Start").?, ui.OutlinedButton).?.widget.as(ui.OutlinedButton).?.on_press != null);
     for (view.test_sizes) |size| {
         Draw(u, d, &report, &actions, &frame_no, size);
         try testing.expect(!view.overflows(u.root.?));
@@ -1437,11 +1456,14 @@ test "switching to Access Point mode, applying configuration, and returning to C
 
     // Without a password (or with a password under 8 characters, or an empty
     // name), Start is inactive (on_press == null).
+    var st = &u.root.?.state(Settings.State).wifi;
+    st.hotspot_password.set("");
+    Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
     try testing.expect(view.up(view.findText(u.root.?, "Start").?, ui.OutlinedButton).?.widget.as(ui.OutlinedButton).?.on_press == null);
     view.click(u, view.findText(u.root.?, "Start").?);
     try testing.expect(actions.hotspot == null);
 
-    var st = &u.root.?.state(Settings.State).wifi;
+    st = &u.root.?.state(Settings.State).wifi;
     st.hotspot_password.set("short");
     Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
     try testing.expect(view.up(view.findText(u.root.?, "Start").?, ui.OutlinedButton).?.widget.as(ui.OutlinedButton).?.on_press == null);
