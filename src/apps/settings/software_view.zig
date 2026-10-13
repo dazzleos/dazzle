@@ -748,10 +748,10 @@ test "software icons: installed when up to date, server when uninstalled, missin
     try makePng(testing.allocator, try std.fmt.bufPrintZ(&path_buf, "{s}/dazzle-camera.png", .{icons_dir}), 0xff400000);
 
     var list = [_]store.App{
-        .{ .name = "dazzle-demo", .title = "Demo", .version = "abc", .time = 1000, .icon = "icons/dazzle-demo.png", .file = "dazzle-demo.tar.xz", .size = 1, .sha256 = "" },
-        .{ .name = "dazzle-files", .title = "Files", .version = "abc", .time = 1000, .icon = "icons/dazzle-files.png", .file = "dazzle-files.tar.xz", .size = 1, .sha256 = "" },
-        .{ .name = "dazzle-camera", .title = "Camera", .version = "abc", .time = 1000, .icon = "icons/dazzle-camera.png", .file = "dazzle-camera.tar.xz", .size = 1, .sha256 = "" },
-        .{ .name = "dazzle-maps", .title = "Maps", .version = "abc", .time = 1000, .icon = "icons/dazzle-maps.png", .file = "dazzle-maps.tar.xz", .size = 1, .sha256 = "" },
+        .{ .name = "dazzle-demo", .title = "Demo", .version = "abc", .time = 1000, .icon = "dazzle-demo.png", .file = "dazzle-demo.tar.xz", .size = 1, .sha256 = "" },
+        .{ .name = "dazzle-files", .title = "Files", .version = "abc", .time = 1000, .icon = "dazzle-files.png", .file = "dazzle-files.tar.xz", .size = 1, .sha256 = "" },
+        .{ .name = "dazzle-camera", .title = "Camera", .version = "abc", .time = 1000, .icon = "dazzle-camera.png", .file = "dazzle-camera.tar.xz", .size = 1, .sha256 = "" },
+        .{ .name = "dazzle-maps", .title = "Maps", .version = "abc", .time = 1000, .icon = "dazzle-maps.png", .file = "dazzle-maps.tar.xz", .size = 1, .sha256 = "" },
     };
 
     var icons: IconSet = .init(testing.allocator);

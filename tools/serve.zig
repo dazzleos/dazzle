@@ -138,7 +138,7 @@ pub fn detectLanIp(buf: *[64]u8) []const u8 {
 }
 
 /// Maps a URL request path (such as `/os.json`, `/apps.json`, `/icon.png`,
-/// `/icons/dazzle-files.png`, or `/dazzle-files.tar.xz`) to its relative
+/// `/dazzle-files.png`, or `/dazzle-files.tar.xz`) to its relative
 /// path under `root_dir`, or null if the path is not an allowed store path.
 pub fn resolveRequestPath(buf: *[512]u8, root_dir: []const u8, req_path: []const u8) ?[]const u8 {
     const clean = if (std.mem.indexOfScalar(u8, req_path, '?')) |q| req_path[0..q] else req_path;
@@ -153,8 +153,8 @@ pub fn resolveRequestPath(buf: *[512]u8, root_dir: []const u8, req_path: []const
     if (std.mem.eql(u8, rel, "apps.json")) {
         return std.fmt.bufPrint(buf, "{s}/apps/apps.json", .{root_dir}) catch null;
     }
-    if (std.mem.startsWith(u8, rel, "icons/") and std.mem.endsWith(u8, rel, ".png")) {
-        const stem = rel["icons/".len .. rel.len - ".png".len];
+    if (std.mem.endsWith(u8, rel, ".png")) {
+        const stem = rel[0 .. rel.len - ".png".len];
         if (!validSlug(stem)) return null;
         return std.fmt.bufPrint(buf, "{s}/apps/{s}", .{ root_dir, rel }) catch null;
     }
@@ -268,11 +268,11 @@ test "resolveRequestPath maps OS and app routes to zig-out/os and zig-out/apps" 
     try std.testing.expectEqualStrings("zig-out/os/icon.png", resolveRequestPath(&buf, "zig-out", "/icon.png").?);
     try std.testing.expectEqualStrings("zig-out/os/dazzle-os.tar.xz", resolveRequestPath(&buf, "zig-out", "/dazzle-os.tar.xz").?);
     try std.testing.expectEqualStrings("zig-out/apps/apps.json", resolveRequestPath(&buf, "zig-out", "/apps.json").?);
-    try std.testing.expectEqualStrings("zig-out/apps/icons/dazzle-files.png", resolveRequestPath(&buf, "zig-out", "/icons/dazzle-files.png").?);
+    try std.testing.expectEqualStrings("zig-out/apps/dazzle-files.png", resolveRequestPath(&buf, "zig-out", "/dazzle-files.png").?);
     try std.testing.expectEqualStrings("zig-out/apps/dazzle-files.tar.xz", resolveRequestPath(&buf, "zig-out", "/dazzle-files.tar.xz").?);
 
     try std.testing.expect(resolveRequestPath(&buf, "zig-out", "/../etc/passwd") == null);
-    try std.testing.expect(resolveRequestPath(&buf, "zig-out", "/icons/../secret.png") == null);
+    try std.testing.expect(resolveRequestPath(&buf, "zig-out", "/icons/dazzle-files.png") == null);
     try std.testing.expect(resolveRequestPath(&buf, "zig-out", "/../secret.tar.xz") == null);
     try std.testing.expect(resolveRequestPath(&buf, "zig-out", "/unknown.txt") == null);
 }

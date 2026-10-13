@@ -79,7 +79,7 @@ jobs:
           (cd dist && sha256sum dazzle.img.xz > dazzle.img.xz.sha256)
           # The apps' archives, icons and catalogue, which Settings downloads
           # from beside the image.
-          cp -r zig-out/apps/* dist/
+          cp zig-out/apps/* dist/
           # The system as an update, its icon and manifest, which Settings
           # checks for newer systems.
           cp zig-out/os/* dist/

@@ -82,7 +82,7 @@ fn addAppArchives(b: *std.Build, apps: []const App) *std.Build.Step {
         const name = a.exe.name;
         const app_dir = std.fs.path.dirname(a.exe.root_module.root_source_file.?.src_path.sub_path).?;
         const icon_png = b.path(b.fmt("{s}/icon.png", .{app_dir}));
-        const icon_rel = b.fmt("icons/{s}.png", .{name});
+        const icon_rel = b.fmt("{s}.png", .{name});
         const pack = b.addRunArtifact(hostTool(b, "mkapp"));
         if (a.extra_step) |es| pack.step.dependOn(es);
         const tar = pack.addOutputFileArg(b.fmt("{s}.tar", .{name}));

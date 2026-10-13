@@ -318,8 +318,8 @@ const testing = std.testing;
 const font = @import("font");
 
 pub const sample_app_list = [_]store.App{
-    .{ .name = "dazzle-demo", .title = "Demo", .description = "Spinning shapes, on the GPU", .icon = "icons/dazzle-demo.png", .file = "dazzle-demo.tar.xz", .size = 40 << 10, .sha256 = "" },
-    .{ .name = "dazzle-files", .title = "Files", .description = "Your files", .icon = "icons/dazzle-files.png", .file = "dazzle-files.tar.xz", .size = 50 << 10, .sha256 = "" },
+    .{ .name = "dazzle-demo", .title = "Demo", .description = "Spinning shapes, on the GPU", .icon = "dazzle-demo.png", .file = "dazzle-demo.tar.xz", .size = 40 << 10, .sha256 = "" },
+    .{ .name = "dazzle-files", .title = "Files", .description = "Your files", .icon = "dazzle-files.png", .file = "dazzle-files.tar.xz", .size = 50 << 10, .sha256 = "" },
 };
 pub const sample_apps: software_view.Apps = .{ .list = &sample_app_list, .installed = &.{ true, false }, .source = "https://example.com/apps", .default_source = "https://example.com/apps" };
 

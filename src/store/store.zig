@@ -126,12 +126,11 @@ pub fn saveServerUrlTo(path: [:0]const u8, url: ?[]const u8) void {
     sys.files.writeNew(path, line_buf[0 .. valid.len + 1]) catch {};
 }
 
-/// Whether `path` is a safe relative PNG icon path on the server ("icon.png"
-/// or "icons/<name>.png").
+/// Whether `path` is a safe relative PNG icon filename on the server
+/// ("icon.png" or "<name>.png").
 pub fn validIconPath(path: []const u8) bool {
     if (!std.mem.endsWith(u8, path, ".png")) return false;
     const stem = path[0 .. path.len - ".png".len];
-    if (std.mem.startsWith(u8, stem, "icons/")) return validName(stem["icons/".len..]);
     return validName(stem);
 }
 
@@ -266,7 +265,7 @@ var last_url: []const u8 = "";
 var last_status: u16 = 0;
 
 /// An HTTP/HTTPS client that keeps its connection open across requests so
-/// os.json, icon.png, apps.json and icons/<app>.png can be fetched in one
+/// os.json, icon.png, apps.json and <app>.png can be fetched in one
 /// socket connection.
 pub const Client = struct {
     gpa: std.mem.Allocator,
@@ -361,7 +360,7 @@ pub fn fetchOs(client: *Client, gpa: std.mem.Allocator, base_url: []const u8, di
     } else |_| {}
 }
 
-/// Downloads `apps.json` and each app's `icons/<name>.png` from `base_url`
+/// Downloads `apps.json` and each app's `<name>.png` from `base_url`
 /// into `dir` using `client`.
 pub fn fetchCatalogue(client: *Client, gpa: std.mem.Allocator, base_url: []const u8, dir: []const u8) !void {
     const url = try std.fmt.allocPrint(gpa, "{s}/apps.json", .{base_url});
@@ -387,7 +386,7 @@ pub fn fetchCatalogue(client: *Client, gpa: std.mem.Allocator, base_url: []const
         const icon_rel = if (validIconPath(a.icon))
             a.icon
         else
-            std.fmt.bufPrint(&rel_buf, "icons/{s}.png", .{a.name}) catch continue;
+            std.fmt.bufPrint(&rel_buf, "{s}.png", .{a.name}) catch continue;
         const icon_url = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ base_url, icon_rel });
         defer gpa.free(icon_url);
         const png = client.download(icon_url) catch continue;
@@ -691,23 +690,23 @@ test "the catalogue: apps, and names that are folders" {
     const json =
         \\{"version": "abc", "time": 1791331200, "apps": [
         \\  {"name": "dazzle-demo", "title": "Demo", "description": "Spins",
-        \\   "version": "abc", "time": 1791331200, "icon": "icons/dazzle-demo.png",
+        \\   "version": "abc", "time": 1791331200, "icon": "dazzle-demo.png",
         \\   "file": "dazzle-demo.tar.xz", "size": 10, "sha256": "00", "added": "later"}
         \\]}
     ;
     const c = try parseCatalogue(testing.allocator, json);
     defer c.deinit();
     try testing.expectEqualStrings("Demo", c.value.apps[0].title);
-    try testing.expectEqualStrings("icons/dazzle-demo.png", c.value.apps[0].icon);
+    try testing.expectEqualStrings("dazzle-demo.png", c.value.apps[0].icon);
     try testing.expectEqual(@as(u64, 1791331200), c.value.apps[0].time);
     try testing.expect(validName("dazzle-demo"));
     try testing.expect(!validName("../etc"));
     try testing.expect(!validName(".hidden"));
     try testing.expect(!validName("Upper"));
     try testing.expect(validIconPath("icon.png"));
-    try testing.expect(validIconPath("icons/dazzle-demo.png"));
+    try testing.expect(validIconPath("dazzle-demo.png"));
     try testing.expect(!validIconPath("../icon.png"));
-    try testing.expect(!validIconPath("icons/../x.png"));
+    try testing.expect(!validIconPath("icons/dazzle-demo.png"));
     try testing.expect(!validIconPath("view_in_ar"));
     const bad = "{\"apps\": [{\"name\": \"../x\", \"title\": \"X\", \"file\": \"x\", \"size\": 1, \"sha256\": \"0\"}]}";
     try testing.expectError(error.BadCatalogue, parseCatalogue(testing.allocator, bad));
@@ -763,7 +762,7 @@ test "installing unpacks the app's folder into place, again replaces it, removin
     try testing.expectEqual(@as(usize, 2), count); // . and ..
 }
 
-test "keep-alive fetches os.json, icon.png, apps.json and icons/<app>.png on a single socket connection" {
+test "keep-alive fetches os.json, icon.png, apps.json and <app>.png on a single socket connection" {
     // A minimal 64x64 PNG header for the server to return.
     const png_64 = "\x89PNG\r\n\x1a\n" ++ "\x00\x00\x00\x0dIHDR" ++ "\x00\x00\x00\x40" ++ "\x00\x00\x00\x40" ++ "\x08\x06\x00\x00\x00";
     try testing.expect(validIconPng(png_64));
@@ -786,7 +785,7 @@ test "keep-alive fetches os.json, icon.png, apps.json and icons/<app>.png on a s
                 \\{"name":"dazzle","title":"Dazzle","description":"The operating system","version":"0123abc","time":1791400000,"icon":"icon.png","file":"dazzle-os.tar.xz","size":10,"sha256":"f3e817e51826f4ca7b7d334af8f857d9c42416073f44c7429e1bfda7f097a753"}
             ;
             const apps_body =
-                \\{"version":"0123abc","time":1791400000,"apps":[{"name":"dazzle-demo","title":"Demo","description":"Spins","version":"0123abc","time":1791400000,"icon":"icons/dazzle-demo.png","file":"dazzle-demo.tar.xz","size":10,"sha256":"00"}]}
+                \\{"version":"0123abc","time":1791400000,"apps":[{"name":"dazzle-demo","title":"Demo","description":"Spins","version":"0123abc","time":1791400000,"icon":"dazzle-demo.png","file":"dazzle-demo.tar.xz","size":10,"sha256":"00"}]}
             ;
             // Accept only ONE socket connection: all 4 requests must arrive on it.
             const rc = linux.accept4(lfd, null, null, linux.SOCK.CLOEXEC);
@@ -810,7 +809,7 @@ test "keep-alive fetches os.json, icon.png, apps.json and icons/<app>.png on a s
                     png_64 ++ "OS"
                 else if (std.mem.startsWith(u8, req, "GET /apps.json "))
                     apps_body
-                else if (std.mem.startsWith(u8, req, "GET /icons/dazzle-demo.png "))
+                else if (std.mem.startsWith(u8, req, "GET /dazzle-demo.png "))
                     png_64 ++ "DEMO"
                 else
                     return;
@@ -911,7 +910,7 @@ test "HTTPS client trusts the Dazzle Test CA and fetches over TLS 1.3 keep-alive
                 \\{"name":"dazzle","title":"Dazzle","description":"The operating system","version":"0123abc","time":1791400000,"icon":"icon.png","file":"dazzle-os.tar.xz","size":10,"sha256":"f3e817e51826f4ca7b7d334af8f857d9c42416073f44c7429e1bfda7f097a753"}
             ;
             const apps_body =
-                \\{"version":"0123abc","time":1791400000,"apps":[{"name":"dazzle-demo","title":"Demo","description":"Spins","version":"0123abc","time":1791400000,"icon":"icons/dazzle-demo.png","file":"dazzle-demo.tar.xz","size":10,"sha256":"00"}]}
+                \\{"version":"0123abc","time":1791400000,"apps":[{"name":"dazzle-demo","title":"Demo","description":"Spins","version":"0123abc","time":1791400000,"icon":"dazzle-demo.png","file":"dazzle-demo.tar.xz","size":10,"sha256":"00"}]}
             ;
             const rc = linux.accept4(lfd, null, null, linux.SOCK.CLOEXEC);
             if (linux.errno(rc) != .SUCCESS) return;
@@ -937,7 +936,7 @@ test "HTTPS client trusts the Dazzle Test CA and fetches over TLS 1.3 keep-alive
                     png_64 ++ "TLS-OS"
                 else if (std.mem.startsWith(u8, req, "GET /apps.json "))
                     apps_body
-                else if (std.mem.startsWith(u8, req, "GET /icons/dazzle-demo.png "))
+                else if (std.mem.startsWith(u8, req, "GET /dazzle-demo.png "))
                     png_64 ++ "TLS-DEMO"
                 else
                     return;

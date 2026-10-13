@@ -1,6 +1,6 @@
 //! Writes the app catalogue, apps.json: the apps that can be installed,
 //! published beside the image and their archives (each made by mkapp, and
-//! compressed). Settings downloads it, each app's icon (`icons/<name>.png`),
+//! compressed). Settings downloads it, each app's icon (`<name>.png`),
 //! and an app's archive from the same place by its "file", checking its size
 //! and SHA-256.
 //!
@@ -14,7 +14,7 @@
 //!           "description": "A spinning 3D shape, showing off the graphics",
 //!           "version": "<the commit they were built from>",
 //!           "time": <when it was committed, in seconds since 1970>,
-//!           "icon": "icons/dazzle-demo.png",
+//!           "icon": "dazzle-demo.png",
 //!           "file": "dazzle-demo.tar.xz",
 //!           "size": 104321,
 //!           "sha256": "<64 hex digits>"
@@ -100,7 +100,7 @@ test "the catalogue: each app, with its archive's size and digest" {
         .description = "Spins",
         .version = "abc1234",
         .time = 1791331200,
-        .icon = "icons/dazzle-demo.png",
+        .icon = "dazzle-demo.png",
         .file = "dazzle-demo.tar.xz",
         .size = 3,
         .sha256 = try hexSha256(a, "abc"),
@@ -109,7 +109,7 @@ test "the catalogue: each app, with its archive's size and digest" {
     try std.testing.expectEqualStrings("abc1234", back.version);
     try std.testing.expectEqual(@as(u64, 1791331200), back.time);
     try std.testing.expectEqualStrings("Demo", back.apps[0].title);
-    try std.testing.expectEqualStrings("icons/dazzle-demo.png", back.apps[0].icon);
+    try std.testing.expectEqualStrings("dazzle-demo.png", back.apps[0].icon);
     try std.testing.expectEqualStrings("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", back.apps[0].sha256);
 }
 
