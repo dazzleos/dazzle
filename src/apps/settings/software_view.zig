@@ -61,6 +61,10 @@ pub const State = struct {
     /// Whether the Dazzle item on the Software page is expanded to show
     /// the build and kernel version.
     dazzle_expanded: bool = false,
+    /// Whether the current error snackbar has been dismissed.
+    dismissed: bool = false,
+    last_message_buf: [160]u8 = undefined,
+    last_message_len: u8 = 0,
     /// Whether the form for a custom software server URL is open in the
     /// popup, what is typed in it, and whether it was not an `https://` URL.
     custom_form: bool = false,
@@ -87,6 +91,10 @@ pub const State = struct {
         st.dazzle_expanded = !st.dazzle_expanded;
     }
 
+    pub fn dismissMessage(st: *State) void {
+        st.dismissed = true;
+    }
+
     pub fn setServerUrl(st: *State, t: []const u8) void {
         st.server_url.set(t);
     }
@@ -100,9 +108,20 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
     const a = cx.ui.arena();
     const os_busy = self.update.status == .checking or self.update.status == .downloading or self.update.status == .installing;
     const busy = apps.busy != null or os_busy;
-    if (apps.message.len > 0 and !std.mem.startsWith(u8, apps.message, "Cannot get the list of apps")) {
-        rows.append(a, b.value(apps.message)) catch {};
+    const err_msg = if (apps.message.len > 0 and !std.mem.startsWith(u8, apps.message, "Cannot get the list of apps"))
+        apps.message
+    else
+        "";
+    if (err_msg.len == 0 or apps.busy != null) {
+        state.dismissed = false;
+        state.last_message_len = 0;
+    } else if (!std.mem.eql(u8, state.last_message_buf[0..state.last_message_len], err_msg)) {
+        const n: u8 = @intCast(@min(err_msg.len, state.last_message_buf.len));
+        @memcpy(state.last_message_buf[0..n], err_msg[0..n]);
+        state.last_message_len = n;
+        state.dismissed = false;
     }
+    const snackbar_msg = if (state.dismissed) "" else err_msg;
     dazzleRows(self, b, state, &rows);
     var updates: usize = @intFromBool(self.update.status == .available);
     for (apps.list, 0..) |app, i| {
@@ -111,7 +130,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
         if (updatable) updates += 1;
         const this_busy = if (apps.busy) |n| std.mem.eql(u8, n, app.name) or (std.mem.eql(u8, n, "*") and updatable) else false;
         const enabled = self.actions != null and !busy;
-        const x = if (self.actions) |acts| appAct(cx, acts, app.name) else null;
+        const x = if (self.actions) |acts| appAct(cx, acts, state, app.name) else null;
         const button: ui.Widget = if (this_busy)
             cx.make(ui.Spinner{ .size = 28 })
         else if (updatable)
@@ -155,13 +174,13 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
         footer_children.append(a, cx.make(ui.OutlinedButton{
             .label = "Update all",
             .icon = .download,
-            .on_press = if (self.actions != null and !busy) .of(self.actions.?, updateAll) else null,
+            .on_press = if (self.actions != null and !busy) .of(appAct(cx, self.actions.?, state, ""), AppAct.updateAll) else null,
         })) catch {};
     }
     footer_children.append(a, cx.make(ui.OutlinedButton{
         .label = "Refresh",
         .icon = .refresh,
-        .on_press = if (self.actions != null and !busy) .of(appAct(cx, self.actions.?, ""), AppAct.refresh) else null,
+        .on_press = if (self.actions != null and !busy) .of(appAct(cx, self.actions.?, state, ""), AppAct.refresh) else null,
     })) catch {};
     footer_children.append(a, cx.make(ServerConfigButton{
         .state = state,
@@ -171,13 +190,17 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
     })) catch {};
     const footer = cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = footer_children.items });
     return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &.{
-        cx.make(ui.Expanded{ .child = cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{
-            .padding = .{ .left = 24, .top = 24, .right = 24, .bottom = 12 },
-            .child = cx.make(ui.Align{
-                .alignment = .top_center,
-                .child = cx.make(ui.ConstrainedBox{ .constraints = .{ .max_w = view.max_page_width }, .child = b.page(rows.items) }),
-            }),
-        }) }).withKey(@as(u64, @intFromEnum(Page.apps)) + 1) }),
+        cx.make(ui.Expanded{ .child = cx.make(ui.Snackbar{
+            .message = snackbar_msg,
+            .on_dismiss = .of(state, State.dismissMessage),
+            .child = cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{
+                .padding = .{ .left = 24, .top = 24, .right = 24, .bottom = 12 },
+                .child = cx.make(ui.Align{
+                    .alignment = .top_center,
+                    .child = cx.make(ui.ConstrainedBox{ .constraints = .{ .max_w = view.max_page_width }, .child = b.page(rows.items) }),
+                }),
+            }) }).withKey(@as(u64, @intFromEnum(Page.apps)) + 1),
+        }) }),
         cx.make(ui.Padding{
             .padding = .{ .left = 24, .top = 12, .right = 24, .bottom = 24 },
             .child = cx.make(ui.Align{
@@ -191,10 +214,6 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
 
 fn downloadUpdate(a: *Actions) void {
     a.download_update = true;
-}
-
-fn updateAll(a: *Actions) void {
-    a.update_all = true;
 }
 
 fn restartNow(a: *Actions) void {
@@ -275,29 +294,38 @@ fn dazzleDetail(cx: *ui.Context, name: []const u8, text: []const u8) ui.Widget {
     } });
 }
 
-/// Install, Remove and Refresh on the Apps page: requests for the main
-/// loop.
+/// Install, Remove, Update all and Refresh on the Apps page: requests
+/// for the main loop.
 const AppAct = struct {
     actions: *Actions,
+    state: *State,
     name: Actions.AppName,
 
     fn install(x: *AppAct) void {
+        x.state.dismissed = false;
         x.actions.install = x.name;
     }
 
     fn remove(x: *AppAct) void {
+        x.state.dismissed = false;
         x.actions.remove = x.name;
     }
 
+    fn updateAll(x: *AppAct) void {
+        x.state.dismissed = false;
+        x.actions.update_all = true;
+    }
+
     fn refresh(x: *AppAct) void {
+        x.state.dismissed = false;
         x.actions.refresh_apps = true;
         x.actions.check_update = true;
     }
 };
 
-fn appAct(cx: *ui.Context, actions: *Actions, name: []const u8) *AppAct {
+fn appAct(cx: *ui.Context, actions: *Actions, state: *State, name: []const u8) *AppAct {
     const x = cx.ui.arena().create(AppAct) catch unreachable;
-    x.* = .{ .actions = actions, .name = .init(name) };
+    x.* = .{ .actions = actions, .state = state, .name = .init(name) };
     return x;
 }
 
@@ -583,9 +611,19 @@ test "installing and removing apps, and getting their list again" {
     view.click(u, view.up(view.findText(u.root.?, "Remove").?, ui.OutlinedButton).?);
     try testing.expect(actions.remove == null);
 
-    // No list yet: labelled at the bottom, not at the top of the page.
-    settings.apps = .{ .message = "Cannot get the list of apps: the server could not be reached (is the network up?)" };
+    // An install error shows in a dismissible snackbar.
+    settings.apps = view.sample_apps;
+    settings.apps.message = "Cannot install Files: the server could not be reached (is the network up?)";
+    u.frame(1920, 960, 3, settings);
+    const snack = view.findType(u.root.?, ui.Snackbar).?;
+    try testing.expect(view.findText(snack, "Cannot install Files: the server could not be reached (is the network up?)") != null);
+    view.click(u, view.findType(snack, ui.IconButton).?);
     u.frame(1920, 960, 4, settings);
+    try testing.expect(view.findText(u.root.?, "Cannot install Files: the server could not be reached (is the network up?)") == null);
+
+    // No list yet: labelled at the bottom, not in a snackbar.
+    settings.apps = .{ .message = "Cannot get the list of apps: the server could not be reached (is the network up?)" };
+    u.frame(1920, 960, 5, settings);
     try testing.expect(view.findText(u.root.?, "No list of apps yet: is the network up?") != null);
     try testing.expect(view.findText(u.root.?, "Cannot get the list of apps: the server could not be reached (is the network up?)") == null);
 }

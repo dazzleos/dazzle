@@ -651,10 +651,10 @@ pub const Store = struct {
     pub fn uninstall(s: *Store, name: []const u8) void {
         if (s.job != null) return;
         remove(apps_dir, name) catch |err| {
-            s.setMessage("Cannot remove {s}: {s}", .{ name, @errorName(err) });
+            s.setMessage("Cannot remove {s}: {s}", .{ s.title(name), @errorName(err) });
             return;
         };
-        s.setMessage("Removed {s}", .{s.title(name)});
+        s.message_len = 0;
     }
 
     /// An app's title, from the catalogue (else its name).
@@ -675,7 +675,7 @@ pub const Store = struct {
         s.job = null;
         switch (kind) {
             .catalogue => if (outcome) |why| s.setMessage("Cannot get the list of apps: {s}", .{why}) else s.loadCatalogue(),
-            .install => if (outcome) |why| s.setMessage("Cannot install {s}: {s}", .{ s.title(name), why }) else s.setMessage("Installed {s}: it is in the dock", .{s.title(name)}),
+            .install => if (outcome) |why| s.setMessage("Cannot install {s}: {s}", .{ s.title(name), why }),
             .update_all => if (outcome) |why| s.setMessage("Cannot update apps: {s}", .{why}) else {
                 s.message_len = 0;
             },

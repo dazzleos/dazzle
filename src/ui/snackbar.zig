@@ -31,7 +31,10 @@ pub const Snackbar = struct {
     pub const min_height = 48;
 
     pub fn build(self: *const Snackbar, cx: *Context) Widget {
-        if (self.message.len == 0) return self.child orelse cx.make(Empty{});
+        if (self.message.len == 0) {
+            if (self.child) |under| return cx.make(Overlay{ .children = &.{under} });
+            return cx.make(Empty{});
+        }
         const t = cx.theme();
 
         var items: [3]Widget = undefined;
