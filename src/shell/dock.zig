@@ -36,6 +36,7 @@ pub const NetworkStatus = union(enum) {
 };
 
 pub fn networkStatusFromReport(r: sys.network.Report) NetworkStatus {
+    if (r.ethernetConnected() or r.ethernetCarrier()) return .{ .ethernet = true };
     if (r.wifiAdapters().len > 0) {
         if (r.hotspot.state == .active) return .{ .wifi = 4 };
         if (r.connection.state.joined()) {
@@ -47,7 +48,7 @@ pub fn networkStatusFromReport(r: sys.network.Report) NetworkStatus {
         }
         return .{ .wifi = 0 };
     }
-    return .{ .ethernet = r.ethernetConnected() or r.ethernetCarrier() };
+    return .{ .ethernet = false };
 }
 
 pub fn readNetworkStatus() NetworkStatus {
@@ -87,8 +88,9 @@ pub fn readNetworkStatus() NetworkStatus {
             }
         }
     }
+    if (eth_up) return .{ .ethernet = true };
     if (has_wifi) return .{ .wifi = if (wifi_up) 4 else 0 };
-    return .{ .ethernet = eth_up };
+    return .{ .ethernet = false };
 }
 
 pub const App = struct {
@@ -460,16 +462,17 @@ test "icons and the status box are in a row in the middle, and clicks find the a
     try testing.expectEqual(@as(u32, background), at(&d, rs.x + rs.size / 2, rs.y + 5));
 }
 
-test "networkStatusFromReport picks Wi-Fi bars when a Wi-Fi adapter is present and Ethernet otherwise" {
-    const r_eth = sys.network.Report.parse(
+test "networkStatusFromReport picks Ethernet when Ethernet is connected and Wi-Fi otherwise" {
+    const r_eth_and_wifi = sys.network.Report.parse(
         \\ethernet eth0 dhcp 10.0.2.15/24 10.0.2.2 up
+        \\wifi adapter wlan0 b8:27:eb:01:02:03 up
         \\end
         \\
     ).?;
-    try testing.expectEqual(NetworkStatus{ .ethernet = true }, networkStatusFromReport(r_eth));
+    try testing.expectEqual(NetworkStatus{ .ethernet = true }, networkStatusFromReport(r_eth_and_wifi));
 
     const r_wifi = sys.network.Report.parse(
-        \\ethernet eth0 dhcp 10.0.2.15/24 10.0.2.2 up
+        \\ethernet eth0 dhcp none none down
         \\wifi adapter wlan0 b8:27:eb:01:02:03 up
         \\wifi connection connected none 486f6d65 192.168.1.50
         \\wifi network -6200 2437 wpa2 486f6d65
@@ -535,4 +538,3 @@ test "apps are the directories holding a program of the same name, with builtin 
     try testing.expectEqual(@as(?icons.Icon, null), apps[2].icon);
     try testing.expectEqual(@as(usize, 0), (try findApps(a, "/nonexistent", &.{})).len);
 }
-
