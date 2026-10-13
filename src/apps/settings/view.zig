@@ -13,9 +13,11 @@ const store = @import("store");
 const usb = @import("usb.zig");
 const gpio = @import("gpio.zig");
 const log = @import("log.zig");
+const audio = @import("audio");
 
 pub const wifi_view = @import("wifi_view.zig");
 pub const ethernet_view = @import("ethernet_view.zig");
+pub const sound_view = @import("sound_view.zig");
 pub const board_view = @import("board_view.zig");
 pub const software_view = @import("software_view.zig");
 pub const resources_view = @import("resources_view.zig");
@@ -53,6 +55,9 @@ pub const Actions = struct {
     gpio: ?GpioChange = null,
     /// The video memory to have from the next start, in MiB.
     video_memory: ?u16 = null,
+    /// Sound settings (volume, mute, output device) and test chime trigger.
+    sound: ?audio.Settings = null,
+    test_sound: bool = false,
 
     pub const GpioChange = struct { pin: u6, mode: gpio.Mode };
 
@@ -123,6 +128,8 @@ pub const Settings = struct {
     apps: software_view.Apps = .{},
     update: software_view.Update = .{},
     video_memory: resources_view.VideoMemory = .{},
+    sound: audio.Settings = .{},
+    audio_devices: *const audio.Devices = &empty_audio_devices,
     /// The title bar's buttons (close, and maximize, which shows whether
     /// the window is), and pressing the bar (to move the window).
     on_close: ?ui.Callback = null,
@@ -135,6 +142,7 @@ pub const Settings = struct {
         page: Page = .wifi,
         wifi: wifi_view.State = .{},
         ethernet: ethernet_view.State = .{},
+        sound: sound_view.State = .{},
         board: board_view.State = .{},
         software: software_view.State = .{},
         resources: resources_view.State = .{},
@@ -164,6 +172,7 @@ pub const Settings = struct {
         const right = switch (state.page) {
             .wifi => wifi_view.build(self, b, &state.wifi),
             .ethernet => b.scroll(.ethernet, ethernet_view.build(self, b, &state.ethernet)),
+            .sound => b.scroll(.sound, sound_view.build(self, b, &state.sound)),
             .board => board_view.build(self, b, &state.board),
             .apps => software_view.build(self, b, &state.software),
             .resources => resources_view.build(self, b, &state.resources),
@@ -190,10 +199,13 @@ pub const Settings = struct {
     }
 };
 
+const empty_audio_devices: audio.Devices = .{};
+
 /// The pages, in the order of their tabs.
 pub const Page = enum {
     wifi,
     ethernet,
+    sound,
     board,
     apps,
     resources,
@@ -204,6 +216,7 @@ pub const Page = enum {
         return switch (p) {
             .wifi => wifi_view.label,
             .ethernet => ethernet_view.label,
+            .sound => sound_view.label,
             .board => board_view.label,
             .apps => software_view.label,
             .resources => resources_view.label,
@@ -216,6 +229,7 @@ pub const Page = enum {
         return switch (p) {
             .wifi => wifi_view.icon,
             .ethernet => ethernet_view.icon,
+            .sound => sound_view.icon,
             .board => board_view.icon,
             .apps => software_view.icon,
             .resources => resources_view.icon,
@@ -416,6 +430,7 @@ test "everything is shown, and fits from the smallest window to the biggest" {
     defer u.destroy();
     var d = sample();
     const wifi = sampleWifi();
+    const audio_devs = sound_view.sampleDevices();
     var all: std.ArrayList(u8) = .empty;
     defer all.deinit(testing.allocator);
     // Every page, at every size.
@@ -423,13 +438,13 @@ test "everything is shown, and fits from the smallest window to the biggest" {
     for (std.enums.values(Page)) |page| {
         for (test_sizes) |size| {
             frame_no += 1;
-            u.frame(size[0], size[1], frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps, .video_memory = .{ .now = 128, .next = 192 } });
+            u.frame(size[0], size[1], frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps, .video_memory = .{ .now = 128, .next = 192 }, .audio_devices = &audio_devs });
             try testing.expect(!overflows(u.root.?));
         }
         // What shows maximized (in a smaller window, rows of the lists
         // further down are not made).
         frame_no += 1;
-        u.frame(1920, 1036, frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps, .video_memory = .{ .now = 128, .next = 192 } });
+        u.frame(1920, 1036, frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps, .video_memory = .{ .now = 128, .next = 192 }, .audio_devices = &audio_devs });
         texts(u.root.?, &all);
         if (page == .ethernet) {
             d.net.len = 2;
@@ -490,6 +505,10 @@ test "everything is shown, and fits from the smallest window to the biggest" {
         "Spinning shapes, on the GPU",
         "Install",
         "All apps updated",
+        "Sound",
+        "Volume",
+        "Headphones",
+        "Test sound",
     }) |want| {
         if (std.mem.indexOf(u8, all.items, want) == null) {
             std.debug.print("missing \"{s}\" in:\n{s}\n", .{ want, all.items });

@@ -49,6 +49,10 @@ fn run() !void {
         const name = std.fmt.bufPrint(&name_buf, "{s}{d}", .{ prefix, n }) catch continue;
         grant(name, false);
     };
+    for (0..8) |card| for (0..4) |dev| for ([_]u8{ 'p', 'c' }) |dir| {
+        const name = std.fmt.bufPrint(&name_buf, "snd/pcmC{d}D{d}{c}", .{ card, dev, dir }) catch continue;
+        grant(name, false);
+    };
     for (single_devices) |name| grant(name, false);
 
     var buf: [4096]u8 = undefined;
@@ -63,11 +67,26 @@ fn run() !void {
 const max_scanned = 32;
 
 /// The device nodes the user gets (relative to /dev, without their
-/// numbers): input events, and the camera's.
-const user_devices = [_][]const u8{ "input/event", "video", "v4l-subdev", "media", "gpiochip", "gpiomem", "i2c-", "ttyUSB", "ttyACM", "ttyAMA", "ttyS" };
+/// numbers): input events, the camera's, GPIO, I2C, serial and audio.
+const user_devices = [_][]const u8{ "input/event", "video", "v4l-subdev", "media", "gpiochip", "gpiomem", "i2c-", "ttyUSB", "ttyACM", "ttyAMA", "ttyS", "snd/controlC" };
 
 /// Device nodes the user gets that are not numbered.
-const single_devices = [_][]const u8{"gpiomem"};
+const single_devices = [_][]const u8{ "gpiomem", "snd/timer" };
+
+/// Whether `devname` is an ALSA PCM node (`snd/pcmC<card>D<dev><p|c>`).
+fn isSndPcm(devname: []const u8) bool {
+    if (!std.mem.startsWith(u8, devname, "snd/pcmC")) return false;
+    const rest = devname["snd/pcmC".len..];
+    if (rest.len < 4) return false;
+    const stream = rest[rest.len - 1];
+    if (stream != 'p' and stream != 'c') return false;
+    const mid = rest[0 .. rest.len - 1];
+    const d_pos = std.mem.indexOfScalar(u8, mid, 'D') orelse return false;
+    if (d_pos == 0 or d_pos + 1 >= mid.len) return false;
+    for (mid[0..d_pos]) |c| if (!std.ascii.isDigit(c)) return false;
+    for (mid[d_pos + 1 ..]) |c| if (!std.ascii.isDigit(c)) return false;
+    return true;
+}
 
 /// The device node (relative to /dev) a uevent adds, if it is one the
 /// user gets.
@@ -81,6 +100,7 @@ fn userDevice(msg: []const u8) ?[]const u8 {
     }
     if (!std.mem.eql(u8, action, "add")) return null;
     for (single_devices) |name| if (std.mem.eql(u8, devname, name)) return devname;
+    if (isSndPcm(devname)) return devname;
     for (user_devices) |prefix| {
         if (devname.len > prefix.len and std.mem.startsWith(u8, devname, prefix) and std.ascii.isDigit(devname[prefix.len])) return devname;
     }
@@ -105,7 +125,7 @@ fn grant(name: []const u8, log: bool) void {
     if (log) print("dazzle: devices: {s} is the user's\n", .{path});
 }
 
-test "the camera's uevents" {
+test "the camera's and audio uevents" {
     const video = "add@/devices/platform/soc/20801000.csi/video4linux/video0\x00ACTION=add\x00SUBSYSTEM=video4linux\x00DEVNAME=video0\x00SEQNUM=900\x00";
     try std.testing.expectEqualStrings("video0", userDevice(video).?);
     const subdev = "add@/devices/x\x00ACTION=add\x00DEVNAME=v4l-subdev1\x00";
@@ -117,6 +137,11 @@ test "the camera's uevents" {
     try std.testing.expectEqualStrings("ttyUSB0", userDevice("add@/x\x00ACTION=add\x00DEVNAME=ttyUSB0\x00").?);
     try std.testing.expect(userDevice("add@/x\x00ACTION=add\x00DEVNAME=tty1\x00") == null);
     try std.testing.expectEqualStrings("gpiomem", userDevice("add@/x\x00ACTION=add\x00DEVNAME=gpiomem\x00").?);
+    try std.testing.expectEqualStrings("snd/controlC0", userDevice("add@/x\x00ACTION=add\x00DEVNAME=snd/controlC0\x00").?);
+    try std.testing.expectEqualStrings("snd/pcmC0D0p", userDevice("add@/x\x00ACTION=add\x00DEVNAME=snd/pcmC0D0p\x00").?);
+    try std.testing.expectEqualStrings("snd/pcmC1D0c", userDevice("add@/x\x00ACTION=add\x00DEVNAME=snd/pcmC1D0c\x00").?);
+    try std.testing.expectEqualStrings("snd/timer", userDevice("add@/x\x00ACTION=add\x00DEVNAME=snd/timer\x00").?);
+    try std.testing.expect(userDevice("add@/x\x00ACTION=add\x00DEVNAME=snd/seq\x00") == null);
     // Not "videofoo", nor others.
     try std.testing.expect(userDevice("add@/x\x00ACTION=add\x00DEVNAME=videofoo\x00") == null);
     try std.testing.expect(userDevice("add@/x\x00ACTION=add\x00DEVNAME=mmcblk0\x00") == null);

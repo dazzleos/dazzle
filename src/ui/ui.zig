@@ -107,6 +107,8 @@ pub const image = @import("image.zig");
 pub const qr_code = @import("qr_code.zig");
 pub const video_player = @import("video_player.zig");
 pub const video = @import("video");
+pub const audio_player = @import("audio_player.zig");
+pub const audio = @import("audio");
 /// The icons there are (`icons.Icon`), and their font.
 pub const icons = @import("icons");
 pub const keymap = @import("keymap.zig");
@@ -199,6 +201,7 @@ pub const Icon = icon.Icon;
 pub const Image = image.Image;
 pub const QrCode = qr_code.QrCode;
 pub const VideoPlayer = video_player.VideoPlayer;
+pub const AudioPlayer = audio_player.AudioPlayer;
 pub const SeekBar = video_player.SeekBar;
 
 pub const Painter = painter.Painter;
@@ -257,6 +260,7 @@ test {
     _ = image;
     _ = qr_code;
     _ = video_player;
+    _ = audio_player;
     _ = keymap;
     _ = painter;
     _ = damage;

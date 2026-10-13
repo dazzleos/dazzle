@@ -98,4 +98,13 @@ pub const Icon = enum {
     code,
     // Showcase.
     widgets,
+    // Audio and Sound.
+    volume_up,
+    volume_down,
+    volume_mute,
+    volume_off,
+    speaker,
+    tv,
+    music_note,
+    audio_file,
 };

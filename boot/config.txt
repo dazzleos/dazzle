@@ -20,8 +20,10 @@ kernel=kernel8.img
 initramfs initramfs.cpio followkernel
 
 # The kernel's vc4 driver drives the display and the GPU (it is off in the
-# device trees until this overlay turns it on).
+# device trees until this overlay turns it on), and dtparam=audio=on enables
+# the onboard 3.5 mm headphone jack alongside HDMI audio.
 dtoverlay=vc4-kms-v3d
+dtparam=audio=on
 
 # The camera: the firmware finds which Camera Module is on the connector
 # and applies its overlay from the slot's overlays/ (imx219 or ov5647, the

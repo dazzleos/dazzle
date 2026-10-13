@@ -34,6 +34,7 @@ const gpio = @import("gpio.zig");
 const view = @import("view.zig");
 const store = @import("store");
 const update = @import("update.zig");
+const audio = @import("audio");
 
 /// How often the GPIO pins' levels are read, while their page shows.
 const gpio_poll_ns = 100 * std.time.ns_per_ms;
@@ -80,6 +81,11 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
     var monitor: info.UsageMonitor = .{};
     var usage = monitor.read(sys.nowNs());
     var network = info.Network.read();
+    var sound = audio.loadSettings();
+    var audio_devices = audio.listDevices();
+    audio.applySettings(sound, &audio_devices);
+    var test_player: ?audio.Player = null;
+    defer if (test_player) |*p| p.close();
     // The USB devices, read while the board page shows.
     var devices = usb.Devices.read();
     // The GPIO pins, read while their page shows: their levels several
@@ -135,7 +141,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
     while (true) {
         a.win.wake_fds = .{ pages_fd, net_sub.fd, updater.sub.fd, if (view.shownPage(a.ui) == .log) syslog.fd else null };
         const board_page = view.shownPage(a.ui) == .board;
-        const until = if (a.suspended) sys.nowNs() + 60 * std.time.ns_per_s else if (board_page) @min(next_update, next_levels) else next_update;
+        const base_until = if (a.suspended) sys.nowNs() + 60 * std.time.ns_per_s else if (board_page) @min(next_update, next_levels) else next_update;
+        const until = if (test_player != null) @min(base_until, sys.nowNs() + 16 * std.time.ns_per_ms) else base_until;
         if (!try a.step(@max(until -| sys.nowNs(), std.time.ns_per_ms))) return;
         // Covered by another window: nothing is read or drawn, and the
         // window in front gets the GPU memory.
@@ -152,6 +159,9 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
                 devices = usb.Devices.read();
                 pins.readUsers();
             }
+            if (view.shownPage(a.ui) == .sound) {
+                audio_devices = audio.listDevices();
+            }
             if (view.shownPage(a.ui) == .log) _ = syslog.poll();
             a.dirty = true;
         }
@@ -167,6 +177,26 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             actions.gpio = null;
             pins.set(g.pin, g.mode);
             a.dirty = true;
+        }
+        if (actions.sound) |s| {
+            actions.sound = null;
+            sound = s;
+            audio.saveSettings(sound);
+            audio.applySettings(sound, &audio_devices);
+            if (test_player) |*p| p.updateSettings(sound);
+            a.dirty = true;
+        }
+        if (actions.test_sound) {
+            actions.test_sound = false;
+            if (test_player) |*p| p.close();
+            test_player = audio.Player.openTestTone(sound);
+            a.dirty = true;
+        }
+        if (test_player) |*p| {
+            if (p.step(now) == null) {
+                p.close();
+                test_player = null;
+            }
         }
         // Installing, or getting the list of apps (and os.json, over the
         // same keep-alive connection).
@@ -366,6 +396,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
                     .next = if (updater.report) |r| r.video_memory_next else null,
                     .failed = video_memory_failed,
                 },
+                .sound = sound,
+                .audio_devices = &audio_devices,
                 .update = .{
                     .status = updater.status(),
                     .available = if (updater.available()) |m| std.fmt.bufPrint(&available_buf, "{s} ({s})", .{ m.version, update.formatDate(&date_buf, m.time) }) catch m.version else "",
@@ -385,6 +417,7 @@ test {
     _ = view;
     _ = @import("wifi_view.zig");
     _ = @import("ethernet_view.zig");
+    _ = @import("sound_view.zig");
     _ = @import("board_view.zig");
     _ = @import("software_view.zig");
     _ = @import("resources_view.zig");
