@@ -365,6 +365,7 @@ test {
     _ = @import("media.zig");
     _ = @import("volume.zig");
     _ = @import("nl80211.zig");
+    _ = @import("nat.zig");
     _ = @import("supplicant.zig");
     _ = @import("mkfs.zig");
     _ = @import("storage.zig");

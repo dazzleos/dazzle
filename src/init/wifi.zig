@@ -24,6 +24,7 @@ const nl80211 = @import("nl80211.zig");
 const supplicant = @import("supplicant.zig");
 const ipv4 = @import("ipv4.zig");
 const dhcp = @import("dhcp.zig");
+const nat = @import("nat.zig");
 
 const wifi = sys.network;
 const print = sys.print;
@@ -436,6 +437,13 @@ pub const Manager = struct {
             m.hotspot = h;
             return m.failHotspot(.rejected);
         };
+        if (share) {
+            nat.enableMasquerade(ap_ip, net.subnetMask(), upstream) catch |err| {
+                print(sys.log_warning ++ "dazzle: wifi: cannot configure hotspot NAT ({s})\n", .{@errorName(err)});
+            };
+        } else {
+            nat.disableMasquerade();
+        }
         setIpForward(share);
         h.dhcp_fd = ipv4.openDhcpServer(st.adapter.name()) catch null;
         m.hotspot = h;
@@ -454,6 +462,7 @@ pub const Manager = struct {
             if (h.eapol) |fd| sys.close(fd);
             h.eapol = null;
             setIpForward(false);
+            nat.disableMasquerade();
             if (m.station) |st| {
                 if (m.nl) |*nl| {
                     nl.stopAp(st.index) catch {};
@@ -783,6 +792,7 @@ pub const Manager = struct {
     pub fn dhcp(m: *Manager) void {
         const h = &(m.hotspot orelse return);
         const fd = h.dhcp_fd orelse return;
+        if (h.pool.share_internet) h.pool.dns = readResolvConfDns() orelse h.pool.dns;
         while (ipv4.stepDhcpServer(fd, &h.pool)) |mac| {
             if (h.pool.clientInfo(mac)) |info| {
                 var cl: wifi.HotspotClient = .{ .mac = mac, .address = info.ip };
