@@ -161,7 +161,8 @@ pub const Showcase = struct {
             s.radio_choice = v;
         }
         fn setText(s: *State, txt: []const u8) void {
-            const n = @min(txt.len, s.text_buf.len);
+            var n = @min(txt.len, s.text_buf.len);
+            while (n > 0 and n < txt.len and txt[n] & 0xc0 == 0x80) n -= 1;
             @memcpy(s.text_buf[0..n], txt[0..n]);
             s.text_len = n;
         }

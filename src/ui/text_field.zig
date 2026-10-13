@@ -1,7 +1,7 @@
 //! TextField: one line of text to type, Material's outlined text field.
 //! Clicking it gives it the keyboard; typing, Backspace, Delete, the arrow
 //! keys, Home and End edit it; Enter submits. With `obscure` (for
-//! passwords) it shows dots. ASCII only, for now.
+//! passwords) it shows dots.
 //!
 //! Text is selected by dragging over it, or with Shift and the arrow keys,
 //! Home or End (Ctrl+A: all of it). Ctrl+X cuts the selection, Ctrl+C
@@ -52,10 +52,7 @@ pub const TextField = struct {
 
     pub fn initState(self: *const TextField) State {
         var st: State = .{};
-        const n = @min(self.initial.len, capacity, self.max_len);
-        @memcpy(st.buf[0..n], self.initial[0..n]);
-        st.len = n;
-        st.cursor = n;
+        _ = st.insert(self.initial, self.max_len);
         return st;
     }
 
@@ -143,9 +140,17 @@ pub const TextField = struct {
             s.len -= to - from;
         }
 
+        /// The character boundary at or before byte `i`.
+        pub fn snap(s: *const State, i: usize) usize {
+            if (i >= s.len) return s.len;
+            var j = i;
+            while (j > 0 and s.buf[j] & 0xc0 == 0x80) j -= 1;
+            return j;
+        }
+
         /// The character boundary before byte `i` (0 at the start).
         fn before(s: *const State, i: usize) usize {
-            var j = i -| 1;
+            var j = @min(i, s.len) -| 1;
             while (j > 0 and s.buf[j] & 0xc0 == 0x80) j -= 1;
             return j;
         }
@@ -164,7 +169,7 @@ pub const TextField = struct {
             if (extend) {
                 if (s.anchor == null) s.anchor = s.cursor;
             } else s.anchor = null;
-            s.cursor = to;
+            s.cursor = s.snap(to);
         }
 
         pub fn selectAll(s: *State) void {
@@ -468,12 +473,15 @@ pub const TextField = struct {
     fn cursorAt(self: *const TextField, n: *const Node, x: f32) usize {
         const st = n.state(State);
         const style = self.fontStyle(n) orelse return st.len;
+        const right_pad: f32 = if (self.obscure) toggle_pad else pad;
+        const room = @max(n.size.w - pad - right_pad, 0);
+        const scroll = @max(self.xOf(style, st, st.cursor) - room, 0);
         var best: usize = 0;
         var best_d = std.math.inf(f32);
         for (0..st.len + 1) |i| {
             // Only between characters.
             if (i < st.len and st.buf[i] & 0xc0 == 0x80) continue;
-            const d = @abs(pad + self.xOf(style, st, i) - x);
+            const d = @abs(pad - scroll + self.xOf(style, st, i) - x);
             if (d < best_d) {
                 best = i;
                 best_d = d;
@@ -926,5 +934,23 @@ test "a password field has a visibility toggle button on the right hand side" {
     try testing.expect(!st.revealed);
     try testing.expect(tf.isObscured(st));
     try testing.expectEqualStrings("••••••", tf.shown(st, &buf, st.text()));
+}
+
+test "initial text and max_len never split a multi-byte UTF-8 character" {
+    // "café" is 5 bytes ('c','a','f', 0xc3, 0xa9); max_len = 4 only fits "caf".
+    const tf: TextField = .{ .initial = "café", .max_len = 4 };
+    var st = tf.initState();
+    try testing.expectEqualStrings("caf", st.text());
+    try testing.expectEqual(@as(usize, 3), st.cursor);
+
+    // 2, 3, and 4-byte UTF-8 sequences in initial text, with control chars normalized.
+    const tf2: TextField = .{ .initial = "hé\t€\n🌍", .max_len = 32 };
+    st = tf2.initState();
+    try testing.expectEqualStrings("hé € 🌍", st.text());
+    // Snapping mid-character byte offsets with moveTo.
+    st.moveTo(2, false); // inside 'é' (bytes 1..3)
+    try testing.expectEqual(@as(usize, 1), st.cursor);
+    st.moveTo(6, true); // inside '€' (bytes 4..7)
+    try testing.expectEqual(@as(usize, 4), st.cursor);
 }
 

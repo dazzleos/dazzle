@@ -45,7 +45,10 @@ pub const Document = struct {
 
     pub fn init(gpa: std.mem.Allocator, initial: []const u8) !Document {
         var d: Document = .{ .gpa = gpa };
-        try d.bytes.appendSlice(gpa, initial);
+        try d.bytes.ensureTotalCapacity(gpa, initial.len);
+        d.insert(initial);
+        d.cursor = 0;
+        d.version = 0;
         return d;
     }
 
@@ -74,7 +77,7 @@ pub const Document = struct {
         if (extend) {
             if (d.anchor == null) d.anchor = d.cursor;
         } else d.anchor = null;
-        d.cursor = @min(to, d.bytes.items.len);
+        d.cursor = d.snap(to);
     }
 
     fn remove(d: *Document, from: usize, to: usize) void {
@@ -121,9 +124,17 @@ pub const Document = struct {
         }
     }
 
+    /// The character boundary at or before byte `i`.
+    pub fn snap(d: *const Document, i: usize) usize {
+        if (i >= d.bytes.items.len) return d.bytes.items.len;
+        var j = i;
+        while (j > 0 and d.bytes.items[j] & 0xc0 == 0x80) j -= 1;
+        return j;
+    }
+
     /// The character boundary before byte `i` (0 at the start).
     pub fn before(d: *const Document, i: usize) usize {
-        var j = i -| 1;
+        var j = @min(i, d.bytes.items.len) -| 1;
         while (j > 0 and d.bytes.items[j] & 0xc0 == 0x80) j -= 1;
         return j;
     }
@@ -335,8 +346,8 @@ pub const TextArea = struct {
             var x: f32 = pad;
             var at = l.start;
             while (at < l.end) {
-                var end = at + 1;
-                while (end < l.end and cs[end] == cs[at]) end += 1;
+                var end = @min(d.after(at), l.end);
+                while (end < l.end and cs[end] == cs[at]) end = @min(d.after(end), l.end);
                 x = p.text(s.size, x, baseline, text[at..end], t.syntax.color(cs[at], t.on_surface));
                 at = end;
             }
@@ -598,6 +609,24 @@ test "a document: typing, selecting and deleting whole characters" {
     d.insert("H");
     try testing.expectEqualStrings("H    x\nyllo", d.text());
     try testing.expect(d.version > 0);
+}
+
+test "a document: init normalizes UTF-8 and moveTo snaps to character boundaries" {
+    var d = try Document.init(testing.allocator, "café\r\n\t—🌍\xff");
+    defer d.deinit();
+    try testing.expectEqual(@as(usize, 0), d.cursor);
+    try testing.expectEqual(@as(u64, 0), d.version);
+    try testing.expectEqualStrings("café\n    —🌍", d.text());
+    // "caf" is 3 bytes, "é" is bytes 3..5; moving to byte 4 snaps back to byte 3.
+    d.moveTo(4, false);
+    try testing.expectEqual(@as(usize, 3), d.cursor);
+    try testing.expectEqual(@as(usize, 5), d.after(d.cursor));
+    // "—" is 3 bytes (10..13), "🌍" is 4 bytes (13..17); moving to byte 15 snaps to 13.
+    d.moveTo(15, true);
+    try testing.expectEqual(@as(usize, 13), d.cursor);
+    try testing.expectEqual([2]usize{ 3, 13 }, d.selection().?);
+    _ = d.deleteSelection();
+    try testing.expectEqualStrings("caf🌍", d.text());
 }
 
 test "lines wrap between words, or within one too long" {
