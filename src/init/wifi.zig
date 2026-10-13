@@ -46,6 +46,9 @@ const eth_p_pae: u16 = 0x888e;
 const Join = struct {
     ssid_buf: [32]u8 = undefined,
     ssid_len: u8 = 0,
+    pass_buf: [63]u8 = undefined,
+    pass_len: u8 = 0,
+    has_bss: bool = false,
     /// The PMK; null for an open network.
     pmk: ?[32]u8 = null,
     bss: nl80211.Bss = undefined,
@@ -65,6 +68,10 @@ const Join = struct {
 
     fn ssid(j: *const Join) []const u8 {
         return j.ssid_buf[0..j.ssid_len];
+    }
+
+    fn passphrase(j: *const Join) []const u8 {
+        return j.pass_buf[0..j.pass_len];
     }
 };
 
@@ -138,6 +145,38 @@ pub const Manager = struct {
     hotspot: ?Hotspot = null,
     /// How the Wi-Fi client gets its address (DHCP or static).
     addressing: wifi.Addressing = .dhcp,
+    preferred_adapter_buf: [16]u8 = undefined,
+    preferred_adapter_len: u8 = 0,
+    pending_hotspot: ?wifi.WifiRequest.Connect = null,
+
+    fn preferredAdapter(m: *const Manager) []const u8 {
+        return m.preferred_adapter_buf[0..m.preferred_adapter_len];
+    }
+
+    fn setPreferredAdapter(m: *Manager, name: []const u8) void {
+        m.preferred_adapter_len = @intCast(@min(name.len, m.preferred_adapter_buf.len));
+        @memcpy(m.preferred_adapter_buf[0..m.preferred_adapter_len], name[0..m.preferred_adapter_len]);
+    }
+
+    /// Loads saved Wi-Fi configuration at startup.
+    pub fn loadConfig(m: *Manager, cfg: *const wifi.Config, now: u64) void {
+        m.addressing = cfg.wifi_addressing;
+        m.report.connection.addressing = cfg.wifi_addressing;
+        if (cfg.wifi_address_adapter_len > 0) {
+            m.setPreferredAdapter(cfg.wifiAddressAdapter());
+        }
+        switch (cfg.wifi_mode) {
+            .none => {},
+            .connect => |*con| {
+                if (con.adapter_len > 0) m.setPreferredAdapter(con.adapter());
+                m.connect(con.ssid(), con.passphrase(), now);
+            },
+            .hotspot => |*hs| {
+                if (hs.adapter_len > 0) m.setPreferredAdapter(hs.adapter());
+                m.pending_hotspot = hs.*;
+            },
+        }
+    }
 
     /// Looks for Wi-Fi adapters (and nl80211 itself).
     pub fn look(m: *Manager, now: u64) void {
@@ -172,11 +211,33 @@ pub const Manager = struct {
             } else m.station = m.stations[0];
         } else {
             m.station = m.stations[0];
+            if (m.preferred_adapter_len > 0) {
+                for (m.stations[0..n]) |ifc| {
+                    if (std.mem.eql(u8, ifc.adapter.name(), m.preferredAdapter())) {
+                        m.station = ifc;
+                        break;
+                    }
+                }
+            }
+        }
+        if (m.station != null) {
+            if (m.pending_hotspot) |hs| {
+                if (hs.adapter_len > 0) m.selectStation(hs.adapter());
+                if (hs.adapter_len == 0 or std.mem.eql(u8, m.station.?.adapter.name(), hs.adapter())) {
+                    m.pending_hotspot = null;
+                    m.startHotspot(hs.ssid(), hs.passphrase(), hs.network, hs.upstream());
+                }
+            } else if (m.join) |*j| {
+                if (!j.has_bss and m.scan_started_ns == null and j.retry_at == null) {
+                    m.tryStartPendingJoin(now);
+                }
+            }
         }
     }
 
     fn selectStation(m: *Manager, name: []const u8) void {
         if (name.len == 0) return;
+        m.setPreferredAdapter(name);
         if (m.station) |cur| if (std.mem.eql(u8, cur.adapter.name(), name)) return;
         for (m.stations[0..m.station_len]) |ifc| {
             if (std.mem.eql(u8, ifc.adapter.name(), name)) {
@@ -201,6 +262,7 @@ pub const Manager = struct {
             },
             .disconnect => |d| {
                 m.selectStation(d.adapter());
+                m.pending_hotspot = null;
                 m.leave(true);
                 m.stopHotspot();
             },
@@ -217,11 +279,13 @@ pub const Manager = struct {
             },
             .connect => |c| {
                 m.selectStation(c.adapter());
+                m.pending_hotspot = null;
                 m.stopHotspot();
                 m.connect(c.ssid_buf[0..c.ssid_len], c.pass_buf[0..c.pass_len], now);
             },
             .hotspot => |h| {
                 m.selectStation(h.adapter());
+                m.pending_hotspot = null;
                 m.startHotspot(h.ssid_buf[0..h.ssid_len], h.pass_buf[0..h.pass_len], h.network, h.upstream());
             },
         }
@@ -263,11 +327,13 @@ pub const Manager = struct {
     /// Starts a scan if the last is old.
     fn scan(m: *Manager, now: u64) void {
         const st = m.station orelse return;
-        // Not while a hotspot is active or while joining: scanning takes the
-        // radio off the channel.
+        // Not while a hotspot is active or while joining an AP on a channel:
+        // scanning takes the radio off the channel.
         if (m.hotspot != null or m.report.hotspot.state == .active) return;
+        const associating = if (m.join) |j| j.has_bss else false;
         switch (m.report.connection.state) {
-            .connecting, .authenticating, .addressing => return,
+            .connecting => if (associating) return,
+            .authenticating, .addressing => return,
             else => {},
         }
         if (m.scan_started_ns != null or (m.scanned_ns != 0 and now -| m.scanned_ns < rescan_ns)) return;
@@ -405,22 +471,63 @@ pub const Manager = struct {
         m.leave(true);
         m.report.connection = .{ .addressing = m.addressing };
         m.report.connection.setSsid(ssid);
-        const st = m.station orelse return m.fail(.not_found);
-        const bss = (m.nl.?.findBss(st.index, ssid) catch null) orelse return m.fail(.not_found);
-        var j: Join = .{ .bss = bss, .started_ns = now };
+        if (ssid.len == 0 or ssid.len > wifi.max_ssid) return m.fail(.rejected);
+        if (passphrase.len > 0 and !supplicant.validPassphrase(passphrase)) return m.fail(.bad_passphrase);
+
+        var j: Join = .{ .started_ns = now };
         @memcpy(j.ssid_buf[0..ssid.len], ssid);
         j.ssid_len = @intCast(ssid.len);
-        const wpa2 = bss.rsn_len > 0;
-        if (wpa2) {
-            if (!bss.ccmp or !bss.psk or (bss.group_cipher != supplicant.cipher_ccmp and bss.group_cipher != supplicant.cipher_tkip)) return m.fail(.unsupported);
-            if (!supplicant.validPassphrase(passphrase)) return m.fail(.bad_passphrase);
+        @memcpy(j.pass_buf[0..passphrase.len], passphrase);
+        j.pass_len = @intCast(passphrase.len);
+        if (passphrase.len > 0) {
             j.pmk = supplicant.pmkFromPassphrase(passphrase, ssid);
-        } else if (bss.network.security != .open) return m.fail(.unsupported);
+        }
         m.join = j;
-        m.startJoin(now) catch |err| {
-            print(sys.log_warning ++ "dazzle: wifi: cannot connect ({s})\n", .{@errorName(err)});
-            m.fail(.rejected);
+        m.tryStartPendingJoin(now);
+    }
+
+    fn tryStartPendingJoin(m: *Manager, now: u64) void {
+        const j = &(m.join orelse return);
+        const st = m.station orelse {
+            if (m.looked_ns == 0) {
+                m.setState(.connecting);
+            } else {
+                m.report.connection.state = .failed;
+                m.report.connection.failure = .not_found;
+                j.retry_at = now + retry_ns;
+            }
+            return;
         };
+        const nl = &(m.nl orelse return);
+        if (nl.findBss(st.index, j.ssid()) catch null) |bss| {
+            const wpa2 = bss.rsn_len > 0;
+            if (wpa2) {
+                if (!bss.ccmp or !bss.psk or (bss.group_cipher != supplicant.cipher_ccmp and bss.group_cipher != supplicant.cipher_tkip)) return m.fail(.unsupported);
+                if (!supplicant.validPassphrase(j.passphrase())) return m.fail(.bad_passphrase);
+                if (j.pmk == null) j.pmk = supplicant.pmkFromPassphrase(j.passphrase(), j.ssid());
+            } else {
+                if (bss.network.security != .open) return m.fail(.unsupported);
+                j.pmk = null;
+            }
+            j.bss = bss;
+            j.has_bss = true;
+            m.startJoin(now) catch |err| {
+                print(sys.log_warning ++ "dazzle: wifi: cannot connect ({s})\n", .{@errorName(err)});
+                m.fail(.rejected);
+            };
+            return;
+        }
+        // Not in the scan cache yet: if no scan has finished recently, start
+        // one and wait for `ev.scan_done` before declaring `not_found`.
+        if (m.scanned_ns == 0 or m.scan_started_ns != null) {
+            m.setState(.connecting);
+            m.scan(now);
+            if (m.scan_started_ns != null) return;
+        }
+        print(sys.log_warning ++ "dazzle: wifi: could not join \"{s}\": not_found\n", .{j.ssid()});
+        m.report.connection.state = .failed;
+        m.report.connection.failure = .not_found;
+        j.retry_at = now + retry_ns;
     }
 
     /// Asks the driver to connect (again), with the handshake ready.
@@ -508,6 +615,9 @@ pub const Manager = struct {
                 m.report.networks = fresh.networks;
                 m.report.len = fresh.len;
             } else |err| print(sys.log_warning ++ "dazzle: wifi: cannot read the scan ({s})\n", .{@errorName(err)});
+            if (m.join) |*j| if (!j.has_bss) {
+                m.tryStartPendingJoin(now);
+            };
         } else if (m.scan_started_ns) |t| if (now -| t > scan_timeout_ns) {
             m.scan_started_ns = null;
         };
@@ -687,8 +797,14 @@ pub const Manager = struct {
         const j = &(m.join orelse return);
         switch (m.report.connection.state) {
             .connecting, .authenticating => if (now -| j.started_ns > connect_timeout_ns) {
-                const wrong = j.pmk != null and j.handshake.message1_count > 1 and !j.handshake.complete;
-                m.fail(if (wrong) .wrong_password else .timeout);
+                if (!j.has_bss) {
+                    m.report.connection.state = .failed;
+                    m.report.connection.failure = .not_found;
+                    j.retry_at = now + retry_ns;
+                } else {
+                    const wrong = j.pmk != null and j.handshake.message1_count > 1 and !j.handshake.complete;
+                    m.fail(if (wrong) .wrong_password else .timeout);
+                }
             },
             .addressing, .connected => {
                 const addr = ipv4.interfaceAddress(m.station.?.adapter.name());
@@ -700,9 +816,16 @@ pub const Manager = struct {
                 m.report.connection.address = addr;
             },
             .failed => if (j.retry_at) |t| if (now >= t) {
-                m.startJoin(now) catch {
-                    j.retry_at = now + retry_ns;
-                };
+                if (j.has_bss) {
+                    m.startJoin(now) catch {
+                        j.retry_at = now + retry_ns;
+                    };
+                } else {
+                    m.scanned_ns = 0;
+                    j.started_ns = now;
+                    j.retry_at = null;
+                    m.tryStartPendingJoin(now);
+                }
             },
             .idle => {},
         }
@@ -762,3 +885,32 @@ fn readResolvConfDns() ?wifi.Ip4 {
     }
     return null;
 }
+
+const testing = std.testing;
+
+test "Manager.loadConfig restores Wi-Fi client and hotspot settings at startup" {
+    var req_buf: [256]u8 = undefined;
+    var cfg: wifi.Config = .{};
+    const st = wifi.Static.parse("192.168.1.99/24", "192.168.1.1").?;
+    _ = cfg.apply(wifi.Request.parse(wifi.wifiAddressRequest(&req_buf, "wlan0", .{ .static = st })).?);
+    _ = cfg.apply(wifi.Request.parse(wifi.connectAdapterRequest(&req_buf, "wlan0", "HomeNet", "secret123")).?);
+
+    var m: Manager = .{};
+    m.loadConfig(&cfg, 1000);
+    try testing.expectEqual(st, m.addressing.static);
+    try testing.expectEqualStrings("wlan0", m.preferredAdapter());
+    try testing.expect(m.join != null);
+    try testing.expect(!m.join.?.has_bss);
+    try testing.expectEqualStrings("HomeNet", m.join.?.ssid());
+    try testing.expectEqualStrings("secret123", m.join.?.passphrase());
+    try testing.expectEqual(wifi.ConnectionState.connecting, m.report.connection.state);
+
+    var cfg_hs: wifi.Config = .{};
+    _ = cfg_hs.apply(wifi.Request.parse(wifi.hotspotFullRequest(&req_buf, "wlan0", "DazzleAP", "hunter22", .{}, "eth0")).?);
+    var m_hs: Manager = .{};
+    m_hs.loadConfig(&cfg_hs, 1000);
+    try testing.expect(m_hs.pending_hotspot != null);
+    try testing.expectEqualStrings("DazzleAP", m_hs.pending_hotspot.?.ssid());
+    try testing.expectEqualStrings("eth0", m_hs.pending_hotspot.?.upstream());
+}
+

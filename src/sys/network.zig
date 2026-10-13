@@ -44,6 +44,9 @@ const sys = @import("sys.zig");
 /// The manager's socket.
 pub const socket_path = "/os/sockets/network";
 
+/// Where persistent network settings are stored on `/data`.
+pub const settings_file = "/data/system/network";
+
 /// The programs the manager answers.
 pub const allowed_program = "/os/shell/dazzle-settings";
 pub const setup_program = "/os/shell/dazzle-setup";
@@ -1350,3 +1353,172 @@ test "the wired adapter's addressing goes through the socket" {
     const got = sub.poll().?;
     try testing.expect(got.ready and got.ethernetConnected());
 }
+
+/// Persistent network settings kept in `/data/system/network`.
+pub const Config = struct {
+    ethernet_default: Addressing = .dhcp,
+    ethernets: [max_adapters]EthernetRequest = undefined,
+    ethernet_len: usize = 0,
+    wifi_addressing: Addressing = .dhcp,
+    wifi_address_adapter_buf: [16]u8 = undefined,
+    wifi_address_adapter_len: u8 = 0,
+    wifi_mode: WifiMode = .none,
+
+    pub const WifiMode = union(enum) {
+        none,
+        connect: WifiRequest.Connect,
+        hotspot: WifiRequest.Connect,
+    };
+
+    pub fn wifiAddressAdapter(c: *const Config) []const u8 {
+        return c.wifi_address_adapter_buf[0..c.wifi_address_adapter_len];
+    }
+
+    pub fn ethernetAddressingFor(c: *const Config, name: []const u8) Addressing {
+        for (c.ethernets[0..c.ethernet_len]) |*e| {
+            if (std.mem.eql(u8, e.adapter(), name)) return e.addressing;
+        }
+        return c.ethernet_default;
+    }
+
+    /// Updates `c` with `req`. Returns whether the persistent configuration changed.
+    pub fn apply(c: *Config, req: Request) bool {
+        switch (req) {
+            .status, .subscribe => return false,
+            .ethernet => |er| {
+                const name = er.adapter();
+                if (name.len == 0) {
+                    c.ethernet_default = er.addressing;
+                    if (c.ethernet_len > 0) c.ethernets[0].addressing = er.addressing;
+                    return true;
+                }
+                for (c.ethernets[0..c.ethernet_len]) |*e| {
+                    if (std.mem.eql(u8, e.adapter(), name)) {
+                        e.addressing = er.addressing;
+                        if (c.ethernet_len == 1) c.ethernet_default = er.addressing;
+                        return true;
+                    }
+                }
+                if (c.ethernet_len < max_adapters) {
+                    c.ethernets[c.ethernet_len] = er;
+                    c.ethernet_len += 1;
+                    if (c.ethernet_len == 1) c.ethernet_default = er.addressing;
+                } else {
+                    c.ethernet_default = er.addressing;
+                }
+                return true;
+            },
+            .wifi => |wr| switch (wr) {
+                .scan => return false,
+                .disconnect => |d| {
+                    const name = d.adapter();
+                    const active_adapter = switch (c.wifi_mode) {
+                        .none => return false,
+                        .connect => |*con| con.adapter(),
+                        .hotspot => |*hs| hs.adapter(),
+                    };
+                    if (name.len == 0 or active_adapter.len == 0 or std.mem.eql(u8, active_adapter, name)) {
+                        c.wifi_mode = .none;
+                        return true;
+                    }
+                    return false;
+                },
+                .address => |a| {
+                    c.wifi_addressing = a.addressing;
+                    c.wifi_address_adapter_len = a.adapter_len;
+                    @memcpy(c.wifi_address_adapter_buf[0..a.adapter_len], a.adapter());
+                    return true;
+                },
+                .connect => |con| {
+                    c.wifi_mode = .{ .connect = con };
+                    return true;
+                },
+                .hotspot => |hs| {
+                    c.wifi_mode = .{ .hotspot = hs };
+                    return true;
+                },
+            },
+        }
+    }
+
+    pub fn write(c: *const Config, buf: []u8) []const u8 {
+        var w: std.Io.Writer = .fixed(buf);
+        var line_buf: [256]u8 = undefined;
+        if (c.ethernet_len == 0) {
+            w.writeAll(ethernetAdapterRequest(&line_buf, "", c.ethernet_default)) catch {};
+        } else {
+            if (c.ethernet_default != .dhcp) {
+                w.writeAll(ethernetAdapterRequest(&line_buf, "", c.ethernet_default)) catch {};
+            }
+            for (c.ethernets[0..c.ethernet_len]) |*e| {
+                w.writeAll(ethernetAdapterRequest(&line_buf, e.adapter(), e.addressing)) catch {};
+            }
+        }
+        w.writeAll(wifiAddressRequest(&line_buf, c.wifiAddressAdapter(), c.wifi_addressing)) catch {};
+        switch (c.wifi_mode) {
+            .none => {},
+            .connect => |*con| {
+                w.writeAll(connectAdapterRequest(&line_buf, con.adapter(), con.ssid(), con.passphrase())) catch {};
+            },
+            .hotspot => |*hs| {
+                w.writeAll(hotspotFullRequest(&line_buf, hs.adapter(), hs.ssid(), hs.passphrase(), hs.network, hs.upstream())) catch {};
+            },
+        }
+        return w.buffered();
+    }
+
+    pub fn parse(text: []const u8) Config {
+        var c: Config = .{};
+        var lines = std.mem.tokenizeScalar(u8, text, '\n');
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            if (trimmed.len == 0) continue;
+            if (Request.parse(trimmed)) |req| {
+                _ = c.apply(req);
+            }
+        }
+        return c;
+    }
+};
+
+test "network Config round-trips Ethernet, Wi-Fi client, and Wi-Fi hotspot settings" {
+    var cfg: Config = .{};
+    var req_buf: [256]u8 = undefined;
+
+    const eth_st = Static.parse("192.168.1.50/24", "192.168.1.1").?;
+    try testing.expect(cfg.apply(Request.parse(ethernetAdapterRequest(&req_buf, "eth0", .{ .static = eth_st })).?));
+
+    const wifi_st = Static.parse("10.0.0.42/24", "10.0.0.1").?;
+    try testing.expect(cfg.apply(Request.parse(wifiAddressRequest(&req_buf, "wlan0", .{ .static = wifi_st })).?));
+    try testing.expect(cfg.apply(Request.parse(connectAdapterRequest(&req_buf, "wlan0", "HomeWiFi", "correct horse")).?));
+
+    var file_buf: [1024]u8 = undefined;
+    const saved = cfg.write(&file_buf);
+    const loaded = Config.parse(saved);
+    try testing.expectEqual(eth_st, loaded.ethernetAddressingFor("eth0").static);
+    try testing.expectEqual(wifi_st, loaded.wifi_addressing.static);
+    try testing.expectEqualStrings("wlan0", loaded.wifiAddressAdapter());
+    try testing.expect(loaded.wifi_mode == .connect);
+    try testing.expectEqualStrings("wlan0", loaded.wifi_mode.connect.adapter());
+    try testing.expectEqualStrings("HomeWiFi", loaded.wifi_mode.connect.ssid());
+    try testing.expectEqualStrings("correct horse", loaded.wifi_mode.connect.passphrase());
+
+    // Switching to hotspot replaces connect mode, and round-trips hotspot CIDR & upstream:
+    var cfg_hs = loaded;
+    const hs_net = HotspotNetwork.parseHost("10.42.0.5/24").?;
+    try testing.expect(cfg_hs.apply(Request.parse(hotspotFullRequest(&req_buf, "wlan0", "DazzleAP", "hunter22", hs_net, "eth0")).?));
+    const saved_hs = cfg_hs.write(&file_buf);
+    const loaded_hs = Config.parse(saved_hs);
+    try testing.expect(loaded_hs.wifi_mode == .hotspot);
+    try testing.expectEqualStrings("DazzleAP", loaded_hs.wifi_mode.hotspot.ssid());
+    try testing.expectEqualStrings("hunter22", loaded_hs.wifi_mode.hotspot.passphrase());
+    try testing.expectEqualStrings("eth0", loaded_hs.wifi_mode.hotspot.upstream());
+    try testing.expectEqual(Ip4{ 10, 42, 0, 5 }, loaded_hs.wifi_mode.hotspot.network.serverIp());
+
+    // Disconnect clears the saved Wi-Fi mode:
+    var cfg_disc = loaded_hs;
+    try testing.expect(cfg_disc.apply(Request.parse(disconnectRequest(&req_buf, "wlan0")).?));
+    const loaded_disc = Config.parse(cfg_disc.write(&file_buf));
+    try testing.expect(loaded_disc.wifi_mode == .none);
+}
+

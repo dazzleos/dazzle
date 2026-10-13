@@ -43,8 +43,9 @@ pub fn start() ?linux.pid_t {
             return null;
         },
     }
-    // And setting the clock, from the network's time (netconf.zig).
-    sys.dropPrivilegesKeeping(&.{ .net_admin, .net_raw, .net_bind_service, .sys_time }) catch |err| {
+    // And setting the clock, from the network's time (netconf.zig), plus
+    // reading and writing /data/system/network.
+    sys.dropPrivilegesKeeping(&.{ .net_admin, .net_raw, .net_bind_service, .sys_time, .dac_override, .chown }) catch |err| {
         print(sys.log_warning ++ "dazzle: network: cannot drop privileges ({s})\n", .{@errorName(err)});
         linux.exit(1);
     };
@@ -95,7 +96,7 @@ const Ethernet = struct {
 
     /// Finds wired adapters, or notices any that have gone. DHCP starts
     /// once the computer has been named (setup names it on the first start).
-    fn look(e: *Ethernet, now: u64) void {
+    fn look(e: *Ethernet, now: u64, cfg: *const proto.Config) void {
         if (ipv4.hostname()) |h| if (!std.mem.eql(u8, e.hostname.slice(), h.slice())) {
             e.hostname = h;
             for (&e.slots) |*slot| if (slot.*) |*s| if (s.addressing == .dhcp) {
@@ -129,7 +130,7 @@ const Ethernet = struct {
                 print("dazzle: network: found {s} ({x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2})\n", .{
                     i.name(), i.mac[0], i.mac[1], i.mac[2], i.mac[3], i.mac[4], i.mac[5],
                 });
-                slot.* = .{ .ifc = i, .addressing = e.default_addressing };
+                slot.* = .{ .ifc = i, .addressing = cfg.ethernetAddressingFor(i.name()) };
                 slot.*.?.apply(e.hostname.len > 0);
                 break;
             };
@@ -169,6 +170,29 @@ const Ethernet = struct {
         };
     }
 };
+
+fn loadConfig() proto.Config {
+    var buf: [1024]u8 = undefined;
+    const text = sys.readFile(proto.settings_file, &buf) orelse return .{};
+    return proto.Config.parse(text);
+}
+
+fn saveConfig(cfg: *const proto.Config) bool {
+    if (linux.errno(linux.access(sys.system.config_dir, linux.F_OK)) != .SUCCESS) return false;
+    var buf: [1024]u8 = undefined;
+    const data = cfg.write(&buf);
+    const fd = sys.open(proto.settings_file, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }) catch |err| {
+        print(sys.log_warning ++ "dazzle: network: cannot write {s}: {s}\n", .{ proto.settings_file, @errorName(err) });
+        return false;
+    };
+    defer sys.close(fd);
+    _ = linux.write(fd, data.ptr, data.len);
+    _ = linux.fsync(fd);
+    // Mode first, before handing ownership to root.
+    _ = linux.fchmod(fd, 0o600);
+    _ = linux.fchown(fd, 0, 0);
+    return true;
+}
 
 fn networkReady() bool {
     var buf: [64]u8 = undefined;
@@ -210,14 +234,18 @@ fn run() !void {
         };
         break :blk fd;
     };
-    var ethernet: Ethernet = .{};
+    var config = loadConfig();
+    var config_dirty = false;
+    var ethernet: Ethernet = .{ .default_addressing = config.ethernet_default };
     var w: wifi.Manager = .{};
+    w.loadConfig(&config, sys.nowNs());
     var clients: [max_clients]?ClientConn = @splat(null);
     var last_report: [4096]u8 = undefined;
     var last_len: usize = 0;
     while (true) {
         const now = sys.nowNs();
-        ethernet.look(now);
+        if (config_dirty) config_dirty = !saveConfig(&config);
+        ethernet.look(now, &config);
         w.look(now);
 
         var fds: [5 + max_clients]linux.pollfd = undefined;
@@ -234,7 +262,7 @@ fn run() !void {
             var nl_buf: [1024]u8 = undefined;
             while (linux.errno(linux.recvfrom(rfd, &nl_buf, nl_buf.len, 0, null, null)) == .SUCCESS) {}
             ethernet.looked_ns = 0;
-            ethernet.look(t);
+            ethernet.look(t, &config);
         };
         w.events(t);
         w.eapol();
@@ -266,11 +294,14 @@ fn run() !void {
                     conn.needs_initial = true;
                     continue;
                 }
-                ethernet.look(t);
+                ethernet.look(t, &config);
                 switch (req) {
                     .status, .subscribe => {},
                     .ethernet => |er| ethernet.set(er),
                     .wifi => |wr| w.handle(wr, t),
+                }
+                if (config.apply(req)) {
+                    config_dirty = !saveConfig(&config);
                 }
                 var report: proto.Report = .{ .ready = networkReady() };
                 ethernet.fill(&report);
