@@ -208,6 +208,14 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
             .{ .name = "locale", .module = locale },
         },
     });
+    const audio = b.createModule(.{
+        .root_source_file = b.path("src/audio/audio.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sys", .module = sys },
+        },
+    });
     const video = b.createModule(.{
         .root_source_file = b.path("src/video/video.zig"),
         .target = target,
@@ -215,14 +223,7 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         .imports = &.{
             .{ .name = "sys", .module = sys },
             .{ .name = "gfx", .module = gfx },
-        },
-    });
-    const audio = b.createModule(.{
-        .root_source_file = b.path("src/audio/audio.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "sys", .module = sys },
+            .{ .name = "audio", .module = audio },
         },
     });
     const ui = b.createModule(.{

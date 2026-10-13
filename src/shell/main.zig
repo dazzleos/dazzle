@@ -40,6 +40,7 @@ const dock_mod = @import("dock.zig");
 const perf_mod = @import("perf.zig");
 const keyboard = @import("keyboard.zig");
 const screenshot = @import("screenshot.zig");
+const audio = @import("audio");
 const build_info = @import("build_info");
 
 const print = sys.print;
@@ -98,6 +99,8 @@ fn run(init: std.process.Init.Minimal) !void {
     // are sent its keymap, again when it changes.
     var locale_watch: dock_mod.Watch = .{ .path = locale.settings_file };
     _ = locale_watch.changed();
+    var sound_watch: dock_mod.Watch = .{ .path = audio.settings_file };
+    _ = sound_watch.changed();
     for (apps) |app| print("dazzle-shell: app {s} ({s})\n", .{ app.label, app.path });
     var dock = try dock_mod.Dock.init(gpa, ui_font, apps, renderer.width, renderer.height);
     var net_sub: sys.network.Subscription = .{};
@@ -107,6 +110,9 @@ fn run(init: std.process.Init.Minimal) !void {
     defer sys_sub.deinit();
     sys_sub.connect();
     dock.network = if (net_sub.poll()) |r| dock_mod.networkStatusFromReport(r) else dock_mod.readNetworkStatus();
+    const initial_sound = audio.loadSettings();
+    audio.applySettings(initial_sound, &audio.listDevices());
+    dock.volume = .{ .volume = initial_sound.volume, .muted = initial_sound.muted };
     const dock_y: u32 = renderer.height - dock.height;
     const with_dock: server_mod.Rect = .{ .x = 0, .y = 0, .width = renderer.width, .height = dock_y };
     var perf = try perf_mod.Overlay.init(gpa, ui_font, renderer.width, renderer.height);
@@ -202,6 +208,7 @@ fn run(init: std.process.Init.Minimal) !void {
             dock_shown = true;
             print("dazzle-shell: setup finished\n", .{});
             if (net_sub.fd == null) dock.network = dock_mod.readNetworkStatus();
+            dock.volume = dock_mod.readVolumeStatus();
             dock.draw();
             renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
             server.setWorkArea(with_dock);
@@ -390,6 +397,17 @@ fn run(init: std.process.Init.Minimal) !void {
 
         const top = server.topWindow();
         const t_now = sys.nowNs();
+        if ((server.damaged or t_now >= next_tick) and sound_watch.changed()) {
+            const vol = dock_mod.readVolumeStatus();
+            if (!std.meta.eql(vol, dock.volume)) {
+                dock.volume = vol;
+                if (dock_shown) {
+                    dock.draw();
+                    renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+                    panels_damaged = true;
+                }
+            }
+        }
         if (t_now >= next_tick) {
             next_tick = start + ((t_now - start) / std.time.ns_per_s + 1) * std.time.ns_per_s;
             // Keyboards and mice plugged in since.

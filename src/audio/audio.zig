@@ -10,6 +10,7 @@ const sys = @import("sys");
 
 pub const wav = @import("wav.zig");
 pub const alsa = @import("alsa.zig");
+pub const aac = @import("aac.zig");
 
 pub const settings_file = sys.system.apps_dir ++ "/.sound";
 pub const max_devices = 8;
@@ -245,6 +246,20 @@ pub fn applySettings(settings: Settings, devices: *const Devices) void {
     }
 }
 
+/// Opens the active ALSA playback device for `settings` at `preferred_rate`
+/// and applies hardware mixer volume/mute.
+pub fn openOutput(preferred_rate: u32, settings: Settings) ?alsa.PcmOutput {
+    const devs = listDevices();
+    const dev = activeDevice(&devs, &settings) orelse return null;
+    const hw_vol = alsa.setCardVolume(dev.card, settings.volume, settings.muted);
+    if (alsa.PcmOutput.open(dev.card, dev.pcm_device, preferred_rate)) |out| {
+        var pcm = out;
+        pcm.hw_volume = hw_vol;
+        return pcm;
+    }
+    return null;
+}
+
 // --- Streaming WAV & Test Tone Player ----------------------------------------
 
 pub const Player = struct {
@@ -316,14 +331,7 @@ pub const Player = struct {
     }
 
     fn openHardware(p: *Player) void {
-        const devs = listDevices();
-        const dev = activeDevice(&devs, &p.settings) orelse return;
-        const hw_vol = alsa.setCardVolume(dev.card, p.settings.volume, p.settings.muted);
-        if (alsa.PcmOutput.open(dev.card, dev.pcm_device, p.header.sample_rate)) |out| {
-            var pcm = out;
-            pcm.hw_volume = hw_vol;
-            p.pcm = pcm;
-        }
+        p.pcm = openOutput(p.header.sample_rate, p.settings);
     }
 
     pub fn close(p: *Player) void {
@@ -559,6 +567,7 @@ const testing = std.testing;
 test {
     _ = wav;
     _ = alsa;
+    _ = aac;
 }
 
 test "classifyCard identifies Headphones, HDMI and USB audio outputs" {

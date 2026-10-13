@@ -18,6 +18,7 @@ const linux = std.os.linux;
 const sys = @import("sys");
 const font = @import("font");
 const icons = @import("icons");
+const audio = @import("audio");
 
 pub const apps_dir = sys.system.apps_dir;
 
@@ -34,6 +35,26 @@ pub const NetworkStatus = union(enum) {
     /// Wired Ethernet (true when carrier/address is present).
     ethernet: bool,
 };
+
+pub const VolumeStatus = struct {
+    volume: u8 = 80,
+    muted: bool = false,
+
+    pub fn icon(v: VolumeStatus) icons.Icon {
+        if (v.muted or v.volume == 0) return .volume_off;
+        if (v.volume < 50) return .volume_down;
+        return .volume_up;
+    }
+
+    pub fn active(v: VolumeStatus) bool {
+        return !v.muted and v.volume > 0;
+    }
+};
+
+pub fn readVolumeStatus() VolumeStatus {
+    const s = audio.loadSettings();
+    return .{ .volume = s.volume, .muted = s.muted };
+}
 
 pub fn networkStatusFromReport(r: sys.network.Report) NetworkStatus {
     if (r.ethernetConnected() or r.ethernetCarrier()) return .{ .ethernet = true };
@@ -160,11 +181,12 @@ pub fn rescan(gpa: std.mem.Allocator, old: []App, dir_path: []const u8, builtin:
     return new;
 }
 
-/// Notices a directory changing: an entry added, removed or renamed (its
-/// time of change), or another directory mounted over it.
+/// Notices a directory or file changing: an entry added, removed or renamed
+/// (its time of change), or a file created or replaced.
 pub const Watch = struct {
     path: [*:0]const u8,
     stamp: ?[5]u64 = null,
+    initialized: bool = false,
 
     /// Whether it changed since the last call (not on the first).
     pub fn changed(w: *Watch) bool {
@@ -174,8 +196,13 @@ pub const Watch = struct {
             .{ stx.dev_major, stx.dev_minor, stx.ino, @bitCast(stx.mtime.sec), stx.mtime.nsec }
         else
             null;
-        defer w.stamp = now;
-        const before = w.stamp orelse return false;
+        defer {
+            w.stamp = now;
+            w.initialized = true;
+        }
+        if (!w.initialized) return false;
+        if (w.stamp == null and now == null) return false;
+        const before = w.stamp orelse return true;
         const after = now orelse return true;
         return !std.mem.eql(u64, &before, &after);
     }
@@ -236,6 +263,8 @@ pub const Dock = struct {
     hover: ?usize = null,
     /// Network status shown in the status box on the right of the dock.
     network: NetworkStatus = .{ .ethernet = false },
+    /// Volume status shown in the status box beside the network status.
+    volume: VolumeStatus = .{},
 
     pub fn init(gpa: std.mem.Allocator, f: ?font.Font, apps: []App, screen_width: u32, screen_height: u32) !Dock {
         const scale = @min(@as(f32, @floatFromInt(screen_width)) / 1920, @as(f32, @floatFromInt(screen_height)) / 1080);
@@ -253,21 +282,23 @@ pub const Dock = struct {
     }
 
     pub const Rect = struct { x: f32, y: f32, size: f32 };
+    pub const StatusRect = struct { x: f32, y: f32, width: f32, height: f32 };
 
     /// Where app `i`'s icon is, in the dock: the icons and the status box
     /// on the right are in a row in the middle.
     pub fn iconRect(d: *const Dock, i: usize) Rect {
         const size = 56 * d.scale;
         const gap = 20 * d.scale;
-        const n: f32 = @floatFromInt(d.apps.len + 1);
-        const row = n * size + (n - 1) * gap;
+        const status_width = 104 * d.scale;
+        const row = @as(f32, @floatFromInt(d.apps.len)) * (size + gap) + status_width;
         const x0 = (@as(f32, @floatFromInt(d.width)) - row) / 2;
         return .{ .x = x0 + @as(f32, @floatFromInt(i)) * (size + gap), .y = 6 * d.scale, .size = size };
     }
 
-    /// Where the network status box is, to the right of the rightmost app.
-    pub fn statusRect(d: *const Dock) Rect {
-        return d.iconRect(d.apps.len);
+    /// Where the status box (volume and network) is, to the right of the rightmost app.
+    pub fn statusRect(d: *const Dock) StatusRect {
+        const r = d.iconRect(d.apps.len);
+        return .{ .x = r.x, .y = r.y, .width = 104 * d.scale, .height = r.size };
     }
 
     /// The app whose icon is at (`x`, `y`) in the dock.
@@ -310,24 +341,28 @@ pub const Dock = struct {
             }
         }
         const rs = d.statusRect();
-        roundedRectOutline(canvas, rs.x, rs.y, rs.size, rs.size, 12 * d.scale, @max(1.5, 2 * d.scale), status_border);
+        roundedRectOutline(canvas, rs.x, rs.y, rs.width, rs.height, 12 * d.scale, @max(1.5, 2 * d.scale), status_border);
         if (icon_font) |f| {
             const size = @round(36 * d.scale);
-            const x = @round(rs.x + (rs.size - size) / 2);
-            const y = @round(rs.y + (rs.size - size) / 2);
+            const pad = @round(10 * d.scale);
+            const y = @round(rs.y + (rs.height - size) / 2);
+            const vol_x = @round(rs.x + pad);
+            const net_x = @round(rs.x + rs.width - pad - size);
             var buf: [4]u8 = undefined;
+            const vol_color: u32 = if (d.volume.active()) 0xffffffff else 0x40ffffff;
+            _ = font.draw(canvas, &d.cache, .{ .font = f, .size = size, .color = vol_color }, vol_x, y + size, icons.text(d.volume.icon(), &buf)) catch {};
             switch (d.network) {
                 .wifi => |bars| {
                     const base_color: u32 = if (bars >= 4) 0xffffffff else 0x40ffffff;
-                    _ = font.draw(canvas, &d.cache, .{ .font = f, .size = size, .color = base_color }, x, y + size, icons.text(.wifi, &buf)) catch {};
+                    _ = font.draw(canvas, &d.cache, .{ .font = f, .size = size, .color = base_color }, net_x, y + size, icons.text(.wifi, &buf)) catch {};
                     if (bars > 0 and bars < 4) {
                         const lit: icons.Icon = if (bars >= 3) .wifi_2_bar else .wifi_1_bar;
-                        _ = font.draw(canvas, &d.cache, .{ .font = f, .size = size, .color = 0xffffffff }, x, y + size, icons.text(lit, &buf)) catch {};
+                        _ = font.draw(canvas, &d.cache, .{ .font = f, .size = size, .color = 0xffffffff }, net_x, y + size, icons.text(lit, &buf)) catch {};
                     }
                 },
                 .ethernet => |connected| {
                     const color: u32 = if (connected) 0xffffffff else 0x40ffffff;
-                    _ = font.draw(canvas, &d.cache, .{ .font = f, .size = size, .color = color }, x, y + size, icons.text(.lan, &buf)) catch {};
+                    _ = font.draw(canvas, &d.cache, .{ .font = f, .size = size, .color = color }, net_x, y + size, icons.text(.lan, &buf)) catch {};
                 },
             }
         }
@@ -431,19 +466,25 @@ test "icons and the status box are in a row in the middle, and clicks find the a
     const r0 = d.iconRect(0);
     const r1 = d.iconRect(1);
     const rs = d.statusRect();
-    try testing.expectApproxEqAbs(@as(f32, 1920) - (rs.x + rs.size), r0.x, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 1920) - (rs.x + rs.width), r0.x, 0.01);
     try testing.expect(rs.x > r1.x + r1.size);
     try testing.expectEqual(@as(?usize, 0), d.hit(r0.x + 1, r0.y + 1));
     try testing.expectEqual(@as(?usize, 1), d.hit(r1.x + r1.size - 1, r1.y + r1.size - 1));
-    try testing.expectEqual(@as(?usize, null), d.hit(rs.x + rs.size / 2, rs.y + rs.size / 2));
+    try testing.expectEqual(@as(?usize, null), d.hit(rs.x + rs.width / 2, rs.y + rs.height / 2));
     try testing.expectEqual(@as(?usize, null), d.hit(r0.x + r0.size + 1, r0.y + 1));
     try testing.expectEqual(@as(?usize, null), d.hit(0, 0));
+
+    try testing.expectEqual(icons.Icon.volume_up, (VolumeStatus{ .volume = 80, .muted = false }).icon());
+    try testing.expectEqual(icons.Icon.volume_down, (VolumeStatus{ .volume = 30, .muted = false }).icon());
+    try testing.expectEqual(icons.Icon.volume_off, (VolumeStatus{ .volume = 80, .muted = true }).icon());
+    try testing.expectEqual(icons.Icon.volume_off, (VolumeStatus{ .volume = 0, .muted = false }).icon());
 
     // Hovering changes the picture; a running app gets a dot.
     try testing.expect(d.pointerAt(r1.x + 1, r1.y + 1));
     try testing.expect(!d.pointerAt(r1.x + 2, r1.y + 2));
     apps[0].pid = 42;
     d.network = .{ .ethernet = true };
+    d.volume = .{ .volume = 75, .muted = false };
     d.draw();
     const at = struct {
         fn f(dock: *const Dock, x: f32, y: f32) u32 {
@@ -457,9 +498,9 @@ test "icons and the status box are in a row in the middle, and clicks find the a
     try testing.expectEqual(@as(u32, hover_background), at(&d, r1.x - 2, r1.y + r1.size / 2));
     // The first app's icon is drawn in white in the middle of its square.
     try testing.expectEqual(@as(u32, 0xffffffff), at(&d, r0.x + r0.size / 2, r0.y + r0.size / 2));
-    // The status box has an outline at its top edge, is unfilled inside its padding, and draws the network icon in its middle.
-    try testing.expectEqual(@as(u32, status_border), at(&d, rs.x + rs.size / 2, rs.y + 1));
-    try testing.expectEqual(@as(u32, background), at(&d, rs.x + rs.size / 2, rs.y + 5));
+    // The status box has an outline at its top edge, is unfilled inside its padding, and draws the volume and network icons inside it.
+    try testing.expectEqual(@as(u32, status_border), at(&d, rs.x + rs.width / 2, rs.y + 1));
+    try testing.expectEqual(@as(u32, background), at(&d, rs.x + rs.width / 2, rs.y + 5));
 }
 
 test "networkStatusFromReport picks Ethernet when Ethernet is connected and Wi-Fi otherwise" {

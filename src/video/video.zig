@@ -15,6 +15,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
 const gfx = @import("gfx");
+const audio = @import("audio");
 pub const v4l2 = sys.v4l2;
 
 pub const Codec = enum {
@@ -50,10 +51,77 @@ pub const Sample = struct {
     keyframe: bool,
 };
 
+pub const AudioCodec = enum {
+    aac,
+    pcm_u8,
+    pcm_s8,
+    pcm_s16le,
+    pcm_s16be,
+    pcm_s24le,
+    pcm_s24be,
+    pcm_s32le,
+    pcm_s32be,
+    float_f32le,
+    float_f32be,
+    ulaw,
+    alaw,
+
+    pub fn bytesPerSample(c: AudioCodec) u8 {
+        return switch (c) {
+            .aac => 0,
+            .pcm_u8, .pcm_s8, .ulaw, .alaw => 1,
+            .pcm_s16le, .pcm_s16be => 2,
+            .pcm_s24le, .pcm_s24be => 3,
+            .pcm_s32le, .pcm_s32be, .float_f32le, .float_f32be => 4,
+        };
+    }
+};
+
+pub const AudioPacket = struct {
+    offset: u64,
+    size: u32,
+    pts_us: u64,
+    frames: u32,
+};
+
+pub const AudioTrack = struct {
+    codec: AudioCodec,
+    sample_rate: u32,
+    channels: u8,
+    aac_config: audio.aac.Config = .{},
+    packets: []AudioPacket,
+    max_packet_size: u32,
+
+    pub fn deinit(a: *AudioTrack, gpa: std.mem.Allocator) void {
+        if (a.packets.len > 0) gpa.free(a.packets);
+        a.packets = &.{};
+    }
+
+    pub fn packetAtOrAfter(a: *const AudioTrack, target_us: u64) usize {
+        for (a.packets, 0..) |pkt, i| {
+            if (pkt.pts_us >= target_us) {
+                return if (a.codec == .aac and i > 0) i - 1 else i;
+            }
+        }
+        return a.packets.len;
+    }
+
+    pub fn readPacket(a: *const AudioTrack, fd: linux.fd_t, index: usize, buf: []u8) ![]const u8 {
+        if (index >= a.packets.len) return error.EndOfStream;
+        const pkt = a.packets[index];
+        if (pkt.size > buf.len) return error.BufferTooSmall;
+        const dst = buf[0..pkt.size];
+        if ((try preadInto(fd, dst, pkt.offset)) != pkt.size) return error.UnexpectedEof;
+        return dst;
+    }
+};
+
 /// The largest `moov` metadata box read into memory (16 MiB), and the
 /// most frames indexed in a single video (~2 hours at 30 fps).
 const max_moov_bytes = 16 * 1024 * 1024;
 const max_samples = 216_000;
+const max_audio_packets = 360_000;
+const max_audio_packet_bytes = 64 * 1024;
 /// The largest raw Annex-B stream scanned in full (64 MiB).
 const max_annexb_bytes = 64 * 1024 * 1024;
 /// The largest single compressed frame buffer (768 KiB, matching
@@ -134,6 +202,7 @@ pub const Stream = struct {
     /// MJPEG, MPEG-4, H.263).
     nal_length_size: u8 = 0,
     scratch: []u8 = &.{},
+    audio_track: ?AudioTrack = null,
 
     pub fn open(gpa: std.mem.Allocator, fd: linux.fd_t, file_size: u64, owns_fd: bool) !Stream {
         var head: [64]u8 = undefined;
@@ -155,6 +224,7 @@ pub const Stream = struct {
     }
 
     pub fn deinit(s: *Stream) void {
+        if (s.audio_track) |*at| at.deinit(s.gpa);
         if (s.scratch.len > 0) s.gpa.free(s.scratch);
         if (s.header.len > 0) s.gpa.free(s.header);
         if (s.samples.len > 0) s.gpa.free(s.samples);
@@ -295,11 +365,31 @@ fn parseMp4(gpa: std.mem.Allocator, fd: linux.fd_t, file_size: u64) !Stream {
 }
 
 fn parseMoov(gpa: std.mem.Allocator, fd: linux.fd_t, file_size: u64, moov: []const u8) !Stream {
+    var video_stream: ?Stream = null;
+    errdefer if (video_stream) |*vs| vs.deinit();
+    var audio_track: ?AudioTrack = null;
+    errdefer if (audio_track) |*at| at.deinit(gpa);
+
     var at: usize = 0;
     while (nextBox(moov, at)) |b| : (at = b.next) {
         if (std.mem.eql(u8, &b.kind, "trak")) {
-            if (parseTrak(gpa, fd, file_size, b.payload)) |stream| return stream else |_| {}
+            if (video_stream == null) {
+                if (parseTrak(gpa, fd, file_size, b.payload)) |s| {
+                    video_stream = s;
+                    continue;
+                } else |_| {}
+            }
+            if (audio_track == null) {
+                if (parseAudioTrak(gpa, file_size, b.payload)) |a| {
+                    audio_track = a;
+                } else |_| {}
+            }
         }
+    }
+    if (video_stream) |*vs| {
+        vs.audio_track = audio_track;
+        audio_track = null;
+        return vs.*;
     }
     return error.InvalidVideo;
 }
@@ -685,6 +775,393 @@ fn parseStbl(
         .header = info.header,
         .nal_length_size = info.nal_length_size,
     };
+}
+
+// --- MP4 / MOV audio track demuxer & PCM/G.711 decoders ----------------------
+
+fn parseAudioTrak(gpa: std.mem.Allocator, file_size: u64, trak: []const u8) !AudioTrack {
+    var mdia: ?[]const u8 = null;
+    var at: usize = 0;
+    while (nextBox(trak, at)) |b| : (at = b.next) {
+        if (std.mem.eql(u8, &b.kind, "mdia")) mdia = b.payload;
+    }
+    const mdia_bytes = mdia orelse return error.InvalidAudio;
+    var timescale: u32 = 0;
+    var is_sound = false;
+    var minf: ?[]const u8 = null;
+    at = 0;
+    while (nextBox(mdia_bytes, at)) |b| : (at = b.next) {
+        if (std.mem.eql(u8, &b.kind, "mdhd") and b.payload.len >= 20) {
+            const version = b.payload[0];
+            if (version == 1 and b.payload.len >= 32) {
+                timescale = std.mem.readInt(u32, b.payload[20..24], .big);
+            } else if (version == 0) {
+                timescale = std.mem.readInt(u32, b.payload[12..16], .big);
+            }
+        } else if (std.mem.eql(u8, &b.kind, "hdlr") and b.payload.len >= 12) {
+            if (std.mem.eql(u8, b.payload[8..12], "soun")) is_sound = true;
+        } else if (std.mem.eql(u8, &b.kind, "minf")) {
+            minf = b.payload;
+        }
+    }
+    if (!is_sound) return error.InvalidAudio;
+    const minf_bytes = minf orelse return error.InvalidAudio;
+    var stbl: ?[]const u8 = null;
+    at = 0;
+    while (nextBox(minf_bytes, at)) |b| : (at = b.next) {
+        if (std.mem.eql(u8, &b.kind, "stbl")) stbl = b.payload;
+    }
+    const stbl_bytes = stbl orelse return error.InvalidAudio;
+    return parseAudioStbl(gpa, file_size, stbl_bytes, timescale);
+}
+
+const AudioStsdInfo = struct {
+    codec: AudioCodec,
+    sample_rate: u32,
+    channels: u8,
+    aac_config: audio.aac.Config = .{},
+};
+
+fn findBoxRecursive(children: []const u8, kind: *const [4]u8) ?[]const u8 {
+    var at: usize = 0;
+    while (nextBox(children, at)) |b| : (at = b.next) {
+        if (std.mem.eql(u8, &b.kind, kind)) return b.payload;
+        if (std.mem.eql(u8, &b.kind, "wave")) {
+            if (findBoxRecursive(b.payload, kind)) |found| return found;
+        }
+    }
+    return null;
+}
+
+fn parseAudioStsd(payload: []const u8, fallback_rate: u32) !AudioStsdInfo {
+    if (payload.len < 16) return error.InvalidAudio;
+    const count = std.mem.readInt(u32, payload[4..8], .big);
+    if (count == 0) return error.InvalidAudio;
+    const entry = nextBox(payload, 8) orelse return error.InvalidAudio;
+    if (entry.payload.len < 28) return error.InvalidAudio;
+
+    const version = std.mem.readInt(u16, entry.payload[8..10], .big);
+    var channels: u8 = @intCast(std.math.clamp(std.mem.readInt(u16, entry.payload[16..18], .big), 1, 8));
+    var sample_size: u16 = std.mem.readInt(u16, entry.payload[18..20], .big);
+    var sample_rate: u32 = std.mem.readInt(u32, entry.payload[24..28], .big) >> 16;
+    if (sample_rate == 0) sample_rate = if (fallback_rate > 0) fallback_rate else 48000;
+
+    if (version == 2 and entry.payload.len >= 64) {
+        const sr_bits = std.mem.readInt(u64, entry.payload[32..40], .big);
+        const sr_f64: f64 = @bitCast(sr_bits);
+        if (sr_f64 >= 4000.0 and sr_f64 <= 192000.0) {
+            sample_rate = @intFromFloat(@round(sr_f64));
+        }
+        const ch32 = std.mem.readInt(u32, entry.payload[40..44], .big);
+        if (ch32 >= 1 and ch32 <= 8) channels = @intCast(ch32);
+        const bits32 = std.mem.readInt(u32, entry.payload[48..52], .big);
+        if (bits32 >= 8 and bits32 <= 64) sample_size = @intCast(bits32);
+    }
+
+    const child_off: usize = if (version == 2 and entry.payload.len >= 64)
+        64
+    else if (version == 1 and entry.payload.len >= 44)
+        44
+    else
+        28;
+    const children = if (child_off <= entry.payload.len) entry.payload[child_off..] else &.{};
+
+    if (std.mem.eql(u8, &entry.kind, "mp4a")) {
+        const esds = findBoxRecursive(children, "esds") orelse return error.InvalidAudio;
+        const asc = parseEsdsConfig(esds) orelse return error.InvalidAudio;
+        const cfg = audio.aac.parseConfig(asc) orelse return error.UnsupportedCodec;
+        return .{
+            .codec = .aac,
+            .sample_rate = cfg.sample_rate,
+            .channels = cfg.channels,
+            .aac_config = cfg,
+        };
+    }
+
+    var little_endian = false;
+    if (findBoxRecursive(children, "enda")) |enda| {
+        if (enda.len >= 2 and std.mem.readInt(u16, enda[0..2], .big) == 1) {
+            little_endian = true;
+        }
+    }
+
+    if (std.mem.eql(u8, &entry.kind, "sowt")) {
+        return .{ .codec = if (sample_size == 8) .pcm_s8 else .pcm_s16le, .sample_rate = sample_rate, .channels = channels };
+    }
+    if (std.mem.eql(u8, &entry.kind, "twos")) {
+        return .{ .codec = if (sample_size == 8) .pcm_s8 else .pcm_s16be, .sample_rate = sample_rate, .channels = channels };
+    }
+    if (std.mem.eql(u8, &entry.kind, "raw ") or std.mem.eql(u8, &entry.kind, "NONE")) {
+        return .{ .codec = .pcm_u8, .sample_rate = sample_rate, .channels = channels };
+    }
+    if (std.mem.eql(u8, &entry.kind, "in24")) {
+        return .{ .codec = if (little_endian) .pcm_s24le else .pcm_s24be, .sample_rate = sample_rate, .channels = channels };
+    }
+    if (std.mem.eql(u8, &entry.kind, "in32")) {
+        return .{ .codec = if (little_endian) .pcm_s32le else .pcm_s32be, .sample_rate = sample_rate, .channels = channels };
+    }
+    if (std.mem.eql(u8, &entry.kind, "fl32")) {
+        return .{ .codec = if (little_endian) .float_f32le else .float_f32be, .sample_rate = sample_rate, .channels = channels };
+    }
+    if (std.mem.eql(u8, &entry.kind, "lpcm")) {
+        if (version == 2 and entry.payload.len >= 56) {
+            const flags = std.mem.readInt(u32, entry.payload[52..56], .big);
+            const is_float = (flags & 1) != 0;
+            const is_be = (flags & 2) != 0;
+            if (is_float and sample_size == 32) {
+                return .{ .codec = if (is_be) .float_f32be else .float_f32le, .sample_rate = sample_rate, .channels = channels };
+            }
+            if (sample_size == 24) return .{ .codec = if (is_be) .pcm_s24be else .pcm_s24le, .sample_rate = sample_rate, .channels = channels };
+            if (sample_size == 32) return .{ .codec = if (is_be) .pcm_s32be else .pcm_s32le, .sample_rate = sample_rate, .channels = channels };
+            if (sample_size == 8) return .{ .codec = if ((flags & 4) != 0) .pcm_s8 else .pcm_u8, .sample_rate = sample_rate, .channels = channels };
+            return .{ .codec = if (is_be) .pcm_s16be else .pcm_s16le, .sample_rate = sample_rate, .channels = channels };
+        }
+        return .{
+            .codec = switch (sample_size) {
+                8 => .pcm_u8,
+                24 => .pcm_s24le,
+                32 => .pcm_s32le,
+                else => .pcm_s16le,
+            },
+            .sample_rate = sample_rate,
+            .channels = channels,
+        };
+    }
+    if (std.mem.eql(u8, &entry.kind, "ulaw")) {
+        return .{ .codec = .ulaw, .sample_rate = sample_rate, .channels = channels };
+    }
+    if (std.mem.eql(u8, &entry.kind, "alaw")) {
+        return .{ .codec = .alaw, .sample_rate = sample_rate, .channels = channels };
+    }
+    return error.UnsupportedCodec;
+}
+
+fn parseAudioStbl(gpa: std.mem.Allocator, file_size: u64, stbl: []const u8, mdhd_timescale: u32) !AudioTrack {
+    var stsd_box: ?[]const u8 = null;
+    var stts_box: ?[]const u8 = null;
+    var stsc_box: ?[]const u8 = null;
+    var stsz_box: ?[]const u8 = null;
+    var stco_box: ?[]const u8 = null;
+    var co64_box: ?[]const u8 = null;
+
+    var at: usize = 0;
+    while (nextBox(stbl, at)) |b| : (at = b.next) {
+        if (std.mem.eql(u8, &b.kind, "stsd")) stsd_box = b.payload else if (std.mem.eql(u8, &b.kind, "stts")) stts_box = b.payload else if (std.mem.eql(u8, &b.kind, "stsc")) stsc_box = b.payload else if (std.mem.eql(u8, &b.kind, "stsz")) stsz_box = b.payload else if (std.mem.eql(u8, &b.kind, "stco")) stco_box = b.payload else if (std.mem.eql(u8, &b.kind, "co64")) co64_box = b.payload;
+    }
+
+    const info = try parseAudioStsd(stsd_box orelse return error.InvalidAudio, mdhd_timescale);
+    const timescale = if (mdhd_timescale > 0) mdhd_timescale else info.sample_rate;
+
+    const stsz = stsz_box orelse return error.InvalidAudio;
+    if (stsz.len < 12) return error.InvalidAudio;
+    const default_size = std.mem.readInt(u32, stsz[4..8], .big);
+    const sample_count_raw = std.mem.readInt(u32, stsz[8..12], .big);
+    if (sample_count_raw == 0) return error.InvalidAudio;
+
+    const stsc = stsc_box orelse return error.InvalidAudio;
+    if (stsc.len < 8) return error.InvalidAudio;
+    const stsc_count = std.mem.readInt(u32, stsc[4..8], .big);
+    if (stsc_count == 0 or stsc.len < 8 + @as(usize, stsc_count) * 12) return error.InvalidAudio;
+
+    const chunk_count: usize = if (stco_box) |co| blk: {
+        if (co.len < 8) return error.InvalidAudio;
+        const c = std.mem.readInt(u32, co[4..8], .big);
+        if (co.len < 8 + @as(usize, c) * 4) return error.InvalidAudio;
+        break :blk c;
+    } else if (co64_box) |co| blk: {
+        if (co.len < 8) return error.InvalidAudio;
+        const c = std.mem.readInt(u32, co[4..8], .big);
+        if (co.len < 8 + @as(usize, c) * 8) return error.InvalidAudio;
+        break :blk c;
+    } else return error.InvalidAudio;
+    if (chunk_count == 0) return error.InvalidAudio;
+
+    var packets: std.ArrayList(AudioPacket) = .empty;
+    errdefer packets.deinit(gpa);
+    var max_packet_size: u32 = 0;
+
+    if (info.codec != .aac and default_size != 0) {
+        // Constant-size PCM / G.711 samples: group contiguous chunk frames into packets of up to 1024 frames.
+        const bpf: u32 = @as(u32, info.codec.bytesPerSample()) * info.channels;
+        if (bpf == 0) return error.InvalidAudio;
+        var stsc_idx: usize = 0;
+        var total_frames: u64 = 0;
+        var samples_left: u64 = sample_count_raw;
+
+        for (0..chunk_count) |chunk_idx| {
+            if (samples_left == 0 or packets.items.len >= max_audio_packets) break;
+            const chunk_1based = chunk_idx + 1;
+            while (stsc_idx + 1 < stsc_count) {
+                const next_first = std.mem.readInt(u32, stsc[8 + (stsc_idx + 1) * 12 ..][0..4], .big);
+                if (chunk_1based >= next_first) stsc_idx += 1 else break;
+            }
+            const per_chunk: u64 = @min(@as(u64, std.mem.readInt(u32, stsc[8 + stsc_idx * 12 + 4 ..][0..4], .big)), samples_left);
+            var offset: u64 = if (stco_box) |co|
+                std.mem.readInt(u32, co[8 + chunk_idx * 4 ..][0..4], .big)
+            else
+                std.mem.readInt(u64, co64_box.?[8 + chunk_idx * 8 ..][0..8], .big);
+
+            var chunk_frames: u64 = if (default_size == bpf)
+                per_chunk
+            else if (default_size > bpf and default_size % bpf == 0)
+                per_chunk * (default_size / bpf)
+            else
+                per_chunk;
+
+            samples_left -|= per_chunk;
+            while (chunk_frames > 0 and packets.items.len < max_audio_packets) {
+                const pkt_frames: u32 = @intCast(@min(chunk_frames, 1024));
+                const pkt_bytes: u32 = pkt_frames * bpf;
+                if (offset + pkt_bytes > file_size) break;
+                const pts_us: u64 = (total_frames * 1_000_000) / @max(info.sample_rate, 1);
+                try packets.append(gpa, .{
+                    .offset = offset,
+                    .size = pkt_bytes,
+                    .pts_us = pts_us,
+                    .frames = pkt_frames,
+                });
+                max_packet_size = @max(max_packet_size, pkt_bytes);
+                offset += pkt_bytes;
+                total_frames += pkt_frames;
+                chunk_frames -= pkt_frames;
+            }
+        }
+    } else {
+        // Variable-size packets (AAC or chunked PCM with explicit stsz table).
+        const sample_count: usize = @min(sample_count_raw, max_audio_packets);
+        if (default_size == 0 and stsz.len < 12 + sample_count * 4) return error.InvalidAudio;
+        const bpf: u32 = if (info.codec == .aac) 0 else @as(u32, info.codec.bytesPerSample()) * info.channels;
+
+        var sample_idx: usize = 0;
+        var stsc_idx: usize = 0;
+        for (0..chunk_count) |chunk_idx| {
+            if (sample_idx >= sample_count) break;
+            const chunk_1based = chunk_idx + 1;
+            while (stsc_idx + 1 < stsc_count) {
+                const next_first = std.mem.readInt(u32, stsc[8 + (stsc_idx + 1) * 12 ..][0..4], .big);
+                if (chunk_1based >= next_first) stsc_idx += 1 else break;
+            }
+            const per_chunk = std.mem.readInt(u32, stsc[8 + stsc_idx * 12 + 4 ..][0..4], .big);
+            var offset: u64 = if (stco_box) |co|
+                std.mem.readInt(u32, co[8 + chunk_idx * 4 ..][0..4], .big)
+            else
+                std.mem.readInt(u64, co64_box.?[8 + chunk_idx * 8 ..][0..8], .big);
+
+            var j: u32 = 0;
+            while (j < per_chunk and sample_idx < sample_count) : (j += 1) {
+                const sz = if (default_size != 0)
+                    default_size
+                else
+                    std.mem.readInt(u32, stsz[12 + sample_idx * 4 ..][0..4], .big);
+                if (sz == 0 or sz > max_audio_packet_bytes or offset + sz > file_size) {
+                    if (sample_idx == 0) return error.InvalidAudio;
+                    break;
+                }
+                const pkt_frames: u32 = if (info.codec == .aac)
+                    audio.aac.frame_samples
+                else if (bpf > 0)
+                    sz / bpf
+                else
+                    1024;
+                try packets.append(gpa, .{
+                    .offset = offset,
+                    .size = sz,
+                    .pts_us = 0,
+                    .frames = pkt_frames,
+                });
+                max_packet_size = @max(max_packet_size, sz);
+                offset += sz;
+                sample_idx += 1;
+            }
+        }
+
+        // Fill timestamps from stts (or fallback to frame counter).
+        var dts_ticks: u64 = 0;
+        var idx: usize = 0;
+        if (stts_box) |stts| if (stts.len >= 8) {
+            const count = std.mem.readInt(u32, stts[4..8], .big);
+            var entry_i: usize = 0;
+            while (entry_i < count and 8 + (entry_i + 1) * 8 <= stts.len and idx < packets.items.len) : (entry_i += 1) {
+                const n = std.mem.readInt(u32, stts[8 + entry_i * 8 ..][0..4], .big);
+                const delta = std.mem.readInt(u32, stts[8 + entry_i * 8 + 4 ..][0..4], .big);
+                var k: u32 = 0;
+                while (k < n and idx < packets.items.len) : (k += 1) {
+                    packets.items[idx].pts_us = (dts_ticks * 1_000_000) / @max(timescale, 1);
+                    dts_ticks += delta;
+                    idx += 1;
+                }
+            }
+        };
+        while (idx < packets.items.len) : (idx += 1) {
+            packets.items[idx].pts_us = (@as(u64, idx) * 1024 * 1_000_000) / @max(info.sample_rate, 1);
+        }
+    }
+
+    if (packets.items.len == 0) return error.InvalidAudio;
+    return .{
+        .codec = info.codec,
+        .sample_rate = info.sample_rate,
+        .channels = info.channels,
+        .aac_config = info.aac_config,
+        .packets = try packets.toOwnedSlice(gpa),
+        .max_packet_size = max_packet_size,
+    };
+}
+
+pub fn decodeAudioPcmPacket(codec: AudioCodec, channels: u8, raw: []const u8, out: *[1024][2]i16) usize {
+    const bps = codec.bytesPerSample();
+    if (bps == 0 or channels == 0) return 0;
+    const bpf: usize = @as(usize, bps) * channels;
+    const count = @min(raw.len / bpf, out.len);
+    for (0..count) |i| {
+        const frame = raw[i * bpf ..][0..bpf];
+        const l = decodeOneSample(codec, frame[0..bps]);
+        const r = if (channels >= 2) decodeOneSample(codec, frame[bps .. bps * 2]) else l;
+        out[i] = .{ l, r };
+    }
+    return count;
+}
+
+fn decodeOneSample(codec: AudioCodec, bytes: []const u8) i16 {
+    return switch (codec) {
+        .aac => 0,
+        .pcm_u8 => (@as(i16, bytes[0]) - 128) << 8,
+        .pcm_s8 => @as(i16, @as(i8, @bitCast(bytes[0]))) << 8,
+        .pcm_s16le => std.mem.readInt(i16, bytes[0..2], .little),
+        .pcm_s16be => std.mem.readInt(i16, bytes[0..2], .big),
+        .pcm_s24le => @intCast((@as(i32, @as(i8, @bitCast(bytes[2]))) << 8) | bytes[1]),
+        .pcm_s24be => @intCast((@as(i32, @as(i8, @bitCast(bytes[0]))) << 8) | bytes[1]),
+        .pcm_s32le => @intCast(std.mem.readInt(i32, bytes[0..4], .little) >> 16),
+        .pcm_s32be => @intCast(std.mem.readInt(i32, bytes[0..4], .big) >> 16),
+        .float_f32le => blk: {
+            const f: f32 = @bitCast(std.mem.readInt(u32, bytes[0..4], .little));
+            if (std.math.isNan(f)) break :blk 0;
+            break :blk @intFromFloat(std.math.clamp(f * 32767.0, -32768.0, 32767.0));
+        },
+        .float_f32be => blk: {
+            const f: f32 = @bitCast(std.mem.readInt(u32, bytes[0..4], .big));
+            if (std.math.isNan(f)) break :blk 0;
+            break :blk @intFromFloat(std.math.clamp(f * 32767.0, -32768.0, 32767.0));
+        },
+        .ulaw => decodeUlaw(bytes[0]),
+        .alaw => decodeAlaw(bytes[0]),
+    };
+}
+
+fn decodeUlaw(u_val: u8) i16 {
+    const u = ~u_val;
+    const t: i32 = ((@as(i32, u & 0x0f) << 3) + 0x84) << @as(u4, @intCast((u & 0x70) >> 4));
+    const v: i32 = if ((u & 0x80) != 0) (0x84 - t) else (t - 0x84);
+    return @intCast(std.math.clamp(v, -32768, 32767));
+}
+
+fn decodeAlaw(a_val: u8) i16 {
+    const a = a_val ^ 0x55;
+    var t: i32 = (@as(i32, a & 0x0f) << 4) + 8;
+    const seg: u4 = @intCast((a & 0x70) >> 4);
+    if (seg != 0) t = (t + 0x100) << (seg - 1);
+    const v: i32 = if ((a & 0x80) != 0) t else -t;
+    return @intCast(std.math.clamp(v, -32768, 32767));
 }
 
 // --- Raw Annex-B H.264 stream parser & SPS decoder ---------------------------
@@ -2289,6 +2766,16 @@ pub const Player = struct {
     pending: ?DecodedFrame = null,
     /// Why hardware decoding could not start, if `decoder == null`.
     hw_unavailable: bool = false,
+    /// Audio playback state when `stream.audio_track` is present.
+    pcm: ?audio.alsa.PcmOutput = null,
+    audio_settings: audio.Settings = .{},
+    aac_decoder: ?*audio.aac.Decoder = null,
+    audio_pkt_buf: []u8 = &.{},
+    audio_frames: [4096][2]i16 = undefined,
+    audio_frames_len: usize = 0,
+    audio_frames_pos: usize = 0,
+    audio_resample_frac: u32 = 0,
+    next_audio_pkt: usize = 0,
 
     pub fn open(gpa: std.mem.Allocator, fd: linux.fd_t, file_size: u64, owns_fd: bool, now_ns: u64) !*Player {
         var stream = try Stream.open(gpa, fd, file_size, owns_fd);
@@ -2311,9 +2798,11 @@ pub const Player = struct {
         if (Decoder.open(stream.codec, stream.width, stream.height)) |dec| {
             p.decoder = dec;
             p.decodeFirstFrame();
+            p.initAudio();
             p.playing = true;
             p.start_ns = now_ns;
             p.base_us = 0;
+            p.feedAudio();
         } else |_| {
             p.hw_unavailable = true;
         }
@@ -2321,12 +2810,110 @@ pub const Player = struct {
     }
 
     pub fn destroy(p: *Player) void {
+        if (p.pcm) |*pcm| pcm.close();
+        if (p.aac_decoder) |aac_dec| p.gpa.destroy(aac_dec);
+        if (p.audio_pkt_buf.len > 0) p.gpa.free(p.audio_pkt_buf);
         if (p.pending) |f| if (p.decoder) |*d| d.queueCapture(f.index) catch {};
         if (p.decoder) |*d| d.deinit();
         if (p.pixels[0].len > 0) p.gpa.free(p.pixels[0]);
         if (p.pixels[1].len > 0) p.gpa.free(p.pixels[1]);
         p.stream.deinit();
         p.gpa.destroy(p);
+    }
+
+    fn initAudio(p: *Player) void {
+        const at = &(p.stream.audio_track orelse return);
+        if (at.packets.len == 0 or at.max_packet_size == 0) return;
+        p.audio_settings = audio.loadSettings();
+        p.pcm = audio.openOutput(at.sample_rate, p.audio_settings) orelse return;
+        p.audio_pkt_buf = p.gpa.alloc(u8, at.max_packet_size) catch {
+            if (p.pcm) |*pcm| pcm.close();
+            p.pcm = null;
+            return;
+        };
+        if (at.codec == .aac) {
+            const dec = p.gpa.create(audio.aac.Decoder) catch {
+                p.gpa.free(p.audio_pkt_buf);
+                p.audio_pkt_buf = &.{};
+                if (p.pcm) |*pcm| pcm.close();
+                p.pcm = null;
+                return;
+            };
+            dec.* = audio.aac.Decoder.init(at.aac_config);
+            p.aac_decoder = dec;
+        }
+    }
+
+    fn resetAudioAt(p: *Player, target_us: u64) void {
+        if (p.pcm) |*pcm| pcm.drop();
+        p.audio_frames_pos = 0;
+        p.audio_frames_len = 0;
+        p.audio_resample_frac = 0;
+        if (p.aac_decoder) |aac_dec| aac_dec.reset();
+        if (p.stream.audio_track) |*at| {
+            p.next_audio_pkt = at.packetAtOrAfter(target_us);
+        }
+    }
+
+    fn feedAudio(p: *Player) void {
+        const pcm = &(p.pcm orelse return);
+        const at = &(p.stream.audio_track orelse return);
+
+        if (p.audio_frames_pos < p.audio_frames_len) {
+            const rem = p.audio_frames[p.audio_frames_pos..p.audio_frames_len];
+            const written = pcm.writeStereoFrames(rem, p.audio_settings.volume, p.audio_settings.muted);
+            p.audio_frames_pos += written;
+            if (p.audio_frames_pos < p.audio_frames_len) return;
+        }
+
+        const horizon_us = p.position_us + 150_000;
+        var raw_frames: [1024][2]i16 = undefined;
+        var rounds: usize = 0;
+
+        while (p.next_audio_pkt < at.packets.len and rounds < 8) : (rounds += 1) {
+            const pkt = at.packets[p.next_audio_pkt];
+            if (pkt.pts_us > horizon_us) break;
+            const pkt_idx = p.next_audio_pkt;
+            p.next_audio_pkt += 1;
+
+            // Drop packets that are more than 250 ms behind the current clock.
+            if (pkt.pts_us + 250_000 < p.position_us) continue;
+
+            const bytes = at.readPacket(p.stream.fd, pkt_idx, p.audio_pkt_buf) catch continue;
+            const decoded: usize = if (at.codec == .aac) blk: {
+                const aac_dec = p.aac_decoder orelse break;
+                break :blk aac_dec.decodeFrame(bytes, &raw_frames) catch continue;
+            } else decodeAudioPcmPacket(at.codec, at.channels, bytes, &raw_frames);
+
+            if (decoded == 0) continue;
+            // If this was a pre-roll AAC packet decoded solely to prime the
+            // IMDCT overlap window before `position_us`, don't queue its PCM.
+            if (at.codec == .aac and pkt.pts_us + 20_000 < p.position_us) continue;
+
+            if (at.sample_rate == pcm.rate) {
+                @memcpy(p.audio_frames[0..decoded], raw_frames[0..decoded]);
+                p.audio_frames_len = decoded;
+            } else {
+                const res = audio.alsa.resampleLinear(
+                    raw_frames[0..decoded],
+                    at.sample_rate,
+                    &p.audio_frames,
+                    pcm.rate,
+                    &p.audio_resample_frac,
+                );
+                p.audio_frames_len = res.produced;
+            }
+            p.audio_frames_pos = 0;
+            if (p.audio_frames_len == 0) continue;
+
+            const written = pcm.writeStereoFrames(
+                p.audio_frames[0..p.audio_frames_len],
+                p.audio_settings.volume,
+                p.audio_settings.muted,
+            );
+            p.audio_frames_pos = written;
+            if (p.audio_frames_pos < p.audio_frames_len) break;
+        }
     }
 
     /// Feeds the initial frames and waits briefly for the hardware decoder
@@ -2393,6 +2980,7 @@ pub const Player = struct {
         var changed = false;
 
         p.feedDecoder();
+        p.feedAudio();
 
         while (true) {
             if (p.pending == null) {
@@ -2415,6 +3003,7 @@ pub const Player = struct {
             p.playing = false;
             p.finished = true;
             p.position_us = p.stream.duration_us;
+            if (p.pcm) |*pcm| pcm.drop();
             changed = true;
         }
         return changed;
@@ -2423,12 +3012,20 @@ pub const Player = struct {
     /// How long the main loop should wait before calling `step` again.
     pub fn nextWakeNs(p: *const Player) ?u64 {
         if (!p.playing or p.decoder == null) return null;
-        if (p.pending) |f| {
-            if (f.pts_us <= p.position_us) return 1 * std.time.ns_per_ms;
+        const video_wake: u64 = if (p.pending) |f| blk: {
+            if (f.pts_us <= p.position_us) break :blk 1 * std.time.ns_per_ms;
             const wait_us = @min(f.pts_us - p.position_us, 33_000);
-            return @max(wait_us * std.time.ns_per_us, 1 * std.time.ns_per_ms);
+            break :blk @max(wait_us * std.time.ns_per_us, 1 * std.time.ns_per_ms);
+        } else 8 * std.time.ns_per_ms;
+
+        if (p.pcm != null) {
+            if (p.stream.audio_track) |at| {
+                if (p.next_audio_pkt < at.packets.len or p.audio_frames_pos < p.audio_frames_len) {
+                    return @min(video_wake, 12 * std.time.ns_per_ms);
+                }
+            }
         }
-        return 8 * std.time.ns_per_ms;
+        return video_wake;
     }
 
     pub fn togglePlay(p: *Player, now_ns: u64) void {
@@ -2438,6 +3035,7 @@ pub const Player = struct {
             p.position_us = @min(p.base_us + elapsed_us, p.stream.duration_us);
             p.base_us = p.position_us;
             p.playing = false;
+            p.resetAudioAt(p.position_us);
             return;
         }
         if (p.finished or p.position_us >= p.stream.duration_us) {
@@ -2447,6 +3045,11 @@ pub const Player = struct {
         p.playing = true;
         p.start_ns = now_ns;
         p.base_us = p.position_us;
+        p.audio_settings = audio.loadSettings();
+        if (p.pcm) |*pcm| {
+            pcm.hw_volume = audio.alsa.setCardVolume(pcm.card, p.audio_settings.volume, p.audio_settings.muted);
+        }
+        p.feedAudio();
     }
 
     pub fn seekTo(p: *Player, target_us: u64, now_ns: u64) void {
@@ -2460,6 +3063,7 @@ pub const Player = struct {
         p.next_sample = kf;
         p.need_header = true;
         p.eos_sent = false;
+        p.resetAudioAt(kf_pts);
         if (p.pending) |f| {
             if (p.decoder) |*d| d.queueCapture(f.index) catch {};
             p.pending = null;
@@ -2482,6 +3086,7 @@ pub const Player = struct {
                 _ = linux.poll(&fds, 1, 5);
             }
         }
+        if (p.playing) p.feedAudio();
     }
 };
 
@@ -2799,3 +3404,46 @@ pub fn buildTestMp4(gpa: std.mem.Allocator, sps: []const u8, pps: []const u8, fr
 
     return out.toOwnedSlice(gpa);
 }
+
+test "MP4 audio track parsing and PCM/AAC packet decoding" {
+    // 1. Verify PCM packet decoding across endianness and channel counts.
+    var pcm_out: [1024][2]i16 = undefined;
+    const s16le_bytes = [_]u8{ 0x34, 0x12, 0xcc, 0xed, 0x00, 0x40, 0x00, 0xc0 };
+    const n_le = decodeAudioPcmPacket(.pcm_s16le, 2, &s16le_bytes, &pcm_out);
+    try testing.expectEqual(@as(usize, 2), n_le);
+    try testing.expectEqual(@as(i16, 0x1234), pcm_out[0][0]);
+    try testing.expectEqual(@as(i16, -0x1234), pcm_out[0][1]);
+    try testing.expectEqual(@as(i16, 0x4000), pcm_out[1][0]);
+    try testing.expectEqual(@as(i16, -0x4000), pcm_out[1][1]);
+
+    const s16be_mono = [_]u8{ 0x12, 0x34 };
+    const n_be = decodeAudioPcmPacket(.pcm_s16be, 1, &s16be_mono, &pcm_out);
+    try testing.expectEqual(@as(usize, 1), n_be);
+    try testing.expectEqual(@as(i16, 0x1234), pcm_out[0][0]);
+    try testing.expectEqual(@as(i16, 0x1234), pcm_out[0][1]);
+
+    // 2. Verify mp4a stsd + esds parsing for 48 kHz stereo AAC-LC (0x11, 0x90).
+    const mp4a_stsd = [_]u8{
+        0, 0, 0, 0, // version + flags
+        0, 0, 0, 1, // entry count = 1
+        0, 0, 0, 57, 'm', 'p', '4', 'a', // box header (57 bytes)
+        0, 0, 0, 0, 0, 0, // reserved
+        0, 1, // data_reference_index
+        0, 0, 0, 0, 0, 0, 0, 0, // version=0, revision=0, vendor=0
+        0, 2, // channels = 2
+        0, 16, // sample_size = 16
+        0, 0, 0, 0, // compression_id, packet_size
+        0xbb, 0x80, 0, 0, // sample_rate = 48000.0 (16.16 fixed)
+        // esds child box (21 bytes):
+        0, 0, 0, 21, 'e', 's', 'd', 's',
+        0, 0, 0, 0, // version + flags
+        0x03, 0x07, 0x00, 0x01, 0x00, // ES_Descriptor
+        0x05, 0x02, 0x11, 0x90, // DecoderSpecificInfo: AAC-LC 48 kHz stereo
+    };
+    const stsd_info = try parseAudioStsd(&mp4a_stsd, 48000);
+    try testing.expectEqual(AudioCodec.aac, stsd_info.codec);
+    try testing.expectEqual(@as(u32, 48000), stsd_info.sample_rate);
+    try testing.expectEqual(@as(u8, 2), stsd_info.channels);
+    try testing.expectEqual(@as(u4, 3), stsd_info.aac_config.freq_index);
+}
+
