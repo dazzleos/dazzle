@@ -118,7 +118,7 @@ fn run(init: std.process.Init.Minimal) !void {
     var perf = try perf_mod.Overlay.init(gpa, ui_font, renderer.width, renderer.height);
     var perf_monitor: perf_mod.Monitor = .{};
     var perf_shown = false;
-    var perf_key_down = false;
+    var shortcut_key: ?u32 = null;
     var perf_frames: u32 = 0;
     var perf_gpu_ns: u64 = 0;
     renderer.setPanelHidden(.perf, true);
@@ -287,27 +287,36 @@ fn run(init: std.process.Init.Minimal) !void {
                     if (e.key.pressed) screenshot_wanted = true;
                     continue;
                 }
-                // Super+I toggles the performance overlay.
-                if (e == .key and e.key.code == perf_mod.key_i) {
-                    if (e.key.pressed and (server.modifiers.depressed() & keyboard.mod4) != 0) {
-                        perf_key_down = true;
-                        perf_shown = !perf_shown;
-                        renderer.setPanelHidden(.perf, !perf_shown);
-                        if (perf_shown) {
-                            const now_ns = sys.nowNs();
-                            perf_monitor.reset(now_ns);
-                            perf_frames = 0;
-                            perf_gpu_ns = 0;
-                            var pids: [max_clients]linux.pid_t = undefined;
-                            perf.draw(perf_monitor.sample(now_ns, 0, 0, clientPids(&server, &pids)));
-                            renderer.setPanelAt(.perf, perf.pixels, perf.width, perf.height, perf.x, perf.y);
-                        }
-                        panels_damaged = true;
+                // Super+I toggles the performance overlay; Super+S opens
+                // Settings, and Super+1..9,0 open the app at that dock
+                // position.
+                if (e == .key) {
+                    if (!e.key.pressed and shortcut_key == e.key.code) {
+                        shortcut_key = null;
                         continue;
                     }
-                    if (!e.key.pressed and perf_key_down) {
-                        perf_key_down = false;
-                        continue;
+                    if (e.key.pressed and (server.modifiers.depressed() & keyboard.mod4) != 0) {
+                        if (e.key.code == perf_mod.key_i) {
+                            shortcut_key = e.key.code;
+                            perf_shown = !perf_shown;
+                            renderer.setPanelHidden(.perf, !perf_shown);
+                            if (perf_shown) {
+                                const now_ns = sys.nowNs();
+                                perf_monitor.reset(now_ns);
+                                perf_frames = 0;
+                                perf_gpu_ns = 0;
+                                var pids: [max_clients]linux.pid_t = undefined;
+                                perf.draw(perf_monitor.sample(now_ns, 0, 0, clientPids(&server, &pids)));
+                                renderer.setPanelAt(.perf, perf.pixels, perf.width, perf.height, perf.x, perf.y);
+                            }
+                            panels_damaged = true;
+                            continue;
+                        }
+                        if (dock_shown) if (dock_mod.shortcutApp(apps, e.key.code)) |i| {
+                            shortcut_key = e.key.code;
+                            activateApp(&apps[i], &server, &dock, &renderer, dock_y, runtime_dir, &panels_damaged);
+                            continue;
+                        };
                     }
                 }
                 // Touches go to the window they go down on, but those on
@@ -334,15 +343,7 @@ fn run(init: std.process.Init.Minimal) !void {
                     if (dock_tap == null and e.button.code != btn_left) continue;
                     const at = dock_tap orelse [2]f64{ pointer.x, pointer.y };
                     const i = dock.hit(at[0], at[1] - @as(f64, @floatFromInt(dock_y))) orelse continue;
-                    const app = &apps[i];
-                    if (app.pid) |pid| {
-                        if (!server.raise(pid)) print("dazzle-shell: {s} has no window yet\n", .{app.label});
-                    } else {
-                        app.pid = spawn(app.path, null, runtime_dir);
-                        dock.draw();
-                        renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
-                        panels_damaged = true;
-                    }
+                    activateApp(&apps[i], &server, &dock, &renderer, dock_y, runtime_dir, &panels_damaged);
                     continue;
                 }
                 pointer.handle(&server, time_ms, e);
@@ -698,6 +699,26 @@ fn openApp(listener: linux.fd_t, apps: []dock_mod.App, server: *server_mod.Serve
     print("dazzle-shell: opening {s}{s}{s}\n", .{ app.name, if (req.what != null) " at " else "", req.what orelse "" });
     app.pid = spawn(app.path, arg, runtime_dir);
     return true;
+}
+
+/// Starts `app`, or raises its window to the front if it is already running.
+fn activateApp(
+    app: *dock_mod.App,
+    server: *server_mod.Server,
+    dock: *dock_mod.Dock,
+    renderer: *render.Renderer,
+    dock_y: u32,
+    runtime_dir: ?[:0]const u8,
+    panels_damaged: *bool,
+) void {
+    if (app.pid) |pid| {
+        if (!server.raise(pid)) print("dazzle-shell: {s} has no window yet\n", .{app.label});
+    } else {
+        app.pid = spawn(app.path, null, runtime_dir);
+        dock.draw();
+        renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+        panels_damaged.* = true;
+    }
 }
 
 /// Starts a client program. Dazzle's apps find the shell on
