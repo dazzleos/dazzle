@@ -114,13 +114,12 @@ fn run(init: std.process.Init.Minimal) !void {
     // the dock shows once it has finished.
     var args = init.args.iterate();
     _ = args.skip();
-    var setup_pid: ?linux.pid_t = null;
+    var in_setup = false;
     var setup_args = args;
     while (setup_args.next()) |arg| if (std.mem.eql(u8, arg, "--setup")) {
-        var setup_buf: [512]u8 = undefined;
-        setup_pid = spawn(try sys.appFile(&setup_buf, "dazzle-setup"), null, runtime_dir);
+        in_setup = true;
     };
-    var dock_shown = setup_pid == null;
+    var dock_shown = !in_setup;
     if (dock_shown) {
         dock.draw();
         renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
@@ -143,6 +142,11 @@ fn run(init: std.process.Init.Minimal) !void {
     const path = if (runtime_dir) |dir| try std.fmt.bufPrintZ(&path_buf, "{s}/wayland-0", .{dir}) else wayland.client.default_socket;
     const listener = try listen(path);
     print("dazzle-shell: listening on {s}\n", .{path});
+
+    var setup_pid: ?linux.pid_t = if (in_setup) blk: {
+        var setup_buf: [512]u8 = undefined;
+        break :blk spawn(try sys.appFile(&setup_buf, "dazzle-setup"), null, runtime_dir);
+    } else null;
 
     // Start the clients named on the command line.
     while (args.next()) |client| if (!std.mem.eql(u8, client, "--setup")) {
@@ -478,7 +482,6 @@ const Scanout = struct {
         s.queued = null;
     }
 };
-
 
 const max_clients = 32;
 

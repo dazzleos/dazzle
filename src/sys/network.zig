@@ -711,6 +711,7 @@ pub const Adapter = struct {
 pub const Ethernet = struct {
     adapter: ?Adapter = null,
     addressing: Addressing = .dhcp,
+    address: ?Ip4 = null,
 };
 
 pub const Report = struct {
@@ -726,6 +727,8 @@ pub const Report = struct {
     hotspot: Hotspot = .{},
     networks: [max_networks]Network = undefined,
     len: usize = 0,
+    /// Whether the network has name servers configured (and the clock set).
+    ready: bool = false,
     /// The manager refused the client.
     denied: bool = false,
 
@@ -754,8 +757,24 @@ pub const Report = struct {
     /// `ethernet` if `ethernets` was not populated directly.
     pub fn ethernetAdapters(r: *const Report) []const Ethernet {
         if (r.ethernet_len > 0) return r.ethernets[0..r.ethernet_len];
-        if (r.ethernet.adapter != null or r.ethernet.addressing != .dhcp) return (&r.ethernet)[0..1];
+        if (r.ethernet.adapter != null or r.ethernet.addressing != .dhcp or r.ethernet.address != null) return (&r.ethernet)[0..1];
         return &.{};
+    }
+
+    /// Whether any wired Ethernet adapter has a carrier (a cable plugged in).
+    pub fn ethernetCarrier(r: *const Report) bool {
+        for (r.ethernetAdapters()) |*e| {
+            if (e.adapter) |a| if (a.up) return true;
+        }
+        return false;
+    }
+
+    /// Whether any wired Ethernet adapter has an IPv4 address.
+    pub fn ethernetConnected(r: *const Report) bool {
+        for (r.ethernetAdapters()) |*e| {
+            if (e.address != null) return true;
+        }
+        return false;
     }
 
     /// Adds a wired adapter entry to the report.
@@ -803,22 +822,24 @@ pub const Report = struct {
         return n;
     }
 
+    fn writeEthernet(w: *std.Io.Writer, e: *const Ethernet) void {
+        w.print("ethernet {s} ", .{if (e.adapter) |*a| a.name() else "-"}) catch {};
+        switch (e.addressing) {
+            .dhcp => w.writeAll("dhcp") catch {},
+            .static => |st| w.print("static {f}", .{st}) catch {},
+        }
+        if (e.adapter) |*a| if (a.up) w.writeAll(" up") catch {};
+        if (e.address) |ip| w.print(" {d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] }) catch {};
+        w.writeAll("\n") catch {};
+    }
+
     pub fn write(r: *const Report, buf: []u8) []const u8 {
         var w: std.Io.Writer = .fixed(buf);
         const eths = r.ethernetAdapters();
         if (eths.len == 0) {
-            const e = &r.ethernet;
-            w.print("ethernet {s} ", .{if (e.adapter) |*a| a.name() else "-"}) catch {};
-            switch (e.addressing) {
-                .dhcp => w.writeAll("dhcp\n") catch {},
-                .static => |st| w.print("static {f}\n", .{st}) catch {},
-            }
+            writeEthernet(&w, &r.ethernet);
         } else for (eths) |*e| {
-            w.print("ethernet {s} ", .{if (e.adapter) |*a| a.name() else "-"}) catch {};
-            switch (e.addressing) {
-                .dhcp => w.writeAll("dhcp\n") catch {},
-                .static => |st| w.print("static {f}\n", .{st}) catch {},
-            }
+            writeEthernet(&w, e);
         }
         const wifis = r.wifiAdapters();
         if (wifis.len == 0) {
@@ -869,6 +890,7 @@ pub const Report = struct {
         for (r.slice()) |*n| {
             w.print("wifi network {d} {d} {s} {x}\n", .{ n.signal_mbm, n.freq_mhz, @tagName(n.security), n.ssid() }) catch {};
         }
+        if (r.ready) w.writeAll("ready\n") catch {};
         w.writeAll("end\n") catch {};
         return w.buffered();
     }
@@ -884,10 +906,12 @@ pub const Report = struct {
             // Wi-Fi's lines say what about it after "wifi".
             const is_wifi = std.mem.eql(u8, kind, "wifi");
             if (is_wifi) kind = f.next() orelse continue;
-            if (is_wifi != !(std.mem.eql(u8, kind, "ethernet") or std.mem.eql(u8, kind, "denied"))) continue;
+            if (is_wifi != !(std.mem.eql(u8, kind, "ethernet") or std.mem.eql(u8, kind, "ready") or std.mem.eql(u8, kind, "denied"))) continue;
             if (std.mem.eql(u8, kind, "denied")) {
                 r.denied = true;
                 return r;
+            } else if (std.mem.eql(u8, kind, "ready")) {
+                r.ready = true;
             } else if (std.mem.eql(u8, kind, "scanning")) {
                 r.scanning = true;
             } else if (std.mem.eql(u8, kind, "ethernet")) {
@@ -901,6 +925,13 @@ pub const Report = struct {
                 if (std.mem.eql(u8, f.next() orelse "", "static")) {
                     const cidr = f.next() orelse continue;
                     if (Static.parse(cidr, f.next() orelse "-")) |st| e.addressing = .{ .static = st };
+                }
+                while (f.next()) |tok| {
+                    if (std.mem.eql(u8, tok, "up")) {
+                        if (e.adapter) |*a| a.up = true;
+                    } else if (parseIp4(tok)) |ip| {
+                        e.address = ip;
+                    }
                 }
                 if (e.adapter != null or r.ethernet_len > 0) {
                     r.addEthernet(e);
@@ -1195,5 +1226,16 @@ test "the wired adapter's addressing goes through the socket" {
     try testing.expectEqualStrings("eth0", back.ethernet.adapter.?.name());
     try testing.expectEqual(r.ethernet.addressing.static, back.addressingFor("eth0").static);
     try testing.expect(back.addressingFor("eth1") == .dhcp);
+    try testing.expect(!back.ethernetCarrier() and !back.ethernetConnected() and !back.ready);
     try testing.expect(Report.parse("ethernet - dhcp\nwifi none\nend\n").?.ethernet.adapter == null);
+
+    var r2: Report = .{ .ready = true };
+    var a3: Adapter = .{ .up = true };
+    a3.setName("eth0");
+    r2.addEthernet(.{ .adapter = a3, .addressing = .dhcp, .address = .{ 192, 168, 1, 20 } });
+    const back2 = Report.parse(r2.write(&out)).?;
+    try testing.expect(back2.ethernetCarrier());
+    try testing.expect(back2.ethernetConnected());
+    try testing.expectEqual(Ip4{ 192, 168, 1, 20 }, back2.ethernet.address.?);
+    try testing.expect(back2.ready);
 }

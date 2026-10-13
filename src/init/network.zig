@@ -161,10 +161,20 @@ const Ethernet = struct {
         for (e.slots) |slot| if (slot) |*s| {
             var a: proto.Adapter = .{ .mac = s.ifc.mac, .up = s.ifc.carrier() };
             a.setName(s.ifc.name());
-            r.addEthernet(.{ .adapter = a, .addressing = s.addressing });
+            r.addEthernet(.{
+                .adapter = a,
+                .addressing = s.addressing,
+                .address = ipv4.interfaceAddress(s.ifc.name()),
+            });
         };
     }
 };
+
+fn networkReady() bool {
+    var buf: [64]u8 = undefined;
+    const text = sys.readFile("/etc/resolv.conf", &buf) orelse return false;
+    return std.mem.trim(u8, text, " \t\n").len > 0;
+}
 
 fn run() !void {
     // Loopback first: some programs talk to themselves over it.
@@ -219,7 +229,7 @@ fn run() !void {
                     .ethernet => |er| ethernet.set(er),
                     .wifi => |wr| w.handle(wr, t),
                 }
-                var report: proto.Report = .{};
+                var report: proto.Report = .{ .ready = networkReady() };
                 ethernet.fill(&report);
                 w.fill(&report);
                 var out: [4096]u8 = undefined;

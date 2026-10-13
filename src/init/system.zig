@@ -50,6 +50,7 @@ const Work = struct {
     /// How far it has got, in percent.
     percent: std.atomic.Value(u32) = .init(0),
     /// Why it failed (read once it is done).
+    failure: proto.Failure = .io,
     err: ?anyerror = null,
 
     fn finished(w: *const Work) bool {
@@ -128,6 +129,9 @@ const Manager = struct {
         }
         var uts: linux.utsname = undefined;
         if (linux.errno(linux.uname(&uts)) == .SUCCESS) m.report.hostname = proto.Hostname.parse(std.mem.sliceTo(&uts.nodename, 0)) orelse .{};
+        // On the first start, prepare the card's free space in the background
+        // at once without waiting for the setup app to ask.
+        if (!m.finished and m.report.storage == .unprepared) m.prepare();
         const Conn = struct { fd: linux.fd_t, who: proto.Client };
         var clients: [max_clients]?Conn = @splat(null);
         while (true) {
@@ -196,7 +200,7 @@ const Manager = struct {
             .restart => m.restart = true,
             .locale => |l| {
                 m.report.locale = l;
-                m.keepLocale();
+                if (m.report.storage == .ready) m.keepLocale();
             },
             .video_memory => |mib| m.setVideoMemory(mib),
         }
@@ -261,39 +265,11 @@ const Manager = struct {
         m.report.failure = why;
     }
 
-    /// Makes the partition for files and starts formatting it.
+    /// Makes the partition for files and starts formatting it on a
+    /// background thread so the socket loop stays responsive.
     fn prepare(m: *Manager) void {
+        if (m.formatting != null) return;
         m.report.failure = .none;
-        const disk = sys.open(storage.card, .{ .ACCMODE = .RDWR, .CLOEXEC = true }) catch |err| return m.fail(.io, err);
-        defer sys.close(disk);
-        var mbr: [512]u8 = undefined;
-        const n = sys.check(linux.pread(disk, &mbr, mbr.len, 0)) catch |err| return m.fail(.io, err);
-        if (n != mbr.len) return m.fail(.io, error.ShortRead);
-        const sectors = storage.diskSectors(disk) catch |err| return m.fail(.io, err);
-        const plan = storage.planPartition(&mbr, sectors) catch |err| return m.fail(switch (err) {
-            error.TooSmall => .too_small,
-            error.NoRoom, error.NotMbr => .no_room,
-            else => .io,
-        }, err);
-        print("dazzle: system: partition {d} for files: {d} MiB from {d} MiB\n", .{ @as(u32, plan.entry) + 1, plan.sectors / 2048, plan.start / 2048 });
-        storage.addPartition(&mbr, plan);
-        _ = sys.check(linux.pwrite(disk, &mbr, mbr.len, 0)) catch |err| return m.fail(.io, err);
-        _ = linux.fsync(disk);
-        storage.announcePartition(disk, plan) catch |err| return m.fail(.io, err);
-        // The device node comes a moment after.
-        var waited: u32 = 0;
-        while (!storage.exists(storage.data_partition) and waited < 3000) : (waited += 50) sys.sleepMs(50);
-        const fd = sys.open(storage.data_partition, .{ .ACCMODE = .RDWR, .CLOEXEC = true }) catch |err| return m.fail(.io, err);
-        var uuid: [16]u8 = undefined;
-        random(&uuid);
-        // A random (version 4) UUID.
-        uuid[6] = (uuid[6] & 0x0f) | 0x40;
-        uuid[8] = (uuid[8] & 0x3f) | 0x80;
-        m.formatter = mkfs.Formatter.init(std.heap.page_allocator, fd, @as(u64, plan.sectors) * 512, uuid, @intCast(@max(sys.realtimeSec(), 0))) catch |err| {
-            sys.close(fd);
-            return m.fail(if (err == error.TooSmall) .too_small else .io, err);
-        };
-        m.fd = fd;
         m.report.storage = .preparing;
         m.report.progress = 0;
         m.formatting = .{ .thread = undefined };
@@ -303,19 +279,69 @@ const Manager = struct {
         };
     }
 
-    /// The formatting thread.
+    /// The formatting thread: partitions the card, formats the new
+    /// partition, and mounts it at /data.
     fn formatAll(m: *Manager) void {
         const w = &m.formatting.?;
         defer w.done.store(true, .release);
+        m.partitionAndFormat(w) catch |err| {
+            w.err = err;
+        };
+    }
+
+    fn partitionAndFormat(m: *Manager, w: *Work) !void {
+        const disk = try sys.open(storage.card, .{ .ACCMODE = .RDWR, .CLOEXEC = true });
+        defer sys.close(disk);
+        var mbr: [512]u8 = undefined;
+        const n = try sys.check(linux.pread(disk, &mbr, mbr.len, 0));
+        if (n != mbr.len) return error.ShortRead;
+        const sectors = try storage.diskSectors(disk);
+        const plan = storage.planPartition(&mbr, sectors) catch |err| {
+            w.failure = switch (err) {
+                error.TooSmall => .too_small,
+                error.NoRoom, error.NotMbr => .no_room,
+                else => .io,
+            };
+            return err;
+        };
+        print("dazzle: system: partition {d} for files: {d} MiB from {d} MiB\n", .{ @as(u32, plan.entry) + 1, plan.sectors / 2048, plan.start / 2048 });
+        storage.addPartition(&mbr, plan);
+        _ = try sys.check(linux.pwrite(disk, &mbr, mbr.len, 0));
+        _ = linux.fsync(disk);
+        try storage.announcePartition(disk, plan);
+        // The device node comes a moment after.
+        var waited: u32 = 0;
+        while (!storage.exists(storage.data_partition) and waited < 3000) : (waited += 50) sys.sleepMs(50);
+        const fd = try sys.open(storage.data_partition, .{ .ACCMODE = .RDWR, .CLOEXEC = true });
+        var uuid: [16]u8 = undefined;
+        random(&uuid);
+        // A random (version 4) UUID.
+        uuid[6] = (uuid[6] & 0x0f) | 0x40;
+        uuid[8] = (uuid[8] & 0x3f) | 0x80;
+        m.formatter = mkfs.Formatter.init(std.heap.page_allocator, fd, @as(u64, plan.sectors) * 512, uuid, @intCast(@max(sys.realtimeSec(), 0))) catch |err| {
+            sys.close(fd);
+            if (err == error.TooSmall) w.failure = .too_small;
+            return err;
+        };
+        m.fd = fd;
         const f = &m.formatter.?;
         while (true) {
-            const done = f.step() catch |err| {
-                w.err = err;
-                return;
-            };
+            const done = try f.step();
             w.percent.store(@intFromFloat(@min(f.progress() * 100, 100)), .monotonic);
-            if (done) return;
+            if (done) break;
         }
+        print("dazzle: system: formatted {s} ({d} MiB)\n", .{ storage.data_partition, @as(u64, f.layout.blocks) * mkfs.block_size >> 20 });
+        m.stopFormatting();
+        if (!storage.mountData()) {
+            w.failure = .mount;
+            return error.MountFailed;
+        }
+        // The system's settings belong to root; the user's files to the user.
+        _ = linux.mkdir(proto.config_dir, 0o755);
+        _ = linux.chown(proto.config_dir, 0, 0);
+        _ = linux.mkdir(proto.user_dir, 0o700);
+        // The apps go there too, and updates.
+        storage.makeUserDirs();
     }
 
     /// The copying thread.
@@ -328,7 +354,7 @@ const Manager = struct {
     }
 
     fn maybeStartCopying(m: *Manager) void {
-        if (m.copier_started or m.report.slot == null) return;
+        if (m.copier_started or m.report.slot == null or !m.finished) return;
         if (m.report.storage == .unprepared or m.report.storage == .preparing) return;
         m.copier_started = true;
         m.copier = slots.Copier.start(m.report.slot.?) catch |err| {
@@ -346,26 +372,18 @@ const Manager = struct {
         };
     }
 
-    /// How formatting goes; once it is done, mounts the filesystem.
+    /// How formatting goes; once it is done, marks /data ready.
     fn checkFormatting(m: *Manager) void {
         const w = &(m.formatting orelse return);
         m.report.progress = @intCast(w.percent.load(.monotonic));
         if (!w.finished()) return;
         w.thread.join();
         const err = w.err;
+        const failure = w.failure;
         m.formatting = null;
-        if (err) |e| return m.fail(.io, e);
-        const f = &m.formatter.?;
-        print("dazzle: system: formatted {s} ({d} MiB)\n", .{ storage.data_partition, @as(u64, f.layout.blocks) * mkfs.block_size >> 20 });
-        m.stopFormatting();
-        if (!storage.mountData()) return m.fail(.mount, error.MountFailed);
-        // The system's settings belong to root; the user's files to the user.
-        _ = linux.mkdir(proto.config_dir, 0o755);
-        _ = linux.chown(proto.config_dir, 0, 0);
-        _ = linux.mkdir(proto.user_dir, 0o700);
-        // The apps go there too, and updates.
-        storage.makeUserDirs();
+        if (err) |e| return m.fail(failure, e);
         m.report.storage = .ready;
+        m.keepLocale();
     }
 
     /// Whether the OS slot has been copied.
