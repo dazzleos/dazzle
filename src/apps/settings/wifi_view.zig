@@ -17,7 +17,7 @@ const PillButton = ui.PillButton;
 pub const label = "Wi-Fi";
 pub const icon: ui.icons.Icon = .wifi;
 
-pub const Mode = enum { join, hotspot };
+pub const Mode = enum { client, access_point };
 
 pub const State = struct {
     /// The Wi-Fi adapter picked, when there is more than one.
@@ -131,10 +131,10 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
     const current_hs = on_this_hs and hs.state != .off;
     const is_hotspot = state.hotspot_form or current_hs;
     const upstreams = upstreamOptions(self, adapter.name());
-    if (is_hotspot) ensureHotspotDefaults(self, state, hs, current_hs, &upstreams);
+    if (is_hotspot) ensureHotspotDefaults(self, state, hs, on_this_hs, &upstreams);
 
     const active_hs = is_hotspot and current_hs and hs.state == .active;
-    const mode_row = modeRow(self, b, state, adapter.name(), hs, current_hs, is_hotspot, &upstreams);
+    const mode_row = modeRow(self, b, state, adapter.name(), hs, on_this_hs, current_hs, is_hotspot, &upstreams);
     const status_row = statusRow(self, b, state, adapter.name(), &report.connection, hs, is_hotspot, report.scanning);
     const address_row = addressRow(self, b, state, adapter.name(), &report.connection, hs, current_hs, is_hotspot);
     const m = adapter.mac;
@@ -606,7 +606,7 @@ fn ensureHotspotDefaults(
     self: *const Settings,
     state: *State,
     hs: *const info.manager.Hotspot,
-    current_hs: bool,
+    on_this_hs: bool,
     upstreams: *const UpstreamList,
 ) void {
     const default_upstream = if (upstreams.len > 0) upstreams.items[0].name else info.Str(16){};
@@ -614,7 +614,7 @@ fn ensureHotspotDefaults(
         state.form_filled = true;
         state.form_id +%= 1;
         state.hotspot_invalid = false;
-        if (current_hs and hs.ssid_len > 0) {
+        if (on_this_hs and hs.ssid_len > 0) {
             state.hotspot_ssid.set(hs.ssid());
             state.hotspot_password.set(hs.passphrase());
             state.hotspot_network = hs.network();
@@ -658,18 +658,21 @@ fn modeRow(
     state: *State,
     adapter_name: []const u8,
     hs: *const info.manager.Hotspot,
+    on_this_hs: bool,
     current_hs: bool,
     is_hotspot: bool,
     upstreams: *const UpstreamList,
 ) ui.Widget {
     const cx = b.cx;
     const a = cx.ui.arena();
-    const mode: Mode = if (is_hotspot) .hotspot else .join;
+    const mode: Mode = if (is_hotspot) .access_point else .client;
     const default_upstream = if (upstreams.len > 0) upstreams.items[0].name else info.Str(16){};
     const choice = a.create(ModeChoice) catch return cx.make(ui.Empty{});
     choice.* = .{
         .actions = self.actions,
         .state = state,
+        .hs = hs,
+        .on_this_hs = on_this_hs,
         .current_hs = current_hs,
         .adapter = .of(adapter_name),
         .hostname = self.system.hostname,
@@ -721,6 +724,8 @@ fn hotspotRows(
     choice.* = .{
         .actions = self.actions,
         .state = state,
+        .hs = hs,
+        .on_this_hs = true,
         .current_hs = current_hs,
         .adapter = .of(adapter_name),
         .hostname = self.system.hostname,
@@ -829,8 +834,8 @@ fn hotspotRows(
 pub const ModeMenu = ui.Select(Mode);
 
 const mode_options = [_]ModeMenu.Option{
-    .{ .value = .join, .label = "Client" },
-    .{ .value = .hotspot, .label = "Access Point" },
+    .{ .value = .client, .label = "Client" },
+    .{ .value = .access_point, .label = "Access Point" },
 };
 
 /// The interface whose internet connection is shared over the access point.
@@ -863,6 +868,8 @@ const UpstreamPick = struct {
 const ModeChoice = struct {
     actions: ?*Actions,
     state: *State,
+    hs: *const info.manager.Hotspot,
+    on_this_hs: bool = false,
     current_hs: bool,
     adapter: info.Str(16),
     hostname: info.Str(64) = .{},
@@ -871,28 +878,34 @@ const ModeChoice = struct {
     fn choose(x: *ModeChoice, mode: Mode) void {
         const st = x.state;
         switch (mode) {
-            .join => {
+            .client => {
                 st.hotspot_form = false;
-                st.form_filled = false;
                 st.hotspot_invalid = false;
                 if (x.current_hs) if (x.actions) |acts| {
                     acts.disconnect = true;
                     acts.wifi_adapter = x.adapter;
                 };
             },
-            .hotspot => {
+            .access_point => {
                 st.hotspot_form = true;
                 st.has_selected = false;
                 if (!st.form_filled) {
                     st.form_filled = true;
                     st.form_id +%= 1;
                     st.hotspot_invalid = false;
-                    const default_ssid = if (x.hostname.len > 0) x.hostname.slice() else "dazzle";
-                    st.hotspot_ssid.set(default_ssid);
-                    var pass_buf: [12]u8 = undefined;
-                    st.hotspot_password.set(randomHotspotPassword(&pass_buf));
-                    st.hotspot_network = .{};
-                    st.hotspot_upstream = x.default_upstream;
+                    if (x.on_this_hs and x.hs.ssid_len > 0) {
+                        st.hotspot_ssid.set(x.hs.ssid());
+                        st.hotspot_password.set(x.hs.passphrase());
+                        st.hotspot_network = x.hs.network();
+                        st.hotspot_upstream = if (x.hs.upstream_len > 0) .of(x.hs.upstream()) else x.default_upstream;
+                    } else {
+                        const default_ssid = if (x.hostname.len > 0) x.hostname.slice() else "dazzle";
+                        st.hotspot_ssid.set(default_ssid);
+                        var pass_buf: [12]u8 = undefined;
+                        st.hotspot_password.set(randomHotspotPassword(&pass_buf));
+                        st.hotspot_network = .{};
+                        st.hotspot_upstream = x.default_upstream;
+                    }
                 }
             },
         }
@@ -1015,7 +1028,7 @@ const Networks = struct {
             (if (l.actions) |acts| .of(act(cx, acts, l.state, l.adapter_name, ""), Act.disconnect) else null)
         else
             null;
-        const item = networkRow(cx, n, is_chosen, joined, choose(cx, l.state, n.ssid()), on_disconnect);
+        const item = networkRow(cx, n, is_chosen, joined, choose(cx, l.state, n.ssid(), n.passphrase()), on_disconnect);
         if (i + 1 >= l.nets.len) return cx.make(ui.Column{
             .main_axis_size = .min,
             .cross_axis_alignment = .stretch,
@@ -1113,6 +1126,8 @@ const Choose = struct {
     state: *State,
     ssid_buf: [32]u8,
     ssid_len: u8,
+    pass_buf: [63]u8 = undefined,
+    pass_len: u8 = 0,
 
     fn press(c: *Choose) void {
         const st = c.state;
@@ -1124,16 +1139,18 @@ const Choose = struct {
         st.has_selected = true;
         st.selected_len = c.ssid_len;
         @memcpy(st.selected_buf[0..c.ssid_len], ssid);
-        st.password_len = 0;
+        st.setPassword(c.pass_buf[0..c.pass_len]);
     }
 };
 
-fn choose(cx: *ui.Context, state: *State, ssid: []const u8) ui.Callback {
+fn choose(cx: *ui.Context, state: *State, ssid: []const u8, passphrase: []const u8) ui.Callback {
     const c = cx.ui.arena().create(Choose) catch return .of(state, struct {
         fn none(_: *State) void {}
     }.none);
-    c.* = .{ .state = state, .ssid_buf = undefined, .ssid_len = @intCast(ssid.len) };
+    const pass_len: u8 = @intCast(@min(passphrase.len, c.pass_buf.len));
+    c.* = .{ .state = state, .ssid_buf = undefined, .ssid_len = @intCast(ssid.len), .pass_len = pass_len };
     @memcpy(c.ssid_buf[0..ssid.len], ssid);
+    @memcpy(c.pass_buf[0..pass_len], passphrase[0..pass_len]);
     return .of(c, Choose.press);
 }
 
@@ -1321,6 +1338,20 @@ test "choosing a network, typing its password and connecting" {
     failed.connection.setSsid("Home");
     u.frame(1920, 960, 10, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &failed });
     try testing.expect(view.findText(u.root.?, "Could not connect to Home: wrong password") != null);
+
+    // Selecting a network with a remembered passphrase pre-fills its password so Connect works immediately.
+    var saved_wifi = wifi;
+    for (saved_wifi.networks[0..saved_wifi.len]) |*n| {
+        if (std.mem.eql(u8, n.ssid(), "Home")) n.setPassphrase("savedsecret");
+    }
+    actions = .{};
+    const saved_settings: Settings = .{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &saved_wifi };
+    u.frame(1920, 960, 9, saved_settings);
+    view.click(u, view.findText(u.root.?, "Home").?);
+    u.frame(1920, 960, 10, saved_settings);
+    view.click(u, view.findText(u.root.?, "Connect").?);
+    try testing.expectEqualStrings("Home", actions.connect.?.ssid());
+    try testing.expectEqualStrings("savedsecret", actions.connect.?.passphrase());
 }
 
 test "choosing between multiple Wi-Fi adapters with pill buttons" {

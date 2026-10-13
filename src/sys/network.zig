@@ -79,6 +79,8 @@ pub const Security = enum {
 pub const Network = struct {
     ssid_buf: [32]u8 = undefined,
     ssid_len: u8 = 0,
+    pass_buf: [63]u8 = undefined,
+    pass_len: u8 = 0,
     /// Hundredths of dBm.
     signal_mbm: i32 = 0,
     freq_mhz: u32 = 0,
@@ -91,6 +93,15 @@ pub const Network = struct {
     pub fn setSsid(n: *Network, s: []const u8) void {
         n.ssid_len = @intCast(@min(s.len, n.ssid_buf.len));
         @memcpy(n.ssid_buf[0..n.ssid_len], s[0..n.ssid_len]);
+    }
+
+    pub fn passphrase(n: *const Network) []const u8 {
+        return n.pass_buf[0..n.pass_len];
+    }
+
+    pub fn setPassphrase(n: *Network, p: []const u8) void {
+        n.pass_len = @intCast(@min(p.len, n.pass_buf.len));
+        @memcpy(n.pass_buf[0..n.pass_len], p[0..n.pass_len]);
     }
 
     pub fn dbm(n: *const Network) i32 {
@@ -872,7 +883,7 @@ pub const Report = struct {
         }
         w.writeAll("\n") catch {};
         const h = &r.hotspot;
-        if (h.state != .off) {
+        if (h.state != .off or h.ssid_len > 0) {
             w.print("wifi hotspot {s} {s} ", .{ @tagName(h.state), @tagName(h.failure) }) catch {};
             if (h.ssid_len == 0) w.writeAll("-") catch {} else w.print("{x}", .{h.ssid()}) catch {};
             if (h.pass_len == 0) w.writeAll(" -") catch {} else w.print(" {x}", .{h.passphrase()}) catch {};
@@ -894,7 +905,11 @@ pub const Report = struct {
             }
         }
         for (r.slice()) |*n| {
-            w.print("wifi network {d} {d} {s} {x}\n", .{ n.signal_mbm, n.freq_mhz, @tagName(n.security), n.ssid() }) catch {};
+            if (n.pass_len > 0) {
+                w.print("wifi network {d} {d} {s} {x} {x}\n", .{ n.signal_mbm, n.freq_mhz, @tagName(n.security), n.ssid(), n.passphrase() }) catch {};
+            } else {
+                w.print("wifi network {d} {d} {s} {x}\n", .{ n.signal_mbm, n.freq_mhz, @tagName(n.security), n.ssid() }) catch {};
+            }
         }
         if (r.ready) w.writeAll("ready\n") catch {};
         w.writeAll("end\n") catch {};
@@ -1026,6 +1041,11 @@ pub const Report = struct {
                 var bytes: [32]u8 = undefined;
                 const decoded = std.fmt.hexToBytes(bytes[0..@min(bytes.len, hex.len / 2)], hex[0 .. @min(bytes.len, hex.len / 2) * 2]) catch continue;
                 n.setSsid(decoded);
+                if (f.next()) |pass_hex| {
+                    if (!std.mem.eql(u8, pass_hex, "-") and pass_hex.len <= 126 and pass_hex.len % 2 == 0) {
+                        n.pass_len = @intCast((std.fmt.hexToBytes(&n.pass_buf, pass_hex) catch continue).len);
+                    }
+                }
                 if (r.len < max_networks) {
                     r.networks[r.len] = n;
                     r.len += 1;
@@ -1354,6 +1374,22 @@ test "the wired adapter's addressing goes through the socket" {
     try testing.expect(got.ready and got.ethernetConnected());
 }
 
+/// Credentials for a known Wi-Fi network.
+pub const SavedNetwork = struct {
+    ssid_buf: [32]u8 = undefined,
+    ssid_len: u8 = 0,
+    pass_buf: [63]u8 = undefined,
+    pass_len: u8 = 0,
+
+    pub fn ssid(s: *const SavedNetwork) []const u8 {
+        return s.ssid_buf[0..s.ssid_len];
+    }
+
+    pub fn passphrase(s: *const SavedNetwork) []const u8 {
+        return s.pass_buf[0..s.pass_len];
+    }
+};
+
 /// Persistent network settings kept in `/data/system/network`.
 pub const Config = struct {
     ethernet_default: Addressing = .dhcp,
@@ -1363,11 +1399,14 @@ pub const Config = struct {
     wifi_address_adapter_buf: [16]u8 = undefined,
     wifi_address_adapter_len: u8 = 0,
     wifi_mode: WifiMode = .none,
+    saved_networks: [max_networks]SavedNetwork = undefined,
+    saved_len: usize = 0,
+    saved_access_point: ?WifiRequest.Connect = null,
 
     pub const WifiMode = union(enum) {
         none,
-        connect: WifiRequest.Connect,
-        hotspot: WifiRequest.Connect,
+        client: WifiRequest.Connect,
+        access_point: WifiRequest.Connect,
     };
 
     pub fn wifiAddressAdapter(c: *const Config) []const u8 {
@@ -1379,6 +1418,55 @@ pub const Config = struct {
             if (std.mem.eql(u8, e.adapter(), name)) return e.addressing;
         }
         return c.ethernet_default;
+    }
+
+    pub fn savedPassphrase(c: *const Config, ssid: []const u8) ?[]const u8 {
+        for (c.saved_networks[0..c.saved_len]) |*sn| {
+            if (std.mem.eql(u8, sn.ssid(), ssid)) return sn.passphrase();
+        }
+        return null;
+    }
+
+    pub fn rememberNetwork(c: *Config, ssid: []const u8, passphrase: []const u8) void {
+        if (ssid.len == 0 or ssid.len > 32 or passphrase.len > 63) return;
+        var entry: SavedNetwork = .{ .ssid_len = @intCast(ssid.len), .pass_len = @intCast(passphrase.len) };
+        @memcpy(entry.ssid_buf[0..ssid.len], ssid);
+        @memcpy(entry.pass_buf[0..passphrase.len], passphrase);
+        for (c.saved_networks[0..c.saved_len], 0..) |*existing, i| {
+            if (std.mem.eql(u8, existing.ssid(), ssid)) {
+                if (passphrase.len == 0 and existing.pass_len > 0) {
+                    entry.pass_len = existing.pass_len;
+                    @memcpy(entry.pass_buf[0..existing.pass_len], existing.passphrase());
+                }
+                std.mem.copyBackwards(SavedNetwork, c.saved_networks[1 .. i + 1], c.saved_networks[0..i]);
+                c.saved_networks[0] = entry;
+                return;
+            }
+        }
+        const end = @min(c.saved_len, max_networks - 1);
+        std.mem.copyBackwards(SavedNetwork, c.saved_networks[1 .. end + 1], c.saved_networks[0..end]);
+        c.saved_networks[0] = entry;
+        c.saved_len = end + 1;
+    }
+
+    fn appendSavedNetwork(c: *Config, ssid: []const u8, passphrase: []const u8) void {
+        if (ssid.len == 0 or ssid.len > 32 or passphrase.len > 63) return;
+        for (c.saved_networks[0..c.saved_len]) |*existing| {
+            if (std.mem.eql(u8, existing.ssid(), ssid)) {
+                if (passphrase.len > 0) {
+                    existing.pass_len = @intCast(passphrase.len);
+                    @memcpy(existing.pass_buf[0..passphrase.len], passphrase);
+                }
+                return;
+            }
+        }
+        if (c.saved_len < max_networks) {
+            var entry: SavedNetwork = .{ .ssid_len = @intCast(ssid.len), .pass_len = @intCast(passphrase.len) };
+            @memcpy(entry.ssid_buf[0..ssid.len], ssid);
+            @memcpy(entry.pass_buf[0..passphrase.len], passphrase);
+            c.saved_networks[c.saved_len] = entry;
+            c.saved_len += 1;
+        }
     }
 
     /// Updates `c` with `req`. Returns whether the persistent configuration changed.
@@ -1414,8 +1502,8 @@ pub const Config = struct {
                     const name = d.adapter();
                     const active_adapter = switch (c.wifi_mode) {
                         .none => return false,
-                        .connect => |*con| con.adapter(),
-                        .hotspot => |*hs| hs.adapter(),
+                        .client => |*con| con.adapter(),
+                        .access_point => |*hs| hs.adapter(),
                     };
                     if (name.len == 0 or active_adapter.len == 0 or std.mem.eql(u8, active_adapter, name)) {
                         c.wifi_mode = .none;
@@ -1430,11 +1518,20 @@ pub const Config = struct {
                     return true;
                 },
                 .connect => |con| {
-                    c.wifi_mode = .{ .connect = con };
+                    var full = con;
+                    if (full.pass_len == 0) {
+                        if (c.savedPassphrase(full.ssid())) |saved_pass| {
+                            full.pass_len = @intCast(@min(saved_pass.len, full.pass_buf.len));
+                            @memcpy(full.pass_buf[0..full.pass_len], saved_pass[0..full.pass_len]);
+                        }
+                    }
+                    c.rememberNetwork(full.ssid(), full.passphrase());
+                    c.wifi_mode = .{ .client = full };
                     return true;
                 },
                 .hotspot => |hs| {
-                    c.wifi_mode = .{ .hotspot = hs };
+                    c.saved_access_point = hs;
+                    c.wifi_mode = .{ .access_point = hs };
                     return true;
                 },
             },
@@ -1455,12 +1552,23 @@ pub const Config = struct {
             }
         }
         w.writeAll(wifiAddressRequest(&line_buf, c.wifiAddressAdapter(), c.wifi_addressing)) catch {};
+        for (c.saved_networks[0..c.saved_len]) |*sn| {
+            w.print("wifi saved {x} ", .{sn.ssid()}) catch {};
+            if (sn.pass_len == 0) w.writeAll("-\n") catch {} else w.print("{x}\n", .{sn.passphrase()}) catch {};
+        }
+        if (c.saved_access_point) |*ap| if (c.wifi_mode != .access_point) {
+            const hs_line = hotspotFullRequest(&line_buf, ap.adapter(), ap.ssid(), ap.passphrase(), ap.network, ap.upstream());
+            if (std.mem.startsWith(u8, hs_line, "wifi hotspot ")) {
+                w.writeAll("wifi saved_ap ") catch {};
+                w.writeAll(hs_line["wifi hotspot ".len..]) catch {};
+            }
+        };
         switch (c.wifi_mode) {
             .none => {},
-            .connect => |*con| {
+            .client => |*con| {
                 w.writeAll(connectAdapterRequest(&line_buf, con.adapter(), con.ssid(), con.passphrase())) catch {};
             },
-            .hotspot => |*hs| {
+            .access_point => |*hs| {
                 w.writeAll(hotspotFullRequest(&line_buf, hs.adapter(), hs.ssid(), hs.passphrase(), hs.network, hs.upstream())) catch {};
             },
         }
@@ -1473,6 +1581,31 @@ pub const Config = struct {
         while (lines.next()) |line| {
             const trimmed = std.mem.trim(u8, line, " \t\r");
             if (trimmed.len == 0) continue;
+            if (std.mem.startsWith(u8, trimmed, "wifi saved ")) {
+                var f = std.mem.tokenizeAny(u8, trimmed["wifi saved ".len..], " \t");
+                const ssid_hex = f.next() orelse continue;
+                const pass_hex = f.next() orelse continue;
+                if (ssid_hex.len == 0 or ssid_hex.len > 64 or ssid_hex.len % 2 != 0) continue;
+                var ssid_buf: [32]u8 = undefined;
+                const ssid = std.fmt.hexToBytes(&ssid_buf, ssid_hex) catch continue;
+                var pass_buf: [63]u8 = undefined;
+                const pass: []const u8 = if (std.mem.eql(u8, pass_hex, "-"))
+                    ""
+                else blk: {
+                    if (pass_hex.len > 126 or pass_hex.len % 2 != 0) continue;
+                    break :blk std.fmt.hexToBytes(&pass_buf, pass_hex) catch continue;
+                };
+                c.appendSavedNetwork(ssid, pass);
+                continue;
+            }
+            if (std.mem.startsWith(u8, trimmed, "wifi saved_ap ")) {
+                var hs_buf: [256]u8 = undefined;
+                const hs_line = std.fmt.bufPrint(&hs_buf, "wifi hotspot {s}", .{trimmed["wifi saved_ap ".len..]}) catch continue;
+                if (Request.parse(hs_line)) |req| if (req == .wifi and req.wifi == .hotspot) {
+                    c.saved_access_point = req.wifi.hotspot;
+                };
+                continue;
+            }
             if (Request.parse(trimmed)) |req| {
                 _ = c.apply(req);
             }
@@ -1481,7 +1614,7 @@ pub const Config = struct {
     }
 };
 
-test "network Config round-trips Ethernet, Wi-Fi client, and Wi-Fi hotspot settings" {
+test "network Config round-trips Ethernet, Wi-Fi client, saved credentials, and access point settings" {
     var cfg: Config = .{};
     var req_buf: [256]u8 = undefined;
 
@@ -1491,34 +1624,51 @@ test "network Config round-trips Ethernet, Wi-Fi client, and Wi-Fi hotspot setti
     const wifi_st = Static.parse("10.0.0.42/24", "10.0.0.1").?;
     try testing.expect(cfg.apply(Request.parse(wifiAddressRequest(&req_buf, "wlan0", .{ .static = wifi_st })).?));
     try testing.expect(cfg.apply(Request.parse(connectAdapterRequest(&req_buf, "wlan0", "HomeWiFi", "correct horse")).?));
+    try testing.expect(cfg.apply(Request.parse(connectAdapterRequest(&req_buf, "wlan0", "OfficeWiFi", "battery staple")).?));
 
-    var file_buf: [1024]u8 = undefined;
+    var file_buf: [2048]u8 = undefined;
     const saved = cfg.write(&file_buf);
     const loaded = Config.parse(saved);
     try testing.expectEqual(eth_st, loaded.ethernetAddressingFor("eth0").static);
     try testing.expectEqual(wifi_st, loaded.wifi_addressing.static);
     try testing.expectEqualStrings("wlan0", loaded.wifiAddressAdapter());
-    try testing.expect(loaded.wifi_mode == .connect);
-    try testing.expectEqualStrings("wlan0", loaded.wifi_mode.connect.adapter());
-    try testing.expectEqualStrings("HomeWiFi", loaded.wifi_mode.connect.ssid());
-    try testing.expectEqualStrings("correct horse", loaded.wifi_mode.connect.passphrase());
+    try testing.expect(loaded.wifi_mode == .client);
+    try testing.expectEqualStrings("wlan0", loaded.wifi_mode.client.adapter());
+    try testing.expectEqualStrings("OfficeWiFi", loaded.wifi_mode.client.ssid());
+    try testing.expectEqualStrings("battery staple", loaded.wifi_mode.client.passphrase());
+    try testing.expectEqual(@as(usize, 2), loaded.saved_len);
+    try testing.expectEqualStrings("correct horse", loaded.savedPassphrase("HomeWiFi").?);
+    try testing.expectEqualStrings("battery staple", loaded.savedPassphrase("OfficeWiFi").?);
 
-    // Switching to hotspot replaces connect mode, and round-trips hotspot CIDR & upstream:
+    // Switching to access_point mode preserves both saved client networks and round-trips AP CIDR & upstream:
     var cfg_hs = loaded;
     const hs_net = HotspotNetwork.parseHost("10.42.0.5/24").?;
     try testing.expect(cfg_hs.apply(Request.parse(hotspotFullRequest(&req_buf, "wlan0", "DazzleAP", "hunter22", hs_net, "eth0")).?));
     const saved_hs = cfg_hs.write(&file_buf);
     const loaded_hs = Config.parse(saved_hs);
-    try testing.expect(loaded_hs.wifi_mode == .hotspot);
-    try testing.expectEqualStrings("DazzleAP", loaded_hs.wifi_mode.hotspot.ssid());
-    try testing.expectEqualStrings("hunter22", loaded_hs.wifi_mode.hotspot.passphrase());
-    try testing.expectEqualStrings("eth0", loaded_hs.wifi_mode.hotspot.upstream());
-    try testing.expectEqual(Ip4{ 10, 42, 0, 5 }, loaded_hs.wifi_mode.hotspot.network.serverIp());
+    try testing.expect(loaded_hs.wifi_mode == .access_point);
+    try testing.expectEqualStrings("DazzleAP", loaded_hs.wifi_mode.access_point.ssid());
+    try testing.expectEqualStrings("hunter22", loaded_hs.wifi_mode.access_point.passphrase());
+    try testing.expectEqualStrings("eth0", loaded_hs.wifi_mode.access_point.upstream());
+    try testing.expectEqual(Ip4{ 10, 42, 0, 5 }, loaded_hs.wifi_mode.access_point.network.serverIp());
+    try testing.expectEqualStrings("correct horse", loaded_hs.savedPassphrase("HomeWiFi").?);
 
-    // Disconnect clears the saved Wi-Fi mode:
+    // Disconnect clears the active Wi-Fi mode while keeping saved client credentials and AP settings:
     var cfg_disc = loaded_hs;
     try testing.expect(cfg_disc.apply(Request.parse(disconnectRequest(&req_buf, "wlan0")).?));
     const loaded_disc = Config.parse(cfg_disc.write(&file_buf));
     try testing.expect(loaded_disc.wifi_mode == .none);
+    try testing.expectEqualStrings("correct horse", loaded_disc.savedPassphrase("HomeWiFi").?);
+    try testing.expectEqualStrings("battery staple", loaded_disc.savedPassphrase("OfficeWiFi").?);
+    try testing.expectEqualStrings("DazzleAP", loaded_disc.saved_access_point.?.ssid());
+    try testing.expectEqualStrings("hunter22", loaded_disc.saved_access_point.?.passphrase());
+
+    // Reconnecting to a saved network without re-sending its passphrase uses the remembered passphrase:
+    var cfg_rejoin = loaded_disc;
+    try testing.expect(cfg_rejoin.apply(Request.parse(connectAdapterRequest(&req_buf, "wlan0", "HomeWiFi", "")).?));
+    try testing.expect(cfg_rejoin.wifi_mode == .client);
+    try testing.expectEqualStrings("HomeWiFi", cfg_rejoin.wifi_mode.client.ssid());
+    try testing.expectEqualStrings("correct horse", cfg_rejoin.wifi_mode.client.passphrase());
 }
+
 

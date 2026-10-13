@@ -172,14 +172,14 @@ const Ethernet = struct {
 };
 
 fn loadConfig() proto.Config {
-    var buf: [1024]u8 = undefined;
+    var buf: [4096]u8 = undefined;
     const text = sys.readFile(proto.settings_file, &buf) orelse return .{};
     return proto.Config.parse(text);
 }
 
 fn saveConfig(cfg: *const proto.Config) bool {
     if (linux.errno(linux.access(sys.system.config_dir, linux.F_OK)) != .SUCCESS) return false;
-    var buf: [1024]u8 = undefined;
+    var buf: [4096]u8 = undefined;
     const data = cfg.write(&buf);
     const fd = sys.open(proto.settings_file, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }) catch |err| {
         print(sys.log_warning ++ "dazzle: network: cannot write {s}: {s}\n", .{ proto.settings_file, @errorName(err) });

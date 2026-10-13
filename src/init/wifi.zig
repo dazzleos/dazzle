@@ -154,6 +154,8 @@ pub const Manager = struct {
     preferred_adapter_buf: [16]u8 = undefined,
     preferred_adapter_len: u8 = 0,
     pending_hotspot: ?wifi.WifiRequest.Connect = null,
+    saved_networks: [wifi.max_networks]wifi.SavedNetwork = undefined,
+    saved_len: usize = 0,
 
     fn preferredAdapter(m: *const Manager) []const u8 {
         return m.preferred_adapter_buf[0..m.preferred_adapter_len];
@@ -164,21 +166,68 @@ pub const Manager = struct {
         @memcpy(m.preferred_adapter_buf[0..m.preferred_adapter_len], name[0..m.preferred_adapter_len]);
     }
 
+    pub fn savedPassphrase(m: *const Manager, ssid: []const u8) ?[]const u8 {
+        for (m.saved_networks[0..m.saved_len]) |*sn| {
+            if (std.mem.eql(u8, sn.ssid(), ssid)) return sn.passphrase();
+        }
+        return null;
+    }
+
+    pub fn rememberNetwork(m: *Manager, ssid: []const u8, passphrase: []const u8) void {
+        if (ssid.len == 0 or ssid.len > 32 or passphrase.len > 63) return;
+        var entry: wifi.SavedNetwork = .{ .ssid_len = @intCast(ssid.len), .pass_len = @intCast(passphrase.len) };
+        @memcpy(entry.ssid_buf[0..ssid.len], ssid);
+        @memcpy(entry.pass_buf[0..passphrase.len], passphrase);
+        for (m.saved_networks[0..m.saved_len], 0..) |*existing, i| {
+            if (std.mem.eql(u8, existing.ssid(), ssid)) {
+                if (passphrase.len == 0 and existing.pass_len > 0) {
+                    entry.pass_len = existing.pass_len;
+                    @memcpy(entry.pass_buf[0..existing.pass_len], existing.passphrase());
+                }
+                std.mem.copyBackwards(wifi.SavedNetwork, m.saved_networks[1 .. i + 1], m.saved_networks[0..i]);
+                m.saved_networks[0] = entry;
+                return;
+            }
+        }
+        const end = @min(m.saved_len, wifi.max_networks - 1);
+        std.mem.copyBackwards(wifi.SavedNetwork, m.saved_networks[1 .. end + 1], m.saved_networks[0..end]);
+        m.saved_networks[0] = entry;
+        m.saved_len = end + 1;
+    }
+
+    fn setSavedHotspotReport(m: *Manager, hs: *const wifi.WifiRequest.Connect) void {
+        m.report.hotspot = .{
+            .state = .off,
+            .address = hs.network.serverIp(),
+            .prefix = hs.network.prefix,
+        };
+        m.report.hotspot.setSsid(hs.ssid());
+        m.report.hotspot.setPassphrase(hs.passphrase());
+        m.report.hotspot.setUpstream(hs.upstream());
+        if (hs.adapter_len > 0) m.report.hotspot.setAdapter(hs.adapter());
+    }
+
     /// Loads saved Wi-Fi configuration at startup.
     pub fn loadConfig(m: *Manager, cfg: *const wifi.Config, now: u64) void {
         m.addressing = cfg.wifi_addressing;
         m.report.connection.addressing = cfg.wifi_addressing;
+        m.saved_networks = cfg.saved_networks;
+        m.saved_len = cfg.saved_len;
         if (cfg.wifi_address_adapter_len > 0) {
             m.setPreferredAdapter(cfg.wifiAddressAdapter());
         }
+        if (cfg.saved_access_point) |*ap| {
+            m.setSavedHotspotReport(ap);
+        }
         switch (cfg.wifi_mode) {
             .none => {},
-            .connect => |*con| {
+            .client => |*con| {
                 if (con.adapter_len > 0) m.setPreferredAdapter(con.adapter());
                 m.connect(con.ssid(), con.passphrase(), now);
             },
-            .hotspot => |*hs| {
+            .access_point => |*hs| {
                 if (hs.adapter_len > 0) m.setPreferredAdapter(hs.adapter());
+                m.setSavedHotspotReport(hs);
                 m.pending_hotspot = hs.*;
             },
         }
@@ -312,6 +361,13 @@ pub const Manager = struct {
         }
         r.networks = m.report.networks;
         r.len = m.report.len;
+        for (r.networks[0..r.len]) |*n| {
+            if (n.security != .open) {
+                if (m.savedPassphrase(n.ssid())) |pass| {
+                    if (pass.len > 0) n.setPassphrase(pass);
+                }
+            }
+        }
     }
 
     /// nl80211's events and EAPOL frames come on these.
@@ -390,7 +446,7 @@ pub const Manager = struct {
     fn startHotspot(m: *Manager, ssid: []const u8, passphrase: []const u8, net: wifi.HotspotNetwork, upstream: []const u8) void {
         m.leave(true);
         m.stopHotspot();
-        m.report.hotspot = .{ .prefix = net.prefix };
+        m.report.hotspot = .{ .address = net.serverIp(), .prefix = net.prefix };
         m.report.hotspot.setSsid(ssid);
         m.report.hotspot.setPassphrase(passphrase);
         m.report.hotspot.setUpstream(upstream);
@@ -477,7 +533,9 @@ pub const Manager = struct {
             }
             m.hotspot = null;
         }
-        m.report.hotspot = .{};
+        m.report.hotspot.state = .off;
+        m.report.hotspot.failure = .none;
+        m.report.hotspot.client_len = 0;
     }
 
     /// Starts joining a network.
@@ -486,15 +544,23 @@ pub const Manager = struct {
         m.report.connection = .{ .addressing = m.addressing };
         m.report.connection.setSsid(ssid);
         if (ssid.len == 0 or ssid.len > wifi.max_ssid) return m.fail(.rejected);
-        if (passphrase.len > 0 and !supplicant.validPassphrase(passphrase)) return m.fail(.bad_passphrase);
+        var pass_buf: [63]u8 = undefined;
+        const resolved_pass: []const u8 = if (passphrase.len > 0)
+            passphrase
+        else if (m.savedPassphrase(ssid)) |saved| blk: {
+            @memcpy(pass_buf[0..saved.len], saved);
+            break :blk pass_buf[0..saved.len];
+        } else "";
+        if (resolved_pass.len > 0 and !supplicant.validPassphrase(resolved_pass)) return m.fail(.bad_passphrase);
+        m.rememberNetwork(ssid, resolved_pass);
 
         var j: Join = .{ .started_ns = now };
         @memcpy(j.ssid_buf[0..ssid.len], ssid);
         j.ssid_len = @intCast(ssid.len);
-        @memcpy(j.pass_buf[0..passphrase.len], passphrase);
-        j.pass_len = @intCast(passphrase.len);
-        if (passphrase.len > 0) {
-            j.pmk = supplicant.pmkFromPassphrase(passphrase, ssid);
+        @memcpy(j.pass_buf[0..resolved_pass.len], resolved_pass);
+        j.pass_len = @intCast(resolved_pass.len);
+        if (resolved_pass.len > 0) {
+            j.pmk = supplicant.pmkFromPassphrase(resolved_pass, ssid);
         }
         m.join = j;
         m.tryStartPendingJoin(now);
@@ -513,15 +579,35 @@ pub const Manager = struct {
             return;
         };
         const nl = &(m.nl orelse return);
-        if (nl.findBss(st.index, j.ssid()) catch null) |bss| {
-            const wpa = bss.rsn_len > 0;
+        const found_bss = nl.findBss(st.index, j.ssid()) catch null;
+        const bss: ?nl80211.Bss = found_bss orelse blk: {
+            if (m.scanned_ns != 0 and m.scan_started_ns == null) {
+                for (m.saved_networks[0..m.saved_len]) |*sn| {
+                    if (std.mem.eql(u8, sn.ssid(), j.ssid())) continue;
+                    if (nl.findBss(st.index, sn.ssid()) catch null) |alt| {
+                        const alt_ssid = sn.ssid();
+                        const alt_pass = sn.passphrase();
+                        @memcpy(j.ssid_buf[0..alt_ssid.len], alt_ssid);
+                        j.ssid_len = @intCast(alt_ssid.len);
+                        @memcpy(j.pass_buf[0..alt_pass.len], alt_pass);
+                        j.pass_len = @intCast(alt_pass.len);
+                        j.pmk = if (alt_pass.len > 0) supplicant.pmkFromPassphrase(alt_pass, alt_ssid) else null;
+                        m.report.connection.setSsid(alt_ssid);
+                        break :blk alt;
+                    }
+                }
+            }
+            break :blk null;
+        };
+        if (bss) |b| {
+            const wpa = b.rsn_len > 0;
             if (wpa) {
-                if (!bss.ccmp or (!bss.psk and !bss.psk_sha256 and !bss.sae) or (bss.group_cipher != supplicant.cipher_ccmp and bss.group_cipher != supplicant.cipher_tkip)) return m.fail(.unsupported);
-                if (bss.psk) {
+                if (!b.ccmp or (!b.psk and !b.psk_sha256 and !b.sae) or (b.group_cipher != supplicant.cipher_ccmp and b.group_cipher != supplicant.cipher_tkip)) return m.fail(.unsupported);
+                if (b.psk) {
                     j.akm = supplicant.akm_psk;
                     if (!supplicant.validPassphrase(j.passphrase())) return m.fail(.bad_passphrase);
                     if (j.pmk == null) j.pmk = supplicant.pmkFromPassphrase(j.passphrase(), j.ssid());
-                } else if (bss.psk_sha256) {
+                } else if (b.psk_sha256) {
                     j.akm = supplicant.akm_psk_sha256;
                     if (!supplicant.validPassphrase(j.passphrase())) return m.fail(.bad_passphrase);
                     if (j.pmk == null) j.pmk = supplicant.pmkFromPassphrase(j.passphrase(), j.ssid());
@@ -531,11 +617,11 @@ pub const Manager = struct {
                     j.pmk = @splat(0);
                 }
             } else {
-                if (bss.network.security != .open) return m.fail(.unsupported);
+                if (b.network.security != .open) return m.fail(.unsupported);
                 j.akm = 0;
                 j.pmk = null;
             }
-            j.bss = bss;
+            j.bss = b;
             j.has_bss = true;
             m.startJoin(now) catch |err| {
                 print(sys.log_warning ++ "dazzle: wifi: cannot connect ({s})\n", .{@errorName(err)});
@@ -669,7 +755,7 @@ pub const Manager = struct {
                     var commit_body: [256]u8 = undefined;
                     var tx_frame: [300]u8 = undefined;
                     const cb = sae.writeCommit(&commit_body, token);
-                    const tx = supplicant.Sae.buildAuthFrame(&tx_frame, st.adapter.mac, j.bss.bssid, 1, supplicant.status_success, cb);
+                    const tx = supplicant.Sae.buildAuthFrame(&tx_frame, j.bss.bssid, st.adapter.mac, j.bss.bssid, 1, supplicant.status_success, cb);
                     nl.sendFrame(st.index, freq, tx) catch {};
                     return;
                 }
@@ -681,7 +767,7 @@ pub const Manager = struct {
                 var confirm_body: [supplicant.Sae.confirm_len]u8 = undefined;
                 var tx_frame: [64]u8 = undefined;
                 const cb = sae.writeConfirm(&confirm_body);
-                const tx = supplicant.Sae.buildAuthFrame(&tx_frame, st.adapter.mac, j.bss.bssid, 2, supplicant.status_success, cb);
+                const tx = supplicant.Sae.buildAuthFrame(&tx_frame, j.bss.bssid, st.adapter.mac, j.bss.bssid, 2, supplicant.status_success, cb);
                 nl.sendFrame(st.index, freq, tx) catch {
                     nl.externalAuthStatus(st.index, j.ssid(), j.bss.bssid, 1, null);
                     return m.fail(.rejected);
@@ -762,7 +848,7 @@ pub const Manager = struct {
                 var commit_body: [128]u8 = undefined;
                 var tx_frame: [160]u8 = undefined;
                 const cb = j.sae.?.writeCommit(&commit_body, &.{});
-                const tx = supplicant.Sae.buildAuthFrame(&tx_frame, st.adapter.mac, j.bss.bssid, 1, supplicant.status_success, cb);
+                const tx = supplicant.Sae.buildAuthFrame(&tx_frame, j.bss.bssid, st.adapter.mac, j.bss.bssid, 1, supplicant.status_success, cb);
                 nl.sendFrame(st.index, j.bss.network.freq_mhz, tx) catch |err| {
                     print(sys.log_warning ++ "dazzle: wifi: cannot send SAE Commit ({s})\n", .{@errorName(err)});
                     nl.externalAuthStatus(st.index, j.ssid(), j.bss.bssid, 1, null);
@@ -1027,11 +1113,12 @@ fn readResolvConfDns() ?wifi.Ip4 {
 
 const testing = std.testing;
 
-test "Manager.loadConfig restores Wi-Fi client and hotspot settings at startup" {
+test "Manager.loadConfig restores Wi-Fi client, saved credentials, and access point settings at startup" {
     var req_buf: [256]u8 = undefined;
     var cfg: wifi.Config = .{};
     const st = wifi.Static.parse("192.168.1.99/24", "192.168.1.1").?;
     _ = cfg.apply(wifi.Request.parse(wifi.wifiAddressRequest(&req_buf, "wlan0", .{ .static = st })).?);
+    _ = cfg.apply(wifi.Request.parse(wifi.connectAdapterRequest(&req_buf, "wlan0", "OldNet", "oldpassword")).?);
     _ = cfg.apply(wifi.Request.parse(wifi.connectAdapterRequest(&req_buf, "wlan0", "HomeNet", "secret123")).?);
 
     var m: Manager = .{};
@@ -1043,6 +1130,20 @@ test "Manager.loadConfig restores Wi-Fi client and hotspot settings at startup" 
     try testing.expectEqualStrings("HomeNet", m.join.?.ssid());
     try testing.expectEqualStrings("secret123", m.join.?.passphrase());
     try testing.expectEqual(wifi.ConnectionState.connecting, m.report.connection.state);
+    try testing.expectEqualStrings("oldpassword", m.savedPassphrase("OldNet").?);
+
+    // Filling a report populates saved passphrases onto scanned networks:
+    var n: wifi.Network = .{ .signal_mbm = -5000, .freq_mhz = 2412, .security = .wpa2 };
+    n.setSsid("OldNet");
+    m.report.add(n);
+    var filled: wifi.Report = .{};
+    m.fill(&filled);
+    try testing.expectEqualStrings("oldpassword", filled.slice()[0].passphrase());
+
+    // Reconnecting to OldNet with an empty passphrase uses its remembered passphrase:
+    m.handle(wifi.Request.parse(wifi.connectAdapterRequest(&req_buf, "wlan0", "OldNet", "")).?.wifi, 2000);
+    try testing.expectEqualStrings("OldNet", m.join.?.ssid());
+    try testing.expectEqualStrings("oldpassword", m.join.?.passphrase());
 
     var cfg_hs: wifi.Config = .{};
     _ = cfg_hs.apply(wifi.Request.parse(wifi.hotspotFullRequest(&req_buf, "wlan0", "DazzleAP", "hunter22", .{}, "eth0")).?);
@@ -1051,5 +1152,12 @@ test "Manager.loadConfig restores Wi-Fi client and hotspot settings at startup" 
     try testing.expect(m_hs.pending_hotspot != null);
     try testing.expectEqualStrings("DazzleAP", m_hs.pending_hotspot.?.ssid());
     try testing.expectEqualStrings("eth0", m_hs.pending_hotspot.?.upstream());
+    // Stopping the access point keeps its configured SSID, passphrase, address, and upstream:
+    m_hs.handle(wifi.Request.parse(wifi.disconnectRequest(&req_buf, "wlan0")).?.wifi, 2000);
+    try testing.expectEqual(wifi.HotspotState.off, m_hs.report.hotspot.state);
+    try testing.expectEqualStrings("DazzleAP", m_hs.report.hotspot.ssid());
+    try testing.expectEqualStrings("hunter22", m_hs.report.hotspot.passphrase());
+    try testing.expectEqualStrings("eth0", m_hs.report.hotspot.upstream());
 }
+
 
