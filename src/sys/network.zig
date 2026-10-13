@@ -151,8 +151,8 @@ pub const Failure = enum {
         return switch (f) {
             .none => "",
             .not_found => "the network is out of range",
-            .unsupported => "its security is not supported yet (only open and WPA2 networks are)",
-            .bad_passphrase => "a WPA2 password has 8 to 63 characters",
+            .unsupported => "its security is not supported yet (only open, WPA2 and WPA3 networks are)",
+            .bad_passphrase => "a password has 8 to 63 characters",
             .wrong_password => "wrong password",
             .rejected => "the network refused",
             .timeout => "no answer",

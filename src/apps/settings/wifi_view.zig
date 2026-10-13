@@ -931,14 +931,14 @@ const ModeChoice = struct {
     }
 };
 
-/// Joining the chosen network: a password field for WPA2, and Connect.
+/// Joining the chosen network: a password field for WPA2/WPA3, and Connect.
 fn joinForm(self: *const Settings, b: Builder, state: *State, adapter_name: []const u8, n: *const info.manager.Network) ui.Widget {
     const cx = b.cx;
     const t = &cx.ui.theme;
     const on_connect: ?ui.Callback = if (self.actions) |acts| .of(act(cx, acts, state, adapter_name, n.ssid()), Act.connect) else null;
     const field: ui.Widget = switch (n.security) {
         .open => cx.make(ui.Text{ .text = "An open network: what is sent can be seen", .style = .{ .size = 16, .color = t.on_surface_variant } }),
-        .wpa2 => cx.make(ui.TextField{
+        .wpa2, .wpa3 => cx.make(ui.TextField{
             .initial = state.password_buf[0..state.password_len],
             .placeholder = "Password",
             .obscure = true,
@@ -949,7 +949,7 @@ fn joinForm(self: *const Settings, b: Builder, state: *State, adapter_name: []co
         }).withKey(std.hash.Fnv1a_64.hash(n.ssid())),
         else => cx.make(ui.Text{ .text = cx.fmt("{s} networks are not supported yet", .{n.security.label()}), .style = .{ .size = 16, .color = t.on_surface_variant } }),
     };
-    const supported = n.security == .open or n.security == .wpa2;
+    const supported = n.security == .open or n.security == .wpa2 or n.security == .wpa3;
     return cx.make(ui.Padding{
         .padding = .symmetric(16, 8),
         .child = cx.make(ui.Row{
@@ -1294,11 +1294,22 @@ test "choosing a network, typing its password and connecting" {
     view.click(u, view.findText(u.root.?, "Disconnect").?);
     try testing.expect(actions.disconnect);
 
-    // A network whose security is not supported cannot be joined.
+    // A WPA3 network shows the password field and can be joined.
     actions = .{};
     u.frame(1920, 960, 6, settings);
-    view.click(u, view.findText(u.root.?, "Library").?);
+    view.click(u, view.findText(u.root.?, "Office").?);
     u.frame(1920, 960, 7, settings);
+    try testing.expect(view.findType(u.root.?, ui.TextField) != null);
+    u.root.?.state(Settings.State).wifi.setPassword("wpa3secret");
+    view.click(u, view.findText(u.root.?, "Connect").?);
+    try testing.expectEqualStrings("Office", actions.connect.?.ssid());
+    try testing.expectEqualStrings("wpa3secret", actions.connect.?.passphrase());
+
+    // A network whose security is not supported cannot be joined.
+    actions = .{};
+    u.frame(1920, 960, 8, settings);
+    view.click(u, view.findText(u.root.?, "Library").?);
+    u.frame(1920, 960, 9, settings);
     try testing.expect(view.findText(u.root.?, "Enterprise networks are not supported yet") != null);
     view.click(u, view.findText(u.root.?, "Connect").?);
     try testing.expect(actions.connect == null);
@@ -1308,7 +1319,7 @@ test "choosing a network, typing its password and connecting" {
     failed.scanning = false;
     failed.connection = .{ .state = .failed, .failure = .wrong_password };
     failed.connection.setSsid("Home");
-    u.frame(1920, 960, 8, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &failed });
+    u.frame(1920, 960, 10, Settings{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &failed });
     try testing.expect(view.findText(u.root.?, "Could not connect to Home: wrong password") != null);
 }
 

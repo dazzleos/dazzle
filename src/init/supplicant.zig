@@ -1,36 +1,41 @@
-//! The WPA supplicant: the station's side of WPA2-Personal's key handshakes
-//! (IEEE 802.11-2020 12.7), as EAPOL-Key frames in and out. It has no I/O
-//! of its own: the network manager hands it the frames that arrive (over a
-//! packet socket) and sends and installs what it says.
+//! The WPA supplicant: the station's side of WPA2-Personal and WPA3-Personal
+//! authentication and key handshakes (IEEE 802.11-2020 12.4 and 12.7), as
+//! 802.11 Authentication and EAPOL-Key frames in and out. It has no I/O of
+//! its own: the network manager hands it the frames that arrive and sends and
+//! installs what it says.
 //!
-//! Joining a WPA2-Personal network:
+//! Joining a WPA2-Personal or WPA3-Personal network:
 //!
-//! 1. The pairwise master key (PMK) is the passphrase stretched with
-//!    PBKDF2-SHA1 over the SSID, 4096 rounds (`pmkFromPassphrase`).
+//! 1. For WPA2 (PSK), the pairwise master key (PMK) is the passphrase
+//!    stretched with PBKDF2-SHA1 over the SSID, 4096 rounds
+//!    (`pmkFromPassphrase`). For WPA3 (SAE), the station and access point
+//!    derive a shared PMK and PMKID with Simultaneous Authentication of
+//!    Equals (`Sae`, Dragonfly over NIST P-256, group 19) in two 802.11
+//!    Authentication messages (Commit and Confirm) before association.
 //! 2. After association, the access point sends message 1 of the 4-way
 //!    handshake with its nonce (ANonce). The supplicant picks its own
 //!    (SNonce) and derives the pairwise transient key (PTK) from both
-//!    nonces, both addresses and the PMK: a key confirmation key (KCK, for
-//!    the MIC that proves each side knows the PMK), a key encryption key
-//!    (KEK, for the group key) and the temporal key (TK, which encrypts the
-//!    traffic). It answers with message 2: its nonce, its RSN element and a
-//!    MIC.
+//!    nonces, both addresses and the PMK (using PRF-SHA1 for WPA2-PSK, or
+//!    KDF-SHA-256 for WPA3-SAE and WPA2-PSK-SHA256): a key confirmation key
+//!    (KCK, for the MIC that proves each side knows the PMK), a key
+//!    encryption key (KEK, for the group key) and the temporal key (TK,
+//!    which encrypts the traffic). It answers with message 2: its nonce, its
+//!    RSN element and a MIC.
 //! 3. Message 3 proves the access point knows the PMK too (its MIC), repeats
 //!    the RSN element it advertised (so a downgrade would show) and carries
-//!    the group temporal key (GTK, for broadcasts), wrapped with the KEK
-//!    (AES key wrap). Message 4 acknowledges it; then both sides install
-//!    the keys.
+//!    the group temporal key (GTK, for broadcasts) and optional integrity
+//!    group temporal key (IGTK, for management frame protection), wrapped
+//!    with the KEK (AES key wrap). Message 4 acknowledges it; then both
+//!    sides install the keys.
 //! 4. The access point replaces the GTK from time to time with the group key
 //!    handshake: one message carrying the new GTK, and an acknowledgement.
-//!
-//! Only CCMP (AES) pairwise keys and PSK key management are supported: WPA2,
-//! and WPA2/WPA3 networks through their WPA2 side. The group cipher may be
-//! CCMP or TKIP (on old mixed networks). WPA3 (SAE) is not.
 
 const std = @import("std");
 
 const HmacSha1 = std.crypto.auth.hmac.HmacSha1;
+const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
 const Aes128 = std.crypto.core.aes.Aes128;
+const P256 = std.crypto.ecc.P256;
 
 pub const Mac = [6]u8;
 pub const Nonce = [32]u8;
@@ -38,8 +43,16 @@ pub const Nonce = [32]u8;
 /// Cipher suites, as nl80211 names them (OUI 00-0F-AC and the type).
 pub const cipher_tkip: u32 = 0x000fac02;
 pub const cipher_ccmp: u32 = 0x000fac04;
-/// Key management: PSK.
+/// Group management cipher suite: BIP-CMAC-128 (IEEE 802.11w).
+pub const cipher_bip_cmac_128: u32 = 0x000fac06;
+/// Key management suites: PSK (SHA-1), PSK-SHA256, and SAE (WPA3-Personal).
 pub const akm_psk: u32 = 0x000fac02;
+pub const akm_psk_sha256: u32 = 0x000fac06;
+pub const akm_sae: u32 = 0x000fac08;
+
+/// RSN Capability bits (IEEE 802.11-2020 9.4.2.24.4).
+pub const rsn_cap_mfpr: u16 = 1 << 6;
+pub const rsn_cap_mfpc: u16 = 1 << 7;
 
 // --- Keys -----------------------------------------------------------------------
 
@@ -51,7 +64,7 @@ pub fn pmkFromPassphrase(passphrase: []const u8, ssid: []const u8) [32]u8 {
     return pmk;
 }
 
-/// Whether a passphrase is one WPA2 accepts: 8 to 63 printable ASCII
+/// Whether a passphrase is one WPA2/WPA3 accepts: 8 to 63 printable ASCII
 /// characters.
 pub fn validPassphrase(p: []const u8) bool {
     if (p.len < 8 or p.len > 63) return false;
@@ -78,14 +91,38 @@ pub fn prf(out: []u8, key: []const u8, label: []const u8, data: []const u8) void
     }
 }
 
+/// The 802.11 SHA-256 key derivation function (IEEE 802.11-2020 12.7.1.7.2):
+/// `out.len` bytes from `key`, `label` and `context`, using 16-bit
+/// little-endian iteration counter (starting at 1) and bit length `L`.
+pub fn kdfSha256(out: []u8, key: []const u8, label: []const u8, context: []const u8) void {
+    const bit_len: u16 = @intCast(out.len * 8);
+    var len_le: [2]u8 = undefined;
+    std.mem.writeInt(u16, &len_le, bit_len, .little);
+    var counter: u16 = 1;
+    var at: usize = 0;
+    while (at < out.len) : (counter += 1) {
+        var cnt_le: [2]u8 = undefined;
+        std.mem.writeInt(u16, &cnt_le, counter, .little);
+        var h = HmacSha256.init(key);
+        h.update(&cnt_le);
+        h.update(label);
+        h.update(context);
+        h.update(&len_le);
+        var block: [HmacSha256.mac_length]u8 = undefined;
+        h.final(&block);
+        const n = @min(block.len, out.len - at);
+        @memcpy(out[at..][0..n], block[0..n]);
+        at += n;
+    }
+}
+
 pub const Ptk = struct {
     kck: [16]u8,
     kek: [16]u8,
     tk: [16]u8,
 };
 
-/// The pairwise transient key for CCMP.
-pub fn derivePtk(pmk: *const [32]u8, aa: Mac, spa: Mac, anonce: Nonce, snonce: Nonce) Ptk {
+fn ptkContext(aa: Mac, spa: Mac, anonce: Nonce, snonce: Nonce) [6 + 6 + 32 + 32]u8 {
     var data: [6 + 6 + 32 + 32]u8 = undefined;
     const a_first = std.mem.order(u8, &aa, &spa) == .lt;
     @memcpy(data[0..6], if (a_first) &aa else &spa);
@@ -93,8 +130,22 @@ pub fn derivePtk(pmk: *const [32]u8, aa: Mac, spa: Mac, anonce: Nonce, snonce: N
     const n_first = std.mem.order(u8, &anonce, &snonce) == .lt;
     @memcpy(data[12..44], if (n_first) &anonce else &snonce);
     @memcpy(data[44..76], if (n_first) &snonce else &anonce);
+    return data;
+}
+
+/// The pairwise transient key for CCMP (WPA2-PSK, SHA-1 PRF).
+pub fn derivePtk(pmk: *const [32]u8, aa: Mac, spa: Mac, anonce: Nonce, snonce: Nonce) Ptk {
+    const data = ptkContext(aa, spa, anonce, snonce);
     var out: [48]u8 = undefined;
     prf(&out, pmk, "Pairwise key expansion", &data);
+    return .{ .kck = out[0..16].*, .kek = out[16..32].*, .tk = out[32..48].* };
+}
+
+/// The pairwise transient key for CCMP with SHA-256 KDF (SAE and PSK-SHA256).
+pub fn derivePtkSha256(pmk: *const [32]u8, aa: Mac, spa: Mac, anonce: Nonce, snonce: Nonce) Ptk {
+    const data = ptkContext(aa, spa, anonce, snonce);
+    var out: [48]u8 = undefined;
+    kdfSha256(&out, pmk, "Pairwise key expansion", &data);
     return .{ .kck = out[0..16].*, .kek = out[16..32].*, .tk = out[32..48].* };
 }
 
@@ -103,6 +154,14 @@ pub fn derivePtk(pmk: *const [32]u8, aa: Mac, spa: Mac, anonce: Nonce, snonce: N
 pub fn mic(kck: *const [16]u8, frame: []const u8) [16]u8 {
     var full: [HmacSha1.mac_length]u8 = undefined;
     HmacSha1.create(&full, frame, kck);
+    return full[0..16].*;
+}
+
+/// The EAPOL-Key MIC for AKM 00-0F-AC:6 and 00-0F-AC:8 (SAE): HMAC-SHA256
+/// over the frame with its MIC field zeroed, cut to 16 bytes (128 bits).
+pub fn micSha256(kck: *const [16]u8, frame: []const u8) [16]u8 {
+    var full: [HmacSha256.mac_length]u8 = undefined;
+    HmacSha256.create(&full, frame, kck);
     return full[0..16].*;
 }
 
@@ -153,12 +212,230 @@ pub fn aesUnwrap(kek: *const [16]u8, wrapped: []const u8, out: []u8) error{BadKe
     if (!std.crypto.timing_safe.eql([8]u8, a, wrap_iv)) return error.BadKeyWrap;
 }
 
+// --- SAE (WPA3-Personal, IEEE 802.11-2020 12.4) ---------------------------------
+
+/// NIST P-256 (IANA Group 19) field prime p, in big-endian bytes.
+const p256_prime_be = [32]u8{
+    0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+};
+
+/// 802.11 authentication algorithm number for SAE.
+pub const auth_alg_sae: u16 = 3;
+/// 802.11 status codes used in SAE authentication frames.
+pub const status_success: u16 = 0;
+pub const status_anti_clogging_token_req: u16 = 76;
+pub const status_sae_hash_to_element: u16 = 126;
+
+/// Derives the SAE Password Element (PWE) on NIST P-256 (group 19) using the
+/// Hunting-and-Pecking algorithm (IEEE 802.11-2020 12.4.4.2.2), running a
+/// fixed 40 iterations in constant time.
+pub fn derivePwe(password: []const u8, addr1: Mac, addr2: Mac) P256 {
+    var salt: [12]u8 = undefined;
+    const a1_bigger = std.mem.order(u8, &addr1, &addr2) == .gt;
+    @memcpy(salt[0..6], if (a1_bigger) &addr1 else &addr2);
+    @memcpy(salt[6..12], if (a1_bigger) &addr2 else &addr1);
+
+    var found: u1 = 0;
+    var chosen_x = P256.Fe.zero;
+    var chosen_odd: u1 = 0;
+    const dummy_seed: [32]u8 = @splat(0x5a);
+
+    var counter: u8 = 1;
+    while (counter <= 40) : (counter += 1) {
+        var h = HmacSha256.init(&salt);
+        h.update(password);
+        h.update(&.{counter});
+        var pwd_seed: [32]u8 = undefined;
+        h.final(&pwd_seed);
+        const odd: u1 = @truncate(pwd_seed[31] & 1);
+        for (&pwd_seed, dummy_seed) |*b, d| {
+            b.* ^= (b.* ^ d) *% found;
+        }
+        var pwd_value: [32]u8 = undefined;
+        kdfSha256(&pwd_value, &pwd_seed, "SAE Hunting and Pecking", &p256_prime_be);
+        if (P256.Fe.fromBytes(pwd_value, .big)) |x| {
+            const rhs = x.sq().mul(x).sub(x).sub(x).sub(x).add(P256.B);
+            const is_sq: u1 = @intFromBool(rhs.isSquare());
+            const take: u1 = is_sq & ~found;
+            chosen_x.cMov(x, take);
+            chosen_odd ^= (chosen_odd ^ odd) & take;
+            found |= is_sq;
+        } else |_| {}
+    }
+    const y = P256.recoverY(chosen_x, chosen_odd == 1) catch return P256.basePoint;
+    return .{ .x = chosen_x, .y = y, .z = P256.Fe.one };
+}
+
+/// Samples a random scalar in 2..r-1 for P-256.
+fn randomScalar(random: *const fn ([]u8) void) P256.scalar.Scalar {
+    while (true) {
+        var raw: [48]u8 = undefined;
+        random(&raw);
+        const s = P256.scalar.Scalar.fromBytes48(raw, .little);
+        if (!s.isZero() and !s.equivalent(P256.scalar.Scalar.one)) return s;
+    }
+}
+
+/// Simultaneous Authentication of Equals (SAE, Dragonfly over NIST P-256,
+/// group 19) for WPA3-Personal.
+pub const Sae = struct {
+    pub const group_id: u16 = 19;
+    pub const commit_len = 2 + 32 + 64;
+    pub const confirm_len = 2 + 32;
+
+    pwe: P256,
+    rand: P256.scalar.Scalar,
+    mask: P256.scalar.Scalar,
+    own_scalar: [32]u8,
+    own_element: [64]u8,
+    peer_scalar: [32]u8 = @splat(0),
+    peer_element: [64]u8 = @splat(0),
+    kck: [32]u8 = @splat(0),
+    pmk: [32]u8 = @splat(0),
+    pmkid: [16]u8 = @splat(0),
+    send_confirm: u16 = 0,
+    committed: bool = false,
+    confirmed: bool = false,
+
+    /// Prepares a fresh SAE session and generates our Commit scalar and element.
+    pub fn init(password: []const u8, sta: Mac, ap: Mac, random: *const fn ([]u8) void) Sae {
+        const pwe = derivePwe(password, sta, ap);
+        const r = randomScalar(random);
+        const m = randomScalar(random);
+        const scalar = r.add(m).toBytes(.big);
+        // COMMIT-ELEMENT = -(mask * PWE) = mask * (-PWE).
+        const elem_pt = pwe.neg().mul(m.toBytes(.big), .big) catch P256.basePoint;
+        const aff = elem_pt.affineCoordinates();
+        var elem: [64]u8 = undefined;
+        elem[0..32].* = aff.x.toBytes(.big);
+        elem[32..64].* = aff.y.toBytes(.big);
+        return .{
+            .pwe = pwe,
+            .rand = r,
+            .mask = m,
+            .own_scalar = scalar,
+            .own_element = elem,
+        };
+    }
+
+    /// Writes the body of an SAE Commit frame (after the 802.11 Authentication
+    /// header's alg=3, seq=1, status=0): group 19, optional anti-clogging
+    /// token, our 32-byte scalar and 64-byte element.
+    pub fn writeCommit(s: *const Sae, out: []u8, token: []const u8) []const u8 {
+        std.mem.writeInt(u16, out[0..2], group_id, .little);
+        var pos: usize = 2;
+        if (token.len > 0) {
+            @memcpy(out[pos..][0..token.len], token);
+            pos += token.len;
+        }
+        @memcpy(out[pos..][0..32], &s.own_scalar);
+        pos += 32;
+        @memcpy(out[pos..][0..64], &s.own_element);
+        pos += 64;
+        return out[0..pos];
+    }
+
+    /// Processes the peer's SAE Commit frame body (starting at Group ID) and
+    /// derives KCK, PMK, and PMKID. Returns false if the group is not 19, the
+    /// scalar/element are invalid, or a reflection attack is detected.
+    pub fn processCommit(s: *Sae, body: []const u8) bool {
+        if (body.len < commit_len) return false;
+        if (std.mem.readInt(u16, body[0..2], .little) != group_id) return false;
+        const p_scalar_bytes = body[2..34].*;
+        const p_elem_bytes = body[34..98].*;
+        // Reflection check: peer's commit must not equal our own.
+        if (std.mem.eql(u8, &p_scalar_bytes, &s.own_scalar) and std.mem.eql(u8, &p_elem_bytes, &s.own_element)) return false;
+
+        const p_scalar = P256.scalar.Scalar.fromBytes(p_scalar_bytes, .big) catch return false;
+        if (p_scalar.isZero() or p_scalar.equivalent(P256.scalar.Scalar.one)) return false;
+        const p_elem = P256.fromSerializedAffineCoordinates(p_elem_bytes[0..32].*, p_elem_bytes[32..64].*, .big) catch return false;
+        p_elem.rejectIdentity() catch return false;
+
+        // K = rand * (peer_scalar * PWE + PEER_ELEMENT).
+        const sp = s.pwe.mul(p_scalar_bytes, .big) catch return false;
+        const sum = sp.add(p_elem);
+        const k_pt = sum.mul(s.rand.toBytes(.big), .big) catch return false;
+        const k_x = k_pt.affineCoordinates().x.toBytes(.big);
+
+        const zero_key: [32]u8 = @splat(0);
+        var keyseed: [32]u8 = undefined;
+        HmacSha256.create(&keyseed, &k_x, &zero_key);
+
+        const own_s = P256.scalar.Scalar.fromBytes(s.own_scalar, .big) catch return false;
+        const context = own_s.add(p_scalar).toBytes(.big);
+
+        var kck_pmk: [64]u8 = undefined;
+        kdfSha256(&kck_pmk, &keyseed, "SAE KCK and PMK", &context);
+        s.kck = kck_pmk[0..32].*;
+        s.pmk = kck_pmk[32..64].*;
+        s.pmkid = context[0..16].*;
+        s.peer_scalar = p_scalar_bytes;
+        s.peer_element = p_elem_bytes;
+        s.committed = true;
+        return true;
+    }
+
+    fn computeConfirm(kck: *const [32]u8, send_confirm: u16, s1: *const [32]u8, e1: *const [64]u8, s2: *const [32]u8, e2: *const [64]u8) [32]u8 {
+        var sc: [2]u8 = undefined;
+        std.mem.writeInt(u16, &sc, send_confirm, .little);
+        var h = HmacSha256.init(kck);
+        h.update(&sc);
+        h.update(s1);
+        h.update(e1);
+        h.update(s2);
+        h.update(e2);
+        var out: [32]u8 = undefined;
+        h.final(&out);
+        return out;
+    }
+
+    /// Writes the body of an SAE Confirm frame (send-confirm + 32-byte HMAC).
+    pub fn writeConfirm(s: *Sae, out: *[confirm_len]u8) []const u8 {
+        s.send_confirm +%= 1;
+        std.mem.writeInt(u16, out[0..2], s.send_confirm, .little);
+        out[2..34].* = computeConfirm(&s.kck, s.send_confirm, &s.own_scalar, &s.own_element, &s.peer_scalar, &s.peer_element);
+        return out[0..];
+    }
+
+    /// Verifies the peer's SAE Confirm frame body (send-confirm + 32-byte HMAC).
+    pub fn processConfirm(s: *Sae, body: []const u8) bool {
+        if (!s.committed or body.len < confirm_len) return false;
+        const peer_sc = std.mem.readInt(u16, body[0..2], .little);
+        const expected = computeConfirm(&s.kck, peer_sc, &s.peer_scalar, &s.peer_element, &s.own_scalar, &s.own_element);
+        if (!std.crypto.timing_safe.eql([32]u8, expected, body[2..34].*)) return false;
+        s.confirmed = true;
+        return true;
+    }
+
+    /// Builds a complete 802.11 Authentication management frame (24-byte
+    /// header + 6-byte auth header + body).
+    pub fn buildAuthFrame(out: []u8, da: Mac, sa: Mac, bssid: Mac, seq: u16, status: u16, body: []const u8) []const u8 {
+        @memset(out[0..24], 0);
+        out[0] = 0xb0; // Subtype: Authentication
+        @memcpy(out[4..10], &da);
+        @memcpy(out[10..16], &sa);
+        @memcpy(out[16..22], &bssid);
+        std.mem.writeInt(u16, out[24..26], auth_alg_sae, .little);
+        std.mem.writeInt(u16, out[26..28], seq, .little);
+        std.mem.writeInt(u16, out[28..30], status, .little);
+        @memcpy(out[30..][0..body.len], body);
+        return out[0 .. 30 + body.len];
+    }
+};
+
 // --- EAPOL-Key frames -----------------------------------------------------------
 
 /// Key information bits.
 pub const info = struct {
+    /// Key descriptor version 0: AKM-defined MIC and key wrap (used by SAE).
+    pub const version_akm: u16 = 0;
     /// Key descriptor version 2: HMAC-SHA1-128 MIC, AES key wrap.
     pub const version_aes: u16 = 2;
+    /// Key descriptor version 3: AES-128-CMAC / HMAC-SHA256-128 MIC, AES key wrap.
+    pub const version_sha256: u16 = 3;
     pub const version_mask: u16 = 0x7;
     pub const pairwise: u16 = 1 << 3;
     pub const install: u16 = 1 << 6;
@@ -208,18 +485,29 @@ pub const KeyFrame = struct {
         };
     }
 
-    /// Whether the frame's MIC is right for this KCK.
+    /// Whether the frame's MIC is right for this KCK (HMAC-SHA1-128).
     pub fn micValid(f: *const KeyFrame, kck: *const [16]u8) bool {
+        return f.micValidWith(kck, false);
+    }
+
+    /// Whether the frame's MIC is right for this KCK, using HMAC-SHA256-128
+    /// when `sha256` is true or HMAC-SHA1-128 when false.
+    pub fn micValidWith(f: *const KeyFrame, kck: *const [16]u8, sha256: bool) bool {
         var copy: [2048]u8 = undefined;
         if (f.raw.len > copy.len) return false;
         @memcpy(copy[0..f.raw.len], f.raw);
         @memset(copy[mic_at..][0..16], 0);
-        return std.crypto.timing_safe.eql([16]u8, mic(kck, copy[0..f.raw.len]), f.mic);
+        const want = if (sha256) micSha256(kck, copy[0..f.raw.len]) else mic(kck, copy[0..f.raw.len]);
+        return std.crypto.timing_safe.eql([16]u8, want, f.mic);
     }
 };
 
 /// Builds an EAPOL-Key frame into `buf`, with its MIC if `kck` is given.
 pub fn buildKeyFrame(buf: []u8, eapol_version: u8, key_info: u16, key_length: u16, replay: u64, nonce: Nonce, data: []const u8, kck: ?*const [16]u8) []const u8 {
+    return buildKeyFrameWith(buf, eapol_version, key_info, key_length, replay, nonce, data, kck, false);
+}
+
+pub fn buildKeyFrameWith(buf: []u8, eapol_version: u8, key_info: u16, key_length: u16, replay: u64, nonce: Nonce, data: []const u8, kck: ?*const [16]u8, sha256: bool) []const u8 {
     const len = header_len + data.len;
     const f = buf[0..len];
     @memset(f, 0);
@@ -233,12 +521,12 @@ pub fn buildKeyFrame(buf: []u8, eapol_version: u8, key_info: u16, key_length: u1
     @memcpy(f[17..49], &nonce);
     std.mem.writeInt(u16, f[97..99], @intCast(data.len), .big);
     @memcpy(f[header_len..], data);
-    if (kck) |k| f[mic_at..][0..16].* = mic(k, f);
+    if (kck) |k| f[mic_at..][0..16].* = if (sha256) micSha256(k, f) else mic(k, f);
     return f;
 }
 
-/// The RSN element the station sends (in its association request and in
-/// message 2): version 1, the network's group cipher, CCMP for pairwise,
+/// The RSN element the station sends for WPA2 (in its association request and
+/// in message 2): version 1, the network's group cipher, CCMP for pairwise,
 /// PSK key management and no capabilities.
 pub fn rsnElement(buf: *[22]u8, group_cipher: u32) []const u8 {
     buf.* = .{
@@ -258,6 +546,44 @@ pub fn rsnElement(buf: *[22]u8, group_cipher: u32) []const u8 {
     return buf;
 }
 
+/// The RSN element the station sends for WPA3-SAE (or WPA2 with MFP/SHA256):
+/// version 1, group cipher, CCMP pairwise, `akm` (`akm_sae`, `akm_psk_sha256`
+/// or `akm_psk`), RSN capabilities (MFPC and MFPR when management frame
+/// protection is used), optional PMKID, and BIP-CMAC-128 group management
+/// cipher suite when MFP is enabled.
+pub fn rsnElementEx(buf: *[44]u8, group_cipher: u32, akm: u32, mfp_capable: bool, mfp_required: bool, pmkid: ?[16]u8) []const u8 {
+    if (akm == akm_psk and !mfp_capable and !mfp_required and pmkid == null) {
+        return rsnElement(buf[0..22], group_cipher);
+    }
+    buf[0] = 48;
+    std.mem.writeInt(u16, buf[2..4], 1, .little);
+    std.mem.writeInt(u32, buf[4..8], group_cipher, .big);
+    std.mem.writeInt(u16, buf[8..10], 1, .little);
+    std.mem.writeInt(u32, buf[10..14], cipher_ccmp, .big);
+    std.mem.writeInt(u16, buf[14..16], 1, .little);
+    std.mem.writeInt(u32, buf[16..20], akm, .big);
+    var caps: u16 = 0;
+    if (mfp_capable or mfp_required) caps |= rsn_cap_mfpc;
+    if (mfp_required) caps |= rsn_cap_mfpr;
+    std.mem.writeInt(u16, buf[20..22], caps, .little);
+    var pos: usize = 22;
+    if (pmkid) |id| {
+        std.mem.writeInt(u16, buf[pos..][0..2], 1, .little);
+        pos += 2;
+        @memcpy(buf[pos..][0..16], &id);
+        pos += 16;
+    } else if (mfp_capable or mfp_required) {
+        std.mem.writeInt(u16, buf[pos..][0..2], 0, .little);
+        pos += 2;
+    }
+    if (mfp_capable or mfp_required) {
+        std.mem.writeInt(u32, buf[pos..][0..4], cipher_bip_cmac_128, .big);
+        pos += 4;
+    }
+    buf[1] = @intCast(pos - 2);
+    return buf[0..pos];
+}
+
 // --- The handshakes -------------------------------------------------------------
 
 pub const GroupKey = struct {
@@ -268,6 +594,14 @@ pub const GroupKey = struct {
     rsc: [6]u8,
 };
 
+/// Integrity Group Temporal Key (IGTK) for Management Frame Protection (802.11w).
+pub const Igtk = struct {
+    /// Key ID (typically 4 or 5).
+    index: u8,
+    ipn: [6]u8,
+    key: [16]u8,
+};
+
 /// What to do after a frame.
 pub const Actions = struct {
     /// A frame to send to the access point.
@@ -275,6 +609,7 @@ pub const Actions = struct {
     /// The pairwise key to install (CCMP), after sending the reply.
     pairwise: ?[16]u8 = null,
     group: ?GroupKey = null,
+    igtk: ?Igtk = null,
     /// The 4-way handshake has finished: the connection may carry traffic.
     complete: bool = false,
 };
@@ -291,6 +626,8 @@ pub const Handshake = struct {
     ap_rsn: []const u8,
     /// The network's group cipher (for swapping a TKIP group key's MIC keys).
     group_cipher: u32,
+    /// The negotiated key management suite (`akm_psk`, `akm_psk_sha256`, or `akm_sae`).
+    akm: u32 = akm_psk,
     anonce: ?Nonce = null,
     snonce: Nonce = undefined,
     ptk: ?Ptk = null,
@@ -303,6 +640,18 @@ pub const Handshake = struct {
     complete: bool = false,
     /// Frames are built here.
     out: [256]u8 = undefined,
+
+    fn usesSha256(h: *const Handshake) bool {
+        return h.akm == akm_sae or h.akm == akm_psk_sha256;
+    }
+
+    fn validVersion(h: *const Handshake, ver: u16) bool {
+        return switch (h.akm) {
+            akm_sae => ver == info.version_akm or ver == info.version_sha256 or ver == info.version_aes,
+            akm_psk_sha256 => ver == info.version_sha256 or ver == info.version_akm,
+            else => ver == info.version_aes,
+        };
+    }
 
     /// Updates the access point's address and RSN element; drops any PTK
     /// derived for another address.
@@ -321,7 +670,7 @@ pub const Handshake = struct {
     pub fn handle(h: *Handshake, frame: []const u8, random: *const fn ([]u8) void, actions: *Actions) void {
         actions.* = .{};
         const k = KeyFrame.parse(frame) orelse return;
-        if (k.info & info.version_mask != info.version_aes or k.info & info.ack == 0) return;
+        if (!h.validVersion(k.info & info.version_mask) or k.info & info.ack == 0) return;
         if (h.replay) |r| if (k.replay <= r and k.info & info.mic != 0) return;
         if (k.info & info.pairwise != 0) {
             if (k.info & info.mic == 0) h.message1(&k, random, actions) else h.message3(&k, actions) catch {};
@@ -331,14 +680,19 @@ pub const Handshake = struct {
     /// Message 1: the ANonce. Answered with message 2.
     fn message1(h: *Handshake, k: *const KeyFrame, random: *const fn ([]u8) void, actions: *Actions) void {
         h.message1_count += 1;
+        const sha256 = h.usesSha256();
         // A repeated message 1 with the same nonce gets the same answer.
         if (h.anonce == null or !std.mem.eql(u8, &h.anonce.?, &k.nonce)) {
             h.anonce = k.nonce;
             random(&h.snonce);
-            h.ptk = derivePtk(&h.pmk, h.aa, h.spa, k.nonce, h.snonce);
+            h.ptk = if (sha256)
+                derivePtkSha256(&h.pmk, h.aa, h.spa, k.nonce, h.snonce)
+            else
+                derivePtk(&h.pmk, h.aa, h.spa, k.nonce, h.snonce);
         }
         h.replay = k.replay;
-        actions.reply = buildKeyFrame(&h.out, k.eapol_version, info.version_aes | info.pairwise | info.mic, 0, k.replay, h.snonce, h.own_rsn, &h.ptk.?.kck);
+        const ver = k.info & info.version_mask;
+        actions.reply = buildKeyFrameWith(&h.out, k.eapol_version, ver | info.pairwise | info.mic, 0, k.replay, h.snonce, h.own_rsn, &h.ptk.?.kck, sha256);
     }
 
     /// Message 3: checked, and its GTK taken; answered with message 4, then
@@ -348,7 +702,8 @@ pub const Handshake = struct {
         const anonce = h.anonce orelse return;
         if (!std.mem.eql(u8, &k.nonce, &anonce)) return;
         if (k.info & info.install == 0 or k.info & info.encrypted == 0) return;
-        if (!k.micValid(&ptk.kck)) return;
+        const sha256 = h.usesSha256();
+        if (!k.micValidWith(&ptk.kck, sha256)) return;
         h.replay = k.replay;
         var plain: [512]u8 = undefined;
         if (k.data.len > plain.len + 8) return;
@@ -360,9 +715,11 @@ pub const Handshake = struct {
             const rsn = kd.rsn orelse return;
             if (!std.mem.eql(u8, rsn, h.ap_rsn)) return;
         }
-        actions.reply = buildKeyFrame(&h.out, k.eapol_version, info.version_aes | info.pairwise | info.mic | info.secure, 0, k.replay, @splat(0), &.{}, &ptk.kck);
+        const ver = k.info & info.version_mask;
+        actions.reply = buildKeyFrameWith(&h.out, k.eapol_version, ver | info.pairwise | info.mic | info.secure, 0, k.replay, @splat(0), &.{}, &ptk.kck, sha256);
         actions.pairwise = ptk.tk;
         if (kd.gtk) |g| actions.group = h.groupKey(g, k.rsc);
+        actions.igtk = kd.igtk;
         actions.complete = true;
         h.complete = true;
     }
@@ -372,14 +729,18 @@ pub const Handshake = struct {
         if (!h.complete) return;
         const ptk = h.ptk orelse return;
         if (k.info & info.mic == 0 or k.info & info.encrypted == 0) return;
-        if (!k.micValid(&ptk.kck)) return;
+        const sha256 = h.usesSha256();
+        if (!k.micValidWith(&ptk.kck, sha256)) return;
         h.replay = k.replay;
         var plain: [512]u8 = undefined;
         if (k.data.len > plain.len + 8) return;
         try aesUnwrap(&ptk.kek, k.data, &plain);
-        const g = parseKeyData(plain[0 .. k.data.len - 8]).gtk orelse return;
-        actions.reply = buildKeyFrame(&h.out, k.eapol_version, info.version_aes | info.mic | info.secure, 0, k.replay, @splat(0), &.{}, &ptk.kck);
+        const kd = parseKeyData(plain[0 .. k.data.len - 8]);
+        const g = kd.gtk orelse return;
+        const ver = k.info & info.version_mask;
+        actions.reply = buildKeyFrameWith(&h.out, k.eapol_version, ver | info.mic | info.secure, 0, k.replay, @splat(0), &.{}, &ptk.kck, sha256);
         actions.group = h.groupKey(g, k.rsc);
+        actions.igtk = kd.igtk;
     }
 
     fn groupKey(h: *const Handshake, g: Gtk, rsc: [8]u8) ?GroupKey {
@@ -403,10 +764,12 @@ const Gtk = struct { index: u2, key: []const u8 };
 const KeyData = struct {
     rsn: ?[]const u8 = null,
     gtk: ?Gtk = null,
+    igtk: ?Igtk = null,
 };
 
-/// The RSN element and GTK from (decrypted) key data: elements and key
-/// data encapsulations (KDEs: element 0xdd, OUI 00-0F-AC, a type).
+/// The RSN element, GTK and IGTK from (decrypted) key data: elements and key
+/// data encapsulations (KDEs: element 0xdd, OUI 00-0F-AC, a type: 1 for GTK,
+/// 9 for IGTK).
 fn parseKeyData(data: []const u8) KeyData {
     var out: KeyData = .{};
     var at: usize = 0;
@@ -417,28 +780,55 @@ fn parseKeyData(data: []const u8) KeyData {
         if (id == 0xdd and len == 0) break;
         if (at + 2 + len > data.len) break;
         const body = data[at + 2 ..][0..len];
-        if (id == 48) out.rsn = data[at..][0 .. 2 + len];
-        if (id == 0xdd and len >= 6 and std.mem.eql(u8, body[0..3], &.{ 0x00, 0x0f, 0xac }) and body[3] == 1) {
-            out.gtk = .{ .index = @truncate(body[4] & 3), .key = body[6..] };
+        if (id == 48 and out.rsn == null) out.rsn = data[at..][0 .. 2 + len];
+        if (id == 0xdd and len >= 6 and std.mem.eql(u8, body[0..3], &.{ 0x00, 0x0f, 0xac })) {
+            if (body[3] == 1) {
+                out.gtk = .{ .index = @truncate(body[4] & 3), .key = body[6..] };
+            } else if (body[3] == 9 and len >= 4 + 2 + 6 + 16) {
+                // IGTK KDE (IEEE 802.11-2020 Figure 12-42): Key ID (2 bytes LE),
+                // IPN (6 bytes), and 16-byte IGTK (for BIP-CMAC-128).
+                const key_id = std.mem.readInt(u16, body[4..6], .little);
+                if (key_id <= 0xff) {
+                    out.igtk = .{
+                        .index = @intCast(key_id),
+                        .ipn = body[6..12].*,
+                        .key = body[12..28].*,
+                    };
+                }
+            }
         }
         at += 2 + len;
     }
     return out;
 }
 
-/// The access point's side of a station's WPA2 4-way handshake.
+/// The access point's side of a station's WPA2/WPA3 4-way handshake.
 pub const Authenticator = struct {
     pmk: [32]u8,
     aa: Mac,
     spa: Mac,
     rsn: []const u8,
     gtk: [16]u8,
+    igtk: ?[16]u8 = null,
+    akm: u32 = akm_psk,
     rsc: u8 = 0,
     anonce: Nonce = @splat(0x5a),
     replay: u64 = 1,
     ptk: ?Ptk = null,
     complete: bool = false,
     buf: [512]u8 = undefined,
+
+    fn usesSha256(a: *const Authenticator) bool {
+        return a.akm == akm_sae or a.akm == akm_psk_sha256;
+    }
+
+    fn descriptorVersion(a: *const Authenticator) u16 {
+        return switch (a.akm) {
+            akm_sae => info.version_akm,
+            akm_psk_sha256 => info.version_sha256,
+            else => info.version_aes,
+        };
+    }
 
     /// Picks a fresh ANonce and builds message 1 of the 4-way handshake.
     pub fn start(a: *Authenticator, random: *const fn ([]u8) void) []const u8 {
@@ -450,34 +840,38 @@ pub const Authenticator = struct {
     }
 
     pub fn message1(a: *Authenticator) []const u8 {
-        return buildKeyFrame(&a.buf, 2, info.version_aes | info.pairwise | info.ack, 16, a.replay, a.anonce, &.{}, null);
+        return buildKeyFrameWith(&a.buf, 2, a.descriptorVersion() | info.pairwise | info.ack, 16, a.replay, a.anonce, &.{}, null, a.usesSha256());
     }
 
     /// Checks message 2 and answers with message 3 (null if the MIC is
     /// wrong: a wrong passphrase).
     pub fn message3(a: *Authenticator, m2: []const u8) ?[]const u8 {
         const k = KeyFrame.parse(m2) orelse return null;
-        a.ptk = derivePtk(&a.pmk, a.aa, a.spa, a.anonce, k.nonce);
-        if (!k.micValid(&a.ptk.?.kck)) return null;
-        return a.encrypted(info.version_aes | info.pairwise | info.ack | info.mic | info.install | info.secure | info.encrypted, true);
+        const sha256 = a.usesSha256();
+        a.ptk = if (sha256)
+            derivePtkSha256(&a.pmk, a.aa, a.spa, a.anonce, k.nonce)
+        else
+            derivePtk(&a.pmk, a.aa, a.spa, a.anonce, k.nonce);
+        if (!k.micValidWith(&a.ptk.?.kck, sha256)) return null;
+        return a.encrypted(a.descriptorVersion() | info.pairwise | info.ack | info.mic | info.install | info.secure | info.encrypted, true);
     }
 
     pub fn groupMessage1(a: *Authenticator) []const u8 {
-        return a.encrypted(info.version_aes | info.ack | info.mic | info.secure | info.encrypted, false);
+        return a.encrypted(a.descriptorVersion() | info.ack | info.mic | info.secure | info.encrypted, false);
     }
 
     /// Handles an EAPOL-Key frame (message 2 or message 4) from the station.
     pub fn handle(a: *Authenticator, frame: []const u8, actions: *Actions) void {
         actions.* = .{};
         const k = KeyFrame.parse(frame) orelse return;
-        if (k.info & info.version_mask != info.version_aes) return;
+        if (k.info & info.version_mask != a.descriptorVersion()) return;
         if (k.info & info.pairwise == 0 or k.info & info.mic == 0 or k.info & info.ack != 0) return;
         if (k.replay != a.replay) return;
         if (k.info & info.secure == 0) {
             if (a.message3(frame)) |m3| actions.reply = m3;
         } else {
             const ptk = a.ptk orelse return;
-            if (!k.micValid(&ptk.kck)) return;
+            if (!k.micValidWith(&ptk.kck, a.usesSha256())) return;
             actions.pairwise = ptk.tk;
             actions.complete = true;
             a.complete = true;
@@ -486,7 +880,7 @@ pub const Authenticator = struct {
 
     fn encrypted(a: *Authenticator, key_info: u16, with_rsn: bool) []const u8 {
         a.replay += 1;
-        var plain: [64]u8 = undefined;
+        var plain: [128]u8 = undefined;
         var n: usize = 0;
         if (with_rsn) {
             @memcpy(plain[0..a.rsn.len], a.rsn);
@@ -497,18 +891,26 @@ pub const Authenticator = struct {
         n += kde.len;
         @memcpy(plain[n..][0..16], &a.gtk);
         n += 16;
+        if (a.igtk) |igtk| {
+            const igtk_kde = [_]u8{ 0xdd, 28, 0x00, 0x0f, 0xac, 9, 4, 0, 0, 0, 0, 0, 0, 0 };
+            @memcpy(plain[n..][0..igtk_kde.len], &igtk_kde);
+            n += igtk_kde.len;
+            @memcpy(plain[n..][0..16], &igtk);
+            n += 16;
+        }
         // Padded to a multiple of 8 with 0xdd and zeros.
         if (n % 8 != 0) {
             plain[n] = 0xdd;
             n += 1;
             while (n % 8 != 0) : (n += 1) plain[n] = 0;
         }
-        var wrapped: [72]u8 = undefined;
+        var wrapped: [136]u8 = undefined;
         aesWrap(&a.ptk.?.kek, plain[0..n], wrapped[0 .. n + 8]);
-        var f = buildKeyFrame(&a.buf, 2, key_info, 16, a.replay, a.anonce, wrapped[0 .. n + 8], null);
+        const sha256 = a.usesSha256();
+        var f = buildKeyFrameWith(&a.buf, 2, key_info, 16, a.replay, a.anonce, wrapped[0 .. n + 8], null, sha256);
         const m = a.buf[0..f.len];
         m[65] = a.rsc;
-        m[mic_at..][0..16].* = mic(&a.ptk.?.kck, m);
+        m[mic_at..][0..16].* = if (sha256) micSha256(&a.ptk.?.kck, m) else mic(&a.ptk.?.kck, m);
         f = m;
         return f;
     }
@@ -701,3 +1103,122 @@ test "setAp invalidates cached PTK when the access point BSSID changes" {
     s.handle(m3, testRandom, &act);
     try testing.expect(act.complete);
 }
+
+test "WPA3-Personal: SAE Commit/Confirm exchange followed by SHA-256 4-way handshake and IGTK" {
+    const sta_mac: Mac = .{ 0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee };
+    const ap_mac: Mac = .{ 0x02, 0x11, 0x22, 0x33, 0x44, 0x55 };
+
+    // PWE derivation is symmetric in MAC order and produces a valid point on P-256.
+    const pwe1 = derivePwe("correct horse", sta_mac, ap_mac);
+    const pwe2 = derivePwe("correct horse", ap_mac, sta_mac);
+    try pwe1.rejectIdentity();
+    try testing.expect(pwe1.equivalent(pwe2));
+
+    const Rng = struct {
+        var seed: u8 = 1;
+        fn fill(buf: []u8) void {
+            for (buf) |*b| {
+                b.* = seed;
+                seed +%= 17;
+            }
+        }
+    };
+
+    var sta_sae = Sae.init("correct horse", sta_mac, ap_mac, Rng.fill);
+    var ap_sae = Sae.init("correct horse", ap_mac, sta_mac, Rng.fill);
+
+    var sta_commit_buf: [128]u8 = undefined;
+    var ap_commit_buf: [128]u8 = undefined;
+    const sta_commit = sta_sae.writeCommit(&sta_commit_buf, &.{});
+    const ap_commit = ap_sae.writeCommit(&ap_commit_buf, &.{});
+
+    // Reflection attack (peer sends our own commit back) is rejected.
+    try testing.expect(!sta_sae.processCommit(sta_commit));
+
+    try testing.expect(sta_sae.processCommit(ap_commit));
+    try testing.expect(ap_sae.processCommit(sta_commit));
+    try testing.expectEqual(sta_sae.pmk, ap_sae.pmk);
+    try testing.expectEqual(sta_sae.pmkid, ap_sae.pmkid);
+    try testing.expectEqual(sta_sae.kck, ap_sae.kck);
+
+    var sta_confirm: [Sae.confirm_len]u8 = undefined;
+    var ap_confirm: [Sae.confirm_len]u8 = undefined;
+    _ = sta_sae.writeConfirm(&sta_confirm);
+    _ = ap_sae.writeConfirm(&ap_confirm);
+
+    try testing.expect(sta_sae.processConfirm(&ap_confirm));
+    try testing.expect(ap_sae.processConfirm(&sta_confirm));
+
+    // A wrong password fails Confirm verification.
+    var wrong_sae = Sae.init("wrong horse!", sta_mac, ap_mac, Rng.fill);
+    var wrong_commit_buf: [128]u8 = undefined;
+    const wrong_commit = wrong_sae.writeCommit(&wrong_commit_buf, &.{});
+    var ap_sae2 = Sae.init("correct horse", ap_mac, sta_mac, Rng.fill);
+    var ap_commit2_buf: [128]u8 = undefined;
+    const ap_commit2 = ap_sae2.writeCommit(&ap_commit2_buf, &.{});
+    try testing.expect(wrong_sae.processCommit(ap_commit2));
+    try testing.expect(ap_sae2.processCommit(wrong_commit));
+    var wrong_confirm: [Sae.confirm_len]u8 = undefined;
+    _ = wrong_sae.writeConfirm(&wrong_confirm);
+    try testing.expect(!ap_sae2.processConfirm(&wrong_confirm));
+
+    // Now run the WPA3-SAE 4-way handshake with the SAE-derived PMK and PMKID.
+    var sta_rsn_buf: [44]u8 = undefined;
+    const sta_rsn = rsnElementEx(&sta_rsn_buf, cipher_ccmp, akm_sae, true, true, sta_sae.pmkid);
+    try testing.expectEqual(@as(usize, 44), sta_rsn.len);
+
+    var ap_rsn_buf: [44]u8 = undefined;
+    const ap_rsn = rsnElementEx(&ap_rsn_buf, cipher_ccmp, akm_sae, true, true, null);
+    try testing.expectEqual(@as(usize, 28), ap_rsn.len);
+
+    var s: Handshake = .{
+        .pmk = sta_sae.pmk,
+        .aa = ap_mac,
+        .spa = sta_mac,
+        .own_rsn = sta_rsn,
+        .ap_rsn = ap_rsn,
+        .group_cipher = cipher_ccmp,
+        .akm = akm_sae,
+    };
+    var ap: Authenticator = .{
+        .pmk = ap_sae.pmk,
+        .aa = ap_mac,
+        .spa = sta_mac,
+        .rsn = ap_rsn,
+        .gtk = @splat(0x42),
+        .igtk = @splat(0x99),
+        .akm = akm_sae,
+        .rsc = 7,
+    };
+
+    var sta_act: Actions = .{};
+    var ap_act: Actions = .{};
+
+    const m1 = ap.start(testRandom);
+    var m1_copy: [256]u8 = undefined;
+    @memcpy(m1_copy[0..m1.len], m1);
+    s.handle(m1_copy[0..m1.len], testRandom, &sta_act);
+    try testing.expect(sta_act.reply != null and !sta_act.complete);
+
+    var m2_copy: [256]u8 = undefined;
+    const m2_len = sta_act.reply.?.len;
+    @memcpy(m2_copy[0..m2_len], sta_act.reply.?);
+    ap.handle(m2_copy[0..m2_len], &ap_act);
+    try testing.expect(ap_act.reply != null and !ap_act.complete);
+
+    var m3_copy: [256]u8 = undefined;
+    const m3_len = ap_act.reply.?.len;
+    @memcpy(m3_copy[0..m3_len], ap_act.reply.?);
+    s.handle(m3_copy[0..m3_len], testRandom, &sta_act);
+    try testing.expect(sta_act.complete and sta_act.reply != null);
+    try testing.expectEqual(ap.ptk.?.tk, sta_act.pairwise.?);
+    try testing.expectEqual(@as(u8, 4), sta_act.igtk.?.index);
+    try testing.expectEqual(@as([16]u8, @splat(0x99)), sta_act.igtk.?.key);
+
+    var m4_copy: [256]u8 = undefined;
+    const m4_len = sta_act.reply.?.len;
+    @memcpy(m4_copy[0..m4_len], sta_act.reply.?);
+    ap.handle(m4_copy[0..m4_len], &ap_act);
+    try testing.expect(ap_act.complete);
+}
+

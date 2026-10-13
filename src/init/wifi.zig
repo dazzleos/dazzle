@@ -52,8 +52,13 @@ const Join = struct {
     has_bss: bool = false,
     /// The PMK; null for an open network.
     pmk: ?[32]u8 = null,
+    /// Key management suite (`akm_psk`, `akm_psk_sha256`, or `akm_sae`); 0 for open.
+    akm: u32 = 0,
+    sae: ?supplicant.Sae = null,
+    sae_committed: bool = false,
+    sae_confirmed: bool = false,
     bss: nl80211.Bss = undefined,
-    rsn_buf: [22]u8 = undefined,
+    rsn_buf: [44]u8 = undefined,
     handshake: supplicant.Handshake = undefined,
     eapol: ?linux.fd_t = null,
     /// Message 1 can arrive from the radio before the driver's connect
@@ -509,13 +514,25 @@ pub const Manager = struct {
         };
         const nl = &(m.nl orelse return);
         if (nl.findBss(st.index, j.ssid()) catch null) |bss| {
-            const wpa2 = bss.rsn_len > 0;
-            if (wpa2) {
-                if (!bss.ccmp or !bss.psk or (bss.group_cipher != supplicant.cipher_ccmp and bss.group_cipher != supplicant.cipher_tkip)) return m.fail(.unsupported);
-                if (!supplicant.validPassphrase(j.passphrase())) return m.fail(.bad_passphrase);
-                if (j.pmk == null) j.pmk = supplicant.pmkFromPassphrase(j.passphrase(), j.ssid());
+            const wpa = bss.rsn_len > 0;
+            if (wpa) {
+                if (!bss.ccmp or (!bss.psk and !bss.psk_sha256 and !bss.sae) or (bss.group_cipher != supplicant.cipher_ccmp and bss.group_cipher != supplicant.cipher_tkip)) return m.fail(.unsupported);
+                if (bss.psk) {
+                    j.akm = supplicant.akm_psk;
+                    if (!supplicant.validPassphrase(j.passphrase())) return m.fail(.bad_passphrase);
+                    if (j.pmk == null) j.pmk = supplicant.pmkFromPassphrase(j.passphrase(), j.ssid());
+                } else if (bss.psk_sha256) {
+                    j.akm = supplicant.akm_psk_sha256;
+                    if (!supplicant.validPassphrase(j.passphrase())) return m.fail(.bad_passphrase);
+                    if (j.pmk == null) j.pmk = supplicant.pmkFromPassphrase(j.passphrase(), j.ssid());
+                } else {
+                    j.akm = supplicant.akm_sae;
+                    if (j.passphrase().len < 8 or j.passphrase().len > 63) return m.fail(.bad_passphrase);
+                    j.pmk = @splat(0);
+                }
             } else {
                 if (bss.network.security != .open) return m.fail(.unsupported);
+                j.akm = 0;
                 j.pmk = null;
             }
             j.bss = bss;
@@ -546,13 +563,32 @@ pub const Manager = struct {
         j.started_ns = now;
         j.retry_at = null;
         j.pending_eapol_len = 0;
+        j.sae = null;
+        j.sae_committed = false;
+        j.sae_confirmed = false;
         var params: nl80211.ConnectParams = .{ .ssid = j.ssid(), .bssid = j.bss.bssid, .freq_mhz = j.bss.network.freq_mhz };
         if (j.pmk) |pmk| {
-            const rsn = supplicant.rsnElement(&j.rsn_buf, j.bss.group_cipher);
-            j.handshake = .{ .pmk = pmk, .aa = j.bss.bssid, .spa = st.adapter.mac, .own_rsn = rsn, .ap_rsn = j.bss.rsn(), .group_cipher = j.bss.group_cipher };
+            const is_sae = j.akm == supplicant.akm_sae;
+            const mfp_capable = is_sae or j.bss.mfp_capable or j.bss.mfp_required;
+            const mfp_required = is_sae or j.bss.mfp_required;
+            const rsn = supplicant.rsnElementEx(&j.rsn_buf, j.bss.group_cipher, j.akm, mfp_capable, mfp_required, null);
+            j.handshake = .{
+                .pmk = pmk,
+                .aa = j.bss.bssid,
+                .spa = st.adapter.mac,
+                .own_rsn = rsn,
+                .ap_rsn = j.bss.rsn(),
+                .group_cipher = j.bss.group_cipher,
+                .akm = j.akm,
+            };
             // Listening before connecting, so message 1 is not missed.
             if (j.eapol == null) j.eapol = try openEapol(st.index);
-            params.wpa2 = .{ .rsn = rsn, .group_cipher = j.bss.group_cipher };
+            params.wpa2 = .{
+                .rsn = rsn,
+                .group_cipher = j.bss.group_cipher,
+                .akm = j.akm,
+                .mfp_required = mfp_required,
+            };
         }
         if (!m.station.?.adapter.up) m.station.?.adapter.up = ipv4.bringUp(st.adapter.name());
         print("dazzle: wifi: joining \"{s}\" ({x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}, {d} MHz)\n", .{ j.ssid(), j.bss.bssid[0], j.bss.bssid[1], j.bss.bssid[2], j.bss.bssid[3], j.bss.bssid[4], j.bss.bssid[5], j.bss.network.freq_mhz });
@@ -610,6 +646,62 @@ pub const Manager = struct {
         }
     }
 
+    /// Handles an incoming 802.11 SAE Authentication frame during external
+    /// authentication.
+    fn handleSaeFrame(m: *Manager, rx: *const nl80211.RxFrame) void {
+        const nl = &(m.nl orelse return);
+        const st = m.station orelse return;
+        const j = &(m.join orelse return);
+        const sae = &(j.sae orelse return);
+        const frame = rx.bytes();
+        if (frame.len < 30 or frame[0] != 0xb0) return;
+        const alg = std.mem.readInt(u16, frame[24..26], .little);
+        if (alg != supplicant.auth_alg_sae) return;
+        const seq = std.mem.readInt(u16, frame[26..28], .little);
+        const status = std.mem.readInt(u16, frame[28..30], .little);
+        const body = frame[30..];
+        const freq = if (rx.freq_mhz != 0) rx.freq_mhz else j.bss.network.freq_mhz;
+
+        switch (seq) {
+            1 => {
+                if (status == supplicant.status_anti_clogging_token_req and body.len >= 2) {
+                    const token = body[2..];
+                    var commit_body: [256]u8 = undefined;
+                    var tx_frame: [300]u8 = undefined;
+                    const cb = sae.writeCommit(&commit_body, token);
+                    const tx = supplicant.Sae.buildAuthFrame(&tx_frame, st.adapter.mac, j.bss.bssid, 1, supplicant.status_success, cb);
+                    nl.sendFrame(st.index, freq, tx) catch {};
+                    return;
+                }
+                if (status != supplicant.status_success or !sae.processCommit(body)) {
+                    nl.externalAuthStatus(st.index, j.ssid(), j.bss.bssid, 1, null);
+                    return m.fail(.rejected);
+                }
+                j.sae_committed = true;
+                var confirm_body: [supplicant.Sae.confirm_len]u8 = undefined;
+                var tx_frame: [64]u8 = undefined;
+                const cb = sae.writeConfirm(&confirm_body);
+                const tx = supplicant.Sae.buildAuthFrame(&tx_frame, st.adapter.mac, j.bss.bssid, 2, supplicant.status_success, cb);
+                nl.sendFrame(st.index, freq, tx) catch {
+                    nl.externalAuthStatus(st.index, j.ssid(), j.bss.bssid, 1, null);
+                    return m.fail(.rejected);
+                };
+            },
+            2 => {
+                if (status != supplicant.status_success or !j.sae_committed or !sae.processConfirm(body)) {
+                    nl.externalAuthStatus(st.index, j.ssid(), j.bss.bssid, 1, null);
+                    return m.fail(.wrong_password);
+                }
+                j.sae_confirmed = true;
+                j.pmk = sae.pmk;
+                j.handshake.pmk = sae.pmk;
+                j.handshake.ptk = null;
+                nl.externalAuthStatus(st.index, j.ssid(), j.bss.bssid, 0, sae.pmkid);
+            },
+            else => {},
+        }
+    }
+
     /// Handles nl80211's events.
     pub fn events(m: *Manager, now: u64) void {
         const nl = &(m.nl orelse return);
@@ -652,8 +744,42 @@ pub const Manager = struct {
 
         const j = &(m.join orelse return);
         const state = m.report.connection.state;
+        if (ev.external_auth) |ext| if (state == .connecting and j.akm == supplicant.akm_sae) {
+            if (!ext.start) {
+                j.sae = null;
+            } else {
+                if (!std.mem.allEqual(u8, &ext.bssid, 0) and !std.mem.eql(u8, &j.bss.bssid, &ext.bssid)) {
+                    if (nl.findBssByBssid(st.index, j.ssid(), ext.bssid) catch null) |actual| {
+                        j.bss = actual;
+                    } else {
+                        j.bss.bssid = ext.bssid;
+                    }
+                    j.handshake.setAp(j.bss.bssid, j.bss.rsn());
+                }
+                j.sae = supplicant.Sae.init(j.passphrase(), st.adapter.mac, j.bss.bssid, random);
+                j.sae_committed = false;
+                j.sae_confirmed = false;
+                var commit_body: [128]u8 = undefined;
+                var tx_frame: [160]u8 = undefined;
+                const cb = j.sae.?.writeCommit(&commit_body, &.{});
+                const tx = supplicant.Sae.buildAuthFrame(&tx_frame, st.adapter.mac, j.bss.bssid, 1, supplicant.status_success, cb);
+                nl.sendFrame(st.index, j.bss.network.freq_mhz, tx) catch |err| {
+                    print(sys.log_warning ++ "dazzle: wifi: cannot send SAE Commit ({s})\n", .{@errorName(err)});
+                    nl.externalAuthStatus(st.index, j.ssid(), j.bss.bssid, 1, null);
+                    return m.fail(.rejected);
+                };
+            }
+        };
+        for (ev.auth_frames[0..ev.auth_frames_len]) |*rx| {
+            if (m.join == null) return;
+            m.handleSaeFrame(rx);
+        }
+        if (m.join == null) return;
         if (ev.connected) |c| if (state == .connecting) {
-            if (c.status != 0) return m.fail(.rejected);
+            if (c.status != 0) {
+                const wrong_sae = j.akm == supplicant.akm_sae and j.sae_committed and !j.sae_confirmed;
+                return m.fail(if (wrong_sae) .wrong_password else .rejected);
+            }
             if (!std.mem.allEqual(u8, &c.bssid, 0)) {
                 if (!std.mem.eql(u8, &j.bss.bssid, &c.bssid)) {
                     if (nl.findBssByBssid(st.index, j.ssid(), c.bssid) catch null) |actual| {
@@ -772,8 +898,10 @@ pub const Manager = struct {
         if (actions.group) |g| m.nl.?.setGroupKey(st.index, j.bss.group_cipher, g.index, g.key[0..g.len], g.rsc) catch |err| {
             print(sys.log_warning ++ "dazzle: wifi: cannot install the group key ({s})\n", .{@errorName(err)});
         };
+        if (actions.igtk) |igtk| m.nl.?.setManagementGroupKey(st.index, igtk.index, igtk.key, igtk.ipn);
         if (actions.complete and !m.report.connection.state.joined()) {
-            print("dazzle: wifi: joined \"{s}\" (WPA2)\n", .{j.ssid()});
+            const proto = if (j.akm == supplicant.akm_sae) "WPA3" else "WPA2";
+            print("dazzle: wifi: joined \"{s}\" ({s})\n", .{ j.ssid(), proto });
             m.nl.?.authorize(st.index, j.bss.bssid);
             m.startDhcp();
         }
@@ -812,8 +940,9 @@ pub const Manager = struct {
                     m.report.connection.failure = .not_found;
                     j.retry_at = now + retry_ns;
                 } else {
-                    const wrong = j.pmk != null and j.handshake.message1_count > 1 and !j.handshake.complete;
-                    m.fail(if (wrong) .wrong_password else .timeout);
+                    const wrong_eapol = j.pmk != null and j.handshake.message1_count > 1 and !j.handshake.complete;
+                    const wrong_sae = j.akm == supplicant.akm_sae and j.sae_committed and !j.sae_confirmed;
+                    m.fail(if (wrong_eapol or wrong_sae) .wrong_password else .timeout);
                 }
             },
             .addressing, .connected => {

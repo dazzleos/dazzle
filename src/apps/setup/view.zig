@@ -381,7 +381,7 @@ pub const Setup = struct {
         const on_connect: ?ui.Callback = if (self.actions) |acts| .of(act(cx, acts, state, n.ssid()), Act.connect) else null;
         const field: ui.Widget = switch (n.security) {
             .open => cx.make(ui.Text{ .text = "An open network: what is sent can be seen", .style = .{ .size = 16, .color = t.on_surface_variant } }),
-            .wpa2 => cx.make(ui.TextField{
+            .wpa2, .wpa3 => cx.make(ui.TextField{
                 .initial = state.password_buf[0..state.password_len],
                 .placeholder = "Password",
                 .obscure = true,
@@ -392,7 +392,7 @@ pub const Setup = struct {
             }).withKey(std.hash.Fnv1a_64.hash(n.ssid())),
             else => cx.make(ui.Text{ .text = cx.fmt("{s} networks are not supported yet", .{n.security.label()}), .style = .{ .size = 16, .color = t.on_surface_variant } }),
         };
-        const supported = n.security == .open or n.security == .wpa2;
+        const supported = n.security == .open or n.security == .wpa2 or n.security == .wpa3;
         return cx.make(ui.Padding{
             .padding = .symmetric(16, 8),
             .child = cx.make(ui.Row{
