@@ -107,24 +107,44 @@ pub const Renderer = struct {
     }
 
     /// Gives each image drawn a texture (uploaded once), and frees those of
-    /// images no longer drawn.
+    /// images no longer drawn (or reuses their buffers when a new image of
+    /// the same size replaces one, as a camera preview does every frame).
     fn uploadImages(r: *Renderer, canvases: []const *const Canvas) !void {
         var used: std.AutoHashMapUnmanaged(u64, void) = .empty;
         defer used.deinit(r.gpa);
         for (canvases) |c| for (c.batches.items) |*b| {
             const img = b.image orelse continue;
             try used.put(r.gpa, img.id, {});
+        };
+        var stale_ids: std.ArrayList(u64) = .empty;
+        defer stale_ids.deinit(r.gpa);
+        var it = r.images.iterator();
+        while (it.next()) |e| if (!used.contains(e.key_ptr.*)) try stale_ids.append(r.gpa, e.key_ptr.*);
+        var stale: std.ArrayList(vc4.Bo) = .empty;
+        defer {
+            for (stale.items) |bo| r.dev.destroyBo(bo);
+            stale.deinit(r.gpa);
+        }
+        try stale.ensureTotalCapacity(r.gpa, stale_ids.items.len);
+        for (stale_ids.items) |id| stale.appendAssumeCapacity(r.images.fetchRemove(id).?.value);
+
+        for (canvases) |c| for (c.batches.items) |*b| {
+            const img = b.image orelse continue;
             if (r.images.contains(img.id)) continue;
-            const bo = try r.dev.createBo(vc4.texture.imageSize(img.width, img.height));
+            const size = vc4.texture.imageSize(img.width, img.height);
+            const bo = r.takeStaleBo(&stale, size) orelse try r.dev.createBo(size);
             errdefer r.dev.destroyBo(bo);
             vc4.texture.upload(bo.map, img.pixels, img.width, img.height);
             try r.images.put(r.gpa, img.id, bo);
         };
-        var stale: std.ArrayList(u64) = .empty;
-        defer stale.deinit(r.gpa);
-        var it = r.images.iterator();
-        while (it.next()) |e| if (!used.contains(e.key_ptr.*)) try stale.append(r.gpa, e.key_ptr.*);
-        for (stale.items) |id| r.dev.destroyBo(r.images.fetchRemove(id).?.value);
+    }
+
+    fn takeStaleBo(r: *const Renderer, stale: *std.ArrayList(vc4.Bo), size: u32) ?vc4.Bo {
+        if (r.pipelined) return null;
+        for (stale.items, 0..) |bo, i| {
+            if (bo.map.len == size) return stale.swapRemove(i);
+        }
+        return null;
     }
 
     fn upload(r: *Renderer, a: *atlas_mod.Atlas) !void {

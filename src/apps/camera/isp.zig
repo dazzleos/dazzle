@@ -37,10 +37,35 @@ pub const Raw = struct {
 
     /// The sample at (x, y), its top 8 bits.
     pub fn at(r: Raw, x: u32, y: u32) u8 {
-        const row = r.data[@as(usize, y) * r.stride ..];
-        return if (r.bits == 8) row[x] else row[x / 4 * 5 + x % 4];
+        return sampleAt(r.data[@as(usize, y) * r.stride ..], r.bits, x);
+    }
+
+    /// Bytes of pixels in a row of `width` samples.
+    pub fn rowBytes(r: Raw) usize {
+        return if (r.bits == 8) r.width else (@as(usize, r.width) + 3) / 4 * 5;
+    }
+
+    /// Copies row `y` into `dst` and returns the slice of it. V4L2 `MMAP`
+    /// capture buffers are mapped by `vb2_dma_contig` as uncached DMA
+    /// memory; copying each needed row sequentially into cached stack
+    /// memory lets the CPU burst-read a row once instead of stalling the
+    /// bus interface on every sample across two or three rows.
+    fn copyRow(r: Raw, y: u32, dst: []u8) []const u8 {
+        const len = @min(r.rowBytes(), r.stride);
+        const src = r.data[@as(usize, y) * r.stride ..][0..len];
+        if (len > dst.len) return src;
+        const out = dst[0..len];
+        @memcpy(out, src);
+        return out;
     }
 };
+
+/// Enough for a row of up to 6552 10-bit or 8192 8-bit samples.
+const max_row_bytes = 8192;
+
+fn sampleAt(row: []const u8, bits: u8, x: u32) u8 {
+    return if (bits == 8) row[x] else row[x / 4 * 5 + x % 4];
+}
 
 pub const Channel = enum(u2) { r, g, b };
 
@@ -127,15 +152,24 @@ pub fn preview(raw: Raw, tables: *const Tables, black: u8, out: []u32, width: u3
             g_n += 1;
         },
     };
+    var row_buf: [2][max_row_bytes]u8 = undefined;
     var sums: [3]u64 = .{ 0, 0, 0 };
     for (0..height) |oy| {
         const by: u32 = @intCast(oy * step * 2);
+        const rows = [2][]const u8{
+            raw.copyRow(by, &row_buf[0]),
+            raw.copyRow(by + 1, &row_buf[1]),
+        };
+        const r_row = rows[r_at[1]];
+        const g0_row = rows[pos[0][1]];
+        const g1_row = rows[pos[1][1]];
+        const b_row = rows[b_at[1]];
         const row = out[oy * width ..][0..width];
         for (row, 0..) |*o, ox| {
             const bx: u32 = @intCast(ox * step * 2);
-            const r = raw.at(bx + r_at[0], by + r_at[1]);
-            const g: u8 = @intCast((@as(u32, raw.at(bx + pos[0][0], by + pos[0][1])) + raw.at(bx + pos[1][0], by + pos[1][1]) + 1) / 2);
-            const b = raw.at(bx + b_at[0], by + b_at[1]);
+            const r = sampleAt(r_row, raw.bits, bx + r_at[0]);
+            const g: u8 = @intCast((@as(u32, sampleAt(g0_row, raw.bits, bx + pos[0][0])) + sampleAt(g1_row, raw.bits, bx + pos[1][0]) + 1) / 2);
+            const b = sampleAt(b_row, raw.bits, bx + b_at[0]);
             sums[0] += r -| black;
             sums[1] += g -| black;
             sums[2] += b -| black;
@@ -151,29 +185,48 @@ pub fn develop(raw: Raw, tables: *const Tables, out: []u32) void {
     std.debug.assert(out.len >= @as(usize, raw.width) * raw.height);
     const w = raw.width;
     const h = raw.height;
+    var row_buf: [3][max_row_bytes]u8 = undefined;
+    var row_slice: [3][]const u8 = undefined;
+    var cached_y: [3]u32 = .{ std.math.maxInt(u32), std.math.maxInt(u32), std.math.maxInt(u32) };
     for (0..h) |yi| {
         const y: u32 = @intCast(yi);
+        const ys = [3]u32{
+            mirror(@as(i32, @intCast(y)) - 1, h),
+            y,
+            mirror(@as(i32, @intCast(y)) + 1, h),
+        };
+        var rows: [3][]const u8 = undefined;
+        for (ys, 0..) |ry, i| {
+            const slot = ry % 3;
+            if (cached_y[slot] != ry) {
+                row_slice[slot] = raw.copyRow(ry, &row_buf[slot]);
+                cached_y[slot] = ry;
+            }
+            rows[i] = row_slice[slot];
+        }
         for (0..w) |xi| {
             const x: u32 = @intCast(xi);
             var v: [3]u32 = undefined;
             const own = colourAt(raw.bayer, x, y);
-            v[@intFromEnum(own)] = raw.at(x, y);
+            v[@intFromEnum(own)] = sampleAt(rows[1], raw.bits, x);
             // The others: the means of the nearest that have them (within
             // the 3x3 around it, the edges mirrored).
             var sum: [3]u32 = .{ 0, 0, 0 };
             var count: [3]u32 = .{ 0, 0, 0 };
             var dy: i32 = -1;
             while (dy <= 1) : (dy += 1) {
+                const di: usize = @intCast(dy + 1);
+                const ny = ys[di];
+                const r_row = rows[di];
                 var dx: i32 = -1;
                 while (dx <= 1) : (dx += 1) {
                     if (dx == 0 and dy == 0) continue;
                     const nx = mirror(@as(i32, @intCast(x)) + dx, w);
-                    const ny = mirror(@as(i32, @intCast(y)) + dy, h);
                     const c = colourAt(raw.bayer, nx, ny);
                     if (c == own) continue;
                     // Green's nearest are beside it, not diagonal.
                     if (c == .g and dx != 0 and dy != 0) continue;
-                    sum[@intFromEnum(c)] += raw.at(nx, ny);
+                    sum[@intFromEnum(c)] += sampleAt(r_row, raw.bits, nx);
                     count[@intFromEnum(c)] += 1;
                 }
             }
