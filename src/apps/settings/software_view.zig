@@ -136,7 +136,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
         else if (updatable)
             cx.make(ui.OutlinedButton{ .label = "Update", .icon = .download, .on_press = if (enabled) .of(x.?, AppAct.install) else null })
         else if (installed)
-            cx.make(ui.OutlinedButton{ .label = "Remove", .icon = .delete, .on_press = if (enabled) .of(x.?, AppAct.remove) else null })
+            cx.make(ui.OutlinedButton{ .icon = .delete, .destructive = true, .on_press = if (enabled) .of(x.?, AppAct.remove) else null })
         else
             cx.make(ui.OutlinedButton{ .label = "Install", .icon = .download, .on_press = if (enabled) .of(x.?, AppAct.install) else null });
         var size_buf: [32]u8 = undefined;
@@ -596,7 +596,7 @@ test "installing and removing apps, and getting their list again" {
     try testing.expect(view.findText(u.root.?, "Update all") == null);
     view.click(u, view.up(view.findText(u.root.?, "Install").?, ui.OutlinedButton).?);
     try testing.expectEqualStrings("dazzle-files", actions.install.?.slice());
-    view.click(u, view.up(view.findText(u.root.?, "Remove").?, ui.OutlinedButton).?);
+    view.click(u, view.up(view.findIcon(u.root.?, .delete).?, ui.OutlinedButton).?);
     try testing.expectEqualStrings("dazzle-demo", actions.remove.?.slice());
     view.click(u, view.up(view.findText(u.root.?, "Refresh").?, ui.OutlinedButton).?);
     try testing.expect(actions.refresh_apps);
@@ -608,7 +608,7 @@ test "installing and removing apps, and getting their list again" {
     u.frame(1920, 960, 2, settings);
     try testing.expect(view.findText(u.root.?, "Install") == null);
     try testing.expect(view.findText(u.root.?, "Installing…") != null);
-    view.click(u, view.up(view.findText(u.root.?, "Remove").?, ui.OutlinedButton).?);
+    view.click(u, view.up(view.findIcon(u.root.?, .delete).?, ui.OutlinedButton).?);
     try testing.expect(actions.remove == null);
 
     // An install error shows in a dismissible snackbar.
@@ -652,7 +652,7 @@ test "updates: offered, downloaded, installed, then a restart" {
     settings.apps.updatable = &.{ true, false };
     u.frame(1920, 960, 2, settings);
     try testing.expect(view.findText(u.root.?, "2 updates available") != null);
-    try testing.expect(view.findText(u.root.?, "Remove") == null);
+    try testing.expect(view.findIcon(u.root.?, .delete) == null);
 
     // Build and kernel details are shown when Dazzle is expanded.
     try testing.expect(view.findText(u.root.?, "de14aa2 (7 October 2026)") == null);

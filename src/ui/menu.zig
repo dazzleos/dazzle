@@ -28,6 +28,9 @@ pub const Item = struct {
     label: []const u8,
     /// Its keyboard shortcut, shown at the right ("Ctrl+C").
     shortcut: []const u8 = "",
+    /// Destructive action (e.g. delete): shown in the theme's error colour
+    /// when enabled.
+    destructive: bool = false,
     /// Shown dimmed, and not pressable, if not.
     enabled: bool = true,
     on_press: ?Callback = null,
@@ -87,12 +90,13 @@ const MenuRow = struct {
         state.ui = cx.ui;
         const i = state.interaction;
         const layer: f32 = if (!enabled) 0 else if (i.pressed) 0.10 else if (i.hovered) 0.08 else 0;
-        const label_color = if (enabled) t.on_surface else t.on_surface.withAlpha(0.38);
-        const hint_color = if (enabled) t.on_surface_variant else t.on_surface.withAlpha(0.38);
+        const accent = if (self.item.destructive) t.@"error" else t.on_surface;
+        const label_color = if (enabled) accent else t.on_surface.withAlpha(0.38);
+        const hint_color = if (enabled) (if (self.item.destructive) t.@"error" else t.on_surface_variant) else t.on_surface.withAlpha(0.38);
         return cx.make(Pressable{
             .on_press = if (enabled) .of(state, State.press) else null,
             .interaction = &state.interaction,
-            .child = cx.make(Decorated{ .color = if (layer > 0) t.on_surface.withAlpha(layer) else null, .child = cx.make(SizedBox{
+            .child = cx.make(Decorated{ .color = if (layer > 0) accent.withAlpha(layer) else null, .child = cx.make(SizedBox{
                 .height = item_height,
                 .child = cx.make(Padding{ .padding = .symmetric(12, 0), .child = cx.make(Row{ .spacing = 12, .children = &.{
                     cx.make(Expanded{ .child = cx.make(Text{ .text = self.item.label, .style = .{ .size = t.label_size, .color = label_color }, .wrap = false, .ellipsis = true }) }),

@@ -27,6 +27,9 @@ pub const OutlinedButton = struct {
     /// An icon after the label (for menu or forward buttons).
     trailing_icon: ?@import("icons").Icon = null,
     child: ?Widget = null,
+    /// Destructive action (e.g. delete or remove): shown in the theme's
+    /// error colour when enabled.
+    destructive: bool = false,
     /// Without it the button is disabled.
     on_press: ?Callback = null,
 
@@ -44,7 +47,8 @@ pub const OutlinedButton = struct {
         const i = state.interaction;
         // State layers: the label's colour over the button.
         const layer: f32 = if (!enabled) 0 else if (i.pressed) 0.10 else if (i.hovered) 0.08 else 0;
-        const label_color = if (enabled) t.primary else t.on_surface.withAlpha(0.38);
+        const accent = if (self.destructive) t.@"error" else t.primary;
+        const label_color = if (enabled) accent else t.on_surface.withAlpha(0.38);
         const border = if (enabled) t.outline else t.on_surface.withAlpha(0.12);
         const label = cx.make(Text{
             .text = self.label,
@@ -71,7 +75,7 @@ pub const OutlinedButton = struct {
             .on_press = self.on_press,
             .interaction = &state.interaction,
             .child = cx.make(Decorated{
-                .color = if (layer > 0) t.primary.withAlpha(layer) else null,
+                .color = if (layer > 0) accent.withAlpha(layer) else null,
                 .border = .{ .width = 1, .color = border },
                 .radius = .all(height / 2),
                 .child = cx.make(ConstrainedBox{

@@ -389,6 +389,12 @@ pub fn findType(node: *ui.Node, comptime T: type) ?*ui.Node {
     return null;
 }
 
+pub fn findIcon(node: *ui.Node, icon: ui.icons.Icon) ?*ui.Node {
+    if (node.widget.as(ui.Icon)) |i| if (i.icon == icon) return node;
+    for (node.children.items) |ch| if (findIcon(ch, icon)) |n| return n;
+    return null;
+}
+
 /// The nearest node above `n` (or `n`) whose widget is a `T`.
 pub fn up(n: *ui.Node, comptime T: type) ?*ui.Node {
     var at: ?*ui.Node = n;
@@ -483,7 +489,6 @@ test "everything is shown, and fits from the smallest window to the biggest" {
         "Dazzle",
         "Spinning shapes, on the GPU",
         "Install",
-        "Remove",
         "All apps updated",
     }) |want| {
         if (std.mem.indexOf(u8, all.items, want) == null) {
