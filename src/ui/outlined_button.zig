@@ -65,6 +65,8 @@ pub const OutlinedButton = struct {
             const glyph = cx.make(Icon{ .icon = which, .size = icon_size, .color = label_color });
             break :blk if (self.label.len == 0) glyph else cx.make(Row{ .spacing = 8, .main_axis_size = .min, .cross_axis_alignment = .center, .children = &.{ label, glyph } });
         } else label;
+        const icon_only = self.child == null and self.label.len == 0 and (self.icon == null) != (self.trailing_icon == null);
+        const h_pad: f32 = if (icon_only) (height - icon_size) / 2 else padding;
         return cx.make(Pressable{
             .on_press = self.on_press,
             .interaction = &state.interaction,
@@ -73,9 +75,9 @@ pub const OutlinedButton = struct {
                 .border = .{ .width = 1, .color = border },
                 .radius = .all(height / 2),
                 .child = cx.make(ConstrainedBox{
-                    .constraints = .{ .min_w = 48, .min_h = height },
+                    .constraints = .{ .min_w = if (icon_only) height else 48, .min_h = height },
                     .child = cx.make(Padding{
-                        .padding = .symmetric(padding, 0),
+                        .padding = .symmetric(h_pad, 0),
                         .child = cx.make(Center{ .width_factor = 1, .height_factor = 1, .child = content }),
                     }),
                 }),
