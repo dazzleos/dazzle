@@ -275,8 +275,9 @@ pub const Window = struct {
     /// toolkit: `Ui.keyboard`).
     layout: locale.Keyboard = .us,
     /// A file of the app's that `wait` also wakes for when it can be
-    /// read (a camera's frames, say).
+    /// read (a camera's frames, say), and any extra wake files.
     wake_fd: ?linux.fd_t = null,
+    wake_fds: [4]?linux.fd_t = @splat(null),
     pointer: ?client.Proxy = null,
     keyboard: ?client.Proxy = null,
     /// Keys per second (`wl_keyboard.repeat_info`, 0 disables repeat) and
@@ -542,19 +543,26 @@ pub const Window = struct {
         const caller_ms: u64 = std.math.divCeil(u64, timeout_ns, std.time.ns_per_ms) catch 0;
         const timeout_ms = @min(caller_ms, w.repeatTimeoutMs(now) orelse caller_ms);
         const paste_fd = w.clipboard.pasteFd();
-        if (paste_fd == null and w.wake_fd == null) {
+        const has_wake_fds = for (w.wake_fds) |fd| {
+            if (fd != null) break true;
+        } else false;
+        if (paste_fd == null and w.wake_fd == null and !has_wake_fds) {
             try w.conn.dispatchTimeout(@intCast(@min(timeout_ms, std.math.maxInt(i32))));
             w.serviceRepeat(sys.nowNs());
             return;
         }
         // A paste under way: its pipe is waited on too (no longer than
-        // until it gives up); and the app's own file, if it has one.
+        // until it gives up); and the app's own files, if it has any.
         try w.conn.flush();
         if (try w.conn.dispatchPending() == 0) {
             const ms = @min(timeout_ms, w.clipboard.pasteTimeoutMs() orelse timeout_ms, std.math.maxInt(i32));
-            var fds: [3]linux.pollfd = undefined;
+            var fds: [3 + 4]linux.pollfd = undefined;
             var n: usize = 0;
             for ([_]?linux.fd_t{ w.conn.conn.fd, paste_fd, w.wake_fd }) |fd| if (fd) |f| {
+                fds[n] = .{ .fd = f, .events = linux.POLL.IN, .revents = 0 };
+                n += 1;
+            };
+            for (w.wake_fds) |fd| if (fd) |f| {
                 fds[n] = .{ .fd = f, .events = linux.POLL.IN, .revents = 0 };
                 n += 1;
             };

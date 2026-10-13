@@ -386,6 +386,13 @@ const Worker = struct {
     }
 
     fn loop(w: *Worker) void {
+        var sys_sub: proto.Subscription = .{};
+        defer sys_sub.deinit();
+        sys_sub.connect();
+        var net_sub: net.Subscription = .{};
+        defer net_sub.deinit();
+        net_sub.connect();
+
         var sys_rep: ?proto.Report = ask("prepare\n");
         if (sys_rep) |r| w.publishSystem(r);
         if (w.isStopping()) return;
@@ -393,13 +400,22 @@ const Worker = struct {
         var net_rep: ?net.Report = net.ask("wifi scan\n");
         if (net_rep) |r| w.publishNet(r);
 
-        var named = false;
         var was_wifi_page = false;
-        var next_ask: u64 = sys.nowNs() + std.time.ns_per_s;
-        var next_net_ask: u64 = sys.nowNs() + 3 * std.time.ns_per_s;
+        var next_scan: u64 = sys.nowNs() + 5 * std.time.ns_per_s;
 
         while (true) {
             drain(w.cmd_fds[0]);
+            if (sys_sub.fd == null) sys_sub.connect();
+            if (sys_sub.poll()) |r| if (!r.denied) {
+                sys_rep = r;
+                w.publishSystem(r);
+            };
+            if (net_sub.fd == null) net_sub.connect();
+            if (net_sub.poll()) |r| if (!r.denied) {
+                net_rep = r;
+                w.publishNet(r);
+            };
+
             w.mutex.lock();
             if (w.stopping) {
                 w.mutex.unlock();
@@ -417,7 +433,6 @@ const Worker = struct {
             w.pending_finish = null;
             const on_wifi_page = w.on_wifi_page;
             const wifi_selected = w.wifi_selected;
-            const finishing = w.finishing;
             w.mutex.unlock();
 
             if (loc) |l| {
@@ -426,39 +441,45 @@ const Worker = struct {
                 if (sys_rep) |r| w.publishSystem(r);
             }
             if (host) |h| {
-                named = true;
                 var req_buf: [96]u8 = undefined;
                 sys_rep = ask(std.fmt.bufPrint(&req_buf, "hostname {s}\n", .{h.slice()}) catch "");
                 if (sys_rep) |r| w.publishSystem(r);
                 net_rep = net.ask("wifi scan\n");
                 if (net_rep) |r| w.publishNet(r);
-                // If an Ethernet cable is plugged in, poll while DHCP gets
-                // an address and configures DNS.
+                // If an Ethernet cable is plugged in, wait for the network
+                // manager's subscription to report that DHCP got an address.
                 if (net_rep != null and net_rep.?.ethernetCarrier() and !net_rep.?.ethernetConnected()) {
                     const deadline = sys.nowNs() + 3 * std.time.ns_per_s;
                     while (sys.nowNs() < deadline and !w.isStopping()) {
-                        sys.sleepMs(100);
-                        net_rep = net.ask("status\n");
-                        if (net_rep) |r| {
+                        if (net_sub.fd == null) net_sub.connect();
+                        const rem_ms: i32 = @intCast(@min((deadline -| sys.nowNs()) / std.time.ns_per_ms, std.math.maxInt(i32)));
+                        var wait_fds = [2]linux.pollfd{
+                            .{ .fd = w.cmd_fds[0], .events = linux.POLL.IN, .revents = 0 },
+                            .{ .fd = net_sub.fd orelse -1, .events = linux.POLL.IN, .revents = 0 },
+                        };
+                        _ = linux.poll(&wait_fds, wait_fds.len, rem_ms);
+                        if (net_sub.poll()) |r| if (!r.denied) {
+                            net_rep = r;
                             w.publishNet(r);
                             if (r.ethernetConnected()) break;
-                        }
+                        };
+                        if (wait_fds[0].revents != 0) break;
                     }
                 }
-                next_net_ask = sys.nowNs() + 500 * std.time.ns_per_ms;
+                next_scan = sys.nowNs() + 5 * std.time.ns_per_s;
             }
             if (conn) |j| {
                 var req_buf: [256]u8 = undefined;
                 print("dazzle-setup: joining \"{s}\"\n", .{j.ssid()});
                 net_rep = net.ask(net.connectRequest(&req_buf, j.ssid(), j.passphrase()));
                 if (net_rep) |r| w.publishNet(r);
-                next_net_ask = sys.nowNs() + 500 * std.time.ns_per_ms;
+                next_scan = sys.nowNs() + 5 * std.time.ns_per_s;
             }
             if (disc) {
                 var req_buf: [64]u8 = undefined;
                 net_rep = net.ask(net.disconnectRequest(&req_buf, ""));
                 if (net_rep) |r| w.publishNet(r);
-                next_net_ask = sys.nowNs() + 500 * std.time.ns_per_ms;
+                next_scan = sys.nowNs() + 5 * std.time.ns_per_s;
             }
             if (fin) |h| {
                 var req_buf: [96]u8 = undefined;
@@ -473,39 +494,36 @@ const Worker = struct {
                 return;
             }
 
-            if (on_wifi_page and !was_wifi_page) next_net_ask = 0;
+            if (on_wifi_page and !was_wifi_page) next_scan = 0;
             was_wifi_page = on_wifi_page;
 
-            const now = sys.nowNs();
-            if (now >= next_ask or (finishing and next_ask > now + 250 * std.time.ns_per_ms)) {
-                const need_prepare = sys_rep == null or sys_rep.?.storage == .unprepared;
-                sys_rep = ask(if (need_prepare) "prepare\n" else "status\n");
+            if (sys_rep == null or sys_rep.?.storage == .unprepared) {
+                sys_rep = ask("prepare\n");
                 if (sys_rep) |r| w.publishSystem(r);
-                const preparing = if (sys_rep) |r| r.storage == .preparing or r.storage == .unprepared else true;
-                next_ask = if (preparing) sys.nowNs() + @as(u64, if (finishing) 250 else 1000) * std.time.ns_per_ms else std.math.maxInt(u64);
             }
-            if (sys.nowNs() >= next_net_ask) {
-                const need_bg = net_rep == null or net_rep.?.wifiAdapters().len == 0 or (net_rep.?.scanning and net_rep.?.len == 0) or (named and !net_rep.?.ready);
-                if (on_wifi_page or need_bg) {
-                    const need_scan = (on_wifi_page and !wifi_selected) or if (net_rep) |r| r.len == 0 else true;
-                    net_rep = net.ask(if (need_scan) "wifi scan\n" else "status\n");
+            if (sys.nowNs() >= next_scan) {
+                const need_scan = (on_wifi_page and !wifi_selected) or if (net_rep) |r| r.len == 0 else true;
+                if (need_scan) {
+                    net_rep = net.ask("wifi scan\n");
                     if (net_rep) |r| w.publishNet(r);
-                    const busy = if (net_rep) |r| r.scanning or r.connection.state == .connecting or r.connection.state == .authenticating or r.connection.state == .addressing else false;
-                    const fast = (on_wifi_page and busy) or (named and (net_rep == null or !net_rep.?.ready));
-                    next_net_ask = sys.nowNs() + @as(u64, if (fast) 1000 else 3000) * std.time.ns_per_ms;
-                } else {
-                    next_net_ask = std.math.maxInt(u64);
                 }
+                next_scan = if (on_wifi_page or net_rep == null or net_rep.?.len == 0)
+                    sys.nowNs() + 5 * std.time.ns_per_s
+                else
+                    std.math.maxInt(u64);
             }
 
             const after = sys.nowNs();
-            const wake_ns = @min(next_ask, next_net_ask);
-            const timeout_ms: i32 = if (wake_ns == std.math.maxInt(u64))
+            const timeout_ms: i32 = if (next_scan == std.math.maxInt(u64))
                 -1
             else
-                @intCast(@min((wake_ns -| after) / std.time.ns_per_ms, std.math.maxInt(i32)));
-            var pfd = [1]linux.pollfd{.{ .fd = w.cmd_fds[0], .events = linux.POLL.IN, .revents = 0 }};
-            _ = linux.poll(&pfd, 1, timeout_ms);
+                @intCast(@min((next_scan -| after) / std.time.ns_per_ms, std.math.maxInt(i32)));
+            var pfd = [3]linux.pollfd{
+                .{ .fd = w.cmd_fds[0], .events = linux.POLL.IN, .revents = 0 },
+                .{ .fd = sys_sub.fd orelse -1, .events = linux.POLL.IN, .revents = 0 },
+                .{ .fd = net_sub.fd orelse -1, .events = linux.POLL.IN, .revents = 0 },
+            };
+            _ = linux.poll(&pfd, pfd.len, timeout_ms);
         }
     }
 };

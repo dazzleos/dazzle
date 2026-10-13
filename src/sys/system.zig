@@ -59,6 +59,7 @@ pub const socket_path = "/os/sockets/system";
 /// The programs the manager answers.
 pub const setup_program = "/os/shell/dazzle-setup";
 pub const settings_program = "/os/shell/dazzle-settings";
+pub const shell_program = "/os/shell/dazzle-shell";
 
 /// Where the card's free space is mounted, and the files in it.
 pub const data_dir = "/data";
@@ -121,6 +122,7 @@ pub const Failure = enum {
 
 pub const Request = union(enum) {
     status,
+    subscribe,
     prepare,
     hostname: Hostname,
     finish: Hostname,
@@ -135,6 +137,7 @@ pub const Request = union(enum) {
         var f = std.mem.tokenizeAny(u8, line, " \n");
         const kind = f.next() orelse return null;
         if (std.mem.eql(u8, kind, "status")) return .status;
+        if (std.mem.eql(u8, kind, "subscribe")) return .subscribe;
         if (std.mem.eql(u8, kind, "prepare")) return .prepare;
         if (std.mem.eql(u8, kind, "hostname")) return .{ .hostname = Hostname.parse(f.next() orelse return null) orelse return null };
         if (std.mem.eql(u8, kind, "finish")) return .{ .finish = Hostname.parse(f.next() orelse return null) orelse return null };
@@ -162,15 +165,15 @@ pub const Request = union(enum) {
     /// Whether `client` may ask this.
     pub fn allowedFor(r: Request, client: Client) bool {
         return switch (r) {
-            .status => true,
+            .status, .subscribe => true,
             .prepare, .hostname, .finish => client == .setup,
             .update, .restart, .video_memory => client == .settings,
-            .locale => true,
+            .locale => client == .setup or client == .settings,
         };
     }
 };
 
-pub const Client = enum { setup, settings };
+pub const Client = enum { setup, settings, shell };
 
 /// What an OS slot holds: when its source was committed (seconds since
 /// 1970: newer systems have later times) and the commit (Dazzle's and the
@@ -379,6 +382,101 @@ pub fn ask(request: []const u8, timeout_ms: u64) ?Report {
     return Report.parse(buf[0..len]);
 }
 
+/// Extracts the first complete report from `text`, returning it and how
+/// many bytes of `text` it consumed.
+fn takeReport(text: []const u8) ?struct { report: Report, consumed: usize } {
+    var pos: usize = 0;
+    while (pos < text.len) {
+        const nl = std.mem.indexOfScalarPos(u8, text, pos, '\n') orelse return null;
+        const line = std.mem.trim(u8, text[pos..nl], " \r");
+        pos = nl + 1;
+        if (std.mem.eql(u8, line, "end") or std.mem.eql(u8, line, "denied")) {
+            const report = Report.parse(text[0..pos]) orelse return null;
+            return .{ .report = report, .consumed = pos };
+        }
+    }
+    return null;
+}
+
+/// A live connection to the system manager that receives a new `Report`
+/// whenever the system state changes.
+pub const Subscription = struct {
+    fd: ?linux.fd_t = null,
+    buf: [4096]u8 = undefined,
+    len: usize = 0,
+
+    pub fn deinit(s: *Subscription) void {
+        if (s.fd) |fd| sys.close(fd);
+        s.fd = null;
+        s.len = 0;
+    }
+
+    /// Connects and subscribes if not already connected.
+    pub fn connect(s: *Subscription) ?linux.fd_t {
+        return s.connectTo(socket_path);
+    }
+
+    pub fn connectTo(s: *Subscription, path: []const u8) ?linux.fd_t {
+        if (s.fd) |fd| return fd;
+        const fd: linux.fd_t = @intCast(sys.check(linux.socket(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK, 0)) catch return null);
+        var addr: linux.sockaddr.un = .{ .path = @splat(0) };
+        if (path.len >= addr.path.len) {
+            sys.close(fd);
+            return null;
+        }
+        @memcpy(addr.path[0..path.len], path);
+        _ = sys.check(linux.connect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.un))) catch {
+            sys.close(fd);
+            return null;
+        };
+        const req = "subscribe\n";
+        _ = sys.check(linux.write(fd, req.ptr, req.len)) catch {
+            sys.close(fd);
+            return null;
+        };
+        s.fd = fd;
+        s.len = 0;
+        return fd;
+    }
+
+    /// Reads any reports that have arrived without blocking, returning the
+    /// latest complete `Report` if at least one arrived.
+    pub fn poll(s: *Subscription) ?Report {
+        return s.pollFrom(socket_path);
+    }
+
+    pub fn pollFrom(s: *Subscription, path: []const u8) ?Report {
+        const fd = s.connectTo(path) orelse return null;
+        while (s.len < s.buf.len) {
+            const rc = linux.read(fd, s.buf[s.len..].ptr, s.buf.len - s.len);
+            switch (linux.errno(rc)) {
+                .SUCCESS => {
+                    if (rc == 0) {
+                        s.deinit();
+                        break;
+                    }
+                    s.len += rc;
+                },
+                .INTR => continue,
+                .AGAIN => break,
+                else => {
+                    s.deinit();
+                    break;
+                },
+            }
+        }
+        var latest: ?Report = null;
+        while (takeReport(s.buf[0..s.len])) |got| {
+            if (!got.report.denied) latest = got.report;
+            const rem = s.len - got.consumed;
+            std.mem.copyForwards(u8, s.buf[0..rem], s.buf[got.consumed..s.len]);
+            s.len = rem;
+        }
+        if (s.len == s.buf.len) s.len = 0;
+        return latest;
+    }
+};
+
 const testing = std.testing;
 
 test "hostnames" {
@@ -394,6 +492,7 @@ test "hostnames" {
 
 test "requests and reports go through the socket" {
     try testing.expect(Request.parse("status\n").? == .status);
+    try testing.expect(Request.parse("subscribe\n").? == .subscribe);
     try testing.expect(Request.parse("prepare\n").? == .prepare);
     try testing.expectEqualStrings("awesome-elephant", Request.parse("hostname awesome-elephant\n").?.hostname.slice());
     try testing.expect(Request.parse("hostname Bad!\n") == null);
@@ -407,7 +506,9 @@ test "requests and reports go through the socket" {
     try testing.expect(Request.parse("update " ++ "g" ** 64) == null);
     // Who may ask what.
     try testing.expect(Request.allowedFor(.status, .settings));
+    try testing.expect(Request.allowedFor(.subscribe, .shell));
     try testing.expect(!Request.allowedFor(.prepare, .settings));
+    try testing.expect(!Request.allowedFor(.{ .locale = .{} }, .shell));
     try testing.expect(Request.allowedFor(.{ .hostname = Hostname.parse("my-pi").? }, .setup));
     try testing.expect(!Request.allowedFor(.{ .hostname = Hostname.parse("my-pi").? }, .settings));
     try testing.expect(!Request.allowedFor(.restart, .setup));
@@ -467,4 +568,16 @@ test "requests and reports go through the socket" {
     try testing.expect(!videoMemoryAllowed(100, 940));
     try testing.expect(Version.parse("soon abc") == null);
     try testing.expect(Version.parse("12 a/b") == null);
+
+    var pair: [2]linux.fd_t = undefined;
+    try testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK, 0, &pair));
+    defer sys.close(pair[1]);
+    var sub: Subscription = .{ .fd = pair[0] };
+    defer sub.deinit();
+    _ = linux.write(pair[1], text.ptr, text.len);
+    const vm_text = r.write(&buf);
+    _ = linux.write(pair[1], vm_text.ptr, vm_text.len);
+    const got = sub.poll().?;
+    try testing.expectEqual(@as(?u16, 256), got.video_memory_next);
 }
+

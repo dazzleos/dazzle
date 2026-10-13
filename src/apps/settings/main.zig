@@ -91,11 +91,14 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
     // The system's log, read while its page shows.
     var syslog: log.Log = .{};
     defer syslog.deinit();
-    // The network manager is asked less often: each request may start a
-    // Wi-Fi scan.
+    // Updates of the network manager's state arrive over a subscription;
+    // a Wi-Fi scan is asked for while the Wi-Fi page shows.
     var report: ?info.manager.Report = null;
-    var next_ask: u64 = 0;
-    var was_wifi_page = true;
+    var net_sub: info.manager.Subscription = .{};
+    defer net_sub.deinit();
+    net_sub.connect();
+    var next_scan: u64 = 0;
+    var was_wifi_page = false;
     var wifi_adapter: info.Str(16) = .{};
     // What the window asks of the network manager (Connect, Disconnect, an
     // Ethernet address).
@@ -109,6 +112,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
     var updatable: [64]bool = undefined;
     // Updates of the system, and which system this is.
     var updater: update.Updater = .init(gpa, server_url, sys.system.Version.init(build_info.commit_time, build_info.commit) orelse .{});
+    defer updater.deinit();
     var icons: view.software_view.IconSet = .init(gpa);
     defer icons.deinit();
     var icons_dirty = true;
@@ -126,10 +130,10 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
         sys.close(fd);
         _ = linux.unlink(sock_path);
     };
-    a.win.wake_fd = pages_fd;
 
     var next_update: u64 = sys.nowNs() + std.time.ns_per_s;
     while (true) {
+        a.win.wake_fds = .{ pages_fd, net_sub.fd, updater.sub.fd, if (view.shownPage(a.ui) == .log) syslog.fd else null };
         const board_page = view.shownPage(a.ui) == .board;
         const until = if (a.suspended) sys.nowNs() + 60 * std.time.ns_per_s else if (board_page) @min(next_update, next_levels) else next_update;
         if (!try a.step(@max(until -| sys.nowNs(), std.time.ns_per_ms))) return;
@@ -204,10 +208,9 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             a.dirty = true;
         }
         // The list is got when the page is first shown.
-        // The log is read as soon as its page shows.
-        if (view.shownPage(a.ui) == .log and syslog.fd == null and !syslog.failed) {
-            _ = syslog.poll();
-            a.dirty = true;
+        // The log is read as soon as its page shows, and whenever new lines arrive.
+        if (view.shownPage(a.ui) == .log and !syslog.failed) {
+            if (syslog.fd == null or syslog.poll()) a.dirty = true;
         }
         if (view.shownPage(a.ui) == .apps and !apps.asked) {
             apps.refresh(false);
@@ -271,24 +274,30 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
                 report = info.askManager(info.manager.scanRequest(&req_buf, wifi_adapter.slice()));
             }
             actions = .{};
-            next_ask = sys.nowNs() + std.time.ns_per_s;
+            next_scan = sys.nowNs() + 10 * std.time.ns_per_s;
             a.dirty = true;
         }
-        // Wi-Fi networks are scanned for only while their page is shown
-        // (at once when it is chosen); other pages only ask how things
-        // are.
-        const wifi_page = view.shownPage(a.ui) == .wifi;
-        if (wifi_page and !was_wifi_page) next_ask = 0;
-        was_wifi_page = wifi_page;
-        if (!a.suspended and now >= next_ask) {
-            // Soon after the first answer (to show what the first scan
-            // found) and while joining a network, then every few seconds.
-            const busy = if (report) |r| r.scanning or r.connection.state == .connecting or r.connection.state == .authenticating or r.connection.state == .addressing else true;
-            next_ask = now + @as(u64, if (busy and wifi_page) 1 else 5) * std.time.ns_per_s;
-            var scan_buf: [64]u8 = undefined;
-            const scan = wifi_page and !view.wifiNetworkSelected(a.ui);
-            report = info.askManager(if (scan) info.manager.scanRequest(&scan_buf, wifi_adapter.slice()) else "status\n");
+        if (net_sub.fd == null and !a.suspended) net_sub.connect();
+        if (net_sub.poll()) |r| if (!r.denied) {
+            report = r;
+            network = info.Network.read();
             a.dirty = true;
+        };
+        // Wi-Fi networks are scanned for only while their page is shown
+        // (at once when it is chosen, and periodically when no network is
+        // selected); status updates arrive over `net_sub`.
+        const wifi_page = view.shownPage(a.ui) == .wifi;
+        if (wifi_page and !was_wifi_page) next_scan = 0;
+        was_wifi_page = wifi_page;
+        if (!a.suspended and wifi_page and now >= next_scan) {
+            next_scan = now + 10 * std.time.ns_per_s;
+            if (!view.wifiNetworkSelected(a.ui)) {
+                var scan_buf: [64]u8 = undefined;
+                if (info.askManager(info.manager.scanRequest(&scan_buf, wifi_adapter.slice()))) |r| {
+                    report = r;
+                    a.dirty = true;
+                }
+            }
         }
 
         // Another app asked (through the shell) for a page to be shown.

@@ -41,7 +41,7 @@ const locale = @import("locale");
 const proto = sys.system;
 const print = sys.print;
 
-const max_clients = 4;
+const max_clients = 8;
 /// Work on a thread of its own (formatting, or copying the OS slot), so
 /// the manager answers meanwhile.
 const Work = struct {
@@ -132,8 +132,10 @@ const Manager = struct {
         // On the first start, prepare the card's free space in the background
         // at once without waiting for the setup app to ask.
         if (!m.finished and m.report.storage == .unprepared) m.prepare();
-        const Conn = struct { fd: linux.fd_t, who: proto.Client };
+        const Conn = struct { fd: linux.fd_t, who: proto.Client, subscribed: bool = false, needs_initial: bool = false };
         var clients: [max_clients]?Conn = @splat(null);
+        var last_sent: [512]u8 = undefined;
+        var last_sent_len: usize = 0;
         while (true) {
             // While formatting or copying, see how it goes now and then.
             if (m.formatting != null) m.checkFormatting();
@@ -146,6 +148,28 @@ const Manager = struct {
                 m.report.update_failure = how;
                 m.readSlots();
             };
+
+            {
+                var out: [512]u8 = undefined;
+                const text = m.report.write(&out);
+                const changed = !std.mem.eql(u8, text, last_sent[0..last_sent_len]);
+                if (changed) {
+                    @memcpy(last_sent[0..text.len], text);
+                    last_sent_len = text.len;
+                }
+                for (&clients) |*c| {
+                    const conn = &(c.* orelse continue);
+                    if (!conn.subscribed) continue;
+                    if (changed or conn.needs_initial) {
+                        conn.needs_initial = false;
+                        const w = linux.write(conn.fd, text.ptr, text.len);
+                        if (linux.errno(w) != .SUCCESS) {
+                            sys.close(conn.fd);
+                            c.* = null;
+                        }
+                    }
+                }
+            }
 
             var fds: [1 + max_clients]linux.pollfd = undefined;
             fds[0] = .{ .fd = listener, .events = linux.POLL.IN, .revents = 0 };
@@ -167,19 +191,24 @@ const Manager = struct {
                 }
             }
             for (&clients, fds[1..]) |*c, f| {
-                const conn = c.* orelse continue;
+                const conn = &(c.* orelse continue);
                 if (f.revents == 0) continue;
                 var buf: [256]u8 = undefined;
                 const n = linux.read(conn.fd, &buf, buf.len);
                 if (linux.errno(n) == .SUCCESS and n > 0) if (proto.Request.parse(buf[0..n])) |req| {
                     if (req.allowedFor(conn.who)) {
+                        if (req == .subscribe) {
+                            conn.subscribed = true;
+                            conn.needs_initial = true;
+                            continue;
+                        }
                         m.handle(req);
                         var out: [512]u8 = undefined;
                         const text = m.report.write(&out);
                         _ = linux.write(conn.fd, text.ptr, text.len);
                     } else _ = linux.write(conn.fd, "denied\n", 7);
                 };
-                // One request per connection.
+                // One request per connection (unless subscribed).
                 sys.close(conn.fd);
                 c.* = null;
             }
@@ -189,7 +218,7 @@ const Manager = struct {
 
     fn handle(m: *Manager, req: proto.Request) void {
         switch (req) {
-            .status => {},
+            .status, .subscribe => {},
             .prepare => switch (m.report.storage) {
                 .unprepared, .failed => m.prepare(),
                 else => {},
@@ -472,6 +501,7 @@ fn client(fd: linux.fd_t) ?proto.Client {
     const n = sys.check(linux.readlink(path.ptr, &exe, exe.len)) catch return null;
     if (std.mem.eql(u8, exe[0..n], proto.setup_program)) return .setup;
     if (std.mem.eql(u8, exe[0..n], proto.settings_program)) return .settings;
+    if (std.mem.eql(u8, exe[0..n], proto.shell_program)) return .shell;
     print("dazzle: system: refused {s} (pid {d})\n", .{ exe[0..n], cred.pid });
     return null;
 }

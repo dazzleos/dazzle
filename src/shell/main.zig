@@ -100,7 +100,13 @@ fn run(init: std.process.Init.Minimal) !void {
     _ = locale_watch.changed();
     for (apps) |app| print("dazzle-shell: app {s} ({s})\n", .{ app.label, app.path });
     var dock = try dock_mod.Dock.init(gpa, ui_font, apps, renderer.width, renderer.height);
-    dock.network = dock_mod.readNetworkStatus();
+    var net_sub: sys.network.Subscription = .{};
+    defer net_sub.deinit();
+    net_sub.connect();
+    var sys_sub: sys.system.Subscription = .{};
+    defer sys_sub.deinit();
+    sys_sub.connect();
+    dock.network = if (net_sub.poll()) |r| dock_mod.networkStatusFromReport(r) else dock_mod.readNetworkStatus();
     const dock_y: u32 = renderer.height - dock.height;
     const with_dock: server_mod.Rect = .{ .x = 0, .y = 0, .width = renderer.width, .height = dock_y };
     var perf = try perf_mod.Overlay.init(gpa, ui_font, renderer.width, renderer.height);
@@ -195,7 +201,7 @@ fn run(init: std.process.Init.Minimal) !void {
         if (!dock_shown and setup_pid == null) {
             dock_shown = true;
             print("dazzle-shell: setup finished\n", .{});
-            dock.network = dock_mod.readNetworkStatus();
+            if (net_sub.fd == null) dock.network = dock_mod.readNetworkStatus();
             dock.draw();
             renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
             server.setWorkArea(with_dock);
@@ -205,7 +211,7 @@ fn run(init: std.process.Init.Minimal) !void {
         // Wait for clients, input, the display (a page flip completing), or
         // the next clock tick; or not at all if a frame is due and can be
         // drawn.
-        var fds: [3 + max_clients + input.max_devices]linux.pollfd = undefined;
+        var fds: [5 + max_clients + input.max_devices]linux.pollfd = undefined;
         fds[0] = .{ .fd = listener, .events = linux.POLL.IN, .revents = 0 };
         fds[1] = .{ .fd = renderer.dev.fd, .events = linux.POLL.IN, .revents = 0 };
         const n_clients = @min(server.clients.items.len, max_clients);
@@ -219,8 +225,12 @@ fn run(init: std.process.Init.Minimal) !void {
         }
         const timeout: i32 = if (wake > now) @intCast((wake - now) / std.time.ns_per_ms + 1) else 0;
         const opener_index = 2 + n_clients + n_inputs;
+        const net_index = opener_index + 1;
+        const sys_index = opener_index + 2;
         fds[opener_index] = .{ .fd = opener orelse -1, .events = linux.POLL.IN, .revents = 0 };
-        _ = linux.poll(&fds, opener_index + 1, timeout);
+        fds[net_index] = .{ .fd = net_sub.fd orelse -1, .events = linux.POLL.IN, .revents = 0 };
+        fds[sys_index] = .{ .fd = sys_sub.fd orelse -1, .events = linux.POLL.IN, .revents = 0 };
+        _ = linux.poll(&fds, sys_index + 1, timeout);
         if (fds[opener_index].revents != 0) if (opener) |l| {
             if (openApp(l, apps, &server, runtime_dir) and dock_shown) {
                 dock.draw();
@@ -228,6 +238,25 @@ fn run(init: std.process.Init.Minimal) !void {
                 panels_damaged = true;
             }
         };
+        if (fds[net_index].revents != 0) {
+            if (net_sub.poll()) |r| if (!r.denied) {
+                const net = dock_mod.networkStatusFromReport(r);
+                if (!std.meta.eql(net, dock.network)) {
+                    dock.network = net;
+                    if (dock_shown) {
+                        dock.draw();
+                        renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+                        panels_damaged = true;
+                    }
+                }
+            };
+        }
+        if (fds[sys_index].revents != 0) {
+            if (sys_sub.poll()) |r| if (!r.denied and r.locale.keyboard != server.keyboard_layout) {
+                print("dazzle-shell: keyboard {s}\n", .{r.locale.keyboard.code()});
+                server.setKeyboard(r.locale.keyboard);
+            };
+        }
         // The last frame reached the screen: its frame callbacks fire, and
         // the next one can be drawn.
         if (fds[1].revents != 0) {
@@ -383,14 +412,26 @@ fn run(init: std.process.Init.Minimal) !void {
                     }
                 } else |err| print(sys.log_warning ++ "dazzle-shell: cannot list the apps: {s}\n", .{@errorName(err)});
             }
-            const net = dock_mod.readNetworkStatus();
-            if (!std.meta.eql(net, dock.network)) {
-                dock.network = net;
-                if (dock_shown) {
-                    dock.draw();
-                    renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
-                    panels_damaged = true;
-                }
+            if (net_sub.fd == null) {
+                net_sub.connect();
+                if (net_sub.poll()) |r| if (!r.denied) {
+                    const net = dock_mod.networkStatusFromReport(r);
+                    if (!std.meta.eql(net, dock.network)) {
+                        dock.network = net;
+                        if (dock_shown) {
+                            dock.draw();
+                            renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+                            panels_damaged = true;
+                        }
+                    }
+                };
+            }
+            if (sys_sub.fd == null) {
+                sys_sub.connect();
+                if (sys_sub.poll()) |r| if (!r.denied and r.locale.keyboard != server.keyboard_layout) {
+                    print("dazzle-shell: keyboard {s}\n", .{r.locale.keyboard.code()});
+                    server.setKeyboard(r.locale.keyboard);
+                };
             }
             if (perf_shown) {
                 var pids: [max_clients]linux.pid_t = undefined;

@@ -32,7 +32,7 @@ const print = sys.print;
 
 /// How often to look for a wired adapter, and whether it is still there.
 const look_ns = 2 * std.time.ns_per_s;
-const max_clients = 4;
+const max_clients = 8;
 
 pub fn start() ?linux.pid_t {
     const rc = linux.fork();
@@ -176,28 +176,66 @@ fn networkReady() bool {
     return std.mem.trim(u8, text, " \t\n").len > 0;
 }
 
+fn writeAll(fd: linux.fd_t, bytes: []const u8) bool {
+    var rest = bytes;
+    while (rest.len > 0) {
+        const rc = linux.write(fd, rest.ptr, rest.len);
+        switch (linux.errno(rc)) {
+            .SUCCESS => rest = rest[rc..],
+            .INTR => continue,
+            else => return false,
+        }
+    }
+    return true;
+}
+
+const ClientConn = struct {
+    fd: linux.fd_t,
+    subscribed: bool = false,
+    needs_initial: bool = false,
+};
+
 fn run() !void {
     // Loopback first: some programs talk to themselves over it.
     ipv4.setStatic("lo", .{ 127, 0, 0, 1 }, 8, null) catch {};
 
     const listener = try listen(proto.socket_path);
+    const rtnl: ?linux.fd_t = blk: {
+        const fd: linux.fd_t = @intCast(sys.check(linux.socket(linux.AF.NETLINK, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK, linux.NETLINK.ROUTE)) catch break :blk null);
+        // RTMGRP_LINK (1) | RTMGRP_IPV4_IFADDR (0x10) | RTMGRP_IPV4_ROUTE (0x40)
+        var addr: linux.sockaddr.nl = .{ .pid = 0, .groups = 0x51 };
+        sys.check(linux.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.nl))) catch {
+            sys.close(fd);
+            break :blk null;
+        };
+        break :blk fd;
+    };
     var ethernet: Ethernet = .{};
     var w: wifi.Manager = .{};
-    var clients: [max_clients]?linux.fd_t = @splat(null);
+    var clients: [max_clients]?ClientConn = @splat(null);
+    var last_report: [4096]u8 = undefined;
+    var last_len: usize = 0;
     while (true) {
         const now = sys.nowNs();
         ethernet.look(now);
         w.look(now);
 
-        var fds: [4 + max_clients]linux.pollfd = undefined;
+        var fds: [5 + max_clients]linux.pollfd = undefined;
         fds[0] = .{ .fd = listener, .events = linux.POLL.IN, .revents = 0 };
         fds[1] = .{ .fd = w.eventFd(), .events = linux.POLL.IN, .revents = 0 };
         fds[2] = .{ .fd = w.eapolFd(), .events = linux.POLL.IN, .revents = 0 };
         fds[3] = .{ .fd = w.dhcpFd(), .events = linux.POLL.IN, .revents = 0 };
-        for (clients, fds[4..]) |c, *f| f.* = .{ .fd = c orelse -1, .events = linux.POLL.IN, .revents = 0 };
+        fds[4] = .{ .fd = rtnl orelse -1, .events = linux.POLL.IN, .revents = 0 };
+        for (clients, fds[5..]) |c, *f| f.* = .{ .fd = if (c) |conn| conn.fd else -1, .events = linux.POLL.IN, .revents = 0 };
         _ = linux.poll(&fds, fds.len, 1000);
         const t = sys.nowNs();
 
+        if (fds[4].revents != 0) if (rtnl) |rfd| {
+            var nl_buf: [1024]u8 = undefined;
+            while (linux.errno(linux.recvfrom(rfd, &nl_buf, nl_buf.len, 0, null, null)) == .SUCCESS) {}
+            ethernet.looked_ns = 0;
+            ethernet.look(t);
+        };
         w.events(t);
         w.eapol();
         w.dhcp();
@@ -211,21 +249,26 @@ fn run() !void {
                     sys.close(fd);
                 } else for (&clients) |*c| {
                     if (c.* == null) {
-                        c.* = fd;
+                        c.* = .{ .fd = fd };
                         break;
                     }
                 } else sys.close(fd);
             }
         }
-        for (&clients, fds[4..]) |*c, f| {
-            const fd = c.* orelse continue;
+        for (&clients, fds[5..]) |*c, f| {
+            const conn = &(c.* orelse continue);
             if (f.revents == 0) continue;
             var buf: [256]u8 = undefined;
-            const n = linux.read(fd, &buf, buf.len);
+            const n = linux.read(conn.fd, &buf, buf.len);
             if (linux.errno(n) == .SUCCESS and n > 0) if (proto.Request.parse(buf[0..n])) |req| {
+                if (req == .subscribe) {
+                    conn.subscribed = true;
+                    conn.needs_initial = true;
+                    continue;
+                }
                 ethernet.look(t);
                 switch (req) {
-                    .status => {},
+                    .status, .subscribe => {},
                     .ethernet => |er| ethernet.set(er),
                     .wifi => |wr| w.handle(wr, t),
                 }
@@ -234,11 +277,32 @@ fn run() !void {
                 w.fill(&report);
                 var out: [4096]u8 = undefined;
                 const text = report.write(&out);
-                _ = linux.write(fd, text.ptr, text.len);
+                _ = writeAll(conn.fd, text);
+                if (conn.subscribed) continue;
             };
-            // One request per connection.
-            sys.close(fd);
+            sys.close(conn.fd);
             c.* = null;
+        }
+        var report: proto.Report = .{ .ready = networkReady() };
+        ethernet.fill(&report);
+        w.fill(&report);
+        var out: [4096]u8 = undefined;
+        const text = report.write(&out);
+        const changed = !std.mem.eql(u8, text, last_report[0..last_len]);
+        if (changed) {
+            @memcpy(last_report[0..text.len], text);
+            last_len = text.len;
+        }
+        for (&clients) |*slot| {
+            const conn = &(slot.* orelse continue);
+            if (!conn.subscribed) continue;
+            if (changed or conn.needs_initial) {
+                conn.needs_initial = false;
+                if (!writeAll(conn.fd, text)) {
+                    sys.close(conn.fd);
+                    slot.* = null;
+                }
+            }
         }
     }
 }

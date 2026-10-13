@@ -81,6 +81,7 @@ pub const Updater = struct {
     job: ?store.Job = null,
     /// What the system manager last said.
     report: ?proto.Report = null,
+    sub: proto.Subscription = .{},
     next_ask: u64 = 0,
     /// Whether os.json has been asked for since the program started.
     asked: bool = false,
@@ -91,7 +92,13 @@ pub const Updater = struct {
     pub fn init(gpa: std.mem.Allocator, base_url: []const u8, running: proto.Version) Updater {
         var u: Updater = .{ .gpa = gpa, .base_url = base_url, .running = running };
         u.loadManifest();
+        u.sub.connect();
         return u;
+    }
+
+    pub fn deinit(u: *Updater) void {
+        u.sub.deinit();
+        if (u.manifest) |*m| m.deinit();
     }
 
     pub fn setBaseUrl(u: *Updater, base_url: []const u8) void {
@@ -171,6 +178,17 @@ pub const Updater = struct {
         if (proto.ask("restart\n", 3000) == null) u.setMessage("Cannot restart: the system did not answer", .{});
     }
 
+    fn applyReport(u: *Updater, r: proto.Report) void {
+        u.report = r;
+        // What the manager says of installing goes before what was
+        // said before.
+        switch (r.update) {
+            .failed => if (u.message_len == 0) u.setMessage("Cannot update: {s}", .{r.update_failure.label()}),
+            .installing, .ready => u.message_len = 0,
+            .none => {},
+        }
+    }
+
     /// Follows the job under way and the system manager. Returns whether
     /// what is shown changed.
     pub fn poll(u: *Updater, now: u64) bool {
@@ -185,24 +203,18 @@ pub const Updater = struct {
                     .os_check => if (outcome) |why| u.setMessage("Cannot check for updates: {s}", .{why}) else u.loadManifest(),
                     else => if (outcome) |why| u.setMessage("Cannot update: {s}", .{why}),
                 }
-                u.next_ask = 0;
             }
         }
-        if (now >= u.next_ask) {
-            const was = u.status();
-            u.report = proto.ask("status\n", 1000);
-            // Often while it installs.
-            const installing = if (u.report) |r| r.update == .installing else false;
-            u.next_ask = now + @as(u64, if (installing) 1 else 10) * std.time.ns_per_s;
-            // What the manager says of installing goes before what was
-            // said before.
-            if (u.report) |r| switch (r.update) {
-                .failed => if (u.message_len == 0) u.setMessage("Cannot update: {s}", .{r.update_failure.label()}),
-                .installing, .ready => u.message_len = 0,
-                .none => {},
-            };
-            changed = changed or u.status() != was;
+        if (u.sub.fd == null and now >= u.next_ask) {
+            u.sub.connect();
+            u.next_ask = now + 5 * std.time.ns_per_s;
         }
+        if (u.sub.poll()) |r| if (!r.denied) {
+            const was = u.status();
+            const prev_report = u.report;
+            u.applyReport(r);
+            changed = changed or u.status() != was or !std.meta.eql(prev_report, u.report);
+        };
         return changed;
     }
 };

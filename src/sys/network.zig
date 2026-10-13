@@ -575,6 +575,7 @@ pub const WifiRequest = union(enum) {
 
 pub const Request = union(enum) {
     status,
+    subscribe,
     ethernet: EthernetRequest,
     wifi: WifiRequest,
 
@@ -582,6 +583,7 @@ pub const Request = union(enum) {
         var f = std.mem.tokenizeAny(u8, line, " \n");
         const kind = f.next() orelse return null;
         if (std.mem.eql(u8, kind, "status")) return .status;
+        if (std.mem.eql(u8, kind, "subscribe")) return .subscribe;
         if (std.mem.eql(u8, kind, "ethernet")) {
             const first = f.next() orelse return null;
             var er: EthernetRequest = .{ .addressing = .dhcp };
@@ -1059,6 +1061,101 @@ pub fn ask(request: []const u8) ?Report {
     return Report.parse(buf[0..len]);
 }
 
+/// Extracts the first complete report from `text`, returning it and how
+/// many bytes of `text` it consumed.
+fn takeReport(text: []const u8) ?struct { report: Report, consumed: usize } {
+    var pos: usize = 0;
+    while (pos < text.len) {
+        const nl = std.mem.indexOfScalarPos(u8, text, pos, '\n') orelse return null;
+        const line = std.mem.trim(u8, text[pos..nl], " \r");
+        pos = nl + 1;
+        if (std.mem.eql(u8, line, "end") or std.mem.eql(u8, line, "denied")) {
+            const report = Report.parse(text[0..pos]) orelse return null;
+            return .{ .report = report, .consumed = pos };
+        }
+    }
+    return null;
+}
+
+/// A live connection to the network manager that receives a new `Report`
+/// whenever the network state changes.
+pub const Subscription = struct {
+    fd: ?linux.fd_t = null,
+    buf: [8192]u8 = undefined,
+    len: usize = 0,
+
+    pub fn deinit(s: *Subscription) void {
+        if (s.fd) |fd| sys.close(fd);
+        s.fd = null;
+        s.len = 0;
+    }
+
+    /// Connects and subscribes if not already connected.
+    pub fn connect(s: *Subscription) ?linux.fd_t {
+        return s.connectTo(socket_path);
+    }
+
+    pub fn connectTo(s: *Subscription, path: []const u8) ?linux.fd_t {
+        if (s.fd) |fd| return fd;
+        const fd: linux.fd_t = @intCast(sys.check(linux.socket(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK, 0)) catch return null);
+        var addr: linux.sockaddr.un = .{ .path = @splat(0) };
+        if (path.len >= addr.path.len) {
+            sys.close(fd);
+            return null;
+        }
+        @memcpy(addr.path[0..path.len], path);
+        _ = sys.check(linux.connect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.un))) catch {
+            sys.close(fd);
+            return null;
+        };
+        const req = "subscribe\n";
+        _ = sys.check(linux.write(fd, req.ptr, req.len)) catch {
+            sys.close(fd);
+            return null;
+        };
+        s.fd = fd;
+        s.len = 0;
+        return fd;
+    }
+
+    /// Reads any reports that have arrived without blocking, returning the
+    /// latest complete `Report` if at least one arrived.
+    pub fn poll(s: *Subscription) ?Report {
+        return s.pollFrom(socket_path);
+    }
+
+    pub fn pollFrom(s: *Subscription, path: []const u8) ?Report {
+        const fd = s.connectTo(path) orelse return null;
+        while (s.len < s.buf.len) {
+            const rc = linux.read(fd, s.buf[s.len..].ptr, s.buf.len - s.len);
+            switch (linux.errno(rc)) {
+                .SUCCESS => {
+                    if (rc == 0) {
+                        s.deinit();
+                        break;
+                    }
+                    s.len += rc;
+                },
+                .INTR => continue,
+                .AGAIN => break,
+                else => {
+                    s.deinit();
+                    break;
+                },
+            }
+        }
+        var latest: ?Report = null;
+        while (takeReport(s.buf[0..s.len])) |got| {
+            if (!got.report.denied) latest = got.report;
+            const rem = s.len - got.consumed;
+            std.mem.copyForwards(u8, s.buf[0..rem], s.buf[got.consumed..s.len]);
+            s.len = rem;
+        }
+        if (s.len == s.buf.len) s.len = 0;
+        return latest;
+    }
+};
+
 const testing = std.testing;
 
 fn net(name: []const u8, mbm: i32, freq: u32, sec: Security) Network {
@@ -1212,6 +1309,7 @@ test "the wired adapter's addressing goes through the socket" {
     try testing.expect(Request.parse("ethernet static 10.0.0.2/8 -\n").?.ethernet.addressing.static.gateway == null);
     try testing.expect(Request.parse("ethernet static nonsense\n") == null);
     try testing.expect(Request.parse("status\n").? == .status);
+    try testing.expect(Request.parse("subscribe\n").? == .subscribe);
 
     var r: Report = .{};
     var a: Adapter = .{};
@@ -1239,4 +1337,17 @@ test "the wired adapter's addressing goes through the socket" {
     try testing.expect(back2.ethernetConnected());
     try testing.expectEqual(Ip4{ 192, 168, 1, 20 }, back2.ethernet.address.?);
     try testing.expect(back2.ready);
+
+    // A subscription reads back-to-back reports and returns the latest complete one.
+    var pair: [2]linux.fd_t = undefined;
+    try testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK, 0, &pair));
+    defer sys.close(pair[1]);
+    var sub: Subscription = .{ .fd = pair[0] };
+    defer sub.deinit();
+    _ = linux.write(pair[1], text.ptr, text.len);
+    const text2 = r2.write(&out);
+    _ = linux.write(pair[1], text2.ptr, text2.len);
+    const got = sub.poll().?;
+    try testing.expect(got.ready and got.ethernetConnected());
 }
+
