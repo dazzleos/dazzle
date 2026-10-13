@@ -222,6 +222,12 @@ const ClientConn = struct {
 fn run() !void {
     // Loopback first: some programs talk to themselves over it.
     ipv4.setStatic("lo", .{ 127, 0, 0, 1 }, 8, null) catch {};
+    // Let unprivileged apps open SOCK_DGRAM IPPROTO_ICMP sockets for ping.
+    if (sys.open("/proc/sys/net/ipv4/ping_group_range", .{ .ACCMODE = .WRONLY, .TRUNC = true, .CLOEXEC = true })) |fd| {
+        const range = "0 2147483647\n";
+        _ = linux.write(fd, range.ptr, range.len);
+        sys.close(fd);
+    } else |_| {}
 
     const listener = try listen(proto.socket_path);
     const rtnl: ?linux.fd_t = blk: {
