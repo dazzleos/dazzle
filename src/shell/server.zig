@@ -8,7 +8,7 @@
 //! them: see `Popup`), wl_output (the screen), wl_seat (a pointer, and a
 //! keyboard with a US XKB keymap: see keyboard.zig), wp_cursor_shape_manager_v1
 //! (the pointer's picture, by name) and wl_data_device_manager (copy and
-//! paste: see `setSelection`; drag and drop is not supported yet).
+//! paste: see `setSelection`; drag and drop: see `startDrag`).
 //!
 //! Windows go in the work area above the shell's dock: restored (as they
 //! start, at the size the client chooses when told 0 by 0, in the middle
@@ -145,9 +145,9 @@ const Object = union(enum) {
     touch: u32,
     cursor_shape_manager,
     cursor_shape_device,
-    data_device_manager,
+    data_device_manager: u32,
     data_source: *DataSource,
-    data_device,
+    data_device: u32,
     data_offer: *DataOffer,
     pointer_constraints,
     locked_pointer: *PointerLock,
@@ -175,18 +175,46 @@ pub const PointerLock = struct {
     spent: bool = false,
 };
 
-/// What a client offers to paste, as MIME types. The clipboard (the
-/// selection) holds one at a time.
+/// What a client offers to paste or drag, as MIME types. The clipboard
+/// (the selection) and a drag each hold at most one at a time.
 pub const DataSource = struct {
     client: *Client,
     id: u32,
+    version: u32 = 1,
     mime_types: std.ArrayList([]u8) = .empty,
+    /// Drag-and-drop actions set by wl_data_source.set_actions.
+    actions: ?u32 = null,
+    /// The last negotiated action sent to this source.
+    action: u32 = 0,
+    action_sent: bool = false,
+    /// Used for the selection or a drag: cannot be used again.
+    used: bool = false,
 };
 
-/// What the clipboard holds, as offered to a client: what it can ask for
-/// (`receive`). Null once the source has gone.
+/// What the clipboard or a drag holds, as offered to a client: what it
+/// can ask for (`receive`). `source` is null once the source has gone.
 pub const DataOffer = struct {
+    client: *Client,
+    id: u32,
+    version: u32 = 1,
     source: ?*DataSource,
+    /// True for a drag-and-drop offer; false for a clipboard offer.
+    dnd: bool = false,
+    /// True while this offer is the active drag offer (or dropped and
+    /// awaiting `finish`).
+    active: bool = false,
+    /// True once `wl_data_device.drop` has been sent on this offer.
+    dropped: bool = false,
+    /// True once `wl_data_offer.finish` has been called.
+    finished: bool = false,
+    /// Whether a non-null MIME type has been accepted.
+    accepted: bool = false,
+    /// Drag-and-drop actions and preferred action set by `set_actions`.
+    actions: u32 = 0,
+    preferred_action: u32 = 0,
+    /// The last negotiated action sent to this offer.
+    action: u32 = 0,
+    action_sent: bool = false,
 };
 
 pub const Surface = struct {
@@ -204,6 +232,8 @@ pub const Surface = struct {
     xdg: ?*XdgSurface = null,
     /// Its place in its parent, if it is a subsurface.
     sub: ?*Subsurface = null,
+    /// Used as a drag-and-drop icon (wl_data_device.start_drag).
+    drag_icon: bool = false,
     /// Its subsurfaces, bottom first, drawn above it.
     subsurfaces: std.ArrayList(*Subsurface) = .empty,
     /// Told it is on the output (wl_surface.enter).
@@ -460,6 +490,8 @@ pub const Server = struct {
     /// the offers of it made to clients.
     selection: ?*DataSource = null,
     offers: std.ArrayList(*DataOffer) = .empty,
+    /// A drag-and-drop operation in progress.
+    drag: ?Drag = null,
     /// The screen.
     output: Output = .{},
     /// The popups shown, bottom first.
@@ -472,6 +504,17 @@ pub const Server = struct {
 
     /// A move or resize: by the pointer, or by a touch (`touch`: its ID).
     const Grab = struct { t: *Toplevel, dx: f64, dy: f64, resize: ?Resize = null, touch: ?i32 = null };
+
+    /// A drag-and-drop operation: by the pointer, or by a touch (`touch`:
+    /// its ID).
+    const Drag = struct {
+        client: *Client,
+        source: ?*DataSource,
+        icon: ?*Surface,
+        touch: ?i32 = null,
+        focus: ?*Surface = null,
+        offer: ?*DataOffer = null,
+    };
 
     /// A touch on a surface: its events go to the surface it went down on
     /// (null once that has gone, or the touch is the shell's, moving a
@@ -652,6 +695,21 @@ pub const Server = struct {
         // The client knows it destroyed the surface; no leave events.
         if (s.pointer_focus == surf) s.pointer_focus = null;
         if (s.keyboard_focus == surf) s.keyboard_focus = null;
+        if (s.drag) |*d| {
+            if (d.icon == surf) {
+                d.icon = null;
+                s.damaged = true;
+            }
+            if (d.focus == surf) {
+                d.focus = null;
+                if (d.offer) |offer| {
+                    offer.active = false;
+                    offer.accepted = false;
+                    d.offer = null;
+                }
+                if (d.source) |src| s.clearDragSourceTarget(src);
+            }
+        }
         for (&s.touches) |*slot| if (slot.*) |*tp| if (tp.surface == surf) {
             tp.surface = null;
         };
@@ -767,8 +825,9 @@ pub const Server = struct {
     pub fn scanoutBuffer(s: *const Server, t: *const Toplevel) ?*Buffer {
         if (!t.maximized and !t.fullscreen) return null;
         const surf = t.xdg.surface orelse return null;
-        // Subsurfaces and popups are drawn on it.
+        // Subsurfaces, popups and a drag icon are drawn on it.
         if (surf.subsurfaces.items.len > 0) return null;
+        if (s.drag) |d| if (d.icon) |icon| if (icon.texture() != null) return null;
         for (s.popups.items) |pp| if (pp.xdg.surface) |ps| if (s.rootToplevel(ps) == t) return null;
         const b = surf.buffer orelse return null;
         const area = s.areaOf(t);
@@ -1004,7 +1063,7 @@ pub const Server = struct {
     /// `serial`: a button press it is still holding on the window, or a
     /// touch still down on it; and from where.
     fn clientGrabAllowed(s: *const Server, t: *const Toplevel, serial: u32) ?GrabBy {
-        if (t.maximized or t.fullscreen or !t.shown() or s.grab != null) return null;
+        if (t.maximized or t.fullscreen or !t.shown() or s.grab != null or s.drag != null) return null;
         const surf = t.xdg.surface orelse return null;
         if (s.buttons_down != 0 and serial == s.press_serial and s.pointer_focus == surf) return .{ .press_x = s.press_x, .press_y = s.press_y, .x = s.pointer_x, .y = s.pointer_y };
         if (serial == s.touch_serial) if (s.touchPoint(s.touch_serial_id)) |tp| if (tp.surface == surf) return .{ .press_x = tp.press_x, .press_y = tp.press_y, .x = tp.x, .y = tp.y, .touch = tp.id };
@@ -1311,7 +1370,7 @@ pub const Server = struct {
                         .surface => |x| x,
                         else => return error.InvalidObject,
                     };
-                    if (surf.xdg != null) return c.postError(m.object, p.xdg_wm_base.err.role, "surface already has a role", .{});
+                    if (surf.xdg != null or surf.sub != null or surf.drag_icon) return c.postError(m.object, p.xdg_wm_base.err.role, "surface already has a role", .{});
                     const x = try s.gpa.create(XdgSurface);
                     x.* = .{ .surface = surf, .id = id, .version = version };
                     c.addObject(id, .{ .xdg_surface = x }) catch |e| {
@@ -1359,7 +1418,7 @@ pub const Server = struct {
                         .surface => |x| x,
                         else => return error.InvalidObject,
                     };
-                    if (surf.xdg != null or surf.sub != null) return c.postError(m.object, p.wl_subcompositor.err.bad_surface, "surface already has a role", .{});
+                    if (surf.xdg != null or surf.sub != null or surf.drag_icon) return c.postError(m.object, p.wl_subcompositor.err.bad_surface, "surface already has a role", .{});
                     // Not itself, nor one of its own subsurfaces.
                     var at: ?*Surface = parent;
                     while (at) |a| : (at = if (a.sub) |sub| sub.parent else null) {
@@ -1549,11 +1608,11 @@ pub const Server = struct {
             .pointer => if (m.opcode == p.wl_pointer.request.release) c.deleteId(m.object),
             .touch => if (m.opcode == p.wl_touch.request.release) c.deleteId(m.object),
             .keyboard => if (m.opcode == p.wl_keyboard.request.release) c.deleteId(m.object),
-            .data_device_manager => switch (m.opcode) {
+            .data_device_manager => |version| switch (m.opcode) {
                 p.wl_data_device_manager.request.create_data_source => {
                     const id = try r.uint();
                     const src = try s.gpa.create(DataSource);
-                    src.* = .{ .client = c, .id = id };
+                    src.* = .{ .client = c, .id = id, .version = version };
                     c.addObject(id, .{ .data_source = src }) catch |e| {
                         s.gpa.destroy(src);
                         return e;
@@ -1562,10 +1621,10 @@ pub const Server = struct {
                 p.wl_data_device_manager.request.get_data_device => {
                     const id = try r.uint();
                     _ = try r.uint(); // the seat: there is one
-                    try c.addObject(id, .data_device);
+                    try c.addObject(id, .{ .data_device = version });
                     // A client with the keyboard learns what the clipboard
                     // holds.
-                    if (s.keyboard_focus) |surf| if (surf.client == c) s.sendSelectionTo(c, id);
+                    if (s.keyboard_focus) |surf| if (surf.client == c) s.sendSelectionTo(c, id, version);
                 },
                 else => return error.InvalidOpcode,
             },
@@ -1583,13 +1642,44 @@ pub const Server = struct {
                     c.deleteId(m.object);
                     s.destroySource(src);
                 },
-                // Actions are for drag and drop.
-                p.wl_data_source.request.set_actions => {},
+                p.wl_data_source.request.set_actions => {
+                    const actions = try r.uint();
+                    if (actions & ~@as(u32, p.wl_data_device_manager.dnd_action.all) != 0)
+                        return c.postError(m.object, p.wl_data_source.err.invalid_action_mask, "invalid action mask {d}", .{actions});
+                    if (src.used or src.actions != null)
+                        return c.postError(m.object, p.wl_data_source.err.invalid_source, "actions already set or source already used", .{});
+                    src.actions = actions;
+                },
                 else => return error.InvalidOpcode,
             },
             .data_device => switch (m.opcode) {
-                // Drag and drop is not supported: nothing is dragged.
-                p.wl_data_device.request.start_drag => {},
+                p.wl_data_device.request.start_drag => {
+                    const src_id = try r.uint();
+                    const origin_id = try r.uint();
+                    const icon_id = try r.uint();
+                    const serial = try r.uint();
+                    const src: ?*DataSource = if (src_id == 0) null else switch (c.objects.get(src_id) orelse return error.InvalidObject) {
+                        .data_source => |x| x,
+                        else => return error.InvalidObject,
+                    };
+                    const origin = switch (c.objects.get(origin_id) orelse return error.InvalidObject) {
+                        .surface => |x| x,
+                        else => return error.InvalidObject,
+                    };
+                    const icon: ?*Surface = if (icon_id == 0) null else switch (c.objects.get(icon_id) orelse return error.InvalidObject) {
+                        .surface => |x| x,
+                        else => return error.InvalidObject,
+                    };
+                    if (icon) |ic| {
+                        if (ic.xdg != null or ic.sub != null) return c.postError(m.object, p.wl_data_device.err.role, "surface already has a role", .{});
+                        ic.drag_icon = true;
+                    }
+                    if (src) |ds| {
+                        if (ds.used) return c.postError(m.object, p.wl_data_device.err.used_source, "data source already used", .{});
+                        ds.used = true;
+                    }
+                    s.startDrag(c, src, origin, icon, serial);
+                },
                 p.wl_data_device.request.set_selection => {
                     const id = try r.uint();
                     _ = try r.uint(); // serial
@@ -1597,23 +1687,68 @@ pub const Server = struct {
                         .data_source => |x| x,
                         else => return error.InvalidObject,
                     };
+                    if (src) |ds| {
+                        if (ds.actions != null) return c.postError(ds.id, p.wl_data_source.err.invalid_source, "drag source cannot be used as selection", .{});
+                        if (ds.used) return c.postError(m.object, p.wl_data_device.err.used_source, "data source already used", .{});
+                        ds.used = true;
+                    }
                     s.setSelection(c, src);
                 },
                 p.wl_data_device.request.release => c.deleteId(m.object),
                 else => return error.InvalidOpcode,
             },
             .data_offer => |offer| switch (m.opcode) {
+                p.wl_data_offer.request.accept => {
+                    _ = try r.uint(); // serial
+                    const mime = try r.string();
+                    if (offer.finished) return c.postError(m.object, p.wl_data_offer.err.invalid_offer, "offer already finished", .{});
+                    if (!offer.dnd or !offer.active) return;
+                    offer.accepted = mime != null;
+                    if (offer.source) |src| {
+                        if (src.client.send(src.id, p.wl_data_source.event.target)) |m0| {
+                            var e = m0;
+                            e.string(mime).end();
+                        }
+                        if (offer.version < 3) s.negotiateAction(offer);
+                    }
+                },
                 p.wl_data_offer.request.receive => {
                     const mime = (try r.string()) orelse "";
-                    s.receive(offer, mime, try r.fd());
+                    const fd = try r.fd();
+                    if (offer.finished) {
+                        _ = linux.close(fd);
+                        return c.postError(m.object, p.wl_data_offer.err.invalid_offer, "offer already finished", .{});
+                    }
+                    s.receive(offer, mime, fd);
                 },
                 p.wl_data_offer.request.destroy => {
                     // Made by the server: no delete_id.
                     _ = c.objects.remove(m.object);
                     s.destroyOffer(offer);
                 },
-                // Accepting, finishing and actions are for drag and drop.
-                p.wl_data_offer.request.accept, p.wl_data_offer.request.finish, p.wl_data_offer.request.set_actions => {},
+                p.wl_data_offer.request.finish => {
+                    if (!offer.dnd or !offer.dropped or !offer.active or offer.finished or !offer.accepted or (offer.version >= 3 and offer.action == 0))
+                        return c.postError(m.object, p.wl_data_offer.err.invalid_finish, "cannot finish this offer", .{});
+                    offer.finished = true;
+                    offer.active = false;
+                    if (offer.source) |src| {
+                        if (src.version >= 3) sendTo(src.client, src.id, p.wl_data_source.event.dnd_finished, .{});
+                        offer.source = null;
+                    }
+                },
+                p.wl_data_offer.request.set_actions => {
+                    const actions = try r.uint();
+                    const preferred = try r.uint();
+                    if (!offer.dnd or offer.finished)
+                        return c.postError(m.object, p.wl_data_offer.err.invalid_offer, "not an active drag offer", .{});
+                    if (actions & ~@as(u32, p.wl_data_device_manager.dnd_action.all) != 0)
+                        return c.postError(m.object, p.wl_data_offer.err.invalid_action_mask, "invalid action mask {d}", .{actions});
+                    if (preferred & ~@as(u32, p.wl_data_device_manager.dnd_action.all) != 0 or @popCount(preferred) > 1)
+                        return c.postError(m.object, p.wl_data_offer.err.invalid_action, "invalid preferred action {d}", .{preferred});
+                    offer.actions = actions;
+                    offer.preferred_action = preferred;
+                    if (offer.active) s.negotiateAction(offer);
+                },
                 else => return error.InvalidOpcode,
             },
             .cursor_shape_manager => switch (m.opcode) {
@@ -1679,7 +1814,7 @@ pub const Server = struct {
                 };
             },
             6 => try c.addObject(id, .cursor_shape_manager),
-            7 => try c.addObject(id, .data_device_manager),
+            7 => try c.addObject(id, .{ .data_device_manager = version }),
             8 => try c.addObject(id, .subcompositor),
             10 => try c.addObject(id, .pointer_constraints),
             11 => try c.addObject(id, .relative_pointer_manager),
@@ -1945,6 +2080,11 @@ pub const Server = struct {
             const o = s.surfaceOrigin(parent) orelse return null;
             return .{ o[0] + sub.x, o[1] + sub.y };
         }
+        if (s.drag) |d| if (d.icon == surf) {
+            if (surf.texture() == null) return null;
+            const pos = s.dragPos(d);
+            return .{ @intFromFloat(@round(pos[0])), @intFromFloat(@round(pos[1])) };
+        };
         const x = surf.xdg orelse return null;
         if (x.toplevel) |t| {
             if (!t.shown()) return null;
@@ -1964,8 +2104,8 @@ pub const Server = struct {
     pub const Quad = struct { texture: Texture, x: i32, y: i32, clip: Rect };
 
     /// What to draw, bottom first: each window that can be seen, with its
-    /// subsurfaces, then its popups (the top ones, if there are more than
-    /// fit in `buf`).
+    /// subsurfaces, then its popups, and a drag icon on top (the top ones,
+    /// if there are more than fit in `buf`).
     pub fn drawList(s: *const Server, buf: []Quad) []Quad {
         var shown: [32]*Toplevel = undefined;
         var list: std.ArrayList(Quad) = .initBuffer(buf);
@@ -1976,6 +2116,7 @@ pub const Server = struct {
             s.addTree(&list, surf, clip);
             for (s.popups.items) |pp| if (pp.xdg.surface) |ps| if (s.rootToplevel(ps) == t) s.addTree(&list, ps, clip);
         }
+        if (s.drag) |d| if (d.icon) |icon| s.addTree(&list, icon, s.screen());
         return list.items;
     }
 
@@ -2045,6 +2186,7 @@ pub const Server = struct {
     }
 
     fn destroySource(s: *Server, src: *DataSource) void {
+        if (s.drag) |d| if (d.source == src) s.cancelDrag();
         s.forgetSource(src);
         if (s.selection == src) {
             s.selection = null;
@@ -2056,6 +2198,23 @@ pub const Server = struct {
     }
 
     fn destroyOffer(s: *Server, offer: *DataOffer) void {
+        if (s.drag) |*d| if (d.offer == offer) {
+            d.offer = null;
+        };
+        if (offer.dropped and offer.active) {
+            offer.active = false;
+            if (offer.source) |src| if (!src.client.dead) {
+                if (offer.version < 3) {
+                    if (src.version >= 3) sendTo(src.client, src.id, p.wl_data_source.event.dnd_finished, .{});
+                } else {
+                    if (src.version >= 3 and src.action != 0) {
+                        src.action = 0;
+                        sendTo(src.client, src.id, p.wl_data_source.event.action, .{@as(u32, 0)});
+                    }
+                    sendCancelled(src);
+                }
+            };
+        }
         if (std.mem.indexOfScalar(*DataOffer, s.offers.items, offer)) |i| _ = s.offers.swapRemove(i);
         s.gpa.destroy(offer);
     }
@@ -2064,50 +2223,65 @@ pub const Server = struct {
     fn sendSelection(s: *Server) void {
         const surf = s.keyboard_focus orelse return;
         const c = surf.client;
-        var devices: [4]u32 = undefined;
+        var devices: [4]struct { id: u32, version: u32 } = undefined;
         var n: usize = 0;
         var it = c.objects.iterator();
-        while (it.next()) |e| if (e.value_ptr.* == .data_device and n < devices.len) {
-            devices[n] = e.key_ptr.*;
-            n += 1;
+        while (it.next()) |e| switch (e.value_ptr.*) {
+            .data_device => |v| if (n < devices.len) {
+                devices[n] = .{ .id = e.key_ptr.*, .version = v };
+                n += 1;
+            },
+            else => {},
         };
         // (Offers are added to the objects: not while iterating them.)
-        for (devices[0..n]) |id| s.sendSelectionTo(c, id);
+        for (devices[0..n]) |dev| s.sendSelectionTo(c, dev.id, dev.version);
     }
 
-    /// Sends a client's data device a new offer of what the clipboard
-    /// holds, with its MIME types, as the selection (or that it is empty).
-    fn sendSelectionTo(s: *Server, c: *Client, device: u32) void {
-        if (c.dead) return;
-        const src = s.selection orelse {
-            sendTo(c, device, p.wl_data_device.event.selection, .{@as(u32, 0)});
-            return;
-        };
-        const offer = s.gpa.create(DataOffer) catch return;
-        offer.* = .{ .source = src };
+    /// Sends a client's data device a new offer of `src`, with its MIME
+    /// types (and drag actions, if `dnd`).
+    fn makeOffer(s: *Server, c: *Client, device: u32, version: u32, src: *DataSource, dnd: bool) ?*DataOffer {
+        const offer = s.gpa.create(DataOffer) catch return null;
         const id = c.next_server_id;
         c.next_server_id += 1;
+        offer.* = .{ .client = c, .id = id, .version = version, .source = src, .dnd = dnd };
         s.offers.append(s.gpa, offer) catch {
             s.gpa.destroy(offer);
-            return;
+            return null;
         };
         c.objects.put(s.gpa, id, .{ .data_offer = offer }) catch {
             _ = s.offers.pop();
             s.gpa.destroy(offer);
-            return;
+            return null;
         };
         sendTo(c, device, p.wl_data_device.event.data_offer, .{id});
         for (src.mime_types.items) |mime| if (c.send(id, p.wl_data_offer.event.offer)) |m0| {
             var m = m0;
             m.string(mime).end();
         };
-        sendTo(c, device, p.wl_data_device.event.selection, .{id});
+        if (dnd and version >= 3) sendTo(c, id, p.wl_data_offer.event.source_actions, .{src.actions orelse 0});
+        return offer;
     }
 
-    /// A client asks for what the clipboard holds, as `mime`, written to
-    /// `fd`: its source is asked to write it. If it has gone, `fd` is
-    /// closed (and the client reads nothing).
+    /// Sends a client's data device a new offer of what the clipboard
+    /// holds, with its MIME types, as the selection (or that it is empty).
+    fn sendSelectionTo(s: *Server, c: *Client, device: u32, version: u32) void {
+        if (c.dead) return;
+        const src = s.selection orelse {
+            sendTo(c, device, p.wl_data_device.event.selection, .{@as(u32, 0)});
+            return;
+        };
+        const offer = s.makeOffer(c, device, version, src, false) orelse return;
+        sendTo(c, device, p.wl_data_device.event.selection, .{offer.id});
+    }
+
+    /// A client asks for what an offer holds, as `mime`, written to `fd`:
+    /// its source is asked to write it. If it has gone, `fd` is closed
+    /// (and the client reads nothing).
     fn receive(_: *Server, offer: *DataOffer, mime: []const u8, fd: linux.fd_t) void {
+        if (offer.dnd and !offer.active) {
+            _ = linux.close(fd);
+            return;
+        }
         const src = offer.source orelse {
             _ = linux.close(fd);
             return;
@@ -2116,6 +2290,185 @@ pub const Server = struct {
             var m = m0;
             m.string(mime).fd(fd).end();
         } else _ = linux.close(fd);
+    }
+
+    // --- Drag and drop ---------------------------------------------------------
+
+    /// Whether `origin` has the active button press or touch with `serial`,
+    /// and from where.
+    fn dragAllowed(s: *const Server, origin: *const Surface, serial: u32) ?GrabBy {
+        if (s.grab != null or s.drag != null) return null;
+        if (s.buttons_down != 0 and serial == s.press_serial and s.pointer_focus == origin) return .{ .press_x = s.press_x, .press_y = s.press_y, .x = s.pointer_x, .y = s.pointer_y };
+        if (serial == s.touch_serial) if (s.touchPoint(s.touch_serial_id)) |tp| if (tp.surface == origin) return .{ .press_x = tp.press_x, .press_y = tp.press_y, .x = tp.x, .y = tp.y, .touch = tp.id };
+        return null;
+    }
+
+    /// Starts a drag from `origin` (with an optional `src` and `icon`
+    /// surface) if `serial` matches the active button press or touch on it.
+    fn startDrag(s: *Server, c: *Client, src: ?*DataSource, origin: *Surface, icon: ?*Surface, serial: u32) void {
+        const by = s.dragAllowed(origin, serial) orelse {
+            if (src) |ds| sendCancelled(ds);
+            return;
+        };
+        s.drag = .{ .client = c, .source = src, .icon = icon, .touch = by.touch };
+        s.takeInput(by.touch);
+        s.updateLock();
+        if (icon) |ic| if (ic.texture() != null) {
+            s.damaged = true;
+        };
+        _ = s.updateDragFocus(.{ by.x, by.y });
+    }
+
+    fn dragPos(s: *const Server, d: Drag) [2]f64 {
+        if (d.touch) |id| if (s.touchPoint(id)) |tp| return .{ tp.x, tp.y };
+        return .{ s.pointer_x, s.pointer_y };
+    }
+
+    fn clearDragSourceTarget(_: *Server, src: *DataSource) void {
+        if (src.client.send(src.id, p.wl_data_source.event.target)) |m0| {
+            var e = m0;
+            e.string(null).end();
+        }
+        if (src.version >= 3 and src.action != 0) {
+            src.action = 0;
+            src.action_sent = true;
+            sendTo(src.client, src.id, p.wl_data_source.event.action, .{@as(u32, 0)});
+        }
+    }
+
+    /// Updates the surface under an active drag, sending `leave` and `enter`
+    /// (with a new `wl_data_offer`) when it changes. Returns whether it
+    /// changed.
+    fn updateDragFocus(s: *Server, pos: [2]f64) bool {
+        const d = &(s.drag orelse return false);
+        var under = s.surfaceAt(pos[0], pos[1]);
+        // Without a data source, only the dragging client's own surfaces
+        // receive drag events.
+        if (d.source == null) if (under) |u| if (u.client != d.client) {
+            under = null;
+        };
+        if (under == d.focus) return false;
+        if (d.focus) |old| {
+            broadcast(old.client, .data_device, p.wl_data_device.event.leave, 1, .{});
+            if (d.offer) |offer| {
+                offer.active = false;
+                offer.accepted = false;
+                d.offer = null;
+            }
+            if (d.source) |src| if (under == null) s.clearDragSourceTarget(src);
+        }
+        d.focus = under;
+        const surf = under orelse return true;
+        const c = surf.client;
+        if (c.dead) return true;
+        var devices: [4]struct { id: u32, version: u32 } = undefined;
+        var n: usize = 0;
+        var it = c.objects.iterator();
+        while (it.next()) |e| switch (e.value_ptr.*) {
+            .data_device => |v| if (n < devices.len) {
+                devices[n] = .{ .id = e.key_ptr.*, .version = v };
+                n += 1;
+            },
+            else => {},
+        };
+        const local = s.localTo(surf, pos[0], pos[1]);
+        const serial = s.nextSerial();
+        for (devices[0..n]) |dev| {
+            if (d.source) |src| {
+                const offer = s.makeOffer(c, dev.id, dev.version, src, true) orelse continue;
+                offer.active = true;
+                d.offer = offer;
+                sendTo(c, dev.id, p.wl_data_device.event.enter, .{ serial, surf.id, local[0], local[1], offer.id });
+                s.negotiateAction(offer);
+            } else {
+                sendTo(c, dev.id, p.wl_data_device.event.enter, .{ serial, surf.id, local[0], local[1], @as(u32, 0) });
+            }
+        }
+        return true;
+    }
+
+    /// A drag follows the pointer or touch to (`x`, `y`).
+    fn dragTo(s: *Server, time_ms: u32, x: f64, y: f64) void {
+        const d = s.drag orelse return;
+        if (d.icon) |icon| if (icon.texture() != null) {
+            s.damaged = true;
+        };
+        // Entering a surface carries the position.
+        if (s.updateDragFocus(.{ x, y })) return;
+        const surf = (s.drag orelse return).focus orelse return;
+        const local = s.localTo(surf, x, y);
+        broadcast(surf.client, .data_device, p.wl_data_device.event.motion, 1, .{ time_ms, local[0], local[1] });
+    }
+
+    /// Chooses the drag action from what the source and target offer support,
+    /// and notifies either side whose action changed.
+    fn negotiateAction(_: *Server, offer: *DataOffer) void {
+        const src = offer.source orelse return;
+        const A = p.wl_data_device_manager.dnd_action;
+        const src_actions: u32 = if (src.version < 3) (A.copy | A.move) else (src.actions orelse 0);
+        const dst_actions: u32 = if (offer.version < 3) (if (offer.accepted) src_actions else 0) else offer.actions;
+        const common = src_actions & dst_actions;
+        const chosen: u32 = if (common == 0)
+            A.none
+        else if (offer.preferred_action != 0 and (common & offer.preferred_action) != 0)
+            offer.preferred_action
+        else if ((common & A.copy) != 0)
+            A.copy
+        else if ((common & A.move) != 0)
+            A.move
+        else if ((common & A.ask) != 0)
+            A.ask
+        else
+            A.none;
+        if (offer.version >= 3 and (!offer.action_sent or offer.action != chosen)) {
+            offer.action = chosen;
+            offer.action_sent = true;
+            sendTo(offer.client, offer.id, p.wl_data_offer.event.action, .{chosen});
+        }
+        if (src.version >= 3 and (!src.action_sent or src.action != chosen)) {
+            src.action = chosen;
+            src.action_sent = true;
+            sendTo(src.client, src.id, p.wl_data_source.event.action, .{chosen});
+        }
+    }
+
+    /// Ends an active drag when the buttons are released or the touch comes
+    /// up: drops onto the focused surface if accepted, or cancels the drag.
+    fn endDrag(s: *Server) void {
+        const d = s.drag orelse return;
+        s.drag = null;
+        if (d.icon != null) s.damaged = true;
+        if (d.source) |src| {
+            const accepted = if (d.focus != null) if (d.offer) |offer|
+                offer.accepted and ((src.version < 3 and offer.version < 3) or offer.action != 0 or src.action != 0)
+            else
+                false else false;
+            if (accepted) {
+                const surf = d.focus.?;
+                const offer = d.offer.?;
+                offer.dropped = true;
+                broadcast(surf.client, .data_device, p.wl_data_device.event.drop, 1, .{});
+                if (src.version >= 3) sendTo(src.client, src.id, p.wl_data_source.event.dnd_drop_performed, .{});
+            } else {
+                if (d.focus) |surf| broadcast(surf.client, .data_device, p.wl_data_device.event.leave, 1, .{});
+                if (d.offer) |offer| offer.active = false;
+                if (!src.client.dead) sendCancelled(src);
+            }
+        } else if (d.focus) |surf| {
+            broadcast(surf.client, .data_device, p.wl_data_device.event.drop, 1, .{});
+            broadcast(surf.client, .data_device, p.wl_data_device.event.leave, 1, .{});
+        }
+        if (s.updatePointerFocus()) s.pointerFrame();
+    }
+
+    /// Cancels an active drag (when its source is destroyed).
+    fn cancelDrag(s: *Server) void {
+        const d = s.drag orelse return;
+        s.drag = null;
+        if (d.icon != null) s.damaged = true;
+        if (d.focus) |surf| broadcast(surf.client, .data_device, p.wl_data_device.event.leave, 1, .{});
+        if (d.offer) |offer| offer.active = false;
+        if (s.updatePointerFocus()) s.pointerFrame();
     }
 
     // --- Touch ------------------------------------------------------------------
@@ -2168,6 +2521,7 @@ pub const Server = struct {
         tp.x = x;
         tp.y = y;
         if (s.grab) |g| if (g.touch == id) return s.grabTo(g, x, y);
+        if (s.drag) |d| if (d.touch == id) return s.dragTo(time_ms, x, y);
         const sf = tp.surface orelse return;
         const local = s.localTo(sf, x, y);
         broadcast(sf.client, .touch, p.wl_touch.event.motion, 1, .{ time_ms, @as(u32, @bitCast(id)), local[0], local[1] });
@@ -2182,6 +2536,7 @@ pub const Server = struct {
             break;
         };
         if (s.grab) |g| if (g.touch == id) return s.endGrab();
+        if (s.drag) |d| if (d.touch == id) return s.endDrag();
         const sf = surf orelse return;
         broadcast(sf.client, .touch, p.wl_touch.event.up, 1, .{ s.nextSerial(), time_ms, @as(u32, @bitCast(id)) });
         s.touchedClient(sf.client);
@@ -2223,6 +2578,10 @@ pub const Server = struct {
             if (g.touch != null) return;
             return s.grabTo(g, x, y);
         }
+        if (s.drag) |d| {
+            if (d.touch != null) return;
+            return s.dragTo(time_ms, x, y);
+        }
         // Entering a surface carries the position.
         if (s.updatePointerFocus()) return;
         const surf = s.pointer_focus orelse return;
@@ -2235,7 +2594,7 @@ pub const Server = struct {
     /// Returns whether the pointer is locked, and so stays where it is
     /// (`pointerMotion` is not called).
     pub fn pointerRelative(s: *Server, time_ms: u32, dx: f64, dy: f64) bool {
-        if (s.grab == null) if (s.pointer_focus) |surf| {
+        if (s.grab == null and s.drag == null) if (s.pointer_focus) |surf| {
             const us: u64 = @as(u64, time_ms) * 1000;
             broadcast(surf.client, .relative_pointer, p.zwp_relative_pointer_v1.event.relative_motion, 1, .{ @as(u32, @truncate(us >> 32)), @as(u32, @truncate(us)), dx, dy, dx, dy });
         };
@@ -2254,7 +2613,7 @@ pub const Server = struct {
         const top = s.topWindow();
         const want: ?*PointerLock = for (s.locks.items) |lock| {
             const surf = lock.surface orelse continue;
-            if (lock.spent or surf != s.pointer_focus or s.grab != null) continue;
+            if (lock.spent or surf != s.pointer_focus or s.grab != null or s.drag != null) continue;
             if (top == null or s.rootToplevel(surf) != top) continue;
             break lock;
         } else null;
@@ -2312,6 +2671,10 @@ pub const Server = struct {
             // The move ends when the buttons are released, which are not
             // passed on (a touch's ends when it comes up).
             if (s.buttons_down == 0 and g.touch == null) s.endGrab();
+            return;
+        }
+        if (s.drag) |d| {
+            if (s.buttons_down == 0 and d.touch == null) s.endDrag();
             return;
         }
         if (pressed) {
@@ -2404,6 +2767,7 @@ pub const Server = struct {
     /// whether they are covered (see `updateCovered`).
     pub fn updateFocus(s: *Server) void {
         s.updateCovered();
+        if (s.drag) |d| _ = s.updateDragFocus(s.dragPos(d));
         if (s.updatePointerFocus()) s.pointerFrame();
         s.updateLock();
         // The top window has the keyboard, or its topmost grabbing popup
@@ -2467,7 +2831,7 @@ pub const Server = struct {
     /// is over none; while a button is held down, the surface it was
     /// pressed on keeps the pointer until the button is released.
     fn updatePointerFocus(s: *Server) bool {
-        const under = if (s.grab != null)
+        const under = if (s.grab != null or s.drag != null)
             null
         else if (s.buttons_down != 0)
             (if (s.pointer_focus) |surf| if (surf.texture() != null and s.surfaceOrigin(surf) != null) surf else null else null)

@@ -475,14 +475,21 @@ pub const wl_keyboard = struct {
     };
 };
 
-/// Copy and paste (the clipboard is the "selection"). Drag and drop is
-/// part of the same interfaces; Dazzle does not do it yet.
+/// Copy and paste (the clipboard is the "selection") and drag and drop.
 pub const wl_data_device_manager = struct {
     pub const name = "wl_data_device_manager";
     pub const version = 3;
     pub const request = struct {
         pub const create_data_source = 0;
         pub const get_data_device = 1;
+    };
+    /// Drag-and-drop actions (since version 3).
+    pub const dnd_action = struct {
+        pub const none = 0;
+        pub const copy = 1;
+        pub const move = 2;
+        pub const ask = 4;
+        pub const all = copy | move | ask;
     };
 };
 
@@ -499,11 +506,16 @@ pub const wl_data_source = struct {
         /// Write the data, as this MIME type, to the file descriptor, then
         /// close it.
         pub const send = 1;
-        /// Another source replaced it: it can be destroyed.
+        /// Another source replaced it (or the drag failed): it can be
+        /// destroyed.
         pub const cancelled = 2;
         pub const dnd_drop_performed = 3;
         pub const dnd_finished = 4;
         pub const action = 5;
+    };
+    pub const err = struct {
+        pub const invalid_action_mask = 0;
+        pub const invalid_source = 1;
     };
 };
 
@@ -526,6 +538,10 @@ pub const wl_data_device = struct {
         /// and when it changes.
         pub const selection = 5;
     };
+    pub const err = struct {
+        pub const role = 0;
+        pub const used_source = 1;
+    };
 };
 
 pub const wl_data_offer = struct {
@@ -543,6 +559,12 @@ pub const wl_data_offer = struct {
         pub const offer = 0;
         pub const source_actions = 1;
         pub const action = 2;
+    };
+    pub const err = struct {
+        pub const invalid_finish = 0;
+        pub const invalid_action_mask = 1;
+        pub const invalid_action = 2;
+        pub const invalid_offer = 3;
     };
 };
 

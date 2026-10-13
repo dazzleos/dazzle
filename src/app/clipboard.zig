@@ -206,6 +206,10 @@ pub const Clipboard = struct {
                 c.incoming_mime = null;
                 d.setListener(id, .{ .ptr = c, .handler = offerEvent }) catch {};
             },
+            p.wl_data_device.event.enter => {
+                if (c.incoming) |old| if (old != c.offer) c.destroyOffer(old);
+                c.incoming = null;
+            },
             p.wl_data_device.event.selection => {
                 const id = r.uint() catch return;
                 if (c.offer) |old| if (old != id) c.destroyOffer(old);

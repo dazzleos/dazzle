@@ -438,8 +438,8 @@ test "the keyboard's modifiers are sent as they change" {
     try testing.expectEqual(before + 2, keyboard_heard.counts[p.wl_keyboard.event.modifiers]);
 }
 
-/// What a client heard on its data device: offers, their MIME types, and
-/// the selection.
+/// What a client heard on its data device: offers, their MIME types and
+/// actions, drag enter/motion/leave/drop, and the selection.
 const DataHeard = struct {
     peer: *Peer,
     offer: ?u32 = null,
@@ -447,6 +447,19 @@ const DataHeard = struct {
     selections: u32 = 0,
     mime: [64]u8 = undefined,
     mime_len: usize = 0,
+    source_actions: u32 = 0,
+    action: u32 = 0,
+    enter_serial: u32 = 0,
+    enter_surface: u32 = 0,
+    enter_x: f64 = 0,
+    enter_y: f64 = 0,
+    enter_offer: ?u32 = null,
+    enters: u32 = 0,
+    leaves: u32 = 0,
+    motions: u32 = 0,
+    motion_x: f64 = 0,
+    motion_y: f64 = 0,
+    drops: u32 = 0,
 
     fn deviceEvent(ptr: ?*anyopaque, d: *client.Display, _: u32, opcode: u16, r: *wire.Reader) void {
         const h: *DataHeard = @ptrCast(@alignCast(ptr.?));
@@ -456,6 +469,23 @@ const DataHeard = struct {
                 h.offer = id;
                 d.setListener(id, .{ .ptr = h, .handler = offerEvent }) catch {};
             },
+            p.wl_data_device.event.enter => {
+                h.enter_serial = r.uint() catch return;
+                h.enter_surface = r.uint() catch return;
+                h.enter_x = r.fixed() catch return;
+                h.enter_y = r.fixed() catch return;
+                const id = r.uint() catch return;
+                h.enter_offer = if (id == 0) null else id;
+                h.enters += 1;
+            },
+            p.wl_data_device.event.leave => h.leaves += 1,
+            p.wl_data_device.event.motion => {
+                _ = r.uint() catch return;
+                h.motion_x = r.fixed() catch return;
+                h.motion_y = r.fixed() catch return;
+                h.motions += 1;
+            },
+            p.wl_data_device.event.drop => h.drops += 1,
             p.wl_data_device.event.selection => {
                 const id = r.uint() catch return;
                 h.selection = if (id == 0) null else id;
@@ -467,26 +497,50 @@ const DataHeard = struct {
 
     fn offerEvent(ptr: ?*anyopaque, _: *client.Display, _: u32, opcode: u16, r: *wire.Reader) void {
         const h: *DataHeard = @ptrCast(@alignCast(ptr.?));
-        if (opcode != p.wl_data_offer.event.offer) return;
-        const mime = (r.string() catch return) orelse return;
-        h.mime_len = @min(mime.len, h.mime.len);
-        @memcpy(h.mime[0..h.mime_len], mime[0..h.mime_len]);
+        switch (opcode) {
+            p.wl_data_offer.event.offer => {
+                const mime = (r.string() catch return) orelse return;
+                h.mime_len = @min(mime.len, h.mime.len);
+                @memcpy(h.mime[0..h.mime_len], mime[0..h.mime_len]);
+            },
+            p.wl_data_offer.event.source_actions => h.source_actions = r.uint() catch return,
+            p.wl_data_offer.event.action => h.action = r.uint() catch return,
+            else => {},
+        }
     }
 };
 
-/// What a client heard on its data source: what to send, and where.
+/// What a client heard on its data source: target MIME type, negotiated
+/// action, what to send and where, drop performed/finished, and cancelled.
 const SourceHeard = struct {
     send_fd: ?linux.fd_t = null,
     cancelled: bool = false,
+    drop_performed: bool = false,
+    finished: bool = false,
+    action: u32 = 0,
+    targets: u32 = 0,
+    target_mime: [64]u8 = undefined,
+    target_mime_len: ?usize = null,
 
     fn event(ptr: ?*anyopaque, _: *client.Display, _: u32, opcode: u16, r: *wire.Reader) void {
         const h: *SourceHeard = @ptrCast(@alignCast(ptr.?));
         switch (opcode) {
+            p.wl_data_source.event.target => {
+                h.targets += 1;
+                if (r.string() catch return) |mime| {
+                    const n = @min(mime.len, h.target_mime.len);
+                    @memcpy(h.target_mime[0..n], mime[0..n]);
+                    h.target_mime_len = n;
+                } else h.target_mime_len = null;
+            },
             p.wl_data_source.event.send => {
                 _ = r.string() catch return;
                 h.send_fd = r.fd() catch return;
             },
             p.wl_data_source.event.cancelled => h.cancelled = true,
+            p.wl_data_source.event.dnd_drop_performed => h.drop_performed = true,
+            p.wl_data_source.event.dnd_finished => h.finished = true,
+            p.wl_data_source.event.action => h.action = r.uint() catch return,
             else => {},
         }
     }
@@ -719,3 +773,266 @@ test "pressing in a window keeps the pointer when dragging and releasing outside
     try testing.expect(w.server.grab == null);
 }
 
+test "dragging from one client and dropping on another negotiates actions, draws the icon, transfers data, and finishes" {
+    var w: World = .{};
+    w.init();
+    defer w.deinit();
+    const mime = "text/uri-list";
+    const A = p.wl_data_device_manager.dnd_action;
+    const Side = struct {
+        peer: *Peer,
+        compositor: client.Proxy,
+        shm: client.Proxy,
+        seat: client.Proxy,
+        pointer: client.Proxy,
+        pointer_heard: Heard = .{},
+        manager: client.Proxy,
+        device: client.Proxy,
+        heard: DataHeard,
+        win: Window = .{ .surface = undefined, .xdg = undefined, .toplevel = undefined },
+
+        fn setUp(side: *@This(), world: *World) !void {
+            const peer = try world.connect();
+            side.* = .{
+                .peer = peer,
+                .compositor = undefined,
+                .shm = undefined,
+                .seat = undefined,
+                .pointer = undefined,
+                .manager = undefined,
+                .device = undefined,
+                .heard = .{ .peer = peer },
+            };
+            side.compositor = try peer.bind(p.wl_compositor.name, 4, null);
+            const wm_base = try peer.bind(p.xdg_wm_base.name, 6, null);
+            side.shm = try peer.bind(p.wl_shm.name, 1, null);
+            side.seat = try peer.bind(p.wl_seat.name, 5, null);
+            side.pointer = try peer.d.newObject(side.pointer_heard.listener());
+            var m = try side.seat.request(p.wl_seat.request.get_pointer);
+            m.uint(side.pointer.id).end();
+            side.manager = try peer.bind(p.wl_data_device_manager.name, 3, null);
+            side.device = try peer.d.newObject(.{ .ptr = &side.heard, .handler = DataHeard.deviceEvent });
+            m = try side.manager.request(p.wl_data_device_manager.request.get_data_device);
+            m.uint(side.device.id).uint(side.seat.id).end();
+            try side.win.open(peer, side.compositor, wm_base, side.shm, null);
+        }
+    };
+
+    var a: Side = undefined;
+    try a.setUp(&w);
+    var b: Side = undefined;
+    try b.setUp(&w);
+    // Restore A and B to 400x280 at 200,180, and move B to 350,220 so both
+    // windows are visible side by side.
+    var m = try a.win.toplevel.request(p.xdg_toplevel.request.unset_maximized);
+    m.end();
+    m = try b.win.toplevel.request(p.xdg_toplevel.request.unset_maximized);
+    m.end();
+    try w.pump();
+    try a.peer.show(a.win.surface, try a.peer.shmBuffer(a.shm, 400, 280));
+    try b.peer.show(b.win.surface, try b.peer.shmBuffer(b.shm, 400, 280));
+    try w.pump();
+    w.server.pointerMotion(1, 250, 200);
+    w.server.pointerFrame();
+    w.server.pointerButton(2, p.input.btn_left, true);
+    w.server.pointerFrame();
+    try w.pump();
+    m = try b.win.toplevel.request(p.xdg_toplevel.request.move);
+    m.uint(b.seat.id).uint(w.server.press_serial).end();
+    try w.pump();
+    w.server.pointerMotion(3, 400, 240);
+    w.server.pointerButton(4, p.input.btn_left, false);
+    w.server.pointerFrame();
+    try w.pump();
+
+    // Press in A at 250,250 and start a drag with an icon surface.
+    w.server.pointerMotion(8, 250, 250);
+    w.server.pointerFrame();
+    w.server.pointerButton(9, p.input.btn_left, true);
+    w.server.pointerFrame();
+    try w.pump();
+    const drag_serial = w.server.press_serial;
+
+    var src_heard: SourceHeard = .{};
+    const source = try a.peer.d.newObject(.{ .ptr = &src_heard, .handler = SourceHeard.event });
+    m = try a.manager.request(p.wl_data_device_manager.request.create_data_source);
+    m.uint(source.id).end();
+    m = try source.request(p.wl_data_source.request.offer);
+    m.string(mime).end();
+    m = try source.request(p.wl_data_source.request.set_actions);
+    m.uint(A.copy | A.move).end();
+
+    const icon = try a.peer.surface(a.compositor, null);
+    try a.peer.show(icon, try a.peer.shmBuffer(a.shm, 24, 24));
+    const leaves_before = a.pointer_heard.counts[p.wl_pointer.event.leave];
+    m = try a.device.request(p.wl_data_device.request.start_drag);
+    m.uint(source.id).uint(a.win.surface.id).uint(icon.id).uint(drag_serial).end();
+    try w.pump();
+
+    // Starting the drag takes the pointer away from A (wl_pointer.leave),
+    // enters A's surface on its data device, and draws the icon on top.
+    try testing.expectEqual(leaves_before + 1, a.pointer_heard.counts[p.wl_pointer.event.leave]);
+    try testing.expectEqual(@as(u32, 1), a.heard.enters);
+    try testing.expectEqual(a.win.surface.id, a.heard.enter_surface);
+    var quads: [16]Server.Quad = undefined;
+    const drawn = w.drawn(&quads);
+    try testing.expectEqual(@as(usize, 3), drawn.len);
+    try testing.expectEqual(@as(i32, 250), drawn[2].x);
+    try testing.expectEqual(@as(i32, 250), drawn[2].y);
+
+    // Move over B's window at 650,300 (which is at 350,220, so local 300,80).
+    w.server.pointerMotion(10, 650, 300);
+    w.server.pointerFrame();
+    try w.pump();
+    try testing.expectEqual(@as(u32, 1), a.heard.leaves);
+    try testing.expectEqual(@as(u32, 1), b.heard.enters);
+    try testing.expectEqual(b.win.surface.id, b.heard.enter_surface);
+    try testing.expectEqual(@as(f64, 300), b.heard.enter_x);
+    try testing.expectEqual(@as(f64, 80), b.heard.enter_y);
+    try testing.expectEqual(A.copy | A.move, b.heard.source_actions);
+    try testing.expectEqualStrings(mime, b.heard.mime[0..b.heard.mime_len]);
+    const b_offer_id = b.heard.enter_offer orelse return error.TestUnexpectedResult;
+    const b_offer: client.Proxy = .{ .display = b.peer.d, .id = b_offer_id };
+
+    // B accepts the MIME type and prefers `move`: both sides learn the
+    // negotiated action (`move`), and A learns the accepted target MIME.
+    m = try b_offer.request(p.wl_data_offer.request.accept);
+    m.uint(b.heard.enter_serial).string(mime).end();
+    m = try b_offer.request(p.wl_data_offer.request.set_actions);
+    m.uint(A.copy | A.move).uint(A.move).end();
+    try w.pump();
+    try testing.expectEqual(A.move, b.heard.action);
+    try testing.expectEqual(A.move, src_heard.action);
+    try testing.expectEqualStrings(mime, src_heard.target_mime[0..src_heard.target_mime_len.?]);
+
+    // Moving further inside B sends wl_data_device.motion and moves the icon.
+    w.server.pointerMotion(11, 660, 315);
+    w.server.pointerFrame();
+    try w.pump();
+    try testing.expectEqual(@as(u32, 1), b.heard.motions);
+    try testing.expectEqual(@as(f64, 310), b.heard.motion_x);
+    try testing.expectEqual(@as(f64, 95), b.heard.motion_y);
+    try testing.expectEqual(@as(i32, 660), w.drawn(&quads)[2].x);
+    try testing.expectEqual(@as(i32, 315), w.drawn(&quads)[2].y);
+
+    // Moving outside all windows (e.g. x=100, y=100) leaves B and resets
+    // A's target and action to none.
+    w.server.pointerMotion(12, 100, 100);
+    w.server.pointerFrame();
+    try w.pump();
+    try testing.expectEqual(@as(u32, 1), b.heard.leaves);
+    try testing.expect(src_heard.target_mime_len == null);
+    try testing.expectEqual(A.none, src_heard.action);
+
+    // Re-enter B, accept and negotiate `copy`, then release the button to drop.
+    w.server.pointerMotion(13, 650, 300);
+    w.server.pointerFrame();
+    try w.pump();
+    try testing.expectEqual(@as(u32, 2), b.heard.enters);
+    const offer2: client.Proxy = .{ .display = b.peer.d, .id = b.heard.enter_offer.? };
+    m = try offer2.request(p.wl_data_offer.request.accept);
+    m.uint(b.heard.enter_serial).string(mime).end();
+    m = try offer2.request(p.wl_data_offer.request.set_actions);
+    m.uint(A.copy).uint(A.copy).end();
+    try w.pump();
+    try testing.expectEqual(A.copy, b.heard.action);
+    try testing.expectEqual(A.copy, src_heard.action);
+
+    w.server.pointerButton(14, p.input.btn_left, false);
+    w.server.pointerFrame();
+    try w.pump();
+    try testing.expectEqual(@as(u32, 1), b.heard.drops);
+    try testing.expect(src_heard.drop_performed);
+    try testing.expect(!src_heard.cancelled);
+    // The drag icon is gone once the drag ends, and the pointer enters B.
+    try testing.expectEqual(@as(usize, 2), w.drawn(&quads).len);
+    try testing.expectEqual(w.server.pointer_focus.?.id, b.win.surface.id);
+
+    // B receives the data from the dropped offer, then finishes and destroys it.
+    var pipe: [2]linux.fd_t = undefined;
+    try testing.expectEqual(@as(usize, 0), linux.pipe2(&pipe, .{ .CLOEXEC = true }));
+    m = try offer2.request(p.wl_data_offer.request.receive);
+    m.string(mime).fd(pipe[1]).end();
+    try w.pump();
+    const fd = src_heard.send_fd orelse return error.TestUnexpectedResult;
+    _ = linux.write(fd, "file:///a\r\n", 11);
+    _ = linux.close(fd);
+    var got: [32]u8 = undefined;
+    const n = linux.read(pipe[0], &got, got.len);
+    _ = linux.close(pipe[0]);
+    try testing.expectEqualStrings("file:///a\r\n", got[0..n]);
+
+    m = try offer2.request(p.wl_data_offer.request.finish);
+    m.end();
+    m = try offer2.request(p.wl_data_offer.request.destroy);
+    m.end();
+    try w.pump();
+    try testing.expect(src_heard.finished);
+}
+
+test "releasing an unaccepted drag cancels the source, and a touch can drive a drag" {
+    var w: World = .{};
+    w.init();
+    defer w.deinit();
+    const A = p.wl_data_device_manager.dnd_action;
+    const a = try w.connect();
+    const compositor = try a.bind(p.wl_compositor.name, 4, null);
+    const wm_base = try a.bind(p.xdg_wm_base.name, 6, null);
+    const shm = try a.bind(p.wl_shm.name, 1, null);
+    const seat = try a.bind(p.wl_seat.name, 5, null);
+    var touch_heard: Heard = .{};
+    const touch = try a.d.newObject(touch_heard.listener());
+    var m = try seat.request(p.wl_seat.request.get_touch);
+    m.uint(touch.id).end();
+    const manager = try a.bind(p.wl_data_device_manager.name, 3, null);
+    var data_heard: DataHeard = .{ .peer = a };
+    const device = try a.d.newObject(.{ .ptr = &data_heard, .handler = DataHeard.deviceEvent });
+    m = try manager.request(p.wl_data_device_manager.request.get_data_device);
+    m.uint(device.id).uint(seat.id).end();
+    var win: Window = .{ .surface = undefined, .xdg = undefined, .toplevel = undefined };
+    try win.open(a, compositor, wm_base, shm, null);
+
+    // Touch down and start a drag, then lift the finger without accepting
+    // the offer: the target gets leave and the source gets cancelled.
+    w.server.touchDown(1, 0, 100, 140);
+    try w.pump();
+    const serial: u32 = @intCast(touch_heard.args[0]);
+    var src_heard: SourceHeard = .{};
+    const source = try a.d.newObject(.{ .ptr = &src_heard, .handler = SourceHeard.event });
+    m = try manager.request(p.wl_data_device_manager.request.create_data_source);
+    m.uint(source.id).end();
+    m = try source.request(p.wl_data_source.request.offer);
+    m.string("text/plain").end();
+    m = try source.request(p.wl_data_source.request.set_actions);
+    m.uint(A.copy).end();
+    m = try device.request(p.wl_data_device.request.start_drag);
+    m.uint(source.id).uint(win.surface.id).uint(0).uint(serial).end();
+    try w.pump();
+    try testing.expectEqual(@as(u32, 1), touch_heard.counts[p.wl_touch.event.cancel]);
+    try testing.expectEqual(@as(u32, 1), data_heard.enters);
+
+    w.server.touchMotion(2, 0, 150, 200);
+    try w.pump();
+    try testing.expectEqual(@as(u32, 1), data_heard.motions);
+
+    w.server.touchUp(3, 0);
+    try w.pump();
+    try testing.expectEqual(@as(u32, 0), data_heard.drops);
+    try testing.expectEqual(@as(u32, 1), data_heard.leaves);
+    try testing.expect(src_heard.cancelled);
+
+    // A self-drag (source = 0) enters, moves and drops on the client's own
+    // surface without an offer.
+    w.server.touchDown(4, 1, 200, 240);
+    try w.pump();
+    const serial2: u32 = @intCast(touch_heard.args[0]);
+    m = try device.request(p.wl_data_device.request.start_drag);
+    m.uint(0).uint(win.surface.id).uint(0).uint(serial2).end();
+    try w.pump();
+    try testing.expectEqual(@as(u32, 2), data_heard.enters);
+    try testing.expect(data_heard.enter_offer == null);
+    w.server.touchUp(5, 1);
+    try w.pump();
+    try testing.expectEqual(@as(u32, 1), data_heard.drops);
+    try testing.expectEqual(@as(u32, 2), data_heard.leaves);
+}
