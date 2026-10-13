@@ -104,6 +104,7 @@ pub const scroll_view = @import("scroll_view.zig");
 pub const lazy_grid = @import("lazy_grid.zig");
 pub const icon = @import("icon.zig");
 pub const image = @import("image.zig");
+pub const qr_code = @import("qr_code.zig");
 pub const video_player = @import("video_player.zig");
 pub const video = @import("video");
 /// The icons there are (`icons.Icon`), and their font.
@@ -196,6 +197,7 @@ pub const ScrollView = scroll_view.ScrollView;
 pub const LazyGrid = lazy_grid.LazyGrid;
 pub const Icon = icon.Icon;
 pub const Image = image.Image;
+pub const QrCode = qr_code.QrCode;
 pub const VideoPlayer = video_player.VideoPlayer;
 pub const SeekBar = video_player.SeekBar;
 
@@ -253,6 +255,7 @@ test {
     _ = lazy_grid;
     _ = icon;
     _ = image;
+    _ = qr_code;
     _ = video_player;
     _ = keymap;
     _ = painter;
@@ -260,4 +263,3 @@ test {
     _ = runtime;
     _ = @import("tests.zig");
 }
-

@@ -133,11 +133,28 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
     const upstreams = upstreamOptions(self, adapter.name());
     if (is_hotspot) ensureHotspotDefaults(self, state, hs, current_hs, &upstreams);
 
-    rows.append(a, modeRow(self, b, state, adapter.name(), hs, current_hs, is_hotspot, &upstreams)) catch {};
-    rows.append(a, statusRow(self, b, state, adapter.name(), &report.connection, hs, is_hotspot, report.scanning)) catch {};
-    rows.append(a, addressRow(self, b, state, adapter.name(), &report.connection, hs, current_hs, is_hotspot)) catch {};
+    const active_hs = is_hotspot and current_hs and hs.state == .active;
+    const mode_row = modeRow(self, b, state, adapter.name(), hs, current_hs, is_hotspot, &upstreams);
+    const status_row = statusRow(self, b, state, adapter.name(), &report.connection, hs, is_hotspot, report.scanning);
+    const address_row = addressRow(self, b, state, adapter.name(), &report.connection, hs, current_hs, is_hotspot);
     const m = adapter.mac;
-    rows.append(a, b.item("MAC address", cx.fmt("{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}", .{ m[0], m[1], m[2], m[3], m[4], m[5] }))) catch {};
+    const mac_row = b.item("MAC address", cx.fmt("{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}", .{ m[0], m[1], m[2], m[3], m[4], m[5] }));
+
+    if (active_hs) {
+        const qr_ssid = if (hs.ssid_len > 0) hs.ssid() else state.hotspot_ssid.text();
+        const qr_pass = if (hs.passphrase().len > 0) hs.passphrase() else state.hotspot_password.text();
+        rows.append(a, cx.make(ui.Overlay{
+            .children = &.{
+                b.page(&.{ mode_row, status_row, address_row, mac_row }),
+                cx.make(ui.Align{
+                    .alignment = .top_right,
+                    .child = cx.make(ui.QrCode{ .text = wifiQrText(a, qr_ssid, qr_pass) }),
+                }),
+            },
+        })) catch {};
+    } else {
+        rows.appendSlice(a, &.{ mode_row, status_row, address_row, mac_row }) catch {};
+    }
 
     if (is_hotspot) {
         hotspotRows(self, b, state, adapter.name(), hs, current_hs, &upstreams, &rows);
@@ -1028,6 +1045,47 @@ pub fn printable(cx: *ui.Context, ssid: []const u8) []const u8 {
     return out;
 }
 
+/// Formats a Wi-Fi configuration payload (`WIFI:T:WPA;S:<ssid>;P:<password>;;`)
+/// for a QR code, escaping `\`, `;`, `,`, `"`, and `:`.
+pub fn wifiQrText(a: std.mem.Allocator, ssid: []const u8, password: []const u8) []const u8 {
+    const buf = a.alloc(u8, 256) catch return "";
+    var pos: usize = 0;
+    const prefix = if (password.len == 0) "WIFI:T:nopass;S:" else "WIFI:T:WPA;S:";
+    @memcpy(buf[pos .. pos + prefix.len], prefix);
+    pos += prefix.len;
+    pos = appendWifiQrEscaped(buf, pos, ssid);
+    if (password.len > 0) {
+        const mid = ";P:";
+        @memcpy(buf[pos .. pos + mid.len], mid);
+        pos += mid.len;
+        pos = appendWifiQrEscaped(buf, pos, password);
+    }
+    const suffix = ";;";
+    @memcpy(buf[pos .. pos + suffix.len], suffix);
+    pos += suffix.len;
+    return buf[0..pos];
+}
+
+fn appendWifiQrEscaped(buf: []u8, start: usize, s: []const u8) usize {
+    var pos = start;
+    for (s) |c| {
+        switch (c) {
+            '\\', ';', ',', '"', ':' => {
+                if (pos + 2 > buf.len) break;
+                buf[pos] = '\\';
+                buf[pos + 1] = c;
+                pos += 2;
+            },
+            else => {
+                if (pos + 1 > buf.len) break;
+                buf[pos] = c;
+                pos += 1;
+            },
+        }
+    }
+    return pos;
+}
+
 /// Whether a connection is being made or kept (and can be ended).
 fn connectionBusy(c: *const info.manager.Connection) bool {
     return c.state != .idle and !(c.state == .failed and c.failure != .lost);
@@ -1425,7 +1483,9 @@ test "switching to Access Point mode, applying configuration, and returning to C
     actions = .{};
 
     // Active access point shows Active status, the assigned CIDR address, a Stop button,
-    // disabled AddressConfigButton and config fields, and connected clients.
+    // disabled AddressConfigButton and config fields, connected clients, and the QR code
+    // in the top right.
+    try testing.expect(view.findType(u.root.?, ui.QrCode) == null);
     report.hotspot = .{ .state = .active, .address = .{ 10, 42, 0, 254 }, .prefix = 24 };
     report.hotspot.setSsid("DazzleBox");
     report.hotspot.setPassphrase("secretpass");
@@ -1433,6 +1493,10 @@ test "switching to Access Point mode, applying configuration, and returning to C
     var cl: info.manager.HotspotClient = .{ .mac = .{ 0xa4, 0x5e, 0x60, 0x12, 0x34, 0x56 }, .address = .{ 10, 42, 0, 10 } };
     cl.setName("laptop");
     report.hotspot.addClient(cl);
+    for (view.test_sizes) |size| {
+        Draw(u, d, &report, &actions, &frame_no, size);
+        try testing.expect(!view.overflows(u.root.?));
+    }
     Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
     try testing.expect(view.findText(u.root.?, "Active") != null);
     try testing.expect(view.findText(u.root.?, "10.42.0.254/24") != null);
@@ -1441,17 +1505,22 @@ test "switching to Access Point mode, applying configuration, and returning to C
     try testing.expect(!view.findType(u.root.?, ui.TextField).?.widget.as(ui.TextField).?.enabled);
     try testing.expect(view.findType(view.findType(u.root.?, InternetMenu).?, ui.OutlinedButton).?.widget.as(ui.OutlinedButton).?.on_press == null);
     try testing.expect(view.findText(u.root.?, "laptop (10.42.0.10, a4:5e:60:12:34:56)") != null);
+    const qr_node = view.findType(u.root.?, ui.QrCode).?;
+    try testing.expectEqualStrings("WIFI:T:WPA;S:DazzleBox;P:secretpass;;", qr_node.widget.as(ui.QrCode).?.text);
+    try testing.expect(qr_node.position()[0] > view.findText(u.root.?, "Active").?.position()[0]);
+    try testing.expect(qr_node.position()[1] <= view.findText(u.root.?, "Status").?.position()[1]);
     // Clicking AddressConfigButton while active does not open the popup.
     view.click(u, view.findType(u.root.?, AddressConfigButton).?);
     Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
     try testing.expect(u.menu_root == null);
 
-    // Pressing Stop stops the access point and makes the Address popup and config fields active again.
+    // Pressing Stop stops the access point, hides the QR code, and makes the Address popup and config fields active again.
     view.click(u, view.findText(u.root.?, "Stop").?);
     try testing.expect(actions.disconnect);
     actions = .{};
     report.hotspot = .{};
     Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
+    try testing.expect(view.findType(u.root.?, ui.QrCode) == null);
     try testing.expect(view.findText(u.root.?, "Inactive") != null);
     try testing.expect(view.findText(u.root.?, "10.42.0.254/24") != null);
     try testing.expect(view.findText(u.root.?, "Start") != null);
@@ -1464,7 +1533,3 @@ test "switching to Access Point mode, applying configuration, and returning to C
     Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
     try testing.expect(view.findText(u.root.?, "Home") != null);
 }
-
-
-
-
