@@ -47,6 +47,7 @@ pub const socket_path = "/os/sockets/network";
 /// The programs the manager answers.
 pub const allowed_program = "/os/shell/dazzle-settings";
 pub const setup_program = "/os/shell/dazzle-setup";
+pub const shell_program = "/os/shell/dazzle-shell";
 
 pub const max_networks = 24;
 pub const max_adapters = 4;

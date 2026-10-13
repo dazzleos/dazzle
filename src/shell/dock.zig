@@ -23,9 +23,73 @@ pub const apps_dir = sys.system.apps_dir;
 
 const background = 0xff1c2a4a;
 const hover_background = 0xff2c3e66;
+const status_border = 0xff3b507a;
 const dot_color = 0xffe8eefc;
 /// Icon colours, picked by the app's name.
 const palette = [_]u32{ 0xff3f7ee8, 0xffe8743f, 0xff3fb86e, 0xffb04fd6, 0xffe8b33f, 0xff3fb8c4, 0xffe84f6a };
+
+pub const NetworkStatus = union(enum) {
+    /// Wi-Fi signal strength in bars (0..4).
+    wifi: u8,
+    /// Wired Ethernet (true when carrier/address is present).
+    ethernet: bool,
+};
+
+pub fn networkStatusFromReport(r: sys.network.Report) NetworkStatus {
+    if (r.wifiAdapters().len > 0) {
+        if (r.hotspot.state == .active) return .{ .wifi = 4 };
+        if (r.connection.state.joined()) {
+            const joined = r.connection.ssid();
+            for (r.slice()) |*n| {
+                if (std.mem.eql(u8, n.ssid(), joined)) return .{ .wifi = @max(n.bars(), 1) };
+            }
+            return .{ .wifi = 4 };
+        }
+        return .{ .wifi = 0 };
+    }
+    return .{ .ethernet = r.ethernetConnected() or r.ethernetCarrier() };
+}
+
+pub fn readNetworkStatus() NetworkStatus {
+    if (sys.network.ask("status\n")) |r| {
+        if (!r.denied) return networkStatusFromReport(r);
+    }
+    const dir = sys.open("/sys/class/net", .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }) catch return .{ .ethernet = false };
+    defer sys.close(dir);
+    var has_wifi = false;
+    var wifi_up = false;
+    var eth_up = false;
+    var buf: [2048]u8 align(8) = undefined;
+    while (true) {
+        const n = sys.check(linux.getdents64(dir, &buf, buf.len)) catch break;
+        if (n == 0) break;
+        var at: usize = 0;
+        while (at < n) {
+            const reclen = std.mem.readInt(u16, buf[at + 16 ..][0..2], .little);
+            const name = std.mem.sliceTo(buf[at + 19 .. at + reclen], 0);
+            at += reclen;
+            if (name.len == 0 or name[0] == '.' or std.mem.eql(u8, name, "lo")) continue;
+            var pbuf: [128]u8 = undefined;
+            const phy = std.fmt.bufPrintZ(&pbuf, "/sys/class/net/{s}/phy80211/name", .{name}) catch continue;
+            const is_wifi = linux.errno(linux.access(phy, linux.F_OK)) == .SUCCESS;
+            const state_path = std.fmt.bufPrintZ(&pbuf, "/sys/class/net/{s}/operstate", .{name}) catch continue;
+            var sbuf: [32]u8 = undefined;
+            const up = if (sys.open(state_path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true })) |fd| blk: {
+                defer sys.close(fd);
+                const sn = sys.check(linux.read(fd, &sbuf, sbuf.len)) catch 0;
+                break :blk std.mem.eql(u8, std.mem.trim(u8, sbuf[0..sn], " \t\r\n"), "up");
+            } else |_| false;
+            if (is_wifi) {
+                has_wifi = true;
+                if (up) wifi_up = true;
+            } else if (up) {
+                eth_up = true;
+            }
+        }
+    }
+    if (has_wifi) return .{ .wifi = if (wifi_up) 4 else 0 };
+    return .{ .ethernet = eth_up };
+}
 
 pub const App = struct {
     /// Its directory's name, and its program's.
@@ -45,20 +109,11 @@ pub const App = struct {
 };
 
 /// The apps in `dir` (its directories that hold a program of the same
-/// name) and the programs `builtin` (paths, those that are there), sorted
-/// by name.
+/// name), sorted by name, followed by the programs `builtin` (paths, those
+/// that are there) on the right.
 pub fn findApps(gpa: std.mem.Allocator, dir_path: []const u8, builtin: []const []const u8) ![]App {
     var apps: std.ArrayList(App) = .empty;
     errdefer apps.deinit(gpa);
-    for (builtin) |p| {
-        const path = try gpa.dupeZ(u8, p);
-        if (linux.errno(linux.access(path, linux.X_OK)) != .SUCCESS) {
-            gpa.free(path);
-            continue;
-        }
-        const owned = try gpa.dupe(u8, std.fs.path.basename(p));
-        try apps.append(gpa, .{ .name = owned, .label = try label(gpa, owned), .path = path, .icon = iconOf(path) });
-    }
     var path_buf: [256]u8 = undefined;
     const dir_z = try std.fmt.bufPrintZ(&path_buf, "{s}", .{dir_path});
     if (sys.open(dir_z, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true })) |dir| {
@@ -70,6 +125,15 @@ pub fn findApps(gpa: std.mem.Allocator, dir_path: []const u8, builtin: []const [
             return std.mem.lessThan(u8, a.name, b.name);
         }
     }.lessThan);
+    for (builtin) |p| {
+        const path = try gpa.dupeZ(u8, p);
+        if (linux.errno(linux.access(path, linux.X_OK)) != .SUCCESS) {
+            gpa.free(path);
+            continue;
+        }
+        const owned = try gpa.dupe(u8, std.fs.path.basename(p));
+        try apps.append(gpa, .{ .name = owned, .label = try label(gpa, owned), .path = path, .icon = iconOf(path) });
+    }
     return apps.toOwnedSlice(gpa);
 }
 
@@ -168,6 +232,8 @@ pub const Dock = struct {
     apps: []App,
     /// The app under the pointer.
     hover: ?usize = null,
+    /// Network status shown in the status box on the right of the dock.
+    network: NetworkStatus = .{ .ethernet = false },
 
     pub fn init(gpa: std.mem.Allocator, f: ?font.Font, apps: []App, screen_width: u32, screen_height: u32) !Dock {
         const scale = @min(@as(f32, @floatFromInt(screen_width)) / 1920, @as(f32, @floatFromInt(screen_height)) / 1080);
@@ -184,15 +250,22 @@ pub const Dock = struct {
         };
     }
 
-    /// Where app `i`'s icon is, in the dock: the icons are in a row in the
-    /// middle.
-    pub fn iconRect(d: *const Dock, i: usize) struct { x: f32, y: f32, size: f32 } {
+    pub const Rect = struct { x: f32, y: f32, size: f32 };
+
+    /// Where app `i`'s icon is, in the dock: the icons and the status box
+    /// on the right are in a row in the middle.
+    pub fn iconRect(d: *const Dock, i: usize) Rect {
         const size = 56 * d.scale;
         const gap = 20 * d.scale;
-        const n: f32 = @floatFromInt(d.apps.len);
+        const n: f32 = @floatFromInt(d.apps.len + 1);
         const row = n * size + (n - 1) * gap;
         const x0 = (@as(f32, @floatFromInt(d.width)) - row) / 2;
         return .{ .x = x0 + @as(f32, @floatFromInt(i)) * (size + gap), .y = 6 * d.scale, .size = size };
+    }
+
+    /// Where the network status box is, to the right of the rightmost app.
+    pub fn statusRect(d: *const Dock) Rect {
+        return d.iconRect(d.apps.len);
     }
 
     /// The app whose icon is at (`x`, `y`) in the dock.
@@ -207,6 +280,7 @@ pub const Dock = struct {
     pub fn draw(d: *Dock) void {
         const canvas: font.Canvas = .{ .pixels = d.pixels, .width = d.width, .height = d.height, .stride = d.width };
         canvas.fill(0, 0, d.width, d.height, background);
+        const icon_font: ?*const font.Font = if (d.icon_font) |*f| f else null;
         for (d.apps, 0..) |*app, i| {
             const r = d.iconRect(i);
             if (d.hover == i) {
@@ -214,7 +288,6 @@ pub const Dock = struct {
                 roundedRect(canvas, r.x - pad, r.y - pad, r.size + 2 * pad, r.size + 2 * pad, 14 * d.scale, hover_background);
             }
             roundedRect(canvas, r.x, r.y, r.size, r.size, 12 * d.scale, app.color());
-            const icon_font: ?*const font.Font = if (d.icon_font) |*f| f else null;
             if (app.icon != null and icon_font != null) {
                 // Icons fill the em square, with the baseline at the bottom.
                 const size = @round(36 * d.scale);
@@ -232,6 +305,28 @@ pub const Dock = struct {
             if (app.pid != null) {
                 const dot = 6 * d.scale;
                 roundedRect(canvas, r.x + (r.size - dot) / 2, r.y + r.size + 3 * d.scale, dot, dot, dot / 2, dot_color);
+            }
+        }
+        const rs = d.statusRect();
+        roundedRectOutline(canvas, rs.x, rs.y, rs.size, rs.size, 12 * d.scale, @max(1.5, 2 * d.scale), status_border);
+        if (icon_font) |f| {
+            const size = @round(36 * d.scale);
+            const x = @round(rs.x + (rs.size - size) / 2);
+            const y = @round(rs.y + (rs.size - size) / 2);
+            var buf: [4]u8 = undefined;
+            switch (d.network) {
+                .wifi => |bars| {
+                    const base_color: u32 = if (bars >= 4) 0xffffffff else 0x40ffffff;
+                    _ = font.draw(canvas, &d.cache, .{ .font = f, .size = size, .color = base_color }, x, y + size, icons.text(.wifi, &buf)) catch {};
+                    if (bars > 0 and bars < 4) {
+                        const lit: icons.Icon = if (bars >= 3) .wifi_2_bar else .wifi_1_bar;
+                        _ = font.draw(canvas, &d.cache, .{ .font = f, .size = size, .color = 0xffffffff }, x, y + size, icons.text(lit, &buf)) catch {};
+                    }
+                },
+                .ethernet => |connected| {
+                    const color: u32 = if (connected) 0xffffffff else 0x40ffffff;
+                    _ = font.draw(canvas, &d.cache, .{ .font = f, .size = size, .color = color }, x, y + size, icons.text(.lan, &buf)) catch {};
+                },
             }
         }
     }
@@ -261,6 +356,29 @@ fn roundedRect(c: font.Canvas, x: f32, y: f32, w: f32, h: f32, radius: f32, colo
         const qy = @abs(@as(f32, @floatFromInt(py)) + 0.5 - cy) - (h / 2 - r);
         const outside = std.math.hypot(@max(qx, 0), @max(qy, 0)) + @min(@max(qx, qy), 0) - r;
         const coverage = std.math.clamp(0.5 - outside, 0, 1);
+        if (coverage <= 0) continue;
+        const p = &c.pixels[py * c.stride + px];
+        p.* = font.text.blend(p.*, color, @intFromFloat(@round(coverage * 255)));
+    };
+}
+
+/// Strokes the outline of a rectangle with rounded corners, anti-aliased,
+/// leaving its interior unfilled.
+fn roundedRectOutline(c: font.Canvas, x: f32, y: f32, w: f32, h: f32, radius: f32, stroke: f32, color: u32) void {
+    const x0: u32 = @intFromFloat(std.math.clamp(@floor(x), 0, @as(f32, @floatFromInt(c.width))));
+    const y0: u32 = @intFromFloat(std.math.clamp(@floor(y), 0, @as(f32, @floatFromInt(c.height))));
+    const x1: u32 = @intFromFloat(std.math.clamp(@ceil(x + w), 0, @as(f32, @floatFromInt(c.width))));
+    const y1: u32 = @intFromFloat(std.math.clamp(@ceil(y + h), 0, @as(f32, @floatFromInt(c.height))));
+    const cx = x + w / 2;
+    const cy = y + h / 2;
+    const r = @min(radius, @min(w, h) / 2);
+    const half_s = stroke / 2;
+    for (y0..y1) |py| for (x0..x1) |px| {
+        const qx = @abs(@as(f32, @floatFromInt(px)) + 0.5 - cx) - (w / 2 - r);
+        const qy = @abs(@as(f32, @floatFromInt(py)) + 0.5 - cy) - (h / 2 - r);
+        const outside = std.math.hypot(@max(qx, 0), @max(qy, 0)) + @min(@max(qx, qy), 0) - r;
+        const dist = @abs(outside + half_s) - half_s;
+        const coverage = std.math.clamp(0.5 - dist, 0, 1);
         if (coverage <= 0) continue;
         const p = &c.pixels[py * c.stride + px];
         p.* = font.text.blend(p.*, color, @intFromFloat(@round(coverage * 255)));
@@ -299,7 +417,7 @@ test "app labels drop the dazzle- prefix" {
     try testing.expectEqualStrings("Notes", m);
 }
 
-test "icons are in a row in the middle, and clicks find them" {
+test "icons and the status box are in a row in the middle, and clicks find the apps" {
     var apps = [_]App{
         .{ .name = "a", .label = "A", .path = "/apps/a/a", .icon = .folder },
         .{ .name = "b", .label = "B", .path = "/apps/b/b" },
@@ -310,9 +428,12 @@ test "icons are in a row in the middle, and clicks find them" {
     try testing.expectEqual(@as(u32, 76), d.height);
     const r0 = d.iconRect(0);
     const r1 = d.iconRect(1);
-    try testing.expectApproxEqAbs(@as(f32, 1920) - (r1.x + r1.size), r0.x, 0.01);
+    const rs = d.statusRect();
+    try testing.expectApproxEqAbs(@as(f32, 1920) - (rs.x + rs.size), r0.x, 0.01);
+    try testing.expect(rs.x > r1.x + r1.size);
     try testing.expectEqual(@as(?usize, 0), d.hit(r0.x + 1, r0.y + 1));
     try testing.expectEqual(@as(?usize, 1), d.hit(r1.x + r1.size - 1, r1.y + r1.size - 1));
+    try testing.expectEqual(@as(?usize, null), d.hit(rs.x + rs.size / 2, rs.y + rs.size / 2));
     try testing.expectEqual(@as(?usize, null), d.hit(r0.x + r0.size + 1, r0.y + 1));
     try testing.expectEqual(@as(?usize, null), d.hit(0, 0));
 
@@ -320,6 +441,7 @@ test "icons are in a row in the middle, and clicks find them" {
     try testing.expect(d.pointerAt(r1.x + 1, r1.y + 1));
     try testing.expect(!d.pointerAt(r1.x + 2, r1.y + 2));
     apps[0].pid = 42;
+    d.network = .{ .ethernet = true };
     d.draw();
     const at = struct {
         fn f(dock: *const Dock, x: f32, y: f32) u32 {
@@ -333,15 +455,37 @@ test "icons are in a row in the middle, and clicks find them" {
     try testing.expectEqual(@as(u32, hover_background), at(&d, r1.x - 2, r1.y + r1.size / 2));
     // The first app's icon is drawn in white in the middle of its square.
     try testing.expectEqual(@as(u32, 0xffffffff), at(&d, r0.x + r0.size / 2, r0.y + r0.size / 2));
+    // The status box has an outline at its top edge, is unfilled inside its padding, and draws the network icon in its middle.
+    try testing.expectEqual(@as(u32, status_border), at(&d, rs.x + rs.size / 2, rs.y + 1));
+    try testing.expectEqual(@as(u32, background), at(&d, rs.x + rs.size / 2, rs.y + 5));
 }
 
-test "apps are the directories holding a program of the same name" {
+test "networkStatusFromReport picks Wi-Fi bars when a Wi-Fi adapter is present and Ethernet otherwise" {
+    const r_eth = sys.network.Report.parse(
+        \\ethernet eth0 dhcp 10.0.2.15/24 10.0.2.2 up
+        \\end
+        \\
+    ).?;
+    try testing.expectEqual(NetworkStatus{ .ethernet = true }, networkStatusFromReport(r_eth));
+
+    const r_wifi = sys.network.Report.parse(
+        \\ethernet eth0 dhcp 10.0.2.15/24 10.0.2.2 up
+        \\wifi adapter wlan0 b8:27:eb:01:02:03 up
+        \\wifi connection connected none 486f6d65 192.168.1.50
+        \\wifi network -6200 2437 wpa2 486f6d65
+        \\end
+        \\
+    ).?;
+    try testing.expectEqual(NetworkStatus{ .wifi = 3 }, networkStatusFromReport(r_wifi));
+}
+
+test "apps are the directories holding a program of the same name, with builtin apps on the right" {
     const a = testing.allocator;
     var tmp_buf: [64]u8 = undefined;
     const root = try std.fmt.bufPrintZ(&tmp_buf, "/tmp/dazzle-dock-test-{d}", .{linux.getpid()});
     defer {
         var b: [128]u8 = undefined;
-        for ([_][]const u8{ "/zeta/zeta", "/alpha/alpha", "/alpha/alpha.icon", "/zeta", "/alpha", "/notes", "" }) |p| {
+        for ([_][]const u8{ "/zeta/zeta", "/alpha/alpha", "/alpha/alpha.icon", "/dazzle-settings", "/zeta", "/alpha", "/notes", "" }) |p| {
             const path = std.fmt.bufPrintZ(&b, "{s}{s}", .{ root, p }) catch unreachable;
             if (linux.errno(linux.unlink(path)) != .SUCCESS) _ = linux.rmdir(path);
         }
@@ -364,10 +508,15 @@ test "apps are the directories holding a program of the same name" {
         _ = linux.write(fd, "folder\n", 7);
         sys.close(fd);
     }
-    // And a program of the shell's own (one that is not there is left out).
+    // And a program of the shell's own whose name sorts before "zeta", to check it stays rightmost.
     var own_buf: [128]u8 = undefined;
-    const own = try std.fmt.bufPrint(&own_buf, "{s}/zeta/zeta", .{root});
-    const apps = try findApps(a, root, &.{ own, "/nonexistent/beta" });
+    const own_z = try std.fmt.bufPrintZ(&own_buf, "{s}/dazzle-settings", .{root});
+    {
+        const fd = try sys.open(own_z, .{ .ACCMODE = .WRONLY, .CREAT = true, .CLOEXEC = true });
+        _ = linux.fchmod(fd, 0o755);
+        sys.close(fd);
+    }
+    const apps = try findApps(a, root, &.{ own_z, "/nonexistent/beta" });
     defer {
         for (apps) |app| {
             a.free(app.name);
@@ -379,9 +528,11 @@ test "apps are the directories holding a program of the same name" {
     try testing.expectEqual(@as(usize, 3), apps.len);
     try testing.expectEqualStrings("alpha", apps[0].name);
     try testing.expectEqual(@as(?icons.Icon, .folder), apps[0].icon);
-    try testing.expectEqual(@as(?icons.Icon, null), apps[2].icon);
+    try testing.expectEqualStrings("zeta", apps[1].name);
     try testing.expectEqualStrings("Zeta", apps[1].label);
-    try testing.expectEqualStrings("zeta", apps[2].name);
     try testing.expect(std.mem.endsWith(u8, apps[1].path, "/zeta/zeta"));
+    try testing.expectEqualStrings("dazzle-settings", apps[2].name);
+    try testing.expectEqual(@as(?icons.Icon, null), apps[2].icon);
     try testing.expectEqual(@as(usize, 0), (try findApps(a, "/nonexistent", &.{})).len);
 }
+

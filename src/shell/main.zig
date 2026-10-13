@@ -100,6 +100,7 @@ fn run(init: std.process.Init.Minimal) !void {
     _ = locale_watch.changed();
     for (apps) |app| print("dazzle-shell: app {s} ({s})\n", .{ app.label, app.path });
     var dock = try dock_mod.Dock.init(gpa, ui_font, apps, renderer.width, renderer.height);
+    dock.network = dock_mod.readNetworkStatus();
     const dock_y: u32 = renderer.height - dock.height;
     const with_dock: server_mod.Rect = .{ .x = 0, .y = 0, .width = renderer.width, .height = dock_y };
     var perf = try perf_mod.Overlay.init(gpa, ui_font, renderer.width, renderer.height);
@@ -194,6 +195,7 @@ fn run(init: std.process.Init.Minimal) !void {
         if (!dock_shown and setup_pid == null) {
             dock_shown = true;
             print("dazzle-shell: setup finished\n", .{});
+            dock.network = dock_mod.readNetworkStatus();
             dock.draw();
             renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
             server.setWorkArea(with_dock);
@@ -380,6 +382,15 @@ fn run(init: std.process.Init.Minimal) !void {
                         panels_damaged = true;
                     }
                 } else |err| print(sys.log_warning ++ "dazzle-shell: cannot list the apps: {s}\n", .{@errorName(err)});
+            }
+            const net = dock_mod.readNetworkStatus();
+            if (!std.meta.eql(net, dock.network)) {
+                dock.network = net;
+                if (dock_shown) {
+                    dock.draw();
+                    renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+                    panels_damaged = true;
+                }
             }
             if (perf_shown) {
                 var pids: [max_clients]linux.pid_t = undefined;

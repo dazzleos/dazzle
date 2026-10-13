@@ -259,7 +259,7 @@ fn allowed(fd: linux.fd_t) bool {
 }
 
 pub fn isAllowedProgram(exe: []const u8) bool {
-    return std.mem.eql(u8, exe, proto.allowed_program) or std.mem.eql(u8, exe, proto.setup_program);
+    return std.mem.eql(u8, exe, proto.allowed_program) or std.mem.eql(u8, exe, proto.setup_program) or std.mem.eql(u8, exe, proto.shell_program);
 }
 
 /// The listening socket, replacing a stale one; only the user can connect.
@@ -276,9 +276,10 @@ fn listen(path: [:0]const u8) !linux.fd_t {
     return fd;
 }
 
-test "only the setup and settings apps are answered" {
+test "only the setup, settings and shell programs are answered" {
     try std.testing.expect(isAllowedProgram("/os/shell/dazzle-settings"));
     try std.testing.expect(isAllowedProgram("/os/shell/dazzle-setup"));
+    try std.testing.expect(isAllowedProgram("/os/shell/dazzle-shell"));
     try std.testing.expect(!isAllowedProgram("/apps/dazzle-demo/dazzle-demo"));
     try std.testing.expect(!isAllowedProgram("/os/shell/dazzle-settings (deleted)"));
     try std.testing.expect(!isAllowedProgram("/tmp/dazzle-settings"));
