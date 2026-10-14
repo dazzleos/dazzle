@@ -172,7 +172,7 @@ const Heard = struct {
     last_opcode: u16 = 0,
     args: [8]i64 = @splat(0),
     /// Events by opcode.
-    counts: [8]u32 = @splat(0),
+    counts: [16]u32 = @splat(0),
     /// On a keyboard: its keymap event carries a file, which is closed.
     keyboard: bool = false,
 
@@ -1035,4 +1035,368 @@ test "releasing an unaccepted drag cancels the source, and a touch can drive a d
     try w.pump();
     try testing.expectEqual(@as(u32, 1), data_heard.drops);
     try testing.expectEqual(@as(u32, 2), data_heard.leaves);
+}
+
+test "client cursors from wl_pointer.set_cursor and cursor shapes from wp_cursor_shape_device_v1" {
+    var w: World = .{};
+    w.init();
+    defer w.deinit();
+    const a = try w.connect();
+    const compositor = try a.bind(p.wl_compositor.name, 4, null);
+    const wm_base = try a.bind(p.xdg_wm_base.name, 6, null);
+    const shm = try a.bind(p.wl_shm.name, 1, null);
+    const seat = try a.bind(p.wl_seat.name, 5, null);
+    var pointer_heard: Heard = .{};
+    const pointer = try a.d.newObject(pointer_heard.listener());
+    var m = try seat.request(p.wl_seat.request.get_pointer);
+    m.uint(pointer.id).end();
+    const shape_mgr = try a.bind(p.wp_cursor_shape_manager_v1.name, 1, null);
+    const shape_dev = try a.d.newObject(null);
+    m = try shape_mgr.request(p.wp_cursor_shape_manager_v1.request.get_pointer);
+    m.uint(shape_dev.id).uint(pointer.id).end();
+    var win: Window = .{ .surface = undefined, .xdg = undefined, .toplevel = undefined };
+    try win.open(a, compositor, wm_base, shm, null);
+
+    // Move pointer into the window to acquire pointer focus and an enter serial.
+    w.server.pointerMotion(1, 100, 100);
+    try w.pump();
+    try testing.expectEqual(w.server.pointer_focus.?.id, win.surface.id);
+    const enter_serial: u32 = @intCast(pointer_heard.args[0]);
+
+    // Setting cursor shapes updates the server's chosen cursor.
+    m = try shape_dev.request(p.wp_cursor_shape_device_v1.request.set_shape);
+    m.uint(enter_serial).uint(p.wp_cursor_shape_device_v1.shape.pointer).end();
+    try w.pump();
+    try testing.expectEqual(.pointer, w.server.cursor());
+
+    m = try shape_dev.request(p.wp_cursor_shape_device_v1.request.set_shape);
+    m.uint(enter_serial).uint(p.wp_cursor_shape_device_v1.shape.text).end();
+    try w.pump();
+    try testing.expectEqual(.text, w.server.cursor());
+
+    m = try shape_dev.request(p.wp_cursor_shape_device_v1.request.set_shape);
+    m.uint(enter_serial).uint(p.wp_cursor_shape_device_v1.shape.not_allowed).end();
+    try w.pump();
+    try testing.expectEqual(.not_allowed, w.server.cursor());
+
+    // Setting a client-drawn cursor surface hides the hardware cursor plane and
+    // draws the cursor surface at (pointer - hotspot) on top of the scene.
+    const cur_surf = try a.surface(compositor, null);
+    try a.show(cur_surf, try a.shmBuffer(shm, 16, 16));
+    m = try pointer.request(p.wl_pointer.request.set_cursor);
+    m.uint(enter_serial).uint(cur_surf.id).int(4).int(6).end();
+    try w.pump();
+    try testing.expectEqual(.hidden, w.server.cursor());
+    var quads: [16]Server.Quad = undefined;
+    const drawn = w.drawn(&quads);
+    try testing.expectEqual(@as(usize, 2), drawn.len);
+    try testing.expectEqual(@as(i32, 96), drawn[1].x);
+    try testing.expectEqual(@as(i32, 94), drawn[1].y);
+
+    // Passing surface = 0 to set_cursor hides the cursor without drawing a quad.
+    m = try pointer.request(p.wl_pointer.request.set_cursor);
+    m.uint(enter_serial).uint(0).int(0).int(0).end();
+    try w.pump();
+    try testing.expectEqual(.hidden, w.server.cursor());
+    try testing.expectEqual(@as(usize, 1), w.drawn(&quads).len);
+}
+
+test "input regions with add and subtract pass pointer events through to the window behind" {
+    var w: World = .{};
+    w.init();
+    defer w.deinit();
+    const a = try w.connect();
+    const b = try w.connect();
+    const a_comp = try a.bind(p.wl_compositor.name, 4, null);
+    const a_wm = try a.bind(p.xdg_wm_base.name, 6, null);
+    const a_shm = try a.bind(p.wl_shm.name, 1, null);
+    const b_comp = try b.bind(p.wl_compositor.name, 4, null);
+    const b_wm = try b.bind(p.xdg_wm_base.name, 6, null);
+    const b_shm = try b.bind(p.wl_shm.name, 1, null);
+
+    var a_win: Window = .{ .surface = undefined, .xdg = undefined, .toplevel = undefined };
+    try a_win.open(a, a_comp, a_wm, a_shm, null);
+    var b_win: Window = .{ .surface = undefined, .xdg = undefined, .toplevel = undefined };
+    try b_win.open(b, b_comp, b_wm, b_shm, null);
+
+    // B is on top (at 0,40, 800x560). Give B an input region covering 0..400x0..560
+    // minus a hole at 100..200x100..200, and an opaque region.
+    const reg = try b.d.newObject(null);
+    var m = try b_comp.request(p.wl_compositor.request.create_region);
+    m.uint(reg.id).end();
+    m = try reg.request(p.wl_region.request.add);
+    m.int(0).int(0).int(400).int(560).end();
+    m = try reg.request(p.wl_region.request.subtract);
+    m.int(100).int(100).int(100).int(100).end();
+    m = try b_win.surface.request(p.wl_surface.request.set_input_region);
+    m.uint(reg.id).end();
+    m = try b_win.surface.request(p.wl_surface.request.set_opaque_region);
+    m.uint(reg.id).end();
+    m = try reg.request(p.wl_region.request.destroy);
+    m.end();
+    m = try b_win.surface.request(p.wl_surface.request.commit);
+    m.end();
+    try w.pump();
+
+    // At 50,100 on screen (50,60 in B): inside B's input region -> hits B.
+    w.server.pointerMotion(1, 50, 100);
+    w.server.pointerFrame();
+    try w.pump();
+    try testing.expectEqual(w.server.pointer_focus.?.client, b.c);
+
+    // At 150,190 on screen (150,150 in B): inside the subtracted hole -> passes through to A!
+    w.server.pointerMotion(2, 150, 190);
+    w.server.pointerFrame();
+    try w.pump();
+    try testing.expectEqual(w.server.pointer_focus.?.client, a.c);
+
+    // At 500,200 on screen (500,160 in B): outside B's 0..400 region -> passes through to A.
+    w.server.pointerMotion(3, 500, 200);
+    w.server.pointerFrame();
+    try w.pump();
+    try testing.expectEqual(w.server.pointer_focus.?.client, a.c);
+}
+
+test "pointer confinement clamps pointer motion to the region, and locked pointer hint warps on unlock" {
+    var w: World = .{};
+    w.init();
+    defer w.deinit();
+    const a = try w.connect();
+    const compositor = try a.bind(p.wl_compositor.name, 4, null);
+    const wm_base = try a.bind(p.xdg_wm_base.name, 6, null);
+    const shm = try a.bind(p.wl_shm.name, 1, null);
+    const seat = try a.bind(p.wl_seat.name, 5, null);
+    const pointer = try a.d.newObject(null);
+    var m = try seat.request(p.wl_seat.request.get_pointer);
+    m.uint(pointer.id).end();
+    const constraints = try a.bind(p.zwp_pointer_constraints_v1.name, 1, null);
+    var win: Window = .{ .surface = undefined, .xdg = undefined, .toplevel = undefined };
+    try win.open(a, compositor, wm_base, shm, null);
+
+    // Create a confinement region [50..150, 60..160] in surface coords (screen [50..150, 100..200]).
+    const reg = try a.d.newObject(null);
+    m = try compositor.request(p.wl_compositor.request.create_region);
+    m.uint(reg.id).end();
+    m = try reg.request(p.wl_region.request.add);
+    m.int(50).int(60).int(100).int(100).end();
+
+    var confined_heard: Heard = .{};
+    const confined = try a.d.newObject(confined_heard.listener());
+    m = try constraints.request(p.zwp_pointer_constraints_v1.request.confine_pointer);
+    m.uint(confined.id).uint(win.surface.id).uint(pointer.id).uint(reg.id).uint(p.zwp_pointer_constraints_v1.lifetime.oneshot).end();
+    try w.pump();
+    // Pointer starts at 400,300 (outside the confinement region), so not confined yet.
+    try testing.expectEqual(@as(u32, 0), confined_heard.counts[p.zwp_confined_pointer_v1.event.confined]);
+
+    // Move pointer into the region (screen 100,150 -> surface 100,110): activates confinement.
+    w.server.pointerMotion(1, 100, 150);
+    w.server.pointerFrame();
+    try w.pump();
+    try testing.expectEqual(@as(u32, 1), confined_heard.counts[p.zwp_confined_pointer_v1.event.confined]);
+
+    // Clamping keeps the pointer inside [50..149, 100..199] on screen.
+    const clamped = w.server.clampPointer(300, 400);
+    try testing.expectEqual(@as(f64, 149), clamped[0]);
+    try testing.expectEqual(@as(f64, 199), clamped[1]);
+
+    // Breaking the constraint sends unconfined and removes oneshot constraint.
+    w.server.breakLock();
+    try w.pump();
+    try testing.expectEqual(@as(u32, 1), confined_heard.counts[p.zwp_confined_pointer_v1.event.unconfined]);
+    m = try confined.request(p.zwp_confined_pointer_v1.request.destroy);
+    m.end();
+
+    // Lock the pointer and set a cursor position hint (220, 180 in surface -> 220, 220 on screen).
+    var locked_heard: Heard = .{};
+    const locked = try a.d.newObject(locked_heard.listener());
+    m = try constraints.request(p.zwp_pointer_constraints_v1.request.lock_pointer);
+    m.uint(locked.id).uint(win.surface.id).uint(pointer.id).uint(0).uint(p.zwp_pointer_constraints_v1.lifetime.persistent).end();
+    m = try locked.request(p.zwp_locked_pointer_v1.request.set_cursor_position_hint);
+    m.fixed(220).fixed(180).end();
+    m = try win.surface.request(p.wl_surface.request.commit);
+    m.end();
+    try w.pump();
+    try testing.expectEqual(@as(u32, 1), locked_heard.counts[p.zwp_locked_pointer_v1.event.locked]);
+
+    // Destroying the locked pointer warps the server pointer to the hint position.
+    m = try locked.request(p.zwp_locked_pointer_v1.request.destroy);
+    m.end();
+    try w.pump();
+    try testing.expectEqual(@as(f64, 220), w.server.pointer_x);
+    try testing.expectEqual(@as(f64, 220), w.server.pointer_y);
+}
+
+test "synchronized subsurfaces hold their committed buffer until the parent commits or set_desync is called" {
+    var w: World = .{};
+    w.init();
+    defer w.deinit();
+    const a = try w.connect();
+    const compositor = try a.bind(p.wl_compositor.name, 4, null);
+    const wm_base = try a.bind(p.xdg_wm_base.name, 6, null);
+    const shm = try a.bind(p.wl_shm.name, 1, null);
+    const subcompositor = try a.bind(p.wl_subcompositor.name, 1, null);
+    var win: Window = .{ .surface = undefined, .xdg = undefined, .toplevel = undefined };
+    try win.open(a, compositor, wm_base, shm, null);
+
+    const sub_surf = try a.surface(compositor, null);
+    const role = try a.d.newObject(null);
+    var m = try subcompositor.request(p.wl_subcompositor.request.get_subsurface);
+    m.uint(role.id).uint(sub_surf.id).uint(win.surface.id).end();
+    m = try role.request(p.wl_subsurface.request.set_sync);
+    m.end();
+    try a.show(sub_surf, try a.shmBuffer(shm, 40, 30));
+    try w.pump();
+
+    // While synchronized, the subsurface's committed buffer is cached and not yet drawn.
+    var quads: [16]Server.Quad = undefined;
+    try testing.expectEqual(@as(usize, 1), w.drawn(&quads).len);
+
+    // Committing the parent applies the cached subsurface state.
+    m = try win.surface.request(p.wl_surface.request.commit);
+    m.end();
+    try w.pump();
+    try testing.expectEqual(@as(usize, 2), w.drawn(&quads).len);
+
+    // Detaching the subsurface buffer while synchronized waits until set_desync.
+    m = try sub_surf.request(p.wl_surface.request.attach);
+    m.uint(0).int(0).int(0).end();
+    m = try sub_surf.request(p.wl_surface.request.commit);
+    m.end();
+    try w.pump();
+    try testing.expectEqual(@as(usize, 2), w.drawn(&quads).len);
+
+    m = try role.request(p.wl_subsurface.request.set_desync);
+    m.end();
+    try w.pump();
+    try testing.expectEqual(@as(usize, 1), w.drawn(&quads).len);
+}
+
+test "xdg_surface window geometry, xdg_toplevel parent/app_id/close, and xdg_wm_base ping/pong" {
+    var w: World = .{};
+    w.init();
+    defer w.deinit();
+    const a = try w.connect();
+    const compositor = try a.bind(p.wl_compositor.name, 4, null);
+    var wm_heard: Heard = .{};
+    const wm_base = try a.bind(p.xdg_wm_base.name, 6, wm_heard.listener());
+    const shm = try a.bind(p.wl_shm.name, 1, null);
+    var win: Window = .{ .surface = undefined, .xdg = undefined, .toplevel = undefined };
+    try win.open(a, compositor, wm_base, shm, null);
+
+    var top_heard: Heard = .{};
+    try a.d.setListener(win.toplevel.id, top_heard.listener());
+
+    // Restore and set a 10,15 window geometry offset (e.g. client-drawn shadow margin).
+    var m = try win.toplevel.request(p.xdg_toplevel.request.unset_maximized);
+    m.end();
+    m = try win.xdg.request(p.xdg_surface.request.set_window_geometry);
+    m.int(10).int(15).int(400).int(280).end();
+    m = try win.toplevel.request(p.xdg_toplevel.request.set_app_id);
+    m.string("io.dazzle.test").end();
+    m = try win.toplevel.request(p.xdg_toplevel.request.set_parent);
+    m.uint(0).end();
+    m = try win.toplevel.request(p.xdg_toplevel.request.show_window_menu);
+    m.uint(0).uint(0).int(20).int(20).end();
+    m = try win.toplevel.request(p.xdg_toplevel.request.set_minimized);
+    m.end();
+    try a.show(win.surface, try a.shmBuffer(shm, 420, 310));
+    try w.pump();
+
+    const t = w.server.topWindow().?;
+    try testing.expectEqualStrings("io.dazzle.test", t.appId());
+    // Window is at 200,180; with geometry offset 10,15 its surface draws at 190,165.
+    var quads: [16]Server.Quad = undefined;
+    const drawn = w.drawn(&quads);
+    try testing.expectEqual(@as(i32, 190), drawn[0].x);
+    try testing.expectEqual(@as(i32, 165), drawn[0].y);
+
+    // Server ping is delivered on xdg_wm_base and cleared by client pong.
+    _ = w.server.ping(a.c);
+    try w.pump();
+    try testing.expect(a.c.ping_serial != 0);
+    try testing.expectEqual(p.xdg_wm_base.event.ping, wm_heard.last_opcode);
+    m = try wm_base.request(p.xdg_wm_base.request.pong);
+    m.uint(@intCast(wm_heard.args[0])).end();
+    try w.pump();
+    try testing.expectEqual(@as(u32, 0), a.c.ping_serial);
+
+    // Closing the toplevel sends xdg_toplevel.close.
+    w.server.closeToplevel(t);
+    try w.pump();
+    try testing.expectEqual(@as(u32, 1), top_heard.counts[p.xdg_toplevel.event.close]);
+}
+
+test "pointer axis v5 sends axis_source, axis_discrete, and axis_stop" {
+    var w: World = .{};
+    w.init();
+    defer w.deinit();
+    const a = try w.connect();
+    const compositor = try a.bind(p.wl_compositor.name, 4, null);
+    const wm_base = try a.bind(p.xdg_wm_base.name, 6, null);
+    const shm = try a.bind(p.wl_shm.name, 1, null);
+    const seat = try a.bind(p.wl_seat.name, 5, null);
+    var pointer_heard: Heard = .{};
+    const pointer = try a.d.newObject(pointer_heard.listener());
+    var m = try seat.request(p.wl_seat.request.get_pointer);
+    m.uint(pointer.id).end();
+    var win: Window = .{ .surface = undefined, .xdg = undefined, .toplevel = undefined };
+    try win.open(a, compositor, wm_base, shm, null);
+
+    w.server.pointerMotion(1, 100, 100);
+    w.server.pointerFrame();
+    w.server.pointerAxis(2, p.wl_pointer.axis.vertical_scroll, 15.0);
+    w.server.pointerFrame();
+    try w.pump();
+    try testing.expectEqual(@as(u32, 1), pointer_heard.counts[p.wl_pointer.event.axis_source]);
+    try testing.expectEqual(@as(u32, 1), pointer_heard.counts[p.wl_pointer.event.axis_discrete]);
+    try testing.expectEqual(@as(u32, 1), pointer_heard.counts[p.wl_pointer.event.axis]);
+
+    // Value 0 sends axis_stop.
+    w.server.pointerAxis(3, p.wl_pointer.axis.vertical_scroll, 0);
+    w.server.pointerFrame();
+    try w.pump();
+    try testing.expectEqual(@as(u32, 1), pointer_heard.counts[p.wl_pointer.event.axis_stop]);
+}
+
+test "surface buffer scale and transform determine logical size, and unmapping sends wl_surface.leave" {
+    var w: World = .{};
+    w.init();
+    defer w.deinit();
+    const a = try w.connect();
+    _ = try a.bind(p.wl_output.name, 4, null);
+    const compositor = try a.bind(p.wl_compositor.name, 4, null);
+    const wm_base = try a.bind(p.xdg_wm_base.name, 6, null);
+    const shm = try a.bind(p.wl_shm.name, 1, null);
+    var surf_heard: Heard = .{};
+    var win: Window = .{ .surface = undefined, .xdg = undefined, .toplevel = undefined };
+    try win.open(a, compositor, wm_base, shm, surf_heard.listener());
+    try testing.expectEqual(@as(u32, 1), surf_heard.counts[p.wl_surface.event.enter]);
+
+    // Restore and attach a 400x600 buffer with scale 2 and 90-degree transform:
+    // logical size becomes (600 / 2) x (400 / 2) = 300 x 200.
+    var m = try win.toplevel.request(p.xdg_toplevel.request.unset_maximized);
+    m.end();
+    m = try win.surface.request(p.wl_surface.request.set_buffer_scale);
+    m.int(2).end();
+    m = try win.surface.request(p.wl_surface.request.set_buffer_transform);
+    m.int(p.wl_output.transform.@"90").end();
+    try a.show(win.surface, try a.shmBuffer(shm, 400, 600));
+    try w.pump();
+
+    var quads: [16]Server.Quad = undefined;
+    const drawn = w.drawn(&quads);
+    try testing.expectEqual(@as(usize, 1), drawn.len);
+    try testing.expectEqual(@as(u32, 300), drawn[0].width);
+    try testing.expectEqual(@as(u32, 200), drawn[0].height);
+    try testing.expectEqual(@as(u3, p.wl_output.transform.@"90"), drawn[0].transform);
+    // Scaled/transformed buffers use the compositor rather than direct scanout.
+    try testing.expect(w.server.scanoutBuffer(w.server.topWindow().?) == null);
+
+    // Unmapping the surface sends wl_surface.leave for the output.
+    m = try win.surface.request(p.wl_surface.request.attach);
+    m.uint(0).int(0).int(0).end();
+    m = try win.surface.request(p.wl_surface.request.commit);
+    m.end();
+    try w.pump();
+    try testing.expectEqual(@as(u32, 1), surf_heard.counts[p.wl_surface.event.leave]);
 }

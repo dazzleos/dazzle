@@ -177,6 +177,13 @@ pub const wl_output = struct {
     };
     pub const transform = struct {
         pub const normal = 0;
+        pub const @"90" = 1;
+        pub const @"180" = 2;
+        pub const @"270" = 3;
+        pub const flipped = 4;
+        pub const flipped_90 = 5;
+        pub const flipped_180 = 6;
+        pub const flipped_270 = 7;
     };
     pub const mode_flags = struct {
         pub const current = 1;
@@ -449,6 +456,15 @@ pub const wl_pointer = struct {
         pub const vertical_scroll = 0;
         pub const horizontal_scroll = 1;
     };
+    pub const axis_source = struct {
+        pub const wheel = 0;
+        pub const finger = 1;
+        pub const continuous = 2;
+        pub const wheel_tilt = 3;
+    };
+    pub const err = struct {
+        pub const role = 0;
+    };
 };
 
 pub const wl_keyboard = struct {
@@ -586,9 +602,25 @@ pub const wp_cursor_shape_device_v1 = struct {
         pub const destroy = 0;
         pub const set_shape = 1;
     };
-    /// The shapes Dazzle uses (of CSS's cursor names).
+    /// CSS cursor names (version 1).
     pub const shape = struct {
         pub const default = 1;
+        pub const context_menu = 2;
+        pub const help = 3;
+        pub const pointer = 4;
+        pub const progress = 5;
+        pub const wait = 6;
+        pub const cell = 7;
+        pub const crosshair = 8;
+        pub const text = 9;
+        pub const vertical_text = 10;
+        pub const alias = 11;
+        pub const copy = 12;
+        pub const move = 13;
+        pub const no_drop = 14;
+        pub const not_allowed = 15;
+        pub const grab = 16;
+        pub const grabbing = 17;
         pub const e_resize = 18;
         pub const n_resize = 19;
         pub const ne_resize = 20;
@@ -601,14 +633,19 @@ pub const wp_cursor_shape_device_v1 = struct {
         pub const ns_resize = 27;
         pub const nesw_resize = 28;
         pub const nwse_resize = 29;
+        pub const col_resize = 30;
+        pub const row_resize = 31;
+        pub const all_scroll = 32;
+        pub const zoom_in = 33;
+        pub const zoom_out = 34;
     };
     pub const err = struct {
         pub const invalid_shape = 1;
     };
 };
 
-/// Locking the pointer in place, for a game that turns its view with the
-/// mouse (pointer-constraints-unstable-v1.xml; confining is not supported).
+/// Locking or confining the pointer to a surface
+/// (pointer-constraints-unstable-v1.xml).
 pub const zwp_pointer_constraints_v1 = struct {
     pub const name = "zwp_pointer_constraints_v1";
     pub const version = 1;
@@ -636,6 +673,18 @@ pub const zwp_locked_pointer_v1 = struct {
     pub const event = struct {
         pub const locked = 0;
         pub const unlocked = 1;
+    };
+};
+
+pub const zwp_confined_pointer_v1 = struct {
+    pub const name = "zwp_confined_pointer_v1";
+    pub const request = struct {
+        pub const destroy = 0;
+        pub const set_region = 1;
+    };
+    pub const event = struct {
+        pub const confined = 0;
+        pub const unconfined = 1;
     };
 };
 

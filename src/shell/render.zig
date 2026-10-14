@@ -30,9 +30,13 @@ var capture_frame: render.Frame = undefined;
 
 pub const Window = struct {
     texture: server.Texture,
-    /// Where its top left goes, and the area it is clipped to.
+    /// Where its top left goes, its logical size (0 = texture size),
+    /// buffer transform, and the area it is clipped to.
     x: i32,
     y: i32,
+    width: u32 = 0,
+    height: u32 = 0,
+    transform: u3 = 0,
     clip: server.Rect,
 };
 
@@ -50,27 +54,41 @@ pub fn recordFrame(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo
     std.debug.assert(windows.len <= max_windows);
     var quads: usize = 0;
     for (windows) |w| {
-        try quad(frame, pipeline, vbo, quads, w.texture, w.x, w.y, .{ .x = w.clip.x, .y = w.clip.y, .width = w.clip.width, .height = w.clip.height });
+        const qw = if (w.width != 0) w.width else w.texture.width;
+        const qh = if (w.height != 0) w.height else w.texture.height;
+        try quad(frame, pipeline, vbo, quads, w.texture, w.x, w.y, qw, qh, w.transform, .{ .x = w.clip.x, .y = w.clip.y, .width = w.clip.width, .height = w.clip.height });
         quads += 1;
     }
     for (panels) |panel| if (panel) |pq| {
-        try quad(frame, pipeline, vbo, quads, pq.texture, pq.x, pq.y, null);
+        try quad(frame, pipeline, vbo, quads, pq.texture, pq.x, pq.y, pq.texture.width, pq.texture.height, 0, null);
         quads += 1;
     };
 }
 
-/// Draws a texture 1:1 with its top left at (x, y).
-fn quad(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, index: usize, t: server.Texture, x: i32, y: i32, scissor: ?render.Viewport) !void {
+fn quadUvs(transform: u3) [4][2]f32 {
+    const rot: [4][2]f32 = switch (@as(u2, @truncate(transform))) {
+        0 => .{ .{ 0, 0 }, .{ 0, 1 }, .{ 1, 0 }, .{ 1, 1 } },
+        1 => .{ .{ 1, 0 }, .{ 0, 0 }, .{ 1, 1 }, .{ 0, 1 } },
+        2 => .{ .{ 1, 1 }, .{ 1, 0 }, .{ 0, 1 }, .{ 0, 0 } },
+        3 => .{ .{ 0, 1 }, .{ 1, 1 }, .{ 0, 0 }, .{ 1, 0 } },
+    };
+    if (transform & 4 == 0) return rot;
+    return .{ rot[2], rot[3], rot[0], rot[1] };
+}
+
+/// Draws a texture with its top left at (x, y) and logical size (qw, qh).
+fn quad(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, index: usize, t: server.Texture, x: i32, y: i32, qw: u32, qh: u32, transform: u3, scissor: ?render.Viewport) !void {
     // Two triangles, in clip space, with texture coordinates.
     const w: f32 = @floatFromInt(frame.target.width);
     const h: f32 = @floatFromInt(frame.target.height);
     const x0 = @as(f32, @floatFromInt(x)) / w * 2 - 1;
-    const x1 = @as(f32, @floatFromInt(x + @as(i32, @intCast(t.width)))) / w * 2 - 1;
+    const x1 = @as(f32, @floatFromInt(x + @as(i32, @intCast(qw)))) / w * 2 - 1;
     const y0 = 1 - @as(f32, @floatFromInt(y)) / h * 2;
-    const y1 = 1 - @as(f32, @floatFromInt(y + @as(i32, @intCast(t.height)))) / h * 2;
+    const y1 = 1 - @as(f32, @floatFromInt(y + @as(i32, @intCast(qh)))) / h * 2;
+    const uv = quadUvs(transform);
     const verts = [6][4]f32{
-        .{ x0, y0, 0, 0 }, .{ x0, y1, 0, 1 }, .{ x1, y0, 1, 0 },
-        .{ x1, y0, 1, 0 }, .{ x0, y1, 0, 1 }, .{ x1, y1, 1, 1 },
+        .{ x0, y0, uv[0][0], uv[0][1] }, .{ x0, y1, uv[1][0], uv[1][1] }, .{ x1, y0, uv[2][0], uv[2][1] },
+        .{ x1, y0, uv[2][0], uv[2][1] }, .{ x0, y1, uv[1][0], uv[1][1] }, .{ x1, y1, uv[3][0], uv[3][1] },
     };
     const offset: u32 = @intCast(index * @sizeOf(@TypeOf(verts)));
     @memcpy(vbo.map[offset..][0..@sizeOf(@TypeOf(verts))], std.mem.asBytes(&verts));

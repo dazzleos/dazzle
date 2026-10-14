@@ -631,8 +631,12 @@ const Pointer = struct {
         ptr.dx = 0;
         ptr.dy = 0;
         if (server.pointerRelative(time_ms, dx, dy)) return;
-        ptr.x = std.math.clamp(ptr.x + dx, 0, ptr.max_x);
-        ptr.y = std.math.clamp(ptr.y + dy, 0, ptr.max_y);
+        const clamped = server.clampPointer(
+            std.math.clamp(ptr.x + dx, 0, ptr.max_x),
+            std.math.clamp(ptr.y + dy, 0, ptr.max_y),
+        );
+        ptr.x = clamped[0];
+        ptr.y = clamped[1];
         ptr.moved = true;
         server.pointerMotion(time_ms, ptr.x, ptr.y);
     }
@@ -762,7 +766,15 @@ fn spawn(program: [*:0]const u8, arg: ?[*:0]const u8, runtime_dir: ?[:0]const u8
 fn frameWindows(server: *server_mod.Server, out: *[render.max_windows]render.Window) []const render.Window {
     var quads: [render.max_windows]server_mod.Server.Quad = undefined;
     const list = server.drawList(&quads);
-    for (list, out[0..list.len]) |q, *w| w.* = .{ .texture = q.texture, .x = q.x, .y = q.y, .clip = q.clip };
+    for (list, out[0..list.len]) |q, *w| w.* = .{
+        .texture = q.texture,
+        .x = q.x,
+        .y = q.y,
+        .width = q.width,
+        .height = q.height,
+        .transform = q.transform,
+        .clip = q.clip,
+    };
     return out[0..list.len];
 }
 

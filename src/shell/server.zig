@@ -125,7 +125,7 @@ const Object = union(enum) {
     callback,
     compositor,
     surface: *Surface,
-    region,
+    region: *Region,
     shm,
     shm_pool: *ShmPool,
     buffer: *Buffer,
@@ -153,28 +153,75 @@ const Object = union(enum) {
     data_offer: *DataOffer,
     pointer_constraints,
     locked_pointer: *PointerLock,
-    /// Confining the pointer is not supported: the object does nothing.
-    confined_pointer,
+    confined_pointer: *PointerLock,
     relative_pointer_manager,
     /// With the version bound (1), for `broadcast`.
     relative_pointer: u32,
 };
 
-/// A client's wish to have the pointer locked in place over a surface
-/// (zwp_locked_pointer_v1), for a game turning its view with the mouse.
-/// It takes effect while the pointer is over the surface and its window is
-/// on top: the pointer stays where it is, its picture is hidden, and the
-/// client gets only its relative motion.
+pub const RegionOp = struct {
+    subtract: bool = false,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+};
+
+pub const Region = struct {
+    ops: std.ArrayList(RegionOp) = .empty,
+
+    pub fn contains(ops: []const RegionOp, x: i32, y: i32) bool {
+        var in = false;
+        for (ops) |op| {
+            if (op.width > 0 and op.height > 0 and x >= op.x and y >= op.y and x -| op.x < op.width and y -| op.y < op.height) {
+                in = !op.subtract;
+            }
+        }
+        return in;
+    }
+
+    pub fn bounds(ops: []const RegionOp) ?Rect {
+        var x0: i32 = std.math.maxInt(i32);
+        var y0: i32 = std.math.maxInt(i32);
+        var x1: i32 = std.math.minInt(i32);
+        var y1: i32 = std.math.minInt(i32);
+        var any = false;
+        for (ops) |op| {
+            if (op.subtract or op.width <= 0 or op.height <= 0) continue;
+            x0 = @min(x0, op.x);
+            y0 = @min(y0, op.y);
+            x1 = @max(x1, op.x +| op.width);
+            y1 = @max(y1, op.y +| op.height);
+            any = true;
+        }
+        if (!any or x1 <= x0 or y1 <= y0) return null;
+        return .{ .x = x0, .y = y0, .width = @intCast(x1 - x0), .height = @intCast(y1 - y0) };
+    }
+};
+
+/// A client's wish to have the pointer locked in place or confined over a
+/// surface (zwp_locked_pointer_v1 / zwp_confined_pointer_v1). It takes
+/// effect while the pointer is over the surface (and inside `region`, if
+/// set) and its window is on top.
 pub const PointerLock = struct {
     client: *Client,
     id: u32,
     /// Null once the surface has been destroyed.
     surface: ?*Surface,
+    /// True for a locked pointer; false for a confined pointer.
+    lock: bool = true,
     /// Takes effect again after it ends (lifetime persistent); otherwise
     /// only once.
     persistent: bool,
     /// Ended, and not persistent: it will not take effect again.
     spent: bool = false,
+    /// Optional constraint region (null = entire surface input region).
+    region: ?[]RegionOp = null,
+    pending_region: ?[]RegionOp = null,
+    pending_region_set: bool = false,
+    /// Cursor position hint for a locked pointer, in surface coordinates.
+    hint: ?[2]f64 = null,
+    pending_hint: ?[2]f64 = null,
 };
 
 /// What a client offers to paste or drag, as MIME types. The clipboard
@@ -227,6 +274,16 @@ pub const Surface = struct {
     pending_callbacks: std.ArrayList(u32) = .empty,
     /// Frame callbacks committed while the window was covered.
     held_callbacks: std.ArrayList(u32) = .empty,
+    pending_scale: ?u32 = null,
+    scale: u32 = 1,
+    pending_transform: ?u3 = null,
+    transform: u3 = 0,
+    pending_input_region: ?[]RegionOp = null,
+    pending_input_region_set: bool = false,
+    input_region: ?[]RegionOp = null,
+    pending_opaque_region: ?[]RegionOp = null,
+    pending_opaque_region_set: bool = false,
+    opaque_region: ?[]RegionOp = null,
     /// The dmabuf buffer being shown, if any.
     buffer: ?*Buffer = null,
     /// A copy of the last shm buffer, owned by the surface.
@@ -236,6 +293,8 @@ pub const Surface = struct {
     sub: ?*Subsurface = null,
     /// Used as a drag-and-drop icon (wl_data_device.start_drag).
     drag_icon: bool = false,
+    /// Used as a pointer cursor (wl_pointer.set_cursor).
+    cursor_role: bool = false,
     /// Its subsurfaces, bottom first, drawn above it.
     subsurfaces: std.ArrayList(*Subsurface) = .empty,
     /// Told it is on the output (wl_surface.enter).
@@ -244,6 +303,18 @@ pub const Surface = struct {
     pub fn texture(s: *const Surface) ?Texture {
         if (s.buffer) |b| return b.dmabuf;
         return s.copy;
+    }
+
+    /// Logical surface dimensions after applying buffer transform and scale.
+    pub fn size(s: *const Surface) ?[2]u32 {
+        const tex = s.texture() orelse return null;
+        const bw = if (s.transform & 1 != 0) tex.height else tex.width;
+        const bh = if (s.transform & 1 != 0) tex.width else tex.height;
+        return .{ @max(bw / s.scale, 1), @max(bh / s.scale, 1) };
+    }
+
+    pub fn hasRole(s: *const Surface) bool {
+        return s.xdg != null or s.sub != null or s.drag_icon or s.cursor_role;
     }
 };
 
@@ -288,6 +359,23 @@ pub const Subsurface = struct {
     y: i32 = 0,
     /// A new place, taking effect when the parent is next committed.
     pending: ?[2]i32 = null,
+    /// In synchronized mode, commits to the subsurface are cached until the
+    /// parent commits (or `set_desync` is called).
+    sync: bool = false,
+    cached: CachedState = .{},
+
+    pub const CachedState = struct {
+        has_state: bool = false,
+        attach: bool = false,
+        buffer: ?*Buffer = null,
+        callbacks: std.ArrayList(u32) = .empty,
+        scale: ?u32 = null,
+        transform: ?u3 = null,
+        input_region: ?[]RegionOp = null,
+        input_region_set: bool = false,
+        opaque_region: ?[]RegionOp = null,
+        opaque_region_set: bool = false,
+    };
 };
 
 /// Where a popup goes (xdg_positioner): see placement.zig.
@@ -325,13 +413,19 @@ pub const XdgSurface = struct {
     configured: bool = false,
     /// The xdg_wm_base version it was made with.
     version: u32 = 1,
+    /// Optional window geometry set by `xdg_surface.set_window_geometry`.
+    pending_geometry: ?Rect = null,
+    geometry: ?Rect = null,
 };
 
 pub const Toplevel = struct {
     xdg: *XdgSurface,
     id: u32,
+    parent: ?*Toplevel = null,
     title_buf: [64]u8 = undefined,
     title_len: usize = 0,
+    app_id_buf: [64]u8 = undefined,
+    app_id_len: usize = 0,
     mapped: bool = false,
     /// Covered by other windows, and told so (see `Server.updateCovered`).
     suspended: bool = false,
@@ -380,6 +474,10 @@ pub const Toplevel = struct {
     pub fn title(t: *const Toplevel) []const u8 {
         return t.title_buf[0..t.title_len];
     }
+
+    pub fn appId(t: *const Toplevel) []const u8 {
+        return t.app_id_buf[0..t.app_id_len];
+    }
 };
 
 pub const Params = struct {
@@ -396,6 +494,9 @@ pub const Client = struct {
     pid: ?linux.pid_t = null,
     /// IDs for objects the server makes (data offers).
     next_server_id: u32 = 0xff000000,
+    /// Last ping serial sent on `xdg_wm_base.ping`, and whether it was ponged.
+    ping_serial: u32 = 0,
+    ponged: bool = false,
 
     fn send(c: *Client, object: u32, opcode: u16) ?wire.Builder {
         if (c.dead) return null;
@@ -479,8 +580,10 @@ pub const Server = struct {
     /// meanwhile.
     grab: ?Grab = null,
     /// The pointer's picture the client under it chose (an arrow until it
-    /// does).
+    /// does), or a custom cursor surface set by `wl_pointer.set_cursor`.
     client_cursor: Cursor = .arrow,
+    cursor_surface: ?*Surface = null,
+    cursor_hotspot: [2]i32 = .{ 0, 0 },
     /// The touches down, and the serial of the last to go down (for a
     /// client to move or resize its window with it).
     touches: [10]?TouchPoint = @splat(null),
@@ -668,6 +771,7 @@ pub const Server = struct {
         _ = c;
         switch (o) {
             .surface => |surf| s.destroySurface(surf),
+            .region => |reg| s.destroyRegion(reg),
             .shm_pool => |pool| pool.unref(s.gpa),
             .xdg_surface => |x| {
                 if (x.surface) |surf| surf.xdg = null;
@@ -683,9 +787,14 @@ pub const Server = struct {
             .positioner => |pos| s.gpa.destroy(pos),
             .popup => |pp| s.destroyPopup(pp),
             .subsurface => |sub| s.destroySubsurface(sub),
-            .locked_pointer => |lock| s.destroyLock(lock),
+            .locked_pointer, .confined_pointer => |lock| s.destroyLock(lock),
             else => {},
         }
+    }
+
+    fn destroyRegion(s: *Server, reg: *Region) void {
+        reg.ops.deinit(s.gpa);
+        s.gpa.destroy(reg);
     }
 
     fn destroySurface(s: *Server, surf: *Surface) void {
@@ -697,6 +806,10 @@ pub const Server = struct {
         // The client knows it destroyed the surface; no leave events.
         if (s.pointer_focus == surf) s.pointer_focus = null;
         if (s.keyboard_focus == surf) s.keyboard_focus = null;
+        if (s.cursor_surface == surf) {
+            s.cursor_surface = null;
+            s.damaged = true;
+        }
         if (s.drag) |*d| {
             if (d.icon == surf) {
                 d.icon = null;
@@ -717,6 +830,10 @@ pub const Server = struct {
         };
         s.setBuffer(surf, null);
         if (surf.copy) |t| s.backend.vtable.destroyTexture(s.backend.ptr, t);
+        if (surf.pending_input_region) |ops| s.gpa.free(ops);
+        if (surf.input_region) |ops| s.gpa.free(ops);
+        if (surf.pending_opaque_region) |ops| s.gpa.free(ops);
+        if (surf.opaque_region) |ops| s.gpa.free(ops);
         // Frame callbacks of a destroyed surface never fire.
         for (surf.pending_callbacks.items) |id| _ = surf.client.objects.remove(id);
         for (surf.held_callbacks.items) |id| _ = surf.client.objects.remove(id);
@@ -730,6 +847,7 @@ pub const Server = struct {
         }
         // Subsurfaces live on, without their surface or parent.
         if (surf.sub) |sub| {
+            s.clearSubsurfaceCached(sub, surf.client);
             s.detachSubsurface(sub);
             sub.surface = null;
         }
@@ -739,6 +857,9 @@ pub const Server = struct {
     }
 
     fn destroyToplevel(s: *Server, t: *Toplevel) void {
+        for (s.toplevels.items) |other| if (other.parent == t) {
+            other.parent = null;
+        };
         s.unmap(t);
         t.xdg.toplevel = null;
         s.gpa.destroy(t);
@@ -838,9 +959,12 @@ pub const Server = struct {
     pub fn scanoutBuffer(s: *const Server, t: *const Toplevel) ?*Buffer {
         if (!t.maximized and !t.fullscreen) return null;
         const surf = t.xdg.surface orelse return null;
-        // Subsurfaces, popups and a drag icon are drawn on it.
+        if (surf.scale != 1 or surf.transform != 0) return null;
+        if (t.xdg.geometry) |g| if (g.x != 0 or g.y != 0) return null;
+        // Subsurfaces, popups, a drag icon and a custom cursor are drawn on it.
         if (surf.subsurfaces.items.len > 0) return null;
         if (s.drag) |d| if (d.icon) |icon| if (icon.texture() != null) return null;
+        if (s.cursor_surface) |cs| if (cs.texture() != null and s.pointer_focus != null) return null;
         for (s.popups.items) |pp| if (pp.xdg.surface) |ps| if (s.rootToplevel(ps) == t) return null;
         const b = surf.buffer orelse return null;
         const area = s.areaOf(t);
@@ -854,6 +978,22 @@ pub const Server = struct {
             var m = m0;
             m.end();
         }
+    }
+
+    /// Asks a client to close `t` (`xdg_toplevel.close`).
+    pub fn closeToplevel(_: *Server, t: *Toplevel) void {
+        const surf = t.xdg.surface orelse return;
+        sendTo(surf.client, t.id, p.xdg_toplevel.event.close, .{});
+    }
+
+    /// Sends `xdg_wm_base.ping` to each of `c`'s `xdg_wm_base` objects and
+    /// returns the ping serial.
+    pub fn ping(s: *Server, c: *Client) u32 {
+        const serial = s.nextSerial();
+        c.ping_serial = serial;
+        c.ponged = false;
+        broadcast(c, .wm_base, p.xdg_wm_base.event.ping, 1, .{serial});
+        return serial;
     }
 
     /// Raises the top window of the client with process `pid` above the
@@ -872,10 +1012,23 @@ pub const Server = struct {
 
     fn raiseToplevel(s: *Server, t: *Toplevel) void {
         const i = std.mem.indexOfScalar(*Toplevel, s.toplevels.items, t) orelse return;
-        if (i + 1 == s.toplevels.items.len) return;
-        _ = s.toplevels.orderedRemove(i);
-        s.toplevels.appendAssumeCapacity(t);
-        s.damaged = true;
+        if (i + 1 < s.toplevels.items.len) {
+            _ = s.toplevels.orderedRemove(i);
+            s.toplevels.appendAssumeCapacity(t);
+            s.damaged = true;
+        }
+        // Keep any transient child toplevels (`child.parent == t`) stacked above `t`.
+        var k: usize = 0;
+        var n = s.toplevels.items.len;
+        while (k < n) {
+            const child = s.toplevels.items[k];
+            if (child.parent == t) {
+                s.raiseToplevel(child);
+                n -= 1;
+            } else {
+                k += 1;
+            }
+        }
     }
 
     /// The top window, which has the keyboard.
@@ -905,18 +1058,25 @@ pub const Server = struct {
         return buf[0..n];
     }
 
-    /// Where a window is on the screen, at the size of what it shows.
+    /// Logical window dimensions of `t` (its `xdg_surface` geometry if set,
+    /// otherwise its surface size).
+    fn toplevelLogicalSize(t: *const Toplevel) [2]u32 {
+        if (t.xdg.geometry) |g| return .{ g.width, g.height };
+        return t.xdg.surface.?.size().?;
+    }
+
+    /// Where a window is on the screen, at the logical size of what it shows.
     pub fn windowRect(s: *const Server, t: *const Toplevel) Rect {
-        const tex = t.xdg.surface.?.texture().?;
+        const sz = toplevelLogicalSize(t);
         if (t.maximized or t.fullscreen) {
             const area = s.areaOf(t);
-            return .{ .x = area.x, .y = area.y, .width = tex.width, .height = tex.height };
+            return .{ .x = area.x, .y = area.y, .width = sz[0], .height = sz[1] };
         }
         return .{
-            .x = if (t.anchor_right) |r| r - @as(i32, @intCast(tex.width)) else t.x,
-            .y = if (t.anchor_bottom) |b| b - @as(i32, @intCast(tex.height)) else t.y,
-            .width = tex.width,
-            .height = tex.height,
+            .x = if (t.anchor_right) |r| r - @as(i32, @intCast(sz[0])) else t.x,
+            .y = if (t.anchor_bottom) |b| b - @as(i32, @intCast(sz[1])) else t.y,
+            .width = sz[0],
+            .height = sz[1],
         };
     }
 
@@ -985,14 +1145,14 @@ pub const Server = struct {
     /// smaller, it is told so.
     fn placeFirst(s: *Server, c: *Client, t: *Toplevel) void {
         if (t.placed or t.maximized) return;
-        const tex = t.xdg.surface.?.texture().?;
+        const sz = toplevelLogicalSize(t);
         const wa = s.work_area;
-        t.width = s.clampWidth(t, tex.width, wa.width);
-        t.height = s.clampHeight(t, tex.height, wa.height);
+        t.width = s.clampWidth(t, sz[0], wa.width);
+        t.height = s.clampHeight(t, sz[1], wa.height);
         t.x = wa.x + @divTrunc(@as(i32, @intCast(wa.width)) - @as(i32, @intCast(t.width)), 2);
         t.y = wa.y + @max(@divTrunc(@as(i32, @intCast(wa.height)) - @as(i32, @intCast(t.height)), 2), 0);
         t.placed = true;
-        if (t.width != tex.width or t.height != tex.height) s.requestConfigure(c, t);
+        if (t.width != sz[0] or t.height != sz[1]) s.requestConfigure(c, t);
     }
 
     /// Makes a window fill the screen, over the dock, or not.
@@ -1179,16 +1339,23 @@ pub const Server = struct {
         if (s.updatePointerFocus()) s.pointerFrame();
     }
 
-    /// The picture shown for a cursor-shape protocol shape: the resizes,
-    /// and an arrow for the others (null if there is no such shape).
+    /// The picture shown for a cursor-shape protocol shape (null if there
+    /// is no such shape).
     fn cursorForShape(shape: u32) ?Cursor {
         const sh = p.wp_cursor_shape_device_v1.shape;
         return switch (shape) {
-            sh.e_resize, sh.w_resize, sh.ew_resize => .resize_horizontal,
-            sh.n_resize, sh.s_resize, sh.ns_resize => .resize_vertical,
+            sh.default, sh.context_menu, sh.help, sh.alias, sh.copy, sh.zoom_in, sh.zoom_out => .arrow,
+            sh.pointer => .pointer,
+            sh.progress, sh.wait => .wait,
+            sh.cell, sh.crosshair => .crosshair,
+            sh.text => .text,
+            sh.vertical_text => .vertical_text,
+            sh.move, sh.all_scroll, sh.grab, sh.grabbing => .move,
+            sh.no_drop, sh.not_allowed => .not_allowed,
+            sh.e_resize, sh.w_resize, sh.ew_resize, sh.col_resize => .resize_horizontal,
+            sh.n_resize, sh.s_resize, sh.ns_resize, sh.row_resize => .resize_vertical,
             sh.nw_resize, sh.se_resize, sh.nwse_resize => .resize_diagonal_down,
             sh.ne_resize, sh.sw_resize, sh.nesw_resize => .resize_diagonal_up,
-            1...17, 30...34 => .arrow,
             else => null,
         };
     }
@@ -1197,10 +1364,17 @@ pub const Server = struct {
     pub const Cursor = @import("cursor.zig").Shape;
 
     /// The pointer's picture: a resize while resizing; otherwise the one
-    /// the client under it chose.
+    /// the client under it chose (or `.hidden` if the client drew its own
+    /// cursor surface).
     pub fn cursor(s: *const Server) Cursor {
-        if (s.active_lock != null) return .hidden;
-        const g = s.grab orelse return if (s.pointer_focus != null) s.client_cursor else .arrow;
+        if (s.pointerLocked()) return .hidden;
+        const g = s.grab orelse {
+            if (s.pointer_focus != null) {
+                if (s.cursor_surface != null) return .hidden;
+                return s.client_cursor;
+            }
+            return .arrow;
+        };
         const edges = if (g.resize) |r| r.edges else 0;
         const v = edges & (edge_top | edge_bottom);
         const h = edges & (edge_left | edge_right);
@@ -1292,10 +1466,37 @@ pub const Server = struct {
                         return e;
                     };
                 },
-                p.wl_compositor.request.create_region => try c.addObject(try r.uint(), .region),
+                p.wl_compositor.request.create_region => {
+                    const id = try r.uint();
+                    const reg = try s.gpa.create(Region);
+                    reg.* = .{};
+                    c.addObject(id, .{ .region = reg }) catch |e| {
+                        s.gpa.destroy(reg);
+                        return e;
+                    };
+                },
                 else => return error.InvalidOpcode,
             },
-            .region => if (m.opcode == p.wl_region.request.destroy) c.deleteId(m.object),
+            .region => |reg| switch (m.opcode) {
+                p.wl_region.request.destroy => {
+                    c.deleteId(m.object);
+                    s.destroyRegion(reg);
+                },
+                p.wl_region.request.add, p.wl_region.request.subtract => {
+                    const x = try r.int();
+                    const y = try r.int();
+                    const w = try r.int();
+                    const h = try r.int();
+                    try reg.ops.append(s.gpa, .{
+                        .subtract = m.opcode == p.wl_region.request.subtract,
+                        .x = x,
+                        .y = y,
+                        .width = w,
+                        .height = h,
+                    });
+                },
+                else => return error.InvalidOpcode,
+            },
             .surface => |surf| try s.surfaceRequest(c, surf, m, r),
             .shm => {
                 if (m.opcode != p.wl_shm.request.create_pool) return error.InvalidOpcode;
@@ -1383,7 +1584,7 @@ pub const Server = struct {
                         .surface => |x| x,
                         else => return error.InvalidObject,
                     };
-                    if (surf.xdg != null or surf.sub != null or surf.drag_icon) return c.postError(m.object, p.xdg_wm_base.err.role, "surface already has a role", .{});
+                    if (surf.hasRole()) return c.postError(m.object, p.xdg_wm_base.err.role, "surface already has a role", .{});
                     const x = try s.gpa.create(XdgSurface);
                     x.* = .{ .surface = surf, .id = id, .version = version };
                     c.addObject(id, .{ .xdg_surface = x }) catch |e| {
@@ -1392,7 +1593,13 @@ pub const Server = struct {
                     };
                     surf.xdg = x;
                 },
-                p.xdg_wm_base.request.pong => {},
+                p.xdg_wm_base.request.pong => {
+                    const serial = try r.uint();
+                    if (serial == c.ping_serial) {
+                        c.ping_serial = 0;
+                        c.ponged = true;
+                    }
+                },
                 else => return error.InvalidOpcode,
             },
             .positioner => |pos| try s.positionerRequest(c, pos, m, r),
@@ -1431,7 +1638,7 @@ pub const Server = struct {
                         .surface => |x| x,
                         else => return error.InvalidObject,
                     };
-                    if (surf.xdg != null or surf.sub != null or surf.drag_icon) return c.postError(m.object, p.wl_subcompositor.err.bad_surface, "surface already has a role", .{});
+                    if (surf.hasRole()) return c.postError(m.object, p.wl_subcompositor.err.bad_surface, "surface already has a role", .{});
                     // Not itself, nor one of its own subsurfaces.
                     var at: ?*Surface = parent;
                     while (at) |a| : (at = if (a.sub) |sub| sub.parent else null) {
@@ -1464,9 +1671,13 @@ pub const Server = struct {
                     };
                     s.restack(sub, sibling, m.opcode == p.wl_subsurface.request.place_above);
                 },
-                // Subsurfaces' state is applied when they are committed
-                // (as if desynchronized, whichever they are).
-                p.wl_subsurface.request.set_sync, p.wl_subsurface.request.set_desync => {},
+                p.wl_subsurface.request.set_sync => sub.sync = true,
+                p.wl_subsurface.request.set_desync => {
+                    sub.sync = false;
+                    if (!s.isSubsurfaceSync(sub) and sub.cached.has_state) {
+                        try s.applySubsurfaceCached(sub);
+                    }
+                },
                 else => return error.InvalidOpcode,
             },
             .output => if (m.opcode == p.wl_output.request.release) c.deleteId(m.object),
@@ -1479,7 +1690,7 @@ pub const Server = struct {
                 },
                 p.xdg_surface.request.get_toplevel => {
                     const id = try r.uint();
-                    if (x.toplevel != null) return c.postError(m.object, p.xdg_surface.err.already_constructed, "already has a role", .{});
+                    if (x.toplevel != null or x.popup != null) return c.postError(m.object, p.xdg_surface.err.already_constructed, "already has a role", .{});
                     const t = try s.gpa.create(Toplevel);
                     t.* = .{ .xdg = x, .id = id };
                     c.addObject(id, .{ .toplevel = t }) catch |e| {
@@ -1517,7 +1728,14 @@ pub const Server = struct {
                     const serial = try r.uint();
                     if (x.toplevel) |t| if (serial == t.configure_serial) s.acked(t);
                 },
-                p.xdg_surface.request.set_window_geometry => {},
+                p.xdg_surface.request.set_window_geometry => {
+                    const gx = try r.int();
+                    const gy = try r.int();
+                    const gw = try r.int();
+                    const gh = try r.int();
+                    if (gw <= 0 or gh <= 0) return c.postError(m.object, p.xdg_wm_base.err.invalid_surface_state, "window geometry size must be positive", .{});
+                    x.pending_geometry = .{ .x = gx, .y = gy, .width = @intCast(gw), .height = @intCast(gh) };
+                },
                 else => return error.InvalidOpcode,
             },
             .toplevel => |t| switch (m.opcode) {
@@ -1525,17 +1743,45 @@ pub const Server = struct {
                     c.deleteId(m.object);
                     s.destroyToplevel(t);
                 },
+                p.xdg_toplevel.request.set_parent => {
+                    const parent_id = try r.uint();
+                    const parent: ?*Toplevel = if (parent_id == 0) null else switch (c.objects.get(parent_id) orelse return error.InvalidObject) {
+                        .toplevel => |pt| pt,
+                        else => return error.InvalidObject,
+                    };
+                    var at = parent;
+                    while (at) |cur| : (at = cur.parent) {
+                        if (cur == t) return c.postError(m.object, p.xdg_wm_base.err.invalid_surface_state, "a window cannot be its own parent", .{});
+                    }
+                    t.parent = parent;
+                    if (parent) |pt| if (t.mapped and pt.mapped) s.raiseToplevel(pt);
+                },
                 p.xdg_toplevel.request.set_title => {
                     const title = (try r.string()) orelse "";
                     t.title_len = @min(title.len, t.title_buf.len);
                     @memcpy(t.title_buf[0..t.title_len], title[0..t.title_len]);
                     s.damaged = true;
                 },
+                p.xdg_toplevel.request.set_app_id => {
+                    const app_id = (try r.string()) orelse "";
+                    t.app_id_len = @min(app_id.len, t.app_id_buf.len);
+                    @memcpy(t.app_id_buf[0..t.app_id_len], app_id[0..t.app_id_len]);
+                },
+                p.xdg_toplevel.request.show_window_menu => {
+                    _ = try r.uint(); // seat
+                    _ = try r.uint(); // serial
+                    _ = try r.int(); // x
+                    _ = try r.int(); // y
+                },
                 p.xdg_toplevel.request.set_maximized => s.setMaximized(c, t, true),
                 p.xdg_toplevel.request.unset_maximized => s.setMaximized(c, t, false),
                 // On the one screen there is, whichever output is asked for.
-                p.xdg_toplevel.request.set_fullscreen => s.setFullscreen(c, t, true),
+                p.xdg_toplevel.request.set_fullscreen => {
+                    _ = try r.uint(); // output
+                    s.setFullscreen(c, t, true);
+                },
                 p.xdg_toplevel.request.unset_fullscreen => s.setFullscreen(c, t, false),
+                p.xdg_toplevel.request.set_minimized => {},
                 p.xdg_toplevel.request.move => {
                     _ = try r.uint();
                     s.startMove(t, try r.uint());
@@ -1553,8 +1799,7 @@ pub const Server = struct {
                     const w = try r.int();
                     s.setMaxSize(c, t, w, try r.int());
                 },
-                // Windows cannot be minimized, and have no menu.
-                else => {},
+                else => return error.InvalidOpcode,
             },
             .dmabuf => switch (m.opcode) {
                 p.zwp_linux_dmabuf_v1.request.destroy => c.deleteId(m.object),
@@ -1573,28 +1818,38 @@ pub const Server = struct {
             .seat => |version| try s.seatRequest(c, version, m, r),
             .pointer_constraints => switch (m.opcode) {
                 p.zwp_pointer_constraints_v1.request.destroy => c.deleteId(m.object),
-                p.zwp_pointer_constraints_v1.request.lock_pointer => {
+                p.zwp_pointer_constraints_v1.request.lock_pointer, p.zwp_pointer_constraints_v1.request.confine_pointer => {
+                    const is_lock = m.opcode == p.zwp_pointer_constraints_v1.request.lock_pointer;
                     const id = try r.uint();
                     const surf_id = try r.uint();
                     _ = try r.uint(); // the wl_pointer
-                    _ = try r.uint(); // a region (the whole surface is used)
+                    const region_id = try r.uint();
                     const lifetime = try r.uint();
                     const surf = switch (c.objects.get(surf_id) orelse return error.InvalidObject) {
                         .surface => |x| x,
                         else => return error.InvalidObject,
                     };
+                    const region_ops = try s.copyRegionArg(c, region_id);
+                    errdefer if (region_ops) |ops| s.gpa.free(ops);
                     for (s.locks.items) |other| if (other.surface == surf) {
-                        return c.postError(m.object, p.zwp_pointer_constraints_v1.err.already_constrained, "the pointer is already locked on surface {d}", .{surf_id});
+                        if (region_ops) |ops| s.gpa.free(ops);
+                        return c.postError(m.object, p.zwp_pointer_constraints_v1.err.already_constrained, "the pointer is already constrained on surface {d}", .{surf_id});
                     };
                     const lock = try s.gpa.create(PointerLock);
-                    lock.* = .{ .client = c, .id = id, .surface = surf, .persistent = lifetime == p.zwp_pointer_constraints_v1.lifetime.persistent };
+                    lock.* = .{
+                        .client = c,
+                        .id = id,
+                        .surface = surf,
+                        .lock = is_lock,
+                        .persistent = lifetime == p.zwp_pointer_constraints_v1.lifetime.persistent,
+                        .region = region_ops,
+                    };
                     errdefer s.gpa.destroy(lock);
                     try s.locks.append(s.gpa, lock);
                     errdefer _ = s.locks.pop();
-                    try c.addObject(id, .{ .locked_pointer = lock });
+                    try c.addObject(id, if (is_lock) .{ .locked_pointer = lock } else .{ .confined_pointer = lock });
                     s.updateLock();
                 },
-                p.zwp_pointer_constraints_v1.request.confine_pointer => try c.addObject(try r.uint(), .confined_pointer),
                 else => return error.InvalidOpcode,
             },
             .locked_pointer => |lock| switch (m.opcode) {
@@ -1602,11 +1857,32 @@ pub const Server = struct {
                     c.deleteId(m.object);
                     s.destroyLock(lock);
                 },
-                // The pointer stays where it was; its whole surface counts.
-                p.zwp_locked_pointer_v1.request.set_cursor_position_hint, p.zwp_locked_pointer_v1.request.set_region => {},
+                p.zwp_locked_pointer_v1.request.set_cursor_position_hint => {
+                    const hx = try r.fixed();
+                    const hy = try r.fixed();
+                    lock.pending_hint = .{ hx, hy };
+                },
+                p.zwp_locked_pointer_v1.request.set_region => {
+                    const ops = try s.copyRegionArg(c, try r.uint());
+                    if (lock.pending_region) |old| s.gpa.free(old);
+                    lock.pending_region = ops;
+                    lock.pending_region_set = true;
+                },
                 else => return error.InvalidOpcode,
             },
-            .confined_pointer => if (m.opcode == 0) c.deleteId(m.object),
+            .confined_pointer => |lock| switch (m.opcode) {
+                p.zwp_confined_pointer_v1.request.destroy => {
+                    c.deleteId(m.object);
+                    s.destroyLock(lock);
+                },
+                p.zwp_confined_pointer_v1.request.set_region => {
+                    const ops = try s.copyRegionArg(c, try r.uint());
+                    if (lock.pending_region) |old| s.gpa.free(old);
+                    lock.pending_region = ops;
+                    lock.pending_region_set = true;
+                },
+                else => return error.InvalidOpcode,
+            },
             .relative_pointer_manager => switch (m.opcode) {
                 p.zwp_relative_pointer_manager_v1.request.destroy => c.deleteId(m.object),
                 p.zwp_relative_pointer_manager_v1.request.get_relative_pointer => {
@@ -1617,8 +1893,31 @@ pub const Server = struct {
                 else => return error.InvalidOpcode,
             },
             .relative_pointer => if (m.opcode == p.zwp_relative_pointer_v1.request.destroy) c.deleteId(m.object),
-            // The cursor is the shell's own.
-            .pointer => if (m.opcode == p.wl_pointer.request.release) c.deleteId(m.object),
+            .pointer => switch (m.opcode) {
+                p.wl_pointer.request.set_cursor => {
+                    _ = try r.uint(); // serial
+                    const surf_id = try r.uint();
+                    const hot_x = try r.int();
+                    const hot_y = try r.int();
+                    const surf: ?*Surface = if (surf_id == 0) null else switch (c.objects.get(surf_id) orelse return error.InvalidObject) {
+                        .surface => |x| x,
+                        else => return error.InvalidObject,
+                    };
+                    if (surf) |cs| {
+                        if (cs.xdg != null or cs.sub != null or cs.drag_icon)
+                            return c.postError(m.object, p.wl_pointer.err.role, "surface already has a role", .{});
+                        cs.cursor_role = true;
+                    }
+                    if (s.pointer_focus) |pf| if (pf.client == c) {
+                        if (s.cursor_surface != surf or s.cursor_hotspot[0] != hot_x or s.cursor_hotspot[1] != hot_y) s.damaged = true;
+                        s.cursor_surface = surf;
+                        s.cursor_hotspot = .{ hot_x, hot_y };
+                        s.client_cursor = if (surf == null) .hidden else .arrow;
+                    };
+                },
+                p.wl_pointer.request.release => c.deleteId(m.object),
+                else => return error.InvalidOpcode,
+            },
             .touch => if (m.opcode == p.wl_touch.request.release) c.deleteId(m.object),
             .keyboard => if (m.opcode == p.wl_keyboard.request.release) c.deleteId(m.object),
             .data_device_manager => |version| switch (m.opcode) {
@@ -1684,7 +1983,7 @@ pub const Server = struct {
                         else => return error.InvalidObject,
                     };
                     if (icon) |ic| {
-                        if (ic.xdg != null or ic.sub != null) return c.postError(m.object, p.wl_data_device.err.role, "surface already has a role", .{});
+                        if (ic.xdg != null or ic.sub != null or ic.cursor_role) return c.postError(m.object, p.wl_data_device.err.role, "surface already has a role", .{});
                         ic.drag_icon = true;
                     }
                     if (src) |ds| {
@@ -1782,12 +2081,25 @@ pub const Server = struct {
                     const picture = cursorForShape(shape) orelse return c.postError(m.object, p.wp_cursor_shape_device_v1.err.invalid_shape, "no cursor shape {d}", .{shape});
                     // Only over its own window.
                     if (s.pointer_focus) |surf| if (surf.client == c) {
+                        if (s.cursor_surface != null) {
+                            s.cursor_surface = null;
+                            s.damaged = true;
+                        }
                         s.client_cursor = picture;
                     };
                 },
                 else => return error.InvalidOpcode,
             },
         }
+    }
+
+    fn copyRegionArg(s: *Server, c: *Client, region_id: u32) !?[]RegionOp {
+        if (region_id == 0) return null;
+        const reg = switch (c.objects.get(region_id) orelse return error.InvalidObject) {
+            .region => |x| x,
+            else => return error.InvalidObject,
+        };
+        return try s.gpa.dupe(RegionOp, reg.ops.items);
     }
 
     fn bind(s: *Server, c: *Client, name: u32, id: u32, version: u32) !void {
@@ -1873,6 +2185,11 @@ pub const Server = struct {
     fn sendEnter(_: *Server, c: *Client, surf: *Surface) void {
         var it = c.objects.iterator();
         while (it.next()) |e| if (e.value_ptr.* == .output) sendTo(c, surf.id, p.wl_surface.event.enter, .{e.key_ptr.*});
+    }
+
+    fn sendLeave(_: *Server, c: *Client, surf: *Surface) void {
+        var it = c.objects.iterator();
+        while (it.next()) |e| if (e.value_ptr.* == .output) sendTo(c, surf.id, p.wl_surface.event.leave, .{e.key_ptr.*});
     }
 
     fn seatRequest(s: *Server, c: *Client, version: u32, m: wire.Message, r: *wire.Reader) !void {
@@ -2037,6 +2354,113 @@ pub const Server = struct {
 
     // --- Subsurfaces ------------------------------------------------------------
 
+    /// Whether `sub` (or one of its ancestor subsurfaces) is in synchronized mode.
+    fn isSubsurfaceSync(_: *const Server, sub: *const Subsurface) bool {
+        var cur: ?*const Subsurface = sub;
+        while (cur) |cs| {
+            if (cs.sync) return true;
+            cur = if (cs.parent) |p_surf| p_surf.sub else null;
+        }
+        return false;
+    }
+
+    fn clearSubsurfaceCached(s: *Server, sub: *Subsurface, c: ?*Client) void {
+        if (sub.cached.buffer) |b| {
+            sub.cached.buffer = null;
+            s.dropBuffer(b);
+        }
+        if (c) |cl| {
+            for (sub.cached.callbacks.items) |id| _ = cl.objects.remove(id);
+        }
+        sub.cached.callbacks.deinit(s.gpa);
+        if (sub.cached.input_region) |ops| s.gpa.free(ops);
+        if (sub.cached.opaque_region) |ops| s.gpa.free(ops);
+        sub.cached = .{};
+    }
+
+    fn cacheSubsurfaceCommit(s: *Server, surf: *Surface, sub: *Subsurface) !void {
+        sub.cached.has_state = true;
+        if (surf.pending_attach) {
+            surf.pending_attach = false;
+            const nb = surf.pending_buffer;
+            surf.pending_buffer = null;
+            if (sub.cached.buffer) |old| s.dropBuffer(old);
+            sub.cached.buffer = nb;
+            if (nb) |b| b.uses += 1;
+            sub.cached.attach = true;
+        }
+        if (surf.pending_scale) |sc| {
+            sub.cached.scale = sc;
+            surf.pending_scale = null;
+        }
+        if (surf.pending_transform) |tf| {
+            sub.cached.transform = tf;
+            surf.pending_transform = null;
+        }
+        if (surf.pending_input_region_set) {
+            if (sub.cached.input_region) |old| s.gpa.free(old);
+            sub.cached.input_region = surf.pending_input_region;
+            sub.cached.input_region_set = true;
+            surf.pending_input_region = null;
+            surf.pending_input_region_set = false;
+        }
+        if (surf.pending_opaque_region_set) {
+            if (sub.cached.opaque_region) |old| s.gpa.free(old);
+            sub.cached.opaque_region = surf.pending_opaque_region;
+            sub.cached.opaque_region_set = true;
+            surf.pending_opaque_region = null;
+            surf.pending_opaque_region_set = false;
+        }
+        try sub.cached.callbacks.appendSlice(s.gpa, surf.pending_callbacks.items);
+        surf.pending_callbacks.clearRetainingCapacity();
+    }
+
+    fn applySubsurfaceCached(s: *Server, sub: *Subsurface) anyerror!void {
+        if (!sub.cached.has_state) return;
+        const surf = sub.surface orelse {
+            s.clearSubsurfaceCached(sub, null);
+            return;
+        };
+        sub.cached.has_state = false;
+        if (sub.cached.attach) {
+            sub.cached.attach = false;
+            const b = sub.cached.buffer;
+            sub.cached.buffer = null;
+            defer if (b) |nb| s.dropBuffer(nb);
+            if (!surf.pending_attach) {
+                surf.pending_attach = true;
+                surf.pending_buffer = b;
+            }
+        }
+        if (sub.cached.scale) |sc| {
+            if (surf.pending_scale == null) surf.pending_scale = sc;
+            sub.cached.scale = null;
+        }
+        if (sub.cached.transform) |tf| {
+            if (surf.pending_transform == null) surf.pending_transform = tf;
+            sub.cached.transform = null;
+        }
+        if (sub.cached.input_region_set) {
+            if (!surf.pending_input_region_set) {
+                surf.pending_input_region = sub.cached.input_region;
+                surf.pending_input_region_set = true;
+            } else if (sub.cached.input_region) |ops| s.gpa.free(ops);
+            sub.cached.input_region = null;
+            sub.cached.input_region_set = false;
+        }
+        if (sub.cached.opaque_region_set) {
+            if (!surf.pending_opaque_region_set) {
+                surf.pending_opaque_region = sub.cached.opaque_region;
+                surf.pending_opaque_region_set = true;
+            } else if (sub.cached.opaque_region) |ops| s.gpa.free(ops);
+            sub.cached.opaque_region = null;
+            sub.cached.opaque_region_set = false;
+        }
+        try surf.pending_callbacks.insertSlice(s.gpa, 0, sub.cached.callbacks.items);
+        sub.cached.callbacks.clearRetainingCapacity();
+        try s.applySurfaceCommit(surf.client, surf);
+    }
+
     /// Takes a subsurface out of its parent's list.
     fn detachSubsurface(_: *Server, sub: *Subsurface) void {
         const parent = sub.parent orelse return;
@@ -2044,6 +2468,7 @@ pub const Server = struct {
     }
 
     fn destroySubsurface(s: *Server, sub: *Subsurface) void {
+        s.clearSubsurfaceCached(sub, if (sub.surface) |surf| surf.client else null);
         s.detachSubsurface(sub);
         if (sub.surface) |surf| surf.sub = null;
         s.damaged = true;
@@ -2098,27 +2523,40 @@ pub const Server = struct {
             const pos = s.dragPos(d);
             return .{ @intFromFloat(@round(pos[0])), @intFromFloat(@round(pos[1])) };
         };
+        if (s.cursor_surface == surf and s.pointer_focus != null and s.grab == null and !s.pointerLocked()) {
+            if (surf.texture() == null) return null;
+            return .{
+                @as(i32, @intFromFloat(@round(s.pointer_x))) - s.cursor_hotspot[0],
+                @as(i32, @intFromFloat(@round(s.pointer_y))) - s.cursor_hotspot[1],
+            };
+        }
         const x = surf.xdg orelse return null;
         if (x.toplevel) |t| {
             if (!t.shown()) return null;
             const r = s.windowRect(t);
-            return .{ r.x, r.y };
+            const gx = if (x.geometry) |g| g.x else 0;
+            const gy = if (x.geometry) |g| g.y else 0;
+            return .{ r.x - gx, r.y - gy };
         }
         const pp = x.popup orelse return null;
         if (!pp.mapped) return null;
         const parent = pp.parent orelse return null;
         const ps = parent.surface orelse return null;
         const o = s.surfaceOrigin(ps) orelse return null;
-        return .{ o[0] + pp.x, o[1] + pp.y };
+        const pgx = if (parent.geometry) |g| g.x else 0;
+        const pgy = if (parent.geometry) |g| g.y else 0;
+        const gx = if (x.geometry) |g| g.x else 0;
+        const gy = if (x.geometry) |g| g.y else 0;
+        return .{ o[0] + pgx + pp.x - gx, o[1] + pgy + pp.y - gy };
     }
 
     /// Something to draw: a surface's picture, at a place on the screen,
-    /// clipped to an area.
-    pub const Quad = struct { texture: Texture, x: i32, y: i32, clip: Rect };
+    /// with its logical size and buffer transform, clipped to an area.
+    pub const Quad = struct { texture: Texture, x: i32, y: i32, width: u32 = 0, height: u32 = 0, transform: u3 = 0, clip: Rect };
 
     /// What to draw, bottom first: each window that can be seen, with its
-    /// subsurfaces, then its popups, and a drag icon on top (the top ones,
-    /// if there are more than fit in `buf`).
+    /// subsurfaces, then its popups, a drag icon, and a custom cursor
+    /// surface on top (the top ones, if there are more than fit in `buf`).
     pub fn drawList(s: *const Server, buf: []Quad) []Quad {
         var shown: [32]*Toplevel = undefined;
         var list: std.ArrayList(Quad) = .initBuffer(buf);
@@ -2130,6 +2568,7 @@ pub const Server = struct {
             for (s.popups.items) |pp| if (pp.xdg.surface) |ps| if (s.rootToplevel(ps) == t) s.addTree(&list, ps, clip);
         }
         if (s.drag) |d| if (d.icon) |icon| s.addTree(&list, icon, s.screen());
+        if (s.cursor_surface) |cs| if (s.pointer_focus != null and s.grab == null and !s.pointerLocked()) s.addTree(&list, cs, s.screen());
         return list.items;
     }
 
@@ -2137,9 +2576,10 @@ pub const Server = struct {
     fn addTree(s: *const Server, list: *std.ArrayList(Quad), surf: *const Surface, clip: Rect) void {
         const o = s.surfaceOrigin(surf) orelse return;
         if (surf.texture()) |tex| {
+            const sz = surf.size().?;
             // Over the most there is room for: the newest, at the top.
             if (list.items.len == list.capacity) _ = list.orderedRemove(0);
-            list.appendAssumeCapacity(.{ .texture = tex, .x = o[0], .y = o[1], .clip = clip });
+            list.appendAssumeCapacity(.{ .texture = tex, .x = o[0], .y = o[1], .width = sz[0], .height = sz[1], .transform = surf.transform, .clip = clip });
         }
         for (surf.subsurfaces.items) |sub| if (sub.surface) |child| s.addTree(list, child, clip);
     }
@@ -2152,11 +2592,16 @@ pub const Server = struct {
             i -= 1;
             if (surf.subsurfaces.items[i].surface) |child| if (s.hitTree(child, x, y)) |hit| return hit;
         }
-        const tex = surf.texture() orelse return null;
+        const sz = surf.size() orelse return null;
         const o = s.surfaceOrigin(surf) orelse return null;
-        const x0: f64 = @floatFromInt(o[0]);
-        const y0: f64 = @floatFromInt(o[1]);
-        if (x >= x0 and x < x0 + @as(f64, @floatFromInt(tex.width)) and y >= y0 and y < y0 + @as(f64, @floatFromInt(tex.height))) return surf;
+        const lx = x - @as(f64, @floatFromInt(o[0]));
+        const ly = y - @as(f64, @floatFromInt(o[1]));
+        if (lx >= 0 and lx < @as(f64, @floatFromInt(sz[0])) and ly >= 0 and ly < @as(f64, @floatFromInt(sz[1]))) {
+            if (surf.input_region) |ops| {
+                if (!Region.contains(ops, @intFromFloat(@floor(lx)), @intFromFloat(@floor(ly)))) return null;
+            }
+            return surf;
+        }
         return null;
     }
 
@@ -2581,22 +3026,62 @@ pub const Server = struct {
 
     // --- Input ----------------------------------------------------------------
 
+    /// Clamps (`x`, `y`) to the active pointer confinement region, if one is
+    /// in effect.
+    pub fn clampPointer(s: *const Server, x: f64, y: f64) [2]f64 {
+        const lock = s.active_lock orelse return .{ x, y };
+        if (lock.lock) return .{ s.pointer_x, s.pointer_y };
+        const surf = lock.surface orelse return .{ x, y };
+        const o = s.surfaceOrigin(surf) orelse return .{ x, y };
+        const sz = surf.size() orelse return .{ x, y };
+        const ox: f64 = @floatFromInt(o[0]);
+        const oy: f64 = @floatFromInt(o[1]);
+        var min_x: f64 = 0;
+        var min_y: f64 = 0;
+        var max_x: f64 = @floatFromInt(@max(sz[0], 1) - 1);
+        var max_y: f64 = @floatFromInt(@max(sz[1], 1) - 1);
+        if (surf.input_region) |ops| if (Region.bounds(ops)) |b| {
+            min_x = @max(min_x, @as(f64, @floatFromInt(b.x)));
+            min_y = @max(min_y, @as(f64, @floatFromInt(b.y)));
+            max_x = @min(max_x, @as(f64, @floatFromInt(b.x + @as(i32, @intCast(b.width)) - 1)));
+            max_y = @min(max_y, @as(f64, @floatFromInt(b.y + @as(i32, @intCast(b.height)) - 1)));
+        };
+        if (lock.region) |ops| if (Region.bounds(ops)) |b| {
+            min_x = @max(min_x, @as(f64, @floatFromInt(b.x)));
+            min_y = @max(min_y, @as(f64, @floatFromInt(b.y)));
+            max_x = @min(max_x, @as(f64, @floatFromInt(b.x + @as(i32, @intCast(b.width)) - 1)));
+            max_y = @min(max_y, @as(f64, @floatFromInt(b.y + @as(i32, @intCast(b.height)) - 1)));
+        };
+        const lx = std.math.clamp(x - ox, min_x, @max(min_x, max_x));
+        const ly = std.math.clamp(y - oy, min_y, @max(min_y, max_y));
+        const ix: i32 = @intFromFloat(@floor(lx));
+        const iy: i32 = @intFromFloat(@floor(ly));
+        if (surf.input_region) |ops| if (!Region.contains(ops, ix, iy)) return .{ s.pointer_x, s.pointer_y };
+        if (lock.region) |ops| if (!Region.contains(ops, ix, iy)) return .{ s.pointer_x, s.pointer_y };
+        return .{ ox + lx, oy + ly };
+    }
+
     /// Moves the pointer to (`x`, `y`) on the screen. Finish a batch of
     /// pointer events with `pointerFrame`.
     pub fn pointerMotion(s: *Server, time_ms: u32, x: f64, y: f64) void {
-        s.pointer_x = x;
-        s.pointer_y = y;
+        const clamped = s.clampPointer(x, y);
+        s.pointer_x = clamped[0];
+        s.pointer_y = clamped[1];
+        if (s.cursor_surface) |cs| if (cs.texture() != null) {
+            s.damaged = true;
+        };
         if (s.grab) |g| {
             // A touch moves this window, not the pointer.
             if (g.touch != null) return;
-            return s.grabTo(g, x, y);
+            return s.grabTo(g, s.pointer_x, s.pointer_y);
         }
         if (s.drag) |d| {
             if (d.touch != null) return;
-            return s.dragTo(time_ms, x, y);
+            return s.dragTo(time_ms, s.pointer_x, s.pointer_y);
         }
         // Entering a surface carries the position.
         if (s.updatePointerFocus()) return;
+        s.updateLock();
         const surf = s.pointer_focus orelse return;
         const local = s.surfaceLocal();
         broadcast(surf.client, .pointer, p.wl_pointer.event.motion, 1, .{ time_ms, local[0], local[1] });
@@ -2611,39 +3096,57 @@ pub const Server = struct {
             const us: u64 = @as(u64, time_ms) * 1000;
             broadcast(surf.client, .relative_pointer, p.zwp_relative_pointer_v1.event.relative_motion, 1, .{ @as(u32, @truncate(us >> 32)), @as(u32, @truncate(us)), dx, dy, dx, dy });
         };
-        return s.active_lock != null;
+        return s.pointerLocked();
     }
 
     /// The pointer is locked in place (its picture hidden).
     pub fn pointerLocked(s: *const Server) bool {
-        return s.active_lock != null;
+        return if (s.active_lock) |l| l.lock else false;
     }
 
-    /// Puts the lock that should be in effect into effect: the one on the
-    /// surface under the pointer, if its window is on top (and nothing is
-    /// being moved). One that ends is told so.
+    /// Puts the lock or confinement that should be in effect into effect:
+    /// the one on the surface under the pointer, if its window is on top
+    /// (and nothing is being moved). One that ends is told so.
     fn updateLock(s: *Server) void {
         const top = s.topWindow();
         const want: ?*PointerLock = for (s.locks.items) |lock| {
             const surf = lock.surface orelse continue;
             if (lock.spent or surf != s.pointer_focus or s.grab != null or s.drag != null) continue;
             if (top == null or s.rootToplevel(surf) != top) continue;
+            if (lock.region) |ops| if (s.active_lock != lock) {
+                const local = s.localTo(surf, s.pointer_x, s.pointer_y);
+                if (!Region.contains(ops, @intFromFloat(@floor(local[0])), @intFromFloat(@floor(local[1])))) continue;
+            };
             break lock;
         } else null;
         if (want == s.active_lock) return;
         if (s.active_lock) |old| s.endLock(old);
         if (want) |lock| {
             s.active_lock = lock;
-            sendTo(lock.client, lock.id, p.zwp_locked_pointer_v1.event.locked, .{});
+            const ev: u16 = if (lock.lock) p.zwp_locked_pointer_v1.event.locked else p.zwp_confined_pointer_v1.event.confined;
+            sendTo(lock.client, lock.id, ev, .{});
         }
     }
 
-    /// The lock in effect ends: the client is told, and a one-shot lock
-    /// is spent.
+    fn applyLockHint(s: *Server, lock: *const PointerLock) void {
+        if (!lock.lock) return;
+        const hint = lock.hint orelse return;
+        const surf = lock.surface orelse return;
+        const o = s.surfaceOrigin(surf) orelse return;
+        const max_x: f64 = @floatFromInt(@max(s.output.width, 1) - 1);
+        const max_y: f64 = @floatFromInt(@max(s.output.height, 1) - 1);
+        s.pointer_x = std.math.clamp(@as(f64, @floatFromInt(o[0])) + hint[0], 0, max_x);
+        s.pointer_y = std.math.clamp(@as(f64, @floatFromInt(o[1])) + hint[1], 0, max_y);
+    }
+
+    /// The lock or confinement in effect ends: the client is told, and a
+    /// one-shot constraint is spent.
     fn endLock(s: *Server, lock: *PointerLock) void {
         if (s.active_lock != lock) return;
+        s.applyLockHint(lock);
         s.active_lock = null;
-        sendTo(lock.client, lock.id, p.zwp_locked_pointer_v1.event.unlocked, .{});
+        const ev: u16 = if (lock.lock) p.zwp_locked_pointer_v1.event.unlocked else p.zwp_confined_pointer_v1.event.unconfined;
+        sendTo(lock.client, lock.id, ev, .{});
         if (!lock.persistent) lock.spent = true;
     }
 
@@ -2657,8 +3160,14 @@ pub const Server = struct {
     }
 
     fn destroyLock(s: *Server, lock: *PointerLock) void {
-        // The client destroyed it: no unlocked event.
-        if (s.active_lock == lock) s.active_lock = null;
+        // The client destroyed it: no unlocked/unconfined event, but its
+        // cursor position hint still applies if it was active.
+        if (s.active_lock == lock) {
+            s.applyLockHint(lock);
+            s.active_lock = null;
+        }
+        if (lock.region) |ops| s.gpa.free(ops);
+        if (lock.pending_region) |ops| s.gpa.free(ops);
         for (s.locks.items, 0..) |x, i| if (x == lock) {
             _ = s.locks.swapRemove(i);
             break;
@@ -2716,10 +3225,22 @@ pub const Server = struct {
         if (!pressed and s.buttons_down == 0) _ = s.updatePointerFocus();
     }
 
-    /// Scrolls by `value` (in surface pixels) along `axis`.
+    /// Scrolls by `value` (in surface pixels) along `axis` (or stops when
+    /// `value` is 0).
     pub fn pointerAxis(s: *Server, time_ms: u32, axis: u32, value: f64) void {
+        if (value == 0) return s.pointerAxisStop(time_ms, axis);
         const surf = s.pointer_focus orelse return;
+        broadcast(surf.client, .pointer, p.wl_pointer.event.axis_source, 5, .{@as(u32, p.wl_pointer.axis_source.wheel)});
+        const discrete: i32 = @intFromFloat(@round(value / 15.0));
+        if (discrete != 0) broadcast(surf.client, .pointer, p.wl_pointer.event.axis_discrete, 5, .{ axis, discrete });
         broadcast(surf.client, .pointer, p.wl_pointer.event.axis, 1, .{ time_ms, axis, value });
+    }
+
+    /// Stops scrolling along `axis` (version 5).
+    pub fn pointerAxisStop(s: *Server, time_ms: u32, axis: u32) void {
+        const surf = s.pointer_focus orelse return;
+        broadcast(surf.client, .pointer, p.wl_pointer.event.axis_source, 5, .{@as(u32, p.wl_pointer.axis_source.wheel)});
+        broadcast(surf.client, .pointer, p.wl_pointer.event.axis_stop, 5, .{ time_ms, axis });
     }
 
     /// Ends a batch of pointer events that belong together.
@@ -2767,6 +3288,7 @@ pub const Server = struct {
         const r = s.visibleRect(t);
         for (above) |u| {
             if (!u.shown()) continue;
+            if (u.xdg.surface) |us| if (us.input_region != null) continue;
             const a = s.visibleRect(u);
             if (a.x <= r.x and a.y <= r.y and
                 a.x + @as(i32, @intCast(a.width)) >= r.x + @as(i32, @intCast(r.width)) and
@@ -2857,6 +3379,10 @@ pub const Server = struct {
         }
         s.pointer_focus = under;
         // A window it enters chooses its picture again.
+        if (s.cursor_surface != null) {
+            s.cursor_surface = null;
+            s.damaged = true;
+        }
         s.client_cursor = .arrow;
         if (under) |surf| {
             const local = s.surfaceLocal();
@@ -2946,17 +3472,79 @@ pub const Server = struct {
                 try surf.pending_callbacks.append(s.gpa, id);
             },
             p.wl_surface.request.commit => try s.commit(c, surf),
-            p.wl_surface.request.set_buffer_scale => if (try r.int() != 1)
-                return c.postError(m.object, p.wl_surface.err.invalid_scale, "only scale 1 is supported", .{}),
-            p.wl_surface.request.set_buffer_transform => if (try r.int() != 0)
-                return c.postError(m.object, p.wl_surface.err.invalid_transform, "transforms are not supported", .{}),
-            // Damage and regions: the whole screen is redrawn anyway.
-            p.wl_surface.request.damage, p.wl_surface.request.damage_buffer, p.wl_surface.request.set_opaque_region, p.wl_surface.request.set_input_region => {},
+            p.wl_surface.request.set_buffer_scale => {
+                const sc = try r.int();
+                if (sc <= 0) return c.postError(m.object, p.wl_surface.err.invalid_scale, "scale must be positive", .{});
+                surf.pending_scale = @intCast(sc);
+            },
+            p.wl_surface.request.set_buffer_transform => {
+                const tf = try r.int();
+                if (tf < 0 or tf > 7) return c.postError(m.object, p.wl_surface.err.invalid_transform, "invalid transform {d}", .{tf});
+                surf.pending_transform = @intCast(tf);
+            },
+            p.wl_surface.request.set_input_region => {
+                const ops = try s.copyRegionArg(c, try r.uint());
+                if (surf.pending_input_region) |old| s.gpa.free(old);
+                surf.pending_input_region = ops;
+                surf.pending_input_region_set = true;
+            },
+            p.wl_surface.request.set_opaque_region => {
+                const ops = try s.copyRegionArg(c, try r.uint());
+                if (surf.pending_opaque_region) |old| s.gpa.free(old);
+                surf.pending_opaque_region = ops;
+                surf.pending_opaque_region_set = true;
+            },
+            // Damage: the whole screen is redrawn anyway.
+            p.wl_surface.request.damage, p.wl_surface.request.damage_buffer => {
+                _ = try r.int();
+                _ = try r.int();
+                _ = try r.int();
+                _ = try r.int();
+            },
             else => return error.InvalidOpcode,
         }
     }
 
     fn commit(s: *Server, c: *Client, surf: *Surface) !void {
+        if (surf.sub) |sub| if (s.isSubsurfaceSync(sub)) {
+            return s.cacheSubsurfaceCommit(surf, sub);
+        };
+        try s.applySurfaceCommit(c, surf);
+    }
+
+    fn applySurfaceCommit(s: *Server, c: *Client, surf: *Surface) anyerror!void {
+        if (surf.pending_scale) |sc| {
+            surf.scale = sc;
+            surf.pending_scale = null;
+        }
+        if (surf.pending_transform) |tf| {
+            surf.transform = tf;
+            surf.pending_transform = null;
+        }
+        if (surf.pending_input_region_set) {
+            if (surf.input_region) |old| s.gpa.free(old);
+            surf.input_region = surf.pending_input_region;
+            surf.pending_input_region = null;
+            surf.pending_input_region_set = false;
+        }
+        if (surf.pending_opaque_region_set) {
+            if (surf.opaque_region) |old| s.gpa.free(old);
+            surf.opaque_region = surf.pending_opaque_region;
+            surf.pending_opaque_region = null;
+            surf.pending_opaque_region_set = false;
+        }
+        for (s.locks.items) |lock| if (lock.surface == surf) {
+            if (lock.pending_hint) |h| {
+                lock.hint = h;
+                lock.pending_hint = null;
+            }
+            if (lock.pending_region_set) {
+                if (lock.region) |old| s.gpa.free(old);
+                lock.region = lock.pending_region;
+                lock.pending_region = null;
+                lock.pending_region_set = false;
+            }
+        };
         if (surf.pending_attach) {
             surf.pending_attach = false;
             const b = surf.pending_buffer;
@@ -2981,19 +3569,30 @@ pub const Server = struct {
                 surf.copy = null;
             }
         }
+        if (surf.xdg) |x| if (x.pending_geometry) |g| {
+            x.geometry = g;
+            x.pending_geometry = null;
+        };
         // A covered window's frame callbacks wait until it is uncovered:
         // its client need not draw what cannot be seen.
         const covered = if (s.rootToplevel(surf)) |t| t.mapped and t.suspended else false;
-        // Subsurfaces take their new places with their parent.
-        for (surf.subsurfaces.items) |sub| if (sub.pending) |pos| {
-            sub.x = pos[0];
-            sub.y = pos[1];
-            sub.pending = null;
-        };
-        // Shown for the first time: on the screen.
+        // Subsurfaces take their new places and apply cached synchronized
+        // commits with their parent.
+        for (surf.subsurfaces.items) |sub| {
+            if (sub.pending) |pos| {
+                sub.x = pos[0];
+                sub.y = pos[1];
+                sub.pending = null;
+            }
+            if (sub.cached.has_state) try s.applySubsurfaceCached(sub);
+        }
+        // Shown for the first time: on the screen; unmapped: leaves it.
         if (!surf.entered and surf.texture() != null) {
             surf.entered = true;
             s.sendEnter(c, surf);
+        } else if (surf.entered and surf.texture() == null) {
+            surf.entered = false;
+            s.sendLeave(c, surf);
         }
         if (covered) {
             try surf.held_callbacks.appendSlice(s.gpa, surf.pending_callbacks.items);
@@ -3049,9 +3648,10 @@ pub const Server = struct {
     fn acked(s: *Server, t: *Toplevel) void {
         t.acked = true;
         const surf = t.xdg.surface orelse return;
-        const tex = surf.texture() orelse return;
+        if (surf.texture() == null) return;
+        const sz = toplevelLogicalSize(t);
         const size = s.configuredSize(t);
-        if (tex.width == size[0] and tex.height == size[1]) s.drewConfigure(surf.client, t);
+        if (sz[0] == size[0] and sz[1] == size[1]) s.drewConfigure(surf.client, t);
     }
 
     fn drewConfigure(s: *Server, c: *Client, t: *Toplevel) void {

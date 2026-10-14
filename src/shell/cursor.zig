@@ -9,24 +9,45 @@ pub const size = 32;
 
 pub const Shape = enum {
     arrow,
+    pointer,
+    text,
+    vertical_text,
+    crosshair,
+    move,
+    wait,
+    not_allowed,
     resize_horizontal,
     resize_vertical,
     /// Top left to bottom right.
     resize_diagonal_down,
     /// Bottom left to top right.
     resize_diagonal_up,
-    /// None (while a game has the pointer locked).
+    /// None (while a game has the pointer locked, or the client hides it).
     hidden,
 };
 
 /// The point that is where the pointer is, from the top left corner: the
-/// arrow's tip, or a double arrow's middle.
+/// arrow's tip, the hand's finger tip, or the shape's middle.
 pub fn hotspot(shape: Shape) [2]i32 {
-    return if (shape == .arrow) .{ 1, 1 } else .{ size / 2, size / 2 };
+    return switch (shape) {
+        .arrow => .{ 1, 1 },
+        .pointer => .{ 9, 2 },
+        else => .{ size / 2, size / 2 },
+    };
 }
 
 /// The arrow's outline, in units scaled by `scale`, with the tip at 0,0.
 const arrow = [_][2]f32{ .{ 0, 0 }, .{ 0, 16 }, .{ 4, 12.5 }, .{ 7, 19 }, .{ 9.5, 18 }, .{ 6.5, 11.5 }, .{ 11.5, 11.5 } };
+/// A pointing hand, with the index finger tip at 0,0.
+const hand = [_][2]f32{ .{ 0, 0 }, .{ -1.5, 1 }, .{ -1.5, 6.5 }, .{ -4, 5 }, .{ -5.5, 6.5 }, .{ -1.5, 12 }, .{ 0, 15.5 }, .{ 5.5, 15.5 }, .{ 7, 10.5 }, .{ 7, 5.5 }, .{ 1.5, 4.5 }, .{ 1.5, 1 } };
+/// An I-beam for text, centered at 0,0.
+const ibeam = [_][2]f32{ .{ -3.5, -8 }, .{ 3.5, -8 }, .{ 3.5, -5.5 }, .{ 1.25, -5.5 }, .{ 1.25, 5.5 }, .{ 3.5, 5.5 }, .{ 3.5, 8 }, .{ -3.5, 8 }, .{ -3.5, 5.5 }, .{ -1.25, 5.5 }, .{ -1.25, -5.5 }, .{ -3.5, -5.5 } };
+/// A crosshair (or, rotated, an X), centered at 0,0.
+const cross = [_][2]f32{ .{ -1.5, -8 }, .{ 1.5, -8 }, .{ 1.5, -1.5 }, .{ 8, -1.5 }, .{ 8, 1.5 }, .{ 1.5, 1.5 }, .{ 1.5, 8 }, .{ -1.5, 8 }, .{ -1.5, 1.5 }, .{ -8, 1.5 }, .{ -8, -1.5 }, .{ -1.5, -1.5 } };
+/// A four-way move arrow, centered at 0,0.
+const quad_arrow = [_][2]f32{ .{ 0, -9 }, .{ 3.5, -5 }, .{ 1.5, -5 }, .{ 1.5, -1.5 }, .{ 5, -1.5 }, .{ 5, -3.5 }, .{ 9, 0 }, .{ 5, 3.5 }, .{ 5, 1.5 }, .{ 1.5, 1.5 }, .{ 1.5, 5 }, .{ 3.5, 5 }, .{ 0, 9 }, .{ -3.5, 5 }, .{ -1.5, 5 }, .{ -1.5, 1.5 }, .{ -5, 1.5 }, .{ -5, 3.5 }, .{ -9, 0 }, .{ -5, -3.5 }, .{ -5, -1.5 }, .{ -1.5, -1.5 }, .{ -1.5, -5 }, .{ -3.5, -5 } };
+/// An hourglass, centered at 0,0.
+const hourglass = [_][2]f32{ .{ -5.5, -8 }, .{ 5.5, -8 }, .{ 5.5, -5.5 }, .{ 1.75, 0 }, .{ 5.5, 5.5 }, .{ 5.5, 8 }, .{ -5.5, 8 }, .{ -5.5, 5.5 }, .{ -1.75, 0 }, .{ -5.5, -5.5 } };
 /// A double-headed arrow across, in the same units, its middle at 0,0.
 const double = [_][2]f32{ .{ -8, 0 }, .{ -3.5, -4.5 }, .{ -3.5, -1.75 }, .{ 3.5, -1.75 }, .{ 3.5, -4.5 }, .{ 8, 0 }, .{ 3.5, 4.5 }, .{ 3.5, 1.75 }, .{ -3.5, 1.75 }, .{ -3.5, 4.5 } };
 const scale = 1.5;
@@ -35,16 +56,24 @@ const border = 1.0;
 
 pub fn draw(pixels: *[size * size]u32, shape: Shape) void {
     if (shape == .hidden) return @memset(pixels, 0);
-    // The outline, turned for the double arrows.
+    // The outline, turned for the rotated shapes.
     const angle: f32 = switch (shape) {
-        .arrow, .resize_horizontal, .hidden => 0,
-        .resize_vertical => std.math.pi / 2.0,
-        .resize_diagonal_down => std.math.pi / 4.0,
+        .arrow, .pointer, .text, .crosshair, .move, .wait, .resize_horizontal, .hidden => 0,
+        .vertical_text, .resize_vertical => std.math.pi / 2.0,
+        .not_allowed, .resize_diagonal_down => std.math.pi / 4.0,
         .resize_diagonal_up => -std.math.pi / 4.0,
     };
-    const outline: []const [2]f32 = if (shape == .arrow) &arrow else &double;
+    const outline: []const [2]f32 = switch (shape) {
+        .arrow, .hidden => &arrow,
+        .pointer => &hand,
+        .text, .vertical_text => &ibeam,
+        .crosshair, .not_allowed => &cross,
+        .move => &quad_arrow,
+        .wait => &hourglass,
+        .resize_horizontal, .resize_vertical, .resize_diagonal_down, .resize_diagonal_up => &double,
+    };
     const hot = hotspot(shape);
-    var buf: [double.len][2]f32 = undefined;
+    var buf: [quad_arrow.len][2]f32 = undefined;
     const points = buf[0..outline.len];
     for (outline, points) |o, *pt| pt.* = .{
         (o[0] * @cos(angle) - o[1] * @sin(angle)) * scale + @as(f32, @floatFromInt(hot[0])),
@@ -133,4 +162,17 @@ test "resize arrows point along their edges" {
     draw(&pixels, .resize_diagonal_up);
     try std.testing.expect(Px.white(pixels[9 * size + 22]));
     try std.testing.expectEqual(@as(u32, 0), pixels[8 * size + 8]);
+}
+
+test "pointer, text, crosshair, move, wait, and not_allowed shapes" {
+    var pixels: [size * size]u32 = undefined;
+    for ([_]Shape{ .pointer, .text, .vertical_text, .crosshair, .move, .wait, .not_allowed }) |shape| {
+        draw(&pixels, shape);
+        var opaque_count: usize = 0;
+        for (pixels) |px| {
+            try std.testing.expect(px & 0xff <= px >> 24);
+            if (px >> 24 == 0xff) opaque_count += 1;
+        }
+        try std.testing.expect(opaque_count > 16);
+    }
 }
