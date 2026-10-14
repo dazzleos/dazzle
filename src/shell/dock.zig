@@ -23,10 +23,65 @@ const audio = @import("audio");
 pub const apps_dir = sys.system.apps_dir;
 pub const appearance_file = apps_dir ++ "/.appearance";
 
-const background = 0xff1c2a4a;
-const hover_background = 0xff2c3e66;
-const status_border = 0xff3b507a;
-const dot_color = 0xffe8eefc;
+pub const Theme = enum {
+    dark,
+    light,
+
+    pub const Colors = struct {
+        background: u32,
+        hover_background: u32,
+        status_border: u32,
+        dot: u32,
+        status_active: u32,
+        status_inactive: u32,
+    };
+
+    pub fn colors(t: Theme) Colors {
+        return switch (t) {
+            .dark => .{
+                .background = 0xff1c2a4a,
+                .hover_background = 0xff2c3e66,
+                .status_border = 0xff3b507a,
+                .dot = 0xffe8eefc,
+                .status_active = 0xffffffff,
+                .status_inactive = 0x40ffffff,
+            },
+            .light => .{
+                .background = 0xffe8eef8,
+                .hover_background = 0xffd0dcf0,
+                .status_border = 0xffb0c2e0,
+                .dot = 0xff1c2a4a,
+                .status_active = 0xff1c2a4a,
+                .status_inactive = 0x401c2a4a,
+            },
+        };
+    }
+};
+
+pub fn parseTheme(text: []const u8) Theme {
+    var theme: Theme = .dark;
+    var lines = std.mem.tokenizeScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        var tok = std.mem.tokenizeAny(u8, line, " \t\r");
+        const key = tok.next() orelse continue;
+        const val = tok.next() orelse continue;
+        if (std.mem.eql(u8, key, "theme")) {
+            if (std.meta.stringToEnum(Theme, val)) |t| theme = t;
+        }
+    }
+    return theme;
+}
+
+pub fn readTheme() Theme {
+    var buf: [128]u8 = undefined;
+    const text = sys.readFile(appearance_file, &buf) orelse return .dark;
+    return parseTheme(text);
+}
+
+const background = Theme.dark.colors().background;
+const hover_background = Theme.dark.colors().hover_background;
+const status_border = Theme.dark.colors().status_border;
+const dot_color = Theme.dark.colors().dot;
 /// Icon colours, picked by the app's name.
 const palette = [_]u32{ 0xff3f7ee8, 0xffe8743f, 0xff3fb86e, 0xffb04fd6, 0xffe8b33f, 0xff3fb8c4, 0xffe84f6a };
 
@@ -288,6 +343,8 @@ pub const Dock = struct {
     network: NetworkStatus = .{ .ethernet = false },
     /// Volume status shown in the status box beside the network status.
     volume: VolumeStatus = .{},
+    /// Light or dark colour scheme (from `/data/apps/.appearance`).
+    theme: Theme = .dark,
 
     pub fn init(gpa: std.mem.Allocator, f: ?font.Font, apps: []App, screen_width: u32, screen_height: u32) !Dock {
         const scale = @min(@as(f32, @floatFromInt(screen_width)) / 1920, @as(f32, @floatFromInt(screen_height)) / 1080);
@@ -334,14 +391,15 @@ pub const Dock = struct {
     }
 
     pub fn draw(d: *Dock) void {
+        const c = d.theme.colors();
         const canvas: font.Canvas = .{ .pixels = d.pixels, .width = d.width, .height = d.height, .stride = d.width };
-        canvas.fill(0, 0, d.width, d.height, background);
+        canvas.fill(0, 0, d.width, d.height, c.background);
         const icon_font: ?*const font.Font = if (d.icon_font) |*f| f else null;
         for (d.apps, 0..) |*app, i| {
             const r = d.iconRect(i);
             if (d.hover == i) {
                 const pad = 4 * d.scale;
-                roundedRect(canvas, r.x - pad, r.y - pad, r.size + 2 * pad, r.size + 2 * pad, 14 * d.scale, hover_background);
+                roundedRect(canvas, r.x - pad, r.y - pad, r.size + 2 * pad, r.size + 2 * pad, 14 * d.scale, c.hover_background);
             }
             roundedRect(canvas, r.x, r.y, r.size, r.size, 12 * d.scale, app.color());
             if (app.icon != null and icon_font != null) {
@@ -360,11 +418,11 @@ pub const Dock = struct {
             }
             if (app.pid != null) {
                 const dot = 6 * d.scale;
-                roundedRect(canvas, r.x + (r.size - dot) / 2, r.y + r.size + 3 * d.scale, dot, dot, dot / 2, dot_color);
+                roundedRect(canvas, r.x + (r.size - dot) / 2, r.y + r.size + 3 * d.scale, dot, dot, dot / 2, c.dot);
             }
         }
         const rs = d.statusRect();
-        roundedRectOutline(canvas, rs.x, rs.y, rs.width, rs.height, 12 * d.scale, @max(1.5, 2 * d.scale), status_border);
+        roundedRectOutline(canvas, rs.x, rs.y, rs.width, rs.height, 12 * d.scale, @max(1.5, 2 * d.scale), c.status_border);
         if (icon_font) |f| {
             const size = @round(36 * d.scale);
             const pad = @round(10 * d.scale);
@@ -372,19 +430,19 @@ pub const Dock = struct {
             const vol_x = @round(rs.x + pad);
             const net_x = @round(rs.x + rs.width - pad - size);
             var buf: [4]u8 = undefined;
-            const vol_color: u32 = if (d.volume.active()) 0xffffffff else 0x40ffffff;
+            const vol_color: u32 = if (d.volume.active()) c.status_active else c.status_inactive;
             _ = font.draw(canvas, &d.cache, .{ .font = f, .size = size, .color = vol_color }, vol_x, y + size, icons.text(d.volume.icon(), &buf)) catch {};
             switch (d.network) {
                 .wifi => |bars| {
-                    const base_color: u32 = if (bars >= 4) 0xffffffff else 0x40ffffff;
+                    const base_color: u32 = if (bars >= 4) c.status_active else c.status_inactive;
                     _ = font.draw(canvas, &d.cache, .{ .font = f, .size = size, .color = base_color }, net_x, y + size, icons.text(.wifi, &buf)) catch {};
                     if (bars > 0 and bars < 4) {
                         const lit: icons.Icon = if (bars >= 3) .wifi_2_bar else .wifi_1_bar;
-                        _ = font.draw(canvas, &d.cache, .{ .font = f, .size = size, .color = 0xffffffff }, net_x, y + size, icons.text(lit, &buf)) catch {};
+                        _ = font.draw(canvas, &d.cache, .{ .font = f, .size = size, .color = c.status_active }, net_x, y + size, icons.text(lit, &buf)) catch {};
                     }
                 },
                 .ethernet => |connected| {
-                    const color: u32 = if (connected) 0xffffffff else 0x40ffffff;
+                    const color: u32 = if (connected) c.status_active else c.status_inactive;
                     _ = font.draw(canvas, &d.cache, .{ .font = f, .size = size, .color = color }, net_x, y + size, icons.text(.lan, &buf)) catch {};
                 },
             }
@@ -524,6 +582,18 @@ test "icons and the status box are in a row in the middle, and clicks find the a
     // The status box has an outline at its top edge, is unfilled inside its padding, and draws the volume and network icons inside it.
     try testing.expectEqual(@as(u32, status_border), at(&d, rs.x + rs.width / 2, rs.y + 1));
     try testing.expectEqual(@as(u32, background), at(&d, rs.x + rs.width / 2, rs.y + 5));
+
+    // Switching to the light theme updates the dock background, hover, running dot, and status border.
+    try testing.expectEqual(Theme.dark, parseTheme(""));
+    try testing.expectEqual(Theme.light, parseTheme("theme light\n"));
+    try testing.expectEqual(Theme.dark, parseTheme("theme dark\n"));
+    d.theme = .light;
+    d.draw();
+    const light = Theme.light.colors();
+    try testing.expectEqual(light.background, at(&d, 5, 5));
+    try testing.expectEqual(light.dot, at(&d, r0.x + r0.size / 2, r0.y + r0.size + 6));
+    try testing.expectEqual(light.hover_background, at(&d, r1.x - 2, r1.y + r1.size / 2));
+    try testing.expectEqual(light.status_border, at(&d, rs.x + rs.width / 2, rs.y + 1));
 }
 
 test "networkStatusFromReport picks Ethernet when Ethernet is connected and Wi-Fi otherwise" {
