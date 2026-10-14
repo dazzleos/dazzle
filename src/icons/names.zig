@@ -75,6 +75,8 @@ pub const Icon = enum {
     no_photography,
     // Blocks.
     landscape,
+    person_add,
+    computer,
     // The Data Logger.
     show_chart,
     fiber_manual_record,
