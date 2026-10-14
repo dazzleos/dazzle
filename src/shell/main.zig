@@ -125,6 +125,7 @@ fn run(init: std.process.Init.Minimal) !void {
     audio.applySettings(initial_sound, &audio.listDevices());
     dock.volume = .{ .volume = initial_sound.volume, .muted = initial_sound.muted };
     dock.theme = dock_mod.readTheme();
+    renderer.background = dock.theme.colors().desktop_background;
     const dock_y: u32 = renderer.height - dock.height;
     const with_dock: server_mod.Rect = .{ .x = 0, .y = 0, .width = renderer.width, .height = dock_y };
     var perf = try perf_mod.Overlay.init(gpa, ui_font, renderer.width, renderer.height);
@@ -222,6 +223,7 @@ fn run(init: std.process.Init.Minimal) !void {
             if (net_sub.fd == null) dock.network = dock_mod.readNetworkStatus();
             dock.volume = dock_mod.readVolumeStatus();
             dock.theme = dock_mod.readTheme();
+            renderer.background = dock.theme.colors().desktop_background;
             dock.draw();
             renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
             server.setWorkArea(with_dock);
@@ -429,11 +431,12 @@ fn run(init: std.process.Init.Minimal) !void {
             const theme = dock_mod.readTheme();
             if (theme != dock.theme) {
                 dock.theme = theme;
+                renderer.background = theme.colors().desktop_background;
                 if (dock_shown) {
                     dock.draw();
                     renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
-                    panels_damaged = true;
                 }
+                panels_damaged = true;
             }
             server.wakeAll();
         }

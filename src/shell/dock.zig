@@ -28,6 +28,7 @@ pub const Theme = enum {
     light,
 
     pub const Colors = struct {
+        desktop_background: u32,
         background: u32,
         hover_background: u32,
         status_border: u32,
@@ -39,6 +40,7 @@ pub const Theme = enum {
     pub fn colors(t: Theme) Colors {
         return switch (t) {
             .dark => .{
+                .desktop_background = 0xff101830,
                 .background = 0xff1c2a4a,
                 .hover_background = 0xff2c3e66,
                 .status_border = 0xff3b507a,
@@ -47,6 +49,7 @@ pub const Theme = enum {
                 .status_inactive = 0x40ffffff,
             },
             .light => .{
+                .desktop_background = 0xffdce4f2,
                 .background = 0xffe8eef8,
                 .hover_background = 0xffd0dcf0,
                 .status_border = 0xffb0c2e0,

@@ -168,6 +168,7 @@ pub const Renderer = struct {
     cursor_bos: [n_cursors]?vc4.Bo = @splat(null),
     cursor_shape: ?cursor.Shape = null,
     cursor_move_failed: bool = false,
+    background: u32 = background,
 
     pub fn init(gpa: std.mem.Allocator, dev: vc4.Device, output: vc4.drm.Output) !Renderer {
         // The screen stays 32-bit: it is what everything is composited
@@ -378,7 +379,7 @@ pub const Renderer = struct {
     pub fn composite(r: *Renderer, windows: []const Window) !Timing {
         const t0 = sys.nowNs();
         const quads = try r.panelQuads();
-        static_frame.begin(r.display.backTarget(), .{ .clear = background });
+        static_frame.begin(r.display.backTarget(), .{ .clear = r.background });
         try recordFrame(&static_frame, &r.quads, r.vbo, &quads, windows);
         const t1 = sys.nowNs();
         const seqno = try r.dev.submit(static_frame.finish());
@@ -409,7 +410,7 @@ pub const Renderer = struct {
         const pitch = render.Target.pitch(.xrgb8888, @intCast(r.width));
         const bo = try r.dev.createBo(pitch * r.height);
         defer r.dev.destroyBo(bo);
-        capture_frame.begin(.{ .handle = bo.handle, .width = @intCast(r.width), .height = @intCast(r.height), .tiling = .linear }, .{ .clear = background });
+        capture_frame.begin(.{ .handle = bo.handle, .width = @intCast(r.width), .height = @intCast(r.height), .tiling = .linear }, .{ .clear = r.background });
         try recordFrame(&capture_frame, &r.quads, r.vbo, &quads, windows);
         const seqno = try r.dev.submit(capture_frame.finish());
         try r.dev.waitSeqno(seqno, std.time.ns_per_s);
