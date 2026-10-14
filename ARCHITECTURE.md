@@ -72,9 +72,10 @@ top:
               config.txt, and the two OS slots (slot-a/ and slot-b/)
 /data/        the card's ext4 data partition, created on first boot:
   system/     system settings (hostname, locale, network)
-  user/       user files and preferences (audio, appearance)
+  user/       user files and folders
   apps/       installed apps (/data/apps/<name>/<name>), cached catalogue,
-              icons, custom software server (.server), and signing keys (.keys)
+              icons, audio and appearance preferences (.sound, .appearance),
+              custom software server (.server), and signing keys (.keys)
   update/     staging directory for OS updates
 /media/       mounted USB drives, one directory per drive label
 /dev /proc /sys
