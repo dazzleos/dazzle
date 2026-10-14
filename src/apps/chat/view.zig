@@ -306,8 +306,8 @@ test "the lobby lists rooms to join and a way to start one" {
     try testing.expect(findText(u.root.?, "Rooms on this network") != null);
 
     const ads = [_]net.Ad{
-        .{ .room = 11, .name = protocol.Name.init("Lounge"), .node = 2, .addr = .{ 10, 0, 0, 2 }, .port = 1, .members = 3, .seen_ns = 0 },
-        .{ .room = 12, .name = protocol.Name.init("Workshop"), .node = 3, .addr = .{ 10, 0, 0, 3 }, .port = 1, .members = 1, .seen_ns = 0 },
+        .{ .room = 11, .name = protocol.Name.init("Lounge"), .members = 3 },
+        .{ .room = 12, .name = protocol.Name.init("Workshop"), .members = 1 },
     };
     const some: Chat = .{ .node = 1, .ads = &ads, .room = null, .actions = &actions };
     for ([_][2]u32{ min_size, .{ 1280, 720 } }) |size| {

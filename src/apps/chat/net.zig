@@ -7,13 +7,15 @@
 //! **Finding rooms.** Everyone in a room broadcasts an announcement to
 //! UDP port `protocol.discovery_port` every few seconds, with the TCP
 //! port they listen on; those not in a room hear them and list the rooms.
-//! A room that is not announced for a while is gone from the list. When
-//! someone leaves a room that nobody else is in, they say it is closed,
-//! so it goes from the lists at once. There is nothing else to a room:
-//! it exists while someone is in it, whoever started it.
+//! Each listing remembers the members heard announcing it lately. Someone
+//! leaving says so, and is forgotten at once; a room with nobody left to
+//! announce it (or not heard for a while) is gone from the list. There is
+//! nothing else to a room: it exists while someone is in it, whoever
+//! started it.
 //!
 //! **Joining.** The newcomer connects (TCP) to the member that announced
-//! the room and they exchange `hello`s. Each tells the other who else it
+//! the room last (or, if it cannot be reached, the others heard), and
+//! they exchange `hello`s. Each tells the other who else it
 //! is connected to, so the newcomer connects to all of them: everyone is
 //! connected to everyone. Announcements also mend the mesh: a member that
 //! hears one from someone it is not connected to, and has the smaller id,
@@ -55,19 +57,77 @@ const EPOLL_CLOEXEC = 0x80000;
 const EPOLL_CTL_ADD = 1;
 const EPOLL_CTL_DEL = 2;
 const EPOLL_CTL_MOD = 3;
-const ipproto_tcp = 6;
-const tcp_nodelay = 1;
+
+/// An address and port.
+pub const Endpoint = struct {
+    addr: [4]u8,
+    port: u16,
+};
+
+/// Everyone on the network, where announcements are heard.
+const everyone: Endpoint = .{ .addr = .{ 255, 255, 255, 255 }, .port = protocol.discovery_port };
+
+pub const Options = struct {
+    /// This computer's name, as the others see it.
+    name: []const u8,
+    /// Where announcements are heard (0: any port, for tests).
+    udp_port: u16 = protocol.discovery_port,
+    /// Where they are sent.
+    announce_to: []const Endpoint = &.{everyone},
+};
+
+/// The most members remembered for a room listed.
+pub const max_hosts = 4;
+
+/// A member heard announcing a room: where to connect to them.
+pub const Host = struct {
+    node: u64,
+    at: Endpoint,
+    seen_ns: u64,
+};
 
 /// A room someone announced.
 pub const Ad = struct {
     room: u64,
     name: Name,
-    /// The member that announced it, and where to connect to them.
-    node: u64,
-    addr: [4]u8,
-    port: u16,
     members: u8,
-    seen_ns: u64,
+    /// The members heard announcing it lately, the latest first.
+    hosts: [max_hosts]Host = undefined,
+    hosts_len: u8 = 0,
+
+    pub fn hostList(a: *const Ad) []const Host {
+        return a.hosts[0..a.hosts_len];
+    }
+
+    /// Notes that a member announced it (just now: they go first).
+    fn heard(a: *Ad, h: Host) void {
+        a.forget(h.node);
+        const keep: u8 = @min(a.hosts_len, max_hosts - 1);
+        std.mem.copyBackwards(Host, a.hosts[1 .. keep + 1], a.hosts[0..keep]);
+        a.hosts[0] = h;
+        a.hosts_len = keep + 1;
+    }
+
+    /// Forgets a member (who left).
+    fn forget(a: *Ad, node: u64) void {
+        var k: usize = 0;
+        while (k < a.hosts_len) {
+            if (a.hosts[k].node == node) a.remove(k) else k += 1;
+        }
+    }
+
+    /// Forgets the members not heard for a while.
+    fn expire(a: *Ad, now: u64) void {
+        var k: usize = 0;
+        while (k < a.hosts_len) {
+            if (now -| a.hosts[k].seen_ns > ad_expiry_ns) a.remove(k) else k += 1;
+        }
+    }
+
+    fn remove(a: *Ad, k: usize) void {
+        std.mem.copyForwards(Host, a.hosts[k .. a.hosts_len - 1], a.hosts[k + 1 .. a.hosts_len]);
+        a.hosts_len -= 1;
+    }
 };
 
 /// The room this client is in.
@@ -80,6 +140,10 @@ pub const Room = struct {
     connected: bool,
     /// When to give up on joining.
     deadline_ns: u64 = 0,
+    /// Joining: the members to try, and how many have been.
+    hosts: [max_hosts]Endpoint = undefined,
+    hosts_len: u8 = 0,
+    tried: u8 = 0,
 };
 
 const PeerState = enum { connecting, open, ready };
@@ -111,6 +175,7 @@ const Peer = struct {
 
 pub const Net = struct {
     gpa: std.mem.Allocator,
+    opts: Options,
     /// Readable when any socket has something: the window waits on it.
     epfd: linux.fd_t,
     /// Announcements; not there if the port is taken.
@@ -130,7 +195,7 @@ pub const Net = struct {
     next_ping_ns: u64 = 0,
     last_reply_ns: u64 = 0,
 
-    pub fn init(gpa: std.mem.Allocator, name: []const u8) !Net {
+    pub fn init(gpa: std.mem.Allocator, opts: Options) !Net {
         const epfd: linux.fd_t = @intCast(try sys.check(linux.epoll_create1(EPOLL_CLOEXEC)));
         errdefer sys.close(epfd);
 
@@ -139,12 +204,9 @@ pub const Net = struct {
         const bind_addr = sockaddrIn(.{ 0, 0, 0, 0 }, 0);
         _ = try sys.check(linux.bind(listener, @ptrCast(&bind_addr), @sizeOf(@TypeOf(bind_addr))));
         _ = try sys.check(linux.listen(listener, 8));
-        var bound: linux.sockaddr.in = undefined;
-        var bound_len: linux.socklen_t = @sizeOf(linux.sockaddr.in);
-        _ = try sys.check(linux.getsockname(listener, @ptrCast(&bound), &bound_len));
 
         var message: []const u8 = "";
-        const udp: ?linux.fd_t = openDiscovery() catch blk: {
+        const udp: ?linux.fd_t = openDiscovery(opts.udp_port) catch blk: {
             message = "Rooms cannot be found: the network port is in use";
             break :blk null;
         };
@@ -155,12 +217,13 @@ pub const Net = struct {
 
         var n: Net = .{
             .gpa = gpa,
+            .opts = opts,
             .epfd = epfd,
             .udp = udp,
             .listener = listener,
-            .port = std.mem.bigToNative(u16, bound.port),
+            .port = localPort(listener),
             .node = randomId(),
-            .name = Name.init(name),
+            .name = Name.init(opts.name),
             .message = message,
         };
         // Whoever is in a room says so.
@@ -168,10 +231,13 @@ pub const Net = struct {
         return n;
     }
 
+    /// The port announcements are heard on.
+    pub fn udpPort(n: *const Net) u16 {
+        return localPort(n.udp orelse return 0);
+    }
+
     pub fn deinit(n: *Net) void {
-        n.dropAll();
-        if (n.room) |*r| r.log.deinit();
-        n.room = null;
+        n.leave();
         n.peers.deinit(n.gpa);
         n.ads.deinit(n.gpa);
         if (n.udp) |fd| sys.close(fd);
@@ -211,15 +277,33 @@ pub const Net = struct {
             .connected = false,
             .deadline_ns = now + join_ns,
         };
+        const r = &n.room.?;
+        for (ad.hostList(), 0..) |h, k| r.hosts[k] = h.at;
+        r.hosts_len = ad.hosts_len;
         n.message = "";
         n.changed = true;
-        if (n.dial(ad.addr, ad.port, now) == null) n.joinFailed();
+        n.tryNextHost(now);
     }
 
-    /// Leaves the room. If nobody else is in it, it is closed.
+    /// Joining: connects to the next member heard announcing the room, or
+    /// gives up if there is none left to try.
+    fn tryNextHost(n: *Net, now: u64) void {
+        const r = n.roomPtr() orelse return;
+        while (r.tried < r.hosts_len) {
+            const h = r.hosts[r.tried];
+            r.tried += 1;
+            if (n.dial(h.addr, h.port, now) != null) return;
+        }
+        n.joinFailed();
+    }
+
+    /// Leaves the room. The others carry on in it; if there are none, it
+    /// is gone.
     pub fn leave(n: *Net) void {
         const r = n.roomPtr() orelse return;
-        if (r.connected and n.readyCount() == 0) n.broadcast(.{ .kind = .closed, .room = r.id, .node = n.node });
+        // Not to be joined through any more (and the room not listed at
+        // all, if nobody else announces it).
+        if (r.connected) n.broadcast(.{ .kind = .left, .room = r.id, .node = n.node });
         n.leaveRoom();
     }
 
@@ -321,15 +405,12 @@ pub const Net = struct {
     }
 
     fn tick(n: *Net, now: u64) void {
-        var i: usize = 0;
-        while (i < n.ads.items.len) {
-            if (now -| n.ads.items[i].seen_ns > ad_expiry_ns) {
-                _ = n.ads.orderedRemove(i);
-                n.changed = true;
-            } else i += 1;
-        }
+        n.pruneAds(now);
         const r = n.roomPtr() orelse return;
-        if (!r.connected and (n.peers.items.len == 0 or now >= r.deadline_ns)) return n.joinFailed();
+        if (!r.connected) {
+            if (now >= r.deadline_ns) return n.joinFailed();
+            if (n.peers.items.len == 0) return n.tryNextHost(now);
+        }
         if (now >= n.next_announce_ns) {
             n.announce();
             n.next_announce_ns = now + announce_ns;
@@ -364,8 +445,11 @@ pub const Net = struct {
         const fd = n.udp orelse return;
         var buf: [128]u8 = undefined;
         const bytes = protocol.encodeDatagram(&buf, d) orelse return;
-        const dest = sockaddrIn(.{ 255, 255, 255, 255 }, protocol.discovery_port);
-        _ = linux.sendto(fd, bytes.ptr, bytes.len, linux.MSG.NOSIGNAL, @ptrCast(&dest), @sizeOf(@TypeOf(dest)));
+        for (n.opts.announce_to) |to| {
+            const dest = sockaddrIn(to.addr, to.port);
+            // No network: nobody to hear it.
+            _ = linux.sendto(fd, bytes.ptr, bytes.len, linux.MSG.NOSIGNAL, @ptrCast(&dest), @sizeOf(@TypeOf(dest)));
+        }
     }
 
     fn announce(n: *Net) void {
@@ -402,7 +486,12 @@ pub const Net = struct {
                 n.last_reply_ns = now;
                 n.announce();
             },
-            .closed => n.removeAd(d.room),
+            .left => {
+                for (n.ads.items) |*a| {
+                    if (a.room == d.room) a.forget(d.node);
+                }
+                n.pruneAds(now);
+            },
             .announce => {
                 if (n.roomPtr()) |r| {
                     // A member we are not connected to: the smaller id
@@ -410,25 +499,34 @@ pub const Net = struct {
                     if (r.id == d.room and r.connected and n.node < d.node) n.meet(addr, d.port, d.node, now);
                     if (r.id == d.room) return;
                 }
+                const host: Host = .{ .node = d.node, .at = .{ .addr = addr, .port = d.port }, .seen_ns = now };
+                const name = Name.init(d.room_name);
                 for (n.ads.items) |*a| {
                     if (a.room != d.room) continue;
-                    const name = Name.init(d.room_name);
                     if (a.members != d.members or !std.mem.eql(u8, a.name.get(), name.get())) n.changed = true;
-                    a.* = .{ .room = d.room, .name = name, .node = d.node, .addr = addr, .port = d.port, .members = d.members, .seen_ns = now };
+                    a.name = name;
+                    a.members = d.members;
+                    a.heard(host);
                     return;
                 }
                 if (n.ads.items.len >= max_ads) return;
-                n.ads.append(n.gpa, .{
-                    .room = d.room,
-                    .name = Name.init(d.room_name),
-                    .node = d.node,
-                    .addr = addr,
-                    .port = d.port,
-                    .members = d.members,
-                    .seen_ns = now,
-                }) catch return;
+                var ad: Ad = .{ .room = d.room, .name = name, .members = d.members };
+                ad.heard(host);
+                n.ads.append(n.gpa, ad) catch return;
                 n.changed = true;
             },
+        }
+    }
+
+    /// Lets go of the rooms nobody announces any more.
+    fn pruneAds(n: *Net, now: u64) void {
+        var i: usize = 0;
+        while (i < n.ads.items.len) {
+            n.ads.items[i].expire(now);
+            if (n.ads.items[i].hosts_len == 0) {
+                _ = n.ads.orderedRemove(i);
+                n.changed = true;
+            } else i += 1;
         }
     }
 
@@ -745,18 +843,25 @@ fn newSocket(kind: u32) !linux.fd_t {
 
 fn setNoDelay(fd: linux.fd_t) void {
     const one: c_int = 1;
-    _ = linux.setsockopt(fd, ipproto_tcp, tcp_nodelay, std.mem.asBytes(&one), @sizeOf(c_int));
+    _ = linux.setsockopt(fd, linux.IPPROTO.TCP, linux.TCP.NODELAY, std.mem.asBytes(&one), @sizeOf(c_int));
+}
+
+fn localPort(fd: linux.fd_t) u16 {
+    var a: linux.sockaddr.in = undefined;
+    var len: linux.socklen_t = @sizeOf(linux.sockaddr.in);
+    if (linux.errno(linux.getsockname(fd, @ptrCast(&a), &len)) != .SUCCESS) return 0;
+    return std.mem.bigToNative(u16, a.port);
 }
 
 /// The UDP socket announcements are sent and heard on. Others on this
 /// computer share the port.
-fn openDiscovery() !linux.fd_t {
+fn openDiscovery(port: u16) !linux.fd_t {
     const fd = try newSocket(linux.SOCK.DGRAM);
     errdefer sys.close(fd);
     const one: c_int = 1;
     _ = linux.setsockopt(fd, linux.SOL.SOCKET, linux.SO.REUSEADDR, std.mem.asBytes(&one), @sizeOf(c_int));
     _ = linux.setsockopt(fd, linux.SOL.SOCKET, linux.SO.BROADCAST, std.mem.asBytes(&one), @sizeOf(c_int));
-    const addr = sockaddrIn(.{ 0, 0, 0, 0 }, protocol.discovery_port);
+    const addr = sockaddrIn(.{ 0, 0, 0, 0 }, port);
     _ = try sys.check(linux.bind(fd, @ptrCast(&addr), @sizeOf(@TypeOf(addr))));
     return fd;
 }
@@ -781,31 +886,54 @@ fn randomId() u64 {
 
 const testing = std.testing;
 
-fn clock() u64 {
-    return sys.nowNs();
-}
+const loopback: [4]u8 = .{ 127, 0, 0, 1 };
 
-/// Runs the clients for a while.
-fn pump(nets: []const *Net, ms: u64) void {
-    const end = clock() + ms * std.time.ns_per_ms;
-    while (clock() < end) {
-        for (nets) |n| _ = n.service(clock());
-        sys.sleepMs(2);
+/// Three clients on this computer, each announcing to the others' ports
+/// over the loopback (as a broadcast reaches everyone on a network).
+const Lan = struct {
+    nets: [3]Net,
+    to: [3]Endpoint,
+
+    fn init(lan: *Lan) !void {
+        const names = [_][]const u8{ "alice", "bob", "carol" };
+        var made: usize = 0;
+        errdefer for (lan.nets[0..made]) |*n| n.deinit();
+        for (&lan.nets, names) |*n, name| {
+            n.* = try Net.init(testing.allocator, .{ .name = name, .udp_port = 0, .announce_to = &.{} });
+            made += 1;
+        }
+        for (&lan.nets, &lan.to) |*n, *to| to.* = .{ .addr = loopback, .port = n.udpPort() };
+        for (&lan.nets) |*n| n.opts.announce_to = &lan.to;
     }
+
+    fn deinit(lan: *Lan) void {
+        for (&lan.nets) |*n| n.deinit();
+    }
+
+    /// Runs them all until `done` (or a few seconds go by).
+    fn until(lan: *Lan, comptime done: fn (*Lan) bool) !void {
+        for (0..3000) |_| {
+            for (&lan.nets) |*n| _ = n.service(sys.nowNs());
+            if (done(lan)) return;
+            sys.sleepMs(1);
+        }
+        return error.Timeout;
+    }
+};
+
+fn inRoom(n: *const Net) bool {
+    return n.room != null and n.room.?.connected;
 }
 
-/// Makes `n` hear of `other`'s room, as if from its announcement.
-fn hearOf(n: *Net, other: *Net) !void {
-    const r = other.room.?;
-    try n.ads.append(n.gpa, .{
-        .room = r.id,
-        .name = r.name,
-        .node = other.node,
-        .addr = .{ 127, 0, 0, 1 },
-        .port = other.port,
-        .members = 1,
-        .seen_ns = clock(),
-    });
+fn said(n: *const Net) usize {
+    return if (n.room) |r| r.log.items.items.len else 0;
+}
+
+fn listedBy(n: *const Net, host: u64) bool {
+    for (n.ads.items) |a| {
+        for (a.hostList()) |h| if (h.node == host) return true;
+    }
+    return false;
 }
 
 fn expectSameHistory(a: *const Net, b: *const Net) !void {
@@ -819,95 +947,161 @@ fn expectSameHistory(a: *const Net, b: *const Net) !void {
     }
 }
 
-test "people join a room, see its history, and agree on the order" {
-    var a = try Net.init(testing.allocator, "alice");
-    defer a.deinit();
-    var b = try Net.init(testing.allocator, "bob");
-    defer b.deinit();
-    var c = try Net.init(testing.allocator, "carol");
-    defer c.deinit();
+test "a room is found, joined and talked in, and lasts while anyone is in it" {
+    var lan: Lan = undefined;
+    try lan.init();
+    defer lan.deinit();
+    const a = &lan.nets[0];
+    const b = &lan.nets[1];
+    const c = &lan.nets[2];
 
-    a.create("Lounge", clock());
+    a.create("Lounge", sys.nowNs());
     a.say("first");
     a.say("second");
-    try testing.expect(a.room.?.connected);
 
-    // Bob joins through Alice, and gets what was said.
-    try hearOf(&b, &a);
-    b.join(a.room.?.id, clock());
-    pump(&.{ &a, &b }, 300);
-    try testing.expect(b.room.?.connected);
-    try testing.expectEqual(@as(usize, 1), a.readyCount());
-    try testing.expectEqual(@as(usize, 1), b.readyCount());
-    try expectSameHistory(&a, &b);
-    try testing.expectEqual(@as(usize, 2), b.room.?.log.items.items.len);
+    // The others hear of it.
+    try lan.until(struct {
+        fn f(l: *Lan) bool {
+            return l.nets[1].ads.items.len == 1 and l.nets[2].ads.items.len == 1;
+        }
+    }.f);
+    try testing.expectEqualStrings("Lounge", b.ads.items[0].name.get());
+    try testing.expectEqual(@as(u8, 1), b.ads.items[0].members);
 
-    // They talk at the same time.
+    // Bob joins, and gets what was said.
+    b.join(b.ads.items[0].room, sys.nowNs());
+    try lan.until(struct {
+        fn f(l: *Lan) bool {
+            return inRoom(&l.nets[1]) and said(&l.nets[1]) == 2;
+        }
+    }.f);
+    try expectSameHistory(a, b);
+
+    // They talk at the same time, and agree on the order.
     a.say("from alice");
     b.say("from bob");
-    pump(&.{ &a, &b }, 200);
-    try expectSameHistory(&a, &b);
-    try testing.expectEqual(@as(usize, 4), a.room.?.log.items.items.len);
+    try lan.until(struct {
+        fn f(l: *Lan) bool {
+            return said(&l.nets[0]) == 4 and said(&l.nets[1]) == 4 and l.nets[2].ads.items[0].members == 2;
+        }
+    }.f);
+    try expectSameHistory(a, b);
 
-    // Alice, who started the room, leaves; Bob keeps it open, and Carol
-    // joins through him and gets all of it.
+    // Alice, who started it, leaves: Bob keeps it open, and nobody is
+    // sent to Alice to join it.
     a.leave();
-    try testing.expect(a.room == null);
-    pump(&.{&b}, 100);
-    try testing.expectEqual(@as(usize, 0), b.readyCount());
-    try testing.expect(b.room != null);
-    try hearOf(&c, &b);
-    c.join(b.room.?.id, clock());
-    pump(&.{ &b, &c }, 300);
-    try testing.expect(c.room.?.connected);
-    try expectSameHistory(&b, &c);
-    try testing.expectEqual(@as(usize, 4), c.room.?.log.items.items.len);
+    try lan.until(struct {
+        fn f(l: *Lan) bool {
+            const alice = l.nets[0].node;
+            return l.nets[1].readyCount() == 0 and !listedBy(&l.nets[2], alice) and l.nets[0].ads.items.len == 1;
+        }
+    }.f);
+    try testing.expect(inRoom(b));
+    try testing.expectEqual(@as(usize, 1), c.ads.items.len);
 
+    // Carol joins through Bob, and gets all of it.
+    c.join(c.ads.items[0].room, sys.nowNs());
+    try lan.until(struct {
+        fn f(l: *Lan) bool {
+            return inRoom(&l.nets[2]) and said(&l.nets[2]) == 4;
+        }
+    }.f);
+    try expectSameHistory(b, c);
     c.say("hello from carol");
-    pump(&.{ &b, &c }, 100);
-    try expectSameHistory(&b, &c);
+    try lan.until(struct {
+        fn f(l: *Lan) bool {
+            return said(&l.nets[1]) == 5;
+        }
+    }.f);
+    try expectSameHistory(b, c);
 
-    // The last to leave closes the room.
+    // Bob leaves: it is still listed, as Carol is in it. When she leaves
+    // too it is gone at once (not when it would have expired).
     b.leave();
+    try lan.until(struct {
+        fn f(l: *Lan) bool {
+            return !listedBy(&l.nets[0], l.nets[1].node) and listedBy(&l.nets[0], l.nets[2].node);
+        }
+    }.f);
+    try testing.expectEqual(@as(usize, 1), a.ads.items.len);
     c.leave();
-    try testing.expect(b.room == null and c.room == null);
+    try lan.until(struct {
+        fn f(l: *Lan) bool {
+            return l.nets[0].ads.items.len == 0 and l.nets[1].ads.items.len == 0;
+        }
+    }.f);
 }
 
-test "a room that cannot be reached is given up on" {
-    var a = try Net.init(testing.allocator, "alice");
-    defer a.deinit();
-    // Nothing listens on port 1.
-    try a.ads.append(a.gpa, .{ .room = 5, .name = Name.init("Nowhere"), .node = 9, .addr = .{ 127, 0, 0, 1 }, .port = 1, .members = 1, .seen_ns = clock() });
-    a.join(5, clock());
-    pump(&.{&a}, 200);
-    try testing.expect(a.room == null);
-    try testing.expect(a.message.len > 0);
+test "joining tries each member heard of, and gives up if none answers" {
+    var lan: Lan = undefined;
+    try lan.init();
+    defer lan.deinit();
+    const a = &lan.nets[0];
+    const b = &lan.nets[1];
+    const now = sys.nowNs();
+    a.create("Lounge", now);
+
+    // Heard last from someone who has gone (nothing listens on port 1),
+    // and before that from Alice: Bob gets in through her.
+    var ad: Ad = .{ .room = a.room.?.id, .name = Name.init("Lounge"), .members = 2 };
+    ad.heard(.{ .node = a.node, .at = .{ .addr = loopback, .port = a.port }, .seen_ns = now });
+    ad.heard(.{ .node = 99, .at = .{ .addr = loopback, .port = 1 }, .seen_ns = now });
+    try b.ads.append(b.gpa, ad);
+    b.join(ad.room, now);
+    try lan.until(struct {
+        fn f(l: *Lan) bool {
+            return inRoom(&l.nets[1]);
+        }
+    }.f);
+
+    // Nobody there at all: it says so.
+    const c = &lan.nets[2];
+    var gone: Ad = .{ .room = 5, .name = Name.init("Nowhere"), .members = 1 };
+    gone.heard(.{ .node = 98, .at = .{ .addr = loopback, .port = 1 }, .seen_ns = now });
+    try c.ads.append(c.gpa, gone);
+    c.join(5, now);
+    try lan.until(struct {
+        fn f(l: *Lan) bool {
+            return l.nets[2].room == null;
+        }
+    }.f);
+    try testing.expect(c.message.len > 0);
 }
 
 test "three people all meet, even when two join at once" {
-    var a = try Net.init(testing.allocator, "alice");
-    defer a.deinit();
-    var b = try Net.init(testing.allocator, "bob");
-    defer b.deinit();
-    var c = try Net.init(testing.allocator, "carol");
-    defer c.deinit();
-    a.create("Lounge", clock());
-    try hearOf(&b, &a);
-    try hearOf(&c, &a);
-    b.join(a.room.?.id, clock());
-    c.join(a.room.?.id, clock());
-    pump(&.{ &a, &b, &c }, 500);
-    try testing.expectEqual(@as(usize, 2), a.readyCount());
-    try testing.expectEqual(@as(usize, 2), b.readyCount());
-    try testing.expectEqual(@as(usize, 2), c.readyCount());
+    var lan: Lan = undefined;
+    try lan.init();
+    defer lan.deinit();
+    const a = &lan.nets[0];
+    const b = &lan.nets[1];
+    const c = &lan.nets[2];
+    a.create("Lounge", sys.nowNs());
+    try lan.until(struct {
+        fn f(l: *Lan) bool {
+            return l.nets[1].ads.items.len == 1 and l.nets[2].ads.items.len == 1;
+        }
+    }.f);
+    b.join(b.ads.items[0].room, sys.nowNs());
+    c.join(c.ads.items[0].room, sys.nowNs());
+    try lan.until(struct {
+        fn f(l: *Lan) bool {
+            for (&l.nets) |*n| if (n.readyCount() != 2) return false;
+            return true;
+        }
+    }.f);
+
     // Whoever speaks is heard by everyone, in the same order.
     a.say("one");
     b.say("two");
     c.say("three");
-    pump(&.{ &a, &b, &c }, 200);
-    try expectSameHistory(&a, &b);
-    try expectSameHistory(&a, &c);
-    try testing.expectEqual(@as(usize, 3), a.room.?.log.items.items.len);
+    try lan.until(struct {
+        fn f(l: *Lan) bool {
+            for (&l.nets) |*n| if (said(n) != 3) return false;
+            return true;
+        }
+    }.f);
+    try expectSameHistory(a, b);
+    try expectSameHistory(a, c);
     var names: [4][]const u8 = undefined;
     try testing.expectEqual(@as(usize, 3), a.members(&names).len);
 }

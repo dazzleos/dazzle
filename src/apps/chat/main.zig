@@ -12,6 +12,7 @@
 //! window is closed.
 
 const std = @import("std");
+const linux = std.os.linux;
 const sys = @import("sys");
 const locale = @import("locale");
 const ui = @import("ui");
@@ -37,19 +38,24 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     return 0;
 }
 
-/// The computer's name, which is what others see.
-fn computerName(buf: []u8) []const u8 {
-    const text = sys.readFile(sys.system.hostname_file, buf) orelse return "dazzle";
-    const name = std.mem.trim(u8, text, " \t\r\n");
-    return if (name.len == 0) "dazzle" else name;
+/// The computer's name, which is what others see (the kernel's, set from
+/// the name chosen when the system was set up).
+fn hostname(buf: *[64]u8) []const u8 {
+    var uts: linux.utsname = undefined;
+    if (linux.errno(linux.uname(&uts)) != .SUCCESS) return "dazzle";
+    const n = std.mem.indexOfScalar(u8, &uts.nodename, 0) orelse uts.nodename.len;
+    if (n == 0) return "dazzle";
+    const len = @min(n, buf.len);
+    @memcpy(buf[0..len], uts.nodename[0..len]);
+    return buf[0..len];
 }
 
 fn run(init: std.process.Init.Minimal) !void {
     locale.current = locale.load().language;
     const gpa = std.heap.page_allocator;
 
-    var name_buf: [128]u8 = undefined;
-    var network = try net.Net.init(gpa, computerName(&name_buf));
+    var name_buf: [64]u8 = undefined;
+    var network = try net.Net.init(gpa, .{ .name = hostname(&name_buf) });
     defer network.deinit();
 
     const a = try ui.App.open(gpa, init.environ, .{

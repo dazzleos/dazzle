@@ -163,32 +163,6 @@ size, SHA-256 and Ed25519 signature:
    exits early or the system hangs, the board reboots into the previous
    working slot.
 
-## Chat
-
-The Chat app (`src/apps/chat/`) lets the people on a network talk in rooms,
-with no server. Everything runs in one thread: all of its sockets are in one
-epoll set, which the window waits on.
-
-- **Finding rooms.** Each member of a room broadcasts an announcement (UDP
-  port 48100) every few seconds with the room's name and the TCP port they
-  listen on. Apps not in a room list what they hear, and drop a room that
-  has not been announced for 10 seconds. A room exists while anyone is in
-  it, so whoever started it can leave; the last person to leave says the
-  room is closed.
-- **Joining.** The newcomer connects to the member that announced the
-  room; the two exchange the addresses of everyone else, and the newcomer
-  connects to them all, so members are fully connected. Announcements mend
-  gaps in the mesh.
-- **Order.** Every message carries a Lamport timestamp, and clients order
-  messages by (timestamp, author, number), so all of them show the same
-  order without a leader, and a reply is always after what it replies to.
-- **History.** Every client keeps the room's whole history. When two
-  clients connect they tell each other how many of each author's messages
-  they have, and send what the other lacks, so a new client gets the
-  history from whoever it reaches first.
-
-Rooms have no passwords: anyone on the network can join.
-
 ## Rendering
 
 Dazzle renders directly on the GPU via the `vc4` module (talking to the
