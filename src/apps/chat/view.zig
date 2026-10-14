@@ -1,7 +1,8 @@
 //! Chat's window, as widgets. Outside a room it lists the rooms found on
 //! the network, to join, with a field and a button to start one. In a room
 //! it shows who is there, what has been said in order (scrolled to the
-//! newest), and a field to say something in.
+//! newest), and a field to say something in. Its settings (the gear, in
+//! either) change the name others see.
 
 const std = @import("std");
 const ui = @import("ui");
@@ -25,6 +26,12 @@ pub const Actions = struct {
     /// A room to join (its id).
     join: ?u64 = null,
     dismiss: bool = false,
+    /// The settings are shown, with the name being typed.
+    settings_open: bool = false,
+    name_buf: [ui.TextField.capacity]u8 = undefined,
+    name_len: usize = 0,
+    open_settings: bool = false,
+    save_settings: bool = false,
 
     pub fn roomName(a: *const Actions) []const u8 {
         return a.room_name_buf[0..a.room_name_len];
@@ -57,6 +64,26 @@ pub const Actions = struct {
     fn requestDismiss(a: *Actions) void {
         a.dismiss = true;
     }
+
+    pub fn typedName(a: *const Actions) []const u8 {
+        return a.name_buf[0..a.name_len];
+    }
+
+    pub fn setTypedName(a: *Actions, text: []const u8) void {
+        a.name_len = copyText(&a.name_buf, text);
+    }
+
+    fn requestSettings(a: *Actions) void {
+        a.open_settings = true;
+    }
+
+    fn requestSaveSettings(a: *Actions) void {
+        a.save_settings = true;
+    }
+
+    fn closeSettings(a: *Actions) void {
+        a.settings_open = false;
+    }
 };
 
 /// Copies as much of `text` as fits (whole characters).
@@ -87,11 +114,38 @@ pub const Chat = struct {
     members: []const []const u8 = &.{},
     /// Something to tell the person.
     message: []const u8 = "",
+    /// What others see this client as.
+    name: []const u8 = "",
+    /// What the settings set it back to when cleared.
+    default_name: []const u8 = "",
     actions: *Actions,
 
     pub fn build(self: *const Chat, cx: *ui.Context) ui.Widget {
-        const room = self.room orelse return self.lobby(cx);
-        return self.inRoom(cx, room);
+        const body = if (self.room) |room| self.inRoom(cx, room) else self.lobby(cx);
+        return cx.make(ui.Dialog{
+            .open = self.actions.settings_open,
+            .icon = .settings,
+            .title = "Settings",
+            .description = cx.fmt("The name others see you as. Leave it empty to use this computer's name ({s}).", .{self.default_name}),
+            .content = cx.make(ui.TextField{
+                .initial = self.name,
+                .placeholder = self.default_name,
+                .width = std.math.inf(f32),
+                .max_len = protocol.max_name,
+                .autofocus = true,
+                .on_changed = .of(self.actions, Actions.setTypedName),
+                .on_submit = .of(self.actions, Actions.requestSaveSettings),
+            }),
+            .confirm_label = "Save",
+            .on_confirm = .of(self.actions, Actions.requestSaveSettings),
+            .dismiss_label = "Cancel",
+            .on_dismiss = .of(self.actions, Actions.closeSettings),
+            .child = body,
+        });
+    }
+
+    fn settingsButton(self: *const Chat, cx: *ui.Context) ui.Widget {
+        return cx.make(ui.IconButton{ .icon = .settings, .on_press = .of(self.actions, Actions.requestSettings) });
     }
 
     fn lobby(self: *const Chat, cx: *ui.Context) ui.Widget {
@@ -132,6 +186,16 @@ pub const Chat = struct {
                         .cross_axis_alignment = .stretch,
                         .spacing = 12,
                         .children = &.{
+                            cx.make(ui.Row{ .spacing = 8, .cross_axis_alignment = .center, .children = &.{
+                                cx.make(ui.Icon{ .icon = .person, .color = t.on_surface_variant }),
+                                cx.make(ui.Expanded{ .child = cx.make(ui.Text{
+                                    .text = cx.fmt("You are {s}", .{self.name}),
+                                    .style = .{ .size = 16, .color = t.on_surface },
+                                    .wrap = false,
+                                    .ellipsis = true,
+                                }) }),
+                                self.settingsButton(cx),
+                            } }),
                             cx.make(ui.Row{ .spacing = 12, .cross_axis_alignment = .center, .children = &.{
                                 cx.make(ui.Expanded{ .child = cx.make(ui.TextField{
                                     .placeholder = "Name for a new room",
@@ -208,6 +272,7 @@ pub const Chat = struct {
                             .wrap = false,
                             .ellipsis = true,
                         }) }),
+                        self.settingsButton(cx),
                     },
                 }) }),
                 cx.make(ui.Divider{}),
@@ -297,7 +362,7 @@ test "the lobby lists rooms to join and a way to start one" {
     const u = try ui.Ui.create(testing.allocator, &f);
     defer u.destroy();
     var actions: Actions = .{};
-    const none: Chat = .{ .node = 1, .ads = &.{}, .room = null, .actions = &actions };
+    const none: Chat = .{ .node = 1, .ads = &.{}, .room = null, .name = "kitchen-pi", .default_name = "kitchen-pi", .actions = &actions };
     for ([_][2]u32{ min_size, .{ 1280, 720 }, .{ 1920, 1036 } }) |size| {
         u.frame(size[0], size[1], 0, none);
         try testing.expect(!overflows(u.root.?));
@@ -321,6 +386,50 @@ test "the lobby lists rooms to join and a way to start one" {
 
     click(u, up(findText(u.root.?, "Start Room").?, ui.FilledButton).?);
     try testing.expect(actions.create);
+}
+
+fn findField(n: *ui.Node, text: []const u8) ?*ui.Node {
+    if (n.widget.is(ui.TextField) and std.mem.eql(u8, n.state(ui.TextField.State).text(), text)) return n;
+    for (n.children.items) |ch| if (findField(ch, text)) |f| return f;
+    return null;
+}
+
+/// The settings button (the gear).
+fn findSettings(n: *ui.Node) ?*ui.Node {
+    if (n.widget.as(ui.IconButton)) |b| if (b.icon == .settings) return n;
+    for (n.children.items) |ch| if (findSettings(ch)) |f| return f;
+    return null;
+}
+
+test "the settings change the name" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    var actions: Actions = .{};
+    const chat: Chat = .{ .node = 1, .ads = &.{}, .room = null, .name = "Alice", .default_name = "kitchen-pi", .actions = &actions };
+    u.frame(1280, 720, 0, chat);
+    try testing.expect(findText(u.root.?, "You are Alice") != null);
+    // A long name still fits.
+    u.frame(min_size[0], min_size[1], 0, Chat{ .node = 1, .ads = &.{}, .room = null, .name = "W" ** protocol.max_name, .default_name = "kitchen-pi", .actions = &actions });
+    try testing.expect(!overflows(u.root.?));
+    u.frame(1280, 720, 0, chat);
+    try testing.expect(findText(u.root.?, "Settings") == null);
+    click(u, findSettings(u.root.?).?);
+    try testing.expect(actions.open_settings);
+
+    // Opened (main.zig does that), it has the name to change.
+    actions.settings_open = true;
+    for ([_][2]u32{ min_size, .{ 1280, 720 } }) |size| {
+        u.frame(size[0], size[1], 1, chat);
+        try testing.expect(!overflows(u.root.?));
+    }
+    try testing.expect(findText(u.root.?, "Settings") != null);
+    // Its field has the name (the lobby's, under it, is empty).
+    try testing.expect(findField(u.root.?, "Alice") != null);
+    click(u, up(findText(u.root.?, "Save").?, ui.FilledButton).?);
+    try testing.expect(actions.save_settings);
+    click(u, up(findText(u.root.?, "Cancel").?, ui.TextButton).?);
+    try testing.expect(!actions.settings_open);
 }
 
 test "a room shows who is there and what was said, and sending asks to send" {

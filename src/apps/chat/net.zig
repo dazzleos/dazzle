@@ -342,6 +342,20 @@ pub const Net = struct {
         }
     }
 
+    /// Changes this client's name (telling the room, if it is in one).
+    pub fn rename(n: *Net, name: []const u8) void {
+        n.name = Name.init(name);
+        n.changed = true;
+        var buf: [64]u8 = undefined;
+        const frame = protocol.encodeRename(&buf, n.name.get()) orelse return;
+        var i = n.peers.items.len;
+        while (i > 0) {
+            i -= 1;
+            const p = n.peers.items[i];
+            if (p.state == .ready) _ = n.send(p, frame);
+        }
+    }
+
     /// The names of the people in the room, this client first.
     pub fn members(n: *const Net, out: [][]const u8) [][]const u8 {
         if (out.len == 0) return out[0..0];
@@ -756,6 +770,14 @@ pub const Net = struct {
                 };
                 if (r.log.add(m) catch false) n.changed = true;
             },
+            .rename => {
+                const name = protocol.decodeRename(f.body) orelse {
+                    n.closePeer(p);
+                    return false;
+                };
+                p.name = Name.init(name);
+                n.changed = true;
+            },
             .ping => {},
             _ => {},
         }
@@ -1104,4 +1126,22 @@ test "three people all meet, even when two join at once" {
     try expectSameHistory(a, c);
     var names: [4][]const u8 = undefined;
     try testing.expectEqual(@as(usize, 3), a.members(&names).len);
+
+    // Someone takes another name: the others see it.
+    c.rename("caz");
+    try lan.until(struct {
+        fn f(l: *Lan) bool {
+            var buf: [4][]const u8 = undefined;
+            for (l.nets[0].members(&buf)) |name| if (std.mem.eql(u8, name, "caz")) return true;
+            return false;
+        }
+    }.f);
+    c.say("four");
+    try lan.until(struct {
+        fn f(l: *Lan) bool {
+            return said(&l.nets[1]) == 4;
+        }
+    }.f);
+    const last = b.room.?.log.items.items[3];
+    try testing.expectEqualStrings("caz", last.name);
 }
