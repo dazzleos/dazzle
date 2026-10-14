@@ -35,6 +35,7 @@ pub const Manifest = struct {
     file: []const u8,
     size: u64,
     sha256: []const u8,
+    signature: []const u8 = "",
 
     pub fn parse(gpa: std.mem.Allocator, json: []const u8) !std.json.Parsed(Manifest) {
         const parsed = std.json.parseFromSlice(Manifest, gpa, json, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return error.BadManifest;
@@ -231,6 +232,8 @@ fn childDownload(gpa: std.mem.Allocator, base_url: []const u8, m: Manifest) !voi
     const archive = try store.download(gpa, url);
     if (archive.len != m.size) return error.WrongSize;
     if (!sys.archive.sha256Is(archive, m.sha256)) return error.WrongChecksum;
+    const keys = store.loadKeys();
+    try store.verifySignature(archive, m.signature, keys.slice());
     const tmp = proto.update_archive ++ ".new";
     _ = linux.unlink(tmp);
     try sys.files.writeNew(tmp, archive);

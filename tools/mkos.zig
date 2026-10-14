@@ -16,11 +16,12 @@
 //!       "icon": "icon.png",
 //!       "file": "dazzle-os.tar.xz",
 //!       "size": 4123456,
-//!       "sha256": "<64 hex digits>"
+//!       "sha256": "<64 hex digits>",
+//!       "signature": "<128 hex digits>"
 //!     }
 //!
 //! Usage: mkos pack <output.tar> [<name in the slot>=<file>]...
-//!        mkos manifest <os.json> <version file> <archive>
+//!        mkos manifest [--key=<64-hex-seed>] <os.json> <version file> <archive>
 //!
 //! The version file is the slot's ("<time> <version>").
 
@@ -48,9 +49,20 @@ pub fn main(init: std.process.Init) !void {
             });
         }
         try writeFile(init.io, args[2], try pack(arena, files.items));
-    } else if (args.len == 5 and std.mem.eql(u8, args[1], "manifest")) {
-        const archive = try cwd.readFileAlloc(init.io, args[4], arena, .limited(256 << 20));
-        const version = try cwd.readFileAlloc(init.io, args[3], arena, .limited(256));
+    } else if (args.len >= 5 and std.mem.eql(u8, args[1], "manifest")) {
+        var base: usize = 2;
+        var seed: [32]u8 = mkcatalogue.default_seed;
+        if (base < args.len and std.mem.startsWith(u8, args[base], "--key=")) {
+            seed = try mkcatalogue.parseSeed(args[base]["--key=".len..]);
+            base += 1;
+        }
+        if (args.len != base + 3) {
+            std.debug.print("usage: mkos pack <output.tar> [<name in the slot>=<file>]...\n       mkos manifest [--key=<64-hex-seed>] <os.json> <version file> <archive>\n", .{});
+            std.process.exit(2);
+        }
+        const kp = mkcatalogue.keyPair(seed);
+        const archive = try cwd.readFileAlloc(init.io, args[base + 2], arena, .limited(256 << 20));
+        const version = try cwd.readFileAlloc(init.io, args[base + 1], arena, .limited(256));
         var fields = std.mem.tokenizeAny(u8, version, " \n");
         const time = try std.fmt.parseInt(u64, fields.next() orelse return error.BadVersion, 10);
         const m: Manifest = .{
@@ -63,10 +75,11 @@ pub fn main(init: std.process.Init) !void {
             .file = archive_name,
             .size = archive.len,
             .sha256 = try mkcatalogue.hexSha256(arena, archive),
+            .signature = try mkcatalogue.hexSignature(arena, archive, kp),
         };
-        try writeFile(init.io, args[2], try std.fmt.allocPrint(arena, "{f}\n", .{std.json.fmt(m, .{ .whitespace = .indent_2 })}));
+        try writeFile(init.io, args[base], try std.fmt.allocPrint(arena, "{f}\n", .{std.json.fmt(m, .{ .whitespace = .indent_2 })}));
     } else {
-        std.debug.print("usage: mkos pack <output.tar> [<name in the slot>=<file>]...\n       mkos manifest <os.json> <version file> <archive>\n", .{});
+        std.debug.print("usage: mkos pack <output.tar> [<name in the slot>=<file>]...\n       mkos manifest [--key=<64-hex-seed>] <os.json> <version file> <archive>\n", .{});
         std.process.exit(2);
     }
 }

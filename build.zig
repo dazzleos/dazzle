@@ -76,6 +76,7 @@ fn addAppArchives(b: *std.Build, apps: []const App) *std.Build.Step {
     const commit_time = gitCommitTime(b);
     const version_file = b.addWriteFiles().add("version", b.fmt("{d} {s}\n", .{ commit_time, commit }));
     const catalogue = b.addRunArtifact(hostTool(b, "mkcatalogue"));
+    catalogue.addArg(b.fmt("--key={s}", .{signingKey(b).seed_hex}));
     const json = catalogue.addOutputFileArg("apps.json");
     catalogue.addArgs(&.{ commit, b.fmt("{d}", .{commit_time}) });
     for (apps) |a| {
@@ -246,13 +247,18 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     info.addOption([]const u8, "commit", gitCommit(b));
     info.addOption(u64, "commit_time", gitCommitTime(b));
     info.addOption([]const u8, "apps_url", appsUrl(b));
+    info.addOption([]const u8, "signing_key", signingKey(b).public_hex);
+    const build_info = info.createModule();
     const store = b.createModule(.{
         .root_source_file = b.path("src/store/store.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "sys", .module = sys }},
+        .imports = &.{
+            .{ .name = "sys", .module = sys },
+            .{ .name = "build_info", .module = build_info },
+        },
     });
-    return .{ .sys = sys, .vc4 = vc4, .shader = shader, .app = app, .gfx = gfx, .ui = ui, .font = font, .icons = icons, .wayland = wayland, .build_info = info.createModule(), .store = store, .locale = locale, .video = video, .audio = audio };
+    return .{ .sys = sys, .vc4 = vc4, .shader = shader, .app = app, .gfx = gfx, .ui = ui, .font = font, .icons = icons, .wayland = wayland, .build_info = build_info, .store = store, .locale = locale, .video = video, .audio = audio };
 }
 
 /// `sys`, `vc4` and `shader`: what the GPU's users need, and what the
@@ -392,6 +398,49 @@ fn appsUrl(b: *std.Build) []const u8 {
     State.url = b.option([]const u8, "apps-url", "Where Settings downloads apps and their catalogue (apps.json) from") orelse
         "https://github.com/dazzleos/dazzle/releases/latest/download";
     return State.url.?;
+}
+
+const SigningKey = struct {
+    seed_hex: []const u8,
+    public_hex: []const u8,
+};
+
+/// The Ed25519 signing key seed (64 hex digits) and its derived 64-hex-digit
+/// public key, from `-Dsigning-key=<seed-hex-or-file>`, `DAZZLE_SIGNING_KEY`,
+/// or the deterministic default build seed.
+fn signingKey(b: *std.Build) SigningKey {
+    const State = struct {
+        var key: ?SigningKey = null;
+    };
+    if (State.key) |k| return k;
+    const Ed25519 = std.crypto.sign.Ed25519;
+    const default_seed: [32]u8 = "dazzle-signing-key-seed-00000001".*;
+    const raw_opt = b.option([]const u8, "signing-key", "Ed25519 signing key seed (64 hex digits, or path to file; default: DAZZLE_SIGNING_KEY or built-in key)") orelse
+        b.graph.environ_map.get("DAZZLE_SIGNING_KEY");
+    var seed: [32]u8 = default_seed;
+    if (raw_opt) |raw| {
+        const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+        if (trimmed.len == 64 and isHexSlice(trimmed)) {
+            _ = std.fmt.hexToBytes(&seed, trimmed) catch @panic("invalid -Dsigning-key hex");
+        } else if (trimmed.len > 0) {
+            const file_bytes = std.Io.Dir.cwd().readFileAlloc(b.graph.io, trimmed, b.allocator, .limited(4096)) catch @panic("cannot read signing key file");
+            const file_hex = std.mem.trim(u8, file_bytes, " \t\r\n");
+            if (file_hex.len != 64 or !isHexSlice(file_hex)) @panic("signing key file must contain 64 hex digits (32-byte Ed25519 seed)");
+            _ = std.fmt.hexToBytes(&seed, file_hex) catch @panic("invalid signing key file hex");
+        }
+    }
+    const kp = Ed25519.KeyPair.generateDeterministic(seed) catch unreachable;
+    const pub_bytes = kp.public_key.toBytes();
+    State.key = .{
+        .seed_hex = b.fmt("{x}", .{&seed}),
+        .public_hex = b.fmt("{x}", .{&pub_bytes}),
+    };
+    return State.key.?;
+}
+
+fn isHexSlice(s: []const u8) bool {
+    for (s) |c| if (!std.ascii.isHex(c)) return false;
+    return true;
 }
 
 /// The short hash of the checked-out commit, "-dirty" if tracked files
@@ -888,6 +937,7 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.B
         const archive = compress.captureStdOut(.{ .basename = "dazzle-os.tar.xz" });
         const manifest = b.addRunArtifact(hostTool(b, "mkos"));
         manifest.addArg("manifest");
+        manifest.addArg(b.fmt("--key={s}", .{signingKey(b).seed_hex}));
         const json = manifest.addOutputFileArg("os.json");
         manifest.addFileArg(version);
         manifest.addFileArg(archive);

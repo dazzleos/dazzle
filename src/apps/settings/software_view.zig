@@ -39,6 +39,9 @@ pub const Apps = struct {
     /// Where they come from, and the default server URL.
     source: []const u8 = store.default_url,
     default_source: []const u8 = store.default_url,
+    /// Built-in Ed25519 signing public key (64 hex chars) and subscribed keys.
+    default_key: []const u8 = store.default_signing_key,
+    subscribed_keys: []const [store.key_hex_len]u8 = &.{},
 };
 
 /// What the Software page shows of OS updates.
@@ -72,6 +75,11 @@ pub const State = struct {
     form_id: u32 = 0,
     server_url: Field = .{},
     server_invalid: bool = false,
+    /// What is typed in the new signing key field in the popup, and whether
+    /// it was not a 64-character hex Ed25519 public key.
+    key_form_id: u32 = 1000,
+    key_input: Field = .{},
+    key_invalid: bool = false,
 
     pub const Field = struct {
         buf: [store.max_url_len]u8 = undefined,
@@ -97,6 +105,10 @@ pub const State = struct {
 
     pub fn setServerUrl(st: *State, t: []const u8) void {
         st.server_url.set(t);
+    }
+
+    pub fn setKeyInput(st: *State, t: []const u8) void {
+        st.key_input.set(t);
     }
 };
 
@@ -187,6 +199,8 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
         .actions = if (!busy) self.actions else null,
         .source = if (apps.source.len > 0) apps.source else store.default_url,
         .default_source = if (apps.default_source.len > 0) apps.default_source else store.default_url,
+        .default_key = if (apps.default_key.len > 0) apps.default_key else store.default_signing_key,
+        .subscribed_keys = apps.subscribed_keys,
     })) catch {};
     const footer = cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = footer_children.items });
     return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &.{
@@ -329,14 +343,31 @@ fn appAct(cx: *ui.Context, actions: *Actions, state: *State, name: []const u8) *
     return x;
 }
 
+const KeyAct = struct {
+    actions: *Actions,
+    key: [store.key_hex_len]u8,
+
+    fn unsubscribe(x: *KeyAct) void {
+        x.actions.unsubscribe_key = .of(&x.key);
+    }
+};
+
+fn keyAct(cx: *ui.Context, actions: *Actions, key: [store.key_hex_len]u8) *KeyAct {
+    const x = cx.ui.arena().create(KeyAct) catch unreachable;
+    x.* = .{ .actions = actions, .key = key };
+    return x;
+}
+
 /// An icon button in the Software footer bar: pressing it opens a popup to
 /// switch the software server between the default (`build_info.apps_url`)
-/// and a custom `https://` URL.
+/// and a custom `https://` URL, and to subscribe or remove Ed25519 signing keys.
 pub const ServerConfigButton = struct {
     state: *PageState,
     actions: ?*Actions,
     source: []const u8,
     default_source: []const u8,
+    default_key: []const u8 = store.default_signing_key,
+    subscribed_keys: []const [store.key_hex_len]u8 = &.{},
 
     pub const State = BtnState;
     pub const BtnState = struct {
@@ -345,6 +376,8 @@ pub const ServerConfigButton = struct {
         actions: ?*Actions = null,
         source: []const u8 = store.default_url,
         default_source: []const u8 = store.default_url,
+        default_key: []const u8 = store.default_signing_key,
+        subscribed_keys: []const [store.key_hex_len]u8 = &.{},
 
         fn isCustom(st: *const BtnState) bool {
             return !std.mem.eql(u8, st.source, st.default_source);
@@ -354,6 +387,7 @@ pub const ServerConfigButton = struct {
             const n = st.node orelse return;
             const page_st = st.state orelse return;
             page_st.server_invalid = false;
+            page_st.key_invalid = false;
             page_st.custom_form = st.isCustom();
             if (!st.isCustom()) page_st.form_filled = false;
             const pos = n.position();
@@ -387,6 +421,21 @@ pub const ServerConfigButton = struct {
                 acts.software_server = if (std.mem.eql(u8, url, st.default_source)) .{} else .of(url);
             }
             if (st.node) |n| n.ui.closeMenu();
+        }
+
+        fn subscribeKey(st: *BtnState) void {
+            const page_st = st.state orelse return;
+            var hex: [store.key_hex_len]u8 = undefined;
+            _ = store.parsePublicKey(page_st.key_input.text(), &hex) orelse {
+                page_st.key_invalid = true;
+                return;
+            };
+            page_st.key_invalid = false;
+            page_st.key_input.set("");
+            page_st.key_form_id +%= 1;
+            if (st.actions) |acts| {
+                acts.subscribe_key = .of(&hex);
+            }
         }
 
         fn buildPopup(st: *BtnState, cx: *ui.Context) ui.Widget {
@@ -446,6 +495,41 @@ pub const ServerConfigButton = struct {
                 } })) catch {};
             }
 
+            rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
+                cx.make(ui.SizedBox{ .width = 70, .child = cx.make(ui.Text{ .text = "Keys", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
+                cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = st.default_key, .style = .{ .size = 15, .color = t.on_surface }, .wrap = false, .ellipsis = true }) }),
+            } })) catch {};
+            for (st.subscribed_keys) |k| {
+                const key_str = cx.fmt("{s}", .{&k});
+                const on_unsub: ?ui.Callback = if (st.actions) |acts| .of(keyAct(cx, acts, k), KeyAct.unsubscribe) else null;
+                rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
+                    cx.make(ui.SizedBox{ .width = 70, .child = cx.make(ui.Empty{}) }),
+                    cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = key_str, .style = .{ .size = 15, .color = t.on_surface }, .wrap = false, .ellipsis = true }) }),
+                    cx.make(ui.IconButton{
+                        .icon = .delete,
+                        .size = 28,
+                        .icon_size = 18,
+                        .on_press = on_unsub,
+                    }),
+                } })) catch {};
+            }
+            const on_subscribe: ?ui.Callback = if (st.actions != null) .of(st, BtnState.subscribeKey) else null;
+            rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
+                cx.make(ui.Expanded{ .child = cx.make(ui.TextField{
+                    .placeholder = "Ed25519 public key (64 hex characters)",
+                    .initial = page_st.key_input.text(),
+                    .max_len = store.key_hex_len,
+                    .size = 15,
+                    .on_changed = .of(page_st, PageState.setKeyInput),
+                    .on_submit = on_subscribe,
+                }).withKey(@as(u64, page_st.key_form_id)) }),
+                cx.make(ui.OutlinedButton{ .label = "Subscribe", .on_press = on_subscribe }),
+            } })) catch {};
+            if (page_st.key_invalid) rows.append(a, cx.make(ui.Text{
+                .text = "Give a 64-character hex Ed25519 public key",
+                .style = .{ .size = 15, .color = t.@"error" },
+            })) catch {};
+
             return cx.make(ui.Decorated{
                 .color = t.surface_container,
                 .border = .{ .width = 1, .color = t.outline_variant },
@@ -464,6 +548,8 @@ pub const ServerConfigButton = struct {
         state.actions = self.actions;
         state.source = self.source;
         state.default_source = self.default_source;
+        state.default_key = self.default_key;
+        state.subscribed_keys = self.subscribed_keys;
         return cx.make(ui.IconButton{
             .icon = .settings,
             .size = 36,
@@ -890,3 +976,63 @@ test "changing the software server to a custom https URL and back to default" {
     try testing.expectEqualStrings("", actions.software_server.?.slice());
 }
 
+test "subscribing and removing Ed25519 signing keys in the software settings popup" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    const d = view.sample();
+    var actions: Actions = .{};
+    const kp = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic("test-settings-key-seed-000000001".*);
+    const pub_hex = std.fmt.bytesToHex(kp.public_key.toBytes(), .lower);
+    const subscribed = [_][store.key_hex_len]u8{pub_hex};
+    var settings: Settings = .{
+        .commit = "x",
+        .actions = &actions,
+        .system = &d.sys,
+        .usage = d.usage,
+        .network = &d.net,
+        .apps = view.sample_apps,
+    };
+    var frame_no: u64 = 0;
+    const draw = struct {
+        fn call(uu: *ui.Ui, s: Settings, n: *u64) void {
+            n.* += 1;
+            uu.frame(1920, 960, n.*, s);
+        }
+    }.call;
+
+    draw(u, settings, &frame_no);
+    u.root.?.state(Settings.State).page = .apps;
+    draw(u, settings, &frame_no);
+
+    view.click(u, view.findType(u.root.?, ServerConfigButton).?);
+    draw(u, settings, &frame_no);
+    try testing.expect(u.menu_root != null);
+    try testing.expect(view.findText(u.menu_root.?, "Keys") != null);
+    try testing.expect(view.findText(u.menu_root.?, store.default_signing_key) != null);
+
+    // Invalid key shows an error message.
+    var st = &u.root.?.state(Settings.State).software;
+    st.key_input.set("not-a-valid-key");
+    view.click(u, view.findText(u.menu_root.?, "Subscribe").?);
+    draw(u, settings, &frame_no);
+    try testing.expect(actions.subscribe_key == null);
+    try testing.expect(view.findText(u.menu_root.?, "Give a 64-character hex Ed25519 public key") != null);
+
+    // Valid 64-character hex Ed25519 public key sets subscribe_key action and clears input.
+    st = &u.root.?.state(Settings.State).software;
+    st.key_input.set(&pub_hex);
+    view.click(u, view.findText(u.menu_root.?, "Subscribe").?);
+    draw(u, settings, &frame_no);
+    try testing.expectEqualStrings(&pub_hex, actions.subscribe_key.?.slice());
+    actions = .{};
+
+    // Subscribed keys are displayed with a delete button to unsubscribe.
+    settings.apps.subscribed_keys = &subscribed;
+    draw(u, settings, &frame_no);
+    try testing.expect(view.findText(u.menu_root.?, &pub_hex) != null);
+    try testing.expect(!view.overflows(u.menu_root.?));
+    const del_icon = view.findIcon(u.menu_root.?, .delete).?;
+    view.click(u, view.up(del_icon, ui.IconButton).?);
+    try testing.expectEqualStrings(&pub_hex, actions.unsubscribe_key.?.slice());
+}

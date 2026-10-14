@@ -50,6 +50,9 @@ pub const Actions = struct {
     /// The software server URL (`https://...`), or empty (`""`) to revert to
     /// the default server.
     software_server: ?info.Str(store.max_url_len) = null,
+    /// A 64-character hex Ed25519 public key to subscribe or unsubscribe.
+    subscribe_key: ?info.Str(store.key_hex_len) = null,
+    unsubscribe_key: ?info.Str(store.key_hex_len) = null,
     /// The language and keyboard to use.
     locale: ?locale.Settings = null,
     /// A GPIO pin to set up, and how.

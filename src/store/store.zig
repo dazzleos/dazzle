@@ -24,7 +24,9 @@
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
+const build_info = @import("build_info");
 pub const tls_server = @import("tls_server.zig");
+pub const Ed25519 = std.crypto.sign.Ed25519;
 
 pub const apps_dir = sys.system.apps_dir;
 pub const icons_dir = apps_dir ++ "/.icons";
@@ -34,6 +36,12 @@ pub const icon_size = 64;
 pub const default_url = "https://github.com/dazzleos/dazzle/releases/latest/download";
 pub const max_url_len = 255;
 pub const server_file = apps_dir ++ "/.server";
+pub const keys_file = apps_dir ++ "/.keys";
+pub const key_hex_len = Ed25519.PublicKey.encoded_length * 2;
+pub const sig_hex_len = Ed25519.Signature.encoded_length * 2;
+pub const max_keys = 16;
+pub const default_signing_key: []const u8 = build_info.signing_key;
+pub const default_seed: [32]u8 = "dazzle-signing-key-seed-00000001".*;
 const catalogue_file = apps_dir ++ "/.catalogue.json";
 const ca_file = "/os/certs/ca-certificates.pem";
 
@@ -50,6 +58,7 @@ pub const App = struct {
     file: []const u8,
     size: u64,
     sha256: []const u8,
+    signature: []const u8 = "",
 };
 
 pub const Catalogue = struct {
@@ -207,10 +216,172 @@ pub fn resolveAppIcon(buf: []u8, dir: []const u8, icons_path: []const u8, app: A
     return null;
 }
 
-/// Checks a downloaded archive against the catalogue.
+/// Parses a 64-character hex Ed25519 public key (ignoring surrounding
+/// whitespace) and writes its lowercase hex form to `out_hex`.
+pub fn parsePublicKey(text: []const u8, out_hex: *[key_hex_len]u8) ?Ed25519.PublicKey {
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    if (trimmed.len != key_hex_len) return null;
+    for (trimmed, out_hex) |c, *dst| {
+        if (!std.ascii.isHex(c)) return null;
+        dst.* = std.ascii.toLower(c);
+    }
+    var bytes: [Ed25519.PublicKey.encoded_length]u8 = undefined;
+    _ = std.fmt.hexToBytes(&bytes, out_hex) catch return null;
+    return Ed25519.PublicKey.fromBytes(bytes) catch null;
+}
+
+/// Validates a 64-character hex Ed25519 public key and returns its
+/// normalized lowercase hex array, or null if invalid.
+pub fn validPublicKey(text: []const u8) ?[key_hex_len]u8 {
+    var out: [key_hex_len]u8 = undefined;
+    _ = parsePublicKey(text, &out) orelse return null;
+    return out;
+}
+
+/// User-subscribed Ed25519 public keys (stored in `/data/apps/.keys`).
+pub const KeyList = struct {
+    keys: [max_keys][key_hex_len]u8 = undefined,
+    len: usize = 0,
+
+    pub fn slice(l: *const KeyList) []const [key_hex_len]u8 {
+        return l.keys[0..l.len];
+    }
+
+    pub fn contains(l: *const KeyList, hex: []const u8) bool {
+        for (l.slice()) |*k| {
+            if (std.ascii.eqlIgnoreCase(k, hex)) return true;
+        }
+        return false;
+    }
+
+    pub fn add(l: *KeyList, text: []const u8) bool {
+        const norm = validPublicKey(text) orelse return false;
+        if (std.ascii.eqlIgnoreCase(&norm, default_signing_key)) return true;
+        if (l.contains(&norm)) return true;
+        if (l.len >= max_keys) return false;
+        l.keys[l.len] = norm;
+        l.len += 1;
+        return true;
+    }
+
+    pub fn remove(l: *KeyList, text: []const u8) bool {
+        const trimmed = std.mem.trim(u8, text, " \t\r\n");
+        var i: usize = 0;
+        var removed = false;
+        while (i < l.len) {
+            if (std.ascii.eqlIgnoreCase(&l.keys[i], trimmed)) {
+                var j = i;
+                while (j + 1 < l.len) : (j += 1) l.keys[j] = l.keys[j + 1];
+                l.len -= 1;
+                removed = true;
+            } else {
+                i += 1;
+            }
+        }
+        return removed;
+    }
+};
+
+pub fn loadKeys() KeyList {
+    return loadKeysFrom(keys_file);
+}
+
+pub fn loadKeysFrom(path: [:0]const u8) KeyList {
+    var list: KeyList = .{};
+    var raw: [max_keys * (key_hex_len + 4) + 64]u8 = undefined;
+    const text = sys.readFile(path, &raw) orelse return list;
+    var lines = std.mem.tokenizeAny(u8, text, "\r\n");
+    while (lines.next()) |line| {
+        _ = list.add(line);
+    }
+    return list;
+}
+
+pub fn saveKeys(list: *const KeyList) void {
+    _ = linux.mkdir(apps_dir, 0o755);
+    saveKeysTo(keys_file, list);
+}
+
+pub fn saveKeysTo(path: [:0]const u8, list: *const KeyList) void {
+    if (list.len == 0) {
+        _ = linux.unlink(path);
+        return;
+    }
+    var buf: [max_keys * (key_hex_len + 1)]u8 = undefined;
+    var pos: usize = 0;
+    for (list.slice()) |*k| {
+        @memcpy(buf[pos .. pos + key_hex_len], k);
+        buf[pos + key_hex_len] = '\n';
+        pos += key_hex_len + 1;
+    }
+    _ = linux.unlink(path);
+    sys.files.writeNew(path, buf[0..pos]) catch {};
+}
+
+pub fn subscribeKey(text: []const u8) bool {
+    _ = linux.mkdir(apps_dir, 0o755);
+    return subscribeKeyAt(keys_file, text);
+}
+
+pub fn subscribeKeyAt(path: [:0]const u8, text: []const u8) bool {
+    var list = loadKeysFrom(path);
+    if (!list.add(text)) return false;
+    saveKeysTo(path, &list);
+    return true;
+}
+
+pub fn unsubscribeKey(text: []const u8) void {
+    unsubscribeKeyAt(keys_file, text);
+}
+
+pub fn unsubscribeKeyAt(path: [:0]const u8, text: []const u8) void {
+    var list = loadKeysFrom(path);
+    if (list.remove(text)) saveKeysTo(path, &list);
+}
+
+/// Signs `data` with the Ed25519 key pair derived from `seed`, returning
+/// the 128-character lowercase hex signature.
+pub fn signHex(data: []const u8, seed: [32]u8) [sig_hex_len]u8 {
+    const kp = Ed25519.KeyPair.generateDeterministic(seed) catch unreachable;
+    const sig = kp.sign(data, null) catch unreachable;
+    const bytes = sig.toBytes();
+    var out: [sig_hex_len]u8 = undefined;
+    _ = std.fmt.bufPrint(&out, "{x}", .{&bytes}) catch unreachable;
+    return out;
+}
+
+/// Checks that `signature_hex` (128 hex digits) is a valid Ed25519
+/// signature over `data` by `default_signing_key` or one of `extra_keys`.
+pub fn verifySignature(data: []const u8, signature_hex: []const u8, extra_keys: []const [key_hex_len]u8) !void {
+    const trimmed = std.mem.trim(u8, signature_hex, " \t\r\n");
+    if (trimmed.len != sig_hex_len) return error.BadSignature;
+    var sig_bytes: [Ed25519.Signature.encoded_length]u8 = undefined;
+    _ = std.fmt.hexToBytes(&sig_bytes, trimmed) catch return error.BadSignature;
+    const sig = Ed25519.Signature.fromBytes(sig_bytes);
+
+    var key_hex: [key_hex_len]u8 = undefined;
+    if (parsePublicKey(default_signing_key, &key_hex)) |pk| {
+        if (sig.verify(data, pk)) |_| return else |_| {}
+    }
+    for (extra_keys) |*k| {
+        if (parsePublicKey(k, &key_hex)) |pk| {
+            if (sig.verify(data, pk)) |_| return else |_| {}
+        }
+    }
+    return error.BadSignature;
+}
+
+/// Checks a downloaded archive against the catalogue (size, SHA-256, and
+/// Ed25519 signature against the default key and subscribed keys).
 pub fn verify(archive: []const u8, app: App) !void {
+    const keys = loadKeys();
+    return verifyWithKeys(archive, app, keys.slice());
+}
+
+pub fn verifyWithKeys(archive: []const u8, app: App, extra_keys: []const [key_hex_len]u8) !void {
     if (archive.len != app.size) return error.WrongSize;
     if (!sys.archive.sha256Is(archive, app.sha256)) return error.WrongChecksum;
+    try verifySignature(archive, app.signature, extra_keys);
 }
 
 /// Unpacks `archive` (xz-compressed tar) into `dir` as app `name`,
@@ -535,6 +706,7 @@ pub fn describe(err: anyerror) []const u8 {
     return switch (err) {
         error.ClockNotSet => "the clock is not set yet (it is set once the network is up)",
         error.WrongSize, error.WrongChecksum => "the download was not what the catalogue said",
+        error.BadSignature => "the download's signature could not be trusted",
         error.BadArchive, error.BadName => "the archive was not right",
         error.InstallFailed => "the system could not install it",
         error.BadCatalogue, error.BadManifest => "the list of apps was not right",
@@ -721,14 +893,48 @@ const fixture_app: App = .{
     .sha256 = "f3e817e51826f4ca7b7d334af8f857d9c42416073f44c7429e1bfda7f097a753",
 };
 
-test "a download is checked against the catalogue" {
-    try verify(fixture, fixture_app);
-    var wrong = fixture_app;
+test "a download is checked against the catalogue and its Ed25519 signature" {
+    const sig = signHex(fixture, default_seed);
+    var signed = fixture_app;
+    signed.signature = &sig;
+    try verifyWithKeys(fixture, signed, &.{});
+
+    var wrong = signed;
     wrong.size += 1;
-    try testing.expectError(error.WrongSize, verify(fixture, wrong));
-    wrong = fixture_app;
+    try testing.expectError(error.WrongSize, verifyWithKeys(fixture, wrong, &.{}));
+    wrong = signed;
     wrong.sha256 = "00" ** 32;
-    try testing.expectError(error.WrongChecksum, verify(fixture, wrong));
+    try testing.expectError(error.WrongChecksum, verifyWithKeys(fixture, wrong, &.{}));
+
+    // Missing or tampered signature is rejected.
+    try testing.expectError(error.BadSignature, verifyWithKeys(fixture, fixture_app, &.{}));
+    wrong = signed;
+    wrong.signature = "00" ** 64;
+    try testing.expectError(error.BadSignature, verifyWithKeys(fixture, wrong, &.{}));
+
+    // Signed with another key: rejected until that key is subscribed.
+    const other_seed: [32]u8 = "custom-third-party-signing-seed!".*;
+    const other_kp = Ed25519.KeyPair.generateDeterministic(other_seed) catch unreachable;
+    const other_pub_bytes = other_kp.public_key.toBytes();
+    var other_pub_hex: [key_hex_len]u8 = undefined;
+    _ = std.fmt.bufPrint(&other_pub_hex, "{x}", .{&other_pub_bytes}) catch unreachable;
+    const other_sig = signHex(fixture, other_seed);
+    var third_party = fixture_app;
+    third_party.signature = &other_sig;
+    try testing.expectError(error.BadSignature, verifyWithKeys(fixture, third_party, &.{}));
+
+    var keys_path_buf: [64]u8 = undefined;
+    const keys_path = try std.fmt.bufPrintZ(&keys_path_buf, "/tmp/dazzle-keys-test-{d}", .{linux.getpid()});
+    defer _ = linux.unlink(keys_path);
+
+    try testing.expect(!subscribeKeyAt(keys_path, "not-a-valid-key"));
+    try testing.expect(subscribeKeyAt(keys_path, &other_pub_hex));
+    const loaded = loadKeysFrom(keys_path);
+    try testing.expectEqual(@as(usize, 1), loaded.len);
+    try verifyWithKeys(fixture, third_party, loaded.slice());
+
+    unsubscribeKeyAt(keys_path, &other_pub_hex);
+    try testing.expectEqual(@as(usize, 0), loadKeysFrom(keys_path).len);
 }
 
 test "installing unpacks the app's folder into place, again replaces it, removing deletes it" {

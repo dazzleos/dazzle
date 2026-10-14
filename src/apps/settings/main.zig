@@ -112,6 +112,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
     // The apps that can be installed, and which are.
     var server_url_buf: [store.max_url_len]u8 = undefined;
     var server_url: []const u8 = store.loadServerUrl(&server_url_buf, build_info.apps_url);
+    var subscribed_keys = store.loadKeys();
     var apps: store.Store = .init(gpa, server_url);
     apps.check_os = true;
     var installed: [64]bool = undefined;
@@ -225,6 +226,18 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             updater.setBaseUrl(server_url);
             apps.refresh(true);
             actions.software_server = null;
+            a.dirty = true;
+        }
+        if (actions.subscribe_key) |*k| {
+            _ = store.subscribeKey(k.slice());
+            subscribed_keys = store.loadKeys();
+            actions.subscribe_key = null;
+            a.dirty = true;
+        }
+        if (actions.unsubscribe_key) |*k| {
+            store.unsubscribeKey(k.slice());
+            subscribed_keys = store.loadKeys();
+            actions.unsubscribe_key = null;
             a.dirty = true;
         }
         if (actions.install != null or actions.remove != null or actions.refresh_apps or actions.check_update) {
@@ -396,6 +409,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
                     .message = apps.message(),
                     .source = server_url,
                     .default_source = build_info.apps_url,
+                    .default_key = build_info.signing_key,
+                    .subscribed_keys = subscribed_keys.slice(),
                 },
                 .video_memory = .{
                     .now = if (updater.report) |r| r.video_memory_now else null,
