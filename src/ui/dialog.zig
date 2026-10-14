@@ -34,6 +34,10 @@ pub const Dialog = struct {
     on_confirm: ?Callback = null,
     dismiss_label: []const u8 = "",
     on_dismiss: ?Callback = null,
+    /// Called when the backdrop beside the dialog is clicked; without it,
+    /// `on_dismiss` is (for a dismiss button that does something else, such
+    /// as quitting).
+    on_scrim: ?Callback = null,
     width: f32 = 360,
     /// Optional underlying content; when given, the dialog overlays it
     /// when `open` is true.
@@ -127,7 +131,7 @@ pub const Dialog = struct {
         const modal = cx.make(Overlay{
             .children = &.{
                 cx.make(Scrim{
-                    .on_dismiss = self.on_dismiss,
+                    .on_dismiss = self.on_scrim orelse self.on_dismiss,
                     .child = cx.make(Decorated{ .color = gfx.Color.argb(0x88000000) }),
                 }),
                 cx.make(Center{ .child = card }),
