@@ -4,8 +4,8 @@
 //! compresses it with xz); and the manifest describing it, os.json (in the
 //! same item format as apps.json), both published beside the image with
 //! icon.png. Settings downloads the manifest and icon, and the archive by
-//! its "file" if the system is newer than both slots', checking its size
-//! and SHA-256; the system manager installs it (src/init/update.zig).
+//! its "file" if the system is newer than both slots', checking its size,
+//! SHA-256 and Ed25519 signature; the system manager installs it (src/init/update.zig).
 //!
 //!     {
 //!       "name": "dazzle",

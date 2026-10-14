@@ -1,8 +1,8 @@
 //! The settings app's window, as widgets: pages, chosen with the tabs on
-//! the left, about the Wi-Fi networks around, Ethernet, the board,
-//! software, resources in use, language and keyboard,
-//! and the system's log. What is asked of the network manager, and of the
-//! store, goes to the main loop through `Actions`.
+//! the left, about the Wi-Fi networks around, Ethernet, sound, appearance,
+//! the board, software, resources in use, language and keyboard, and the
+//! system's log. What is asked of the network manager, and of the store,
+//! goes to the main loop through `Actions`.
 
 const std = @import("std");
 const ui = @import("ui");

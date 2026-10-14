@@ -1,19 +1,21 @@
 //! Installing and removing apps: for the setup app (choosing apps, its last
-//! page) and Settings' Apps page.
+//! page) and Settings' Software page.
 //!
 //! The catalogue of apps that can be installed (apps.json; see
 //! tools/mkcatalogue.zig) and their archives are published where the
-//! image is (`build_info.apps_url`). An app's archive is its folder, as in
-//! /data/apps, as a tar file compressed with xz.
+//! image is (`build_info.apps_url`), or on a custom `https://` software
+//! server stored in `/data/apps/.server`. An app's archive is its folder,
+//! as in /data/apps, as a tar file compressed with xz.
 //!
 //! * Downloading (the catalogue, or an app) is done over HTTPS by a child
 //!   process (`Job`), so the window goes on meanwhile. It trusts the
-//!   authorities in /os/certs (Mozilla's), and needs the clock set (the
-//!   network manager sets it).
-//! * Installing checks the archive's size and SHA-256 against the
-//!   catalogue, unpacks it into a hidden folder in /data/apps (only the
-//!   app's own folder, no links), and renames it into place: replacing an
-//!   installed copy, if there is one.
+//!   authorities in /os/certs (Mozilla's) and the `Dazzle Test CA` used by
+//!   `dazzle-serve`, and needs the clock set (the network manager sets it).
+//! * Installing checks the archive's size, SHA-256 and Ed25519 signature
+//!   against the catalogue (using the built-in public key and any extra
+//!   public keys subscribed in `/data/apps/.keys`), unpacks it into a hidden
+//!   folder in /data/apps (only the app's own folder, no links), and renames
+//!   it into place: replacing an installed copy, if there is one.
 //! * Removing renames the app's folder out of sight, then deletes it.
 //!
 //! /data/apps is the user's (made with /data, when setup prepares the
@@ -719,7 +721,7 @@ pub fn describe(err: anyerror) []const u8 {
     };
 }
 
-/// What the Apps page shows and does: the catalogue, and the job under way.
+/// What the Software page shows and does for apps: the catalogue, and the job under way.
 pub const Store = struct {
     gpa: std.mem.Allocator,
     base_url: []const u8,

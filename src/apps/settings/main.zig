@@ -1,16 +1,18 @@
 //! Dazzle's settings app: what the system is and how it is doing. It
-//! shows the build, Linux's version, how long the system has been up and
-//! the board; the resources in use (CPU, temperature, memory, the GPU's
-//! memory and storage); the network (adapters, addresses and traffic);
-//! and the Wi-Fi networks around. Only this app may scan for them, join
-//! one, or choose how Ethernet gets its address: it asks init's network
-//! manager, which answers no other program (see sys.network). The figures
-//! that change are read again every second (see info.zig); the window is built with the
-//! `ui` toolkit (see view.zig), and only what changed is drawn again.
-//! Apps are installed and removed on the Apps page (see store.zig): the
-//! list of them is downloaded when the page is first shown. Updates of the
-//! system are checked for when the System page is first shown, and
-//! downloaded and installed from there (see update.zig).
+//! shows the Wi-Fi networks around (or runs an access point), Ethernet
+//! adapters, sound output and volume, colour scheme (Dark or Light), the
+//! board and its GPIO header, software and system updates, the resources
+//! in use (CPU, temperature, memory, the GPU's memory and storage),
+//! language and keyboard, and the system's log. Only this app may scan for
+//! Wi-Fi networks, join one, start an access point, or choose how Ethernet
+//! gets its address: it asks init's network manager, which answers no
+//! other program (see sys.network). The figures that change are read again
+//! every second (see info.zig); the window is built with the `ui` toolkit
+//! (see view.zig), and only what changed is drawn again.
+//! Apps are installed and removed, and updates of the system checked for,
+//! downloaded and installed, on the Software page (see store.zig and
+//! update.zig): the app catalogue and system manifest are downloaded when
+//! the page is first shown.
 //!
 //!     dazzle-settings [page] [font.ttf]
 //!

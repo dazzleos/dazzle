@@ -1,4 +1,4 @@
-//! Updating the system (Settings' System page). Where the apps come from
+//! Updating the system (Settings' Software page). Where the apps come from
 //! (`build_info.apps_url`), the build also publishes the system as an
 //! update: os.json says which it is (its commit, and when that was
 //! committed), and dazzle-os.tar.xz is its files (see tools/mkos.zig).
@@ -51,7 +51,7 @@ pub const Manifest = struct {
     }
 };
 
-/// What the System page shows of updates.
+/// What the Software page shows of updates.
 pub const Status = enum {
     /// Not checked yet, or the check failed (see the message).
     unknown,

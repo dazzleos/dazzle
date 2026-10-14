@@ -4,8 +4,8 @@ Dazzle builds on Linux (x86-64 or ARM64).
 
 ## Requirements
 
-- `make`, `flex`, `bison`, `bc`, `git`, `curl`, `xz` and the ARM GCC cross
-  compiler. On Debian or Ubuntu:
+- `make`, `flex`, `bison`, `bc`, `git`, `curl`, `xz` and the ARM and ARM64
+  GCC cross compilers. On Debian or Ubuntu:
 
   ```sh
   sudo apt install make flex bison bc git curl xz-utils gcc-arm-linux-gnueabihf gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
@@ -26,7 +26,8 @@ scripts/build
 
 This makes `zig-out/dazzle.img`, the SD card image, ready to write to a
 card with Raspberry Pi Imager (Use Custom) or `dd`. It also makes the apps
-(`zig-out/apps`) and the system as an update (`zig-out/os`).
+(`zig-out/apps`) and the system as an update (`zig-out/os`), signed with
+Ed25519 (`-Dsigning-key=<seed-hex-or-file>` or `DAZZLE_SIGNING_KEY`).
 
 The first build clones the Raspberry Pi kernel into `build/linux-rpi` and
 builds it, which takes a while; later builds redo only what changed. Every
@@ -39,6 +40,7 @@ already there.
 scripts/zig build test       # the unit tests, on the build machine
 scripts/zig build programs   # just the programs
 scripts/zig build kernel     # just the kernels
+scripts/zig build serve      # serve zig-out/os and zig-out/apps over HTTPS
 scripts/zig build qemu       # boot in QEMU, as a Pi Zero
 ```
 

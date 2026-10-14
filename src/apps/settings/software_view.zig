@@ -308,7 +308,7 @@ fn dazzleDetail(cx: *ui.Context, name: []const u8, text: []const u8) ui.Widget {
     } });
 }
 
-/// Install, Remove, Update all and Refresh on the Apps page: requests
+/// Install, Remove, Update all and Refresh on the Software page: requests
 /// for the main loop.
 const AppAct = struct {
     actions: *Actions,

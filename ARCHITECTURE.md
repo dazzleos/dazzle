@@ -19,7 +19,7 @@ library; programs make Linux system calls directly.
 - **Init** (`src/init/`), PID 1. It mounts the filesystems, grants the user
   access to the GPU, and starts the shell. It also runs small helper
   managers as child processes, each keeping only the privileges it needs:
-  - **network**: Ethernet, Wi-Fi, hotspot, DHCP, DNS and NTP clock sync
+  - **network**: Ethernet, Wi-Fi (station and access point), DHCP, DNS and NTP clock sync
   - **devices**: grants access to input, camera, audio, GPIO, I2C and serial devices as they appear
   - **media**: mounts and ejects USB drives
   - **system**: partitions the SD card, manages OS slots, installs updates and restarts
@@ -72,8 +72,9 @@ top:
               config.txt, and the two OS slots (slot-a/ and slot-b/)
 /data/        the card's ext4 data partition, created on first boot:
   system/     system settings (hostname, locale, network)
-  user/       user files
-  apps/       installed apps (/data/apps/<name>/<name>)
+  user/       user files and preferences (audio, appearance)
+  apps/       installed apps (/data/apps/<name>/<name>), cached catalogue,
+              icons, custom software server (.server), and signing keys (.keys)
   update/     staging directory for OS updates
 /media/       mounted USB drives, one directory per drive label
 /dev /proc /sys
@@ -123,26 +124,34 @@ access to:
 ## App packaging and launching
 
 Installed apps live in `/data/apps/<name>/`, which contains the executable,
-icon name, licence notices, and an optional `<name>.handles` file listing
-supported MIME types (one per line). The dock watches `/data/apps` and
-updates automatically as apps are installed or removed.
+`icon.png`, `<name>.icon`, `version`, licence notices, and an optional
+`<name>.handles` file listing supported MIME types (one per line). The dock
+watches `/data/apps` and updates automatically as apps are installed or
+removed.
 
 Apps can ask the shell over `/os/sockets/shell` (`sys.shell`) to launch or
 focus another app with an argument.
 
 Apps are distributed as `<name>.tar.xz` archives described by a catalogue
-(`apps.json`) containing each app's title, description, icon, size, SHA-256
-and Ed25519 signature. Because `/data/apps` is owned by the Dazzle user,
+(`apps.json`) containing each app's title, description, version, timestamp,
+icon, size, SHA-256 and Ed25519 signature. At build time, `mkcatalogue` and
+`mkos` sign archives with an Ed25519 key (`-Dsigning-key` or
+`DAZZLE_SIGNING_KEY`), and the corresponding public key is compiled into
+`build_info.signing_key`. Settings' Software page can also point at a custom
+`https://` software server (`/data/apps/.server`, or served locally via
+`scripts/zig build serve`) and subscribe additional Ed25519 public keys
+(`/data/apps/.keys`). Because `/data/apps` is owned by the Dazzle user,
 installing and removing apps requires no root privileges.
 
 ## OS updates
 
 OS updates are published as `dazzle-os.tar.xz` (the contents of one OS slot)
-alongside a manifest (`os.json`) containing the version, size, SHA-256 and
-Ed25519 signature:
+alongside a manifest (`os.json`) containing the version, timestamp, icon,
+size, SHA-256 and Ed25519 signature:
 
 1. The update archive is downloaded to `/data/update`, verified against the
-   manifest's SHA-256 and Ed25519 signature, and passed to the system manager.
+   manifest's size, SHA-256 and Ed25519 signature, and passed to the system
+   manager.
 2. The system manager verifies the archive's SHA-256 and Ed25519 signature
    again, unpacks it into the inactive OS slot, marks that slot for trial,
    and updates `os_prefix` in `config.txt`.
