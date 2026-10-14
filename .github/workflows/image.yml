@@ -70,6 +70,8 @@ jobs:
         run: scripts/zig build test --summary new
 
       - name: Build the image
+        env:
+          DAZZLE_SIGNING_KEY: ${{ secrets.DAZZLE_SIGNING_KEY }}
         run: scripts/build
 
       - name: Compress the image

@@ -193,7 +193,7 @@ const Manager = struct {
             for (&clients, fds[1..]) |*c, f| {
                 const conn = &(c.* orelse continue);
                 if (f.revents == 0) continue;
-                var buf: [256]u8 = undefined;
+                var buf: [320]u8 = undefined;
                 const n = linux.read(conn.fd, &buf, buf.len);
                 if (linux.errno(n) == .SUCCESS and n > 0) if (proto.Request.parse(buf[0..n])) |req| {
                     if (req.allowedFor(conn.who)) {
@@ -225,7 +225,7 @@ const Manager = struct {
             },
             .hostname => |h| m.setHostname(h),
             .finish => |h| m.finish(h),
-            .update => |sha256| m.startUpdate(sha256),
+            .update => |u| m.startUpdate(u),
             .restart => m.restart = true,
             .locale => |l| {
                 m.report.locale = l;
@@ -269,12 +269,12 @@ const Manager = struct {
     }
 
     /// Starts installing the update Settings downloaded.
-    fn startUpdate(m: *Manager, sha256: [64]u8) void {
+    fn startUpdate(m: *Manager, u: proto.Request.Update) void {
         if (m.installer != null) return;
         const running = m.report.slot orelse return m.updateFailed(.busy);
         // Not while the other slot is being made.
         if (m.copier != null) return m.updateFailed(.busy);
-        m.installer = update.Installer.start(sha256, running) catch |err| {
+        m.installer = update.Installer.start(u.sha256, u.signature, running) catch |err| {
             print(sys.log_warning ++ "dazzle: system: cannot start installing the update: {s}\n", .{@errorName(err)});
             return m.updateFailed(.io);
         };

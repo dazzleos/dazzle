@@ -7,10 +7,11 @@
 //!   asked) into /data/update. An update is offered when it was committed
 //!   after the running system and is in neither OS slot (the system
 //!   manager says what they hold).
-//! * Downloading fetches the archive to /data/update, checks its size and
-//!   SHA-256 against os.json, and asks the system manager to install it
-//!   (with the SHA-256, which it checks again): it unpacks it into the slot
-//!   not running and has the firmware start that slot next time.
+//! * Downloading fetches the archive to /data/update, checks its size,
+//!   SHA-256 and Ed25519 signature against os.json, and asks the system
+//!   manager to install it (with the SHA-256 and signature, which it checks
+//!   again): it unpacks it into the slot not running and has the firmware
+//!   start that slot next time.
 //! * Once it has, Settings offers to restart, which the manager does.
 //!
 //! Downloads run in a child process (`store.Job`), as the apps' do.
@@ -238,10 +239,10 @@ fn childDownload(gpa: std.mem.Allocator, base_url: []const u8, m: Manifest) !voi
     _ = linux.unlink(tmp);
     try sys.files.writeNew(tmp, archive);
     _ = try sys.check(linux.rename(tmp, proto.update_archive));
-    var request: [80]u8 = undefined;
+    var request: [208]u8 = undefined;
     // The manager answers between slices of other work (making the other
     // slot, say), which can take it a while on a slow card.
-    const report = proto.ask(try std.fmt.bufPrint(&request, "update {s}\n", .{m.sha256}), 30_000) orelse return error.InstallFailed;
+    const report = proto.ask(try std.fmt.bufPrint(&request, "update {s} {s}\n", .{ m.sha256, m.signature }), 30_000) orelse return error.InstallFailed;
     if (report.denied or report.update == .failed) return error.InstallFailed;
 }
 

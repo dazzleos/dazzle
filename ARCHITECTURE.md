@@ -131,20 +131,21 @@ Apps can ask the shell over `/os/sockets/shell` (`sys.shell`) to launch or
 focus another app with an argument.
 
 Apps are distributed as `<name>.tar.xz` archives described by a catalogue
-(`apps.json`) containing each app's title, description, icon, size and
-SHA-256. Because `/data/apps` is owned by the Dazzle user, installing and
-removing apps requires no root privileges.
+(`apps.json`) containing each app's title, description, icon, size, SHA-256
+and Ed25519 signature. Because `/data/apps` is owned by the Dazzle user,
+installing and removing apps requires no root privileges.
 
 ## OS updates
 
 OS updates are published as `dazzle-os.tar.xz` (the contents of one OS slot)
-alongside a manifest (`os.json`) containing the version, size and SHA-256:
+alongside a manifest (`os.json`) containing the version, size, SHA-256 and
+Ed25519 signature:
 
 1. The update archive is downloaded to `/data/update`, verified against the
-   manifest's SHA-256, and passed to the system manager.
-2. The system manager verifies the archive again, unpacks it into the
-   inactive OS slot, marks that slot for trial, and updates `os_prefix` in
-   `config.txt`.
+   manifest's SHA-256 and Ed25519 signature, and passed to the system manager.
+2. The system manager verifies the archive's SHA-256 and Ed25519 signature
+   again, unpacks it into the inactive OS slot, marks that slot for trial,
+   and updates `os_prefix` in `config.txt`.
 3. On the next boot, init detects the trial, immediately resets `os_prefix`
    back to the previous slot, and starts the hardware watchdog.
 4. If the shell runs cleanly for one minute, init commits the new slot by

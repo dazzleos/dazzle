@@ -372,4 +372,5 @@ test {
     _ = @import("system.zig");
     _ = @import("slots.zig");
     _ = @import("trial.zig");
+    _ = @import("update.zig");
 }

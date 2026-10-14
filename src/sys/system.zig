@@ -12,9 +12,11 @@
 //!     prepare                  give the card's free space a filesystem (setup)
 //!     hostname <hostname>      name the computer (setup)
 //!     finish <hostname>        name the computer, and finish setting up (setup)
-//!     update <sha256>          install the system in update_archive, whose
-//!                              SHA-256 this is, into the slot not in use,
-//!                              and start that slot next time (settings)
+//!     update <sha256> <signature>
+//!                              install the system in update_archive, whose
+//!                              SHA-256 and Ed25519 signature these are,
+//!                              into the slot not in use, and start that
+//!                              slot next time (settings)
 //!     restart                  restart the computer (settings)
 //!     locale <language> <keyboard>
 //!                              the language and keyboard (setup and
@@ -121,13 +123,19 @@ pub const Failure = enum {
 };
 
 pub const Request = union(enum) {
+    pub const Update = struct {
+        /// The archive's SHA-256, in hex.
+        sha256: [64]u8,
+        /// The archive's Ed25519 signature, in hex.
+        signature: [128]u8,
+    };
+
     status,
     subscribe,
     prepare,
     hostname: Hostname,
     finish: Hostname,
-    /// The archive's SHA-256, in hex.
-    update: [64]u8,
+    update: Update,
     restart,
     locale: locale.Settings,
     /// In MiB, one of `video_memory_sizes`.
@@ -153,10 +161,13 @@ pub const Request = union(enum) {
         }
         if (std.mem.eql(u8, kind, "update")) {
             const hex = f.next() orelse return null;
-            if (hex.len != 64) return null;
+            const sig = f.next() orelse return null;
+            if (hex.len != 64 or sig.len != 128) return null;
             for (hex) |c| if (!std.ascii.isHex(c)) return null;
+            for (sig) |c| if (!std.ascii.isHex(c)) return null;
             var r: Request = .{ .update = undefined };
-            for (&r.update, hex) |*d, c| d.* = std.ascii.toLower(c);
+            for (&r.update.sha256, hex) |*d, c| d.* = std.ascii.toLower(c);
+            for (&r.update.signature, sig) |*d, c| d.* = std.ascii.toLower(c);
             return r;
         }
         return null;
@@ -501,9 +512,14 @@ test "requests and reports go through the socket" {
     try testing.expect(Request.parse("reboot\n") == null);
     try testing.expect(Request.parse("restart\n").? == .restart);
     const sum = "F3e817e51826f4ca7b7d334af8f857d9c42416073f44c7429e1bfda7f097a753";
-    try testing.expectEqualStrings("f3e817e51826f4ca7b7d334af8f857d9c42416073f44c7429e1bfda7f097a753", &Request.parse("update " ++ sum ++ "\n").?.update);
+    const sig = "A1" ++ "02" ** 63;
+    const upd = Request.parse("update " ++ sum ++ " " ++ sig ++ "\n").?.update;
+    try testing.expectEqualStrings("f3e817e51826f4ca7b7d334af8f857d9c42416073f44c7429e1bfda7f097a753", &upd.sha256);
+    try testing.expectEqualStrings("a1" ++ "02" ** 63, &upd.signature);
+    try testing.expect(Request.parse("update " ++ sum ++ "\n") == null);
     try testing.expect(Request.parse("update abc\n") == null);
-    try testing.expect(Request.parse("update " ++ "g" ** 64) == null);
+    try testing.expect(Request.parse("update " ++ "g" ** 64 ++ " " ++ sig) == null);
+    try testing.expect(Request.parse("update " ++ sum ++ " " ++ "g" ** 128) == null);
     // Who may ask what.
     try testing.expect(Request.allowedFor(.status, .settings));
     try testing.expect(Request.allowedFor(.subscribe, .shell));

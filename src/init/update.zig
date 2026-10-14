@@ -1,11 +1,12 @@
 //! Installing an update of the system: Settings downloads it (the files of
 //! an OS slot, as a tar archive of the folder "os", compressed with xz; see
 //! tools/mkos.zig) to /data/update and asks the system manager, with the
-//! archive's SHA-256, to install it. The manager does that in a child
-//! process (`Installer`), so it goes on answering meanwhile:
+//! archive's SHA-256 and Ed25519 signature, to install it. The manager does
+//! that in a child process (`Installer`), so it goes on answering meanwhile:
 //!
-//! 1. The archive is read into memory and checked against the SHA-256
-//!    Settings gave (it is the user's file: it is checked as it is used).
+//! 1. The archive is read into memory and checked against the SHA-256 and
+//!    Ed25519 signature Settings gave (it is the user's file: it is checked
+//!    as it is used).
 //! 2. It is unpacked into slot-<x>.new/ on the boot partition, <x> being
 //!    the slot not running, with the running slot's command line made
 //!    that slot's; it must have a kernel, an initramfs and a version.
@@ -22,6 +23,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
+const store = @import("store");
 const storage = @import("storage.zig");
 const slots = @import("slots.zig");
 const trial = @import("trial.zig");
@@ -34,9 +36,9 @@ pub const Installer = struct {
     /// The child's report: empty if it worked, else the failure's name.
     result: linux.fd_t,
 
-    /// Starts installing the update whose archive has SHA-256 `sha256`
-    /// into the slot other than `running`.
-    pub fn start(sha256: [64]u8, running: u8) !Installer {
+    /// Starts installing the update whose archive has SHA-256 `sha256` and
+    /// Ed25519 signature `signature` into the slot other than `running`.
+    pub fn start(sha256: [64]u8, signature: [128]u8, running: u8) !Installer {
         var fds: [2]linux.fd_t = undefined;
         _ = try sys.check(linux.pipe2(&fds, .{ .CLOEXEC = true }));
         const rc = linux.fork();
@@ -50,7 +52,7 @@ pub const Installer = struct {
         }
         if (rc == 0) {
             sys.close(fds[0]);
-            install(std.heap.page_allocator, &sha256, running) catch |err| {
+            install(std.heap.page_allocator, &sha256, &signature, running) catch |err| {
                 print(sys.log_warning ++ "dazzle: system: cannot install the update: {s}\n", .{@errorName(err)});
                 const why = @tagName(failure(err));
                 _ = linux.write(fds[1], why.ptr, why.len);
@@ -76,16 +78,22 @@ pub const Installer = struct {
 
 fn failure(err: anyerror) proto.UpdateFailure {
     return switch (err) {
-        error.WrongArchive, error.BadArchive, error.NotFound, error.Incomplete => .archive,
+        error.WrongArchive, error.BadSignature, error.BadArchive, error.NotFound, error.Incomplete => .archive,
         else => .io,
     };
 }
 
-fn install(gpa: std.mem.Allocator, sha256: []const u8, running: u8) !void {
+fn verifyArchive(archive: []const u8, sha256: []const u8, signature: []const u8, extra_keys: []const [store.key_hex_len]u8) !void {
+    if (!sys.archive.sha256Is(archive, sha256)) return error.WrongArchive;
+    try store.verifySignature(archive, signature, extra_keys);
+}
+
+fn install(gpa: std.mem.Allocator, sha256: []const u8, signature: []const u8, running: u8) !void {
     const archive = sys.readFileAlloc(gpa, proto.update_archive, sys.archive.max_unpacked) catch |err|
         return if (err == error.NotFound) error.WrongArchive else err;
     defer gpa.free(archive);
-    if (!sys.archive.sha256Is(archive, sha256)) return error.WrongArchive;
+    const keys = store.loadKeys();
+    try verifyArchive(archive, sha256, signature, keys.slice());
     const to = slots.other(running);
     print("dazzle: system: installing the update into OS slot {c}\n", .{std.ascii.toUpper(to)});
 
@@ -130,4 +138,18 @@ fn install(gpa: std.mem.Allocator, sha256: []const u8, running: u8) !void {
     try slots.startNext(to);
     _ = linux.unlink(proto.update_archive);
     print("dazzle: system: OS slot {c} has the update; it starts next time\n", .{std.ascii.toUpper(to)});
+}
+
+test "update archive checks SHA-256 and Ed25519 signature" {
+    const data = "dazzle-os-archive-bytes";
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(data, &digest, .{});
+    var sha256: [64]u8 = undefined;
+    _ = std.fmt.bufPrint(&sha256, "{x}", .{&digest}) catch unreachable;
+    const sig = store.signHex(data, store.default_seed);
+
+    try verifyArchive(data, &sha256, &sig, &.{});
+    try std.testing.expectError(error.WrongArchive, verifyArchive(data, "00" ** 32, &sig, &.{}));
+    try std.testing.expectError(error.BadSignature, verifyArchive(data, &sha256, "00" ** 64, &.{}));
+    try std.testing.expectEqual(proto.UpdateFailure.archive, failure(error.BadSignature));
 }
