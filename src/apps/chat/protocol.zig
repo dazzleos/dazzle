@@ -29,7 +29,7 @@
 //!     ping
 //!
 //! Over UDP (broadcast to port `discovery_port`), a datagram is "DZCH",
-//! the version, a kind ("A" announce, "Q" query, "C" closed), the room,
+//! the version, a kind ("A" announce, "Q" query, "L" left), the room,
 //! its name, the sender, its TCP port and how many people are in the room.
 
 const std = @import("std");
@@ -447,7 +447,7 @@ const magic = "DZCH";
 const version = 1;
 
 pub const Datagram = struct {
-    kind: enum { announce, query, closed },
+    kind: enum { announce, query, left },
     room: u64 = 0,
     room_name: []const u8 = "",
     node: u64 = 0,
@@ -462,7 +462,7 @@ pub fn encodeDatagram(buf: []u8, d: Datagram) ?[]const u8 {
     w.int(u8, switch (d.kind) {
         .announce => 'A',
         .query => 'Q',
-        .closed => 'C',
+        .left => 'L',
     });
     w.int(u64, d.room);
     w.str(d.room_name);
@@ -480,7 +480,7 @@ pub fn decodeDatagram(buf: []const u8) ?Datagram {
     const kind: @FieldType(Datagram, "kind") = switch (r.int(u8)) {
         'A' => .announce,
         'Q' => .query,
-        'C' => .closed,
+        'L' => .left,
         else => return null,
     };
     const room = r.int(u64);
@@ -706,8 +706,8 @@ test "announcements are written and read back" {
     try testing.expectEqual(@as(u8, 3), d.members);
     const q = decodeDatagram(encodeDatagram(&buf, .{ .kind = .query, .node = 6 }).?).?;
     try testing.expect(q.kind == .query);
-    const c = decodeDatagram(encodeDatagram(&buf, .{ .kind = .closed, .room = 5, .node = 6 }).?).?;
-    try testing.expect(c.kind == .closed);
+    const l = decodeDatagram(encodeDatagram(&buf, .{ .kind = .left, .room = 5, .node = 6 }).?).?;
+    try testing.expect(l.kind == .left);
     try testing.expect(decodeDatagram("DZCH") == null);
     try testing.expect(decodeDatagram("XXXX\x01A") == null);
     const good = encodeDatagram(&buf, .{ .kind = .announce, .room = 5, .room_name = "r", .node = 6, .port = 1, .members = 1 }).?;
