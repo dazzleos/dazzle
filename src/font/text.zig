@@ -76,6 +76,7 @@ fn div255(x: u32) u32 {
 }
 
 const Key = struct {
+    font: usize,
     glyph: u16,
     /// Pixels per em, in 1/64ths.
     size: u32,
@@ -110,7 +111,7 @@ pub const GlyphCache = struct {
     /// The glyph rasterized at `size` pixels per em, shifted right by
     /// `subpixel` quarter pixels.
     pub fn get(cache: *GlyphCache, font: *const Font, glyph: u16, size: f32, subpixel: u2) !Bitmap {
-        const key: Key = .{ .glyph = glyph, .size = @intFromFloat(size * 64), .subpixel = subpixel };
+        const key: Key = .{ .font = @intFromPtr(font), .glyph = glyph, .size = @intFromFloat(size * 64), .subpixel = subpixel };
         if (cache.map.get(key)) |b| return b;
         const b = try rasterizeGlyph(cache.gpa, font, glyph, size, @as(f32, @floatFromInt(subpixel)) / 4);
         errdefer cache.gpa.free(b.mask);
@@ -187,35 +188,90 @@ pub const Style = struct {
 };
 
 /// Steps through UTF-8 text glyph by glyph, giving each glyph's pen
-/// position (kerning applied). Invalid UTF-8 shows as U+FFFD.
+/// position (kerning and emoji ligatures applied). Invalid UTF-8 shows as
+/// U+FFFD.
 pub const Layout = struct {
     style: Style,
     text: []const u8,
     at: usize = 0,
     x: f32,
-    prev: ?u16 = null,
+    prev: ?struct { font: *const Font, glyph: u16 } = null,
 
-    pub const Item = struct { glyph: u16, x: f32 };
+    pub const Item = struct { font: *const Font, glyph: u16, x: f32 };
 
     pub fn init(style: Style, text: []const u8, x: f32) Layout {
         return .{ .style = style, .text = text, .x = x };
     }
 
-    pub fn next(l: *Layout) ?Item {
-        if (l.at >= l.text.len) return null;
-        const len = std.unicode.utf8ByteSequenceLength(l.text[l.at]) catch 1;
-        const cp: u21 = if (l.at + len <= l.text.len)
-            std.unicode.utf8Decode(l.text[l.at..][0..len]) catch 0xfffd
+    fn decodeAt(text: []const u8, at: usize) ?struct { cp: u21, next_at: usize } {
+        if (at >= text.len) return null;
+        const len = std.unicode.utf8ByteSequenceLength(text[at]) catch 1;
+        const cp: u21 = if (at + len <= text.len)
+            std.unicode.utf8Decode(text[at..][0..len]) catch 0xfffd
         else
             0xfffd;
-        l.at += @min(len, l.text.len - l.at);
-        const f = l.style.font;
-        const glyph = f.glyphIndex(cp);
-        if (l.prev) |p| l.x += @as(f32, @floatFromInt(f.kerning(p, glyph))) * l.style.scale();
-        const item: Item = .{ .glyph = glyph, .x = l.x };
-        l.x += @as(f32, @floatFromInt(f.advance(glyph))) * l.style.scale();
-        l.prev = glyph;
-        return item;
+        return .{ .cp = cp, .next_at = @min(at + len, text.len) };
+    }
+
+    pub fn next(l: *Layout) ?Item {
+        while (decodeAt(l.text, l.at)) |d| {
+            l.at = d.next_at;
+            if (d.cp == 0xfe0e or d.cp == 0xfe0f or d.cp == 0x200d) continue;
+
+            var next_cps: [8]u21 = undefined;
+            var next_ends: [8]usize = undefined;
+            var next_len: usize = 0;
+            var scan = l.at;
+            while (next_len < next_cps.len) {
+                const nd = decodeAt(l.text, scan) orelse break;
+                next_cps[next_len] = nd.cp;
+                next_ends[next_len] = nd.next_at;
+                scan = nd.next_at;
+                next_len += 1;
+            }
+
+            var f: *const Font = l.style.font;
+            var glyph = f.glyphIndex(d.cp);
+            const wants_emoji = next_len > 0 and (next_cps[0] == 0xfe0f or next_cps[0] == 0x20e3);
+            if (f.fallback) |fb| {
+                if (glyph == opentype.missing_glyph or wants_emoji) {
+                    const fg = fb.glyphIndex(d.cp);
+                    if (fg != opentype.missing_glyph) {
+                        f = fb;
+                        glyph = fg;
+                    }
+                }
+            }
+            if (f.num_ccmp_lookups > 0 and next_len > 0 and glyph != opentype.missing_glyph) {
+                var next_glyphs: [8]u16 = undefined;
+                var valid_len: usize = 0;
+                while (valid_len < next_len) : (valid_len += 1) {
+                    const ng = f.glyphIndex(next_cps[valid_len]);
+                    if (ng == opentype.missing_glyph) break;
+                    next_glyphs[valid_len] = ng;
+                }
+                if (f.ligature(glyph, next_glyphs[0..valid_len])) |lig| {
+                    glyph = lig.glyph;
+                    l.at = next_ends[lig.consumed - 1];
+                } else if (f != l.style.font and wants_emoji and f.colorLayers(glyph) == null) {
+                    f = l.style.font;
+                    glyph = f.glyphIndex(d.cp);
+                }
+            }
+            if (decodeAt(l.text, l.at)) |nd| {
+                if (nd.cp == 0xfe0e or nd.cp == 0xfe0f) l.at = nd.next_at;
+            }
+
+            const scale = l.style.size / @as(f32, @floatFromInt(f.units_per_em));
+            if (l.prev) |p| if (p.font == f) {
+                l.x += @as(f32, @floatFromInt(f.kerning(p.glyph, glyph))) * scale;
+            };
+            const item: Item = .{ .font = f, .glyph = glyph, .x = l.x };
+            l.x += @as(f32, @floatFromInt(f.advance(glyph))) * scale;
+            l.prev = .{ .font = f, .glyph = glyph };
+            return item;
+        }
+        return null;
     }
 };
 
@@ -233,9 +289,25 @@ pub fn draw(canvas: Canvas, cache: *GlyphCache, style: Style, x: f32, baseline: 
     var l: Layout = .{ .style = style, .text = text, .x = x };
     while (l.next()) |item| {
         const quarter: i32 = @intFromFloat(@round(item.x * 4));
-        const b = try cache.get(style.font, item.glyph, style.size, @intCast(@mod(quarter, 4)));
+        const subpixel: u2 = @intCast(@mod(quarter, 4));
+        const pen_x = @divFloor(quarter, 4);
+        if (item.font.colorLayers(item.glyph)) |layers_init| {
+            const style_alpha = style.color >> 24;
+            var layers = layers_init;
+            while (layers.next()) |layer| {
+                const b = try cache.get(item.font, layer.glyph, style.size, subpixel);
+                if (b.width == 0) continue;
+                const color = if (layer.color) |c|
+                    (c & 0x00ffffff) | (div255((c >> 24) * style_alpha) << 24)
+                else
+                    style.color;
+                canvas.blendMask(pen_x + b.left, base + b.top, b.mask, b.width, b.height, color);
+            }
+            continue;
+        }
+        const b = try cache.get(item.font, item.glyph, style.size, subpixel);
         if (b.width == 0) continue;
-        canvas.blendMask(@divFloor(quarter, 4) + b.left, base + b.top, b.mask, b.width, b.height, style.color);
+        canvas.blendMask(pen_x + b.left, base + b.top, b.mask, b.width, b.height, style.color);
     }
     return l.x;
 }
@@ -374,7 +446,7 @@ pub const RunCache = struct {
     /// or out of memory).
     pub fn get(c: *RunCache, style: Style, text: []const u8) ?Run {
         if (text.len > max_text) return null;
-        var buf: [max_text + 16]u8 = undefined;
+        var buf: [max_text + 2 * @sizeOf(usize) + 4]u8 = undefined;
         const key = keyFor(&buf, style, text);
         if (c.map.getPtr(key)) |e| {
             e.used = true;
@@ -423,8 +495,9 @@ pub const RunCache = struct {
 
     fn keyFor(buf: []u8, style: Style, text: []const u8) []const u8 {
         std.mem.writeInt(usize, buf[0..@sizeOf(usize)], @intFromPtr(style.font), .little);
-        std.mem.writeInt(u32, buf[@sizeOf(usize)..][0..4], @bitCast(style.size), .little);
-        const head = @sizeOf(usize) + 4;
+        std.mem.writeInt(usize, buf[@sizeOf(usize)..][0..@sizeOf(usize)], @intFromPtr(style.font.fallback), .little);
+        std.mem.writeInt(u32, buf[2 * @sizeOf(usize) ..][0..4], @bitCast(style.size), .little);
+        const head = 2 * @sizeOf(usize) + 4;
         @memcpy(buf[head..][0..text.len], text);
         return buf[0 .. head + text.len];
     }
@@ -447,4 +520,37 @@ test "runs are laid out once, match measuring, and are swept when unused" {
     try testing.expectEqual(@as(u32, 2), c.map.count());
     c.sweep();
     try testing.expectEqual(@as(u32, 0), c.map.count());
+}
+
+test "colour emoji fallback layout and drawing" {
+    var f = try Font.init(fira);
+    const emoji = try Font.init(@embedFile("TwemojiMozilla.ttf"));
+    f.fallback = &emoji;
+
+    const style: Style = .{ .font = &f, .size = 24 };
+    // A single emoji, a variation-selector emoji, a flag ligature, and a keycap ligature each advance by 1 em (24 px).
+    try testing.expectApproxEqAbs(@as(f32, 24), measure(style, "😀"), 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 24), measure(style, "❤️"), 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 24), measure(style, "🇳🇿"), 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 24), measure(style, "1️⃣"), 0.01);
+    // Plain ASCII digits still come from Fira Sans, not the emoji font.
+    try testing.expect(measure(style, "1") < 20);
+
+    var cache = GlyphCache.init(testing.allocator);
+    defer cache.deinit();
+    var pixels: [120 * 40]u32 = @splat(0xff000000);
+    const canvas: Canvas = .{ .pixels = &pixels, .width = 120, .height = 40, .stride = 120 };
+    _ = try draw(canvas, &cache, style, 4, 30, "Hi 😀 ❤️");
+
+    var has_yellow = false;
+    var has_red = false;
+    for (pixels) |p| {
+        const r = (p >> 16) & 0xff;
+        const g = (p >> 8) & 0xff;
+        const b = p & 0xff;
+        if (r > 200 and g > 150 and b < 100) has_yellow = true;
+        if (r > 180 and g < 80 and b < 90) has_red = true;
+    }
+    try testing.expect(has_yellow);
+    try testing.expect(has_red);
 }

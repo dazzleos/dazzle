@@ -79,6 +79,7 @@ fn run(init: std.process.Init.Minimal) !void {
     });
 
     var ui_font: ?font.Font = null;
+    var emoji_font: ?font.Font = null;
     var font_buf: [512]u8 = undefined;
     const font_path = sys.fontFile(&font_buf, font.default_font_file);
     if (sys.readFileAlloc(gpa, font_path, 32 * 1024 * 1024)) |data| {
@@ -86,6 +87,14 @@ fn run(init: std.process.Init.Minimal) !void {
             ui_font = f;
         } else |err| print("dazzle-shell: font: {s}\n", .{@errorName(err)});
     } else |err| print(sys.log_warning ++ "dazzle-shell: cannot read {s}: {s}\n", .{ font_path, @errorName(err) });
+    var emoji_buf: [512]u8 = undefined;
+    const emoji_path = sys.fontFile(&emoji_buf, font.emoji_font_file);
+    if (sys.readFileAlloc(gpa, emoji_path, 32 * 1024 * 1024)) |data| {
+        if (font.Font.init(data)) |ef| emoji_font = ef else |_| {}
+    } else |_| {}
+    if (ui_font) |*f| if (emoji_font) |*ef| {
+        f.fallback = ef;
+    };
 
     // The shell's own apps are beside it; the others are in /data/apps.
     var settings_buf: [512]u8 = undefined;

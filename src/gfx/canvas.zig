@@ -339,33 +339,49 @@ pub const Canvas = struct {
         const run = atlas.runs.get(style, text);
         const end = x + if (run) |r| r.width else font.measure(style, text);
         if (color.a <= 0 or text.len == 0) return end;
-        c.note(.text, .{ .x = x + ox - style.size, .y = base - 1.5 * style.size, .w = end - x + 2 * style.size, .h = 2.5 * style.size }, .{ @intFromPtr(style.font), style.size, x + ox, base, color }, text);
+        c.note(.text, .{ .x = x + ox - style.size, .y = base - 1.5 * style.size, .w = end - x + 2 * style.size, .h = 2.5 * style.size }, .{ @intFromPtr(style.font), @intFromPtr(style.font.fallback), style.size, x + ox, base, color }, text);
         // Glyphs reach about an em above and below the baseline at most.
         const b = c.batchFor(.text, .{ .x = x + ox - style.size, .y = base - 1.5 * style.size, .w = end - x + 2 * style.size, .h = 2.5 * style.size }) orelse return end;
-        const aw: f32 = @floatFromInt(atlas_mod.width);
-        const ah: f32 = @floatFromInt(atlas_mod.height);
         var l = font.Layout.init(style, text, 0);
         var i: usize = 0;
         while (true) : (i += 1) {
             const item = if (run) |r| (if (i < r.glyphs.len) r.glyphs[i] else break) else l.next() orelse break;
             const quarter: i32 = @intFromFloat(@round(std.math.clamp(item.x + x + ox, -1e6, 1e6) * 4));
-            const e = atlas.glyph(style.font, item.glyph, style.size, @intCast(@mod(quarter, 4))) orelse continue;
-            if (e.w == 0) continue;
-            const x0: f32 = @floatFromInt(@divFloor(quarter, 4) + e.left);
-            const y0 = base + @as(f32, @floatFromInt(e.top));
-            const x1 = x0 + @as(f32, @floatFromInt(e.w));
-            const y1 = y0 + @as(f32, @floatFromInt(e.h));
-            const tu0 = @as(f32, @floatFromInt(e.x)) / aw;
-            const tv0 = @as(f32, @floatFromInt(e.y)) / ah;
-            const tu1 = @as(f32, @floatFromInt(e.x + e.w)) / aw;
-            const tv1 = @as(f32, @floatFromInt(e.y + e.h)) / ah;
-            const corners = [4][4]f32{ .{ x0, y0, tu0, tv0 }, .{ x1, y0, tu1, tv0 }, .{ x1, y1, tu1, tv1 }, .{ x0, y1, tu0, tv1 } };
-            var verts: [4][shaders.text_floats]f32 = undefined;
-            for (corners, &verts) |k, *out| out.* = .{ c.clipX(k[0]), c.clipY(k[1]), k[2], k[3], color.r, color.g, color.b, color.a };
-            const out = c.vertices(b, shaders.text_floats, 6) orelse return end;
-            for ([_]usize{ 0, 1, 2, 0, 2, 3 }, out) |k, *o| o.* = verts[k];
+            if (item.font.colorLayers(item.glyph)) |layers_init| {
+                var layers = layers_init;
+                while (layers.next()) |layer| {
+                    const lc = if (layer.color) |hex| blk: {
+                        const p = Color.argb(hex);
+                        break :blk p.withAlpha(p.a * color.a);
+                    } else color;
+                    if (!c.emitGlyph(b, atlas, item.font, layer.glyph, style.size, quarter, base, lc)) return end;
+                }
+                continue;
+            }
+            if (!c.emitGlyph(b, atlas, item.font, item.glyph, style.size, quarter, base, color)) return end;
         }
         return end;
+    }
+
+    fn emitGlyph(c: *Canvas, b: *Batch, atlas: *Atlas, f: *const font.Font, glyph: u16, size: f32, quarter: i32, base: f32, color: Color) bool {
+        const e = atlas.glyph(f, glyph, size, @intCast(@mod(quarter, 4))) orelse return true;
+        if (e.w == 0) return true;
+        const aw: f32 = @floatFromInt(atlas_mod.width);
+        const ah: f32 = @floatFromInt(atlas_mod.height);
+        const x0: f32 = @floatFromInt(@divFloor(quarter, 4) + e.left);
+        const y0 = base + @as(f32, @floatFromInt(e.top));
+        const x1 = x0 + @as(f32, @floatFromInt(e.w));
+        const y1 = y0 + @as(f32, @floatFromInt(e.h));
+        const tu0 = @as(f32, @floatFromInt(e.x)) / aw;
+        const tv0 = @as(f32, @floatFromInt(e.y)) / ah;
+        const tu1 = @as(f32, @floatFromInt(e.x + e.w)) / aw;
+        const tv1 = @as(f32, @floatFromInt(e.y + e.h)) / ah;
+        const corners = [4][4]f32{ .{ x0, y0, tu0, tv0 }, .{ x1, y0, tu1, tv0 }, .{ x1, y1, tu1, tv1 }, .{ x0, y1, tu0, tv1 } };
+        var verts: [4][shaders.text_floats]f32 = undefined;
+        for (corners, &verts) |k, *out| out.* = .{ c.clipX(k[0]), c.clipY(k[1]), k[2], k[3], color.r, color.g, color.b, color.a };
+        const out = c.vertices(b, shaders.text_floats, 6) orelse return false;
+        for ([_]usize{ 0, 1, 2, 0, 2, 3 }, out) |k, *o| o.* = verts[k];
+        return true;
     }
 
     // --- Images -----------------------------------------------------------------
@@ -756,4 +772,36 @@ test "records tell what was drawn, and where" {
     c.setClip(.{ .x = 0, .y = 0, .w = 20, .h = 20 });
     c.fillRect(.{ .x = 10, .y = 10, .w = 50, .h = 50 }, Color.rgb(0));
     try std.testing.expectEqual(Rect{ .x = 9, .y = 9, .w = 11, .h = 11 }, rec.bounds.?);
+}
+
+test "colour emoji renders multi-coloured layers through the text shader" {
+    const preview = @import("preview.zig");
+    var fira = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const emoji = try font.Font.init(@embedFile("TwemojiMozilla.ttf"));
+    fira.fallback = &emoji;
+
+    var atlas = try Atlas.init(std.testing.allocator);
+    defer atlas.deinit();
+    var c = Canvas.init(std.testing.allocator);
+    defer c.deinit();
+    c.begin(120, 48);
+    _ = c.drawText(&atlas, .{ .font = &fira, .size = 28 }, 4, 34, "😀 ❤️", Color.rgb(0xffffff));
+
+    const pixels = try std.testing.allocator.alloc(u32, 120 * 48);
+    defer std.testing.allocator.free(pixels);
+    @memset(pixels, 0xff000000);
+    const programs = preview.Programs.load();
+    try preview.render(&c, &programs, .{ .pixels = pixels, .width = 120, .height = 48 });
+
+    var has_yellow = false;
+    var has_red = false;
+    for (pixels) |p| {
+        const r = (p >> 16) & 0xff;
+        const g = (p >> 8) & 0xff;
+        const b = p & 0xff;
+        if (r > 200 and g > 150 and b < 100) has_yellow = true;
+        if (r > 180 and g < 80 and b < 90) has_red = true;
+    }
+    try std.testing.expect(has_yellow);
+    try std.testing.expect(has_red);
 }

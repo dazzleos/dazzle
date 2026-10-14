@@ -88,6 +88,8 @@ pub const Ui = struct {
     font: ?*const font.Font,
     owned_font: ?font.Font = null,
     font_data: ?[]const u8 = null,
+    emoji_font: ?font.Font = null,
+    emoji_font_data: ?[]const u8 = null,
     /// Icons are drawn with it (see `Icon`).
     icon_font: font.Font,
     theme: Theme = .dark,
@@ -216,10 +218,29 @@ pub const Ui = struct {
             }
         };
         errdefer if (font_data) |d| gpa.free(d);
+        var emoji_buf: [512]u8 = undefined;
+        const emoji_path = sys.fontFile(&emoji_buf, font.emoji_font_file);
+        var emoji_font_data: ?[]const u8 = null;
+        const emoji_font: ?font.Font = blk: {
+            const data = sys.readFileAlloc(gpa, emoji_path, 32 * 1024 * 1024) catch break :blk null;
+            if (font.Font.init(data)) |f| {
+                emoji_font_data = data;
+                break :blk f;
+            } else |_| {
+                gpa.free(data);
+                break :blk null;
+            }
+        };
+        errdefer if (emoji_font_data) |d| gpa.free(d);
         const ui = try create(gpa, null);
         ui.font_data = font_data;
         ui.owned_font = owned_font;
-        if (ui.owned_font) |*f| ui.font = f;
+        ui.emoji_font_data = emoji_font_data;
+        ui.emoji_font = emoji_font;
+        if (ui.owned_font) |*f| {
+            if (ui.emoji_font) |*ef| f.fallback = ef;
+            ui.font = f;
+        }
         return ui;
     }
 
@@ -244,6 +265,7 @@ pub const Ui = struct {
         ui.atlas.deinit();
         for (&ui.arenas) |*a| a.deinit();
         if (ui.font_data) |d| ui.gpa.free(d);
+        if (ui.emoji_font_data) |d| ui.gpa.free(d);
         ui.gpa.destroy(ui);
     }
 

@@ -1124,6 +1124,8 @@ pub fn build(b: *std.Build) void {
     run_mkinitramfs.addArtifactArg(shell_exe);
     run_mkinitramfs.addFileArg(b.path("fonts/FiraSans-Regular.ttf"));
     run_mkinitramfs.addFileArg(b.path("fonts/OFL.txt"));
+    run_mkinitramfs.addPrefixedFileArg("--file=os/fonts/TwemojiMozilla.ttf=", b.path("fonts/TwemojiMozilla.ttf"));
+    run_mkinitramfs.addPrefixedFileArg("--file=os/fonts/TwemojiMozilla-LICENSE.txt=", b.path("fonts/TwemojiMozilla-LICENSE.txt"));
     // The third-party software built into the system's programs, and its
     // licences (each app has its own: see below).
     addNotices(b, run_mkinitramfs, "os/NOTICES", "Dazzle's system programs", &.{"MaterialIcons"});
@@ -1212,7 +1214,10 @@ pub fn build(b: *std.Build) void {
         host.shader.addAnonymousImport(b.fmt("{s}.spv", .{name}), .{ .root_source_file = addSpirv(b, name, source) });
     }
     // The font tests use the real system font.
-    for ([_]*std.Build.Module{ host.font, host.gfx, host.ui }) |m| m.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
+    for ([_]*std.Build.Module{ host.font, host.gfx, host.ui }) |m| {
+        m.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
+        m.addAnonymousImport("TwemojiMozilla.ttf", .{ .root_source_file = b.path("fonts/TwemojiMozilla.ttf") });
+    }
     const test_step = b.step("test", "Run unit tests on the host");
     // The demo's layout is tested with its real font.
     const host_demo = addProgramModule(b, "src/apps/demo/main.zig", b.graph.host, test_optimize, host, shaders, false);
