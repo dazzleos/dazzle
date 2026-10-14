@@ -8,17 +8,17 @@
 //!
 //!     dazzle-chat
 //!
-//! People are known by the computer's name (Settings). It runs until its
-//! window is closed.
+//! People are known by the name chosen in its settings, or else the
+//! computer's name (see settings.zig). It runs until its window is closed.
 
 const std = @import("std");
-const linux = std.os.linux;
 const sys = @import("sys");
 const locale = @import("locale");
 const ui = @import("ui");
 const net = @import("net.zig");
 const protocol = @import("protocol.zig");
 const view = @import("view.zig");
+const settings = @import("settings.zig");
 
 const print = sys.print;
 
@@ -38,24 +38,14 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     return 0;
 }
 
-/// The computer's name, which is what others see (the kernel's, set from
-/// the name chosen when the system was set up).
-fn hostname(buf: *[64]u8) []const u8 {
-    var uts: linux.utsname = undefined;
-    if (linux.errno(linux.uname(&uts)) != .SUCCESS) return "dazzle";
-    const n = std.mem.indexOfScalar(u8, &uts.nodename, 0) orelse uts.nodename.len;
-    if (n == 0) return "dazzle";
-    const len = @min(n, buf.len);
-    @memcpy(buf[0..len], uts.nodename[0..len]);
-    return buf[0..len];
-}
-
 fn run(init: std.process.Init.Minimal) !void {
     locale.current = locale.load().language;
     const gpa = std.heap.page_allocator;
 
-    var name_buf: [64]u8 = undefined;
-    var network = try net.Net.init(gpa, .{ .name = hostname(&name_buf) });
+    var host_buf: [64]u8 = undefined;
+    const host = settings.hostname(&host_buf);
+    var name_buf: [128]u8 = undefined;
+    var network = try net.Net.init(gpa, .{ .name = settings.loadName(settings.name_file, &name_buf, host) });
     defer network.deinit();
 
     const a = try ui.App.open(gpa, init.environ, .{
@@ -74,7 +64,7 @@ fn run(init: std.process.Init.Minimal) !void {
         const now = sys.nowNs();
         a.takeInput();
         if (network.service(now)) a.dirty = true;
-        if (apply(&actions, &network, now)) a.dirty = true;
+        if (apply(&actions, &network, host, now)) a.dirty = true;
 
         var names: [protocol.max_peers + 1][]const u8 = undefined;
         try a.draw(now, view.Chat{
@@ -83,14 +73,28 @@ fn run(init: std.process.Init.Minimal) !void {
             .room = if (network.room) |*r| r else null,
             .members = network.members(&names),
             .message = network.message,
+            .name = network.name.get(),
+            .default_name = host,
             .actions = &actions,
         });
     }
 }
 
 /// Does what the window asked. Returns whether anything changed.
-fn apply(actions: *view.Actions, network: *net.Net, now: u64) bool {
+fn apply(actions: *view.Actions, network: *net.Net, host: []const u8, now: u64) bool {
     var changed = false;
+    if (actions.open_settings) {
+        actions.open_settings = false;
+        actions.settings_open = true;
+        actions.setTypedName(network.name.get());
+        changed = true;
+    }
+    if (actions.save_settings) {
+        actions.save_settings = false;
+        actions.settings_open = false;
+        network.rename(settings.saveName(settings.name_file, actions.typedName(), host));
+        changed = true;
+    }
     if (actions.dismiss) {
         actions.dismiss = false;
         network.message = "";
@@ -134,4 +138,5 @@ test {
     _ = protocol;
     _ = net;
     _ = view;
+    _ = settings;
 }

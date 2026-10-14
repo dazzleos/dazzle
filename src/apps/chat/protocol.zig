@@ -27,6 +27,7 @@
 //!     sync     count(1) { author(8) next(4) }...
 //!     message  timestamp(8) author(8) number(4) name text(2+bytes)
 //!     ping
+//!     rename   name
 //!
 //! Over UDP (broadcast to port `discovery_port`), a datagram is "DZCH",
 //! the version, a kind ("A" announce, "Q" query, "L" left), the room,
@@ -215,6 +216,8 @@ pub const Kind = enum(u8) {
     message = 3,
     sync = 4,
     ping = 5,
+    /// The sender is called something else now.
+    rename = 6,
     _,
 };
 
@@ -431,6 +434,19 @@ pub fn decodeMessage(body: []const u8) ?Message {
     const text = r.bytes(r.int(u16));
     if (!r.done()) return null;
     return .{ .lamport = lamport, .author = author, .seq = seq, .name = name, .text = text };
+}
+
+pub fn encodeRename(buf: []u8, name: []const u8) ?[]const u8 {
+    var w = Writer.begin(buf, .rename);
+    w.str(name);
+    return w.finish();
+}
+
+pub fn decodeRename(body: []const u8) ?[]const u8 {
+    var r: Reader = .{ .buf = body };
+    const name = r.str();
+    if (!r.done() or name.len > max_name) return null;
+    return name;
 }
 
 pub fn encodePing(buf: []u8) ?[]const u8 {
@@ -652,6 +668,11 @@ test "frames are written and read back" {
     try testing.expectEqual(@as(u32, 7), mg.seq);
     try testing.expectEqualStrings("pi-2", mg.name);
     try testing.expectEqualStrings("héllo", mg.text);
+
+    const rf = (try nextFrame(encodeRename(&buf, "kitchen-pi").?)).?;
+    try testing.expectEqual(Kind.rename, rf.kind);
+    try testing.expectEqualStrings("kitchen-pi", decodeRename(rf.body).?);
+    try testing.expect(decodeRename("") == null);
 
     const pg = (try nextFrame(encodePing(&buf).?)).?;
     try testing.expectEqual(Kind.ping, pg.kind);
