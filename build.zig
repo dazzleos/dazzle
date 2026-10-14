@@ -1126,6 +1126,11 @@ pub fn build(b: *std.Build) void {
         .root_module = addProgramModule(b, "src/apps/logger/main.zig", target, optimize, pi, shaders, true),
     });
     const install_logger = b.addInstallArtifact(logger_exe, .{});
+    const chat_exe = b.addExecutable(.{
+        .name = "dazzle-chat",
+        .root_module = addProgramModule(b, "src/apps/chat/main.zig", target, optimize, pi, shaders, true),
+    });
+    const install_chat = b.addInstallArtifact(chat_exe, .{});
     const blocks_exe = b.addExecutable(.{
         .name = "dazzle-blocks",
         .root_module = addProgramModule(b, "src/apps/blocks/main.zig", target, optimize, pi, shaders, true),
@@ -1208,6 +1213,7 @@ pub fn build(b: *std.Build) void {
         .{ .exe = text_editor_exe, .icon = .edit_note, .title = "Text Editor", .description = "Edit text files", .handles = &.{"text/plain"} },
         .{ .exe = blocks_exe, .icon = .landscape, .title = "Blocks", .description = "Build worlds out of blocks" },
         .{ .exe = logger_exe, .icon = .show_chart, .title = "Data Logger", .description = "Record inputs from the GPIO pins" },
+        .{ .exe = chat_exe, .icon = .chat, .title = "Chat", .description = "Chat with others on your network in rooms" },
         .{ .exe = maps_exe, .icon = .public, .title = "Maps", .description = "Explore the Earth on a 3D globe" },
         .{ .exe = terminal_exe, .icon = .terminal, .title = "Terminal", .description = "Run command-line tools" },
         .{
@@ -1234,7 +1240,7 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(apps_step);
     const install_initramfs = b.addInstallFile(initramfs, "initramfs.cpio");
     const programs_step = b.step("programs", "Build just the programs (zig-out/bin) and zig-out/initramfs.cpio");
-    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_showcase.step, &install_settings.step, &install_files.step, &install_camera.step, &install_text_editor.step, &install_logger.step, &install_blocks.step, &install_maps.step, &install_terminal.step, &install_develop.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
+    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_showcase.step, &install_settings.step, &install_files.step, &install_camera.step, &install_text_editor.step, &install_logger.step, &install_chat.step, &install_blocks.step, &install_maps.step, &install_terminal.step, &install_develop.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
         programs_step.dependOn(st);
         b.getInstallStep().dependOn(st);
     }
@@ -1286,6 +1292,8 @@ pub fn build(b: *std.Build) void {
     host_blocks.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_logger = addProgramModule(b, "src/apps/logger/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_logger.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
+    const host_chat = addProgramModule(b, "src/apps/chat/main.zig", b.graph.host, test_optimize, host, shaders, false);
+    host_chat.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_setup = addProgramModule(b, "src/apps/setup/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_setup.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_maps = addProgramModule(b, "src/apps/maps/main.zig", b.graph.host, test_optimize, host, shaders, false);
@@ -1317,6 +1325,7 @@ pub fn build(b: *std.Build) void {
         host_camera,
         host_text_editor,
         host_logger,
+        host_chat,
         host_blocks,
         host_setup,
         host_maps,
