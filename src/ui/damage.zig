@@ -137,7 +137,6 @@ pub const Tracker = struct {
     }
 
     pub fn add(t: *Tracker, area: ?Rect) void {
-
         const a = area orelse return;
         if (a.intersect(t.window())) |c| t.frame.add(c);
     }

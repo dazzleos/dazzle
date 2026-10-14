@@ -19,6 +19,7 @@
 //!     }
 
 const std = @import("std");
+const wayland = @import("wayland");
 
 pub const window = @import("window.zig");
 pub const clipboard = @import("clipboard.zig");
@@ -26,6 +27,9 @@ pub const Clipboard = clipboard.Clipboard;
 pub const Window = window.Window;
 pub const Gpu = window.Gpu;
 pub const InputEvent = window.InputEvent;
+pub const TextInputState = window.TextInputState;
+pub const CursorShape = wayland.protocol.wp_cursor_shape_device_v1.shape;
+pub const TextInputProtocol = wayland.protocol.zwp_text_input_v3;
 
 /// What an app's title bar does to its window (for the toolkit's TitleBar:
 /// `.on_close = .of(&controls, app.Controls.close)`, and so on).

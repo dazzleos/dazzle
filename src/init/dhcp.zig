@@ -572,4 +572,3 @@ test "DHCP server pool answers discover and request" {
     try testing.expectEqual(MessageType.ack, ack.type);
     try testing.expectEqual(Ip4{ 192, 168, 4, 10 }, ack.yiaddr);
 }
-

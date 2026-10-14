@@ -254,4 +254,3 @@ test "appearance settings parse, format, save and load" {
     try testing.expect(watch.changed());
     try testing.expectEqual(Mode.dark, loadSettingsFrom(path).theme);
 }
-

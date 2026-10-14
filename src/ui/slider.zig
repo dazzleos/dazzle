@@ -104,6 +104,11 @@ pub const Slider = struct {
         c.fillCircle(.{ thumb_x, cy }, if (enabled and st.pressed) thumb_radius + 1 else thumb_radius, active_color);
     }
 
+    pub fn cursor(self: *const Slider, n: *Node, _: geometry.Point) ?widget.Cursor {
+        if (self.on_changed == null) return null;
+        return if (n.state(State).pressed) .grabbing else .pointer;
+    }
+
     pub fn event(self: *const Slider, n: *Node, e: Event) bool {
         const st = n.state(State);
         switch (e) {

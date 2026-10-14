@@ -3433,9 +3433,10 @@ test "MP4 audio track parsing and PCM/AAC packet decoding" {
         0, 2, // channels = 2
         0, 16, // sample_size = 16
         0, 0, 0, 0, // compression_id, packet_size
-        0xbb, 0x80, 0, 0, // sample_rate = 48000.0 (16.16 fixed)
+        0xbb, 0x80, 0,   0, // sample_rate = 48000.0 (16.16 fixed)
         // esds child box (21 bytes):
-        0, 0, 0, 21, 'e', 's', 'd', 's',
+        0,    0,    0,   21,
+        'e',  's',  'd', 's',
         0, 0, 0, 0, // version + flags
         0x03, 0x07, 0x00, 0x01, 0x00, // ES_Descriptor
         0x05, 0x02, 0x11, 0x90, // DecoderSpecificInfo: AAC-LC 48 kHz stereo
@@ -3446,4 +3447,3 @@ test "MP4 audio track parsing and PCM/AAC packet decoding" {
     try testing.expectEqual(@as(u8, 2), stsd_info.channels);
     try testing.expectEqual(@as(u4, 3), stsd_info.aac_config.freq_index);
 }
-

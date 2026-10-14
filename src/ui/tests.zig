@@ -5,6 +5,7 @@ const std = @import("std");
 const gfx = @import("gfx");
 const font = @import("font");
 const vc4 = @import("vc4");
+const app = @import("app");
 const ui = @import("ui.zig");
 
 const testing = std.testing;
@@ -1226,3 +1227,138 @@ test "sliders, dropdowns, dialogs, tooltips, chips, badges, tabs and rails" {
     try testing.expect(!st.dialog_open);
 }
 
+test "widget cursor shapes reflect hovered and captured widgets" {
+    const fira = try font.Font.init(fira_data);
+    const u = try ui.Ui.create(testing.allocator, &fira);
+    defer u.destroy();
+
+    var slider_val: f32 = 0.5;
+    const SetSlider = struct {
+        fn set(v: *f32, x: f32) void {
+            v.* = x;
+        }
+    };
+
+    const CursorApp = struct {
+        slider_val: *f32,
+        pub fn build(self: *const @This(), cx: *Context) Widget {
+            return cx.make(ui.Align{
+                .alignment = .top_left,
+                .child = cx.make(ui.Column{
+                    .cross_axis_alignment = .start,
+                    .spacing = 10,
+                    .children = &.{
+                        cx.make(ui.OutlinedButton{ .label = "Enabled", .on_press = .of(&dummy_count, addDummy) }),
+                        cx.make(ui.OutlinedButton{ .label = "Disabled" }),
+                        cx.make(ui.SizedBox{
+                            .width = 200,
+                            .child = cx.make(ui.TextField{ .initial = "hello" }),
+                        }),
+                        cx.make(ui.SizedBox{
+                            .width = 200,
+                            .child = cx.make(ui.Slider{ .value = self.slider_val.*, .on_changed = .of(self.slider_val, SetSlider.set) }),
+                        }),
+                        cx.make(ui.Draggable{
+                            .data = 1,
+                            .label = "drag-me",
+                            .child = cx.make(ui.SizedBox{ .width = 80, .height = 40 }),
+                        }),
+                    },
+                }),
+            });
+        }
+    };
+
+    const w: CursorApp = .{ .slider_val = &slider_val };
+    u.frame(400, 400, 0, w);
+
+    // Empty background -> default cursor.
+    u.pointerMotion(.{ 350, 350 });
+    try testing.expectEqual(ui.Cursor.default, u.cursor());
+
+    // Enabled button -> pointer cursor; disabled button -> default cursor.
+    var buttons: std.ArrayList(*Node) = .empty;
+    defer buttons.deinit(testing.allocator);
+    try findAll(u.root.?, ui.OutlinedButton, &buttons);
+    const btn_pos = buttons.items[0].position();
+    u.pointerMotion(.{ btn_pos[0] + 10, btn_pos[1] + 10 });
+    try testing.expectEqual(ui.Cursor.pointer, u.cursor());
+
+    const dis_pos = buttons.items[1].position();
+    u.pointerMotion(.{ dis_pos[0] + 10, dis_pos[1] + 10 });
+    try testing.expectEqual(ui.Cursor.default, u.cursor());
+
+    // TextField -> text cursor.
+    const tf = find(u.root.?, ui.TextField).?;
+    const tf_pos = tf.position();
+    u.pointerMotion(.{ tf_pos[0] + 10, tf_pos[1] + 10 });
+    try testing.expectEqual(ui.Cursor.text, u.cursor());
+
+    // Slider -> pointer cursor.
+    const sl = find(u.root.?, ui.Slider).?;
+    const sl_pos = sl.position();
+    u.pointerMotion(.{ sl_pos[0] + 30, sl_pos[1] + 10 });
+    try testing.expectEqual(ui.Cursor.pointer, u.cursor());
+
+    // Draggable -> grab when hovered, grabbing while actively dragging.
+    const dr = find(u.root.?, ui.Draggable).?;
+    const dr_pos = dr.position();
+    u.pointerMotion(.{ dr_pos[0] + 10, dr_pos[1] + 10 });
+    try testing.expectEqual(ui.Cursor.grab, u.cursor());
+    u.pointerButton(.{ dr_pos[0] + 10, dr_pos[1] + 10 }, ui.btn_left, true);
+    u.pointerMotion(.{ dr_pos[0] + 40, dr_pos[1] + 10 });
+    try testing.expectEqual(ui.Cursor.grabbing, u.cursor());
+    u.pointerButton(.{ dr_pos[0] + 40, dr_pos[1] + 10 }, ui.btn_left, false);
+}
+
+test "zwp_text_input_v3 events commit text, render preedit, and delete surrounding bytes in TextField" {
+    const fira = try font.Font.init(fira_data);
+    const u = try ui.Ui.create(testing.allocator, &fira);
+    defer u.destroy();
+
+    const FieldApp = struct {
+        pub fn build(_: *const @This(), cx: *Context) Widget {
+            return cx.make(ui.Align{
+                .alignment = .top_left,
+                .child = cx.make(ui.SizedBox{
+                    .width = 240,
+                    .child = cx.make(ui.TextField{ .initial = "hello" }),
+                }),
+            });
+        }
+    };
+
+    u.frame(300, 100, 0, FieldApp{});
+    // Before focus, textInputState is null.
+    try testing.expect(u.textInputState() == null);
+
+    // Click to focus the TextField at the end of "hello".
+    const tf = find(u.root.?, ui.TextField).?;
+    clickAt(u, .{ tf.position()[0] + 200, tf.position()[1] + 15 });
+    u.frame(300, 100, 1, FieldApp{});
+
+    const st0 = u.textInputState().?;
+    try testing.expectEqualStrings("hello", st0.surrounding_text);
+    try testing.expectEqual(@as(u32, 5), st0.cursor);
+    try testing.expectEqual(@as(u32, 5), st0.anchor);
+
+    const tf_state = find(u.root.?, ui.TextField).?.state(ui.TextField.State);
+
+    // Preedit string appears without mutating committed text yet.
+    var pre_ev: app.InputEvent = .{ .text_preedit = .{ .len = 2, .cursor_begin = 2, .cursor_end = 2 } };
+    @memcpy(pre_ev.text_preedit.buf[0..2], "ni");
+    u.handleInput(pre_ev);
+    try testing.expectEqualStrings("hello", tf_state.text());
+    u.frame(300, 100, 2, FieldApp{});
+
+    // Commit string replaces preedit and inserts into the TextField.
+    var com_ev: app.InputEvent = .{ .text_commit = .{ .len = 1 } };
+    com_ev.text_commit.buf[0] = '!';
+    u.handleInput(com_ev);
+    u.handleInput(.{ .text_preedit = .{} });
+    try testing.expectEqualStrings("hello!", tf_state.text());
+
+    // delete_surrounding_text deletes 2 bytes before cursor ("o!").
+    u.handleInput(.{ .text_delete_surrounding = .{ .before_length = 2, .after_length = 0 } });
+    try testing.expectEqualStrings("hell", tf_state.text());
+}

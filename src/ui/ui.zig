@@ -135,6 +135,8 @@ pub const Widget = widget.Widget;
 pub const Context = widget.Context;
 pub const Node = widget.Node;
 pub const Event = widget.Event;
+pub const Cursor = widget.Cursor;
+pub const TextInputInfo = widget.TextInputInfo;
 pub const Callback = widget.Callback;
 pub const ValueCallback = widget.ValueCallback;
 

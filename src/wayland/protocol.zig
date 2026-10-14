@@ -709,6 +709,108 @@ pub const zwp_relative_pointer_v1 = struct {
     };
 };
 
+/// Presentation timing feedback (`presentation-time.xml`).
+pub const wp_presentation = struct {
+    pub const name = "wp_presentation";
+    pub const version = 1;
+    pub const request = struct {
+        pub const destroy = 0;
+        pub const feedback = 1;
+    };
+    pub const event = struct {
+        pub const clock_id = 0;
+    };
+    pub const err = struct {
+        pub const invalid_timestamp = 0;
+        pub const invalid_flag = 1;
+    };
+    pub const clock = struct {
+        /// `CLOCK_MONOTONIC` (1 on Linux).
+        pub const monotonic = 1;
+    };
+};
+
+pub const wp_presentation_feedback = struct {
+    pub const name = "wp_presentation_feedback";
+    pub const event = struct {
+        pub const sync_output = 0;
+        pub const presented = 1;
+        pub const discarded = 2;
+    };
+    pub const kind = struct {
+        pub const vsync = 0x1;
+        pub const hw_clock = 0x2;
+        pub const hw_completion = 0x4;
+        pub const zero_copy = 0x8;
+    };
+};
+
+/// Text input and input method integration (`text-input-unstable-v3.xml`).
+pub const zwp_text_input_manager_v3 = struct {
+    pub const name = "zwp_text_input_manager_v3";
+    pub const version = 1;
+    pub const request = struct {
+        pub const destroy = 0;
+        pub const get_text_input = 1;
+    };
+};
+
+pub const zwp_text_input_v3 = struct {
+    pub const name = "zwp_text_input_v3";
+    pub const version = 1;
+    pub const request = struct {
+        pub const destroy = 0;
+        pub const enable = 1;
+        pub const disable = 2;
+        pub const set_surrounding_text = 3;
+        pub const set_text_change_cause = 4;
+        pub const set_content_type = 5;
+        pub const set_cursor_rectangle = 6;
+        pub const commit = 7;
+    };
+    pub const event = struct {
+        pub const enter = 0;
+        pub const leave = 1;
+        pub const preedit_string = 2;
+        pub const commit_string = 3;
+        pub const delete_surrounding_text = 4;
+        pub const done = 5;
+    };
+    pub const change_cause = struct {
+        pub const input_method = 0;
+        pub const other = 1;
+    };
+    pub const content_hint = struct {
+        pub const none = 0x0;
+        pub const completion = 0x1;
+        pub const spellcheck = 0x2;
+        pub const auto_capitalization = 0x4;
+        pub const lowercase = 0x8;
+        pub const uppercase = 0x10;
+        pub const titlecase = 0x20;
+        pub const hidden_text = 0x40;
+        pub const sensitive_data = 0x80;
+        pub const latin = 0x100;
+        pub const multiline = 0x200;
+    };
+    pub const content_purpose = struct {
+        pub const normal = 0;
+        pub const alpha = 1;
+        pub const digits = 2;
+        pub const number = 3;
+        pub const phone = 4;
+        pub const url = 5;
+        pub const email = 6;
+        pub const name = 7;
+        pub const password = 8;
+        pub const pin = 9;
+        pub const date = 10;
+        pub const time = 11;
+        pub const datetime = 12;
+        pub const terminal = 13;
+    };
+};
+
 /// Linux input event codes (linux/input-event-codes.h) used by Dazzle.
 pub const input = struct {
     pub const btn_left = 0x110;

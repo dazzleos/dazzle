@@ -140,6 +140,11 @@ pub const SeekTrack = struct {
         c.fillRoundedRect(.{ .x = thumb_x, .y = thumb_y, .w = thumb_r * 2, .h = thumb_r * 2 }, .all(thumb_r), if (self.player.decoder != null) t.primary else t.outline);
     }
 
+    pub fn cursor(self: *const SeekTrack, _: *Node, _: geometry.Point) ?widget.Cursor {
+        if (self.player.decoder == null and !self.player.hw_unavailable) return null;
+        return if (self.state.dragging) .grabbing else .pointer;
+    }
+
     pub fn event(self: *const SeekTrack, n: *Node, e: Event) bool {
         if (self.player.decoder == null and !self.player.hw_unavailable) return false;
         switch (e) {

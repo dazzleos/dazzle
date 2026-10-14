@@ -95,6 +95,18 @@ pub const Document = struct {
         return true;
     }
 
+    /// Deletes `before_len` bytes before the cursor and `after_len` bytes
+    /// after it (`zwp_text_input_v3.delete_surrounding_text`).
+    pub fn deleteSurrounding(d: *Document, before_len: u32, after_len: u32) bool {
+        _ = d.deleteSelection();
+        const from = d.snap(d.cursor -| @min(@as(usize, before_len), d.cursor));
+        const to = d.snap(@min(d.bytes.items.len, d.cursor + @as(usize, after_len)));
+        if (to <= from) return false;
+        d.remove(from, to);
+        d.cursor = from;
+        return true;
+    }
+
     /// Puts `t` (UTF-8) at the cursor, over the selection: its characters
     /// but control ones (tabs as four spaces, "\r\n" as "\n").
     pub fn insert(d: *Document, t: []const u8) void {
@@ -194,6 +206,9 @@ pub const TextArea = struct {
         doc: ?*Document = null,
         node: ?*Node = null,
         on_changed: ?widget.Callback = null,
+        preedit_buf: [128]u8 = undefined,
+        preedit_len: usize = 0,
+        last_change_other: bool = false,
 
         pub fn deinit(s: *State) void {
             if (s.gpa) |g| {
@@ -227,6 +242,7 @@ pub const TextArea = struct {
 
         fn pasted(s: *State, t: []const u8) void {
             const d = s.doc orelse return;
+            s.last_change_other = true;
             d.insert(t);
             s.changed();
         }
@@ -250,6 +266,46 @@ pub const TextArea = struct {
         st.node = n;
         st.on_changed = self.on_changed;
         return st;
+    }
+
+    pub fn cursor(_: *const TextArea, _: *Node, _: Point) ?widget.Cursor {
+        return .text;
+    }
+
+    pub fn textInput(self: *const TextArea, n: *Node) ?widget.TextInputInfo {
+        const st = n.state(State);
+        const d = self.doc;
+        const t = d.text();
+        var cx_px: i32 = pad;
+        var cy_px: i32 = pad;
+        var ch_px: i32 = 20;
+        if (self.style(n)) |s| {
+            const lh = s.lineHeight();
+            ch_px = @max(1, @as(i32, @intFromFloat(@round(lh))));
+            const lines = st.lines.items;
+            const li = lineOf(lines, d.cursor);
+            if (li < lines.len or lines.len == 0) {
+                const l = if (lines.len == 0) Line{ .start = 0, .end = 0 } else lines[li];
+                const x = pad + font.measure(s, t[l.start..@min(d.cursor, l.end)]);
+                const top = pad + @as(f32, @floatFromInt(li)) * lh - st.scroll;
+                cx_px = @intFromFloat(@round(x));
+                cy_px = @intFromFloat(@round(top));
+            }
+        }
+        const window_start = d.snap(d.cursor -| 128);
+        const window_end = d.snap(@min(t.len, window_start + 256));
+        const cur: u32 = @intCast(d.cursor - window_start);
+        const anc_abs = d.anchor orelse d.cursor;
+        const anc: u32 = @intCast(std.math.clamp(anc_abs, window_start, window_end) - window_start);
+        return .{
+            .surrounding_text = t[window_start..window_end],
+            .cursor = cur,
+            .anchor = anc,
+            .cursor_rect = .{ cx_px, cy_px, 2, ch_px },
+            .password = false,
+            .multiline = true,
+            .change_cause_other = st.last_change_other,
+        };
     }
 
     pub fn layout(self: *const TextArea, n: *Node, c: Constraints) Size {
@@ -358,7 +414,15 @@ pub const TextArea = struct {
                 const l = if (lines.len == 0) Line{ .start = 0, .end = 0 } else lines[li];
                 const x = pad + font.measure(s, text[l.start..@min(d.cursor, l.end)]);
                 const top = pad + @as(f32, @floatFromInt(li)) * lh - st.scroll;
-                c.fillRect(.{ .x = @round(x), .y = top, .w = 2, .h = lh }, t.primary);
+                if (st.preedit_len > 0) {
+                    const pre = st.preedit_buf[0..st.preedit_len];
+                    const pre_w = font.measure(s, pre);
+                    const baseline = top + s.ascent();
+                    c.fillRect(.{ .x = @round(x), .y = baseline + 1, .w = pre_w, .h = 1 }, t.primary);
+                    _ = p.text(s.size, @round(x), baseline, pre, t.primary);
+                } else {
+                    c.fillRect(.{ .x = @round(x), .y = top, .w = 2, .h = lh }, t.primary);
+                }
             }
         }
     }
@@ -374,12 +438,14 @@ pub const TextArea = struct {
                 d.anchor = d.cursor;
                 st.dragging = true;
                 st.goal_x = null;
+                st.last_change_other = true;
                 n.ui.needs_frame = true;
                 return true;
             },
             .motion => |pos| if (st.dragging) {
                 d.cursor = self.offsetAt(n, pos);
                 st.reveal = true;
+                st.last_change_other = true;
                 n.ui.needs_frame = true;
             },
             .release => {
@@ -393,10 +459,33 @@ pub const TextArea = struct {
                 return true;
             },
             .focus => st.focused = true,
-            .blur => st.focused = false,
+            .blur => {
+                st.focused = false;
+                st.preedit_len = 0;
+            },
             .key => |k| {
                 if (!k.pressed) return true;
+                st.last_change_other = true;
                 if (self.key(n, st, k)) st.changed() else n.ui.needs_frame = true;
+                return true;
+            },
+            .text_commit => |t| {
+                st.preedit_len = 0;
+                st.last_change_other = false;
+                d.insert(t);
+                st.changed();
+                return true;
+            },
+            .text_delete_surrounding => |del| {
+                st.last_change_other = false;
+                if (d.deleteSurrounding(del.before_length, del.after_length)) st.changed();
+                return true;
+            },
+            .text_preedit => |pre| {
+                const len = @min(pre.text.len, st.preedit_buf.len);
+                @memcpy(st.preedit_buf[0..len], pre.text[0..len]);
+                st.preedit_len = len;
+                n.ui.needs_frame = true;
                 return true;
             },
             .context => |pos| {

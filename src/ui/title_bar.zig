@@ -208,4 +208,3 @@ test "the title bar defaults to the UI's window controls" {
     u.pointerButton(at, btn_left, false);
     try testing.expect(controls.quit);
 }
-

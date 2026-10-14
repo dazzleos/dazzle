@@ -282,8 +282,11 @@ fn run(init: std.process.Init.Minimal) !void {
                 print("dazzle-shell: display events: {s}\n", .{@errorName(err)});
                 break :blk null;
             }) |vblank_us| {
+                const direct = scanout.queued != null;
                 scanout.presented(&server);
-                server.framePresented(@truncate(vblank_us / std.time.us_per_ms));
+                const kind = wayland.protocol.wp_presentation_feedback.kind;
+                const flags: u32 = kind.vsync | kind.hw_clock | kind.hw_completion | (if (direct) @as(u32, kind.zero_copy) else 0);
+                server.framePresentedNs(vblank_us * std.time.ns_per_us, flags);
             }
         }
 
@@ -523,8 +526,11 @@ fn run(init: std.process.Init.Minimal) !void {
                 }
             }
             if (on_screen.?) {
+                const direct = scanout.queued != null;
                 scanout.presented(&server);
-                server.framePresented(@truncate(sys.nowNs() / std.time.ns_per_ms));
+                const kind = wayland.protocol.wp_presentation_feedback.kind;
+                const flags: u32 = kind.vsync | kind.hw_completion | (if (direct) @as(u32, kind.zero_copy) else 0);
+                server.framePresentedNs(sys.nowNs(), flags);
             }
             // The cursor plane needs the mode the first frame set.
             if (!cursor_shown) {

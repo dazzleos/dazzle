@@ -81,9 +81,18 @@ pub const TextField = struct {
         toggle_hovered: bool = false,
         toggle_pressed: bool = false,
         on_changed: ?widget.ValueCallback([]const u8) = null,
+        preedit_buf: [capacity]u8 = undefined,
+        preedit_len: usize = 0,
+        preedit_cursor_begin: i32 = 0,
+        preedit_cursor_end: i32 = 0,
+        last_change_other: bool = false,
 
         pub fn text(s: *const State) []const u8 {
             return s.buf[0..s.len];
+        }
+
+        pub fn preedit(s: *const State) []const u8 {
+            return s.preedit_buf[0..s.preedit_len];
         }
 
         /// The selected bytes' start and end, if any are.
@@ -100,6 +109,18 @@ pub const TextField = struct {
             s.len -= sel[1] - sel[0];
             s.cursor = sel[0];
             s.anchor = null;
+            return true;
+        }
+
+        /// Deletes `before_len` bytes before the cursor and `after_len` bytes
+        /// after it (`zwp_text_input_v3.delete_surrounding_text`).
+        pub fn deleteSurrounding(s: *State, before_len: u32, after_len: u32) bool {
+            _ = s.deleteSelection();
+            const from = s.snap(s.cursor -| @min(@as(usize, before_len), s.cursor));
+            const to = s.snap(@min(s.len, s.cursor + @as(usize, after_len)));
+            if (to <= from) return false;
+            s.remove(from, to);
+            s.cursor = from;
             return true;
         }
 
@@ -201,6 +222,7 @@ pub const TextField = struct {
         }
 
         fn pasted(s: *State, t: []const u8) void {
+            s.last_change_other = true;
             if (s.insert(t, s.max_len)) s.notifyChanged();
         }
 
@@ -313,6 +335,42 @@ pub const TextField = struct {
         return pos[0] >= n.size.w - toggle_pad and pos[0] < n.size.w and pos[1] >= 0 and pos[1] < n.size.h;
     }
 
+    pub fn cursor(self: *const TextField, n: *Node, pos: geometry.Point) ?widget.Cursor {
+        if (!self.enabled) return null;
+        if (self.inToggle(n, pos)) return .pointer;
+        return .text;
+    }
+
+    pub fn textInput(self: *const TextField, n: *Node) ?widget.TextInputInfo {
+        if (!self.enabled) return null;
+        const st = n.state(State);
+        var cx_px: i32 = pad;
+        var cy_px: i32 = 8;
+        var ch_px: i32 = @max(1, @as(i32, @intFromFloat(@round(n.size.h))) - 16);
+        if (self.fontStyle(n)) |style| {
+            const cursor_x = self.xOf(style, st, st.cursor);
+            const right_pad: f32 = if (self.obscure) toggle_pad else pad;
+            const room = @max(n.size.w - pad - right_pad, 0);
+            const scroll = @max(cursor_x - room, 0);
+            const baseline = @round((n.size.h - style.lineHeight()) / 2 + style.ascent());
+            cx_px = @intFromFloat(@round(pad - scroll + cursor_x));
+            cy_px = @intFromFloat(@round(baseline - style.ascent()));
+            ch_px = @max(1, @as(i32, @intFromFloat(@round(style.lineHeight()))));
+        }
+        const surr = if (self.isObscured(st)) "" else st.text();
+        const cur: u32 = if (self.isObscured(st)) 0 else @intCast(st.cursor);
+        const anc: u32 = if (self.isObscured(st)) 0 else @intCast(st.anchor orelse st.cursor);
+        return .{
+            .surrounding_text = surr,
+            .cursor = cur,
+            .anchor = anc,
+            .cursor_rect = .{ cx_px, cy_px, 2, ch_px },
+            .password = self.obscure,
+            .multiline = false,
+            .change_cause_other = st.last_change_other,
+        };
+    }
+
     /// What is shown for `text`: it, or a dot for each character.
     fn shown(self: *const TextField, st: *const State, buf: []u8, text: []const u8) []const u8 {
         if (!self.isObscured(st)) return text;
@@ -371,12 +429,18 @@ pub const TextField = struct {
             const x1 = self.xOf(style, st, sel[1]);
             c.fillRect(.{ .x = @round(pad - scroll + x0), .y = baseline - style.ascent(), .w = @round(x1 - x0), .h = style.lineHeight() }, t.primary.withAlpha(if (st.focused) 0.35 else 0.15));
         }
-        if (st.len == 0 and !st.focused) {
+        if (st.len == 0 and st.preedit_len == 0 and !st.focused) {
             _ = p.text(style.size, pad, baseline, self.placeholder, t.on_surface_variant);
         } else {
             _ = p.text(style.size, pad - scroll, baseline, text, t.on_surface);
         }
-        if (st.focused and st.selection() == null) {
+        if (st.focused and st.preedit_len > 0 and !self.isObscured(st)) {
+            const pre = st.preedit();
+            const pre_w = font.measure(style, pre);
+            const px = @round(pad - scroll + cursor_x);
+            c.fillRect(.{ .x = px, .y = baseline + 1, .w = pre_w, .h = 1 }, t.primary);
+            _ = p.text(style.size, px, baseline, pre, t.primary);
+        } else if (st.focused and st.selection() == null) {
             const x = @round(pad - scroll + cursor_x);
             c.fillRect(.{ .x = x, .y = baseline - style.ascent(), .w = 2, .h = style.lineHeight() }, t.primary);
         }
@@ -413,6 +477,7 @@ pub const TextField = struct {
                 st.moveTo(self.cursorAt(n, pr.pos[0]), false);
                 st.anchor = st.cursor;
                 st.dragging = true;
+                st.last_change_other = true;
                 return true;
             },
             .motion => |pos| {
@@ -423,6 +488,7 @@ pub const TextField = struct {
                 }
                 if (st.dragging) {
                     st.cursor = self.cursorAt(n, pos[0]);
+                    st.last_change_other = true;
                     n.ui.needs_frame = true;
                 }
             },
@@ -440,14 +506,40 @@ pub const TextField = struct {
                 return true;
             },
             .focus => st.focused = true,
-            .blur => st.focused = false,
+            .blur => {
+                st.focused = false;
+                st.preedit_len = 0;
+            },
             .key => |k| {
                 if (!k.pressed) return true;
                 if (k.code == keymap.enter or k.code == keymap.keypad_enter) {
                     if (self.on_submit) |f| f.call();
                     return true;
                 }
+                st.last_change_other = true;
                 if (st.key(k, self.max_len)) if (self.on_changed) |f| f.call(st.text());
+                return true;
+            },
+            .text_commit => |t| {
+                st.preedit_len = 0;
+                st.last_change_other = false;
+                if (st.insert(t, self.max_len)) if (self.on_changed) |f| f.call(st.text());
+                n.ui.needs_frame = true;
+                return true;
+            },
+            .text_delete_surrounding => |del| {
+                st.last_change_other = false;
+                if (st.deleteSurrounding(del.before_length, del.after_length)) if (self.on_changed) |f| f.call(st.text());
+                n.ui.needs_frame = true;
+                return true;
+            },
+            .text_preedit => |pre| {
+                const len = @min(pre.text.len, st.preedit_buf.len);
+                @memcpy(st.preedit_buf[0..len], pre.text[0..len]);
+                st.preedit_len = len;
+                st.preedit_cursor_begin = pre.cursor_begin;
+                st.preedit_cursor_end = pre.cursor_end;
+                n.ui.needs_frame = true;
                 return true;
             },
             .context => |pos| {
@@ -966,4 +1058,3 @@ test "initial text and max_len never split a multi-byte UTF-8 character" {
     st.moveTo(6, true); // inside '€' (bytes 4..7)
     try testing.expectEqual(@as(usize, 4), st.cursor);
 }
-

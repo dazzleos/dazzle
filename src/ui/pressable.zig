@@ -1,6 +1,7 @@
 //! Pressable: calls back when the child is clicked, and says whether the
 //! pointer is over it and pressing it (`Interaction`).
 
+const geometry = @import("geometry.zig");
 const widget = @import("widget.zig");
 
 const Widget = widget.Widget;
@@ -21,6 +22,10 @@ pub const Pressable = struct {
     on_press: ?Callback = null,
     interaction: ?*Interaction = null,
     child: ?Widget = null,
+
+    pub fn cursor(self: *const Pressable, _: *Node, _: geometry.Point) ?widget.Cursor {
+        return if (self.on_press != null) .pointer else null;
+    }
 
     pub fn event(self: *const Pressable, _: *Node, e: Event) bool {
         var dummy: Interaction = .{};

@@ -1188,6 +1188,3 @@ test "HTTPS client trusts the Dazzle Test CA and fetches over TLS 1.3 keep-alive
     const demo_icon = try std.fmt.bufPrintZ(&path_buf, "{s}/.icons/dazzle-demo.png", .{app_dir});
     try testing.expectEqualStrings(png_64 ++ "TLS-DEMO", sys.readFile(demo_icon, &read_buf).?);
 }
-
-
-

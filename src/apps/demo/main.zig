@@ -110,7 +110,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         a.idle = true;
         if (!a.suspended and (a.dirty or a.ui.needs_frame)) {
             a.dirty = false;
-            a.ui.frame(a.width, a.height, frame_start, view.Demo{
+            a.ui.frame(a.width, a.height, a.win.nextPresentationNs(frame_start), view.Demo{
                 .solids = &all_solids,
                 .rings = &rings,
                 .status = status,

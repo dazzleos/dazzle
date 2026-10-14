@@ -263,4 +263,3 @@ test "a PNG that decodes to the pixels" {
     defer gpa.free(decoded_rgba.pixels);
     try testing.expectEqualSlices(u32, &pixels, decoded_rgba.pixels);
 }
-

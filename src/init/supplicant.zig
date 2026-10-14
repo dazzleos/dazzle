@@ -1221,4 +1221,3 @@ test "WPA3-Personal: SAE Commit/Confirm exchange followed by SHA-256 4-way hands
     ap.handle(m4_copy[0..m4_len], &ap_act);
     try testing.expect(ap_act.complete);
 }
-

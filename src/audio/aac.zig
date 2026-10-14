@@ -1262,4 +1262,3 @@ test "Decoder decodes real AAC-LC stereo frames into 440 Hz PCM audio" {
     }
     try testing.expect(peak > 1000);
 }
-

@@ -1400,3 +1400,157 @@ test "surface buffer scale and transform determine logical size, and unmapping s
     try w.pump();
     try testing.expectEqual(@as(u32, 1), surf_heard.counts[p.wl_surface.event.leave]);
 }
+
+test "wp_presentation reports clock_id, sync_output, presented timestamps, and discarded frames" {
+    var w: World = .{};
+    w.init();
+    defer w.deinit();
+    const a = try w.connect();
+    _ = try a.bind(p.wl_output.name, 4, null);
+    const compositor = try a.bind(p.wl_compositor.name, 4, null);
+    const wm_base = try a.bind(p.xdg_wm_base.name, 6, null);
+    const shm = try a.bind(p.wl_shm.name, 1, null);
+    var pres_heard: Heard = .{};
+    const pres = try a.bind(p.wp_presentation.name, 1, pres_heard.listener());
+    try w.pump();
+    // Binding wp_presentation immediately announces CLOCK_MONOTONIC (1).
+    try testing.expectEqual(@as(u32, 1), pres_heard.counts[p.wp_presentation.event.clock_id]);
+    try testing.expectEqual(@as(i64, 1), pres_heard.args[0]);
+
+    var win: Window = .{ .surface = undefined, .xdg = undefined, .toplevel = undefined };
+    try win.open(a, compositor, wm_base, shm, null);
+
+    // Commit two frames before scanout: the first feedback is discarded when superseded,
+    // and the second receives sync_output + presented when framePresentedNs runs.
+    var fb1_heard: Heard = .{};
+    const fb1 = try a.d.newObject(fb1_heard.listener());
+    var m = try pres.request(p.wp_presentation.request.feedback);
+    m.uint(win.surface.id).uint(fb1.id).end();
+    try a.show(win.surface, try a.shmBuffer(shm, 800, 560));
+    try w.pump();
+    try testing.expectEqual(@as(u32, 0), fb1_heard.events);
+
+    var fb2_heard: Heard = .{};
+    const fb2 = try a.d.newObject(fb2_heard.listener());
+    m = try pres.request(p.wp_presentation.request.feedback);
+    m.uint(win.surface.id).uint(fb2.id).end();
+    try a.show(win.surface, try a.shmBuffer(shm, 800, 560));
+    try w.pump();
+
+    // First feedback was superseded by the second commit before presentation.
+    try testing.expectEqual(@as(u32, 1), fb1_heard.counts[p.wp_presentation_feedback.event.discarded]);
+    try testing.expectEqual(@as(u32, 0), fb2_heard.events);
+
+    // Present the frame at t = 5_250_000_000 ns (5s + 250ms).
+    const flags = p.wp_presentation_feedback.kind.vsync | p.wp_presentation_feedback.kind.hw_clock | p.wp_presentation_feedback.kind.hw_completion;
+    w.server.frameDrawn();
+    w.server.framePresentedNs(5_250_000_000, flags);
+    try w.pump();
+    try testing.expectEqual(@as(u32, 1), fb2_heard.counts[p.wp_presentation_feedback.event.sync_output]);
+    try testing.expectEqual(@as(u32, 1), fb2_heard.counts[p.wp_presentation_feedback.event.presented]);
+    // presented args: tv_sec_hi (0), tv_sec_lo (5), tv_nsec (250_000_000), refresh_ns (16683350 for 59940 mHz), seq_hi (0), seq_lo (1), flags.
+    try testing.expectEqual(@as(i64, 0), fb2_heard.args[0]);
+    try testing.expectEqual(@as(i64, 5), fb2_heard.args[1]);
+    try testing.expectEqual(@as(i64, 250_000_000), fb2_heard.args[2]);
+    try testing.expectEqual(@as(i64, 1_000_000_000_000 / 59940), fb2_heard.args[3]);
+    try testing.expectEqual(@as(i64, 1), fb2_heard.args[5]);
+    try testing.expectEqual(@as(i64, flags), fb2_heard.args[6]);
+}
+
+test "zwp_text_input_v3 sends enter/leave with focus, commits client state, and delivers IME events" {
+    var w: World = .{};
+    w.init();
+    defer w.deinit();
+    const a = try w.connect();
+    const compositor = try a.bind(p.wl_compositor.name, 4, null);
+    const wm_base = try a.bind(p.xdg_wm_base.name, 6, null);
+    const shm = try a.bind(p.wl_shm.name, 1, null);
+    const seat = try a.bind(p.wl_seat.name, 5, null);
+    const tim = try a.bind(p.zwp_text_input_manager_v3.name, 1, null);
+
+    const TiEvents = struct {
+        entered: u32 = 0,
+        left: u32 = 0,
+        preedit: [64]u8 = undefined,
+        preedit_len: usize = 0,
+        preedit_begin: i32 = 0,
+        preedit_end: i32 = 0,
+        commit: [64]u8 = undefined,
+        commit_len: usize = 0,
+        del_before: u32 = 0,
+        del_after: u32 = 0,
+        done_serial: u32 = 0,
+
+        fn event(ptr: ?*anyopaque, _: *client.Display, _: u32, opcode: u16, r: *wire.Reader) void {
+            const s: *@This() = @ptrCast(@alignCast(ptr.?));
+            switch (opcode) {
+                p.zwp_text_input_v3.event.enter => s.entered = r.uint() catch 0,
+                p.zwp_text_input_v3.event.leave => s.left = r.uint() catch 0,
+                p.zwp_text_input_v3.event.preedit_string => {
+                    const str = (r.string() catch return) orelse "";
+                    s.preedit_len = @min(str.len, s.preedit.len);
+                    @memcpy(s.preedit[0..s.preedit_len], str[0..s.preedit_len]);
+                    s.preedit_begin = r.int() catch 0;
+                    s.preedit_end = r.int() catch 0;
+                },
+                p.zwp_text_input_v3.event.commit_string => {
+                    const str = (r.string() catch return) orelse "";
+                    s.commit_len = @min(str.len, s.commit.len);
+                    @memcpy(s.commit[0..s.commit_len], str[0..s.commit_len]);
+                },
+                p.zwp_text_input_v3.event.delete_surrounding_text => {
+                    s.del_before = r.uint() catch 0;
+                    s.del_after = r.uint() catch 0;
+                },
+                p.zwp_text_input_v3.event.done => s.done_serial = r.uint() catch 0,
+                else => {},
+            }
+        }
+    };
+
+    var ti_ev: TiEvents = .{};
+    const ti = try a.d.newObject(.{ .ptr = &ti_ev, .handler = TiEvents.event });
+    var m = try tim.request(p.zwp_text_input_manager_v3.request.get_text_input);
+    m.uint(ti.id).uint(seat.id).end();
+
+    var win: Window = .{ .surface = undefined, .xdg = undefined, .toplevel = undefined };
+    try win.open(a, compositor, wm_base, shm, null);
+    try testing.expectEqual(win.surface.id, ti_ev.entered);
+
+    // Client enables text input, sets surrounding text, content type, cursor rectangle, and commits.
+    m = try ti.request(p.zwp_text_input_v3.request.enable);
+    m.end();
+    m = try ti.request(p.zwp_text_input_v3.request.set_surrounding_text);
+    m.string("hello world").int(5).int(5).end();
+    m = try ti.request(p.zwp_text_input_v3.request.set_text_change_cause);
+    m.uint(p.zwp_text_input_v3.change_cause.input_method).end();
+    m = try ti.request(p.zwp_text_input_v3.request.set_content_type);
+    m.uint(p.zwp_text_input_v3.content_hint.spellcheck).uint(p.zwp_text_input_v3.content_purpose.normal).end();
+    m = try ti.request(p.zwp_text_input_v3.request.set_cursor_rectangle);
+    m.int(12).int(34).int(2).int(20).end();
+    m = try ti.request(p.zwp_text_input_v3.request.commit);
+    m.end();
+    try w.pump();
+
+    // Server records the committed state with serial 1.
+    const srv_ti = w.server.activeTextInput().?;
+    try testing.expect(srv_ti.enabled);
+    try testing.expectEqualStrings("hello world", srv_ti.surrounding_text);
+    try testing.expectEqual(@as(i32, 5), srv_ti.cursor);
+    try testing.expectEqual(@as(i32, 5), srv_ti.anchor);
+    try testing.expectEqual(@as(u32, p.zwp_text_input_v3.content_hint.spellcheck), srv_ti.content_hint);
+    try testing.expectEqual(@as(i32, 12), srv_ti.cursor_rect.x);
+    try testing.expectEqual(@as(u32, 1), srv_ti.serial);
+
+    // Server sends preedit, delete_surrounding_text, commit_string, and done(1).
+    w.server.textInputPreedit("ni", 0, 2);
+    w.server.textInputDeleteSurrounding(1, 0);
+    w.server.textInputCommitString("你好");
+    w.server.textInputDone();
+    try w.pump();
+    try testing.expectEqualStrings("ni", ti_ev.preedit[0..ti_ev.preedit_len]);
+    try testing.expectEqual(@as(i32, 2), ti_ev.preedit_end);
+    try testing.expectEqual(@as(u32, 1), ti_ev.del_before);
+    try testing.expectEqualStrings("你好", ti_ev.commit[0..ti_ev.commit_len]);
+    try testing.expectEqual(@as(u32, 1), ti_ev.done_serial);
+}

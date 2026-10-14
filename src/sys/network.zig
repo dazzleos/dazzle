@@ -1679,5 +1679,3 @@ test "network Config round-trips Ethernet, Wi-Fi client, saved credentials, and 
     try testing.expectEqualStrings("HomeWiFi", cfg_rejoin.wifi_mode.client.ssid());
     try testing.expectEqualStrings("correct horse", cfg_rejoin.wifi_mode.client.passphrase());
 }
-
-

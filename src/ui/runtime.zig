@@ -128,6 +128,8 @@ pub const Ui = struct {
     fullscreen: bool = false,
     /// Whether the window fills the work area (for `TitleBar`).
     maximized: bool = true,
+    /// The window attached to the UI, if any.
+    win: ?*app.Window = null,
     /// What the window's title bar buttons do (set by `attachWindow`).
     controls: ?*app.Controls = null,
     /// The system's clipboard (the app gives it); without one, text is
@@ -272,6 +274,7 @@ pub const Ui = struct {
     /// Connects the UI's clipboard, keyboard layout, and window state to
     /// `win` (and its title bar's buttons to `controls`, if given).
     pub fn attachWindow(ui: *Ui, win: *app.Window, controls: ?*app.Controls) void {
+        ui.win = win;
         ui.clipboard = .of(&win.clipboard);
         ui.controls = controls;
         ui.syncWindow(win);
@@ -282,6 +285,92 @@ pub const Ui = struct {
         ui.keyboard = win.layout;
         ui.fullscreen = win.fullscreen;
         ui.maximized = win.maximized;
+    }
+
+    /// The pointer cursor shape requested by the currently dragged,
+    /// captured, or hovered widget.
+    pub fn cursor(ui: *const Ui) widget.Cursor {
+        if (ui.drag != null) return .grabbing;
+        if (ui.captured) |cap| {
+            if (cap.widget.vtable.cursor) |f| {
+                const pos = ui.pointer orelse Point{ 0, 0 };
+                if (f(cap.widget.ptr, cap, local(cap, pos))) |c| return c;
+            }
+        }
+        if (ui.pointer) |pos| {
+            for (ui.hovered.items) |n| {
+                if (n.widget.vtable.cursor) |f| {
+                    if (f(n.widget.ptr, n, local(n, pos))) |c| return c;
+                }
+            }
+        }
+        return .default;
+    }
+
+    /// Maps a `widget.Cursor` to its `wp_cursor_shape_device_v1.shape` code.
+    pub fn cursorShape(c: widget.Cursor) u32 {
+        const sh = app.CursorShape;
+        return switch (c) {
+            .default => sh.default,
+            .pointer => sh.pointer,
+            .text => sh.text,
+            .grab => sh.grab,
+            .grabbing => sh.grabbing,
+            .crosshair => sh.crosshair,
+            .move => sh.move,
+            .not_allowed => sh.not_allowed,
+            .wait => sh.wait,
+            .progress => sh.progress,
+            .help => sh.help,
+            .ew_resize => sh.ew_resize,
+            .ns_resize => sh.ns_resize,
+            .nwse_resize => sh.nwse_resize,
+            .nesw_resize => sh.nesw_resize,
+        };
+    }
+
+    /// Updates `win`'s cursor shape to match `ui.cursor()`.
+    pub fn syncCursor(ui: *const Ui, win: *app.Window) void {
+        win.setCursor(cursorShape(ui.cursor()));
+    }
+
+    /// The `zwp_text_input_v3` state for the currently focused widget, or
+    /// null when no text input widget is focused.
+    pub fn textInputState(ui: *const Ui) ?app.TextInputState {
+        const n = ui.focused orelse return null;
+        const f = n.widget.vtable.text_input orelse return null;
+        const info = f(n.widget.ptr, n) orelse return null;
+        const origin = n.position();
+        const ox: i32 = @intFromFloat(@round(origin[0]));
+        const oy: i32 = @intFromFloat(@round(origin[1]));
+        const ti = app.TextInputProtocol;
+        const hint: u32 = if (info.password)
+            (ti.content_hint.hidden_text | ti.content_hint.sensitive_data)
+        else if (info.multiline)
+            ti.content_hint.multiline
+        else
+            ti.content_hint.none;
+        const purpose: u32 = if (info.password) ti.content_purpose.password else ti.content_purpose.normal;
+        const cause: u32 = if (info.change_cause_other) ti.change_cause.other else ti.change_cause.input_method;
+        return .{
+            .surrounding_text = info.surrounding_text,
+            .cursor = info.cursor,
+            .anchor = info.anchor,
+            .change_cause = cause,
+            .content_hint = hint,
+            .content_purpose = purpose,
+            .cursor_rect = .{
+                ox + info.cursor_rect[0],
+                oy + info.cursor_rect[1],
+                info.cursor_rect[2],
+                info.cursor_rect[3],
+            },
+        };
+    }
+
+    /// Synchronizes `win`'s `zwp_text_input_v3` state with the focused widget.
+    pub fn syncTextInput(ui: *const Ui, win: *app.Window) void {
+        win.setTextInput(ui.textInputState());
     }
 
     /// Lets `render` draw with the GPU.
@@ -335,6 +424,10 @@ pub const Ui = struct {
         if (tt) |n| ui.damage.sweep(n);
         // The layout may have moved things under the pointer.
         if (ui.pointer) |p| ui.updateHover(p);
+        if (ui.win) |win| {
+            ui.syncCursor(win);
+            ui.syncTextInput(win);
+        }
         // A long press is waited for frame by frame.
         if (ui.hold != null) ui.needs_frame = true;
     }
@@ -672,6 +765,23 @@ pub const Ui = struct {
             .touch_up => |id| ui.touchUp(id),
             .touch_cancel => ui.touchCancel(),
             .relative_motion, .pointer_locked => {},
+            .text_commit => |*c| if (ui.focused) |n| {
+                _ = send(n, .{ .text_commit = c.slice() });
+                ui.needs_frame = true;
+            },
+            .text_preedit => |*p| if (ui.focused) |n| {
+                _ = send(n, .{ .text_preedit = .{ .text = p.slice(), .cursor_begin = p.cursor_begin, .cursor_end = p.cursor_end } });
+                ui.needs_frame = true;
+            },
+            .text_delete_surrounding => |d| if (ui.focused) |n| {
+                _ = send(n, .{ .text_delete_surrounding = .{ .before_length = d.before_length, .after_length = d.after_length } });
+                ui.needs_frame = true;
+            },
+            .drag_enter, .drag_motion, .drop => |pos| {
+                ui.pointer = pos;
+                ui.updateHover(pos);
+            },
+            .drag_leave => ui.pointerLeave(),
         }
     }
 
@@ -679,6 +789,7 @@ pub const Ui = struct {
     pub fn takeInput(ui: *Ui, win: *app.Window) void {
         ui.syncWindow(win);
         for (win.takeInput()) |e| ui.handleInput(e);
+        ui.syncCursor(win);
     }
 
     pub fn pointerMotion(ui: *Ui, pos: Point) void {
@@ -690,6 +801,7 @@ pub const Ui = struct {
         if (ui.captured) |n| if (std.mem.indexOfScalar(*Node, ui.hovered.items, n) == null) {
             if (send(n, .{ .motion = local(n, pos) })) ui.needs_frame = true;
         };
+        if (ui.win) |win| ui.syncCursor(win);
     }
 
     /// A button (a Linux key code: BTN_LEFT is 0x110) went down or up.
@@ -697,6 +809,7 @@ pub const Ui = struct {
         ui.pointer = pos;
         ui.updateHover(pos);
         ui.needs_frame = true;
+        defer if (ui.win) |win| ui.syncCursor(win);
         if (pressed) {
             if (ui.captured != null) return;
             // With a menu shown, a press outside it closes it (and does
@@ -872,6 +985,7 @@ pub const Ui = struct {
         ui.pointer = null;
         for (ui.hovered.items) |n| _ = send(n, .leave);
         ui.hovered.clearRetainingCapacity();
+        if (ui.win) |win| ui.syncCursor(win);
         ui.needs_frame = true;
     }
 
@@ -1034,7 +1148,8 @@ pub const App = struct {
     pub fn step(a: *App, idle_timeout_ns: u64) !bool {
         const waited = if (a.idle) blk: {
             try a.win.finishInFlight();
-            const timeout: u64 = if (a.ui.needs_frame and !a.suspended) 16 * std.time.ns_per_ms else idle_timeout_ns;
+            const refresh = if (a.win.refresh_ns > 0) a.win.refresh_ns else 16 * std.time.ns_per_ms;
+            const timeout: u64 = if (a.ui.needs_frame and !a.suspended) refresh else idle_timeout_ns;
             break :blk a.win.wait(timeout);
         } else a.win.poll();
         waited catch |err| {
@@ -1076,6 +1191,7 @@ pub const App = struct {
         a.ui.fullscreen = a.win.fullscreen;
         a.ui.maximized = a.win.maximized;
         for (a.win.takeInput()) |e| a.ui.handleInput(e);
+        a.ui.syncCursor(a.win);
     }
 
     /// If the window is not suspended and the UI needs a frame (`dirty` or
@@ -1085,7 +1201,8 @@ pub const App = struct {
         a.idle = true;
         if (!a.suspended and (a.dirty or a.ui.needs_frame)) {
             a.dirty = false;
-            a.ui.frame(a.width, a.height, now_ns, root);
+            const target_ns = a.win.nextPresentationNs(now_ns);
+            a.ui.frame(a.width, a.height, target_ns, root);
             const clear = a.clear_color orelse a.ui.theme.surface.toArgb();
             if (try a.ui.present(a.win, &a.frame, clear)) a.idle = false;
         }

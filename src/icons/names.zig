@@ -112,4 +112,3 @@ pub const Icon = enum {
     dark_mode,
     light_mode,
 };
-

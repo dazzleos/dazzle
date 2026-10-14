@@ -109,6 +109,8 @@ const globals = [_]struct { name: []const u8, version: u32 }{
     .{ .name = p.wl_output.name, .version = p.wl_output.version },
     .{ .name = p.zwp_pointer_constraints_v1.name, .version = p.zwp_pointer_constraints_v1.version },
     .{ .name = p.zwp_relative_pointer_manager_v1.name, .version = p.zwp_relative_pointer_manager_v1.version },
+    .{ .name = p.wp_presentation.name, .version = p.wp_presentation.version },
+    .{ .name = p.zwp_text_input_manager_v3.name, .version = p.zwp_text_input_manager_v3.version },
 };
 
 /// The screen, as wl_output describes it.
@@ -157,6 +159,37 @@ const Object = union(enum) {
     relative_pointer_manager,
     /// With the version bound (1), for `broadcast`.
     relative_pointer: u32,
+    presentation,
+    presentation_feedback,
+    text_input_manager,
+    text_input: *TextInput,
+};
+
+pub const TextInput = struct {
+    client: *Client,
+    id: u32,
+    /// Number of `commit` requests received on this object (sent in `done`).
+    serial: u32 = 0,
+    enabled: bool = false,
+    surrounding_text: []u8 = &.{},
+    cursor: i32 = 0,
+    anchor: i32 = 0,
+    change_cause: u32 = p.zwp_text_input_v3.change_cause.input_method,
+    content_hint: u32 = p.zwp_text_input_v3.content_hint.none,
+    content_purpose: u32 = p.zwp_text_input_v3.content_purpose.normal,
+    cursor_rect: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+    pending: Pending = .{},
+
+    pub const Pending = struct {
+        enabled: bool = false,
+        surrounding_text: ?[]u8 = null,
+        cursor: i32 = 0,
+        anchor: i32 = 0,
+        change_cause: u32 = p.zwp_text_input_v3.change_cause.input_method,
+        content_hint: u32 = p.zwp_text_input_v3.content_hint.none,
+        content_purpose: u32 = p.zwp_text_input_v3.content_purpose.normal,
+        cursor_rect: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+    };
 };
 
 pub const RegionOp = struct {
@@ -274,6 +307,8 @@ pub const Surface = struct {
     pending_callbacks: std.ArrayList(u32) = .empty,
     /// Frame callbacks committed while the window was covered.
     held_callbacks: std.ArrayList(u32) = .empty,
+    /// `wp_presentation_feedback` object IDs awaiting `wl_surface.commit`.
+    pending_feedback: std.ArrayList(u32) = .empty,
     pending_scale: ?u32 = null,
     scale: u32 = 1,
     pending_transform: ?u3 = null,
@@ -369,6 +404,7 @@ pub const Subsurface = struct {
         attach: bool = false,
         buffer: ?*Buffer = null,
         callbacks: std.ArrayList(u32) = .empty,
+        feedback: std.ArrayList(u32) = .empty,
         scale: ?u32 = null,
         transform: ?u3 = null,
         input_region: ?[]RegionOp = null,
@@ -536,6 +572,7 @@ pub const Client = struct {
 };
 
 const FrameCallback = struct { client: *Client, id: u32 };
+const PresentationFeedback = struct { client: *Client, id: u32, surface: ?*Surface = null };
 
 /// The process at the other end of a Unix socket.
 fn peerPid(fd: linux.fd_t) ?linux.pid_t {
@@ -561,6 +598,12 @@ pub const Server = struct {
     frame_callbacks: std.ArrayList(FrameCallback) = .empty,
     /// Frame callbacks for the frame drawn and waiting to reach the screen.
     presenting: std.ArrayList(FrameCallback) = .empty,
+    /// Presentation feedback objects for the next frame drawn.
+    frame_feedback: std.ArrayList(PresentationFeedback) = .empty,
+    /// Presentation feedback objects for the frame drawn and waiting to reach the screen.
+    presenting_feedback: std.ArrayList(PresentationFeedback) = .empty,
+    /// Monotonically increasing presented frame counter (`wp_presentation_feedback`).
+    present_seq: u64 = 0,
     /// Where the pointer is on the screen.
     pointer_x: f64 = 0,
     pointer_y: f64 = 0,
@@ -653,6 +696,8 @@ pub const Server = struct {
         s.toplevels.deinit(s.gpa);
         s.frame_callbacks.deinit(s.gpa);
         s.presenting.deinit(s.gpa);
+        s.frame_feedback.deinit(s.gpa);
+        s.presenting_feedback.deinit(s.gpa);
         s.offers.deinit(s.gpa);
         s.popups.deinit(s.gpa);
         s.locks.deinit(s.gpa);
@@ -756,6 +801,12 @@ pub const Server = struct {
                 if (list.items[i].client == c) _ = list.swapRemove(i) else i += 1;
             }
         }
+        for ([_]*std.ArrayList(PresentationFeedback){ &s.frame_feedback, &s.presenting_feedback }) |list| {
+            var i: usize = 0;
+            while (i < list.items.len) {
+                if (list.items[i].client == c) _ = list.swapRemove(i) else i += 1;
+            }
+        }
         c.objects.deinit(s.gpa);
         c.conn.deinit();
         for (s.clients.items, 0..) |x, j| if (x == c) {
@@ -788,7 +839,41 @@ pub const Server = struct {
             .popup => |pp| s.destroyPopup(pp),
             .subsurface => |sub| s.destroySubsurface(sub),
             .locked_pointer, .confined_pointer => |lock| s.destroyLock(lock),
+            .text_input => |ti| s.destroyTextInput(ti),
             else => {},
+        }
+    }
+
+    fn destroyTextInput(s: *Server, ti: *TextInput) void {
+        s.gpa.free(ti.surrounding_text);
+        if (ti.pending.surrounding_text) |txt| s.gpa.free(txt);
+        s.gpa.destroy(ti);
+    }
+
+    fn resetTextInputPending(s: *Server, ti: *TextInput) void {
+        if (ti.pending.surrounding_text) |txt| s.gpa.free(txt);
+        ti.pending = .{};
+    }
+
+    fn discardSurfaceFeedback(s: *Server, surf: *Surface) void {
+        var i: usize = 0;
+        while (i < s.frame_feedback.items.len) {
+            const fb = s.frame_feedback.items[i];
+            if (fb.surface == surf) {
+                sendFeedbackDiscarded(fb.client, fb.id);
+                _ = s.frame_feedback.orderedRemove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    fn sendFeedbackDiscarded(c: *Client, id: u32) void {
+        if (!c.dead) {
+            sendTo(c, id, p.wp_presentation_feedback.event.discarded, .{});
+            c.deleteId(id);
+        } else {
+            _ = c.objects.remove(id);
         }
     }
 
@@ -839,6 +924,12 @@ pub const Server = struct {
         for (surf.held_callbacks.items) |id| _ = surf.client.objects.remove(id);
         surf.pending_callbacks.deinit(s.gpa);
         surf.held_callbacks.deinit(s.gpa);
+        for (surf.pending_feedback.items) |id| sendFeedbackDiscarded(surf.client, id);
+        surf.pending_feedback.deinit(s.gpa);
+        s.discardSurfaceFeedback(surf);
+        for (s.presenting_feedback.items) |*fb| if (fb.surface == surf) {
+            fb.surface = null;
+        };
         if (surf.xdg) |x| {
             // The xdg_surface lives on, without a surface.
             if (x.toplevel) |t| s.unmap(t);
@@ -935,7 +1026,6 @@ pub const Server = struct {
             s.configure(surf.client, t);
         }
     }
-
 
     /// The whole screen.
     pub fn screen(s: *const Server) Rect {
@@ -1394,11 +1484,26 @@ pub const Server = struct {
             s.presenting.appendSlice(s.gpa, s.frame_callbacks.items) catch {};
         };
         s.frame_callbacks.clearRetainingCapacity();
+        s.presenting_feedback.appendSlice(s.gpa, s.frame_feedback.items) catch {
+            for (s.frame_feedback.items) |fb| sendFeedbackDiscarded(fb.client, fb.id);
+        };
+        s.frame_feedback.clearRetainingCapacity();
         s.damaged = false;
     }
 
     /// Fires the drawn frame's callbacks once it has reached the screen.
     pub fn framePresented(s: *Server, time_ms: u32) void {
+        const flags: u32 = p.wp_presentation_feedback.kind.vsync |
+            p.wp_presentation_feedback.kind.hw_clock |
+            p.wp_presentation_feedback.kind.hw_completion;
+        s.framePresentedNs(@as(u64, time_ms) * std.time.ns_per_ms, flags);
+    }
+
+    /// Fires the drawn frame's `wl_callback` and `wp_presentation_feedback`
+    /// objects with nanosecond presentation timestamp `time_ns` and
+    /// `wp_presentation_feedback.kind` `flags`.
+    pub fn framePresentedNs(s: *Server, time_ns: u64, flags: u32) void {
+        const time_ms: u32 = @truncate(time_ns / std.time.ns_per_ms);
         for (s.presenting.items) |fc| {
             if (fc.client.send(fc.id, p.wl_callback.event.done)) |m0| {
                 var m = m0;
@@ -1407,6 +1512,39 @@ pub const Server = struct {
             fc.client.deleteId(fc.id);
         }
         s.presenting.clearRetainingCapacity();
+
+        s.present_seq +%= 1;
+        const sec = time_ns / std.time.ns_per_s;
+        const nsec: u32 = @intCast(time_ns % std.time.ns_per_s);
+        const tv_sec_hi: u32 = @truncate(sec >> 32);
+        const tv_sec_lo: u32 = @truncate(sec);
+        const refresh_ns: u32 = if (s.output.refresh_mhz > 0)
+            @intCast(@divTrunc(1_000_000_000_000, @as(u64, @intCast(s.output.refresh_mhz))))
+        else
+            0;
+        const seq_hi: u32 = @truncate(s.present_seq >> 32);
+        const seq_lo: u32 = @truncate(s.present_seq);
+
+        for (s.presenting_feedback.items) |fb| {
+            if (fb.client.dead) continue;
+            var it = fb.client.objects.iterator();
+            while (it.next()) |e| {
+                if (e.value_ptr.* == .output) {
+                    sendTo(fb.client, fb.id, p.wp_presentation_feedback.event.sync_output, .{e.key_ptr.*});
+                }
+            }
+            sendTo(fb.client, fb.id, p.wp_presentation_feedback.event.presented, .{
+                tv_sec_hi,
+                tv_sec_lo,
+                nsec,
+                refresh_ns,
+                seq_hi,
+                seq_lo,
+                flags,
+            });
+            fb.client.deleteId(fb.id);
+        }
+        s.presenting_feedback.clearRetainingCapacity();
         s.flushClients();
     }
 
@@ -2090,6 +2228,110 @@ pub const Server = struct {
                 },
                 else => return error.InvalidOpcode,
             },
+            .presentation => switch (m.opcode) {
+                p.wp_presentation.request.destroy => c.deleteId(m.object),
+                p.wp_presentation.request.feedback => {
+                    const surf_id = try r.uint();
+                    const id = try r.uint();
+                    const surf = switch (c.objects.get(surf_id) orelse return error.InvalidObject) {
+                        .surface => |x| x,
+                        else => return error.InvalidObject,
+                    };
+                    try c.addObject(id, .presentation_feedback);
+                    try surf.pending_feedback.append(s.gpa, id);
+                },
+                else => return error.InvalidOpcode,
+            },
+            .presentation_feedback => return error.InvalidOpcode,
+            .text_input_manager => switch (m.opcode) {
+                p.zwp_text_input_manager_v3.request.destroy => c.deleteId(m.object),
+                p.zwp_text_input_manager_v3.request.get_text_input => {
+                    const id = try r.uint();
+                    _ = try r.uint(); // seat
+                    const ti = try s.gpa.create(TextInput);
+                    ti.* = .{ .client = c, .id = id };
+                    c.addObject(id, .{ .text_input = ti }) catch |e| {
+                        s.gpa.destroy(ti);
+                        return e;
+                    };
+                    if (s.keyboard_focus) |surf| if (surf.client == c) {
+                        sendTo(c, id, p.zwp_text_input_v3.event.enter, .{surf.id});
+                    };
+                },
+                else => return error.InvalidOpcode,
+            },
+            .text_input => |ti| switch (m.opcode) {
+                p.zwp_text_input_v3.request.destroy => {
+                    c.deleteId(m.object);
+                    s.destroyTextInput(ti);
+                },
+                p.zwp_text_input_v3.request.enable => {
+                    s.resetTextInputPending(ti);
+                    ti.pending.enabled = true;
+                },
+                p.zwp_text_input_v3.request.disable => {
+                    s.resetTextInputPending(ti);
+                    ti.pending.enabled = false;
+                },
+                p.zwp_text_input_v3.request.set_surrounding_text => {
+                    const text = (try r.string()) orelse "";
+                    const cur_pos = try r.int();
+                    const anchor = try r.int();
+                    const copy = try s.gpa.dupe(u8, text);
+                    if (ti.pending.surrounding_text) |old| s.gpa.free(old);
+                    ti.pending.surrounding_text = copy;
+                    ti.pending.cursor = cur_pos;
+                    ti.pending.anchor = anchor;
+                },
+                p.zwp_text_input_v3.request.set_text_change_cause => {
+                    ti.pending.change_cause = try r.uint();
+                },
+                p.zwp_text_input_v3.request.set_content_type => {
+                    const hint = try r.uint();
+                    ti.pending.content_hint = hint;
+                    ti.pending.content_purpose = try r.uint();
+                },
+                p.zwp_text_input_v3.request.set_cursor_rectangle => {
+                    const rx = try r.int();
+                    const ry = try r.int();
+                    const rw = try r.int();
+                    const rh = try r.int();
+                    ti.pending.cursor_rect = .{
+                        .x = rx,
+                        .y = ry,
+                        .width = @intCast(@max(rw, 0)),
+                        .height = @intCast(@max(rh, 0)),
+                    };
+                },
+                p.zwp_text_input_v3.request.commit => {
+                    ti.serial +%= 1;
+                    ti.enabled = ti.pending.enabled;
+                    if (!ti.enabled) {
+                        s.gpa.free(ti.surrounding_text);
+                        ti.surrounding_text = &.{};
+                        ti.cursor = 0;
+                        ti.anchor = 0;
+                        ti.change_cause = p.zwp_text_input_v3.change_cause.input_method;
+                        ti.content_hint = p.zwp_text_input_v3.content_hint.none;
+                        ti.content_purpose = p.zwp_text_input_v3.content_purpose.normal;
+                        ti.cursor_rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+                    } else {
+                        if (ti.pending.surrounding_text) |txt| {
+                            s.gpa.free(ti.surrounding_text);
+                            ti.surrounding_text = txt;
+                            ti.pending.surrounding_text = null;
+                            ti.cursor = ti.pending.cursor;
+                            ti.anchor = ti.pending.anchor;
+                        }
+                        ti.change_cause = ti.pending.change_cause;
+                        ti.pending.change_cause = p.zwp_text_input_v3.change_cause.input_method;
+                        ti.content_hint = ti.pending.content_hint;
+                        ti.content_purpose = ti.pending.content_purpose;
+                        ti.cursor_rect = ti.pending.cursor_rect;
+                    }
+                },
+                else => return error.InvalidOpcode,
+            },
         }
     }
 
@@ -2143,6 +2385,11 @@ pub const Server = struct {
             8 => try c.addObject(id, .subcompositor),
             10 => try c.addObject(id, .pointer_constraints),
             11 => try c.addObject(id, .relative_pointer_manager),
+            12 => {
+                try c.addObject(id, .presentation);
+                sendTo(c, id, p.wp_presentation.event.clock_id, .{@as(u32, p.wp_presentation.clock.monotonic)});
+            },
+            13 => try c.addObject(id, .text_input_manager),
             9 => {
                 try c.addObject(id, .{ .output = version });
                 s.describeOutput(c, id, version);
@@ -2371,8 +2618,10 @@ pub const Server = struct {
         }
         if (c) |cl| {
             for (sub.cached.callbacks.items) |id| _ = cl.objects.remove(id);
+            for (sub.cached.feedback.items) |id| sendFeedbackDiscarded(cl, id);
         }
         sub.cached.callbacks.deinit(s.gpa);
+        sub.cached.feedback.deinit(s.gpa);
         if (sub.cached.input_region) |ops| s.gpa.free(ops);
         if (sub.cached.opaque_region) |ops| s.gpa.free(ops);
         sub.cached = .{};
@@ -2388,6 +2637,8 @@ pub const Server = struct {
             sub.cached.buffer = nb;
             if (nb) |b| b.uses += 1;
             sub.cached.attach = true;
+            for (sub.cached.feedback.items) |id| sendFeedbackDiscarded(surf.client, id);
+            sub.cached.feedback.clearRetainingCapacity();
         }
         if (surf.pending_scale) |sc| {
             sub.cached.scale = sc;
@@ -2413,6 +2664,8 @@ pub const Server = struct {
         }
         try sub.cached.callbacks.appendSlice(s.gpa, surf.pending_callbacks.items);
         surf.pending_callbacks.clearRetainingCapacity();
+        try sub.cached.feedback.appendSlice(s.gpa, surf.pending_feedback.items);
+        surf.pending_feedback.clearRetainingCapacity();
     }
 
     fn applySubsurfaceCached(s: *Server, sub: *Subsurface) anyerror!void {
@@ -2458,6 +2711,8 @@ pub const Server = struct {
         }
         try surf.pending_callbacks.insertSlice(s.gpa, 0, sub.cached.callbacks.items);
         sub.cached.callbacks.clearRetainingCapacity();
+        try surf.pending_feedback.insertSlice(s.gpa, 0, sub.cached.feedback.items);
+        sub.cached.feedback.clearRetainingCapacity();
         try s.applySurfaceCommit(surf.client, surf);
     }
 
@@ -3312,14 +3567,72 @@ pub const Server = struct {
             top = ps;
         };
         if (top == s.keyboard_focus) return;
-        if (s.keyboard_focus) |old| broadcast(old.client, .keyboard, p.wl_keyboard.event.leave, 1, .{ s.nextSerial(), old.id });
+        if (s.keyboard_focus) |old| {
+            broadcast(old.client, .keyboard, p.wl_keyboard.event.leave, 1, .{ s.nextSerial(), old.id });
+            var it = old.client.objects.valueIterator();
+            while (it.next()) |o| switch (o.*) {
+                .text_input => |ti| {
+                    ti.enabled = false;
+                    s.resetTextInputPending(ti);
+                    sendTo(old.client, ti.id, p.zwp_text_input_v3.event.leave, .{old.id});
+                },
+                else => {},
+            };
+        }
         s.keyboard_focus = top;
         // What the clipboard holds comes just before the keyboard.
         s.sendSelection();
         if (top) |surf| {
             var it = surf.client.objects.iterator();
-            while (it.next()) |e| if (e.value_ptr.* == .keyboard) s.sendKeyboardEnter(surf.client, e.key_ptr.*, surf);
+            while (it.next()) |e| switch (e.value_ptr.*) {
+                .keyboard => s.sendKeyboardEnter(surf.client, e.key_ptr.*, surf),
+                .text_input => |ti| sendTo(surf.client, ti.id, p.zwp_text_input_v3.event.enter, .{surf.id}),
+                else => {},
+            };
         }
+    }
+
+    /// Returns the active (enabled) `TextInput` of the client with keyboard
+    /// focus, if any.
+    pub fn activeTextInput(s: *const Server) ?*TextInput {
+        const surf = s.keyboard_focus orelse return null;
+        var it = surf.client.objects.valueIterator();
+        while (it.next()) |o| switch (o.*) {
+            .text_input => |ti| if (ti.enabled) return ti,
+            else => {},
+        };
+        return null;
+    }
+
+    /// Sends `zwp_text_input_v3.preedit_string` to the active text input.
+    pub fn textInputPreedit(s: *Server, text: ?[]const u8, cursor_begin: i32, cursor_end: i32) void {
+        const ti = s.activeTextInput() orelse return;
+        if (ti.client.send(ti.id, p.zwp_text_input_v3.event.preedit_string)) |m0| {
+            var m = m0;
+            m.string(text).int(cursor_begin).int(cursor_end).end();
+        }
+    }
+
+    /// Sends `zwp_text_input_v3.commit_string` to the active text input.
+    pub fn textInputCommitString(s: *Server, text: ?[]const u8) void {
+        const ti = s.activeTextInput() orelse return;
+        if (ti.client.send(ti.id, p.zwp_text_input_v3.event.commit_string)) |m0| {
+            var m = m0;
+            m.string(text).end();
+        }
+    }
+
+    /// Sends `zwp_text_input_v3.delete_surrounding_text` to the active text input.
+    pub fn textInputDeleteSurrounding(s: *Server, before_length: u32, after_length: u32) void {
+        const ti = s.activeTextInput() orelse return;
+        sendTo(ti.client, ti.id, p.zwp_text_input_v3.event.delete_surrounding_text, .{ before_length, after_length });
+    }
+
+    /// Sends `zwp_text_input_v3.done` with the last committed serial to the
+    /// active text input.
+    pub fn textInputDone(s: *Server) void {
+        const ti = s.activeTextInput() orelse return;
+        sendTo(ti.client, ti.id, p.zwp_text_input_v3.event.done, .{ti.serial});
     }
 
     /// The surface under the pointer, if any: the top window there.
@@ -3547,6 +3860,9 @@ pub const Server = struct {
         };
         if (surf.pending_attach) {
             surf.pending_attach = false;
+            // A new buffer commit before the previous one was drawn supersedes
+            // any presentation feedback queued for that previous commit.
+            s.discardSurfaceFeedback(surf);
             const b = surf.pending_buffer;
             surf.pending_buffer = null;
             if (b) |nb| {
@@ -3600,6 +3916,12 @@ pub const Server = struct {
             for (surf.pending_callbacks.items) |id| try s.frame_callbacks.append(s.gpa, .{ .client = c, .id = id });
         }
         surf.pending_callbacks.clearRetainingCapacity();
+        if (covered or surf.texture() == null) {
+            for (surf.pending_feedback.items) |id| sendFeedbackDiscarded(c, id);
+        } else {
+            for (surf.pending_feedback.items) |id| try s.frame_feedback.append(s.gpa, .{ .client = c, .id = id, .surface = surf });
+        }
+        surf.pending_feedback.clearRetainingCapacity();
 
         if (surf.xdg) |x| if (x.toplevel) |t| {
             if (!x.configured) {

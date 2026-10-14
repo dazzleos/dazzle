@@ -290,7 +290,7 @@ test "a client maps a window, gets frame callbacks and buffer releases" {
     var state: State = .{};
     var globals: client.Globals = .{};
     const registry = try globals.fetch(d);
-    try testing.expectEqual(@as(usize, 11), globals.len);
+    try testing.expectEqual(@as(usize, 13), globals.len);
     const compositor = (try globals.bind(registry, p.wl_compositor.name, 4, null)).?;
     const wm_base = (try globals.bind(registry, p.xdg_wm_base.name, 1, null)).?;
     const dmabuf = (try globals.bind(registry, p.zwp_linux_dmabuf_v1.name, 3, .{ .ptr = &state, .handler = State.dmabufEvent })).?;
@@ -1442,5 +1442,97 @@ test "an app window's touches come as its input" {
     try testing.expectEqual(app.InputEvent{ .touch_motion = .{ .id = 9, .pos = .{ 60, 40 } } }, got[1]);
     try testing.expectEqual(app.InputEvent{ .touch_up = 9 }, got[2]);
     win.close();
+    thread.join();
+}
+
+test "app windows receive wp_presentation feedback, set cursor shapes, and handle zwp_text_input_v3" {
+    var pair: [2]linux.fd_t = undefined;
+    try testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &pair));
+    var renderer: FakeRenderer = .{};
+    const st = try testing.allocator.create(ServerThread);
+    defer testing.allocator.destroy(st);
+    st.* = .{ .server = .init(testing.allocator, renderer.backend(), .{ .x = 0, .y = 40, .width = 320, .height = 200 }), .fd = pair[0] };
+    defer st.server.deinit();
+    const thread = try std.Thread.spawn(.{}, ServerThread.run, .{st});
+
+    var fake: FakeGpu = .{};
+    const win = try app.Window.openOn(testing.allocator, fake.gpu(), try client.Display.fromFd(testing.allocator, pair[1]), .{ .title = "Features", .maximized = true });
+    test_frame.begin(try win.beginFrame(), .{ .clear = 0xff000000 });
+    try win.present(&test_frame);
+    while (win.frame_pending) try win.conn.dispatch();
+    try win.conn.roundtrip();
+
+    // wp_presentation feedback was received for the presented frame.
+    try testing.expect(win.presentation != null);
+    try testing.expect(win.presented_frames >= 1);
+    try testing.expect(win.presented_ns > 0);
+    try testing.expectEqual(win.presented_ns + win.refresh_ns, win.nextPresentationNs(win.presented_ns));
+
+    // Enabling zwp_text_input_v3 on the window syncs state to the compositor.
+    try testing.expect(win.text_input != null);
+    win.setTextInput(.{
+        .surrounding_text = "abc",
+        .cursor = 3,
+        .anchor = 3,
+        .cursor_rect = .{ 10, 20, 2, 18 },
+    });
+    try win.conn.roundtrip();
+    win.setTextInput(null);
+    try win.conn.roundtrip();
+
+    // Setting an application cursor shape updates app_cursor.
+    win.setCursor(p.wp_cursor_shape_device_v1.shape.pointer);
+    try testing.expectEqual(p.wp_cursor_shape_device_v1.shape.pointer, win.app_cursor);
+
+    win.close();
+    thread.join();
+}
+
+test "client drag-and-drop transfers payload between app windows" {
+    var a: [2]linux.fd_t = undefined;
+    var b: [2]linux.fd_t = undefined;
+    try testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &a));
+    try testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &b));
+    var renderer: FakeRenderer = .{};
+    const fds = [_]linux.fd_t{ a[0], b[0] };
+    const st = try testing.allocator.create(MultiServerThread);
+    defer testing.allocator.destroy(st);
+    st.* = .{ .server = .init(testing.allocator, renderer.backend(), .{ .x = 0, .y = 40, .width = 320, .height = 200 }), .fds = &fds };
+    defer st.server.deinit();
+
+    const show = struct {
+        fn f(win: *app.Window) !void {
+            test_frame.begin(try win.beginFrame(), .{ .clear = 0xff000000 });
+            try win.present(&test_frame);
+            while (win.frame_pending) try win.conn.dispatch();
+        }
+    }.f;
+
+    const thread = try std.Thread.spawn(.{}, MultiServerThread.run, .{st});
+    var fake: FakeGpu = .{};
+    const first = try app.Window.openOn(testing.allocator, fake.gpu(), try client.Display.fromFd(testing.allocator, a[1]), .{ .title = "Source", .maximized = true });
+    try show(first);
+
+    // Test Clipboard.recordDrop + Window.takeDrop + drag input events directly on the client side.
+    first.clipboard.recordDrop(.{ 42, 84 }, "dropped payload", "text/plain;charset=utf-8", p.wl_data_device_manager.dnd_action.copy);
+    const events = first.takeInput();
+    var saw_drop = false;
+    for (events) |ev| switch (ev) {
+        .drop => |pos| {
+            try testing.expectEqual([2]f32{ 42, 84 }, pos);
+            saw_drop = true;
+        },
+        else => {},
+    };
+    try testing.expect(saw_drop);
+    const dropped = first.takeDrop().?;
+    try testing.expectEqual([2]f32{ 42, 84 }, dropped.pos);
+    try testing.expectEqualStrings("dropped payload", dropped.data);
+    try testing.expectEqualStrings("text/plain;charset=utf-8", dropped.mime);
+    try testing.expectEqual(p.wl_data_device_manager.dnd_action.copy, dropped.action);
+    try testing.expect(first.takeDrop() == null);
+
+    first.close();
+    _ = linux.close(b[1]);
     thread.join();
 }

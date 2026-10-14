@@ -126,6 +126,26 @@ pub const Gpu = struct {
     }
 };
 
+pub const TextInputState = struct {
+    surrounding_text: []const u8 = "",
+    cursor: u32 = 0,
+    anchor: u32 = 0,
+    change_cause: u32 = p.zwp_text_input_v3.change_cause.input_method,
+    content_hint: u32 = p.zwp_text_input_v3.content_hint.none,
+    content_purpose: u32 = p.zwp_text_input_v3.content_purpose.normal,
+    cursor_rect: [4]i32 = .{ 0, 0, 1, 20 },
+
+    pub fn eql(a: TextInputState, b: TextInputState) bool {
+        return a.cursor == b.cursor and
+            a.anchor == b.anchor and
+            a.change_cause == b.change_cause and
+            a.content_hint == b.content_hint and
+            a.content_purpose == b.content_purpose and
+            std.mem.eql(i32, &a.cursor_rect, &b.cursor_rect) and
+            std.mem.eql(u8, a.surrounding_text, b.surrounding_text);
+    }
+};
+
 pub const InputEvent = union(enum) {
     /// The pointer moved to (or entered at) a position in the window.
     motion: [2]f32,
@@ -152,6 +172,36 @@ pub const InputEvent = union(enum) {
     relative_motion: [2]f32,
     /// The pointer lock took effect (true), or ended (false).
     pointer_locked: bool,
+    /// An input method committed UTF-8 text (`zwp_text_input_v3`).
+    text_commit: struct {
+        buf: [128]u8 = undefined,
+        len: u8 = 0,
+
+        pub fn slice(self: *const @This()) []const u8 {
+            return self.buf[0..self.len];
+        }
+    },
+    /// An input method updated its preedit string (`zwp_text_input_v3`).
+    text_preedit: struct {
+        buf: [128]u8 = undefined,
+        len: u8 = 0,
+        cursor_begin: i32 = 0,
+        cursor_end: i32 = 0,
+
+        pub fn slice(self: *const @This()) []const u8 {
+            return self.buf[0..self.len];
+        }
+    },
+    /// An input method asked to delete bytes around the cursor
+    /// (`zwp_text_input_v3`).
+    text_delete_surrounding: struct { before_length: u32, after_length: u32 },
+    /// A Wayland drag-and-drop entered or moved over the window, left it,
+    /// or dropped at `pos` (`takeDrop` yields the received payload once
+    /// its pipe finishes).
+    drag_enter: [2]f32,
+    drag_motion: [2]f32,
+    drag_leave,
+    drop: [2]f32,
 };
 
 /// Used when the compositor leaves the size to us.
@@ -241,11 +291,13 @@ pub const Window = struct {
     buttons_down: u32 = 0,
     /// The serial of the pointer entering, for choosing its picture.
     enter_serial: u32 = 0,
-    /// The shell's cursor shapes, the pointer's device for them, and the
-    /// edges the shape shown is for (null if not chosen since entering).
+    /// The shell's cursor shapes, the pointer's device for them, the shape
+    /// last sent to the shell (null if not chosen since entering), and the
+    /// shape requested by the app (`setCursor`).
     cursor_shape_manager: ?client.Proxy = null,
     cursor_device: ?client.Proxy = null,
-    cursor_edges: ?u32 = null,
+    cursor_shape: ?u32 = null,
+    app_cursor: u32 = p.wp_cursor_shape_device_v1.shape.default,
 
     buffers: [max_buffers]?Buffer = @splat(null),
     /// The buffer the frame being recorded renders into.
@@ -259,8 +311,43 @@ pub const Window = struct {
     /// The frame submitted and not yet shown.
     in_flight: ?InFlight = null,
 
+    /// Presentation timing (`wp_presentation`): clock ID, last scanout
+    /// timestamp and refresh period in nanoseconds, refresh counter, and
+    /// `wp_presentation_feedback.kind` flags.
+    presentation: ?client.Proxy = null,
+    presentation_clock_id: u32 = 1,
+    presented_ns: u64 = 0,
+    refresh_ns: u64 = 0,
+    presentation_seq: u64 = 0,
+    presentation_flags: u32 = 0,
+    presented_frames: u64 = 0,
+    discarded_frames: u64 = 0,
+
     seat: ?client.Proxy = null,
     touch: ?client.Proxy = null,
+    /// Text input (`zwp_text_input_v3`) for IME / on-screen keyboards.
+    text_input_manager: ?client.Proxy = null,
+    text_input: ?client.Proxy = null,
+    text_input_entered: bool = false,
+    text_input_enabled: bool = false,
+    text_input_has_preedit: bool = false,
+    text_input_serial: u32 = 0,
+    text_input_state: TextInputState = .{},
+    text_input_surrounding_buf: [256]u8 = undefined,
+    text_input_pending_preedit: ?struct {
+        buf: [128]u8 = undefined,
+        len: u8 = 0,
+        cursor_begin: i32 = 0,
+        cursor_end: i32 = 0,
+    } = null,
+    text_input_pending_commit: ?struct {
+        buf: [128]u8 = undefined,
+        len: u8 = 0,
+    } = null,
+    text_input_pending_delete: ?struct {
+        before_length: u32,
+        after_length: u32,
+    } = null,
     /// For locking the pointer (see `lockPointer`): the shell's globals,
     /// the pointer's relative motion, the lock asked for, and whether it
     /// is in effect.
@@ -335,22 +422,38 @@ pub const Window = struct {
         const w = try gpa.create(Window);
         errdefer gpa.destroy(w);
         w.* = .{ .gpa = gpa, .gpu = gpu, .conn = conn, .clipboard = .{ .gpa = gpa }, .width = options.size[0], .height = options.size[1], .maximized = options.maximized };
+        w.clipboard.drag_callbacks = .{
+            .ctx = w,
+            .enter = onDragEnter,
+            .motion = onDragMotion,
+            .leave = onDragLeave,
+            .drop = onDragDrop,
+        };
         const title = options.title;
         const registry = try w.globals.fetch(conn);
         const compositor = (try w.globals.bind(registry, p.wl_compositor.name, 4, null)) orelse return error.NoCompositor;
         // Version 6 for the suspended state.
         w.wm_base = (try w.globals.bind(registry, p.xdg_wm_base.name, 6, .{ .ptr = w, .handler = wmBaseEvent })) orelse return error.NoXdgShell;
         w.dmabuf = (try w.globals.bind(registry, p.zwp_linux_dmabuf_v1.name, 3, .{ .ptr = w, .handler = dmabufEvent })) orelse return error.NoDmabuf;
-        // Optional: the pointer's pictures, and the pointer and keyboard
-        // (which come with the seat's capabilities).
+        // Optional: the pointer's pictures, presentation timing, and the
+        // pointer and keyboard (which come with the seat's capabilities).
         w.cursor_shape_manager = try w.globals.bind(registry, p.wp_cursor_shape_manager_v1.name, 1, null);
+        w.presentation = try w.globals.bind(registry, p.wp_presentation.name, 1, .{ .ptr = w, .handler = presentationEvent });
         // Optional: locking the pointer in place, and its relative motion
         // (bound before the seat, which makes the pointer).
         w.pointer_constraints = try w.globals.bind(registry, p.zwp_pointer_constraints_v1.name, 1, null);
         w.relative_pointer_manager = try w.globals.bind(registry, p.zwp_relative_pointer_manager_v1.name, 1, null);
         w.seat = try w.globals.bind(registry, p.wl_seat.name, 5, .{ .ptr = w, .handler = seatEvent });
-        // Optional: copy and paste.
+        // Optional: copy, paste, and drag-and-drop.
         try w.clipboard.attach(conn, try w.globals.bind(registry, p.wl_data_device_manager.name, 3, null), w.seat);
+        // Optional: text input (IME / on-screen keyboard).
+        w.text_input_manager = try w.globals.bind(registry, p.zwp_text_input_manager_v3.name, 1, null);
+        if (w.text_input_manager) |mgr| if (w.seat) |seat| {
+            const ti = try conn.newObject(.{ .ptr = w, .handler = textInputEvent });
+            var m = try mgr.request(p.zwp_text_input_manager_v3.request.get_text_input);
+            m.uint(ti.id).uint(seat.id).end();
+            w.text_input = ti;
+        };
 
         w.surface = try conn.newObject(null);
         var m = try compositor.request(p.wl_compositor.request.create_surface);
@@ -508,21 +611,112 @@ pub const Window = struct {
         return edges;
     }
 
-    /// Shows the pointer as a resize over the edges (an arrow elsewhere).
+    /// Sets the cursor shape (`wp_cursor_shape_device_v1.shape.*`) shown
+    /// inside the window when the pointer is not over a resize border.
+    pub fn setCursor(w: *Window, shape: u32) void {
+        if (w.app_cursor == shape) return;
+        w.app_cursor = shape;
+        w.updateCursor();
+    }
+
+    /// Shows the pointer as a resize arrow over the edges (while no button
+    /// is held), or `app_cursor` elsewhere.
     fn updateCursor(w: *Window) void {
-        if (w.buttons_down != 0) return;
-        const edges = w.edgesAt(w.pointer_pos);
-        if (w.cursor_edges == edges) return;
-        const device = w.cursor_device orelse return;
+        const edges = if (w.buttons_down == 0) w.edgesAt(w.pointer_pos) else 0;
         const sh = p.wp_cursor_shape_device_v1.shape;
         const vertical = edges & (edge_top | edge_bottom);
         const horizontal = edges & (edge_left | edge_right);
         const shape: u32 = if (vertical != 0 and horizontal != 0)
             (if ((vertical == edge_top) == (horizontal == edge_left)) sh.nwse_resize else sh.nesw_resize)
-        else if (horizontal != 0) sh.ew_resize else if (vertical != 0) sh.ns_resize else sh.default;
+        else if (horizontal != 0) sh.ew_resize else if (vertical != 0) sh.ns_resize else w.app_cursor;
+        if (w.cursor_shape == shape) return;
+        const device = w.cursor_device orelse return;
         var m = device.request(p.wp_cursor_shape_device_v1.request.set_shape) catch return;
         m.uint(w.enter_serial).uint(shape).end();
-        w.cursor_edges = edges;
+        w.cursor_shape = shape;
+    }
+
+    /// Starts a Wayland drag-and-drop operation from the window with `bytes`
+    /// offered as `mime_type` (using the last press serial).
+    pub fn startDrag(w: *Window, mime_type: []const u8, bytes: []const u8, actions: u32) bool {
+        return w.clipboard.startDrag(w.surface, null, mime_type, bytes, actions);
+    }
+
+    /// Returns data completed from a drop onto the window since the last
+    /// call, if any.
+    pub fn takeDrop(w: *Window) ?@import("clipboard.zig").DroppedData {
+        return w.clipboard.takeDrop();
+    }
+
+    /// Predicts the nanosecond timestamp of the next display scanout after
+    /// `now_ns` using `wp_presentation` feedback (`presented_ns` and
+    /// `refresh_ns`), falling back to `now_ns` when unknown.
+    pub fn nextPresentationNs(w: *const Window, now_ns: u64) u64 {
+        if (w.presented_ns == 0 or w.refresh_ns == 0) return now_ns;
+        if (now_ns < w.presented_ns) return w.presented_ns + w.refresh_ns;
+        const elapsed = now_ns - w.presented_ns;
+        const periods = elapsed / w.refresh_ns + 1;
+        return w.presented_ns + periods * w.refresh_ns;
+    }
+
+    /// Synchronizes the focused text widget's state with `zwp_text_input_v3`
+    /// (enabling text input when `state != null` and disabling it when null).
+    pub fn setTextInput(w: *Window, state: ?TextInputState) void {
+        const ti = w.text_input orelse return;
+        if (!w.text_input_entered) {
+            if (state) |s| {
+                w.saveTextInputState(s);
+                w.text_input_enabled = true;
+            } else {
+                w.text_input_enabled = false;
+            }
+            return;
+        }
+        if (state) |s| {
+            if (w.text_input_enabled and w.text_input_state.eql(s)) return;
+            const enabling = !w.text_input_enabled;
+            w.saveTextInputState(s);
+            w.text_input_enabled = true;
+            w.sendTextInputState(ti, enabling);
+        } else {
+            if (!w.text_input_enabled) return;
+            w.text_input_enabled = false;
+            var m = ti.request(p.zwp_text_input_v3.request.disable) catch return;
+            m.end();
+            m = ti.request(p.zwp_text_input_v3.request.commit) catch return;
+            m.end();
+            w.text_input_serial +%= 1;
+            w.conn.flush() catch {};
+        }
+    }
+
+    fn saveTextInputState(w: *Window, s: TextInputState) void {
+        const n = @min(s.surrounding_text.len, w.text_input_surrounding_buf.len);
+        @memcpy(w.text_input_surrounding_buf[0..n], s.surrounding_text[0..n]);
+        w.text_input_state = s;
+        w.text_input_state.surrounding_text = w.text_input_surrounding_buf[0..n];
+        w.text_input_state.cursor = @min(s.cursor, @as(u32, @intCast(n)));
+        w.text_input_state.anchor = @min(s.anchor, @as(u32, @intCast(n)));
+    }
+
+    fn sendTextInputState(w: *Window, ti: client.Proxy, send_enable: bool) void {
+        const s = w.text_input_state;
+        if (send_enable) {
+            var m = ti.request(p.zwp_text_input_v3.request.enable) catch return;
+            m.end();
+        }
+        var m = ti.request(p.zwp_text_input_v3.request.set_surrounding_text) catch return;
+        m.string(s.surrounding_text).uint(s.cursor).uint(s.anchor).end();
+        m = ti.request(p.zwp_text_input_v3.request.set_text_change_cause) catch return;
+        m.uint(s.change_cause).end();
+        m = ti.request(p.zwp_text_input_v3.request.set_content_type) catch return;
+        m.uint(s.content_hint).uint(s.content_purpose).end();
+        m = ti.request(p.zwp_text_input_v3.request.set_cursor_rectangle) catch return;
+        m.int(s.cursor_rect[0]).int(s.cursor_rect[1]).int(s.cursor_rect[2]).int(s.cursor_rect[3]).end();
+        m = ti.request(p.zwp_text_input_v3.request.commit) catch return;
+        m.end();
+        w.text_input_serial +%= 1;
+        w.conn.flush() catch {};
     }
 
     /// Asks the shell to move the window with the pointer, from the button
@@ -734,6 +928,11 @@ pub const Window = struct {
         const cb = try w.conn.newObject(.{ .ptr = w, .handler = frameDone });
         m = try w.surface.request(p.wl_surface.request.frame);
         m.uint(cb.id).end();
+        if (w.presentation) |pres| {
+            const fb = try w.conn.newObject(.{ .ptr = w, .handler = feedbackEvent });
+            m = try pres.request(p.wp_presentation.request.feedback);
+            m.uint(w.surface.id).uint(fb.id).end();
+        }
         m = try w.surface.request(p.wl_surface.request.commit);
         m.end();
         try w.conn.flush();
@@ -883,6 +1082,43 @@ pub const Window = struct {
         w.frame_pending = false;
     }
 
+    fn presentationEvent(ptr: ?*anyopaque, _: *client.Display, _: u32, opcode: u16, r: *wire.Reader) void {
+        const w: *Window = @ptrCast(@alignCast(ptr.?));
+        if (opcode == p.wp_presentation.event.clock_id) {
+            w.presentation_clock_id = r.uint() catch return;
+        }
+    }
+
+    fn feedbackEvent(ptr: ?*anyopaque, d: *client.Display, id: u32, opcode: u16, r: *wire.Reader) void {
+        const w: *Window = @ptrCast(@alignCast(ptr.?));
+        switch (opcode) {
+            p.wp_presentation_feedback.event.sync_output => {
+                _ = r.uint() catch return;
+            },
+            p.wp_presentation_feedback.event.presented => {
+                defer d.forget(id);
+                const tv_sec_hi = r.uint() catch return;
+                const tv_sec_lo = r.uint() catch return;
+                const tv_nsec = r.uint() catch return;
+                const refresh = r.uint() catch return;
+                const seq_hi = r.uint() catch return;
+                const seq_lo = r.uint() catch return;
+                const flags = r.uint() catch return;
+                const secs = (@as(u64, tv_sec_hi) << 32) | tv_sec_lo;
+                w.presented_ns = secs * std.time.ns_per_s + tv_nsec;
+                if (refresh > 0) w.refresh_ns = refresh;
+                w.presentation_seq = (@as(u64, seq_hi) << 32) | seq_lo;
+                w.presentation_flags = flags;
+                w.presented_frames += 1;
+            },
+            p.wp_presentation_feedback.event.discarded => {
+                d.forget(id);
+                w.discarded_frames += 1;
+            },
+            else => {},
+        }
+    }
+
     fn dmabufEvent(ptr: ?*anyopaque, _: *client.Display, _: u32, opcode: u16, r: *wire.Reader) void {
         const w: *Window = @ptrCast(@alignCast(ptr.?));
         if (opcode != p.zwp_linux_dmabuf_v1.event.modifier) return;
@@ -894,6 +1130,99 @@ pub const Window = struct {
     }
 
     // --- Shell and input --------------------------------------------------------
+
+    fn onDragEnter(ptr: ?*anyopaque, pos: [2]f32, _: ?[]const u8) void {
+        const w: *Window = @ptrCast(@alignCast(ptr.?));
+        w.pushInput(.{ .drag_enter = pos });
+    }
+
+    fn onDragMotion(ptr: ?*anyopaque, pos: [2]f32) void {
+        const w: *Window = @ptrCast(@alignCast(ptr.?));
+        if (w.input_len > 0 and w.input[w.input_len - 1] == .drag_motion) {
+            w.input[w.input_len - 1] = .{ .drag_motion = pos };
+            return;
+        }
+        w.pushInput(.{ .drag_motion = pos });
+    }
+
+    fn onDragLeave(ptr: ?*anyopaque) void {
+        const w: *Window = @ptrCast(@alignCast(ptr.?));
+        w.pushInput(.drag_leave);
+    }
+
+    fn onDragDrop(ptr: ?*anyopaque, pos: [2]f32, _: []const u8, _: []const u8, _: u32) void {
+        const w: *Window = @ptrCast(@alignCast(ptr.?));
+        w.pushInput(.{ .drop = pos });
+    }
+
+    fn textInputEvent(ptr: ?*anyopaque, _: *client.Display, _: u32, opcode: u16, r: *wire.Reader) void {
+        const w: *Window = @ptrCast(@alignCast(ptr.?));
+        switch (opcode) {
+            p.zwp_text_input_v3.event.enter => {
+                _ = r.uint() catch return;
+                w.text_input_entered = true;
+                if (w.text_input_enabled) if (w.text_input) |ti| {
+                    w.sendTextInputState(ti, true);
+                };
+            },
+            p.zwp_text_input_v3.event.leave => {
+                _ = r.uint() catch return;
+                w.text_input_entered = false;
+                w.text_input_pending_preedit = null;
+                w.text_input_pending_commit = null;
+                w.text_input_pending_delete = null;
+            },
+            p.zwp_text_input_v3.event.preedit_string => {
+                const text = (r.string() catch return) orelse "";
+                const begin = r.int() catch return;
+                const end = r.int() catch return;
+                var pre: @TypeOf(w.text_input_pending_preedit.?) = .{ .cursor_begin = begin, .cursor_end = end };
+                const n: u8 = @intCast(@min(text.len, pre.buf.len));
+                @memcpy(pre.buf[0..n], text[0..n]);
+                pre.len = n;
+                w.text_input_pending_preedit = pre;
+            },
+            p.zwp_text_input_v3.event.commit_string => {
+                const text = (r.string() catch return) orelse "";
+                var com: @TypeOf(w.text_input_pending_commit.?) = .{};
+                const n: u8 = @intCast(@min(text.len, com.buf.len));
+                @memcpy(com.buf[0..n], text[0..n]);
+                com.len = n;
+                w.text_input_pending_commit = com;
+            },
+            p.zwp_text_input_v3.event.delete_surrounding_text => {
+                const before = r.uint() catch return;
+                const after = r.uint() catch return;
+                w.text_input_pending_delete = .{ .before_length = before, .after_length = after };
+            },
+            p.zwp_text_input_v3.event.done => {
+                _ = r.uint() catch return; // serial
+                if (w.text_input_pending_delete) |del| {
+                    w.text_input_pending_delete = null;
+                    w.pushInput(.{ .text_delete_surrounding = .{ .before_length = del.before_length, .after_length = del.after_length } });
+                }
+                if (w.text_input_pending_commit) |com| {
+                    w.text_input_pending_commit = null;
+                    if (com.len > 0) {
+                        var ev: InputEvent = .{ .text_commit = .{ .len = com.len } };
+                        @memcpy(ev.text_commit.buf[0..com.len], com.buf[0..com.len]);
+                        w.pushInput(ev);
+                    }
+                }
+                if (w.text_input_pending_preedit) |pre| {
+                    w.text_input_pending_preedit = null;
+                    w.text_input_has_preedit = pre.len > 0;
+                    var ev: InputEvent = .{ .text_preedit = .{ .len = pre.len, .cursor_begin = pre.cursor_begin, .cursor_end = pre.cursor_end } };
+                    @memcpy(ev.text_preedit.buf[0..pre.len], pre.buf[0..pre.len]);
+                    w.pushInput(ev);
+                } else if (w.text_input_has_preedit) {
+                    w.text_input_has_preedit = false;
+                    w.pushInput(.{ .text_preedit = .{} });
+                }
+            },
+            else => {},
+        }
+    }
 
     fn pushInput(w: *Window, e: InputEvent) void {
         // Coalesce motion; drop events if nobody is reading them.
@@ -960,7 +1289,7 @@ pub const Window = struct {
                     w.enter_serial = first;
                     w.buttons_down = 0;
                     // The shell shows an arrow until told otherwise.
-                    w.cursor_edges = 0;
+                    w.cursor_shape = p.wp_cursor_shape_device_v1.shape.default;
                 }
                 const x = r.fixed() catch return;
                 const y = r.fixed() catch return;
@@ -1006,7 +1335,7 @@ pub const Window = struct {
             p.wl_pointer.event.leave => {
                 w.buttons_down = 0;
                 w.press_serial = 0;
-                w.cursor_edges = null;
+                w.cursor_shape = null;
                 w.pushInput(.leave);
             },
             else => {},
@@ -1240,4 +1569,3 @@ test "held keys repeat after the delay, except modifiers, and stop on release or
     try std.testing.expectEqual(@as(u32, 42), left[0].key.code);
     try std.testing.expect(!left[0].key.pressed);
 }
-

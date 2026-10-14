@@ -902,4 +902,3 @@ test "V3D 4.2 texture and sampler state packing" {
     try testing.expectEqual(@as(u32, 0x100f), tmuConfigP0(0x1000));
     try testing.expectEqual(@as(u32, 0x2001), tmuConfigP1(0x2000));
 }
-

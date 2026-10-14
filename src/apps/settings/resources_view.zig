@@ -290,8 +290,6 @@ pub const SegmentBar = struct {
     }
 };
 
-
-
 const testing = std.testing;
 const font = @import("font");
 

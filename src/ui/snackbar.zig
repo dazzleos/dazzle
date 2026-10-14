@@ -139,4 +139,3 @@ const SnackbarRow = struct {
         return .{ .w = main_size, .h = final_cross };
     }
 };
-

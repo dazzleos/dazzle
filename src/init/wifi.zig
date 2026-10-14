@@ -1164,5 +1164,3 @@ test "Manager.loadConfig restores Wi-Fi client, saved credentials, and access po
     try testing.expectEqualStrings("hunter22", m_hs.report.hotspot.passphrase());
     try testing.expectEqualStrings("eth0", m_hs.report.hotspot.upstream());
 }
-
-

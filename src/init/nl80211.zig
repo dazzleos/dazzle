@@ -1169,4 +1169,3 @@ test "beacon head and tail contain SSID and RSN security" {
     const cap = std.mem.readInt(u16, head[34..36], .little);
     try testing.expectEqual(wifi.Security.wpa2, securityOf(cap, tail));
 }
-

@@ -694,4 +694,3 @@ test "V3D 4.2 UIF tiling: uif_xor, ublinear, and lineartile match uploadRectOf" 
     const m = mipmapLayout(256, 256, 8);
     try std.testing.expect(m.base > 0 and m.base % 4096 == 0);
 }
-

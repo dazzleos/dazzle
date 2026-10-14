@@ -78,4 +78,3 @@ test "saving a screenshot on a 1 MiB thread stack" {
     try std.testing.expectEqual(@as(u32, 4), decoded.width);
     try std.testing.expectEqual(@as(u32, 3), decoded.height);
 }
-

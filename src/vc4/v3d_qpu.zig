@@ -917,14 +917,14 @@ pub fn ldtlb(dst: Dst) Inst {
 }
 
 const small_immediates = [48]u32{
-    0,                           1,                           2,                           3,
-    4,                           5,                           6,                           7,
-    8,                           9,                           10,                          11,
-    12,                          13,                          14,                          15,
-    @bitCast(@as(i32, -16)),     @bitCast(@as(i32, -15)),     @bitCast(@as(i32, -14)),     @bitCast(@as(i32, -13)),
-    @bitCast(@as(i32, -12)),     @bitCast(@as(i32, -11)),     @bitCast(@as(i32, -10)),     @bitCast(@as(i32, -9)),
-    @bitCast(@as(i32, -8)),      @bitCast(@as(i32, -7)),      @bitCast(@as(i32, -6)),      @bitCast(@as(i32, -5)),
-    @bitCast(@as(i32, -4)),      @bitCast(@as(i32, -3)),      @bitCast(@as(i32, -2)),      @bitCast(@as(i32, -1)),
+    0,                       1,                       2,                       3,
+    4,                       5,                       6,                       7,
+    8,                       9,                       10,                      11,
+    12,                      13,                      14,                      15,
+    @bitCast(@as(i32, -16)), @bitCast(@as(i32, -15)), @bitCast(@as(i32, -14)), @bitCast(@as(i32, -13)),
+    @bitCast(@as(i32, -12)), @bitCast(@as(i32, -11)), @bitCast(@as(i32, -10)), @bitCast(@as(i32, -9)),
+    @bitCast(@as(i32, -8)),  @bitCast(@as(i32, -7)),  @bitCast(@as(i32, -6)),  @bitCast(@as(i32, -5)),
+    @bitCast(@as(i32, -4)),  @bitCast(@as(i32, -3)),  @bitCast(@as(i32, -2)),  @bitCast(@as(i32, -1)),
     0x3b800000, // 2.0^-8
     0x3c000000, // 2.0^-7
     0x3c800000, // 2.0^-6
@@ -1236,4 +1236,3 @@ test "V3D 7.1 QPU instruction packing matches Mesa qpu_pack" {
     try std.testing.expectEqual(@as(u6, 4), @as(u6, @truncate(rcp >> 6)));
     try std.testing.expectEqual(@as(u6, 32), @as(u6, @truncate(rcp >> 0)));
 }
-

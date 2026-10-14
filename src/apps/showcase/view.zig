@@ -231,7 +231,6 @@ pub const Showcase = struct {
         cx.ui.theme = if (state.light_theme) .light else .dark;
         const t = cx.theme();
 
-
         const rail_items = [_]ui.NavigationRail.Item{
             .{ .label = "Actions", .icon = .apps },
             .{ .label = "Inputs", .icon = .settings_input_component },
@@ -697,7 +696,7 @@ fn buildContainersPage(cx: *ui.Context, state: *Showcase.State) ui.Widget {
                     .children = &.{
                         cx.make(ui.Badge{ .child = cx.make(ui.Icon{ .icon = .wifi, .size = 28 }) }),
                         cx.make(ui.Badge{ .count = state.badge_count, .show = state.badge_count > 0, .child = cx.make(ui.Icon{ .icon = .folder, .size = 28 }) }),
-                        cx.make(ui.Badge{ .count = 128, .child = cx.make(ui.Icon{ .icon = . article, .size = 28 }) }),
+                        cx.make(ui.Badge{ .count = 128, .child = cx.make(ui.Icon{ .icon = .article, .size = 28 }) }),
                         cx.make(ui.Badge{ .label = "NEW" }),
                         cx.make(ui.OutlinedButton{ .label = "Add badge", .icon = .add, .on_press = .of(state, Showcase.State.addBadge) }),
                         cx.make(ui.TextButton{ .label = "Clear", .on_press = .of(state, Showcase.State.clearBadge) }),

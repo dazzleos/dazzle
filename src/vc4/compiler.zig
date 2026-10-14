@@ -2845,4 +2845,3 @@ test "compileV3d71 compiles fragment, vertex, and coordinate shaders" {
     try std.testing.expectEqual(@as(u32, 1), c_fs.num_texture_samples);
     try std.testing.expect(c_fs.code().len > 0);
 }
-

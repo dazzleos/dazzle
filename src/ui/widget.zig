@@ -68,6 +68,38 @@ pub const Widget = struct {
     }
 };
 
+/// The pointer shape a widget asks for while the pointer is over it (or
+/// while it has captured the pointer).
+pub const Cursor = enum {
+    default,
+    pointer,
+    text,
+    grab,
+    grabbing,
+    crosshair,
+    move,
+    not_allowed,
+    wait,
+    progress,
+    help,
+    ew_resize,
+    ns_resize,
+    nwse_resize,
+    nesw_resize,
+};
+
+/// A focused text widget's state for `zwp_text_input_v3`.
+pub const TextInputInfo = struct {
+    surrounding_text: []const u8 = "",
+    cursor: u32 = 0,
+    anchor: u32 = 0,
+    /// Cursor rectangle in the widget's local coordinates (`[x, y, width, height]`).
+    cursor_rect: [4]i32 = .{ 0, 0, 1, 20 },
+    password: bool = false,
+    multiline: bool = false,
+    change_cause_other: bool = false,
+};
+
 /// What happens to a widget with an `event` function.
 pub const Event = union(enum) {
     /// The pointer moved over it (or onto something inside it).
@@ -90,6 +122,13 @@ pub const Event = union(enum) {
     blur,
     /// A key went down or up while it has the keyboard.
     key: Key,
+    /// An input method committed UTF-8 text (`zwp_text_input_v3`).
+    text_commit: []const u8,
+    /// An input method updated its preedit string (`zwp_text_input_v3`).
+    text_preedit: struct { text: []const u8, cursor_begin: i32 = 0, cursor_end: i32 = 0 },
+    /// An input method asked to delete bytes around the cursor
+    /// (`zwp_text_input_v3`).
+    text_delete_surrounding: struct { before_length: u32, after_length: u32 },
     /// A menu is asked for at a point in it: the right button was pressed
     /// there, or the left held down there without moving. Returning true
     /// says it showed one (`Ui.openMenu`).
@@ -164,6 +203,8 @@ pub const VTable = struct {
     paint_over: ?*const fn (*const anyopaque, *Node, *Painter) void,
     event: ?*const fn (*const anyopaque, *Node, Event) bool,
     hit_test: ?*const fn (*const anyopaque, *Node, Point) bool,
+    cursor: ?*const fn (*const anyopaque, *Node, Point) ?Cursor,
+    text_input: ?*const fn (*const anyopaque, *Node) ?TextInputInfo,
     /// Makes its children (instead of `children`), when the tree is built.
     lazy_children: ?*const fn (*const anyopaque, *Context, *Node) []const Widget,
     /// Told, once laid out in a scroll view, what of it shows (relative to
@@ -227,6 +268,12 @@ fn makeVTable(comptime T: type) VTable {
         fn hitTest(ptr: *const anyopaque, n: *Node, p: Point) bool {
             return T.hitTest(self(ptr), n, p);
         }
+        fn cursor(ptr: *const anyopaque, n: *Node, p: Point) ?Cursor {
+            return T.cursor(self(ptr), n, p);
+        }
+        fn textInput(ptr: *const anyopaque, n: *Node) ?TextInputInfo {
+            return T.textInput(self(ptr), n);
+        }
         fn lazyChildren(ptr: *const anyopaque, cx: *Context, n: *Node) []const Widget {
             return T.lazyChildren(self(ptr), cx, n);
         }
@@ -250,6 +297,8 @@ fn makeVTable(comptime T: type) VTable {
         .paint_over = if (@hasDecl(T, "paintOver")) S.paintOver else null,
         .event = if (@hasDecl(T, "event")) S.event else null,
         .hit_test = if (@hasDecl(T, "hitTest")) S.hitTest else null,
+        .cursor = if (@hasDecl(T, "cursor")) S.cursor else null,
+        .text_input = if (@hasDecl(T, "textInput")) S.textInput else null,
         .lazy_children = if (@hasDecl(T, "lazyChildren")) S.lazyChildren else null,
         .realize = if (@hasDecl(T, "realize")) S.realize else null,
         .scrolls = @hasDecl(T, "scrolls") and T.scrolls,
@@ -539,8 +588,8 @@ pub const Node = struct {
             }
         }
         const vt = n.widget.vtable;
-        if (!hit) hit = if (vt.hit_test) |f| f(n.widget.ptr, n, p) else vt.event != null;
-        if (hit and vt.event != null) path.append(n.ui.gpa, n) catch {};
+        if (!hit) hit = if (vt.hit_test) |f| f(n.widget.ptr, n, p) else (vt.event != null or vt.cursor != null);
+        if (hit and (vt.event != null or vt.cursor != null)) path.append(n.ui.gpa, n) catch {};
         return hit;
     }
 

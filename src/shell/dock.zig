@@ -23,7 +23,6 @@ const audio = @import("audio");
 pub const apps_dir = sys.system.apps_dir;
 pub const appearance_file = apps_dir ++ "/.appearance";
 
-
 const background = 0xff1c2a4a;
 const hover_background = 0xff2c3e66;
 const status_border = 0xff3b507a;

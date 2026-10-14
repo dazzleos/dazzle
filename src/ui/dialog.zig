@@ -146,6 +146,10 @@ const Scrim = struct {
     on_dismiss: ?Callback = null,
     child: ?Widget = null,
 
+    pub fn cursor(_: *const Scrim, _: *Node, _: @import("geometry.zig").Point) ?widget.Cursor {
+        return .default;
+    }
+
     pub fn event(self: *const Scrim, _: *Node, e: Event) bool {
         switch (e) {
             .press => |pr| return pr.button == widget.btn_left,
@@ -164,6 +168,10 @@ const Scrim = struct {
 /// Stops clicks inside the dialog surface from falling through to the scrim.
 const SurfaceBlocker = struct {
     child: ?Widget = null,
+
+    pub fn cursor(_: *const SurfaceBlocker, _: *Node, _: @import("geometry.zig").Point) ?widget.Cursor {
+        return .default;
+    }
 
     pub fn event(_: *const SurfaceBlocker, _: *Node, e: Event) bool {
         return switch (e) {
