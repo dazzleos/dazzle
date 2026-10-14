@@ -278,7 +278,8 @@ pub const UniformKind = union(enum) {
     tex_p0: u8,
     /// Texture config parameter 1 for a texture slot.
     tex_p1: u8,
-    /// A literal 32-bit immediate word (V3D 4.2 constant uniform).
+    /// A literal 32-bit word: a constant the code reads from the uniform
+    /// stream (and V3D 4.2 constant uniforms).
     constant: u32,
 };
 
@@ -490,16 +491,45 @@ pub fn compileWithOptions(shader: *const Shader, options: Options) Error!Compile
         var last_use: [max_insts]u16 = @splat(0);
         liveness(shader, &live, &uses, &last_use);
         if (canThread(shader, &live)) {
-            if (compileThreaded(shader, options, true)) |c| return c else |err| {
+            if (compileShortest(shader, options, true)) |c| return c else |err| {
                 // Half the registers were not enough: one thread, then.
                 if (err != error.OutOfRegisters or options.threaded != null) return err;
             }
         } else if (options.threaded == true) return error.CannotThread;
     }
-    return compileThreaded(shader, options, false);
+    return compileShortest(shader, options, false);
 }
 
-fn compileThreaded(shader: *const Shader, options: Options, threaded: bool) Error!Compiled {
+/// How a colour pack's register is chosen (see `compileWith`).
+const PackAlloc = enum {
+    /// When the pack is reached, like any other value.
+    late,
+    /// When its first channel is worked out, so each channel can be packed
+    /// as soon as it is ready; in a register file.
+    early,
+    /// As `early`, in an accumulator if one is free.
+    early_acc,
+};
+
+/// Which is best depends on whether the mul ALU, which packs, has slots to
+/// spare (blending fills them, for one): the shortest code wins.
+fn compileShortest(shader: *const Shader, options: Options, threaded: bool) Error!Compiled {
+    var best = try compileWith(shader, options, threaded, .late);
+    if (!hasColorPack(shader)) return best;
+    for ([_]PackAlloc{ .early, .early_acc }) |pack_alloc| {
+        // Holding the register longer can run out of registers, or room.
+        const c = compileWith(shader, options, threaded, pack_alloc) catch continue;
+        if (c.code_len < best.code_len) best = c;
+    }
+    return best;
+}
+
+fn hasColorPack(shader: *const Shader) bool {
+    for (shader.insts[0..shader.len]) |inst| if (inst.op == .pack_unorm8888) return true;
+    return false;
+}
+
+fn compileWith(shader: *const Shader, options: Options, threaded: bool, pack_alloc: PackAlloc) Error!Compiled {
     const n = shader.len;
     var live: [max_insts]bool = @splat(false);
     var uses: [max_insts]u16 = @splat(0);
@@ -522,13 +552,16 @@ fn compileThreaded(shader: *const Shader, options: Options, threaded: bool) Erro
         }
         if (!inst.op.isAlu() and inst.op != .vpm_write) continue;
         // At most one operand can come from the uniform port and one from
-        // the small immediate field per instruction.
+        // the small immediate field per instruction. A constant that is not
+        // a small immediate and is read once comes from the uniform stream
+        // too, which is free where an immediate load takes an instruction.
         var used_unif = false;
         var used_imm: ?u32 = null;
         for (shader.operands(j)) |v| {
             const d = @intFromEnum(v);
             const def = shader.insts[d];
-            if (def.op == .uniform and uses[d] == 1 and !used_unif) {
+            const streamed = def.op == .uniform or (def.op == .constant and encodeSmallImm(def.imm) == null);
+            if (streamed and uses[d] == 1 and !used_unif) {
                 folded[d] = true;
                 used_unif = true;
             } else if (def.op == .constant and encodeSmallImm(def.imm) != null and
@@ -589,6 +622,25 @@ fn compileThreaded(shader: *const Shader, options: Options, threaded: bool) Erro
     // 3. Register allocation, in program order. A value's register is freed
     // after the instruction holding its last use, so a destination never
     // shares a register with one of its own sources.
+    //
+    // A colour pack is written a channel at a time, and each channel can be
+    // packed as soon as it is worked out. With `pack_alloc` early, its
+    // register is taken when its first channel is (constant channels need
+    // nothing), so that no value in between shares it and the scheduler is
+    // free to move each channel's pack up to where it is ready.
+    var alloc_at: [max_insts]u16 = undefined;
+    for (0..n) |j| alloc_at[j] = @intCast(j);
+    for (0..n) |j| {
+        if (pack_alloc == .late) break;
+        if (!live[j] or shader.insts[j].op != .pack_unorm8888) continue;
+        var start: ?u16 = null;
+        for (shader.operands(j)) |v| {
+            const d = @intFromEnum(v);
+            if (shader.insts[d].op == .constant and reg_uses[d] == 0) continue;
+            start = @min(start orelse d, @as(u16, @intCast(d)));
+        }
+        if (start) |st| alloc_at[j] = st;
+    }
     var al: Allocator = .{};
     if (threaded) al.halve();
     // Thread switches come after texture requests: accumulators do not
@@ -596,73 +648,78 @@ fn compileThreaded(shader: *const Shader, options: Options, threaded: bool) Erro
     var crosses_switch: [max_insts]bool = @splat(false);
     if (threaded) {
         for (0..n) |t| if (live[t] and shader.insts[t].op == .tex) {
-            for (0..t) |d| if (live[d] and last_use[d] > t) {
+            for (0..n) |d| if (live[d] and alloc_at[d] < t and last_use[d] > t) {
                 crosses_switch[d] = true;
             };
         };
     }
     var next_file_a = true;
     var active: [max_insts]bool = @splat(false);
-    for (0..n) |j| {
+    for (0..n) |at| {
         // Free values whose last use was before this instruction.
-        for (0..j) |d| {
-            if (active[d] and last_use[d] < j) {
+        for (0..at) |d| {
+            if (active[d] and last_use[d] < at) {
                 al.release(reg[d]);
                 active[d] = false;
             }
         }
-        if (!live[j] or !shader.insts[j].op.hasResult()) continue;
-        const op = shader.insts[j].op;
-        switch (op) {
-            .frag_z => {
-                reg[j] = .{ .b = qpu.R.frag_payload_zw };
+        // This instruction's value, then any colour pack whose first
+        // channel it is.
+        for (at..n) |j| {
+            if (alloc_at[j] != at) continue;
+            if (!live[j] or !shader.insts[j].op.hasResult()) continue;
+            const op = shader.insts[j].op;
+            switch (op) {
+                .frag_z => {
+                    reg[j] = .{ .b = qpu.R.frag_payload_zw };
+                    continue;
+                },
+                .frag_w => {
+                    reg[j] = .{ .a = qpu.R.frag_payload_zw };
+                    continue;
+                },
+                else => {},
+            }
+            if (folded[j]) {
+                reg[j] = .unif;
                 continue;
-            },
-            .frag_w => {
-                reg[j] = .{ .a = qpu.R.frag_payload_zw };
-                continue;
-            },
-            else => {},
-        }
-        if (folded[j]) {
-            reg[j] = .unif;
-            continue;
-        }
-        const needs_reg = if (op == .constant) reg_uses[j] > 0 else uses[j] > 0;
-        if (!needs_reg) {
-            if (op == .constant) {
-                if (encodeSmallImm(shader.insts[j].imm)) |v| reg[j] = .{ .imm = v };
             }
-            continue; // result discarded
-        }
-        const span = last_use[j] - j;
-        var r: ?Reg = null;
-        const acc_ok = class[j] == .any and !crosses_switch[j];
-        if (acc_ok and span <= 4) {
-            if (al.take("acc_free")) |a| r = .{ .acc = @intCast(a) };
-        }
-        if (r == null) {
-            const prefer_a = class[j] == .a_only or switch (pref[j]) {
-                .a => true,
-                .b => false,
-                .none => next_file_a,
-            };
-            if (prefer_a) {
-                if (al.take("a_free")) |a| r = .{ .a = a };
+            const needs_reg = if (op == .constant) reg_uses[j] > 0 else uses[j] > 0;
+            if (!needs_reg) {
+                if (op == .constant) {
+                    if (encodeSmallImm(shader.insts[j].imm)) |v| reg[j] = .{ .imm = v };
+                }
+                continue; // result discarded
             }
-            if (r == null and class[j] == .any) {
-                if (al.take("b_free")) |b| r = .{ .b = b };
-            }
-            if (r == null and class[j] == .any and !prefer_a) {
-                if (al.take("a_free")) |a| r = .{ .a = a };
-            }
-            if (r == null and acc_ok) {
+            const span = last_use[j] - alloc_at[j];
+            var r: ?Reg = null;
+            const acc_ok = class[j] == .any and !crosses_switch[j];
+            if (acc_ok and (span <= 4 or (op == .pack_unorm8888 and pack_alloc == .early_acc))) {
                 if (al.take("acc_free")) |a| r = .{ .acc = @intCast(a) };
             }
-            next_file_a = !next_file_a;
+            if (r == null) {
+                const prefer_a = class[j] == .a_only or switch (pref[j]) {
+                    .a => true,
+                    .b => false,
+                    .none => next_file_a,
+                };
+                if (prefer_a) {
+                    if (al.take("a_free")) |a| r = .{ .a = a };
+                }
+                if (r == null and class[j] == .any) {
+                    if (al.take("b_free")) |b| r = .{ .b = b };
+                }
+                if (r == null and class[j] == .any and !prefer_a) {
+                    if (al.take("a_free")) |a| r = .{ .a = a };
+                }
+                if (r == null and acc_ok) {
+                    if (al.take("acc_free")) |a| r = .{ .acc = @intCast(a) };
+                }
+                next_file_a = !next_file_a;
+            }
+            reg[j] = r orelse return error.OutOfRegisters;
+            active[j] = true;
         }
-        reg[j] = r orelse return error.OutOfRegisters;
-        active[j] = true;
     }
 
     // 4. Code generation.
@@ -723,9 +780,7 @@ fn compileThreaded(shader: *const Shader, options: Options, threaded: bool) Erro
                 else
                     qpu.Alu{ .add = .{ .op = inst.op.addOp().?, .dst = dst.dst(), .a = a.src(), .b = b.src() } };
                 try g.emit(try qpu.alu(ai));
-                for (srcs) |v| if (reg[@intFromEnum(v)] == .unif) {
-                    try g.addUniform(.{ .user = shader.insts[@intFromEnum(v)].imm });
-                };
+                for (srcs) |v| if (reg[@intFromEnum(v)] == .unif) try g.addUniform(streamedUniform(shader, v));
             },
             .recip, .rsqrt, .exp2, .log2 => {
                 const a = try g.operand(shader, reg, inst.srcs[0]);
@@ -743,8 +798,24 @@ fn compileThreaded(shader: *const Shader, options: Options, threaded: bool) Erro
                 }));
             },
             .pack_unorm8888 => {
+                // Channel by channel in the order they are worked out
+                // (constants first), so the scheduler can pack each one as
+                // soon as it is ready.
                 const modes = [4]qpu.PackMul{ .@"8a", .@"8b", .@"8c", .@"8d" };
-                for (shader.operands(j), modes) |v, mode| {
+                const srcs = shader.operands(j);
+                var by_ready: [4]u2 = .{ 0, 1, 2, 3 };
+                const ready = struct {
+                    fn at(sh: *const Shader, v: Value) usize {
+                        return if (sh.insts[@intFromEnum(v)].op == .constant) 0 else @intFromEnum(v) + 1;
+                    }
+                    fn lessThan(sh_srcs: struct { *const Shader, []const Value }, x: u2, y: u2) bool {
+                        return at(sh_srcs[0], sh_srcs[1][x]) < at(sh_srcs[0], sh_srcs[1][y]);
+                    }
+                };
+                std.mem.sort(u2, &by_ready, .{ shader, srcs }, ready.lessThan);
+                for (by_ready) |k| {
+                    const v = srcs[k];
+                    const mode = modes[k];
                     var a = try g.operand(shader, reg, v);
                     var one: Reg = .{ .imm = encodeSmallImm(@bitCast(@as(f32, 1.0))).? };
                     try g.resolveConflict(&a, &one);
@@ -819,7 +890,7 @@ fn compileThreaded(shader: *const Shader, options: Options, threaded: bool) Erro
                 };
                 const a = try g.operand(shader, reg, inst.srcs[0]);
                 try g.emit(try qpu.mov(.{ .periph = periph }, a.src()));
-                if (a == .unif) try g.addUniform(.{ .user = shader.insts[@intFromEnum(inst.srcs[0])].imm });
+                if (a == .unif) try g.addUniform(streamedUniform(shader, inst.srcs[0]));
             },
         }
     }
@@ -836,6 +907,13 @@ fn compileThreaded(shader: *const Shader, options: Options, threaded: bool) Erro
     g.out.code_len += 3;
     try qpu.validate(g.out.code(), shader.stage, null);
     return g.out;
+}
+
+/// The uniform stream word for a value read from the uniform port: the
+/// caller's uniform, or a constant (see `compileWith`).
+fn streamedUniform(shader: *const Shader, v: Value) UniformKind {
+    const def = shader.insts[@intFromEnum(v)];
+    return if (def.op == .constant) .{ .constant = def.imm } else .{ .user = def.imm };
 }
 
 /// VPM setup word for horizontal, 32-bit, stride 1 accesses.
@@ -1119,6 +1197,54 @@ test "fragment shaders that sample textures run threaded" {
     const a = try sim.run(c.code(), .{ .uniforms = &unif, .varyings = &vary, .texture_memory = &memory });
     const b = try sim.run(single.code(), .{ .uniforms = &unif, .varyings = &vary, .texture_memory = &memory });
     try std.testing.expectEqual(b.tlb_color.?, a.tlb_color.?);
+}
+
+test "a constant that is not a small immediate comes from the uniform stream" {
+    const sim = @import("qpu_sim.zig");
+    const k: f32 = 3.7;
+    var s = Shader.init(.fragment);
+    s.tlbColor(s.fmul(s.varying(), s.constantF(k)));
+    const c = try compile(&s);
+    for (c.code()) |i| try std.testing.expect(qpu.getSig(i) != .load_imm);
+    try std.testing.expectEqualSlices(UniformKind, &.{.{ .constant = @bitCast(k) }}, c.uniforms());
+    // The same as reading it from a caller's uniform.
+    var u = Shader.init(.fragment);
+    u.tlbColor(u.fmul(u.varying(), u.uniform(0)));
+    const cu = try compile(&u);
+    var vary: [1]sim.Vec = undefined;
+    for (&vary[0], 0..) |*e, lane| e.* = @bitCast(@as(f32, @floatFromInt(lane)) * 0.25);
+    const want = try sim.run(cu.code(), .{ .uniforms = &.{@bitCast(k)}, .varyings = &vary });
+    const got = try sim.run(c.code(), .{ .uniforms = &.{@bitCast(k)}, .varyings = &vary });
+    try std.testing.expectEqual(want.tlb_color.?, got.tlb_color.?);
+}
+
+test "a colour's register is taken early only where that is shorter, with the same colour" {
+    const sim = @import("qpu_sim.zig");
+    // Three channels worked out one after another on the add ALU, and a
+    // constant alpha: the mul ALU, which packs, has slots to pack each
+    // channel in while the next is worked out.
+    var s = Shader.init(.fragment);
+    var ch: [3]Value = undefined;
+    for (&ch) |*v| {
+        const x = s.varying();
+        const y = s.binary(.fmax, s.fsub(s.constantF(1.0), s.fadd(x, x)), s.constantF(0.0));
+        v.* = s.binary(.fmin, s.fadd(y, s.constantF(0.25)), s.constantF(1.0));
+    }
+    s.tlbColor(s.packUnorm8888(ch[0], ch[1], ch[2], s.constantF(1.0)));
+    const best = try compile(&s);
+    var vary: [3]sim.Vec = undefined;
+    for (&vary, 0..) |*v, c| {
+        for (v, 0..) |*e, lane| e.* = @bitCast(@as(f32, @floatFromInt(lane + c)) / 20);
+    }
+    const want = try sim.run(best.code(), .{ .varyings = &vary });
+    for ([_]PackAlloc{ .late, .early, .early_acc }) |pack_alloc| {
+        const c = try compileWith(&s, .{}, false, pack_alloc);
+        try std.testing.expect(best.code_len <= c.code_len);
+        const got = try sim.run(c.code(), .{ .varyings = &vary });
+        try std.testing.expectEqual(want.tlb_color.?, got.tlb_color.?);
+    }
+    // Here packing early wins.
+    try std.testing.expect(best.code_len < (try compileWith(&s, .{}, false, .late)).code_len);
 }
 
 test "shaders without textures, or needing more registers, run one thread" {
