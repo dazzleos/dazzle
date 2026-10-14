@@ -100,6 +100,12 @@ pub const Icon = enum {
     code,
     // Showcase.
     widgets,
+    // Chat.
+    chat,
+    forum,
+    group,
+    logout,
+    send,
     // Audio and Sound.
     volume_up,
     volume_down,
