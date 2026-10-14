@@ -219,7 +219,8 @@ pub fn resolveAppIcon(buf: []u8, dir: []const u8, icons_path: []const u8, app: A
 }
 
 /// Parses a 64-character hex Ed25519 public key (ignoring surrounding
-/// whitespace) and writes its lowercase hex form to `out_hex`.
+/// whitespace), rejecting non-canonical encodings, off-curve points, and
+/// small-order torsion points, and writes its lowercase hex form to `out_hex`.
 pub fn parsePublicKey(text: []const u8, out_hex: *[key_hex_len]u8) ?Ed25519.PublicKey {
     const trimmed = std.mem.trim(u8, text, " \t\r\n");
     if (trimmed.len != key_hex_len) return null;
@@ -229,7 +230,10 @@ pub fn parsePublicKey(text: []const u8, out_hex: *[key_hex_len]u8) ?Ed25519.Publ
     }
     var bytes: [Ed25519.PublicKey.encoded_length]u8 = undefined;
     _ = std.fmt.hexToBytes(&bytes, out_hex) catch return null;
-    return Ed25519.PublicKey.fromBytes(bytes) catch null;
+    const pk = Ed25519.PublicKey.fromBytes(bytes) catch return null;
+    const p = std.crypto.ecc.Edwards25519.fromBytes(bytes) catch return null;
+    p.clearCofactor().rejectIdentity() catch return null;
+    return pk;
 }
 
 /// Validates a 64-character hex Ed25519 public key and returns its
@@ -930,6 +934,10 @@ test "a download is checked against the catalogue and its Ed25519 signature" {
     defer _ = linux.unlink(keys_path);
 
     try testing.expect(!subscribeKeyAt(keys_path, "not-a-valid-key"));
+    // Weak (small-order torsion) Ed25519 public keys are rejected:
+    // 00..00 (order 4) and 0100..00 (the identity point, order 1).
+    try testing.expect(!subscribeKeyAt(keys_path, "00" ** 32));
+    try testing.expect(!subscribeKeyAt(keys_path, "01" ++ "00" ** 31));
     try testing.expect(subscribeKeyAt(keys_path, &other_pub_hex));
     const loaded = loadKeysFrom(keys_path);
     try testing.expectEqual(@as(usize, 1), loaded.len);
