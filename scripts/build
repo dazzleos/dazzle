@@ -2,7 +2,7 @@
 # Build Dazzle's SD card image, saying what it does first and, at the end,
 # what was made and how to put it on a card.
 #
-# Usage: scripts/build [zig build options]    e.g. scripts/build --release=fast
+# Usage: scripts/build [zig build options]    e.g. scripts/build -Doffline=true
 #
 # This is `scripts/zig build` (see build.zig) with a word before and after;
 # for its other steps (test, qemu, ...), use scripts/zig build <step>.

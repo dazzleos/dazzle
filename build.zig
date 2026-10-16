@@ -1069,13 +1069,13 @@ pub fn build(b: *std.Build) void {
         .os_tag = .linux,
         .abi = .eabihf,
     });
-    // The Pi programs are optimized for size unless told otherwise (a
+    // The Pi programs are optimized for speed unless told otherwise (a
     // Debug build is far too slow on a Pi Zero); host tests default to
     // Debug, for their safety checks.
-    const explicit_optimize = b.option(std.builtin.OptimizeMode, "optimize", "Optimization mode (default: ReleaseSmall for the Pi, Debug for host tests)");
+    const explicit_optimize = b.option(std.builtin.OptimizeMode, "optimize", "Optimization mode (default: ReleaseFast for the Pi, Debug for host tests)");
     const optimize: std.builtin.OptimizeMode = explicit_optimize orelse switch (b.release_mode) {
-        .off, .any, .small => .ReleaseSmall,
-        .fast => .ReleaseFast,
+        .off, .any, .fast => .ReleaseFast,
+        .small => .ReleaseSmall,
         .safe => .ReleaseSafe,
     };
     const test_optimize = explicit_optimize orelse .Debug;
