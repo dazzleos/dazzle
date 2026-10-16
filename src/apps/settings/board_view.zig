@@ -467,17 +467,61 @@ pub const BoardView = struct {
 
         // What is under the board, faint; then what is on it.
         for (b.parts) |part| if (part.underside) drawPart(c, &part, map(t, part.rect), s, ink.withAlpha(0.35));
-        for (b.parts) |part| if (!part.underside) drawPart(c, &part, map(t, part.rect), s, ink);
+        for (b.parts, 0..) |part, i| if (!part.underside) {
+            const pr = map(t, part.rect);
+            if (partOverhangsBoard(b, &part)) {
+                fillOverhangingPart(c, &part, pr, s, theme.surface, theme.on_surface.withAlpha(0.04));
+            }
+            if (part.kind == .pwr_led) {
+                const led_col = Color.rgb(0xf83b3b);
+                c.fillRoundedRect(pr.outset(1.0 * s), .all(0.9 * s), led_col.withAlpha(0.36));
+                c.fillRoundedRect(pr, .all(0.25 * s), led_col);
+            }
+            const part_ink = if (st.hovered == i or self.selected == i) theme.primary else ink;
+            drawPart(c, &part, pr, s, part_ink);
+        };
 
         // Lit under the pointer, filled in when picked.
-        if (st.hovered) |i| c.fillRoundedRect(map(t, b.parts[i].rect), .all(0.6 * s), theme.primary.withAlpha(0.18));
+        if (st.hovered) |i| c.fillRoundedRect(map(t, b.parts[i].rect), partRadius(&b.parts[i], s), theme.primary.withAlpha(0.22));
         if (self.selected) |i| if (i < b.parts.len) {
             const r = map(t, b.parts[i].rect);
-            c.fillRoundedRect(r, .all(0.6 * s), theme.primary.withAlpha(0.35));
-            c.strokeRoundedRect(r, .all(0.6 * s), heavy, theme.primary);
+            const rad = partRadius(&b.parts[i], s);
+            c.fillRoundedRect(r, rad, theme.primary.withAlpha(0.35));
+            c.strokeRoundedRect(r, rad, heavy, theme.primary);
         };
     }
 };
+
+fn partOverhangsBoard(b: *const board.Board, part: *const board.Part) bool {
+    if (part.underside) return false;
+    const r = part.rect;
+    return r.x < 0 or r.y < 0 or (r.x + r.w) > b.width or (r.y + r.h) > b.height;
+}
+
+fn partRadius(part: *const board.Part, s: f32) gfx.Radii {
+    return switch (part.kind) {
+        .gpio => .all(0),
+        .act_led, .pwr_led => .all(0.25 * s),
+        .antenna, .camera, .display, .camera_display, .pcie => .all(0.3 * s),
+        .usb, .usb_double, .ethernet, .hdmi, .mini_hdmi, .micro_hdmi, .power, .usb_c_power, .power_button, .usb_otg, .micro_sd, .sd => .all(0.4 * s),
+        else => .all(0.6 * s),
+    };
+}
+
+fn fillOverhangingPart(c: *gfx.Canvas, part: *const board.Part, r: gfx.Rect, s: f32, surface_bg: Color, board_tint: Color) void {
+    if (part.kind == .composite) {
+        const body: gfx.Rect = .{ .x = r.x, .y = r.y + r.h * 0.45, .w = r.w, .h = r.h * 0.55 };
+        const barrel: gfx.Rect = .{ .x = r.x + r.w * 0.2, .y = r.y, .w = r.w * 0.6, .h = r.h * 0.45 };
+        c.fillRoundedRect(body, .all(0.6 * s), surface_bg);
+        c.fillRoundedRect(body, .all(0.6 * s), board_tint);
+        c.fillRoundedRect(barrel, .all(0.4 * s), surface_bg);
+        c.fillRoundedRect(barrel, .all(0.4 * s), board_tint);
+        return;
+    }
+    const rad = partRadius(part, s);
+    c.fillRoundedRect(r, rad, surface_bg);
+    c.fillRoundedRect(r, rad, board_tint);
+}
 
 /// A part, as lines: its outline, and what makes it recognisable (a
 /// connector's opening, a header's pins, a chip's pin 1).
@@ -541,13 +585,23 @@ fn drawPart(c: *gfx.Canvas, part: *const board.Part, r: gfx.Rect, s: f32, ink: C
             c.strokeRoundedRect(.{ .x = r.x + r.w * 0.2, .y = r.y, .w = r.w * 0.6, .h = r.h * 0.45 }, .all(0.4 * s), line, ink);
         },
         .camera, .display, .camera_display, .pcie => {
-            c.strokeRoundedRect(r, .all(0.4 * s), line, ink);
-            // The latch along it.
-            if (r.h > r.w) {
-                c.fillRect(.{ .x = r.x + r.w / 2 - line / 2, .y = r.y + 1.5 * s, .w = line, .h = r.h - 3 * s }, ink);
-            } else {
-                c.fillRect(.{ .x = r.x + 1.5 * s, .y = r.y + r.h / 2 - line / 2, .w = r.w - 3 * s, .h = line }, ink);
-            }
+            c.strokeRoundedRect(r, .all(0.3 * s), line, ink);
+            // The ribbon slot along it.
+            const slot: gfx.Rect = if (r.w > r.h)
+                .{ .x = r.x + 1.2 * s, .y = r.y + r.h * 0.35, .w = r.w - 2.4 * s, .h = r.h * 0.3 }
+            else
+                .{ .x = r.x + r.w * 0.35, .y = r.y + 1.2 * s, .w = r.w * 0.3, .h = r.h - 2.4 * s };
+            c.fillRect(slot, ink);
+        },
+        .act_led, .pwr_led => {
+            c.strokeRoundedRect(r, .all(0.25 * s), line, ink);
+            const lens: gfx.Rect = .{
+                .x = r.x + r.w * 0.25,
+                .y = r.y + r.h * 0.2,
+                .w = r.w * 0.5,
+                .h = r.h * 0.6,
+            };
+            c.strokeRoundedRect(lens, .all(0.15 * s), line, ink.withAlpha(ink.a * 0.75));
         },
         .edge => {
             // The contacts.

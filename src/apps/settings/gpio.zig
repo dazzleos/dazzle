@@ -66,7 +66,7 @@ pub fn headerFor(model: []const u8) ?[]const Pin {
         }
     }.f;
     if (has(model, "Compute Module")) return null;
-    const first = !has(model, "Plus") and
+    const first = !(has(model, "Plus") or has(model, "+")) and
         (std.mem.startsWith(u8, model, "Raspberry Pi Model A") or std.mem.startsWith(u8, model, "Raspberry Pi Model B"));
     if (first) return if (has(model, "Rev 1")) &header_26_rev1 else &header_26;
     return &header_40;
