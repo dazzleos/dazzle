@@ -472,11 +472,6 @@ pub const BoardView = struct {
             if (partOverhangsBoard(b, &part)) {
                 fillOverhangingPart(c, &part, pr, s, theme.surface, theme.on_surface.withAlpha(0.04));
             }
-            if (part.kind == .pwr_led) {
-                const led_col = Color.rgb(0xf83b3b);
-                c.fillRoundedRect(pr.outset(1.0 * s), .all(0.9 * s), led_col.withAlpha(0.36));
-                c.fillRoundedRect(pr, .all(0.25 * s), led_col);
-            }
             const part_ink = if (st.hovered == i or self.selected == i) theme.primary else ink;
             drawPart(c, &part, pr, s, part_ink);
         };
