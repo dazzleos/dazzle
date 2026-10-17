@@ -23,8 +23,13 @@ pub const Rasterizer = struct {
 
     pub fn init(gpa: std.mem.Allocator, width: u32, height: u32) !Rasterizer {
         const acc = try gpa.alloc(f32, @as(usize, width) * height + 4);
-        @memset(acc, 0);
-        return .{ .width = width, .height = height, .acc = acc };
+        return initBuffer(acc, width, height);
+    }
+
+    pub fn initBuffer(buf: []f32, width: u32, height: u32) Rasterizer {
+        const n = @as(usize, width) * height + 4;
+        @memset(buf[0..n], 0);
+        return .{ .width = width, .height = height, .acc = buf[0..n] };
     }
 
     pub fn deinit(r: *Rasterizer, gpa: std.mem.Allocator) void {
@@ -146,6 +151,38 @@ pub const Rasterizer = struct {
         while (i < len) : (i += 1) {
             sum += acc_slice[i];
             out_slice[i] = @intFromFloat(@min(@abs(sum), 1.0) * 255.0 + 0.5);
+        }
+    }
+
+    /// Writes the coverage of every pixel (0-255) into a destination buffer
+    /// with row stride `out_stride`.
+    pub fn coverageStrided(r: *const Rasterizer, out: []u8, out_stride: usize) void {
+        const w: usize = r.width;
+        if (out_stride == w) {
+            r.coverage(out);
+            return;
+        }
+        const h: usize = r.height;
+        var sum: f32 = 0;
+        for (0..h) |row| {
+            const acc_row = r.acc[row * w ..][0..w];
+            const out_row = out[row * out_stride ..][0..w];
+            var i: usize = 0;
+            while (i + 4 <= w) : (i += 4) {
+                const s0 = sum + acc_row[i + 0];
+                const s1 = s0 + acc_row[i + 1];
+                const s2 = s1 + acc_row[i + 2];
+                const s3 = s2 + acc_row[i + 3];
+                sum = s3;
+                const v_sum = @Vector(4, f32){ s0, s1, s2, s3 };
+                const v_clamped = @min(@abs(v_sum), @as(@Vector(4, f32), @splat(1.0)));
+                const v_cov: @Vector(4, u8) = @intFromFloat(v_clamped * @as(@Vector(4, f32), @splat(255.0)) + @as(@Vector(4, f32), @splat(0.5)));
+                out_row[i..][0..4].* = v_cov;
+            }
+            while (i < w) : (i += 1) {
+                sum += acc_row[i];
+                out_row[i] = @intFromFloat(@min(@abs(sum), 1.0) * 255.0 + 0.5);
+            }
         }
     }
 };

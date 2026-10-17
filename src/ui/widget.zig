@@ -529,6 +529,19 @@ pub const Node = struct {
     /// frees the nodes left over. (Widgets that make their children as
     /// they are laid out call it then.)
     pub fn reconcile(n: *Node, widgets: []const Widget) void {
+        if (widgets.len == n.children.items.len) {
+            var all_match = true;
+            for (widgets, n.children.items) |w, ch| {
+                if (ch.widget.vtable != w.vtable or ch.widget.key != w.key) {
+                    all_match = false;
+                    break;
+                }
+            }
+            if (all_match) {
+                for (n.children.items, widgets) |ch, w| ch.build(w);
+                return;
+            }
+        }
         const gpa = n.ui.gpa;
         const arena = n.ui.arena();
         // The old children, aside (the list's memory is reused).

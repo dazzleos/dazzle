@@ -106,10 +106,14 @@ pub const Font = struct {
     /// The chosen cmap subtable and its format (4 or 12).
     cmap: []const u8,
     cmap_format: u16,
+    /// Fast lookup table for ASCII codepoints (0..127).
+    ascii_glyphs: [128]u16 = @splat(missing_glyph),
     gpos: []const u8 = &.{},
     /// GPOS lookups of the `kern` feature.
     kern_lookups: [max_kern_lookups]u16 = undefined,
     num_kern_lookups: usize = 0,
+    kern_subtables: [max_kern_subtables]KernSubtable = undefined,
+    num_kern_subtables: usize = 0,
     /// Optional colour glyph tables (`COLR` v0 and `CPAL` v0) and `GSUB`
     /// `ccmp` ligature lookups (for multi-codepoint emoji sequences).
     colr: []const u8 = &.{},
@@ -128,6 +132,22 @@ pub const Font = struct {
     };
 
     const max_kern_lookups = 32;
+    const max_kern_subtables = 64;
+
+    const KernSubtable = struct {
+        lookup_group: u8,
+        format: u16,
+        st: usize,
+        coverage: usize,
+        min_glyph: u16,
+        max_glyph: u16,
+        vf1: u16,
+        record_size: usize,
+        class_def1: usize = 0,
+        class_def2: usize = 0,
+        class1_count: u16 = 0,
+        class2_count: u16 = 0,
+    };
 
     pub fn init(data: []const u8) Error!Font {
         const version = try read(u32, data, 0);
@@ -187,9 +207,11 @@ pub const Font = struct {
         };
         if (f.units_per_em == 0 or f.num_hmetrics == 0) return error.Malformed;
         try f.chooseCmap(cmap);
+        for (0..128) |cp| f.ascii_glyphs[cp] = f.lookupGlyphIndex(@intCast(cp));
         if (tables.gpos) |g| f.findKernLookups(g) catch {
             // Kerning is optional; lay out without it.
             f.num_kern_lookups = 0;
+            f.num_kern_subtables = 0;
         };
         if (tables.gsub) |g| f.findCcmpLookups(g) catch {
             f.num_ccmp_lookups = 0;
@@ -225,7 +247,12 @@ pub const Font = struct {
     }
 
     /// The glyph for a Unicode code point, or `missing_glyph`.
-    pub fn glyphIndex(f: *const Font, cp: u21) u16 {
+    pub inline fn glyphIndex(f: *const Font, cp: u21) u16 {
+        if (cp < 128) return f.ascii_glyphs[cp];
+        return f.lookupGlyphIndex(cp);
+    }
+
+    fn lookupGlyphIndex(f: *const Font, cp: u21) u16 {
         const g = (if (f.cmap_format == 12) f.cmap12(cp) else f.cmap4(cp)) catch return missing_glyph;
         return if (g < f.num_glyphs) g else missing_glyph;
     }
@@ -401,36 +428,63 @@ pub const Font = struct {
                 f.num_kern_lookups += 1;
             }
         }
+        const lookup_list = try read(u16, gpos, 8);
+        for (f.kern_lookups[0..f.num_kern_lookups], 0..) |lookup_index, group| {
+            const lookup = lookup_list + @as(usize, try read(u16, gpos, lookup_list + 2 + @as(usize, lookup_index) * 2));
+            const lookup_type = try read(u16, gpos, lookup);
+            const count = try read(u16, gpos, lookup + 4);
+            for (0..count) |i| {
+                if (f.num_kern_subtables == max_kern_subtables) break;
+                var st = lookup + @as(usize, try read(u16, gpos, lookup + 6 + i * 2));
+                var subtable_type = lookup_type;
+                if (lookup_type == 9) {
+                    subtable_type = try read(u16, gpos, st + 2);
+                    st += try read(u32, gpos, st + 4);
+                }
+                if (subtable_type != 2) continue;
+                const format = try read(u16, gpos, st);
+                if (format != 1 and format != 2) continue;
+                const coverage = st + @as(usize, try read(u16, gpos, st + 2));
+                const bounds = (try coverageBounds(gpos, coverage)) orelse continue;
+                const vf1 = try read(u16, gpos, st + 4);
+                const vf2 = try read(u16, gpos, st + 6);
+                var sub_info: KernSubtable = .{
+                    .lookup_group = @intCast(group),
+                    .format = format,
+                    .st = st,
+                    .coverage = coverage,
+                    .min_glyph = bounds.min,
+                    .max_glyph = bounds.max,
+                    .vf1 = vf1,
+                    .record_size = if (format == 1) 2 + valueRecordSize(vf1) + valueRecordSize(vf2) else valueRecordSize(vf1) + valueRecordSize(vf2),
+                };
+                if (format == 2) {
+                    sub_info.class_def1 = st + @as(usize, try read(u16, gpos, st + 8));
+                    sub_info.class_def2 = st + @as(usize, try read(u16, gpos, st + 10));
+                    sub_info.class1_count = try read(u16, gpos, st + 12);
+                    sub_info.class2_count = try read(u16, gpos, st + 14);
+                }
+                f.kern_subtables[f.num_kern_subtables] = sub_info;
+                f.num_kern_subtables += 1;
+            }
+        }
     }
 
     /// Horizontal kerning between two glyphs, in font units (usually
     /// negative, to pull them together).
     pub fn kerning(f: *const Font, left: u16, right: u16) i16 {
+        if (f.num_kern_subtables == 0) return 0;
         var total: i32 = 0;
-        for (f.kern_lookups[0..f.num_kern_lookups]) |lookup| {
-            total += f.lookupKerning(lookup, left, right) catch 0;
+        var matched_group: u8 = 0xff;
+        for (f.kern_subtables[0..f.num_kern_subtables]) |*sub_info| {
+            if (sub_info.lookup_group == matched_group) continue;
+            if (left < sub_info.min_glyph or left > sub_info.max_glyph) continue;
+            if (pairAdjustmentSubtable(f.gpos, sub_info, left, right) catch null) |v| {
+                total += v;
+                matched_group = sub_info.lookup_group;
+            }
         }
         return @intCast(std.math.clamp(total, std.math.minInt(i16), std.math.maxInt(i16)));
-    }
-
-    fn lookupKerning(f: *const Font, lookup_index: u16, left: u16, right: u16) Error!i16 {
-        const g = f.gpos;
-        const lookup_list = try read(u16, g, 8);
-        const lookup = lookup_list + @as(usize, try read(u16, g, lookup_list + 2 + @as(usize, lookup_index) * 2));
-        const lookup_type = try read(u16, g, lookup);
-        const count = try read(u16, g, lookup + 4);
-        for (0..count) |i| {
-            var st = lookup + @as(usize, try read(u16, g, lookup + 6 + i * 2));
-            var subtable_type = lookup_type;
-            if (lookup_type == 9) {
-                // Extension: the real subtable is at a 32-bit offset.
-                subtable_type = try read(u16, g, st + 2);
-                st += try read(u32, g, st + 4);
-            }
-            if (subtable_type != 2) continue;
-            if (try pairAdjustment(g, st, left, right)) |v| return v;
-        }
-        return 0;
     }
 
     // --- Colour glyphs and ligatures ----------------------------------------
@@ -734,16 +788,33 @@ fn xAdvance(g: []const u8, record: usize, format: u16) Error!i16 {
     return read(i16, g, record + @as(usize, @popCount(format & 0x0003)) * 2);
 }
 
+fn coverageBounds(g: []const u8, table: usize) Error!?struct { min: u16, max: u16 } {
+    const format = try read(u16, g, table);
+    const count = try read(u16, g, table + 2);
+    if (count == 0) return null;
+    if (format == 1) {
+        return .{
+            .min = try read(u16, g, table + 4),
+            .max = try read(u16, g, table + 4 + (@as(usize, count) - 1) * 2),
+        };
+    }
+    if (format == 2) {
+        return .{
+            .min = try read(u16, g, table + 4),
+            .max = try read(u16, g, table + 4 + (@as(usize, count) - 1) * 6 + 2),
+        };
+    }
+    return error.Malformed;
+}
+
 /// A pair adjustment subtable's kerning for (left, right), or null if the
 /// subtable does not cover the pair.
-fn pairAdjustment(g: []const u8, st: usize, left: u16, right: u16) Error!?i16 {
-    const format = try read(u16, g, st);
-    const coverage = st + @as(usize, try read(u16, g, st + 2));
-    const vf1 = try read(u16, g, st + 4);
-    const vf2 = try read(u16, g, st + 6);
-    const index = try coverageIndex(g, coverage, left) orelse return null;
-    const record_size = 2 + valueRecordSize(vf1) + valueRecordSize(vf2);
-    if (format == 1) {
+fn pairAdjustmentSubtable(g: []const u8, sub_info: *const Font.KernSubtable, left: u16, right: u16) Error!?i16 {
+    const index = try coverageIndex(g, sub_info.coverage, left) orelse return null;
+    const st = sub_info.st;
+    const vf1 = sub_info.vf1;
+    const record_size = sub_info.record_size;
+    if (sub_info.format == 1) {
         const set = st + @as(usize, try read(u16, g, st + 10 + index * 2));
         const count = try read(u16, g, set);
         var lo: usize = 0;
@@ -757,16 +828,10 @@ fn pairAdjustment(g: []const u8, st: usize, left: u16, right: u16) Error!?i16 {
         }
         return null;
     }
-    if (format != 2) return null;
-    const class_def1 = st + @as(usize, try read(u16, g, st + 8));
-    const class_def2 = st + @as(usize, try read(u16, g, st + 10));
-    const class1_count = try read(u16, g, st + 12);
-    const class2_count = try read(u16, g, st + 14);
-    const c1 = try classOf(g, class_def1, left);
-    const c2 = try classOf(g, class_def2, right);
-    if (c1 >= class1_count or c2 >= class2_count) return null;
-    const size = valueRecordSize(vf1) + valueRecordSize(vf2);
-    const rec = st + 16 + (@as(usize, c1) * class2_count + c2) * size;
+    const c1 = try classOf(g, sub_info.class_def1, left);
+    const c2 = try classOf(g, sub_info.class_def2, right);
+    if (c1 >= sub_info.class1_count or c2 >= sub_info.class2_count) return null;
+    const rec = st + 16 + (@as(usize, c1) * sub_info.class2_count + c2) * record_size;
     return try xAdvance(g, rec, vf1);
 }
 

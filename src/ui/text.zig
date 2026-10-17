@@ -87,32 +87,15 @@ const ellipsis_text = "…";
 pub fn ellipsize(gpa: std.mem.Allocator, runs: *font.RunCache, style: font.Style, text: []const u8, max_width: f32) !Line {
     const dots = runs.measure(style, ellipsis_text);
     if (dots > max_width) return .{ .text = "", .width = 0 };
-    const whole = runs.measure(style, text);
-    // Start from a guess in proportion, then step a character at a time.
-    var end = boundaryBefore(text, @intFromFloat(@as(f32, @floatFromInt(text.len)) * std.math.clamp((max_width - dots) / @max(whole, 1), 0, 1)));
-    while (end < text.len) {
-        const next = boundaryAfter(text, end);
-        if (font.measure(style, text[0..next]) + dots > max_width) break;
-        end = next;
+    var l = font.Layout.init(style, text, 0);
+    var end: usize = 0;
+    while (l.next()) |_| {
+        if (l.x + dots > max_width) break;
+        end = l.at;
     }
-    while (end > 0 and font.measure(style, text[0..end]) + dots > max_width) end = boundaryBefore(text, end - 1);
     const kept = std.mem.trimEnd(u8, text[0..end], " ");
     const out = try std.mem.concat(gpa, u8, &.{ kept, ellipsis_text });
-    return .{ .text = out, .width = font.measure(style, out) };
-}
-
-/// The start of the UTF-8 character at or before byte `i`.
-fn boundaryBefore(text: []const u8, i_in: usize) usize {
-    var i = @min(i_in, text.len);
-    while (i > 0 and i < text.len and text[i] & 0xc0 == 0x80) i -= 1;
-    return i;
-}
-
-/// The start of the UTF-8 character after the one at byte `i`.
-fn boundaryAfter(text: []const u8, i_in: usize) usize {
-    var i = i_in + 1;
-    while (i < text.len and text[i] & 0xc0 == 0x80) i += 1;
-    return @min(i, text.len);
+    return .{ .text = out, .width = runs.measure(style, out) };
 }
 
 /// Breaks text into lines no wider than `max_width` where it can: at
@@ -130,13 +113,27 @@ pub fn wrap(gpa: std.mem.Allocator, runs: *font.RunCache, style: font.Style, tex
         while (start < para.len) {
             // The longest run of whole words that fits, or one word.
             var end = std.mem.indexOfScalarPos(u8, para, start, ' ') orelse para.len;
-            var width = runs.measure(style, para[start..end]);
-            while (end < para.len) {
-                const next = std.mem.indexOfScalarPos(u8, para, end + 1, ' ') orelse para.len;
-                const w = runs.measure(style, para[start..next]);
-                if (w > max_width) break;
-                end = next;
-                width = w;
+            var width: f32 = 0;
+            var target_rel: usize = end - start;
+            var have_first = false;
+            var l = font.Layout.init(style, para[start..], 0);
+            while (l.next()) |_| {
+                if (l.at == target_rel) {
+                    if (!have_first) {
+                        have_first = true;
+                        width = l.x;
+                        if (end >= para.len or width > max_width) break;
+                        const next = std.mem.indexOfScalarPos(u8, para, end + 1, ' ') orelse para.len;
+                        target_rel = next - start;
+                    } else {
+                        if (l.x > max_width) break;
+                        end = start + target_rel;
+                        width = l.x;
+                        if (end >= para.len) break;
+                        const next = std.mem.indexOfScalarPos(u8, para, end + 1, ' ') orelse para.len;
+                        target_rel = next - start;
+                    }
+                }
             }
             try lines.append(gpa, .{ .text = para[start..end], .width = width });
             // The spaces where it broke start no line.

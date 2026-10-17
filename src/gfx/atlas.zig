@@ -50,6 +50,8 @@ pub const Atlas = struct {
     full: bool = false,
     /// The text drawn recently, laid out.
     runs: font.RunCache,
+    /// Reusable accumulation buffer for glyph rasterization.
+    scratch_acc: std.ArrayList(f32) = .empty,
 
     pub fn init(gpa: std.mem.Allocator) !Atlas {
         const pixels = try gpa.alloc(u8, width * height);
@@ -58,6 +60,7 @@ pub const Atlas = struct {
     }
 
     pub fn deinit(a: *Atlas) void {
+        a.scratch_acc.deinit(a.gpa);
         a.runs.deinit();
         a.map.deinit(a.gpa);
         a.gpa.free(a.pixels);
@@ -83,30 +86,34 @@ pub const Atlas = struct {
         const key: Key = .{ .font = @intFromPtr(f), .glyph = index, .size = @intFromFloat(@max(size, 0) * 64), .subpixel = subpixel };
         if (a.map.get(key)) |e| return e;
         if (a.full) return null;
-        const b = font.rasterizeGlyph(a.gpa, f, index, size, @as(f32, @floatFromInt(subpixel)) / 4) catch return null;
-        defer a.gpa.free(b.mask);
-        var e: Entry = .{ .x = 0, .y = 0, .w = 0, .h = 0, .left = @intCast(std.math.clamp(b.left, -32768, 32767)), .top = @intCast(std.math.clamp(b.top, -32768, 32767)) };
-        if (b.width > 0 and b.height > 0) {
-            // A texel of space around each, so nothing bleeds in.
-            const w = b.width + 1;
-            const h = b.height + 1;
-            if (w > width or h > height) return a.fail();
-            if (a.shelf_x + w > width) {
-                a.shelf_y += a.shelf_h;
-                a.shelf_x = 0;
-                a.shelf_h = 0;
+        const dx = @as(f32, @floatFromInt(subpixel)) / 4;
+        var e: Entry = .{ .x = 0, .y = 0, .w = 0, .h = 0, .left = 0, .top = 0 };
+        if (font.glyphBounds(f, index, size, dx)) |b| {
+            e.left = @intCast(std.math.clamp(b.left, -32768, 32767));
+            e.top = @intCast(std.math.clamp(b.top, -32768, 32767));
+            if (b.width > 0 and b.height > 0) {
+                // A texel of space around each, so nothing bleeds in.
+                const w = b.width + 1;
+                const h = b.height + 1;
+                if (w > width or h > height) return a.fail();
+                if (a.shelf_x + w > width) {
+                    a.shelf_y += a.shelf_h;
+                    a.shelf_x = 0;
+                    a.shelf_h = 0;
+                }
+                if (a.shelf_y + h > height) return a.fail();
+                const acc_len = @as(usize, b.width) * b.height + 4;
+                a.scratch_acc.resize(a.gpa, acc_len) catch return null;
+                const dst = a.pixels[a.shelf_y * width + a.shelf_x ..];
+                font.rasterizeGlyphWith(b, f, index, dx, a.scratch_acc.items[0..acc_len], dst, width) catch return null;
+                e.x = @intCast(a.shelf_x);
+                e.y = @intCast(a.shelf_y);
+                e.w = @intCast(b.width);
+                e.h = @intCast(b.height);
+                a.markDirty(.{ .x0 = a.shelf_x, .y0 = a.shelf_y, .x1 = a.shelf_x + b.width, .y1 = a.shelf_y + b.height });
+                a.shelf_x += w;
+                a.shelf_h = @max(a.shelf_h, h);
             }
-            if (a.shelf_y + h > height) return a.fail();
-            e.x = @intCast(a.shelf_x);
-            e.y = @intCast(a.shelf_y);
-            e.w = @intCast(b.width);
-            e.h = @intCast(b.height);
-            for (0..b.height) |row| {
-                @memcpy(a.pixels[(a.shelf_y + row) * width + a.shelf_x ..][0..b.width], b.mask[row * b.width ..][0..b.width]);
-            }
-            a.markDirty(.{ .x0 = a.shelf_x, .y0 = a.shelf_y, .x1 = a.shelf_x + b.width, .y1 = a.shelf_y + b.height });
-            a.shelf_x += w;
-            a.shelf_h = @max(a.shelf_h, h);
         }
         a.map.put(a.gpa, key, e) catch return null;
         return e;

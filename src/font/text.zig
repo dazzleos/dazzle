@@ -203,9 +203,18 @@ pub const GlyphCache = struct {
     }
 };
 
-/// Rasterizes one glyph, shifted right by `dx` pixels (0 <= dx < 1).
-pub fn rasterizeGlyph(gpa: std.mem.Allocator, font: *const Font, glyph: u16, size: f32, dx: f32) !Bitmap {
-    const box = font.boundingBox(glyph) orelse return .{ .left = 0, .top = 0, .width = 0, .height = 0, .mask = &.{} };
+pub const GlyphBounds = struct {
+    left: i32,
+    top: i32,
+    width: u32,
+    height: u32,
+    x0: f32,
+    y0: f32,
+    scale: f32,
+};
+
+pub fn glyphBounds(font: *const Font, glyph: u16, size: f32, dx: f32) ?GlyphBounds {
+    const box = font.boundingBox(glyph) orelse return null;
     const scale = size / @as(f32, @floatFromInt(font.units_per_em));
     const x0 = @floor(@as(f32, @floatFromInt(box.x_min)) * scale + dx);
     const x1 = @ceil(@as(f32, @floatFromInt(box.x_max)) * scale + dx);
@@ -214,8 +223,19 @@ pub fn rasterizeGlyph(gpa: std.mem.Allocator, font: *const Font, glyph: u16, siz
     // One pixel of margin: curves may bulge slightly past rounded bounds.
     const w: u32 = @intFromFloat(x1 - x0 + 2);
     const h: u32 = @intFromFloat(y1 - y0 + 2);
-    var r = try Rasterizer.init(gpa, w, h);
-    defer r.deinit(gpa);
+    return .{
+        .left = @as(i32, @intFromFloat(x0)) - 1,
+        .top = @as(i32, @intFromFloat(y0)) - 1,
+        .width = w,
+        .height = h,
+        .x0 = x0,
+        .y0 = y0,
+        .scale = scale,
+    };
+}
+
+pub fn rasterizeGlyphWith(bounds: GlyphBounds, font: *const Font, glyph: u16, dx: f32, acc_buf: []f32, out: []u8, out_stride: usize) !void {
+    var r = Rasterizer.initBuffer(acc_buf, bounds.width, bounds.height);
     const sink = struct {
         r: *Rasterizer,
         started: bool = false,
@@ -233,16 +253,25 @@ pub fn rasterizeGlyph(gpa: std.mem.Allocator, font: *const Font, glyph: u16, siz
     };
     var s: sink = .{ .r = &r };
     // Font units (y up) to mask pixels (y down), with the margin.
-    const t: opentype.Transform = .{ .a = scale, .d = -scale, .e = dx - x0 + 1, .f = -y0 + 1 };
+    const t: opentype.Transform = .{ .a = bounds.scale, .d = -bounds.scale, .e = dx - bounds.x0 + 1, .f = -bounds.y0 + 1 };
     try font.outline(glyph, t, &s);
     if (s.started) r.close();
-    const mask = try gpa.alloc(u8, @as(usize, w) * h);
-    r.coverage(mask);
+    r.coverageStrided(out, out_stride);
+}
+
+/// Rasterizes one glyph, shifted right by `dx` pixels (0 <= dx < 1).
+pub fn rasterizeGlyph(gpa: std.mem.Allocator, font: *const Font, glyph: u16, size: f32, dx: f32) !Bitmap {
+    const bounds = glyphBounds(font, glyph, size, dx) orelse return .{ .left = 0, .top = 0, .width = 0, .height = 0, .mask = &.{} };
+    const acc = try gpa.alloc(f32, @as(usize, bounds.width) * bounds.height + 4);
+    defer gpa.free(acc);
+    const mask = try gpa.alloc(u8, @as(usize, bounds.width) * bounds.height);
+    errdefer gpa.free(mask);
+    try rasterizeGlyphWith(bounds, font, glyph, dx, acc, mask, bounds.width);
     return .{
-        .left = @as(i32, @intFromFloat(x0)) - 1,
-        .top = @as(i32, @intFromFloat(y0)) - 1,
-        .width = w,
-        .height = h,
+        .left = bounds.left,
+        .top = bounds.top,
+        .width = bounds.width,
+        .height = bounds.height,
         .mask = mask,
     };
 }
@@ -286,9 +315,11 @@ pub const Layout = struct {
         return .{ .style = style, .text = text, .x = x };
     }
 
-    fn decodeAt(text: []const u8, at: usize) ?struct { cp: u21, next_at: usize } {
+    inline fn decodeAt(text: []const u8, at: usize) ?struct { cp: u21, next_at: usize } {
         if (at >= text.len) return null;
-        const len = std.unicode.utf8ByteSequenceLength(text[at]) catch 1;
+        const b0 = text[at];
+        if (b0 < 0x80) return .{ .cp = b0, .next_at = at + 1 };
+        const len = std.unicode.utf8ByteSequenceLength(b0) catch 1;
         const cp: u21 = if (at + len <= text.len)
             std.unicode.utf8Decode(text[at..][0..len]) catch 0xfffd
         else
@@ -301,48 +332,54 @@ pub const Layout = struct {
             l.at = d.next_at;
             if (d.cp == 0xfe0e or d.cp == 0xfe0f or d.cp == 0x200d) continue;
 
-            var next_cps: [8]u21 = undefined;
-            var next_ends: [8]usize = undefined;
-            var next_len: usize = 0;
-            var scan = l.at;
-            while (next_len < next_cps.len) {
-                const nd = decodeAt(l.text, scan) orelse break;
-                next_cps[next_len] = nd.cp;
-                next_ends[next_len] = nd.next_at;
-                scan = nd.next_at;
-                next_len += 1;
-            }
-
             var f: *const Font = l.style.font;
             var glyph = f.glyphIndex(d.cp);
-            const wants_emoji = next_len > 0 and (next_cps[0] == 0xfe0f or next_cps[0] == 0x20e3);
-            if (f.fallback) |fb| {
-                if (glyph == opentype.missing_glyph or wants_emoji) {
-                    const fg = fb.glyphIndex(d.cp);
-                    if (fg != opentype.missing_glyph) {
-                        f = fb;
-                        glyph = fg;
+
+            const next_non_ascii = l.at < l.text.len and l.text[l.at] >= 0x80;
+            if (glyph == opentype.missing_glyph or next_non_ascii or f.num_ccmp_lookups > 0) {
+                const first_next = if (next_non_ascii) decodeAt(l.text, l.at) else null;
+                const wants_emoji = if (first_next) |fn_d| (fn_d.cp == 0xfe0f or fn_d.cp == 0x20e3) else false;
+                if (f.fallback) |fb| {
+                    if (glyph == opentype.missing_glyph or wants_emoji) {
+                        const fg = fb.glyphIndex(d.cp);
+                        if (fg != opentype.missing_glyph) {
+                            f = fb;
+                            glyph = fg;
+                        }
                     }
                 }
-            }
-            if (f.num_ccmp_lookups > 0 and next_len > 0 and glyph != opentype.missing_glyph) {
-                var next_glyphs: [8]u16 = undefined;
-                var valid_len: usize = 0;
-                while (valid_len < next_len) : (valid_len += 1) {
-                    const ng = f.glyphIndex(next_cps[valid_len]);
-                    if (ng == opentype.missing_glyph) break;
-                    next_glyphs[valid_len] = ng;
+                if (f.num_ccmp_lookups > 0 and l.at < l.text.len and glyph != opentype.missing_glyph) {
+                    var next_cps: [8]u21 = undefined;
+                    var next_ends: [8]usize = undefined;
+                    var next_len: usize = 0;
+                    var scan = l.at;
+                    while (next_len < next_cps.len) {
+                        const nd = decodeAt(l.text, scan) orelse break;
+                        next_cps[next_len] = nd.cp;
+                        next_ends[next_len] = nd.next_at;
+                        scan = nd.next_at;
+                        next_len += 1;
+                    }
+                    var next_glyphs: [8]u16 = undefined;
+                    var valid_len: usize = 0;
+                    while (valid_len < next_len) : (valid_len += 1) {
+                        const ng = f.glyphIndex(next_cps[valid_len]);
+                        if (ng == opentype.missing_glyph) break;
+                        next_glyphs[valid_len] = ng;
+                    }
+                    if (f.ligature(glyph, next_glyphs[0..valid_len])) |lig| {
+                        glyph = lig.glyph;
+                        l.at = next_ends[lig.consumed - 1];
+                    } else if (f != l.style.font and wants_emoji and f.colorLayers(glyph) == null) {
+                        f = l.style.font;
+                        glyph = f.glyphIndex(d.cp);
+                    }
                 }
-                if (f.ligature(glyph, next_glyphs[0..valid_len])) |lig| {
-                    glyph = lig.glyph;
-                    l.at = next_ends[lig.consumed - 1];
-                } else if (f != l.style.font and wants_emoji and f.colorLayers(glyph) == null) {
-                    f = l.style.font;
-                    glyph = f.glyphIndex(d.cp);
+                if (l.at < l.text.len and l.text[l.at] >= 0x80) {
+                    if (decodeAt(l.text, l.at)) |nd| {
+                        if (nd.cp == 0xfe0e or nd.cp == 0xfe0f) l.at = nd.next_at;
+                    }
                 }
-            }
-            if (decodeAt(l.text, l.at)) |nd| {
-                if (nd.cp == 0xfe0e or nd.cp == 0xfe0f) l.at = nd.next_at;
             }
 
             const scale = l.style.size / @as(f32, @floatFromInt(f.units_per_em));
@@ -563,16 +600,16 @@ pub const RunCache = struct {
 
     /// Drops the runs not used since the last sweep.
     pub fn sweep(c: *RunCache) void {
-        var stale: std.ArrayList([]const u8) = .empty;
-        defer stale.deinit(c.gpa);
         var it = c.map.iterator();
         while (it.next()) |e| {
-            if (!e.value_ptr.used) stale.append(c.gpa, e.key_ptr.*) catch break;
-            e.value_ptr.used = false;
-        }
-        for (stale.items) |key| {
-            const kv = c.map.fetchRemove(key).?;
-            c.free(kv.key, kv.value.run);
+            if (!e.value_ptr.used) {
+                const key = e.key_ptr.*;
+                const run = e.value_ptr.run;
+                c.map.removeByPtr(e.key_ptr);
+                c.free(key, run);
+            } else {
+                e.value_ptr.used = false;
+            }
         }
     }
 

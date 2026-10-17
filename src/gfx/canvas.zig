@@ -216,6 +216,8 @@ pub const Canvas = struct {
     gpa: std.mem.Allocator,
     width: f32 = 1,
     height: f32 = 1,
+    inv_w: f32 = 2,
+    inv_h: f32 = 2,
     batches: std.ArrayList(Batch) = .empty,
     /// Batches kept from earlier frames, for their memory.
     spare: std.ArrayList(Batch) = .empty,
@@ -251,6 +253,8 @@ pub const Canvas = struct {
     pub fn begin(c: *Canvas, width: u32, height: u32) void {
         c.width = @floatFromInt(width);
         c.height = @floatFromInt(height);
+        c.inv_w = 2.0 / c.width;
+        c.inv_h = 2.0 / c.height;
         // Kept in reverse, so the next frame's batches (popped off the end)
         // get the buffers the same batches had, already big enough.
         var i = c.batches.items.len;
@@ -364,23 +368,33 @@ pub const Canvas = struct {
     }
 
     fn emitGlyph(c: *Canvas, b: *Batch, atlas: *Atlas, f: *const font.Font, glyph: u16, size: f32, quarter: i32, base: f32, color: Color) bool {
-        const e = atlas.glyph(f, glyph, size, @intCast(@mod(quarter, 4))) orelse return true;
+        const e = atlas.glyph(f, glyph, size, @intCast(quarter & 3)) orelse return true;
         if (e.w == 0) return true;
-        const aw: f32 = @floatFromInt(atlas_mod.width);
-        const ah: f32 = @floatFromInt(atlas_mod.height);
-        const x0: f32 = @floatFromInt(@divFloor(quarter, 4) + e.left);
+        const inv_aw: f32 = 1.0 / @as(f32, @floatFromInt(atlas_mod.width));
+        const inv_ah: f32 = 1.0 / @as(f32, @floatFromInt(atlas_mod.height));
+        const x0: f32 = @floatFromInt((quarter >> 2) + e.left);
         const y0 = base + @as(f32, @floatFromInt(e.top));
         const x1 = x0 + @as(f32, @floatFromInt(e.w));
         const y1 = y0 + @as(f32, @floatFromInt(e.h));
-        const tu0 = @as(f32, @floatFromInt(e.x)) / aw;
-        const tv0 = @as(f32, @floatFromInt(e.y)) / ah;
-        const tu1 = @as(f32, @floatFromInt(e.x + e.w)) / aw;
-        const tv1 = @as(f32, @floatFromInt(e.y + e.h)) / ah;
-        const corners = [4][4]f32{ .{ x0, y0, tu0, tv0 }, .{ x1, y0, tu1, tv0 }, .{ x1, y1, tu1, tv1 }, .{ x0, y1, tu0, tv1 } };
-        var verts: [4][shaders.text_floats]f32 = undefined;
-        for (corners, &verts) |k, *out| out.* = .{ c.clipX(k[0]), c.clipY(k[1]), k[2], k[3], color.r, color.g, color.b, color.a };
+        const tu0 = @as(f32, @floatFromInt(e.x)) * inv_aw;
+        const tv0 = @as(f32, @floatFromInt(e.y)) * inv_ah;
+        const tu1 = @as(f32, @floatFromInt(e.x + e.w)) * inv_aw;
+        const tv1 = @as(f32, @floatFromInt(e.y + e.h)) * inv_ah;
+        const cx0 = c.clipX(x0);
+        const cy0 = c.clipY(y0);
+        const cx1 = c.clipX(x1);
+        const cy1 = c.clipY(y1);
         const out = c.vertices(b, shaders.text_floats, 6) orelse return false;
-        for ([_]usize{ 0, 1, 2, 0, 2, 3 }, out) |k, *o| o.* = verts[k];
+        const v0 = [shaders.text_floats]f32{ cx0, cy0, tu0, tv0, color.r, color.g, color.b, color.a };
+        const v1 = [shaders.text_floats]f32{ cx1, cy0, tu1, tv0, color.r, color.g, color.b, color.a };
+        const v2 = [shaders.text_floats]f32{ cx1, cy1, tu1, tv1, color.r, color.g, color.b, color.a };
+        const v3 = [shaders.text_floats]f32{ cx0, cy1, tu0, tv1, color.r, color.g, color.b, color.a };
+        out[0] = v0;
+        out[1] = v1;
+        out[2] = v2;
+        out[3] = v0;
+        out[4] = v2;
+        out[5] = v3;
         return true;
     }
 
@@ -509,11 +523,27 @@ pub const Canvas = struct {
     /// area it can touch.
     fn note(c: *Canvas, op: Op, bounds: Rect, params: anytype, data: []const u8) void {
         const rec = c.recorder orelse return;
-        rec.hash.update(&.{@intFromEnum(op)});
+        var buf: [128]u8 = undefined;
+        buf[0] = @intFromEnum(op);
+        var len: usize = 1;
         // Field by field: the tuple's padding is not set.
-        inline for (params) |field| rec.hash.update(std.mem.asBytes(&field));
-        rec.hash.update(data);
-        if (c.clip) |clip| rec.hash.update(std.mem.asBytes(&clip));
+        inline for (params) |field| {
+            const bytes = std.mem.asBytes(&field);
+            @memcpy(buf[len..][0..bytes.len], bytes);
+            len += bytes.len;
+        }
+        if (data.len == 0) {
+            if (c.clip) |clip| {
+                const clip_bytes = std.mem.asBytes(&clip);
+                @memcpy(buf[len..][0..clip_bytes.len], clip_bytes);
+                len += clip_bytes.len;
+            }
+            rec.hash.update(buf[0..len]);
+        } else {
+            rec.hash.update(buf[0..len]);
+            rec.hash.update(data);
+            if (c.clip) |clip| rec.hash.update(std.mem.asBytes(&clip));
+        }
         const area = if (c.clip) |clip| bounds.intersect(clip) orelse return else bounds;
         rec.bounds = if (rec.bounds) |b| b.unite(area) else area;
     }
@@ -524,12 +554,12 @@ pub const Canvas = struct {
         return .{ .x = r.x + c.origin[0], .y = r.y + c.origin[1], .w = r.w, .h = r.h };
     }
 
-    fn clipX(c: *const Canvas, x: f32) f32 {
-        return x / c.width * 2 - 1;
+    inline fn clipX(c: *const Canvas, x: f32) f32 {
+        return x * c.inv_w - 1;
     }
 
-    fn clipY(c: *const Canvas, y: f32) f32 {
-        return 1 - y / c.height * 2;
+    inline fn clipY(c: *const Canvas, y: f32) f32 {
+        return 1 - y * c.inv_h;
     }
 
     /// How far back `batchFor` looks for a batch to add to.
