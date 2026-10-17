@@ -193,27 +193,34 @@ pub fn uifSlice(format: Format, width: u32, height: u32) UifSlice {
     return .{ .tiling = tiling, .padded_width = pw, .padded_height = ph, .ub_pad = ub_pad, .size = pw * ph * cpp };
 }
 
-pub fn uifTexelOffsetOf(format: Format, width: u32, height: u32, x: u32, y: u32) u32 {
-    const uw = format.utileWidth();
-    const uh = format.utileHeight();
-    const ub_w = uw * 2;
-    const ub_h = uh * 2;
+pub inline fn uifTexelOffsetOf(format: Format, width: u32, height: u32, x: u32, y: u32) u32 {
     const cpp = format.bytesPerPixel();
-    const in_utile = ((y % uh) * uw + x % uw) * cpp;
+    const uw_shift: u5 = if (cpp == 4) 2 else 3;
+    const uh_shift: u5 = if (cpp == 1) 3 else 2;
+    const uw: u32 = @as(u32, 1) << uw_shift;
+    const uh: u32 = @as(u32, 1) << uh_shift;
+    const ub_w_shift: u5 = uw_shift + 1;
+    const ub_h_shift: u5 = uh_shift + 1;
+    const cpp_shift: u5 = switch (cpp) {
+        4 => 2,
+        2 => 1,
+        else => 0,
+    };
+    const in_utile = (((y & (uh - 1)) << uw_shift) | (x & (uw - 1))) << cpp_shift;
     const slice = uifSlice(format, width, height);
     return switch (slice.tiling) {
-        .raster => y * slice.padded_width * cpp + x * cpp,
-        .lineartile => 64 * ((x / uw) + (y / uh)) + in_utile,
-        .ublinear_1_column => 256 * (y / ub_h) + (if ((x & uw) != 0) @as(u32, 64) else 0) + (if ((y & uh) != 0) @as(u32, 128) else 0) + in_utile,
-        .ublinear_2_column => 256 * ((y / ub_h) * 2 + (x / ub_w)) + (if ((x & uw) != 0) @as(u32, 64) else 0) + (if ((y & uh) != 0) @as(u32, 128) else 0) + in_utile,
+        .raster => (y * slice.padded_width + x) << cpp_shift,
+        .lineartile => (((x >> uw_shift) + (y >> uh_shift)) << 6) + in_utile,
+        .ublinear_1_column => ((y >> ub_h_shift) << 8) + (if ((x & uw) != 0) @as(u32, 64) else 0) + (if ((y & uh) != 0) @as(u32, 128) else 0) + in_utile,
+        .ublinear_2_column => ((((y >> ub_h_shift) << 1) + (x >> ub_w_shift)) << 8) + (if ((x & uw) != 0) @as(u32, 64) else 0) + (if ((y & uh) != 0) @as(u32, 128) else 0) + in_utile,
         .uif_no_xor, .uif_xor => blk: {
-            const mb_x = x / ub_w;
-            var mb_y = y / ub_h;
-            if (slice.tiling == .uif_xor and ((mb_x / 4) & 1) != 0) mb_y ^= 0x10;
-            const mb_h = slice.padded_height / ub_h;
-            const mb_id = ((mb_x / 4) * ((mb_h - 1) * 4)) + mb_x + mb_y * 4;
-            const mb_tile_offset = (if ((y % ub_h) >= uh) @as(u32, 128) else 0) + (if ((x % ub_w) >= uw) @as(u32, 64) else 0);
-            break :blk mb_id * 256 + mb_tile_offset + in_utile;
+            const mb_x = x >> ub_w_shift;
+            var mb_y = y >> ub_h_shift;
+            if (slice.tiling == .uif_xor and ((mb_x >> 2) & 1) != 0) mb_y ^= 0x10;
+            const mb_h = slice.padded_height >> ub_h_shift;
+            const mb_id = ((mb_x >> 2) * ((mb_h - 1) << 2)) + mb_x + (mb_y << 2);
+            const mb_tile_offset = (if ((y & uh) != 0) @as(u32, 128) else 0) + (if ((x & uw) != 0) @as(u32, 64) else 0);
+            break :blk (mb_id << 8) + mb_tile_offset + in_utile;
         },
     };
 }
@@ -387,19 +394,19 @@ pub fn tiledPitch(format: Format, width: u32, height: u32) u32 {
 
 /// Byte offset of the 1 KB sub-tile containing micro-tile (utile_x,
 /// utile_y) in a T image `utile_stride` micro-tiles wide.
-fn tSubtileOffset(utile_x: u32, utile_y: u32, utile_stride: u32) u32 {
-    const tile_stride = utile_stride / 8;
-    var tile_x = utile_x / 8;
-    const tile_y = utile_y / 8;
-    const odd_row = tile_y & 1 != 0;
+pub inline fn tSubtileOffset(utile_x: u32, utile_y: u32, utile_stride: u32) u32 {
+    const tile_stride = utile_stride >> 3;
+    var tile_x = utile_x >> 3;
+    const tile_y = utile_y >> 3;
+    const odd_row = (tile_y & 1) != 0;
     // Odd rows of 4 KB tiles run right to left.
     if (odd_row) tile_x = tile_stride - tile_x - 1;
-    const tile_offset = 4096 * (tile_y * tile_stride + tile_x);
+    const tile_offset = (tile_y * tile_stride + tile_x) << 12;
 
-    const stile_index = ((utile_y / 4) & 1) << 1 | ((utile_x / 4) & 1);
+    const stile_index = ((utile_y >> 2) & 1) << 1 | ((utile_x >> 2) & 1);
     const odd_map = [4]u32{ 2, 1, 3, 0 };
     const even_map = [4]u32{ 0, 3, 1, 2 };
-    return tile_offset + 1024 * (if (odd_row) odd_map else even_map)[stile_index];
+    return tile_offset + ((if (odd_row) odd_map else even_map)[stile_index] << 10);
 }
 
 /// Byte offset of pixel (x, y) in a tiled 32-bit image.
@@ -407,21 +414,29 @@ pub fn texelOffset(width: u32, height: u32, x: u32, y: u32) u32 {
     return texelOffsetOf(.xrgb8888, width, height, x, y);
 }
 
-pub fn texelOffsetOf(format: Format, width: u32, height: u32, x: u32, y: u32) u32 {
+pub inline fn texelOffsetOf(format: Format, width: u32, height: u32, x: u32, y: u32) u32 {
     if (!@inComptime() and use_uif) return uifTexelOffsetOf(format, width, height, x, y);
-    const uw = format.utileWidth();
-    const uh = format.utileHeight();
     const cpp = format.bytesPerPixel();
-    const in_utile = ((y % uh) * uw + x % uw) * cpp;
-    if (isLtOf(format, width, height)) {
-        const row_stride = std.mem.alignForward(u32, width, uw) * cpp;
-        return (y - y % uh) * row_stride + (x / uw) * 64 + in_utile;
+    const uw_shift: u5 = if (cpp == 4) 2 else 3;
+    const uh_shift: u5 = if (cpp == 1) 3 else 2;
+    const uw: u32 = @as(u32, 1) << uw_shift;
+    const uh: u32 = @as(u32, 1) << uh_shift;
+    const cpp_shift: u5 = switch (cpp) {
+        4 => 2,
+        2 => 1,
+        else => 0,
+    };
+    const in_utile = (((y & (uh - 1)) << uw_shift) | (x & (uw - 1))) << cpp_shift;
+    if (width <= (uw << 2) or height <= (uh << 2)) {
+        const row_stride = ((width + uw - 1) & ~(uw - 1)) << cpp_shift;
+        return (y & ~(uh - 1)) * row_stride + ((x >> uw_shift) << 6) + in_utile;
     }
-    const utile_stride = std.mem.alignForward(u32, width, 8 * uw) / uw;
-    const utile_x = x / uw;
-    const utile_y = y / uh;
+    const tile_w = uw << 3;
+    const utile_stride = ((width + tile_w - 1) & ~(tile_w - 1)) >> uw_shift;
+    const utile_x = x >> uw_shift;
+    const utile_y = y >> uh_shift;
     // Within a sub-tile, micro-tiles are a 4x4 raster-order grid.
-    const in_subtile = ((utile_y % 4) * 4 + utile_x % 4) * 64;
+    const in_subtile = (((utile_y & 3) << 2) | (utile_x & 3)) << 6;
     return tSubtileOffset(utile_x & ~@as(u32, 3), utile_y & ~@as(u32, 3), utile_stride) + in_subtile + in_utile;
 }
 
@@ -450,25 +465,32 @@ pub fn uploadRectOf(format: Format, dst: []u8, width: u32, height: u32, rect: Re
     std.debug.assert(dst.len >= imageSizeOf(format, width, height));
     std.debug.assert(rect.x + rect.width <= width and rect.y + rect.height <= height);
     if (rect.width == 0 or rect.height == 0) return;
-    const uw = format.utileWidth();
-    const uh = format.utileHeight();
     const cpp = format.bytesPerPixel();
+    const uw_shift: u5 = if (cpp == 4) 2 else 3;
+    const uh_shift: u5 = if (cpp == 1) 3 else 2;
+    const uw: u32 = @as(u32, 1) << uw_shift;
+    const uh: u32 = @as(u32, 1) << uh_shift;
+    const cpp_shift: u5 = switch (cpp) {
+        4 => 2,
+        2 => 1,
+        else => 0,
+    };
     const x_end = rect.x + rect.width;
     const y_end = rect.y + rect.height;
-    var uy = rect.y / uh;
-    while (uy * uh < y_end) : (uy += 1) {
-        var ux = rect.x / uw;
-        while (ux * uw < x_end) : (ux += 1) {
-            const base = texelOffsetOf(format, width, height, ux * uw, uy * uh);
+    var uy = rect.y >> uh_shift;
+    while ((uy << uh_shift) < y_end) : (uy += 1) {
+        var ux = rect.x >> uw_shift;
+        while ((ux << uw_shift) < x_end) : (ux += 1) {
+            const base = texelOffsetOf(format, width, height, ux << uw_shift, uy << uh_shift);
             // The part of this micro-tile inside the rectangle.
-            const x0 = @max(ux * uw, rect.x);
-            const x1 = @min(ux * uw + uw, x_end);
-            const y0 = @max(uy * uh, rect.y);
-            const y1 = @min(uy * uh + uh, y_end);
-            const n = (x1 - x0) * cpp;
+            const x0 = @max(ux << uw_shift, rect.x);
+            const x1 = @min((ux << uw_shift) + uw, x_end);
+            const y0 = @max(uy << uh_shift, rect.y);
+            const y1 = @min((uy << uh_shift) + uh, y_end);
+            const n = (x1 - x0) << cpp_shift;
             for (y0..y1) |y| {
-                const d = base + ((@as(u32, @intCast(y)) % uh) * uw + x0 % uw) * cpp;
-                const sidx = (@as(u32, @intCast(y)) - rect.y) * stride + (x0 - rect.x) * cpp;
+                const d = base + ((((@as(u32, @intCast(y)) & (uh - 1)) << uw_shift) | (x0 & (uw - 1))) << cpp_shift);
+                const sidx = (@as(u32, @intCast(y)) - rect.y) * stride + ((x0 - rect.x) << cpp_shift);
                 @memcpy(dst[d..][0..n], src[sidx..][0..n]);
             }
         }

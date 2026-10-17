@@ -110,7 +110,7 @@ fn code(comptime s: *const [4]u8) u32 {
 
 /// A 0xAARRGGBB colour as an RGB565 pixel (rounded to the nearest), with
 /// blue in the top 5 bits as the tile buffer stores it.
-pub fn toRgb565(argb: u32) u16 {
+pub inline fn toRgb565(argb: u32) u16 {
     const r: u32 = (argb >> 16) & 0xff;
     const g: u32 = (argb >> 8) & 0xff;
     const b: u32 = argb & 0xff;
@@ -118,11 +118,35 @@ pub fn toRgb565(argb: u32) u16 {
 }
 
 /// An RGB565 pixel as 0xffRRGGBB, each channel's bits repeated to fill 8.
-pub fn fromRgb565(p: u16) u32 {
+pub inline fn fromRgb565(p: u16) u32 {
     const b: u32 = p >> 11;
     const g: u32 = (p >> 5) & 0x3f;
     const r: u32 = p & 0x1f;
     return 0xff000000 | (r << 3 | r >> 2) << 16 | (g << 2 | g >> 4) << 8 | (b << 3 | b >> 2);
+}
+
+pub inline fn toRgb565Vec8(argb: @Vector(8, u32)) @Vector(8, u16) {
+    const r = (argb >> @splat(16)) & @as(@Vector(8, u32), @splat(0xff));
+    const g = (argb >> @splat(8)) & @as(@Vector(8, u32), @splat(0xff));
+    const b = argb & @as(@Vector(8, u32), @splat(0xff));
+    const rx = r * @as(@Vector(8, u32), @splat(31)) + @as(@Vector(8, u32), @splat(127));
+    const gx = g * @as(@Vector(8, u32), @splat(63)) + @as(@Vector(8, u32), @splat(127));
+    const bx = b * @as(@Vector(8, u32), @splat(31)) + @as(@Vector(8, u32), @splat(127));
+    const r5 = (rx + @as(@Vector(8, u32), @splat(1)) + (rx >> @splat(8))) >> @splat(8);
+    const g6 = (gx + @as(@Vector(8, u32), @splat(1)) + (gx >> @splat(8))) >> @splat(8);
+    const b5 = (bx + @as(@Vector(8, u32), @splat(1)) + (bx >> @splat(8))) >> @splat(8);
+    return @truncate((b5 << @splat(11)) | (g6 << @splat(5)) | r5);
+}
+
+pub inline fn fromRgb565Vec8(p16: @Vector(8, u16)) @Vector(8, u32) {
+    const p: @Vector(8, u32) = p16;
+    const b = p >> @splat(11);
+    const g = (p >> @splat(5)) & @as(@Vector(8, u32), @splat(0x3f));
+    const r = p & @as(@Vector(8, u32), @splat(0x1f));
+    const r8 = (r << @splat(3)) | (r >> @splat(2));
+    const g8 = (g << @splat(2)) | (g >> @splat(4));
+    const b8 = (b << @splat(3)) | (b >> @splat(2));
+    return @as(@Vector(8, u32), @splat(0xff000000)) | (r8 << @splat(16)) | (g8 << @splat(8)) | b8;
 }
 
 const testing = std.testing;
@@ -141,7 +165,16 @@ test "RGB565 conversions" {
     try testing.expectEqual(@as(u16, 0x07e0), toRgb565(0xff00ff00));
     try testing.expectEqual(@as(u16, 0xf800), toRgb565(0xff0000ff));
     try testing.expectEqual(@as(u32, 0xffffffff), fromRgb565(0xffff));
-    // Every 565 value survives a round trip.
+    // Every 565 value survives a round trip, and 8-wide SIMD matches scalar.
     var p: u32 = 0;
-    while (p < 0x10000) : (p += 1) try testing.expectEqual(@as(u16, @intCast(p)), toRgb565(fromRgb565(@intCast(p))));
+    while (p < 0x10000) : (p += 8) {
+        var in16: [8]u16 = undefined;
+        for (0..8) |i| in16[i] = @intCast(p + i);
+        const rgb32: [8]u32 = fromRgb565Vec8(in16);
+        const out16: [8]u16 = toRgb565Vec8(rgb32);
+        for (0..8) |i| {
+            try testing.expectEqual(fromRgb565(in16[i]), rgb32[i]);
+            try testing.expectEqual(in16[i], out16[i]);
+        }
+    }
 }

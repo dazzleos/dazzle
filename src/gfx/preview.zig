@@ -41,7 +41,7 @@ const max_varyings = shaders.shape_floats - 2;
 
 /// Pixels waiting to be shaded together.
 const Group = struct {
-    fs: *const vc4.compiler.Compiled,
+    decoded: []const sim.DecodedInst,
     uniforms: []const u32 = &.{},
     uniform_buf: [8]u32 = undefined,
     texture: []const u8 = &.{},
@@ -64,7 +64,9 @@ pub fn render(c: *const canvas_mod.Canvas, programs: *const Programs, img: Image
             .image => &programs.image.fs,
         };
         const nvary = floats - 2;
-        var group: Group = .{ .fs = fs };
+        var decoded_buf: [vc4.compiler.max_code]sim.DecodedInst = undefined;
+        const decoded = sim.decodeProgram(fs.code(), &decoded_buf);
+        var group: Group = .{ .decoded = decoded };
         // An image's own texture (sampled nearest: the simulator has no
         // filtering).
         var image_texture: []u8 = &.{};
@@ -196,7 +198,7 @@ fn shade(g: *Group, nvary: usize, img: Image) !void {
     }
     var tile: sim.Vec = undefined;
     for (&tile, g.index) |*t, idx| t.* = img.pixels[idx];
-    const r = try sim.run(g.fs.code(), .{ .uniforms = g.uniforms, .varyings = g.varyings[0..nvary], .tlb_color_in = tile, .texture_memory = g.texture });
+    const r = try sim.runFragmentDecoded(g.decoded, .{ .uniforms = g.uniforms, .varyings = g.varyings[0..nvary], .tlb_color_in = tile, .texture_memory = g.texture });
     for (g.index[0..g.n], 0..) |idx, lane| img.pixels[idx] = r.tlb_color.?[lane];
     g.n = 0;
 }

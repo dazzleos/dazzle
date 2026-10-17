@@ -31,32 +31,82 @@ pub const Canvas = struct {
     /// is at (x, y).
     pub fn blendMask(c: Canvas, x: i32, y: i32, mask: []const u8, mask_w: u32, mask_h: u32, color: u32) void {
         const color_alpha: u32 = color >> 24;
+        if (color_alpha == 0) return;
         // Clip the mask to the canvas once, not per pixel.
         const mx0: u32 = @intCast(std.math.clamp(-x, 0, @as(i32, @intCast(mask_w))));
         const mx1: u32 = @intCast(std.math.clamp(@as(i32, @intCast(c.width)) - x, 0, @as(i32, @intCast(mask_w))));
         const my0: u32 = @intCast(std.math.clamp(-y, 0, @as(i32, @intCast(mask_h))));
         const my1: u32 = @intCast(std.math.clamp(@as(i32, @intCast(c.height)) - y, 0, @as(i32, @intCast(mask_h))));
-        if (mx0 >= mx1) return;
+        if (mx0 >= mx1 or my0 >= my1) return;
+
+        const span_w: usize = mx1 - mx0;
+        const color_opaque: u32 = color | 0xff000000;
+        const v_src_rb: @Vector(4, u32) = @splat(color & 0x00ff00ff);
+        const v_src_g: @Vector(4, u32) = @splat(color & 0x0000ff00);
+
         for (my0..my1) |my| {
             const cy: usize = @intCast(y + @as(i32, @intCast(my)));
-            const row = c.pixels[cy * c.stride + @as(usize, @intCast(x + @as(i32, @intCast(mx0)))) ..][0 .. mx1 - mx0];
-            const covs = mask[my * mask_w + mx0 ..][0 .. mx1 - mx0];
+            const row = c.pixels[cy * c.stride + @as(usize, @intCast(x + @as(i32, @intCast(mx0)))) ..][0..span_w];
+            const covs = mask[my * mask_w + mx0 ..][0..span_w];
+            var i: usize = 0;
+            while (i + 4 <= span_w) : (i += 4) {
+                blendCov4(row[i..][0..4], covs[i..][0..4].*, color_opaque, color_alpha, v_src_rb, v_src_g);
+            }
             if (color_alpha == 255) {
-                for (row, covs) |*p, cov| if (cov != 0) {
-                    p.* = blend(p.*, color, cov);
-                };
+                while (i < span_w) : (i += 1) {
+                    const cov = covs[i];
+                    if (cov != 0) row[i] = blend(row[i], color, cov);
+                }
             } else {
-                for (row, covs) |*p, cov| if (cov != 0) {
-                    p.* = blend(p.*, color, div255(@as(u32, cov) * color_alpha));
-                };
+                while (i < span_w) : (i += 1) {
+                    const cov = covs[i];
+                    if (cov != 0) row[i] = blend(row[i], color, div255(@as(u32, cov) * color_alpha));
+                }
             }
         }
     }
 };
 
+inline fn blendCov4(
+    dst_ptr: *[4]u32,
+    cov4: [4]u8,
+    color_opaque: u32,
+    color_alpha: u32,
+    v_src_rb: @Vector(4, u32),
+    v_src_g: @Vector(4, u32),
+) void {
+    const cov_bits: u32 = @bitCast(cov4);
+    if (cov_bits == 0) return;
+    if (color_alpha == 255 and cov_bits == 0xffffffff) {
+        dst_ptr.* = @splat(color_opaque);
+        return;
+    }
+    const v_cov8: @Vector(4, u8) = cov4;
+    var v_a: @Vector(4, u32) = v_cov8;
+    if (color_alpha != 255) {
+        const prod = v_a * @as(@Vector(4, u32), @splat(color_alpha)) + @as(@Vector(4, u32), @splat(128));
+        v_a = (prod + (prod >> @splat(8))) >> @splat(8);
+    }
+    const v_ia = @as(@Vector(4, u32), @splat(255)) - v_a;
+    const v_dst: @Vector(4, u32) = dst_ptr.*;
+    const v_mask_rb: @Vector(4, u32) = @splat(0x00ff00ff);
+    const v_mask_g: @Vector(4, u32) = @splat(0x0000ff00);
+    const v_bias_rb: @Vector(4, u32) = @splat(0x00800080);
+    const v_bias_g: @Vector(4, u32) = @splat(0x00008000);
+    const v_alpha: @Vector(4, u32) = @splat(0xff000000);
+    const v_shift8: @Vector(4, u5) = @splat(8);
+
+    const v_rb = v_src_rb * v_a + (v_dst & v_mask_rb) * v_ia + v_bias_rb;
+    const v_g = v_src_g * v_a + (v_dst & v_mask_g) * v_ia + v_bias_g;
+    const v_rb_out = ((v_rb + ((v_rb >> v_shift8) & v_mask_rb)) >> v_shift8) & v_mask_rb;
+    const v_g_out = ((v_g + ((v_g >> v_shift8) & v_mask_g)) >> v_shift8) & v_mask_g;
+    const v_blended = v_alpha | v_rb_out | v_g_out;
+    dst_ptr.* = @select(u32, v_a == @as(@Vector(4, u32), @splat(0)), v_dst, v_blended);
+}
+
 /// `src` over `dst` with alpha `a` (0-255), per colour channel. The result
 /// is opaque.
-pub fn blend(dst: u32, src: u32, a: u32) u32 {
+pub inline fn blend(dst: u32, src: u32, a: u32) u32 {
     if (a >= 255) return src | 0xff000000;
     const ia = 255 - a;
     // Red and blue together (16 bits each, so they cannot overflow into
@@ -69,8 +119,41 @@ pub fn blend(dst: u32, src: u32, a: u32) u32 {
     return 0xff000000 | rb_out | g_out;
 }
 
+/// Blends `src` with uniform alpha `a` (0-255) across a horizontal span of pixels using 4-wide SIMD.
+pub fn blendSpan(dst_slice: []u32, src: u32, a: u32) void {
+    if (a == 0 or dst_slice.len == 0) return;
+    if (a >= 255) {
+        @memset(dst_slice, src | 0xff000000);
+        return;
+    }
+    const ia: u32 = 255 - a;
+    const src_rb: u32 = (src & 0xff00ff) * a + 0x800080;
+    const src_g: u32 = (src & 0x00ff00) * a + 0x008000;
+
+    const v_src_rb: @Vector(4, u32) = @splat(src_rb);
+    const v_src_g: @Vector(4, u32) = @splat(src_g);
+    const v_ia: @Vector(4, u32) = @splat(ia);
+    const v_mask_rb: @Vector(4, u32) = @splat(0x00ff00ff);
+    const v_mask_g: @Vector(4, u32) = @splat(0x0000ff00);
+    const v_alpha: @Vector(4, u32) = @splat(0xff000000);
+    const v_shift8: @Vector(4, u5) = @splat(8);
+
+    var i: usize = 0;
+    while (i + 4 <= dst_slice.len) : (i += 4) {
+        const v_dst: @Vector(4, u32) = dst_slice[i..][0..4].*;
+        const v_rb = v_src_rb + (v_dst & v_mask_rb) * v_ia;
+        const v_g = v_src_g + (v_dst & v_mask_g) * v_ia;
+        const v_rb_out = ((v_rb + ((v_rb >> v_shift8) & v_mask_rb)) >> v_shift8) & v_mask_rb;
+        const v_g_out = ((v_g + ((v_g >> v_shift8) & v_mask_g)) >> v_shift8) & v_mask_g;
+        dst_slice[i..][0..4].* = v_alpha | v_rb_out | v_g_out;
+    }
+    while (i < dst_slice.len) : (i += 1) {
+        dst_slice[i] = blend(dst_slice[i], src, a);
+    }
+}
+
 /// Rounds x / 255 to the nearest integer, for 0 <= x <= 255 * 255.
-fn div255(x: u32) u32 {
+inline fn div255(x: u32) u32 {
     const y = x + 128;
     return (y + (y >> 8)) >> 8;
 }
