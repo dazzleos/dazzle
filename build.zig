@@ -1209,6 +1209,7 @@ pub fn build(b: *std.Build) void {
     const install_shell = b.addInstallArtifact(shell_exe, .{});
     const maps_mod = addProgramModule(b, "src/apps/maps/main.zig", target, optimize, pi, shaders, true);
     maps_mod.addImport("map_data", b.createModule(.{ .root_source_file = map_data, .target = target, .optimize = optimize }));
+    _ = addKete(b, maps_mod, pi, target, optimize, "src/apps/maps");
     const maps_exe = b.addExecutable(.{
         .name = "dazzle-maps",
         .root_module = maps_mod,
@@ -1368,6 +1369,7 @@ pub fn build(b: *std.Build) void {
     const host_maps = addProgramModule(b, "src/apps/maps/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_maps.addImport("map_data", b.createModule(.{ .root_source_file = map_data, .target = b.graph.host, .optimize = test_optimize }));
     host_maps.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
+    _ = addKete(b, host_maps, host, b.graph.host, test_optimize, "src/apps/maps");
     const host_terminal = addProgramModule(b, "src/apps/terminal/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_terminal.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     _ = addKete(b, host_terminal, host, b.graph.host, test_optimize, "src/apps/terminal");
