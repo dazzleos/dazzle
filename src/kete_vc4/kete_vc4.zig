@@ -51,6 +51,10 @@ pub const Host = struct {
         /// Who draws the title bar: kete, or no one (an app with the whole
         /// screen, as setup is).
         decorations: kete.window.WindowDecorations = .toolkit,
+        /// Records a frame while the GPU renders the one before, rather
+        /// than waiting for it: for an app that draws a frame after another
+        /// (a game), at the cost of a frame's delay and a buffer's memory.
+        pipelined: bool = false,
     };
 
     /// Opens the GPU, and makes a kete app whose windows are opened on the
@@ -67,6 +71,7 @@ pub const Host = struct {
         h.display = .{ .gpa = gpa, .io = io, .gpu = gpu, .environ = environ, .app_id = options.app_id, .decorations = options.decorations };
         h.renderer = try Renderer.init(gpa, h.dev, gpu);
         errdefer h.renderer.deinit();
+        if (options.pipelined and h.renderer.setPipelined(true)) h.display.renderer = &h.renderer;
         var font_buf: [256]u8 = undefined;
         var emoji_buf: [256]u8 = undefined;
         h.app = try kete.App.init(gpa, io, environ, .{

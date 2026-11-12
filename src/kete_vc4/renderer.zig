@@ -7,6 +7,13 @@
 //! buffer's GEM handle on the same device, so there is nothing to import.
 //! Draws of the app's own (`kete.gfx.GpuDraw`) are given the
 //! `vc4.render.Frame` (see `Vc4Area`).
+//!
+//! It waits for the GPU to finish each frame, unless `pipelined`: then a
+//! frame is handed to the GPU and left with it (`pending`, which the
+//! window keeps in flight, showing it once the next is handed over), so
+//! the next is recorded while the GPU renders it. Its buffers take turns
+//! for that: the previous frame's vertices and glyph texture are left
+//! alone while the GPU may still read them.
 
 const std = @import("std");
 const kete = @import("kete");
@@ -37,7 +44,8 @@ pub const tiled_modifier: u64 = (0x07 << 56) | 1;
 
 /// The frames drawn: how many, the time spent recording their draws (on
 /// the CPU) and drawing them (from handing them to the GPU to its
-/// finishing), and how many pixels they redrew.
+/// finishing; with `pipelined`, only handing them over), and how many
+/// pixels they redrew.
 pub const Stats = struct {
     frames: u32 = 0,
     cpu_ns: u64 = 0,
@@ -72,6 +80,17 @@ pub const Renderer = struct {
     /// Frames are drawn 4x multisampled (antialiased; see
     /// `render.Frame.beginMultisampled`).
     multisampled: bool = false,
+    /// Frames are left with the GPU rather than waited for (see above):
+    /// set with `setPipelined`.
+    pipelined: bool = false,
+    /// The frame last handed to the GPU and not waited for (`Gpu.submit`'s
+    /// number), for the window to keep in flight.
+    pending: ?u64 = null,
+    /// With `pipelined`: the previous frame's vertices and glyph texture
+    /// (and the rows of it not uploaded yet), taking turns with this one's.
+    other_vbo: ?vc4.Bo = null,
+    other_atlas_bo: ?vc4.Bo = null,
+    other_atlas_stale: ?atlas_mod.Rect = null,
 
     const ImageTexture = struct {
         bo: vc4.Bo,
@@ -106,7 +125,9 @@ pub const Renderer = struct {
         while (it.next()) |t| r.dev.destroyBo(t.bo);
         r.images.deinit(r.gpa);
         if (r.vbo) |bo| r.dev.destroyBo(bo);
+        if (r.other_vbo) |bo| r.dev.destroyBo(bo);
         if (r.atlas_bo) |bo| r.dev.destroyBo(bo);
+        if (r.other_atlas_bo) |bo| r.dev.destroyBo(bo);
         r.gpa.destroy(r.frame);
     }
 
@@ -114,10 +135,22 @@ pub const Renderer = struct {
         return .of(r);
     }
 
+    /// Leaves frames with the GPU (see above), if it can say when they are
+    /// done; true if it now does.
+    pub fn setPipelined(r: *Renderer, on: bool) bool {
+        r.pipelined = on and r.gpu.vtable.submit != null and r.gpu.vtable.wait != null;
+        return r.pipelined;
+    }
+
     /// Makes room for the canvases a frame draws, and uploads the glyphs
     /// their text added to the atlas, and their images. The previous frame
-    /// must have finished rendering.
+    /// must have finished rendering, unless `pipelined`.
     pub fn prepare(r: *Renderer, canvases: []const *const Canvas) !void {
+        if (r.pipelined) {
+            std.mem.swap(?vc4.Bo, &r.vbo, &r.other_vbo);
+            std.mem.swap(?vc4.Bo, &r.atlas_bo, &r.other_atlas_bo);
+            std.mem.swap(?atlas_mod.Rect, &r.atlas_stale, &r.other_atlas_stale);
+        }
         var bytes: usize = 0;
         for (canvases) |c| for (c.batches.items) |*b| {
             bytes += std.mem.alignForward(usize, b.floats.items.len * 4, 16);
@@ -158,20 +191,30 @@ pub const Renderer = struct {
             const img = b.image orelse continue;
             if (r.images.getPtr(img.id)) |t| {
                 if (t.version == img.version) continue;
-                // Its pixels changed in place: the same texture, again.
+                // Its pixels changed in place: the same texture, again; or,
+                // with a frame in flight that may be drawing it, another
+                // (the kernel keeps the old one until it is done).
+                if (r.pipelined) {
+                    const bo = try r.dev.createBo(t.bo.map.len);
+                    r.dev.destroyBo(t.bo);
+                    t.bo = bo;
+                }
                 vc4.texture.upload(t.bo.map, img.pixels, img.width, img.height);
                 t.version = img.version;
                 continue;
             }
             const size = vc4.texture.imageSize(img.width, img.height);
-            const bo = takeStaleBo(&stale, size) orelse try r.dev.createBo(size);
+            const bo = r.takeStaleBo(&stale, size) orelse try r.dev.createBo(size);
             errdefer r.dev.destroyBo(bo);
             vc4.texture.upload(bo.map, img.pixels, img.width, img.height);
             try r.images.put(r.gpa, img.id, .{ .bo = bo, .version = img.version });
         };
     }
 
-    fn takeStaleBo(stale: *std.ArrayList(vc4.Bo), size: u32) ?vc4.Bo {
+    /// A buffer of an image no longer drawn, for a new one the same size
+    /// (not with a frame in flight, which may still be drawing it).
+    fn takeStaleBo(r: *const Renderer, stale: *std.ArrayList(vc4.Bo), size: u32) ?vc4.Bo {
+        if (r.pipelined) return null;
         for (stale.items, 0..) |bo, i| {
             if (bo.map.len == size) return stale.swapRemove(i);
         }
@@ -191,8 +234,10 @@ pub const Renderer = struct {
             r.atlas = a;
             a.dirty = all;
         }
+        // What changed, for this texture and (taking turns) the other.
         if (a.dirty) |d| {
             r.atlas_stale = merge(r.atlas_stale, d);
+            r.other_atlas_stale = merge(r.other_atlas_stale, d);
             a.dirty = null;
         }
         const d = r.atlas_stale orelse return;
@@ -306,7 +351,9 @@ pub const Renderer = struct {
             .gpu => |g| if (frame.covers(viewport(g.area.scissor orelse g.area.viewport))) try g.f(g.ctx, frame, g.area),
         };
         const issued = sys.nowNs();
-        try r.gpu.vtable.run(r.gpu.ptr, frame);
+        if (r.pipelined) {
+            r.pending = try r.gpu.vtable.submit.?(r.gpu.ptr, frame);
+        } else try r.gpu.vtable.run(r.gpu.ptr, frame);
         r.stats.frames += 1;
         r.stats.cpu_ns += issued - started;
         r.stats.gpu_ns += sys.nowNs() - issued;

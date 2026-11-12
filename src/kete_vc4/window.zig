@@ -88,6 +88,9 @@ pub const Window = struct {
     on_key: ?kete.ValueCallback(KeyPress) = null,
     /// Takes the input it wants before kete sees it (`Display.input_filter`).
     input_filter: ?InputFilter = null,
+    /// The renderer, when it leaves frames with the GPU: the frame it left
+    /// is kept in flight (`Display.renderer`).
+    renderer: ?*renderer_mod.Renderer = null,
 
     pub fn platform(_: *const Window) kwin.WindowPlatform {
         return .custom;
@@ -251,13 +254,20 @@ pub const Window = struct {
         return w.win.bufferAge();
     }
 
-    /// Shows the frame the renderer drew, saying what changed in it.
+    /// Shows the frame the renderer drew, saying what changed in it; or,
+    /// if the renderer left it with the GPU, keeps it in flight and shows
+    /// the one before.
     pub fn showDamaged(w: *Window, damage: ?[]const kgfx.Viewport) !void {
-        const d = damage orelse return w.win.showDamaged(null);
         var vps: [kgfx.frame.Damage.max_rects]vc4.render.Viewport = undefined;
-        if (d.len > vps.len) return w.win.showDamaged(null);
-        for (d, vps[0..d.len]) |v, *o| o.* = renderer_mod.viewport(v);
-        return w.win.showDamaged(vps[0..d.len]);
+        const rects: ?[]const vc4.render.Viewport = if (damage) |d| if (d.len <= vps.len) blk: {
+            for (d, vps[0..d.len]) |v, *o| o.* = renderer_mod.viewport(v);
+            break :blk vps[0..d.len];
+        } else null else null;
+        if (w.renderer) |r| if (r.pending) |seqno| {
+            r.pending = null;
+            return w.win.submitted(seqno, rects);
+        };
+        return w.win.showDamaged(rects);
     }
 
     /// Dazzle's input since the last call, as kete's.
@@ -389,6 +399,9 @@ pub const Display = struct {
     on_key: ?kete.ValueCallback(KeyPress) = null,
     /// Sees the input first, and takes what it wants from kete.
     input_filter: ?InputFilter = null,
+    /// The renderer, if it leaves frames with the GPU (see
+    /// `Renderer.pipelined`): the windows keep its frame in flight.
+    renderer: ?*renderer_mod.Renderer = null,
 
     const max_app_fds = app.window.max_wake_fds - max_sources;
     const max_sources = 3;
@@ -481,7 +494,8 @@ pub const Display = struct {
             side.* = v;
         };
         const win = try app.Window.open(d.gpa, d.gpu, d.environ, options);
-        d.window = .{ .win = win, .gpa = d.gpa, .drawn_by = d.decorations, .keyboard = d.keyboard, .on_key = d.on_key, .input_filter = d.input_filter };
+        d.window = .{ .win = win, .gpa = d.gpa, .drawn_by = d.decorations, .keyboard = d.keyboard, .on_key = d.on_key, .input_filter = d.input_filter, .renderer = d.renderer };
+        if (d.renderer != null) try win.setPipelined(true);
         d.window.?.keepTitle(o.title);
         d.syncWake();
         return &d.window.?;

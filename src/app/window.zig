@@ -875,8 +875,18 @@ pub const Window = struct {
             try w.render(frame);
             return w.showDamaged(damage);
         }
-        const i = w.back orelse return error.NoFrameBegun;
+        if (w.back == null) return error.NoFrameBegun;
         const seqno = try w.gpu.vtable.submit.?(w.gpu.ptr, frame);
+        return w.submitted(seqno, damage);
+    }
+
+    /// Keeps the frame drawn into `beginFrame`'s buffer, which the GPU is
+    /// rendering (`seqno`, from `Gpu.submit`), in flight, and shows the
+    /// frame in flight before it: `submit` for a frame already handed to
+    /// the GPU by its renderer. Only with `setPipelined`.
+    pub fn submitted(w: *Window, seqno: u64, damage: ?[]const vc4.render.Viewport) !void {
+        std.debug.assert(w.pipelined);
+        const i = w.back orelse return error.NoFrameBegun;
         // The frame before is done by the time this one starts (the GPU
         // takes jobs in turn): show it while this one renders.
         try w.finishInFlight();
