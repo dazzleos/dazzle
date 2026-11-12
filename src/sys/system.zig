@@ -71,6 +71,34 @@ pub const config_dir = "/data/system";
 pub const hostname_file = "/data/system/hostname";
 /// There once setup has finished.
 pub const setup_done_file = "/data/system/setup-done";
+/// "on" to serve the log over HTTP (see init's logserver.zig), which
+/// Settings turns on and off; off without it.
+pub const log_server_file = "/data/system/log-server";
+/// On the kernel's command line, serves the log over HTTP whatever
+/// `log_server_file` says (as `zig build qemu` does, having no card).
+pub const log_server_cmdline = "dazzle.log_server=on";
+
+/// Whether the log is to be served over HTTP: the kernel's command line
+/// has `log_server_cmdline`, or `log_server_file` says "on".
+pub fn logServerOn() bool {
+    return logServerForced() or logServerChosen();
+}
+
+/// Whether the kernel's command line has `log_server_cmdline`.
+pub fn logServerForced() bool {
+    var buf: [1024]u8 = undefined;
+    const cmdline = sys.readFile("/proc/cmdline", &buf) orelse return false;
+    var words = std.mem.tokenizeAny(u8, cmdline, " \n");
+    while (words.next()) |w| if (std.mem.eql(u8, w, log_server_cmdline)) return true;
+    return false;
+}
+
+/// Whether `log_server_file` says "on".
+pub fn logServerChosen() bool {
+    var buf: [16]u8 = undefined;
+    const text = sys.readFile(log_server_file, &buf) orelse return false;
+    return std.mem.eql(u8, std.mem.trim(u8, text, " \n"), "on");
+}
 /// The user's files.
 pub const user_dir = "/data/user";
 /// The apps installed, each in its own folder: /data/apps/<name>/<name> is
@@ -140,6 +168,8 @@ pub const Request = union(enum) {
     locale: locale.Settings,
     /// In MiB, one of `video_memory_sizes`.
     video_memory: u16,
+    /// Serve the log over HTTP, or not.
+    log_server: bool,
 
     pub fn parse(line: []const u8) ?Request {
         var f = std.mem.tokenizeAny(u8, line, " \n");
@@ -159,6 +189,7 @@ pub const Request = union(enum) {
             if (std.mem.indexOfScalar(u16, &video_memory_sizes, mib) == null) return null;
             return .{ .video_memory = mib };
         }
+        if (std.mem.eql(u8, kind, "log_server")) return .{ .log_server = parseOnOff(f.next() orelse return null) orelse return null };
         if (std.mem.eql(u8, kind, "update")) {
             const hex = f.next() orelse return null;
             const sig = f.next() orelse return null;
@@ -178,13 +209,19 @@ pub const Request = union(enum) {
         return switch (r) {
             .status, .subscribe => true,
             .prepare, .hostname, .finish => client == .setup,
-            .update, .restart, .video_memory => client == .settings,
+            .update, .restart, .video_memory, .log_server => client == .settings,
             .locale => client == .setup or client == .settings,
         };
     }
 };
 
 pub const Client = enum { setup, settings, shell };
+
+fn parseOnOff(word: []const u8) ?bool {
+    if (std.mem.eql(u8, word, "on")) return true;
+    if (std.mem.eql(u8, word, "off")) return false;
+    return null;
+}
 
 /// What an OS slot holds: when its source was committed (seconds since
 /// 1970: newer systems have later times) and the commit (Dazzle's and the
@@ -285,6 +322,8 @@ pub const Report = struct {
     /// The memory the GPU may have now, and from the next start, in MiB.
     video_memory_now: ?u16 = null,
     video_memory_next: ?u16 = null,
+    /// The log is served over HTTP (see `logServerOn`).
+    log_server: bool = false,
     /// The manager refused the client.
     denied: bool = false,
 
@@ -318,6 +357,7 @@ pub const Report = struct {
         w.print("\nlocale {s} {s}", .{ r.locale.language.code(), r.locale.keyboard.code() }) catch {};
         w.writeAll("\nvideo_memory") catch {};
         for ([_]?u16{ r.video_memory_now, r.video_memory_next }) |v| if (v) |mib| w.print(" {d}", .{mib}) catch {} else w.writeAll(" -") catch {};
+        w.print("\nlog_server {s}", .{if (r.log_server) "on" else "off"}) catch {};
         w.writeAll("\nend\n") catch {};
         return w.buffered();
     }
@@ -355,6 +395,8 @@ pub const Report = struct {
             } else if (std.mem.eql(u8, kind, "video_memory")) {
                 r.video_memory_now = std.fmt.parseInt(u16, f.next() orelse continue, 10) catch null;
                 r.video_memory_next = std.fmt.parseInt(u16, f.next() orelse continue, 10) catch null;
+            } else if (std.mem.eql(u8, kind, "log_server")) {
+                r.log_server = parseOnOff(f.next() orelse continue) orelse false;
             } else if (std.mem.eql(u8, kind, "update")) {
                 r.update = std.meta.stringToEnum(UpdateState, f.next() orelse continue) orelse .none;
                 if (r.update == .failed) r.update_failure = std.meta.stringToEnum(UpdateFailure, f.next() orelse "io") orelse .io;
@@ -552,7 +594,7 @@ test "requests and reports go through the socket" {
     var r: Report = .{ .storage = .preparing, .progress = 42, .hostname = Hostname.parse("awesome-elephant").? };
     var buf: [256]u8 = undefined;
     const text = r.write(&buf);
-    try testing.expectEqualStrings("storage preparing 42\nhostname awesome-elephant\nversion a -\nversion b -\nupdate none\nlocale en-US us\nvideo_memory - -\nend\n", text);
+    try testing.expectEqualStrings("storage preparing 42\nhostname awesome-elephant\nversion a -\nversion b -\nupdate none\nlocale en-US us\nvideo_memory - -\nlog_server off\nend\n", text);
     const back = Report.parse(text).?;
     try testing.expectEqual(StorageState.preparing, back.storage);
     try testing.expectEqual(@as(u8, 42), back.progress);
@@ -592,6 +634,17 @@ test "requests and reports go through the socket" {
     try testing.expect(!videoMemoryAllowed(256, 430));
     try testing.expect(videoMemoryAllowed(192, 430));
     try testing.expect(!videoMemoryAllowed(100, 940));
+    // Serving the log: only Settings turns it on or off.
+    const serving: Report = .{ .log_server = true };
+    var serving_buf: [256]u8 = undefined;
+    try testing.expect(Report.parse(serving.write(&serving_buf)).?.log_server);
+    try testing.expect(Request.parse("log_server on\n").?.log_server);
+    try testing.expect(!Request.parse("log_server off\n").?.log_server);
+    try testing.expect(Request.parse("log_server yes\n") == null);
+    try testing.expect(Request.parse("log_server\n") == null);
+    try testing.expect(Request.allowedFor(.{ .log_server = true }, .settings));
+    try testing.expect(!Request.allowedFor(.{ .log_server = true }, .setup));
+    try testing.expect(!Request.allowedFor(.{ .log_server = true }, .shell));
     try testing.expect(Version.parse("soon abc") == null);
     try testing.expect(Version.parse("12 a/b") == null);
 

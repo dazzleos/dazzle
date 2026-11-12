@@ -64,6 +64,8 @@ pub const Actions = struct {
     test_sound: bool = false,
     /// Appearance settings (Dark or Light colour scheme).
     appearance: ?ui.theme.Settings = null,
+    /// Serve the log over HTTP, or stop.
+    log_server: ?bool = null,
 
     pub const GpioChange = struct { pin: u6, mode: gpio.Mode };
 
@@ -128,6 +130,9 @@ pub const Settings = struct {
     gpio: ?*const gpio.Pins = null,
     /// The system's log, as read so far (while its page shows).
     log: ?*const log.Log = null,
+    /// Whether the log is served over HTTP; null until the system manager
+    /// says.
+    log_server: ?bool = null,
     /// What the network manager last said; null if it could not be asked.
     manager: ?*const info.manager.Report = null,
     /// The apps that can be installed, and how installing goes.
@@ -407,6 +412,13 @@ pub const test_sizes = [_][2]u32{
 pub fn findText(node: *ui.Node, text: []const u8) ?*ui.Node {
     if (node.widget.as(ui.Text)) |t| if (std.mem.eql(u8, t.text, text)) return node;
     for (node.children.items) |ch| if (findText(ch, text)) |n| return n;
+    return null;
+}
+
+/// The first text with `part` in it.
+pub fn findTextContaining(node: *ui.Node, part: []const u8) ?*ui.Node {
+    if (node.widget.as(ui.Text)) |t| if (std.mem.indexOf(u8, t.text, part) != null) return node;
+    for (node.children.items) |ch| if (findTextContaining(ch, part)) |n| return n;
     return null;
 }
 

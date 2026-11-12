@@ -5,9 +5,15 @@
 //!                          which include every program's; see `sys.print`)
 //!     http://<pi>/follow   the same, then new messages as they arrive
 //!
+//! Only while it is turned on, in Settings (`sys.system.log_server_file`,
+//! which it looks at every second), or by `dazzle.log_server=on` on the
+//! kernel's command line: it is off unless asked for, as anyone on the
+//! network can read the log.
+//!
 //! Each request gets its own process reading /dev/kmsg, so a hung GPU job
-//! in the demo does not stop the log. The server runs as the Dazzle user
-//! once it has bound its port.
+//! in the demo does not stop the log; turning the server off ends them.
+//! The server runs as the Dazzle user, keeping only the capability to
+//! bind its port; the processes for requests keep none.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -18,6 +24,9 @@ pub const Ip4 = [4]u8;
 
 /// The HTTP port it listens on.
 const http_port = 80;
+
+/// How often it looks at whether it is to serve, in milliseconds.
+const check_ms = 1000;
 
 fn sockaddrIn(addr: Ip4, port: u16) linux.sockaddr.in {
     return .{
@@ -55,33 +64,80 @@ fn serve() !void {
     ignoreSignal(.CHLD);
     ignoreSignal(.PIPE);
 
-    const listener: linux.fd_t = @intCast(try sys.check(linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0)));
-    const one: c_int = 1;
-    _ = linux.setsockopt(listener, linux.SOL.SOCKET, linux.SO.REUSEADDR, std.mem.asBytes(&one), @sizeOf(c_int));
-    const bind_addr = sockaddrIn(.{ 0, 0, 0, 0 }, http_port);
-    _ = try sys.check(linux.bind(listener, @ptrCast(&bind_addr), @sizeOf(@TypeOf(bind_addr))));
-    _ = try sys.check(linux.listen(listener, 4));
+    // Only binding to the port needs root's privilege; reading /dev/kmsg
+    // does not.
+    try sys.dropPrivilegesKeeping(&.{.net_bind_service});
 
-    // Only binding to the port needed root. Reading /dev/kmsg does not.
-    try sys.dropPrivileges();
-
-    sys.print("dazzle: log server listening on HTTP port {d} as uid {d}\n", .{ http_port, linux.getuid() });
-
+    const forced = sys.system.logServerForced();
+    var listener: ?linux.fd_t = null;
+    // The clients watch the read end, and stop when it is closed here.
+    var stop: [2]linux.fd_t = undefined;
+    var last_err: ?anyerror = null;
     while (true) {
-        const rc = linux.accept4(listener, null, null, linux.SOCK.CLOEXEC);
-        if (linux.errno(rc) != .SUCCESS) {
-            sys.sleepMs(100);
-            continue;
+        const on = forced or sys.system.logServerChosen();
+        if (on and listener == null) {
+            if (listen()) |l| {
+                if (sys.check(linux.pipe2(&stop, .{ .CLOEXEC = true }))) |_| {
+                    listener = l;
+                    last_err = null;
+                    sys.print("dazzle: log server listening on HTTP port {d} as uid {d}\n", .{ http_port, linux.getuid() });
+                } else |err| {
+                    sys.close(l);
+                    return err;
+                }
+            } else |err| {
+                if (last_err == null or last_err.? != err) sys.print(sys.log_warning ++ "dazzle: log server: cannot listen on port {d} ({s})\n", .{ http_port, @errorName(err) });
+                last_err = err;
+            }
+        } else if (!on and listener != null) {
+            sys.close(listener.?);
+            listener = null;
+            // Ends the connections being served.
+            sys.close(stop[1]);
+            sys.close(stop[0]);
+            sys.print("dazzle: log server stopped\n", .{});
         }
+        const l = listener orelse {
+            sys.sleepMs(check_ms);
+            continue;
+        };
+        var fds = [_]linux.pollfd{.{ .fd = l, .events = linux.POLL.IN, .revents = 0 }};
+        const ready = linux.poll(&fds, 1, check_ms);
+        if (linux.errno(ready) != .SUCCESS or ready == 0) continue;
+        const rc = linux.accept4(l, null, null, linux.SOCK.CLOEXEC);
+        if (linux.errno(rc) != .SUCCESS) continue;
         const client: linux.fd_t = @intCast(rc);
         const pid = linux.fork();
         if (pid == 0) {
-            sys.close(listener);
-            handle(client);
+            sys.close(l);
+            sys.close(stop[1]);
+            dropCapabilities();
+            handle(client, stop[0]);
             linux.exit(0);
         }
         sys.close(client);
     }
+}
+
+/// A socket listening on `http_port`.
+fn listen() !linux.fd_t {
+    const fd: linux.fd_t = @intCast(try sys.check(linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0)));
+    errdefer sys.close(fd);
+    const one: c_int = 1;
+    _ = linux.setsockopt(fd, linux.SOL.SOCKET, linux.SO.REUSEADDR, std.mem.asBytes(&one), @sizeOf(c_int));
+    const bind_addr = sockaddrIn(.{ 0, 0, 0, 0 }, http_port);
+    _ = try sys.check(linux.bind(fd, @ptrCast(&bind_addr), @sizeOf(@TypeOf(bind_addr))));
+    _ = try sys.check(linux.listen(fd, 4));
+    return fd;
+}
+
+/// Gives up the capabilities kept (a client's process needs none).
+fn dropCapabilities() void {
+    const Header = extern struct { version: u32, pid: i32 };
+    const Data = extern struct { effective: u32, permitted: u32, inheritable: u32 };
+    var header: Header = .{ .version = 0x20080522, .pid = 0 }; // _LINUX_CAPABILITY_VERSION_3
+    const none = [2]Data{ .{ .effective = 0, .permitted = 0, .inheritable = 0 }, .{ .effective = 0, .permitted = 0, .inheritable = 0 } };
+    _ = linux.syscall2(.capset, @intFromPtr(&header), @intFromPtr(&none));
 }
 
 fn writeAll(fd: linux.fd_t, bytes: []const u8) bool {
@@ -150,7 +206,8 @@ const text_headers = "Content-Type: text/plain; charset=utf-8\r\n" ++
     "Cache-Control: no-store\r\n" ++
     "Connection: close\r\n\r\n";
 
-fn handle(client: linux.fd_t) void {
+/// Answers a request, until `stop` is closed (the server is turned off).
+fn handle(client: linux.fd_t, stop: linux.fd_t) void {
     defer sys.close(client);
     var buf: [2048]u8 = undefined;
     const line = readRequestLine(client, &buf) orelse return;
@@ -172,12 +229,12 @@ fn handle(client: linux.fd_t) void {
     else
         "Dazzle " ++ build_info.commit ++ " system log. /follow shows new messages as they arrive.\n\n";
     if (!writeAll(client, intro)) return;
-    streamLog(client, follow);
+    streamLog(client, follow, stop);
 }
 
 /// Sends the log since boot, then (when following) new messages until the
-/// client goes away.
-fn streamLog(client: linux.fd_t, follow: bool) void {
+/// client goes away, or `stop` is closed.
+fn streamLog(client: linux.fd_t, follow: bool, stop: linux.fd_t) void {
     const kmsg = sys.open("/dev/kmsg", .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NONBLOCK = true }) catch {
         _ = writeAll(client, "cannot open /dev/kmsg\n");
         return;
@@ -201,12 +258,15 @@ fn streamLog(client: linux.fd_t, follow: bool) void {
             .AGAIN => if (!follow) return,
             else => return,
         }
-        // Wait for a new message, or for the client to hang up.
+        // Wait for a new message, for the client to hang up, or for the
+        // server to stop.
         var fds = [_]linux.pollfd{
             .{ .fd = kmsg, .events = linux.POLL.IN, .revents = 0 },
             .{ .fd = client, .events = linux.POLL.IN, .revents = 0 },
+            .{ .fd = stop, .events = linux.POLL.IN, .revents = 0 },
         };
         if (linux.errno(linux.poll(&fds, fds.len, -1)) != .SUCCESS) continue;
+        if (fds[2].revents != 0) return;
         if (fds[1].revents != 0) {
             var discard: [256]u8 = undefined;
             const n = linux.read(client, &discard, discard.len);

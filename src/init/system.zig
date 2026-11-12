@@ -23,6 +23,9 @@
 //! (slots.zig), the image having only one, on another thread. (If setup has finished, as when the power went before the
 //! copy did, it only copies.)
 //!
+//! It also keeps whether the log is served over HTTP (asked for by
+//! Settings; see logserver.zig).
+//!
 //! Updating (update.zig): Settings downloads an update and asks for it to
 //! be installed; a child process unpacks it into the OS slot not running
 //! and has the firmware start that slot next time. Settings then offers to
@@ -122,6 +125,7 @@ const Manager = struct {
         var cmdline: [1024]u8 = undefined;
         if (sys.readFile("/proc/cmdline", &cmdline)) |text| m.report.video_memory_now = slots.cmaMiB(text);
         m.report.locale = locale.load();
+        m.report.log_server = proto.logServerOn();
         // The last update did not work (and the system before is running).
         if (storage.exists(trial.failed_marker)) {
             m.report.update = .failed;
@@ -232,7 +236,18 @@ const Manager = struct {
                 if (m.report.storage == .ready) m.keepLocale();
             },
             .video_memory => |mib| m.setVideoMemory(mib),
+            .log_server => |on| m.setLogServer(on),
         }
+    }
+
+    /// Serves the log over HTTP, or stops (the log server sees the file
+    /// change). Kept in /data/system, so not before setup has made it; the
+    /// report says what the server does now.
+    fn setLogServer(m: *Manager, on: bool) void {
+        defer m.report.log_server = proto.logServerOn();
+        if (!storage.exists(proto.config_dir)) return;
+        writeFile(proto.log_server_file, if (on) "on\n" else "off\n");
+        print("dazzle: system: log server {s}\n", .{if (on) "on" else "off"});
     }
 
     /// Has the next start give the GPU `mib` MiB (in both slots'

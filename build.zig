@@ -1097,7 +1097,8 @@ fn addQemu(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) void {
     qemu.addArgs(&.{ "-dtb", dtb, "-initrd" });
     qemu.addFileArg(initramfs);
     qemu.addArgs(&.{
-        "-append",  "printk.devkmsg=on rdinit=/os/init firmware_class.path=/os/firmware",
+        // The log server is on (there is no card to keep the setting on).
+        "-append",  "printk.devkmsg=on rdinit=/os/init firmware_class.path=/os/firmware dazzle.log_server=on",
         "-device",  "usb-net,netdev=net0",
         "-netdev",  b.fmt("user,id=net0,hostfwd=tcp:127.0.0.1:{d}-:80", .{port}),
         "-display", "none",

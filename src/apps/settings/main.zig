@@ -309,6 +309,17 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             print("dazzle-settings: video memory {d} MiB from the next start{s}\n", .{ mib, if (video_memory_failed) ": refused" else "" });
             a.dirty = true;
         }
+        // Serving the log over HTTP turned on or off: the system manager
+        // keeps it, and the log server follows.
+        if (actions.log_server) |on| {
+            actions.log_server = null;
+            const r = sys.system.ask(if (on) "log_server on\n" else "log_server off\n", 3000);
+            if (r) |have| if (!have.denied) {
+                updater.report = have;
+            };
+            if (r == null) print(sys.log_warning ++ "dazzle-settings: the system did not answer\n", .{});
+            a.dirty = true;
+        }
         if (actions.wifi_adapter) |ad| wifi_adapter = ad;
         if (actions.connect != null or actions.hotspot != null or actions.disconnect or actions.ethernet != null or actions.wifi_addressing != null or actions.wifi_adapter != null) {
             var req_buf: [256]u8 = undefined;
@@ -400,6 +411,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
                 .usb = &devices,
                 .gpio = if (pins_read) &pins else null,
                 .log = if (syslog.fd != null or syslog.failed) &syslog else null,
+                .log_server = if (updater.report) |r| r.log_server else null,
                 .manager = if (report) |*r| r else null,
                 .actions = &actions,
                 .apps = .{

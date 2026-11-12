@@ -1,6 +1,8 @@
 //! The Log page: the system's log, newest first, with when each message
 //! came (since the system started) and what it says, warnings and errors
-//! in colour; or only those.
+//! in colour; or only those. And whether it is served over HTTP, for
+//! reading in a browser on another computer (off unless turned on: anyone
+//! on the network can read it).
 
 const std = @import("std");
 const ui = @import("ui");
@@ -10,6 +12,7 @@ const view = @import("view.zig");
 
 const Settings = view.Settings;
 const Builder = view.Builder;
+const Actions = view.Actions;
 
 pub const label = "Log";
 pub const icon: ui.icons.Icon = .article;
@@ -32,8 +35,9 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
     const cx = b.cx;
     const a = cx.ui.arena();
     const problems = cx.make(ui.Switch{ .value = state.problems, .on_changed = .of(state, State.setProblems), .label = "Only warnings and errors" });
-    const l = self.log orelse return b.page(&.{ problems, b.value("Reading the log…") });
-    if (l.failed) return b.page(&.{b.value("The log cannot be read")});
+    const serving = serveRow(self, b);
+    const l = self.log orelse return b.page(&.{ serving, problems, b.value("Reading the log…") });
+    if (l.failed) return b.page(&.{ serving, b.value("The log cannot be read") });
     // The lines shown, newest first.
     var shown: std.ArrayList(*const log.Line) = .empty;
     for (0..l.count) |i| {
@@ -43,6 +47,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
     const lines = a.create(LogLines) catch return cx.make(ui.Empty{});
     lines.* = .{ .lines = shown.items };
     return b.page(&.{
+        serving,
         problems,
         if (shown.items.len == 0) b.value(if (state.problems) "No warnings or errors" else "Nothing yet") else cx.make(ui.LazyGrid{
             .count = shown.items.len,
@@ -50,6 +55,34 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
             .item = .of(lines, LogLines.row),
         }),
     });
+}
+
+/// Whether the log is served over HTTP, turned on and off here, and where
+/// to read it while it is.
+fn serveRow(self: *const Settings, b: Builder) ui.Widget {
+    const cx = b.cx;
+    const t = cx.theme();
+    // Unknown until the system manager says.
+    const on = self.log_server orelse return cx.make(ui.Empty{});
+    const host = self.system.hostname.slice();
+    const note = if (!on)
+        "Lets other computers on the network read the log in a browser. Anyone on the network can read it."
+    else if (host.len > 0)
+        cx.fmt("Anyone on the network can read the log at http://{s}/ (and http://{s}/follow as it is written).", .{ host, host })
+    else
+        "Anyone on the network can read the log, at this computer's address.";
+    return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 4, .children = &.{
+        cx.make(ui.Switch{
+            .value = on,
+            .on_changed = if (self.actions) |a| .of(a, setLogServer) else null,
+            .label = "Serve the log over HTTP",
+        }),
+        cx.make(ui.Text{ .text = note, .style = .{ .size = 14, .color = t.on_surface_variant } }),
+    } });
+}
+
+fn setLogServer(a: *Actions, on: bool) void {
+    a.log_server = on;
 }
 
 /// The log's lines, to make rows of (in the frame's arena).
@@ -106,8 +139,24 @@ test "the log: newest first, or only its warnings and errors" {
     try testing.expect(view.findText(u.root.?, "dazzle-shell: started") == null);
     try testing.expect(view.findText(u.root.?, "dazzle-files: error: OutOfMemory") != null);
     try testing.expect(view.findText(u.root.?, "dazzle: network: no answer from the time servers") != null);
+    // Serving it over HTTP: off, then turned on (and the address shown).
+    try testing.expect(view.findText(u.root.?, "Serve the log over HTTP") == null);
+    var actions: Actions = .{};
+    const off: Settings = .{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .log = &l, .log_server = false, .actions = &actions };
+    u.frame(1600, 900, 4, off);
+    view.click(u, view.up(view.findText(u.root.?, "Serve the log over HTTP").?, ui.Switch).?);
+    u.frame(1600, 900, 5, off);
+    try testing.expectEqual(@as(?bool, true), actions.log_server);
+    try testing.expect(view.findTextContaining(u.root.?, "http://awesome-elephant/") == null);
+    const on: Settings = .{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .log = &l, .log_server = true, .actions = &actions };
+    u.frame(1600, 900, 6, on);
+    try testing.expect(view.findTextContaining(u.root.?, "http://awesome-elephant/") != null);
+    for (view.test_sizes) |size| {
+        u.frame(size[0], size[1], 7, on);
+        try testing.expect(!view.overflows(u.root.?));
+    }
     // Not read yet, and none to show.
     const reading: Settings = .{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net };
-    u.frame(1600, 900, 4, reading);
+    u.frame(1600, 900, 8, reading);
     try testing.expect(view.findText(u.root.?, "Reading the log…") != null);
 }
