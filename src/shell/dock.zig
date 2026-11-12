@@ -63,7 +63,7 @@ pub const Theme = enum {
 /// The theme and the desktop's colour, as chosen in Settings.
 pub const Appearance = struct {
     theme: Theme = .dark,
-    background: u32 = theme_settings.Background.grey.argb(),
+    background: u32 = theme_settings.Background.navy.argb(),
 
     pub fn parse(text: []const u8) Appearance {
         const s = theme_settings.Settings.parse(text);

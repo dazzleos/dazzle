@@ -43,19 +43,25 @@ pub const Mode = enum {
 /// The colour of the desktop behind the windows: the same in either
 /// theme, and dark, so the windows and the dock stand out on it.
 pub const Background = enum {
-    grey,
-    black,
     navy,
+    teal,
     green,
+    olive,
+    brown,
+    maroon,
     plum,
+    black,
 
     pub fn name(bg: Background) []const u8 {
         return switch (bg) {
-            .grey => "Grey",
-            .black => "Black",
             .navy => "Navy",
+            .teal => "Teal",
             .green => "Green",
+            .olive => "Olive",
+            .brown => "Brown",
+            .maroon => "Maroon",
             .plum => "Plum",
+            .black => "Black",
         };
     }
 
@@ -70,11 +76,14 @@ pub const Background = enum {
     /// 0xAARRGGBB.
     pub fn argb(bg: Background) u32 {
         return switch (bg) {
-            .grey => 0xff202124,
-            .black => 0xff000000,
             .navy => 0xff101830,
+            .teal => 0xff0e2a2c,
             .green => 0xff12261c,
+            .olive => 0xff262612,
+            .brown => 0xff2a1c12,
+            .maroon => 0xff2c1216,
             .plum => 0xff241628,
+            .black => 0xff000000,
         };
     }
 };
@@ -82,7 +91,7 @@ pub const Background = enum {
 /// Persistent appearance settings stored in `settings_file`.
 pub const Settings = struct {
     theme: Mode = .dark,
-    background: Background = .grey,
+    background: Background = .navy,
 
     pub fn parse(text: []const u8) Settings {
         var s: Settings = .{};
@@ -298,9 +307,11 @@ test "appearance settings parse, format, save and load" {
 }
 
 test "the appearance settings keep the theme and the background" {
-    const s: Settings = .{ .theme = .light, .background = .navy };
+    const s: Settings = .{ .theme = .light, .background = .plum };
     var buf: [64]u8 = undefined;
     try std.testing.expectEqual(s, Settings.parse(s.formatBuf(&buf)));
     // Written before there was a choice of background.
-    try std.testing.expectEqual(Settings{ .theme = .light, .background = .grey }, Settings.parse("theme light\n"));
+    try std.testing.expectEqual(Settings{ .theme = .light, .background = .navy }, Settings.parse("theme light\n"));
+    // A colour no longer offered (grey was) is the default.
+    try std.testing.expectEqual(Settings{ .theme = .light, .background = .navy }, Settings.parse("theme light\nbackground grey\n"));
 }
