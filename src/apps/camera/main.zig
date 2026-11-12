@@ -12,15 +12,14 @@
 //! developed frames through `bcm2835-codec-encode` (`/dev/video11`) into an
 //! `.mp4` file while the preview goes on.
 //!
-//!     dazzle-camera [font.ttf]
+//!     dazzle-camera
 //!
 //! It runs until it is stopped or its window is closed.
 
 const std = @import("std");
 const sys = @import("sys");
-const locale = @import("locale");
-const font = @import("font");
-const ui = @import("ui");
+const kete = @import("kete");
+const kete_vc4 = @import("kete_vc4");
 const gfx = @import("gfx");
 const video = @import("video");
 const capture = @import("capture.zig");
@@ -33,13 +32,9 @@ const print = sys.print;
 
 const no_camera = "No camera found. Connect a Raspberry Pi Camera Module (v1 or v2) to the camera connector while the Pi is off, then start it again.";
 
-pub fn main(init: std.process.Init.Minimal) u8 {
+pub fn main(init: std.process.Init) u8 {
     sys.logToKmsgIfStderr();
-    var args = init.args.iterate();
-    _ = args.skip();
-    var font_buf: [512]u8 = undefined;
-    const font_path: [*:0]const u8 = args.next() orelse sys.fontFile(&font_buf, font.default_font_file);
-    run(init, font_path) catch |err| {
+    run(init) catch |err| {
         print(sys.log_error ++ "dazzle-camera: error: {s}\n", .{@errorName(err)});
         return 1;
     };
@@ -57,7 +52,7 @@ const Viewer = struct {
     /// Two pictures: one shown, one being made.
     pixels: [2][]u32,
     shown: u1 = 0,
-    image: ?gfx.Image = null,
+    image: ?kete.gfx.Image = null,
     /// Take a photo of the next frame.
     shoot: bool = false,
     /// The photo being saved, on a thread.
@@ -321,18 +316,30 @@ const Saving = struct {
     }
 };
 
-fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
-    // The language chosen (in setup, or Settings).
-    locale.current = locale.load().language;
+/// The window's root: the camera's picture and what it is doing.
+const Root = struct {
+    viewer: *?Viewer,
+
+    pub fn build(r: *const Root, cx: *kete.BuildContext) kete.Widget {
+        const v: ?*Viewer = if (r.viewer.*) |*vw| vw else null;
+        return cx.make(view.Camera{
+            .preview = if (v) |vw| if (vw.image) |*img| img else null else null,
+            .message = if (v) |vw| (if (vw.image == null) "Starting the camera\u{2026}" else "") else no_camera,
+            .status = if (v) |vw| vw.status() else "",
+            .notice = if (v) |vw| vw.notice() else "",
+            .on_dismiss = if (v) |vw| kete.Callback.of(vw, Viewer.dismissNotice) else null,
+            .on_shoot = if (v) |vw| (if (vw.saving == null) kete.Callback.of(vw, Viewer.requestPhoto) else null) else null,
+            .on_record = if (v) |vw| kete.Callback.of(vw, Viewer.toggleRecord) else null,
+            .recording = if (v) |vw| vw.recorder != null else false,
+        });
+    }
+};
+
+fn run(init: std.process.Init) !void {
     const gpa = std.heap.page_allocator;
-    const a = try ui.App.open(gpa, init.environ, .{
-        .title = "Camera",
-        .app_id = "dazzle-camera",
-        .size = view.open_size,
-        .min_size = view.min_size,
-        .font_path = font_path,
-    });
-    defer a.close();
+    var host: kete_vc4.Host = undefined;
+    try host.init(gpa, init.io, init.minimal.environ, .{ .app_id = "dazzle-camera" });
+    defer host.deinit();
 
     var viewer: ?Viewer = blk: {
         const cam = capture.Camera.open() catch |err| {
@@ -341,38 +348,32 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         };
         break :blk try Viewer.init(gpa, cam);
     };
-    if (viewer) |*v| a.win.wake_fd = v.cam.fd();
+    // Frames wake the loop.
+    if (viewer) |*v| host.wakeOn(v.cam.fd(), true);
     // Any active video recording or photo being saved is finished first when closing.
     defer if (viewer) |*v| {
         if (v.recorder != null) v.stopRecording();
         if (v.saving) |sv| sv.thread.join();
     };
 
-    // Frames wake the window (`wake_fd`); otherwise wait for input.
-    while (try a.step(if (viewer != null) std.time.ns_per_s else 60 * std.time.ns_per_s)) {
-        const now = sys.nowNs();
-        for (a.win.takeInput()) |e| switch (e) {
-            .key => {},
-            else => a.ui.handleInput(e),
-        };
-        if (viewer) |*v| {
-            if (v.checkSaving()) a.dirty = true;
-            // Covered: frames are still taken (and dropped), not shown.
-            const picture_h = a.height -| view.chrome_height;
-            if (try v.update(a.width, picture_h, now) and !a.suspended) a.dirty = true;
-        }
+    const root: Root = .{ .viewer = &viewer };
+    const window = try host.app.openWindow(.{
+        .title = "Camera",
+        .root = .of(&root),
+        .size = view.open_size,
+        .min_size = view.min_size,
+        .on_close_request = .close,
+    });
 
-        const v: ?*Viewer = if (viewer) |*vw| vw else null;
-        try a.draw(now, view.Camera{
-            .preview = if (v) |vw| if (vw.image) |*img| img else null else null,
-            .message = if (v) |vw| (if (vw.image == null) "Starting the camera…" else "") else no_camera,
-            .status = if (v) |vw| vw.status() else "",
-            .notice = if (v) |vw| vw.notice() else "",
-            .on_dismiss = if (v) |vw| ui.Callback.of(vw, Viewer.dismissNotice) else null,
-            .on_shoot = if (v) |vw| (if (vw.saving == null) ui.Callback.of(vw, Viewer.requestPhoto) else null) else null,
-            .on_record = if (v) |vw| ui.Callback.of(vw, Viewer.toggleRecord) else null,
-            .recording = if (v) |vw| vw.recorder != null else false,
-        });
+    while (try host.step(if (viewer != null) std.time.ns_per_s else 60 * std.time.ns_per_s)) {
+        const now = sys.nowNs();
+        if (viewer) |*v| {
+            if (v.checkSaving()) host.redraw();
+            // Covered: frames are still taken (and dropped), not shown.
+            const size = window.size();
+            const picture_h = size[1] -| view.chrome_height;
+            if (try v.update(size[0], picture_h, now) and !window.suspended) host.redraw();
+        }
     }
 }
 
