@@ -510,6 +510,30 @@ fn addProgramModule(b: *std.Build, path: []const u8, target: std.Build.ResolvedT
     return module;
 }
 
+/// Gives `module` kete (built without its own backends), and `kete_vc4`,
+/// which draws it with Dazzle's window and GPU.
+fn addKete(b: *std.Build, module: *std.Build.Module, m: Modules, target: std.Build.ResolvedTarget, optimize: std.builtin.Optimize) *std.Build.Module {
+    const kete = b.dependency("kete", .{ .target = target, .optimize = optimize, .backends = false }).module("kete");
+    const kete_vc4 = b.createModule(.{
+        .root_source_file = b.path("src/kete_vc4/kete_vc4.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "kete", .module = kete },
+            .{ .name = "sys", .module = m.sys },
+            .{ .name = "vc4", .module = m.vc4 },
+            .{ .name = "shader", .module = m.shader },
+            .{ .name = "app", .module = m.app },
+            .{ .name = "gfx", .module = m.gfx },
+            .{ .name = "locale", .module = m.locale },
+            .{ .name = "ui", .module = m.ui },
+        },
+    });
+    module.addImport("kete", kete);
+    module.addImport("kete_vc4", kete_vc4);
+    return kete_vc4;
+}
+
 /// A host tool from tools/.
 fn hostTool(b: *std.Build, name: []const u8) *std.Build.Step.Compile {
     return b.addExecutable(.{
@@ -1120,6 +1144,14 @@ pub fn build(b: *std.Build) void {
         .root_module = addProgramModule(b, "src/apps/showcase/main.zig", target, optimize, pi, shaders, true),
     });
     const install_showcase = b.addInstallArtifact(showcase_exe, .{});
+    // A prototype of an app on kete, drawn by Dazzle's vc4 renderer.
+    const kete_demo_module = addProgramModule(b, "src/apps/kete_demo/main.zig", target, optimize, pi, shaders, true);
+    _ = addKete(b, kete_demo_module, pi, target, optimize);
+    const kete_demo_exe = b.addExecutable(.{
+        .name = "dazzle-kete-demo",
+        .root_module = kete_demo_module,
+    });
+    const install_kete_demo = b.addInstallArtifact(kete_demo_exe, .{});
     const settings_exe = b.addExecutable(.{
         .name = "dazzle-settings",
         .root_module = addProgramModule(b, "src/apps/settings/main.zig", target, optimize, pi, shaders, true),
@@ -1227,6 +1259,7 @@ pub fn build(b: *std.Build) void {
     const apps = [_]App{
         .{ .exe = demo_exe, .icon = .view_in_ar, .title = "Demo" },
         .{ .exe = showcase_exe, .icon = .widgets, .title = "Widget Showcase" },
+        .{ .exe = kete_demo_exe, .icon = .widgets, .title = "Kete Demo" },
         .{ .exe = files_exe, .icon = .folder, .title = "Files", .description = "Browse your files" },
         .{ .exe = camera_exe, .icon = .photo_camera, .title = "Camera", .description = "Take photos and videos" },
         .{ .exe = text_editor_exe, .icon = .edit_note, .title = "Text Editor", .description = "Edit text files", .handles = &.{"text/plain"} },
@@ -1259,7 +1292,7 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(apps_step);
     const install_initramfs = b.addInstallFile(initramfs, "initramfs.cpio");
     const programs_step = b.step("programs", "Build just the programs (zig-out/bin) and zig-out/initramfs.cpio");
-    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_showcase.step, &install_settings.step, &install_files.step, &install_camera.step, &install_text_editor.step, &install_logger.step, &install_chat.step, &install_blocks.step, &install_maps.step, &install_terminal.step, &install_develop.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
+    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_showcase.step, &install_kete_demo.step, &install_settings.step, &install_files.step, &install_camera.step, &install_text_editor.step, &install_logger.step, &install_chat.step, &install_blocks.step, &install_maps.step, &install_terminal.step, &install_develop.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
         programs_step.dependOn(st);
         b.getInstallStep().dependOn(st);
     }
@@ -1298,6 +1331,9 @@ pub fn build(b: *std.Build) void {
     const host_demo = addProgramModule(b, "src/apps/demo/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_demo.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_showcase = addProgramModule(b, "src/apps/showcase/main.zig", b.graph.host, test_optimize, host, shaders, false);
+    // Kete's frames, drawn with Dazzle's shaders in the QPU simulator.
+    const host_kete_demo = addProgramModule(b, "src/apps/kete_demo/main.zig", b.graph.host, test_optimize, host, shaders, false);
+    const host_kete_vc4 = addKete(b, host_kete_demo, host, b.graph.host, test_optimize);
     host_showcase.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_settings = addProgramModule(b, "src/apps/settings/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_settings.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
@@ -1339,6 +1375,7 @@ pub fn build(b: *std.Build) void {
         addProgramModule(b, "src/init/main.zig", b.graph.host, test_optimize, host, shaders, false),
         host_demo,
         host_showcase,
+        host_kete_vc4,
         host_settings,
         host_files,
         host_camera,

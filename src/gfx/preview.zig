@@ -50,13 +50,18 @@ const Group = struct {
     n: usize = 0,
 };
 
-pub fn render(c: *const canvas_mod.Canvas, programs: *const Programs, img: Image) !void {
+/// `c` is a `*const Canvas`, or a canvas of the same batches from elsewhere
+/// (kete's: see `kete_vc4`).
+pub fn render(c: anytype, programs: *const Programs, img: Image) !void {
     // The glyph atlas, as the texture unit reads it.
     var texture: Texture = .{};
     defer texture.deinit();
     for (c.batches.items) |*b| {
-        const floats = canvas_mod.floatsPerVertex(b.kind);
-        const fs = switch (b.kind) {
+        const kind: canvas_mod.Kind = switch (b.kind) {
+            inline else => |k| @field(canvas_mod.Kind, @tagName(k)),
+        };
+        const floats = canvas_mod.floatsPerVertex(kind);
+        const fs = switch (kind) {
             .shape => &programs.shape.fs,
             .solid => &programs.solid.fs,
             .@"opaque" => &programs.@"opaque".fs,
@@ -71,7 +76,7 @@ pub fn render(c: *const canvas_mod.Canvas, programs: *const Programs, img: Image
         // filtering).
         var image_texture: []u8 = &.{};
         defer std.heap.page_allocator.free(image_texture);
-        switch (b.kind) {
+        switch (kind) {
             .text => {
                 group.uniforms = try texture.uniforms(c.atlas orelse continue, fs, &group.uniform_buf);
                 group.texture = texture.memory;
@@ -149,7 +154,7 @@ const Texture = struct {
         std.heap.page_allocator.free(t.memory);
     }
 
-    fn uniforms(t: *Texture, atlas: *const atlas_mod.Atlas, fs: *const vc4.compiler.Compiled, buf: []u32) ![]const u32 {
+    fn uniforms(t: *Texture, atlas: anytype, fs: *const vc4.compiler.Compiled, buf: []u32) ![]const u32 {
         if (t.memory.len == 0) {
             const w = atlas_mod.width;
             const h = atlas_mod.height;
