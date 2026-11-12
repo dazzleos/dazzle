@@ -13,8 +13,8 @@
 
 const std = @import("std");
 const sys = @import("sys");
-const locale = @import("locale");
-const ui = @import("ui");
+const kete = @import("kete");
+const kete_vc4 = @import("kete_vc4");
 const net = @import("net.zig");
 const protocol = @import("protocol.zig");
 const view = @import("view.zig");
@@ -29,7 +29,7 @@ const default_room_name = "Chat Room";
 /// a room, pinging, letting go of rooms not heard of) are due this often.
 const idle_ns = std.time.ns_per_s;
 
-pub fn main(init: std.process.Init.Minimal) u8 {
+pub fn main(init: std.process.Init) u8 {
     sys.logToKmsgIfStderr();
     run(init) catch |err| {
         print(sys.log_error ++ "dazzle-chat: error: {s}\n", .{@errorName(err)});
@@ -38,45 +38,67 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     return 0;
 }
 
-fn run(init: std.process.Init.Minimal) !void {
-    locale.current = locale.load().language;
+/// The window's root: the rooms, and the one joined, as they are now.
+const Root = struct {
+    network: *net.Net,
+    host: []const u8,
+    actions: *view.Actions,
+
+    pub fn build(r: *const Root, cx: *kete.BuildContext) kete.Widget {
+        const network = r.network;
+        const names = cx.arena.alloc([]const u8, protocol.max_peers + 1) catch return cx.make(kete.SizedBox.empty);
+        return cx.make(view.Chat{
+            .node = network.node,
+            .ads = network.ads.items,
+            .room = if (network.room) |*room| room else null,
+            .members = network.members(names[0 .. protocol.max_peers + 1]),
+            .message = network.message,
+            .name = network.name.get(),
+            .default_name = r.host,
+            .actions = r.actions,
+        });
+    }
+};
+
+fn run(init: std.process.Init) !void {
     const gpa = std.heap.page_allocator;
 
     var host_buf: [64]u8 = undefined;
-    const host = settings.hostname(&host_buf);
+    const host_name = settings.hostname(&host_buf);
     var name_buf: [128]u8 = undefined;
-    var network = try net.Net.init(gpa, .{ .name = settings.loadName(settings.name_file, &name_buf, host) });
+    var network = try net.Net.init(gpa, .{ .name = settings.loadName(settings.name_file, &name_buf, host_name) });
     defer network.deinit();
 
-    const a = try ui.App.open(gpa, init.environ, .{
-        .title = "Chat",
-        .app_id = "dazzle-chat",
-        .size = view.open_size,
-        .min_size = view.min_size,
-    });
-    defer a.close();
-    // The sockets wake the window.
-    a.win.wake_fd = network.epfd;
+    var host: kete_vc4.Host = undefined;
+    try host.init(gpa, init.io, init.minimal.environ, .{ .app_id = "dazzle-chat" });
+    defer host.deinit();
+    // The sockets wake the loop.
+    host.wakeOn(network.epfd, true);
 
     var actions: view.Actions = .{};
+    const root: Root = .{ .network = &network, .host = host_name, .actions = &actions };
+    const window = try host.app.openWindow(.{
+        .title = "Chat",
+        .root = .of(&root),
+        .size = view.open_size,
+        .min_size = view.min_size,
+        .on_close_request = .close,
+    });
 
-    while (try a.step(idle_ns)) {
+    var title_buf: [64]u8 = undefined;
+    var title: []const u8 = "Chat";
+    while (try host.step(idle_ns)) {
         const now = sys.nowNs();
-        a.takeInput();
-        if (network.service(now)) a.dirty = true;
-        if (apply(&actions, &network, host, now)) a.dirty = true;
-
-        var names: [protocol.max_peers + 1][]const u8 = undefined;
-        try a.draw(now, view.Chat{
-            .node = network.node,
-            .ads = network.ads.items,
-            .room = if (network.room) |*r| r else null,
-            .members = network.members(&names),
-            .message = network.message,
-            .name = network.name.get(),
-            .default_name = host,
-            .actions = &actions,
-        });
+        if (network.service(now)) host.redraw();
+        if (apply(&actions, &network, host_name, now)) host.redraw();
+        // The title is the room's name, in one.
+        const wanted = view.windowTitle(if (network.room) |*r| r else null);
+        if (!std.mem.eql(u8, wanted, title)) {
+            const n = @min(wanted.len, title_buf.len);
+            @memcpy(title_buf[0..n], wanted[0..n]);
+            title = title_buf[0..n];
+            window.setTitle(title);
+        }
     }
 }
 

@@ -5,7 +5,7 @@
 //! either) change the name others see.
 
 const std = @import("std");
-const ui = @import("ui");
+const kete = @import("kete");
 const net = @import("net.zig");
 const protocol = @import("protocol.zig");
 
@@ -14,9 +14,9 @@ pub const open_size = [2]u32{ 800, 640 };
 
 /// What the window asked for, for the app to do (see main.zig).
 pub const Actions = struct {
-    room_name_buf: [ui.TextField.capacity]u8 = undefined,
+    room_name_buf: [kete.TextField.capacity]u8 = undefined,
     room_name_len: usize = 0,
-    draft_buf: [ui.TextField.capacity]u8 = undefined,
+    draft_buf: [kete.TextField.capacity]u8 = undefined,
     draft_len: usize = 0,
     /// The message field starts again (empty) when this changes.
     draft_key: u64 = 1,
@@ -28,7 +28,7 @@ pub const Actions = struct {
     dismiss: bool = false,
     /// The settings are shown, with the name being typed.
     settings_open: bool = false,
-    name_buf: [ui.TextField.capacity]u8 = undefined,
+    name_buf: [kete.TextField.capacity]u8 = undefined,
     name_len: usize = 0,
     open_settings: bool = false,
     save_settings: bool = false,
@@ -120,14 +120,14 @@ pub const Chat = struct {
     default_name: []const u8 = "",
     actions: *Actions,
 
-    pub fn build(self: *const Chat, cx: *ui.Context) ui.Widget {
+    pub fn build(self: *const Chat, cx: *kete.BuildContext) kete.Widget {
         const body = if (self.room) |room| self.inRoom(cx, room) else self.lobby(cx);
-        return cx.make(ui.Dialog{
+        return cx.make(kete.Dialog{
             .open = self.actions.settings_open,
             .icon = .settings,
             .title = "Settings",
             .description = cx.fmt("The name others see you as. Leave it empty to use this computer's name ({s}).", .{self.default_name}),
-            .content = cx.make(ui.TextField{
+            .content = cx.make(kete.TextField{
                 .initial = self.name,
                 .placeholder = self.default_name,
                 .width = std.math.inf(f32),
@@ -144,51 +144,50 @@ pub const Chat = struct {
         });
     }
 
-    fn settingsButton(self: *const Chat, cx: *ui.Context) ui.Widget {
-        return cx.make(ui.IconButton{ .icon = .settings, .on_press = .of(self.actions, Actions.requestSettings) });
+    fn settingsButton(self: *const Chat, cx: *kete.BuildContext) kete.Widget {
+        return cx.make(kete.IconButton{ .icon = .settings, .on_press = .of(self.actions, Actions.requestSettings) });
     }
 
-    fn lobby(self: *const Chat, cx: *ui.Context) ui.Widget {
+    fn lobby(self: *const Chat, cx: *kete.BuildContext) kete.Widget {
         const t = cx.theme();
-        const a = cx.ui.arena();
+        const a = cx.arena;
         const list = if (self.ads.len == 0)
-            cx.make(ui.Center{ .child = cx.make(ui.Padding{ .padding = .all(16), .child = cx.make(ui.Text{
+            cx.make(kete.Align{ .child = cx.make(kete.Padding{ .padding = .all(16), .child = cx.make(kete.Text{
                 .text = "No rooms found. Start one and others on this network can join it.",
                 .style = .{ .size = 16, .color = t.on_surface_variant },
                 .text_align = .center,
             }) }) })
         else blk: {
-            var rows: std.ArrayList(ui.Widget) = .empty;
+            var rows: std.ArrayList(kete.Widget) = .empty;
             for (self.ads) |ad| {
                 const press = a.create(JoinPress) catch break;
                 press.* = .{ .actions = self.actions, .room = ad.room };
-                rows.append(a, cx.make(ui.ListItem{
+                rows.append(a, cx.make(kete.ListItem{
                     .leading_icon = .forum,
                     .headline = a.dupe(u8, ad.name.get()) catch "",
                     .supporting_text = if (ad.members == 1) "1 person" else cx.fmt("{d} people", .{ad.members}),
                     .on_press = .of(press, JoinPress.press),
                 }).withKey(ad.room)) catch break;
             }
-            break :blk cx.make(ui.ScrollView{ .child = cx.make(ui.Column{
+            break :blk cx.make(kete.ScrollView{ .child = cx.make(kete.Column{
                 .cross_axis_alignment = .stretch,
                 .spacing = 4,
                 .children = rows.items,
             }) });
         };
-        return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &.{
-            cx.make(ui.TitleBar{ .title = "Chat" }),
-            cx.make(ui.Expanded{ .child = cx.make(ui.Snackbar{
+        return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .children = &.{
+            cx.make(kete.Expanded{ .child = cx.make(kete.Snackbar{
                 .message = self.message,
                 .on_dismiss = .of(self.actions, Actions.requestDismiss),
-                .child = cx.make(ui.Center{ .height_factor = 1, .child = cx.make(ui.ConstrainedBox{
+                .child = cx.make(kete.Align{ .height_factor = 1, .child = cx.make(kete.ConstrainedBox{
                     .constraints = .{ .max_w = 560 },
-                    .child = cx.make(ui.Padding{ .padding = .symmetric(12, 8), .child = cx.make(ui.Column{
+                    .child = cx.make(kete.Padding{ .padding = .symmetric(12, 8), .child = cx.make(kete.Column{
                         .cross_axis_alignment = .stretch,
                         .spacing = 12,
                         .children = &.{
-                            cx.make(ui.Row{ .spacing = 8, .cross_axis_alignment = .center, .children = &.{
-                                cx.make(ui.Icon{ .icon = .person, .color = t.on_surface_variant }),
-                                cx.make(ui.Expanded{ .child = cx.make(ui.Text{
+                            cx.make(kete.Row{ .spacing = 8, .cross_axis_alignment = .center, .children = &.{
+                                cx.make(kete.Icon{ .icon = .person, .color = t.on_surface_variant }),
+                                cx.make(kete.Expanded{ .child = cx.make(kete.Text{
                                     .text = cx.fmt("You are {s}", .{self.name}),
                                     .style = .{ .size = 16, .color = t.on_surface },
                                     .wrap = false,
@@ -196,8 +195,8 @@ pub const Chat = struct {
                                 }) }),
                                 self.settingsButton(cx),
                             } }),
-                            cx.make(ui.Row{ .spacing = 12, .cross_axis_alignment = .center, .children = &.{
-                                cx.make(ui.Expanded{ .child = cx.make(ui.TextField{
+                            cx.make(kete.Row{ .spacing = 12, .cross_axis_alignment = .center, .children = &.{
+                                cx.make(kete.Expanded{ .child = cx.make(kete.TextField{
                                     .placeholder = "Name for a new room",
                                     .width = std.math.inf(f32),
                                     .max_len = protocol.max_name,
@@ -205,19 +204,19 @@ pub const Chat = struct {
                                     .on_changed = .of(self.actions, Actions.setRoomName),
                                     .on_submit = .of(self.actions, Actions.requestCreate),
                                 }) }),
-                                cx.make(ui.FilledButton{
+                                cx.make(kete.FilledButton{
                                     .label = "Start Room",
                                     .icon = .add,
                                     .on_press = .of(self.actions, Actions.requestCreate),
                                 }),
                             } }),
-                            cx.make(ui.Padding{ .padding = .{ .top = 4 }, .child = cx.make(ui.Text{
+                            cx.make(kete.Padding{ .padding = .{ .top = 4 }, .child = cx.make(kete.Text{
                                 .text = "Rooms on this network",
                                 .style = .{ .size = 16, .color = t.on_surface_variant },
                                 .wrap = false,
                             }) }),
-                            cx.make(ui.Divider{}),
-                            cx.make(ui.Expanded{ .child = list }),
+                            cx.make(kete.HorizontalDivider{}),
+                            cx.make(kete.Expanded{ .child = list }),
                         },
                     }) }),
                 }) }),
@@ -225,48 +224,47 @@ pub const Chat = struct {
         } });
     }
 
-    fn inRoom(self: *const Chat, cx: *ui.Context, room: *const net.Room) ui.Widget {
+    fn inRoom(self: *const Chat, cx: *kete.BuildContext, room: *const net.Room) kete.Widget {
         const t = cx.theme();
-        const a = cx.ui.arena();
+        const a = cx.arena;
         const messages = room.log.items.items;
 
-        var rows: std.ArrayList(ui.Widget) = .empty;
+        var rows: std.ArrayList(kete.Widget) = .empty;
         for (messages, 0..) |m, i| {
             const mine = m.author == self.node;
-            rows.append(a, cx.make(ui.Padding{ .padding = .symmetric(0, 5), .child = cx.make(ui.Column{
+            rows.append(a, cx.make(kete.Padding{ .padding = .symmetric(0, 5), .child = cx.make(kete.Column{
                 .cross_axis_alignment = .stretch,
                 .children = &.{
-                    cx.make(ui.Text{
+                    cx.make(kete.Text{
                         .text = if (mine) "You" else m.name,
                         .style = .{ .size = 14, .color = if (mine) t.primary else t.on_surface_variant },
                         .wrap = false,
                         .ellipsis = true,
                     }),
-                    cx.make(ui.Text{ .text = m.text, .style = .{ .size = 18, .color = t.on_surface } }),
+                    cx.make(kete.Text{ .text = m.text, .style = .{ .size = 18, .color = t.on_surface } }),
                 },
             }) }).withKey(i + 1)) catch break;
         }
-        if (messages.len == 0) rows.append(a, cx.make(ui.Padding{ .padding = .all(16), .child = cx.make(ui.Text{
+        if (messages.len == 0) rows.append(a, cx.make(kete.Padding{ .padding = .all(16), .child = cx.make(kete.Text{
             .text = "Nothing has been said yet.",
             .style = .{ .size = 16, .color = t.on_surface_variant },
             .text_align = .center,
         }) })) catch {};
 
-        return cx.make(ui.Column{
+        return cx.make(kete.Column{
             .cross_axis_alignment = .stretch,
             .children = &.{
-                cx.make(ui.TitleBar{ .title = room.name.get() }),
-                cx.make(ui.Padding{ .padding = .{ .left = 16, .right = 16, .top = 10, .bottom = 10 }, .child = cx.make(ui.Row{
+                cx.make(kete.Padding{ .padding = .{ .left = 16, .right = 16, .top = 10, .bottom = 10 }, .child = cx.make(kete.Row{
                     .spacing = 12,
                     .cross_axis_alignment = .center,
                     .children = &.{
-                        cx.make(ui.TonalButton{
+                        cx.make(kete.TonalButton{
                             .label = "Leave",
                             .icon = .logout,
                             .on_press = .of(self.actions, Actions.requestLeave),
                         }),
-                        cx.make(ui.Icon{ .icon = .group, .color = t.on_surface_variant }),
-                        cx.make(ui.Expanded{ .child = cx.make(ui.Text{
+                        cx.make(kete.Icon{ .icon = .group, .color = t.on_surface_variant }),
+                        cx.make(kete.Expanded{ .child = cx.make(kete.Text{
                             .text = self.people(cx),
                             .style = .{ .size = 15, .color = t.on_surface_variant },
                             .wrap = false,
@@ -275,27 +273,27 @@ pub const Chat = struct {
                         self.settingsButton(cx),
                     },
                 }) }),
-                cx.make(ui.Divider{}),
-                cx.make(ui.Expanded{
-                    .child = cx.make(ui.Snackbar{
+                cx.make(kete.HorizontalDivider{}),
+                cx.make(kete.Expanded{
+                    .child = cx.make(kete.Snackbar{
                         .message = self.message,
                         .on_dismiss = .of(self.actions, Actions.requestDismiss),
-                        .child = cx.make(ui.ScrollView{
+                        .child = cx.make(kete.ScrollView{
                             // Newest in view as they come.
                             .reveal = if (messages.len > 0) messages.len else null,
-                            .child = cx.make(ui.Padding{ .padding = .symmetric(16, 8), .child = cx.make(ui.Column{
+                            .child = cx.make(kete.Padding{ .padding = .symmetric(16, 8), .child = cx.make(kete.Column{
                                 .cross_axis_alignment = .stretch,
-                                .main_axis_size = .min,
+                                .fill = false,
                                 .children = rows.items,
                             }) }),
                         }),
                     }),
                 }),
-                cx.make(ui.Padding{ .padding = .{ .left = 16, .right = 16, .top = 8, .bottom = 12 }, .child = cx.make(ui.Row{
+                cx.make(kete.Padding{ .padding = .{ .left = 16, .right = 16, .top = 8, .bottom = 12 }, .child = cx.make(kete.Row{
                     .spacing = 8,
                     .cross_axis_alignment = .center,
                     .children = &.{
-                        cx.make(ui.Expanded{ .child = cx.make(ui.TextField{
+                        cx.make(kete.Expanded{ .child = cx.make(kete.TextField{
                             .placeholder = "Say something",
                             .width = std.math.inf(f32),
                             .max_len = protocol.max_text,
@@ -303,7 +301,7 @@ pub const Chat = struct {
                             .on_changed = .of(self.actions, Actions.setDraft),
                             .on_submit = .of(self.actions, Actions.requestSend),
                         }).withKey(self.actions.draft_key) }),
-                        cx.make(ui.IconButton{
+                        cx.make(kete.IconButton{
                             .icon = .send,
                             .on_press = .of(self.actions, Actions.requestSend),
                         }),
@@ -314,8 +312,8 @@ pub const Chat = struct {
     }
 
     /// "3 people: alice (you), bob, carol".
-    fn people(self: *const Chat, cx: *ui.Context) []const u8 {
-        const a = cx.ui.arena();
+    fn people(self: *const Chat, cx: *kete.BuildContext) []const u8 {
+        const a = cx.arena;
         var out: std.ArrayList(u8) = .empty;
         const count = self.members.len;
         out.print(a, "{d} {s}:", .{ count, if (count == 1) "person" else "people" }) catch return "";
@@ -326,40 +324,45 @@ pub const Chat = struct {
     }
 };
 
+/// The window's title: the room's name, in a room.
+pub fn windowTitle(room: ?*const net.Room) []const u8 {
+    return if (room) |r| r.name.get() else "Chat";
+}
+
 // --- Tests ----------------------------------------------------------------------
 
 const testing = std.testing;
-const font = @import("font");
+const font = kete.font;
 
-fn overflows(node: *ui.Node) bool {
+fn overflows(node: *kete.WidgetNode) bool {
     if (node.overflow.any()) return true;
     for (node.children.items) |ch| if (overflows(ch)) return true;
     return false;
 }
 
-fn findText(n: *ui.Node, text: []const u8) ?*ui.Node {
-    if (n.widget.as(ui.Text)) |tx| if (std.mem.eql(u8, tx.text, text)) return n;
+fn findText(n: *kete.WidgetNode, text: []const u8) ?*kete.WidgetNode {
+    if (n.widget.as(kete.Text)) |tx| if (std.mem.eql(u8, tx.text, text)) return n;
     for (n.children.items) |ch| if (findText(ch, text)) |f| return f;
     return null;
 }
 
-fn up(n: *ui.Node, comptime T: type) ?*ui.Node {
-    var at: ?*ui.Node = n;
+fn up(n: *kete.WidgetNode, comptime T: type) ?*kete.WidgetNode {
+    var at: ?*kete.WidgetNode = n;
     while (at) |x| : (at = x.parent) if (x.widget.is(T)) return x;
     return null;
 }
 
-fn click(u: *ui.Ui, n: *ui.Node) void {
+fn click(u: *kete.ui.WindowUi, n: *kete.WidgetNode) void {
     const at = n.position();
-    const p: ui.Point = .{ at[0] + n.size.w / 2, at[1] + n.size.h / 2 };
+    const p: kete.Point = .{ at[0] + n.size.w / 2, at[1] + n.size.h / 2 };
     u.pointerMotion(p);
-    u.pointerButton(p, ui.btn_left, true);
-    u.pointerButton(p, ui.btn_left, false);
+    u.pointerButton(p, .left, true);
+    u.pointerButton(p, .left, false);
 }
 
 test "the lobby lists rooms to join and a way to start one" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const u = try ui.Ui.create(testing.allocator, &f);
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
     var actions: Actions = .{};
     const none: Chat = .{ .node = 1, .ads = &.{}, .room = null, .name = "kitchen-pi", .default_name = "kitchen-pi", .actions = &actions };
@@ -381,29 +384,29 @@ test "the lobby lists rooms to join and a way to start one" {
     }
     try testing.expect(findText(u.root.?, "3 people") != null);
     try testing.expect(findText(u.root.?, "1 person") != null);
-    click(u, up(findText(u.root.?, "Workshop").?, ui.ListItem).?);
+    click(u, up(findText(u.root.?, "Workshop").?, kete.ListItem).?);
     try testing.expectEqual(@as(?u64, 12), actions.join);
 
-    click(u, up(findText(u.root.?, "Start Room").?, ui.FilledButton).?);
+    click(u, up(findText(u.root.?, "Start Room").?, kete.FilledButton).?);
     try testing.expect(actions.create);
 }
 
-fn findField(n: *ui.Node, text: []const u8) ?*ui.Node {
-    if (n.widget.is(ui.TextField) and std.mem.eql(u8, n.state(ui.TextField.State).text(), text)) return n;
+fn findField(n: *kete.WidgetNode, text: []const u8) ?*kete.WidgetNode {
+    if (n.widget.is(kete.TextField) and std.mem.eql(u8, n.state(kete.TextField.State).text(), text)) return n;
     for (n.children.items) |ch| if (findField(ch, text)) |f| return f;
     return null;
 }
 
 /// The settings button (the gear).
-fn findSettings(n: *ui.Node) ?*ui.Node {
-    if (n.widget.as(ui.IconButton)) |b| if (b.icon == .settings) return n;
+fn findSettings(n: *kete.WidgetNode) ?*kete.WidgetNode {
+    if (n.widget.as(kete.IconButton)) |b| if (b.icon == .settings) return n;
     for (n.children.items) |ch| if (findSettings(ch)) |f| return f;
     return null;
 }
 
 test "the settings change the name" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const u = try ui.Ui.create(testing.allocator, &f);
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
     var actions: Actions = .{};
     const chat: Chat = .{ .node = 1, .ads = &.{}, .room = null, .name = "Alice", .default_name = "kitchen-pi", .actions = &actions };
@@ -426,15 +429,15 @@ test "the settings change the name" {
     try testing.expect(findText(u.root.?, "Settings") != null);
     // Its field has the name (the lobby's, under it, is empty).
     try testing.expect(findField(u.root.?, "Alice") != null);
-    click(u, up(findText(u.root.?, "Save").?, ui.FilledButton).?);
+    click(u, up(findText(u.root.?, "Save").?, kete.FilledButton).?);
     try testing.expect(actions.save_settings);
-    click(u, up(findText(u.root.?, "Cancel").?, ui.TextButton).?);
+    click(u, up(findText(u.root.?, "Cancel").?, kete.TextButton).?);
     try testing.expect(!actions.settings_open);
 }
 
 test "a room shows who is there and what was said, and sending asks to send" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const u = try ui.Ui.create(testing.allocator, &f);
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
     var actions: Actions = .{};
     var room: net.Room = .{ .id = 1, .name = protocol.Name.init("Lounge"), .log = protocol.Log.init(testing.allocator), .connected = true };
@@ -447,7 +450,8 @@ test "a room shows who is there and what was said, and sending asks to send" {
         u.frame(size[0], size[1], 0, chat);
         try testing.expect(!overflows(u.root.?));
     }
-    try testing.expect(findText(u.root.?, "Lounge") != null);
+    try testing.expectEqualStrings("Lounge", windowTitle(&room));
+    try testing.expectEqualStrings("Chat", windowTitle(null));
     try testing.expect(findText(u.root.?, "2 people: alice (you), bob") != null);
     try testing.expect(findText(u.root.?, "Hello!") != null);
     try testing.expect(findText(u.root.?, "Hi Bob") != null);
@@ -455,7 +459,7 @@ test "a room shows who is there and what was said, and sending asks to send" {
     try testing.expect(findText(u.root.?, "You") != null);
     try testing.expect(findText(u.root.?, "bob") != null);
 
-    click(u, up(findText(u.root.?, "Leave").?, ui.TonalButton).?);
+    click(u, up(findText(u.root.?, "Leave").?, kete.TonalButton).?);
     try testing.expect(actions.leave);
 
     // An empty room says so.
