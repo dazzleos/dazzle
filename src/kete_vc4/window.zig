@@ -36,6 +36,14 @@ const btn_middle = 0x112;
 const btn_side = 0x113;
 const btn_extra = 0x114;
 
+/// A key going down or up, for an app's own shortcuts (`Display.on_key`):
+/// its Linux key code, and whether Control is held.
+pub const KeyPress = struct {
+    code: u32,
+    pressed: bool,
+    ctrl: bool,
+};
+
 pub const Window = struct {
     win: *app.Window,
     /// Its title, as kete set it (as much as fits).
@@ -60,6 +68,8 @@ pub const Window = struct {
     /// last key pressed (a Linux key code): for an app that shows them.
     pointer: ?[2]f32 = null,
     last_key: ?u32 = null,
+    /// Told of each key before kete is (`Display.on_key`).
+    on_key: ?kete.ValueCallback(KeyPress) = null,
 
     pub fn platform(_: *const Window) kwin.WindowPlatform {
         return .custom;
@@ -298,6 +308,7 @@ pub const Window = struct {
         const k = w.keyboard orelse w.win.layout;
         const shift = w.shift > 0;
         const ctrl = w.ctrl > 0;
+        if (w.on_key) |f| f.call(.{ .code = code, .pressed = pressed, .ctrl = ctrl });
         return .{ .key = .{
             .key = kwin.evdev.keyOf(code),
             .pressed = pressed,
@@ -353,6 +364,9 @@ pub const Display = struct {
     /// The keyboard layout to type with, if the app chooses it rather than
     /// the system (setup, before the system has one).
     keyboard: ?locale.Keyboard = null,
+    /// Told of each key before kete is: for an app's shortcuts that work
+    /// whatever has the keyboard (or nothing does).
+    on_key: ?kete.ValueCallback(KeyPress) = null,
 
     const max_app_fds = app.window.max_wake_fds - max_sources;
     const max_sources = 3;
@@ -445,7 +459,7 @@ pub const Display = struct {
             side.* = v;
         };
         const win = try app.Window.open(d.gpa, d.gpu, d.environ, options);
-        d.window = .{ .win = win, .gpa = d.gpa, .drawn_by = d.decorations, .keyboard = d.keyboard };
+        d.window = .{ .win = win, .gpa = d.gpa, .drawn_by = d.decorations, .keyboard = d.keyboard, .on_key = d.on_key };
         d.window.?.keepTitle(o.title);
         d.syncWake();
         return &d.window.?;
