@@ -1,8 +1,8 @@
 //! LazyGrid: kete's `Grid` (many items the same size, only those that
 //! show made), and a list too: with an infinite cell width, one column of
 //! items as wide as it. `keep` makes an item even when it does not show
-//! (one a scroll view is to reveal). Dazzle's apps' lists, from Dazzle's
-//! own toolkit, on kete.
+//! (one a scroll view is to reveal). Dazzle's apps' lists, from the toolkit
+//! Dazzle had before kete.
 //!
 //!     cx.make(kete.ScrollView{ .child = cx.make(kete_vc4.LazyGrid{
 //!         .count = files.len,

@@ -8,7 +8,7 @@ const Modules = struct {
     shader: *std.Build.Module,
     app: *std.Build.Module,
     gfx: *std.Build.Module,
-    ui: *std.Build.Module,
+    appearance: *std.Build.Module,
     font: *std.Build.Module,
     icons: *std.Build.Module,
     wayland: *std.Build.Module,
@@ -152,7 +152,7 @@ fn addMapData(b: *std.Build) std.Build.LazyPath {
 ///   with them
 /// * `app`: native apps' windows on dazzle-shell, drawn with vc4
 /// * `gfx`: 2D graphics (rounded rectangles, polygons, strokes, text) on vc4
-/// * `ui`: the widget toolkit, on gfx
+/// * `appearance`: the theme and desktop background chosen in Settings
 /// * `font`: OpenType font rendering
 /// * `icons`: Material icons, and the font (with just those) to draw them
 /// * `wayland`: the Wayland wire protocol and a client library
@@ -228,20 +228,12 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
             .{ .name = "audio", .module = audio },
         },
     });
-    const ui = b.createModule(.{
-        .root_source_file = b.path("src/ui/ui.zig"),
+    const appearance = b.createModule(.{
+        .root_source_file = b.path("src/appearance/appearance.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "sys", .module = sys },
-            .{ .name = "locale", .module = locale },
-            .{ .name = "vc4", .module = vc4 },
-            .{ .name = "gfx", .module = gfx },
-            .{ .name = "font", .module = font },
-            .{ .name = "icons", .module = icons },
-            .{ .name = "app", .module = app },
-            .{ .name = "video", .module = video },
-            .{ .name = "audio", .module = audio },
         },
     });
     const info = b.addOptions();
@@ -259,7 +251,7 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
             .{ .name = "build_info", .module = build_info },
         },
     });
-    return .{ .sys = sys, .vc4 = vc4, .shader = shader, .app = app, .gfx = gfx, .ui = ui, .font = font, .icons = icons, .wayland = wayland, .build_info = build_info, .store = store, .locale = locale, .video = video, .audio = audio };
+    return .{ .sys = sys, .vc4 = vc4, .shader = shader, .app = app, .gfx = gfx, .appearance = appearance, .font = font, .icons = icons, .wayland = wayland, .build_info = build_info, .store = store, .locale = locale, .video = video, .audio = audio };
 }
 
 /// `sys`, `vc4` and `shader`: what the GPU's users need, and what the
@@ -494,7 +486,7 @@ fn addProgramModule(b: *std.Build, path: []const u8, target: std.Build.ResolvedT
             .{ .name = "shader", .module = m.shader },
             .{ .name = "app", .module = m.app },
             .{ .name = "gfx", .module = m.gfx },
-            .{ .name = "ui", .module = m.ui },
+            .{ .name = "appearance", .module = m.appearance },
             .{ .name = "font", .module = m.font },
             .{ .name = "icons", .module = m.icons },
             .{ .name = "wayland", .module = m.wayland },
@@ -537,7 +529,7 @@ fn addKete(b: *std.Build, module: *std.Build.Module, m: Modules, target: std.Bui
             .{ .name = "app", .module = m.app },
             .{ .name = "gfx", .module = m.gfx },
             .{ .name = "locale", .module = m.locale },
-            .{ .name = "ui", .module = m.ui },
+            .{ .name = "appearance", .module = m.appearance },
             .{ .name = "font", .module = m.font },
         },
     });
@@ -1343,7 +1335,7 @@ pub fn build(b: *std.Build) void {
         host.shader.addAnonymousImport(b.fmt("{s}.spv", .{name}), .{ .root_source_file = addSpirv(b, name, source) });
     }
     // The font tests use the real system font.
-    for ([_]*std.Build.Module{ host.font, host.gfx, host.ui }) |m| {
+    for ([_]*std.Build.Module{ host.font, host.gfx }) |m| {
         m.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
         m.addAnonymousImport("TwemojiMozilla.ttf", .{ .root_source_file = b.path("fonts/TwemojiMozilla.ttf") });
     }
@@ -1394,7 +1386,7 @@ pub fn build(b: *std.Build) void {
         host.shader,
         host.app,
         host.gfx,
-        host.ui,
+        host.appearance,
         host.font,
         host.icons,
         host.wayland,

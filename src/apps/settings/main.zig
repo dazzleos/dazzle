@@ -7,7 +7,7 @@
 //! Wi-Fi networks, join one, start an access point, or choose how Ethernet
 //! gets its address: it asks init's network manager, which answers no
 //! other program (see sys.network). The figures that change are read again
-//! every second (see info.zig); the window is built with the `ui` toolkit
+//! every second (see info.zig); the window is built with kete
 //! (see view.zig), and only what changed is drawn again.
 //! Apps are installed and removed, and updates of the system checked for,
 //! downloaded and installed, on the Software page (see store.zig and
@@ -26,7 +26,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
 const locale = @import("locale");
-const ui = @import("ui");
+const appearance_settings = @import("appearance");
 const kete = @import("kete");
 const kete_vc4 = @import("kete_vc4");
 const build_info = @import("build_info");
@@ -91,7 +91,7 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
     var host: kete_vc4.Host = undefined;
     try host.init(gpa, init.io, init.minimal.environ, .{ .app_id = "dazzle-settings" });
     defer host.deinit();
-    var appearance = ui.theme.loadSettings();
+    var appearance = appearance_settings.loadSettings();
 
     const system = info.System.read();
     print("dazzle-settings: {s}, {d} {s}\n", .{ system.model.slice(), system.cores, if (system.cores == 1) "core" else "cores" });
@@ -229,7 +229,7 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
         }
         if (actions.appearance) |ap| {
             actions.appearance = null;
-            ui.theme.saveSettings(ap);
+            appearance_settings.saveSettings(ap);
             appearance = ap;
             host.app.setTheme(kete_vc4.themeMode(ap.theme));
             dirty = true;

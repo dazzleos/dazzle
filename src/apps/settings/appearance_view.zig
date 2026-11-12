@@ -4,7 +4,7 @@
 const std = @import("std");
 const kete = @import("kete");
 const kete_vc4 = @import("kete_vc4");
-const ui_theme = @import("ui").theme;
+const appearance_settings = @import("appearance");
 const view = @import("view.zig");
 
 const Settings = view.Settings;
@@ -15,7 +15,7 @@ pub const label = "Appearance";
 pub const icon: kete.IconName = .palette;
 
 pub const State = struct {
-    appearance: ui_theme.Settings = .{},
+    appearance: appearance_settings.Settings = .{},
     actions: ?*Actions = null,
 
     fn setDark(st: *State) void {
@@ -32,7 +32,7 @@ pub const State = struct {
         acts.appearance = next;
     }
 
-    fn setBackground(comptime bg: ui_theme.Background) fn (*State) void {
+    fn setBackground(comptime bg: appearance_settings.Background) fn (*State) void {
         return struct {
             fn set(st: *State) void {
                 const acts = st.actions orelse return;
@@ -83,7 +83,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
 
     // A swatch of each colour, in rows of four under its label; the one
     // chosen is ringed, as a radio button is.
-    const backgrounds = comptime std.enums.values(ui_theme.Background);
+    const backgrounds = comptime std.enums.values(appearance_settings.Background);
     var swatch_rows: [(backgrounds.len + swatches_per_row - 1) / swatches_per_row]kete.Widget = undefined;
     inline for (&swatch_rows, 0..) |*row, r| {
         const from = r * swatches_per_row;
@@ -114,7 +114,7 @@ const ring_gap = 3;
 
 /// A button filled with `bg`'s colour, named by its tooltip, and ringed in
 /// the theme's primary colour when it is the one chosen.
-fn swatch(cx: *kete.BuildContext, bg: ui_theme.Background, chosen: bool, on_press: ?kete.Callback) kete.Widget {
+fn swatch(cx: *kete.BuildContext, bg: appearance_settings.Background, chosen: bool, on_press: ?kete.Callback) kete.Widget {
     const t = cx.theme();
     const outer = 12 + ring + ring_gap;
     return cx.make(kete.Tooltip{
@@ -145,14 +145,14 @@ fn swatch(cx: *kete.BuildContext, bg: ui_theme.Background, chosen: bool, on_pres
 }
 
 /// The swatch of `bg`, by its tooltip.
-fn findSwatch(n: *kete.WidgetNode, bg: ui_theme.Background) ?*kete.WidgetNode {
+fn findSwatch(n: *kete.WidgetNode, bg: appearance_settings.Background) ?*kete.WidgetNode {
     if (n.widget.as(kete.Tooltip)) |tip| if (std.mem.eql(u8, tip.text, bg.name())) return n;
     for (n.children.items) |ch| if (findSwatch(ch, bg)) |f| return f;
     return null;
 }
 
 /// Whether the swatch of `bg` is ringed (chosen).
-fn ringed(n: *kete.WidgetNode, bg: ui_theme.Background) bool {
+fn ringed(n: *kete.WidgetNode, bg: appearance_settings.Background) bool {
     var at = findSwatch(n, bg).?;
     while (!at.widget.is(kete.RoundedBox)) at = at.children.items[0];
     return at.widget.as(kete.RoundedBox).?.border_color != null;
@@ -167,7 +167,7 @@ test "Appearance page toggles between Dark and Light theme" {
     defer u.destroy();
 
     const d = view.sample();
-    var appearance: ui_theme.Settings = .{ .theme = .dark };
+    var appearance: appearance_settings.Settings = .{ .theme = .dark };
     var actions: Actions = .{};
 
     var frame_no: u64 = 1;
@@ -196,7 +196,7 @@ test "Appearance page toggles between Dark and Light theme" {
 
     // Clicking Light sets actions.appearance.theme = .light.
     view.click(u, view.up(view.findText(u.root.?, "Light").?, kete.Pressable).?);
-    try testing.expectEqual(ui_theme.Mode.light, actions.appearance.?.theme);
+    try testing.expectEqual(appearance_settings.Mode.light, actions.appearance.?.theme);
     appearance = actions.appearance.?;
     u.theme = kete_vc4.themeMode(appearance.theme).scheme();
     actions = .{};
@@ -214,7 +214,7 @@ test "Appearance page toggles between Dark and Light theme" {
 
     // Clicking Dark sets actions.appearance.theme = .dark.
     view.click(u, view.up(view.findText(u.root.?, "Dark").?, kete.Pressable).?);
-    try testing.expectEqual(ui_theme.Mode.dark, actions.appearance.?.theme);
+    try testing.expectEqual(appearance_settings.Mode.dark, actions.appearance.?.theme);
 
     // Eight colours, in two rows of four; navy is chosen to start with.
     try testing.expect(view.findText(u.root.?, "Background") != null);
@@ -226,8 +226,8 @@ test "Appearance page toggles between Dark and Light theme" {
 
     // Picking a background keeps the theme, and rings the one picked.
     view.click(u, findSwatch(u.root.?, .plum).?.child(0));
-    try testing.expectEqual(ui_theme.Background.plum, actions.appearance.?.background);
-    try testing.expectEqual(ui_theme.Mode.dark, actions.appearance.?.theme);
+    try testing.expectEqual(appearance_settings.Background.plum, actions.appearance.?.background);
+    try testing.expectEqual(appearance_settings.Mode.dark, actions.appearance.?.theme);
     frame_no += 1;
     u.frame(1280, 720, frame_no, Settings{
         .commit = "x",

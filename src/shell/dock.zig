@@ -20,7 +20,7 @@ const sys = @import("sys");
 const font = @import("font");
 const icons = @import("icons");
 const audio = @import("audio");
-const theme_settings = @import("ui").theme;
+const theme_settings = @import("appearance");
 
 pub const apps_dir = sys.system.apps_dir;
 pub const appearance_file = theme_settings.settings_file;

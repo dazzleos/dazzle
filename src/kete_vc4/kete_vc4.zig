@@ -21,7 +21,7 @@ const kete = @import("kete");
 const vc4 = @import("vc4");
 const sys = @import("sys");
 const app = @import("app");
-const ui = @import("ui");
+const appearance = @import("appearance");
 const dazzle_font = @import("font");
 const linux = std.os.linux;
 
@@ -77,7 +77,7 @@ pub const Host = struct {
             .on_last_window_closed = options.on_last_window_closed,
         });
         h.app.shared.attachRenderer(h.renderer.renderer(), false);
-        h.app.setTheme(themeMode(ui.theme.loadSettings().theme));
+        h.app.setTheme(themeMode(appearance.loadSettings().theme));
         h.theme_watch = .init();
         if (h.theme_watch.fd) |fd| _ = h.display.wakeOn(fd, true);
     }
@@ -93,7 +93,7 @@ pub const Host = struct {
     /// it changed. False when the app should end.
     pub fn step(h: *Host, idle_timeout_ns: u64) !bool {
         const going = try h.app.step(idle_timeout_ns);
-        if (h.theme_watch.changed()) h.app.setTheme(themeMode(ui.theme.loadSettings().theme));
+        if (h.theme_watch.changed()) h.app.setTheme(themeMode(appearance.loadSettings().theme));
         return going;
     }
 
@@ -115,7 +115,7 @@ pub const Host = struct {
 const ThemeWatch = struct {
     fd: ?linux.fd_t,
 
-    const name = std.fs.path.basename(ui.theme.settings_file);
+    const name = std.fs.path.basename(appearance.settings_file);
 
     fn init() ThemeWatch {
         const rc = linux.inotify_init1(linux.IN.NONBLOCK | linux.IN.CLOEXEC);
@@ -156,7 +156,7 @@ const ThemeWatch = struct {
 };
 
 /// Dazzle's appearance setting, as kete's theme.
-pub fn themeMode(m: ui.theme.Mode) kete.ui.theme.ThemeMode {
+pub fn themeMode(m: appearance.Mode) kete.ui.theme.ThemeMode {
     return switch (m) {
         inline else => |tag| @field(kete.ui.theme.ThemeMode, @tagName(tag)),
     };

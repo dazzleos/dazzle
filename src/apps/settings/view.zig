@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const kete = @import("kete");
-const ui_theme = @import("ui").theme;
+const appearance_settings = @import("appearance");
 const gfx = kete.gfx;
 const info = @import("info.zig");
 const locale = @import("locale");
@@ -64,7 +64,7 @@ pub const Actions = struct {
     sound: ?audio.Settings = null,
     test_sound: bool = false,
     /// Appearance settings (Dark or Light colour scheme).
-    appearance: ?ui_theme.Settings = null,
+    appearance: ?appearance_settings.Settings = null,
     /// Serve the log over HTTP, or stop.
     log_server: ?bool = null,
 
@@ -142,7 +142,7 @@ pub const Settings = struct {
     video_memory: resources_view.VideoMemory = .{},
     sound: audio.Settings = .{},
     audio_devices: *const audio.Devices = &empty_audio_devices,
-    appearance: ui_theme.Settings = .{},
+    appearance: appearance_settings.Settings = .{},
     /// The title bar's buttons (close, and maximize, which shows whether
     /// the window is), and pressing the bar (to move the window).
     pub const State = struct {
