@@ -198,6 +198,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
         if (actions.appearance) |ap| {
             actions.appearance = null;
             ui.theme.saveSettings(ap);
+            a.appearance = ap;
             a.setTheme(ap.theme);
             a.dirty = true;
         }

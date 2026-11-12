@@ -1,5 +1,5 @@
-//! The Appearance page: system colour scheme (Dark or Light) and desktop
-//! presentation options.
+//! The Appearance page: system colour scheme (Dark or Light), and the
+//! desktop's background colour (the same in either).
 
 const std = @import("std");
 const ui = @import("ui");
@@ -28,6 +28,17 @@ pub const State = struct {
         var next = acts.appearance orelse st.appearance;
         next.theme = .light;
         acts.appearance = next;
+    }
+
+    fn setBackground(comptime bg: ui.theme.Background) fn (*State) void {
+        return struct {
+            fn set(st: *State) void {
+                const acts = st.actions orelse return;
+                var next = acts.appearance orelse st.appearance;
+                next.background = bg;
+                acts.appearance = next;
+            }
+        }.set;
     }
 };
 
@@ -65,6 +76,27 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
         .children = &.{
             b.label("Theme"),
             theme_bar,
+        },
+    })) catch {};
+
+    const backgrounds = comptime std.enums.values(ui.theme.Background);
+    var pills: [backgrounds.len]ui.Widget = undefined;
+    inline for (backgrounds, &pills, 0..) |bg, *pill, i| {
+        pill.* = cx.make(ui.PillButton{
+            .label = bg.name(),
+            .selected = self.appearance.background == bg,
+            .first = i == 0,
+            .last = i == backgrounds.len - 1,
+            .on_press = if (self.actions != null) .of(state, State.setBackground(bg)) else null,
+        });
+    }
+    // Under its label: five do not fit beside it in the smallest window.
+    rows.append(a, cx.make(ui.Column{
+        .cross_axis_alignment = .start,
+        .spacing = 8,
+        .children = &.{
+            b.label("Background"),
+            cx.make(ui.PillBar{ .children = a.dupe(ui.Widget, &pills) catch &.{} }),
         },
     })) catch {};
 
@@ -127,5 +159,11 @@ test "Appearance page toggles between Dark and Light theme" {
 
     // Clicking Dark sets actions.appearance.theme = .dark.
     view.click(u, view.up(view.findText(u.root.?, "Dark").?, ui.Pressable).?);
+    try testing.expectEqual(ui.theme.Mode.dark, actions.appearance.?.theme);
+
+    // Picking a background keeps the theme.
+    try testing.expect(view.findText(u.root.?, "Background") != null);
+    view.click(u, view.up(view.findText(u.root.?, "Navy").?, ui.Pressable).?);
+    try testing.expectEqual(ui.theme.Background.navy, actions.appearance.?.background);
     try testing.expectEqual(ui.theme.Mode.dark, actions.appearance.?.theme);
 }

@@ -40,9 +40,49 @@ pub const Mode = enum {
     }
 };
 
+/// The colour of the desktop behind the windows: the same in either
+/// theme, and dark, so the windows and the dock stand out on it.
+pub const Background = enum {
+    grey,
+    black,
+    navy,
+    green,
+    plum,
+
+    pub fn name(bg: Background) []const u8 {
+        return switch (bg) {
+            .grey => "Grey",
+            .black => "Black",
+            .navy => "Navy",
+            .green => "Green",
+            .plum => "Plum",
+        };
+    }
+
+    pub fn code(bg: Background) []const u8 {
+        return @tagName(bg);
+    }
+
+    pub fn fromCode(text: []const u8) ?Background {
+        return std.meta.stringToEnum(Background, text);
+    }
+
+    /// 0xAARRGGBB.
+    pub fn argb(bg: Background) u32 {
+        return switch (bg) {
+            .grey => 0xff202124,
+            .black => 0xff000000,
+            .navy => 0xff101830,
+            .green => 0xff12261c,
+            .plum => 0xff241628,
+        };
+    }
+};
+
 /// Persistent appearance settings stored in `settings_file`.
 pub const Settings = struct {
     theme: Mode = .dark,
+    background: Background = .grey,
 
     pub fn parse(text: []const u8) Settings {
         var s: Settings = .{};
@@ -53,13 +93,15 @@ pub const Settings = struct {
             const val = tok.next() orelse continue;
             if (std.mem.eql(u8, key, "theme")) {
                 if (Mode.fromCode(val)) |m| s.theme = m;
+            } else if (std.mem.eql(u8, key, "background")) {
+                if (Background.fromCode(val)) |bg| s.background = bg;
             }
         }
         return s;
     }
 
     pub fn formatBuf(s: Settings, buf: []u8) []const u8 {
-        return std.fmt.bufPrint(buf, "theme {s}\n", .{s.theme.code()}) catch "";
+        return std.fmt.bufPrint(buf, "theme {s}\nbackground {s}\n", .{ s.theme.code(), s.background.code() }) catch "";
     }
 };
 
@@ -253,4 +295,12 @@ test "appearance settings parse, format, save and load" {
     saveSettingsTo(path, .{ .theme = .dark });
     try testing.expect(watch.changed());
     try testing.expectEqual(Mode.dark, loadSettingsFrom(path).theme);
+}
+
+test "the appearance settings keep the theme and the background" {
+    const s: Settings = .{ .theme = .light, .background = .navy };
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqual(s, Settings.parse(s.formatBuf(&buf)));
+    // Written before there was a choice of background.
+    try std.testing.expectEqual(Settings{ .theme = .light, .background = .grey }, Settings.parse("theme light\n"));
 }

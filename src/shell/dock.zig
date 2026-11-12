@@ -20,16 +20,16 @@ const sys = @import("sys");
 const font = @import("font");
 const icons = @import("icons");
 const audio = @import("audio");
+const theme_settings = @import("ui").theme;
 
 pub const apps_dir = sys.system.apps_dir;
-pub const appearance_file = apps_dir ++ "/.appearance";
+pub const appearance_file = theme_settings.settings_file;
 
 pub const Theme = enum {
     dark,
     light,
 
     pub const Colors = struct {
-        desktop_background: u32,
         background: u32,
         hover_background: u32,
         status_border: u32,
@@ -41,7 +41,6 @@ pub const Theme = enum {
     pub fn colors(t: Theme) Colors {
         return switch (t) {
             .dark => .{
-                .desktop_background = 0xff101830,
                 .background = 0xff1c2a4a,
                 .hover_background = 0xff2c3e66,
                 .status_border = 0xff3b507a,
@@ -50,7 +49,6 @@ pub const Theme = enum {
                 .status_inactive = 0x40ffffff,
             },
             .light => .{
-                .desktop_background = 0xffdce4f2,
                 .background = 0xffe8eef8,
                 .hover_background = 0xffd0dcf0,
                 .status_border = 0xffb0c2e0,
@@ -62,24 +60,26 @@ pub const Theme = enum {
     }
 };
 
-pub fn parseTheme(text: []const u8) Theme {
-    var theme: Theme = .dark;
-    var lines = std.mem.tokenizeScalar(u8, text, '\n');
-    while (lines.next()) |line| {
-        var tok = std.mem.tokenizeAny(u8, line, " \t\r");
-        const key = tok.next() orelse continue;
-        const val = tok.next() orelse continue;
-        if (std.mem.eql(u8, key, "theme")) {
-            if (std.meta.stringToEnum(Theme, val)) |t| theme = t;
-        }
-    }
-    return theme;
-}
+/// The theme and the desktop's colour, as chosen in Settings.
+pub const Appearance = struct {
+    theme: Theme = .dark,
+    background: u32 = theme_settings.Background.grey.argb(),
 
-pub fn readTheme() Theme {
+    pub fn parse(text: []const u8) Appearance {
+        const s = theme_settings.Settings.parse(text);
+        return .{
+            .theme = switch (s.theme) {
+                .dark => .dark,
+                .light => .light,
+            },
+            .background = s.background.argb(),
+        };
+    }
+};
+
+pub fn readAppearance() Appearance {
     var buf: [128]u8 = undefined;
-    const text = sys.readFile(appearance_file, &buf) orelse return .dark;
-    return parseTheme(text);
+    return .parse(sys.readFile(appearance_file, &buf) orelse "");
 }
 
 const background = Theme.dark.colors().background;
@@ -653,9 +653,8 @@ test "icons and the status box are in a row in the middle, and clicks find the a
     try testing.expectEqual(@as(u32, background), at(&d, rs.x + rs.width / 2, rs.y + 5));
 
     // Switching to the light theme updates the dock background, hover, running dot, and status border.
-    try testing.expectEqual(Theme.dark, parseTheme(""));
-    try testing.expectEqual(Theme.light, parseTheme("theme light\n"));
-    try testing.expectEqual(Theme.dark, parseTheme("theme dark\n"));
+    try testing.expectEqual(Appearance{}, Appearance.parse(""));
+    try testing.expectEqual(Appearance{ .theme = .light, .background = 0xff000000 }, Appearance.parse("theme light\nbackground black\n"));
     d.theme = .light;
     d.draw();
     const light = Theme.light.colors();
