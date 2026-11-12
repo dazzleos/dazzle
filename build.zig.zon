@@ -6,7 +6,12 @@
     .dependencies = .{
         // The toolkit Dazzle is moving to (built without its own window
         // and render backends: Dazzle gives its own, in src/kete_vc4).
-        .kete = .{ .path = "../kete" },
+        // To build with a kete checkout beside Dazzle's instead:
+        // `scripts/zig build --fork=../kete`.
+        .kete = .{
+            .url = "git+https://github.com/robert-ancell/kete#5de342d29a7ab0aeb612c394840cac4483916a93",
+            .hash = "kete-0.1.0-tp3h6mYuUQAxVtKltFf4DbMxxWH1YhiFn9hT9W7CKcmI",
+        },
     },
     .paths = .{
         "build.zig",

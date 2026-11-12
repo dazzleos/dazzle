@@ -2,3 +2,4 @@ zig-out/
 .zig-cache/
 build/
 *.key
+zig-pkg/
