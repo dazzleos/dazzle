@@ -51,6 +51,11 @@ pub const Window = struct {
     caps: bool = false,
     /// Not yet closed (`close`): `win` is gone once it is.
     open: bool = true,
+    /// Who draws its title bar: kete, or no one (`Display.decorations`).
+    drawn_by: kwin.WindowDecorations = .toolkit,
+    /// The keyboard layout the app chose, rather than the system's
+    /// (`Display.setKeyboard`).
+    keyboard: ?locale.Keyboard = null,
 
     pub fn platform(_: *const Window) kwin.WindowPlatform {
         return .custom;
@@ -61,9 +66,10 @@ pub const Window = struct {
     }
 
     /// Dazzle's shell draws no decorations: kete draws the title bar (with
-    /// no shadow: the buffers it is given have no frame).
-    pub fn decorations(_: *const Window) kwin.WindowDecorations {
-        return .toolkit;
+    /// no shadow: the buffers it is given have no frame), unless the app
+    /// wants none.
+    pub fn decorations(w: *const Window) kwin.WindowDecorations {
+        return w.drawn_by;
     }
 
     pub fn bufferSync(_: *const Window) kwin.WindowBufferSync {
@@ -180,7 +186,7 @@ pub const Window = struct {
     }
 
     pub fn layout(w: *const Window) kwin.KeyboardLayout {
-        const k = w.win.layout;
+        const k = w.keyboard orelse w.win.layout;
         return .init(k.name(), @tagName(k));
     }
 
@@ -276,12 +282,13 @@ pub const Window = struct {
             },
             else => {},
         }
+        const k = w.keyboard orelse w.win.layout;
         const shift = w.shift > 0;
         const ctrl = w.ctrl > 0;
         return .{ .key = .{
             .key = kwin.evdev.keyOf(code),
             .pressed = pressed,
-            .char = if (ctrl) null else w.win.layout.char(code, shift, w.caps, w.altgr),
+            .char = if (ctrl) null else k.char(code, shift, w.caps, w.altgr),
             .shift = shift,
             .ctrl = ctrl,
         } };
@@ -327,6 +334,12 @@ pub const Display = struct {
     /// The app's files to wake for (`wakeOn`), and kete's sources (`watch`).
     wake_fds: [max_app_fds]?linux.fd_t = @splat(null),
     sources: [max_sources]?kwin.Source = @splat(null),
+    /// Who draws its windows' title bars: kete (`.toolkit`), or no one
+    /// (`.none`: an app with the whole screen).
+    decorations: kwin.WindowDecorations = .toolkit,
+    /// The keyboard layout to type with, if the app chooses it rather than
+    /// the system (setup, before the system has one).
+    keyboard: ?locale.Keyboard = null,
 
     const max_app_fds = app.window.max_wake_fds - max_sources;
     const max_sources = 3;
@@ -345,6 +358,12 @@ pub const Display = struct {
             return true;
         };
         return false;
+    }
+
+    /// Types with `k` rather than the system's layout (null: the system's).
+    pub fn setKeyboard(d: *Display, k: ?locale.Keyboard) void {
+        d.keyboard = k;
+        if (d.openWindowOrNull()) |w| w.keyboard = k;
     }
 
     /// kete's sources to wait on (and read when they can be).
@@ -413,7 +432,7 @@ pub const Display = struct {
             side.* = v;
         };
         const win = try app.Window.open(d.gpa, d.gpu, d.environ, options);
-        d.window = .{ .win = win, .gpa = d.gpa };
+        d.window = .{ .win = win, .gpa = d.gpa, .drawn_by = d.decorations, .keyboard = d.keyboard };
         d.window.?.keepTitle(o.title);
         d.syncWake();
         return &d.window.?;

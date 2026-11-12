@@ -16,7 +16,8 @@
 //! the window asks for goes to the main loop through `Actions`.
 
 const std = @import("std");
-const ui = @import("ui");
+const kete = @import("kete");
+const kete_vc4 = @import("kete_vc4");
 const sys = @import("sys");
 const store = @import("store");
 const locale = @import("locale");
@@ -178,12 +179,12 @@ pub const Setup = struct {
         return st;
     }
 
-    pub fn build(self: *const Setup, cx: *ui.Context, state: *State) ui.Widget {
+    pub fn build(self: *const Setup, cx: *kete.BuildContext, state: *State) kete.Widget {
         const show_wifi = self.showWifi();
         if (pages[state.page] == .wifi and !show_wifi) {
             state.page = @intFromEnum(Page.apps);
         }
-        const nav = cx.ui.arena().create(Nav) catch return cx.make(ui.Empty{});
+        const nav = cx.arena.create(Nav) catch return cx.make(kete.SizedBox.empty);
         nav.* = .{
             .state = state,
             .actions = self.actions,
@@ -193,14 +194,14 @@ pub const Setup = struct {
         state.actions = self.actions;
         const content = if (state.finishing) self.finishing(cx, nav) else self.page(cx, state, nav);
         // At most 720 pixels wide, narrower in a narrower window.
-        return cx.make(ui.Decorated{ .color = cx.theme().surface, .child = cx.make(ui.Center{ .child = cx.make(ui.ConstrainedBox{
+        return cx.make(kete.RoundedBox{ .color = cx.theme().surface, .child = cx.make(kete.Align{ .child = cx.make(kete.ConstrainedBox{
             .constraints = .{ .max_w = 720 },
-            .child = cx.make(ui.Padding{ .padding = .all(24), .child = content }),
+            .child = cx.make(kete.Padding{ .padding = .all(24), .child = content }),
         }) }) });
     }
 
     /// A page: its heading, what it asks, and the buttons.
-    fn page(self: *const Setup, cx: *ui.Context, state: *State, nav: *Nav) ui.Widget {
+    fn page(self: *const Setup, cx: *kete.BuildContext, state: *State, nav: *Nav) kete.Widget {
         const t = cx.theme();
         const which = pages[state.page];
         const body = switch (which) {
@@ -216,59 +217,59 @@ pub const Setup = struct {
             "Skip"
         else
             "Next";
-        return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 24, .children = &.{
-            cx.make(ui.Text{ .text = "Welcome to Dazzle", .style = .{ .size = 40, .color = t.primary } }),
+        return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 24, .children = &.{
+            cx.make(kete.Text{ .text = "Welcome to Dazzle", .style = .{ .size = 40, .color = t.primary } }),
             body,
-            cx.make(ui.Row{ .spacing = 12, .main_axis_alignment = .end, .children = &.{
-                if (state.page > 0) cx.make(ui.OutlinedButton{ .label = "Back", .icon = .arrow_back, .on_press = .of(nav, Nav.back) }) else cx.make(ui.Empty{}),
-                cx.make(ui.OutlinedButton{ .label = next_label, .icon = if (last) .check else null, .trailing_icon = if (last) null else .arrow_forward, .on_press = .of(nav, Nav.next) }),
+            cx.make(kete.Row{ .spacing = 12, .main_axis_alignment = .end, .children = &.{
+                if (state.page > 0) cx.make(kete.OutlinedButton{ .label = "Back", .icon = .arrow_back, .on_press = .of(nav, Nav.back) }) else cx.make(kete.SizedBox.empty),
+                cx.make(kete.OutlinedButton{ .label = next_label, .icon = if (last) .check else null, .trailing_icon = if (last) null else .arrow_forward, .on_press = .of(nav, Nav.next) }),
             } }),
         } });
     }
 
-    fn languagePage(cx: *ui.Context, state: *State) ui.Widget {
+    fn languagePage(cx: *kete.BuildContext, state: *State) kete.Widget {
         const t = cx.theme();
-        const a = cx.ui.arena();
-        var languages: std.ArrayList(ui.Widget) = .empty;
-        for (std.enums.values(locale.Language)) |l| languages.append(a, cx.make(ui.Radio(locale.Language){
+        const a = cx.arena;
+        var languages: std.ArrayList(kete.Widget) = .empty;
+        for (std.enums.values(locale.Language)) |l| languages.append(a, cx.make(kete.RadioRow(locale.Language){
             .value = l,
             .group_value = state.language,
             .on_changed = .of(state, State.setLanguage),
             .label = l.name(),
         })) catch {};
-        var keyboards: std.ArrayList(ui.Widget) = .empty;
-        for (std.enums.values(locale.Keyboard)) |k| keyboards.append(a, cx.make(ui.Radio(locale.Keyboard){
+        var keyboards: std.ArrayList(kete.Widget) = .empty;
+        for (std.enums.values(locale.Keyboard)) |k| keyboards.append(a, cx.make(kete.RadioRow(locale.Keyboard){
             .value = k,
             .group_value = state.keyboard,
             .on_changed = .of(state, State.setKeyboard),
             .label = k.name(),
         })) catch {};
-        const heading: ui.TextStyle = .{ .size = 20, .color = t.on_surface_variant };
-        return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 12, .children = &.{
-            cx.make(ui.Text{ .text = "Language and keyboard", .style = .{ .size = 28 } }),
-            cx.make(ui.Row{ .spacing = 24, .cross_axis_alignment = .start, .children = &.{
-                cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .start, .main_axis_size = .min, .spacing = 4, .children = &.{
-                    cx.make(ui.Text{ .text = "Language", .style = heading }),
-                    cx.make(ui.Column{ .cross_axis_alignment = .start, .main_axis_size = .min, .children = languages.items }),
+        const heading: kete.TextStyle = .{ .size = 20, .color = t.on_surface_variant };
+        return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 12, .children = &.{
+            cx.make(kete.Text{ .text = "Language and keyboard", .style = .{ .size = 28 } }),
+            cx.make(kete.Row{ .spacing = 24, .cross_axis_alignment = .start, .children = &.{
+                cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .start, .fill = false, .spacing = 4, .children = &.{
+                    cx.make(kete.Text{ .text = "Language", .style = heading }),
+                    cx.make(kete.Column{ .cross_axis_alignment = .start, .fill = false, .children = languages.items }),
                 } }) }),
-                cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 4, .children = &.{
-                    cx.make(ui.Text{ .text = "Keyboard", .style = heading }),
-                    cx.make(ui.Column{ .cross_axis_alignment = .start, .main_axis_size = .min, .children = keyboards.items }),
-                    cx.make(ui.Padding{ .padding = .{ .top = 8 }, .child = cx.make(ui.TextField{ .placeholder = "Type here to try it", .width = std.math.inf(f32) }) }),
+                cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 4, .children = &.{
+                    cx.make(kete.Text{ .text = "Keyboard", .style = heading }),
+                    cx.make(kete.Column{ .cross_axis_alignment = .start, .fill = false, .children = keyboards.items }),
+                    cx.make(kete.Padding{ .padding = .{ .top = 8 }, .child = cx.make(kete.TextField{ .placeholder = "Type here to try it", .width = std.math.inf(f32) }) }),
                 } }) }),
             } }),
         } });
     }
 
-    fn hostnamePage(_: *const Setup, cx: *ui.Context, state: *State, nav: *Nav) ui.Widget {
+    fn hostnamePage(_: *const Setup, cx: *kete.BuildContext, state: *State, nav: *Nav) kete.Widget {
         const t = cx.theme();
-        return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 12, .children = &.{
-            cx.make(ui.Text{ .text = "Name this computer", .style = .{ .size = 28 } }),
-            cx.make(ui.Text{
+        return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 12, .children = &.{
+            cx.make(kete.Text{ .text = "Name this computer", .style = .{ .size = 28 } }),
+            cx.make(kete.Text{
                 .text = "Other computers on the network know it by this name. It can have lowercase letters, numbers and hyphens.",
                 .style = .{ .size = 18, .color = t.on_surface_variant },
             }),
-            cx.make(ui.TextField{
+            cx.make(kete.TextField{
                 .initial = state.name(),
                 .max_len = state.name_buf.len,
                 .size = 20,
@@ -276,38 +277,38 @@ pub const Setup = struct {
                 .on_changed = .of(state, State.setName),
                 .on_submit = .of(nav, Nav.next),
             }),
-            if (state.name_invalid) cx.make(ui.Text{
+            if (state.name_invalid) cx.make(kete.Text{
                 .text = "Use 1 to 63 lowercase letters, numbers and hyphens, not starting or ending with a hyphen",
                 .style = .{ .size = 16, .color = t.@"error" },
-            }) else cx.make(ui.Empty{}),
+            }) else cx.make(kete.SizedBox.empty),
         } });
     }
 
-    fn wifiPage(self: *const Setup, cx: *ui.Context, state: *State) ui.Widget {
+    fn wifiPage(self: *const Setup, cx: *kete.BuildContext, state: *State) kete.Widget {
         const t = cx.theme();
-        const a = cx.ui.arena();
-        var rows: std.ArrayList(ui.Widget) = .empty;
-        rows.append(a, cx.make(ui.Text{ .text = "Connect to Wi-Fi", .style = .{ .size = 28 } })) catch {};
-        const report = self.wifi orelse return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 12, .children = rows.items });
+        const a = cx.arena;
+        var rows: std.ArrayList(kete.Widget) = .empty;
+        rows.append(a, cx.make(kete.Text{ .text = "Connect to Wi-Fi", .style = .{ .size = 28 } })) catch {};
+        const report = self.wifi orelse return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 12, .children = rows.items });
         const conn = &report.connection;
         const name = printable(cx, conn.ssid());
         switch (conn.state) {
-            .idle => rows.append(a, cx.make(ui.Text{
+            .idle => rows.append(a, cx.make(kete.Text{
                 .text = "Choose a network to connect to, or skip to set up the network later in Settings.",
                 .style = .{ .size = 18, .color = t.on_surface_variant },
             })) catch {},
-            .connecting, .authenticating, .addressing => rows.append(a, cx.make(ui.Row{ .spacing = 12, .cross_axis_alignment = .center, .children = &.{
-                cx.make(ui.Spinner{ .size = 20 }),
-                cx.make(ui.Expanded{ .child = cx.make(ui.Text{
+            .connecting, .authenticating, .addressing => rows.append(a, cx.make(kete.Row{ .spacing = 12, .cross_axis_alignment = .center, .children = &.{
+                cx.make(kete.Spinner{ .size = 20 }),
+                cx.make(kete.Expanded{ .child = cx.make(kete.Text{
                     .text = cx.fmt("{s}: {s}…", .{ name, conn.state.label() }),
                     .style = .{ .size = 18, .color = t.on_surface_variant },
                 }) }),
             } })) catch {},
-            .connected => rows.append(a, cx.make(ui.Text{
+            .connected => rows.append(a, cx.make(kete.Text{
                 .text = cx.fmt("Connected to {s}", .{name}),
                 .style = .{ .size = 18, .color = t.on_surface_variant },
             })) catch {},
-            .failed => rows.append(a, cx.make(ui.Text{
+            .failed => rows.append(a, cx.make(kete.Text{
                 .text = cx.fmt("Could not connect to {s}: {s}", .{ name, conn.failure.label() }),
                 .style = .{ .size = 18, .color = t.@"error" },
             })) catch {},
@@ -316,14 +317,14 @@ pub const Setup = struct {
         const nets = report.slice();
         if (nets.len == 0) {
             if (report.scanning) {
-                rows.append(a, cx.make(ui.Row{ .spacing = 12, .cross_axis_alignment = .center, .children = &.{
-                    cx.make(ui.Spinner{ .size = 24 }),
-                    cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = "Scanning for networks…", .style = .{ .size = 18, .color = t.on_surface_variant } }) }),
+                rows.append(a, cx.make(kete.Row{ .spacing = 12, .cross_axis_alignment = .center, .children = &.{
+                    cx.make(kete.Spinner{ .size = 24 }),
+                    cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = "Scanning for networks…", .style = .{ .size = 18, .color = t.on_surface_variant } }) }),
                 } })) catch {};
             } else {
-                rows.append(a, cx.make(ui.Text{ .text = "No networks found", .style = .{ .size = 18, .color = t.on_surface_variant } })) catch {};
+                rows.append(a, cx.make(kete.Text{ .text = "No networks found", .style = .{ .size = 18, .color = t.on_surface_variant } })) catch {};
             }
-            return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 12, .children = rows.items });
+            return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 12, .children = rows.items });
         }
 
         const chosen: ?*const net.Network = if (state.selected()) |sel| for (nets) |*n| {
@@ -331,36 +332,36 @@ pub const Setup = struct {
         } else null else null;
         const form = chosen != null and !(conn.state.joined() and std.mem.eql(u8, conn.ssid(), chosen.?.ssid()));
         const split = if (form) chosen.? - nets.ptr + 1 else nets.len;
-        var list_rows: std.ArrayList(ui.Widget) = .empty;
+        var list_rows: std.ArrayList(kete.Widget) = .empty;
         if (split > 0) list_rows.append(a, self.networkList(cx, state, report, nets[0..split], chosen)) catch {};
         if (form) list_rows.append(a, self.joinForm(cx, state, chosen.?)) catch {};
         if (split < nets.len) {
-            if (form) list_rows.append(a, cx.make(ui.Divider{ .inset = 16 })) catch {};
+            if (form) list_rows.append(a, cx.make(kete.HorizontalDivider{ .inset = 16 })) catch {};
             list_rows.append(a, self.networkList(cx, state, report, nets[split..], chosen)) catch {};
         }
 
-        rows.append(a, cx.make(ui.ConstrainedBox{
+        rows.append(a, cx.make(kete.ConstrainedBox{
             .constraints = .{ .max_h = 180 },
-            .child = cx.make(ui.ScrollView{
-                .child = cx.make(ui.Card{
+            .child = cx.make(kete.ScrollView{
+                .child = cx.make(kete.Card{
                     .variant = .outlined,
                     .padding = .all(4),
-                    .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .children = list_rows.items }),
+                    .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .children = list_rows.items }),
                 }),
             }),
         })) catch {};
-        return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 12, .children = rows.items });
+        return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 12, .children = rows.items });
     }
 
     fn networkList(
         self: *const Setup,
-        cx: *ui.Context,
+        cx: *kete.BuildContext,
         state: *State,
         report: *const net.Report,
         nets: []const net.Network,
         chosen: ?*const net.Network,
-    ) ui.Widget {
-        const list = cx.ui.arena().create(Networks) catch return cx.make(ui.Empty{});
+    ) kete.Widget {
+        const list = cx.arena.create(Networks) catch return cx.make(kete.SizedBox.empty);
         list.* = .{
             .actions = self.actions,
             .state = state,
@@ -368,7 +369,7 @@ pub const Setup = struct {
             .nets = nets,
             .chosen = chosen,
         };
-        return cx.make(ui.LazyGrid{
+        return cx.make(kete_vc4.LazyGrid{
             .count = nets.len,
             .cell = .{ .w = std.math.inf(f32), .h = network_row_height },
             .spacing = 0,
@@ -376,12 +377,12 @@ pub const Setup = struct {
         });
     }
 
-    fn joinForm(self: *const Setup, cx: *ui.Context, state: *State, n: *const net.Network) ui.Widget {
+    fn joinForm(self: *const Setup, cx: *kete.BuildContext, state: *State, n: *const net.Network) kete.Widget {
         const t = cx.theme();
-        const on_connect: ?ui.Callback = if (self.actions) |acts| .of(act(cx, acts, state, n.ssid()), Act.connect) else null;
-        const field: ui.Widget = switch (n.security) {
-            .open => cx.make(ui.Text{ .text = "An open network: what is sent can be seen", .style = .{ .size = 16, .color = t.on_surface_variant } }),
-            .wpa2, .wpa3 => cx.make(ui.TextField{
+        const on_connect: ?kete.Callback = if (self.actions) |acts| .of(act(cx, acts, state, n.ssid()), Act.connect) else null;
+        const field: kete.Widget = switch (n.security) {
+            .open => cx.make(kete.Text{ .text = "An open network: what is sent can be seen", .style = .{ .size = 16, .color = t.on_surface_variant } }),
+            .wpa2, .wpa3 => cx.make(kete.TextField{
                 .initial = state.password_buf[0..state.password_len],
                 .placeholder = "Password",
                 .obscure = true,
@@ -390,29 +391,29 @@ pub const Setup = struct {
                 .on_changed = .of(state, State.setPassword),
                 .on_submit = on_connect,
             }).withKey(std.hash.Fnv1a_64.hash(n.ssid())),
-            else => cx.make(ui.Text{ .text = cx.fmt("{s} networks are not supported yet", .{n.security.label()}), .style = .{ .size = 16, .color = t.on_surface_variant } }),
+            else => cx.make(kete.Text{ .text = cx.fmt("{s} networks are not supported yet", .{n.security.label()}), .style = .{ .size = 16, .color = t.on_surface_variant } }),
         };
         const supported = n.security == .open or n.security == .wpa2 or n.security == .wpa3;
-        return cx.make(ui.Padding{
+        return cx.make(kete.Padding{
             .padding = .symmetric(16, 8),
-            .child = cx.make(ui.Row{
+            .child = cx.make(kete.Row{
                 .cross_axis_alignment = .center,
                 .spacing = 12,
                 .children = &.{
-                    cx.make(ui.Expanded{ .child = field }),
-                    cx.make(ui.OutlinedButton{ .label = "Connect", .on_press = if (supported) on_connect else null }),
+                    cx.make(kete.Expanded{ .child = field }),
+                    cx.make(kete.OutlinedButton{ .label = "Connect", .on_press = if (supported) on_connect else null }),
                 },
             }),
         });
     }
 
-    fn appsPage(self: *const Setup, cx: *ui.Context, state: *State) ui.Widget {
+    fn appsPage(self: *const Setup, cx: *kete.BuildContext, state: *State) kete.Widget {
         const t = cx.theme();
-        const a = cx.ui.arena();
-        var rows: std.ArrayList(ui.Widget) = .empty;
+        const a = cx.arena;
+        var rows: std.ArrayList(kete.Widget) = .empty;
         rows.appendSlice(a, &.{
-            cx.make(ui.Text{ .text = "Choose your apps", .style = .{ .size = 28 } }),
-            cx.make(ui.Text{
+            cx.make(kete.Text{ .text = "Choose your apps", .style = .{ .size = 28 } }),
+            cx.make(kete.Text{
                 .text = "They are installed when you finish. You can add or remove apps later in Settings.",
                 .style = .{ .size = 18, .color = t.on_surface_variant },
             }),
@@ -423,61 +424,61 @@ pub const Setup = struct {
                 "Getting the list of apps…"
             else
                 cx.fmt("The list of apps could not be got: {s}. You can install apps later in Settings.", .{apps.message});
-            rows.append(a, cx.make(ui.Row{ .spacing = 12, .cross_axis_alignment = .center, .children = &.{
-                if (apps.loading or apps.message.len == 0) cx.make(ui.Spinner{ .size = 24 }) else cx.make(ui.Empty{}),
-                cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = why, .style = .{ .size = 18, .color = t.on_surface_variant } }) }),
+            rows.append(a, cx.make(kete.Row{ .spacing = 12, .cross_axis_alignment = .center, .children = &.{
+                if (apps.loading or apps.message.len == 0) cx.make(kete.Spinner{ .size = 24 }) else cx.make(kete.SizedBox.empty),
+                cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = why, .style = .{ .size = 18, .color = t.on_surface_variant } }) }),
             } })) catch {};
         }
         for (apps.list[0..@min(apps.list.len, max_apps)], 0..) |app, i| {
             const toggle = a.create(Toggle) catch break;
             toggle.* = .{ .state = state, .index = @intCast(i) };
-            rows.append(a, cx.make(ui.Row{ .spacing = 16, .cross_axis_alignment = .center, .children = &.{
-                cx.make(ui.Checkbox{ .value = state.chosen(i), .on_changed = .of(toggle, Toggle.set) }),
-                cx.make(ui.Icon{ .icon = ui.icons.fromName(app.icon) orelse .apps, .size = 32, .color = t.on_surface_variant }),
-                cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 2, .children = &.{
-                    cx.make(ui.Text{ .text = app.title, .style = .{ .size = 20 }, .wrap = false, .ellipsis = true }),
-                    cx.make(ui.Text{ .text = app.description, .style = .{ .size = 16, .color = t.on_surface_variant } }),
+            rows.append(a, cx.make(kete.Row{ .spacing = 16, .cross_axis_alignment = .center, .children = &.{
+                cx.make(kete.Checkbox{ .value = state.chosen(i), .on_changed = .of(toggle, Toggle.set) }),
+                cx.make(kete.Icon{ .icon = kete.IconName.fromName(app.icon) orelse .apps, .size = 32, .color = t.on_surface_variant }),
+                cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 2, .children = &.{
+                    cx.make(kete.Text{ .text = app.title, .style = .{ .size = 20 }, .wrap = false, .ellipsis = true }),
+                    cx.make(kete.Text{ .text = app.description, .style = .{ .size = 16, .color = t.on_surface_variant } }),
                 } }) }),
             } })) catch {};
         }
-        return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 12, .children = rows.items });
+        return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 12, .children = rows.items });
     }
 
     /// After the last page: waiting for the card, or why it could not be
     /// prepared; then installing the apps.
-    fn finishing(self: *const Setup, cx: *ui.Context, nav: *Nav) ui.Widget {
+    fn finishing(self: *const Setup, cx: *kete.BuildContext, nav: *Nav) kete.Widget {
         const t = cx.theme();
         const r = self.report;
         if (r != null and r.?.storage == .failed) {
-            return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 16, .children = &.{
-                cx.make(ui.Text{ .text = "The SD card could not be prepared", .style = .{ .size = 28 } }),
-                cx.make(ui.Text{
+            return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 16, .children = &.{
+                cx.make(kete.Text{ .text = "The SD card could not be prepared", .style = .{ .size = 28 } }),
+                cx.make(kete.Text{
                     .text = cx.fmt("Dazzle cannot keep files: {s}. Setup will run again when the computer next starts.", .{r.?.failure.label()}),
                     .style = .{ .size = 18, .color = t.on_surface_variant },
                 }),
-                cx.make(ui.Row{ .main_axis_alignment = .end, .children = &.{
-                    cx.make(ui.OutlinedButton{ .label = "Continue", .on_press = .of(nav, Nav.continueWithout) }),
+                cx.make(kete.Row{ .main_axis_alignment = .end, .children = &.{
+                    cx.make(kete.OutlinedButton{ .label = "Continue", .on_press = .of(nav, Nav.continueWithout) }),
                 } }),
             } });
         }
         if (self.apps.installing) |title| {
-            return cx.make(ui.Column{ .main_axis_size = .min, .spacing = 20, .children = &.{
-                cx.make(ui.Spinner{ .size = 64 }),
-                cx.make(ui.Text{ .text = cx.fmt("Installing {s}", .{title}), .style = .{ .size = 24 } }),
-                cx.make(ui.Text{ .text = cx.fmt("{d} of {d}", .{ self.apps.done + 1, self.apps.total }), .style = .{ .size = 18, .color = t.on_surface_variant } }),
+            return cx.make(kete.Column{ .fill = false, .spacing = 20, .children = &.{
+                cx.make(kete.Spinner{ .size = 64 }),
+                cx.make(kete.Text{ .text = cx.fmt("Installing {s}", .{title}), .style = .{ .size = 24 } }),
+                cx.make(kete.Text{ .text = cx.fmt("{d} of {d}", .{ self.apps.done + 1, self.apps.total }), .style = .{ .size = 18, .color = t.on_surface_variant } }),
             } });
         }
         const progress = if (r) |rep| (if (rep.storage == .preparing) cx.fmt("{d}%", .{rep.progress}) else "") else "";
-        return cx.make(ui.Column{ .main_axis_size = .min, .spacing = 20, .children = &.{
-            cx.make(ui.Spinner{ .size = 64 }),
-            cx.make(ui.Text{ .text = "Getting the SD card ready", .style = .{ .size = 24 } }),
-            cx.make(ui.Text{ .text = progress, .style = .{ .size = 18, .color = t.on_surface_variant } }),
+        return cx.make(kete.Column{ .fill = false, .spacing = 20, .children = &.{
+            cx.make(kete.Spinner{ .size = 64 }),
+            cx.make(kete.Text{ .text = "Getting the SD card ready", .style = .{ .size = 24 } }),
+            cx.make(kete.Text{ .text = progress, .style = .{ .size = 18, .color = t.on_surface_variant } }),
         } });
     }
 };
 
 /// How tall a network's row is (including the 1px divider below it).
-const network_row_height = ui.ListItem.one_line_height + 1;
+const network_row_height = kete.ListItem.one_line_height + 1;
 
 /// Networks to make rows of (in the frame's arena).
 const Networks = struct {
@@ -487,43 +488,43 @@ const Networks = struct {
     nets: []const net.Network,
     chosen: ?*const net.Network,
 
-    fn row(l: *const Networks, cx: *ui.Context, i: usize) ui.Widget {
+    fn row(l: *const Networks, cx: *kete.BuildContext, i: usize) kete.Widget {
         const n = &l.nets[i];
         const is_chosen = l.chosen != null and n == l.chosen.?;
         const joined = connectionBusy(l.conn) and std.mem.eql(u8, l.conn.ssid(), n.ssid());
-        const on_disconnect: ?ui.Callback = if (joined)
+        const on_disconnect: ?kete.Callback = if (joined)
             (if (l.actions) |acts| .of(act(cx, acts, l.state, ""), Act.disconnect) else null)
         else
             null;
         const item = networkRow(cx, n, is_chosen, joined, choose(cx, l.state, n.ssid()), on_disconnect);
-        if (i + 1 >= l.nets.len) return cx.make(ui.Column{
-            .main_axis_size = .min,
+        if (i + 1 >= l.nets.len) return cx.make(kete.Column{
+            .fill = false,
             .cross_axis_alignment = .stretch,
             .children = &.{item},
         });
-        return cx.make(ui.Column{
-            .main_axis_size = .min,
+        return cx.make(kete.Column{
+            .fill = false,
             .cross_axis_alignment = .stretch,
             .children = &.{
                 item,
-                cx.make(ui.Divider{ .inset = 16 }),
+                cx.make(kete.HorizontalDivider{ .inset = 16 }),
             },
         });
     }
 };
 
 fn networkRow(
-    cx: *ui.Context,
+    cx: *kete.BuildContext,
     n: *const net.Network,
     chosen: bool,
     joined: bool,
-    on_press: ui.Callback,
-    on_disconnect: ?ui.Callback,
-) ui.Widget {
-    return cx.make(ui.ListItem{
+    on_press: kete.Callback,
+    on_disconnect: ?kete.Callback,
+) kete.Widget {
+    return cx.make(kete.ListItem{
         .headline = printable(cx, n.ssid()),
         .leading = cx.make(Signal{ .bars = n.bars(), .locked = n.security != .open, .size = 20 }),
-        .trailing = if (joined) cx.make(ui.OutlinedButton{ .label = "Disconnect", .on_press = on_disconnect }) else null,
+        .trailing = if (joined) cx.make(kete.OutlinedButton{ .label = "Disconnect", .on_press = on_disconnect }) else null,
         .selected = chosen or joined,
         .on_press = on_press,
     });
@@ -534,7 +535,7 @@ const Signal = struct {
     locked: bool = false,
     size: f32,
 
-    fn lit(bars: u8, locked: bool) ?ui.icons.Icon {
+    fn lit(bars: u8, locked: bool) ?kete.IconName {
         return switch (bars) {
             0 => null,
             1, 2 => .wifi_1_bar,
@@ -543,21 +544,21 @@ const Signal = struct {
         };
     }
 
-    pub fn build(self: *const Signal, cx: *ui.Context) ui.Widget {
+    pub fn build(self: *const Signal, cx: *kete.BuildContext) kete.Widget {
         const t = cx.theme();
-        const full: ui.icons.Icon = if (self.locked) .wifi_password else .wifi;
-        const back = cx.make(ui.Icon{ .icon = full, .size = self.size, .color = t.on_surface.withAlpha(0.25) });
+        const full: kete.IconName = if (self.locked) .wifi_password else .wifi;
+        const back = cx.make(kete.Icon{ .icon = full, .size = self.size, .color = t.on_surface.withAlpha(0.25) });
         const front = lit(self.bars, self.locked) orelse return back;
-        return cx.make(ui.SizedBox{ .width = self.size, .height = self.size, .child = cx.make(ui.Overlay{ .children = &.{
+        return cx.make(kete.SizedBox{ .width = self.size, .height = self.size, .child = cx.make(kete.Overlay{ .children = &.{
             back,
-            cx.make(ui.Icon{ .icon = front, .size = self.size, .color = t.on_surface }),
+            cx.make(kete.Icon{ .icon = front, .size = self.size, .color = t.on_surface }),
         } }) });
     }
 };
 
-fn printable(cx: *ui.Context, ssid: []const u8) []const u8 {
+fn printable(cx: *kete.BuildContext, ssid: []const u8) []const u8 {
     if (std.unicode.utf8ValidateSlice(ssid)) return ssid;
-    const out = cx.ui.arena().dupe(u8, ssid) catch return "?";
+    const out = cx.arena.dupe(u8, ssid) catch return "?";
     for (out) |*c| if (c.* >= 0x80 or c.* < 0x20) {
         c.* = '?';
     };
@@ -587,8 +588,8 @@ const Choose = struct {
     }
 };
 
-fn choose(cx: *ui.Context, state: *Setup.State, ssid: []const u8) ui.Callback {
-    const c = cx.ui.arena().create(Choose) catch return .of(state, struct {
+fn choose(cx: *kete.BuildContext, state: *Setup.State, ssid: []const u8) kete.Callback {
+    const c = cx.arena.create(Choose) catch return .of(state, struct {
         fn none(_: *Setup.State) void {}
     }.none);
     c.* = .{ .state = state, .ssid_buf = undefined, .ssid_len = @intCast(ssid.len) };
@@ -615,8 +616,8 @@ const Act = struct {
     }
 };
 
-fn act(cx: *ui.Context, actions: *Actions, state: *Setup.State, ssid: []const u8) *Act {
-    const x = cx.ui.arena().create(Act) catch unreachable;
+fn act(cx: *kete.BuildContext, actions: *Actions, state: *Setup.State, ssid: []const u8) *Act {
+    const x = cx.arena.create(Act) catch unreachable;
     x.* = .{ .actions = actions, .state = state, .ssid_buf = undefined, .ssid_len = @intCast(ssid.len) };
     @memcpy(x.ssid_buf[0..ssid.len], ssid);
     return x;
@@ -689,43 +690,43 @@ const Toggle = struct {
 // --- Tests ---------------------------------------------------------------------
 
 const testing = std.testing;
-const font = @import("font");
+const font = kete.font;
 
-fn overflows(node: *ui.Node) bool {
+fn overflows(node: *kete.WidgetNode) bool {
     if (node.overflow.any()) return true;
     for (node.children.items) |ch| if (overflows(ch)) return true;
     return false;
 }
 
-fn findText(n: *ui.Node, text: []const u8) ?*ui.Node {
-    if (n.widget.as(ui.Text)) |t| if (std.mem.eql(u8, t.text, text)) return n;
+fn findText(n: *kete.WidgetNode, text: []const u8) ?*kete.WidgetNode {
+    if (n.widget.as(kete.Text)) |t| if (std.mem.eql(u8, t.text, text)) return n;
     for (n.children.items) |ch| if (findText(ch, text)) |f| return f;
     return null;
 }
 
-fn findType(n: *ui.Node, comptime T: type) ?*ui.Node {
+fn findType(n: *kete.WidgetNode, comptime T: type) ?*kete.WidgetNode {
     if (n.widget.is(T)) return n;
     for (n.children.items) |ch| if (findType(ch, T)) |f| return f;
     return null;
 }
 
-fn click(u: *ui.Ui, n: *ui.Node) void {
+fn click(u: *kete.ui.WindowUi, n: *kete.WidgetNode) void {
     const at = n.position();
-    const p: ui.Point = .{ at[0] + n.size.w / 2, at[1] + n.size.h / 2 };
+    const p: kete.Point = .{ at[0] + n.size.w / 2, at[1] + n.size.h / 2 };
     u.pointerMotion(p);
-    u.pointerButton(p, ui.btn_left, true);
-    u.pointerButton(p, ui.btn_left, false);
+    u.pointerButton(p, .left, true);
+    u.pointerButton(p, .left, false);
 }
 
 test "naming the computer, then waiting for the card" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const u = try ui.Ui.create(testing.allocator, &f);
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
     var actions: Actions = .{};
     var report: proto.Report = .{ .storage = .preparing, .progress = 10 };
     var now: u64 = 0;
     const Draw = struct {
-        fn draw(uu: *ui.Ui, r: *const proto.Report, a: *Actions, n: *u64, size: [2]u32) void {
+        fn draw(uu: *kete.ui.WindowUi, r: *const proto.Report, a: *Actions, n: *u64, size: [2]u32) void {
             n.* += 1;
             uu.frame(size[0], size[1], n.*, Setup{ .suggestion = "awesome-elephant", .report = r, .actions = a });
         }
@@ -743,8 +744,8 @@ test "naming the computer, then waiting for the card" {
     }
     Draw(u, &report, &actions, &now, .{ 1920, 1080 });
     // The suggestion is filled in.
-    const field = findType(u.root.?, ui.TextField).?;
-    try testing.expectEqualStrings("awesome-elephant", field.state(ui.TextField.State).text());
+    const field = findType(u.root.?, kete.TextField).?;
+    try testing.expectEqualStrings("awesome-elephant", field.state(kete.TextField.State).text());
 
     // Not a hostname: it says so, and stays.
     const st = u.root.?.state(Setup.State);
@@ -768,21 +769,21 @@ test "naming the computer, then waiting for the card" {
     click(u, findText(u.root.?, "Finish").?);
     Draw(u, &report, &actions, &now, .{ 1920, 1080 });
     try testing.expectEqualStrings("my-pi", actions.finish.?.slice());
-    try testing.expect(findType(u.root.?, ui.Spinner) != null);
+    try testing.expect(findType(u.root.?, kete.Spinner) != null);
     try testing.expect(findText(u.root.?, "10%") != null);
     try testing.expect(u.needs_frame);
 
     // If it fails: why, and Continue.
     report = .{ .storage = .failed, .failure = .too_small };
     Draw(u, &report, &actions, &now, .{ 1920, 1080 });
-    try testing.expect(findType(u.root.?, ui.Spinner) == null);
+    try testing.expect(findType(u.root.?, kete.Spinner) == null);
     click(u, findText(u.root.?, "Continue").?);
     try testing.expect(actions.without_storage);
 }
 
 test "Wi-Fi networks are shown when Ethernet is not connected and a Wi-Fi adapter is present" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const u = try ui.Ui.create(testing.allocator, &f);
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
     var actions: Actions = .{};
     const report: proto.Report = .{ .storage = .ready };
@@ -848,7 +849,7 @@ test "Wi-Fi networks are shown when Ethernet is not connected and a Wi-Fi adapte
 
 test "choosing apps, then installing them" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const u = try ui.Ui.create(testing.allocator, &f);
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
     var actions: Actions = .{};
     const report: proto.Report = .{ .storage = .ready };
@@ -864,7 +865,7 @@ test "choosing apps, then installing them" {
     try testing.expect(!overflows(u.root.?));
     try testing.expect(findText(u.root.?, "Browse your files") != null);
     // All chosen to begin with: Files is left out.
-    click(u, findType(up(findText(u.root.?, "Files").?, ui.Row).?, ui.Checkbox).?);
+    click(u, findType(up(findText(u.root.?, "Files").?, kete.Row).?, kete.Checkbox).?);
     u.frame(1280, 720, 2, setup);
     click(u, findText(u.root.?, "Finish").?);
     try testing.expect(actions.apps & 0b111 == 0b101);
@@ -884,15 +885,15 @@ test "choosing apps, then installing them" {
     try testing.expect(findText(u.root.?, "The list of apps could not be got: the server could not be reached (is the network up?). You can install apps later in Settings.") != null);
 }
 
-fn up(n: *ui.Node, comptime T: type) ?*ui.Node {
-    var at: ?*ui.Node = n;
+fn up(n: *kete.WidgetNode, comptime T: type) ?*kete.WidgetNode {
+    var at: ?*kete.WidgetNode = n;
     while (at) |a| : (at = a.parent) if (a.widget.is(T)) return a;
     return null;
 }
 
 test "the language and keyboard: the keyboard goes with the language, until one is picked" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const u = try ui.Ui.create(testing.allocator, &f);
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
     var actions: Actions = .{};
     const report: proto.Report = .{ .storage = .preparing };
@@ -913,6 +914,6 @@ test "the language and keyboard: the keyboard goes with the language, until one 
     u.frame(1280, 720, 3, setup);
     try testing.expectEqual(locale.Settings{ .language = .en_au, .keyboard = .us }, actions.locale.?);
     // Somewhere to try it.
-    try testing.expect(findType(u.root.?, ui.TextField) != null);
+    try testing.expect(findType(u.root.?, kete.TextField) != null);
     try testing.expect(!overflows(u.root.?));
 }

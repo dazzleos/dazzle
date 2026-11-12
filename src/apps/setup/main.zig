@@ -8,14 +8,14 @@
 //! computer and marks setup done, and ends. It lives in /os/shell with the
 //! shell: it cannot be removed.
 //!
-//!     dazzle-setup [font.ttf]
+//!     dazzle-setup
 
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
 const locale = @import("locale");
-const font = @import("font");
-const ui = @import("ui");
+const kete = @import("kete");
+const kete_vc4 = @import("kete_vc4");
 const store = @import("store");
 const build_info = @import("build_info");
 const names = @import("names.zig");
@@ -25,32 +25,61 @@ const proto = sys.system;
 const net = sys.network;
 const print = sys.print;
 
-pub fn main(init: std.process.Init.Minimal) u8 {
+pub fn main(init: std.process.Init) u8 {
     sys.logToKmsgIfStderr();
-    var args = init.args.iterate();
-    _ = args.skip();
-    var font_buf: [512]u8 = undefined;
-    const font_path: [*:0]const u8 = args.next() orelse sys.fontFile(&font_buf, font.default_font_file);
-    run(init, font_path) catch |err| {
+    run(init) catch |err| {
         print(sys.log_error ++ "dazzle-setup: error: {s}\n", .{@errorName(err)});
         return 1;
     };
     return 0;
 }
 
-fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
+/// What the window shows: the page, and what is known so far.
+const Shown = struct {
+    suggestion: []const u8,
+    start_locale: locale.Settings,
+    actions: *view.Actions,
+    report: ?proto.Report = null,
+    net_report: ?net.Report = null,
+    ethernet_connected: bool = false,
+    apps: view.Apps = .{},
+
+    pub fn build(s: *const Shown, cx: *kete.BuildContext) kete.Widget {
+        return cx.make(view.Setup{
+            .suggestion = s.suggestion,
+            .locale = s.start_locale,
+            .report = if (s.report) |*r| r else null,
+            .wifi = if (s.net_report) |*r| r else null,
+            .ethernet_connected = s.ethernet_connected,
+            .apps = s.apps,
+            .actions = s.actions,
+        });
+    }
+};
+
+/// The pages' state (which is showing), in the window's widgets.
+fn pageState(window: *kete.App.Window) ?*view.Setup.State {
+    const root = window.ui.root orelse return null;
+    const n = find(root) orelse return null;
+    return n.state(view.Setup.State);
+}
+
+fn find(n: *kete.WidgetNode) ?*kete.WidgetNode {
+    if (n.widget.is(view.Setup)) return n;
+    for (n.children.items) |ch| if (find(ch)) |f| return f;
+    return null;
+}
+
+fn run(init: std.process.Init) !void {
     const gpa = std.heap.page_allocator;
     const start_locale = locale.load();
     locale.current = start_locale.language;
-    const a = try ui.App.open(gpa, init.environ, .{
-        .title = "Setup",
-        .app_id = "dazzle-setup",
-        .size = view.open_size,
-        .font_path = font_path,
-    });
-    defer a.close();
-    a.sync_keyboard = false;
-    a.ui.keyboard = start_locale.keyboard;
+    var host: kete_vc4.Host = undefined;
+    // The whole screen, with no title bar: it is the only window.
+    try host.init(gpa, init.io, init.minimal.environ, .{ .app_id = "dazzle-setup", .decorations = .none });
+    defer host.deinit();
+    // The keyboard chosen here, not yet the system's.
+    host.display.setKeyboard(start_locale.keyboard);
 
     var name_buf: [32]u8 = undefined;
     const suggestion = names.random(&name_buf);
@@ -66,19 +95,22 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     var installed: usize = 0;
     var total: usize = 0;
 
+    var shown: Shown = .{ .suggestion = suggestion, .start_locale = start_locale, .actions = &actions };
+    const window = try host.app.openWindow(.{
+        .title = "Setup",
+        .root = .of(&shown),
+        .size = view.open_size,
+        .on_close_request = .close,
+    });
     // Show the first page at once before talking to the system and network
     // managers.
-    try a.draw(sys.nowNs(), view.Setup{
-        .suggestion = suggestion,
-        .locale = start_locale,
-        .actions = &actions,
-    });
+    _ = try host.step(0);
 
     // All talking to the system and network managers runs on a worker thread
     // so the UI thread never blocks on sockets or network bring-up.
     const worker = try Worker.start();
     defer worker.stop();
-    a.win.wake_fd = worker.wakeFd();
+    host.wakeOn(worker.wakeFd(), true);
 
     var report: ?proto.Report = null;
     var net_report: ?net.Report = null;
@@ -93,9 +125,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             if (wait_net or apps.job != null) before_step + 250 * std.time.ns_per_ms else std.math.maxInt(u64),
             if (wait_eth) wait_eth_until else std.math.maxInt(u64),
         );
-        if (!try a.step(@max(wake -| before_step, std.time.ns_per_ms))) break;
+        if (!try host.step(@max(wake -| before_step, std.time.ns_per_ms))) break;
         const now = sys.nowNs();
-        a.takeInput();
 
         const prev_eth_connected = if (net_report) |r|
             r.ethernetConnected() or (r.ethernetCarrier() and (!named or now < wait_eth_until))
@@ -103,19 +134,18 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             false;
         if (worker.take(&report, &net_report)) |done| {
             if (done) return;
-            a.dirty = true;
+            host.redraw();
         }
         const eth_connected = if (net_report) |r|
             r.ethernetConnected() or (r.ethernetCarrier() and (!named or now < wait_eth_until))
         else
             false;
         if (eth_connected != prev_eth_connected) {
-            a.dirty = true;
+            host.redraw();
             // If a plugged-in Ethernet cable timed out waiting for DHCP and a
             // Wi-Fi adapter is available, step back to the Wi-Fi page.
             if (!eth_connected and net_report != null and net_report.?.wifiAdapters().len > 0) {
-                if (a.ui.root) |root| {
-                    const st = root.state(view.Setup.State);
+                if (pageState(window)) |st| {
                     if (view.pages[st.page] == .apps and !actions.skip_wifi and actions.finish == null) {
                         st.page = @intFromEnum(view.Page.wifi);
                     }
@@ -127,9 +157,9 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         if (actions.locale) |l| {
             actions.locale = null;
             locale.current = l.language;
-            a.ui.keyboard = l.keyboard;
+            host.display.setKeyboard(l.keyboard);
             worker.setLocale(l);
-            a.dirty = true;
+            host.redraw();
         }
         // The computer's name, confirmed on its page: set now so the
         // network connects with it before the list of apps is fetched.
@@ -142,29 +172,30 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
                 retry_at = 0;
             }
             worker.setHostname(h);
-            a.dirty = true;
+            host.redraw();
         }
         if (actions.connect) |j| {
             actions.connect = null;
             worker.connect(j);
             wait_network_until = now + 10 * std.time.ns_per_s;
             retry_at = 0;
-            a.dirty = true;
+            host.redraw();
         }
         if (actions.disconnect) {
             actions.disconnect = false;
             worker.disconnect();
-            a.dirty = true;
+            host.redraw();
         }
         if (actions.skip_wifi) {
             actions.skip_wifi = false;
             wait_network_until = 0;
             retry_at = 0;
-            a.dirty = true;
+            host.redraw();
         }
 
-        const on_wifi_page = if (a.ui.root) |root| view.pages[root.state(view.Setup.State).page] == .wifi else false;
-        const wifi_selected = if (a.ui.root) |root| root.state(view.Setup.State).has_selected else false;
+        const page_state = pageState(window);
+        const on_wifi_page = if (page_state) |st| view.pages[st.page] == .wifi else false;
+        const wifi_selected = if (page_state) |st| st.has_selected else false;
         worker.setPageState(on_wifi_page, wifi_selected, actions.finish != null);
 
         const storage_now: proto.StorageState = if (report) |r| r.storage else .none;
@@ -172,12 +203,12 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         // The list of apps, kept on the card: once the computer is named
         // and the card and network are ready, and again every while until
         // it comes (the network is brought up once the name is confirmed).
-        if (apps.poll()) a.dirty = true;
+        if (apps.poll()) host.redraw();
         if (named and storage_now == .ready and apps.job == null and apps.apps().len == 0 and queue == null and now >= retry_at) {
             if (net_ready or (!on_wifi_page and now >= wait_network_until)) {
                 apps.refresh(true);
                 retry_at = now + 10 * std.time.ns_per_s;
-                a.dirty = true;
+                host.redraw();
             }
         }
         // The pages are done: finish once the card is ready (or there is
@@ -208,7 +239,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
                         print("dazzle-setup: installing {s}\n", .{item.name});
                         apps.install(item.name);
                         apps_done = false;
-                        a.dirty = true;
+                        host.redraw();
                     }
                 }
             }
@@ -218,25 +249,20 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             }
         }
 
-        try a.draw(sys.nowNs(), view.Setup{
-            .suggestion = suggestion,
-            .locale = start_locale,
-            .report = if (report) |*r| r else null,
-            .wifi = if (net_report) |*r| r else null,
-            .ethernet_connected = if (net_report) |r|
-                r.ethernetConnected() or (r.ethernetCarrier() and (!named or now < wait_eth_until))
-            else
-                false,
-            .apps = .{
-                .list = apps.apps(),
-                .loading = apps.job != null,
-                .message = apps.message(),
-                .installing = if (apps.busy()) |name| (if (name.len > 0) apps.title(name) else null) else null,
-                .done = installed,
-                .total = total,
-            },
-            .actions = &actions,
-        });
+        shown.report = report;
+        shown.net_report = net_report;
+        shown.ethernet_connected = if (net_report) |r|
+            r.ethernetConnected() or (r.ethernetCarrier() and (!named or now < wait_eth_until))
+        else
+            false;
+        shown.apps = .{
+            .list = apps.apps(),
+            .loading = apps.job != null,
+            .message = apps.message(),
+            .installing = if (apps.busy()) |name| (if (name.len > 0) apps.title(name) else null) else null,
+            .done = installed,
+            .total = total,
+        };
     }
 }
 

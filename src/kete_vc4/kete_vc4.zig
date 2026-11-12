@@ -30,6 +30,9 @@ pub const window = @import("window.zig");
 pub const Renderer = renderer.Renderer;
 pub const Window = window.Window;
 pub const Display = window.Display;
+pub const LazyGrid = @import("lazy_grid.zig").LazyGrid;
+/// The icons the apps' catalogue names, kept in kete's icon font.
+pub const app_icons = @import("app_icons.zig").icons;
 
 /// The GPU, the display and renderer kete is given, and the kete app.
 /// Keep it where it is once `init`: they point at each other.
@@ -44,6 +47,9 @@ pub const Host = struct {
         /// The name the shell knows the app by.
         app_id: ?[]const u8 = null,
         on_last_window_closed: kete.App.OnLastWindowClosed = .quit,
+        /// Who draws the title bar: kete, or no one (an app with the whole
+        /// screen, as setup is).
+        decorations: kete.window.WindowDecorations = .toolkit,
     };
 
     /// Opens the GPU, and makes a kete app whose windows are opened on the
@@ -57,7 +63,7 @@ pub const Host = struct {
         };
         errdefer h.dev.close();
         const gpu: app.Gpu = .device(&h.dev);
-        h.display = .{ .gpa = gpa, .io = io, .gpu = gpu, .environ = environ, .app_id = options.app_id };
+        h.display = .{ .gpa = gpa, .io = io, .gpu = gpu, .environ = environ, .app_id = options.app_id, .decorations = options.decorations };
         h.renderer = try Renderer.init(gpa, h.dev, gpu);
         errdefer h.renderer.deinit();
         var font_buf: [256]u8 = undefined;
