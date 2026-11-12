@@ -5,10 +5,10 @@
 //!                          which include every program's; see `sys.print`)
 //!     http://<pi>/follow   the same, then new messages as they arrive
 //!
-//! Only while it is turned on, in Settings (`sys.system.log_server_file`,
-//! which it looks at every second), or by `dazzle.log_server=on` on the
-//! kernel's command line: it is off unless asked for, as anyone on the
-//! network can read the log.
+//! Only while it is turned on, in Settings (`sys.system.log_server_file`:
+//! the system manager, which keeps it, sends the server SIGHUP when it
+//! changes), or by `dazzle.log_server=on` on the kernel's command line: it
+//! is off unless asked for, as anyone on the network can read the log.
 //!
 //! Each request gets its own process reading /dev/kmsg, so a hung GPU job
 //! in the demo does not stop the log; turning the server off ends them.
@@ -24,9 +24,6 @@ pub const Ip4 = [4]u8;
 
 /// The HTTP port it listens on.
 const http_port = 80;
-
-/// How often it looks at whether it is to serve, in milliseconds.
-const check_ms = 1000;
 
 fn sockaddrIn(addr: Ip4, port: u16) linux.sockaddr.in {
     return .{
@@ -44,14 +41,15 @@ fn ignoreSignal(sig: linux.SIG) void {
     _ = linux.sigaction(sig, &act, null);
 }
 
-/// Forks the log server. Returns in the parent; the child never returns.
-pub fn start() void {
+/// Forks the log server, returning its process ID (to tell it of the
+/// setting changing, with SIGHUP). The child never returns.
+pub fn start() ?linux.pid_t {
     const rc = linux.fork();
     switch (linux.errno(rc)) {
-        .SUCCESS => if (rc != 0) return,
+        .SUCCESS => if (rc != 0) return @intCast(rc),
         else => |e| {
             sys.print(sys.log_error ++ "dazzle: log server: fork failed ({s})\n", .{@tagName(e)});
-            return;
+            return null;
         },
     }
     serve() catch |err| sys.print("dazzle: log server: {s}\n", .{@errorName(err)});
@@ -63,6 +61,12 @@ fn serve() !void {
     // connection into EPIPE errors instead of killing the process.
     ignoreSignal(.CHLD);
     ignoreSignal(.PIPE);
+    // SIGHUP says the setting changed: it is read from a signalfd, held
+    // back from being delivered.
+    var hup = linux.sigemptyset();
+    linux.sigaddset(&hup, .HUP);
+    _ = try sys.check(linux.sigprocmask(linux.SIG.BLOCK, &hup, null));
+    const hangups: linux.fd_t = @intCast(try sys.check(linux.signalfd(-1, &hup, linux.SFD.CLOEXEC | linux.SFD.NONBLOCK)));
 
     // Only binding to the port needs root's privilege; reading /dev/kmsg
     // does not.
@@ -72,44 +76,50 @@ fn serve() !void {
     var listener: ?linux.fd_t = null;
     // The clients watch the read end, and stop when it is closed here.
     var stop: [2]linux.fd_t = undefined;
-    var last_err: ?anyerror = null;
+    var check = true;
     while (true) {
-        const on = forced or sys.system.logServerChosen();
-        if (on and listener == null) {
-            if (listen()) |l| {
-                if (sys.check(linux.pipe2(&stop, .{ .CLOEXEC = true }))) |_| {
-                    listener = l;
-                    last_err = null;
-                    sys.print("dazzle: log server listening on HTTP port {d} as uid {d}\n", .{ http_port, linux.getuid() });
-                } else |err| {
-                    sys.close(l);
-                    return err;
-                }
-            } else |err| {
-                if (last_err == null or last_err.? != err) sys.print(sys.log_warning ++ "dazzle: log server: cannot listen on port {d} ({s})\n", .{ http_port, @errorName(err) });
-                last_err = err;
+        if (check) {
+            check = false;
+            const on = forced or sys.system.logServerChosen();
+            if (on and listener == null) {
+                if (listen()) |l| {
+                    if (sys.check(linux.pipe2(&stop, .{ .CLOEXEC = true }))) |_| {
+                        listener = l;
+                        sys.print("dazzle: log server listening on HTTP port {d} as uid {d}\n", .{ http_port, linux.getuid() });
+                    } else |err| {
+                        sys.close(l);
+                        return err;
+                    }
+                } else |err| sys.print(sys.log_warning ++ "dazzle: log server: cannot listen on port {d} ({s})\n", .{ http_port, @errorName(err) });
+            } else if (!on and listener != null) {
+                sys.close(listener.?);
+                listener = null;
+                // Ends the connections being served.
+                sys.close(stop[1]);
+                sys.close(stop[0]);
+                sys.print("dazzle: log server stopped\n", .{});
             }
-        } else if (!on and listener != null) {
-            sys.close(listener.?);
-            listener = null;
-            // Ends the connections being served.
-            sys.close(stop[1]);
-            sys.close(stop[0]);
-            sys.print("dazzle: log server stopped\n", .{});
         }
-        const l = listener orelse {
-            sys.sleepMs(check_ms);
-            continue;
+        // Wait for the setting to change, or (while serving) a connection.
+        var fds = [_]linux.pollfd{
+            .{ .fd = hangups, .events = linux.POLL.IN, .revents = 0 },
+            .{ .fd = listener orelse -1, .events = linux.POLL.IN, .revents = 0 },
         };
-        var fds = [_]linux.pollfd{.{ .fd = l, .events = linux.POLL.IN, .revents = 0 }};
-        const ready = linux.poll(&fds, 1, check_ms);
-        if (linux.errno(ready) != .SUCCESS or ready == 0) continue;
+        if (linux.errno(linux.poll(&fds, fds.len, -1)) != .SUCCESS) continue;
+        if (fds[0].revents != 0) {
+            var info: linux.signalfd_siginfo = undefined;
+            while (linux.errno(linux.read(hangups, std.mem.asBytes(&info), @sizeOf(linux.signalfd_siginfo))) == .SUCCESS) {}
+            check = true;
+        }
+        const l = listener orelse continue;
+        if (fds[1].revents == 0) continue;
         const rc = linux.accept4(l, null, null, linux.SOCK.CLOEXEC);
         if (linux.errno(rc) != .SUCCESS) continue;
         const client: linux.fd_t = @intCast(rc);
         const pid = linux.fork();
         if (pid == 0) {
             sys.close(l);
+            sys.close(hangups);
             sys.close(stop[1]);
             dropCapabilities();
             handle(client, stop[0]);

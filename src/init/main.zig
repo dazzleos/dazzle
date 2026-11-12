@@ -65,7 +65,7 @@ pub fn main() void {
     const name = card.hostname.slice();
     if (name.len > 0) _ = linux.syscall2(.sethostname, @intFromPtr(name.ptr), name.len);
     const network_pid = network.start();
-    logserver.start();
+    const log_server_pid = logserver.start();
     const devices_pid = devices.start();
     grantGpuAccess();
     const media_pid = media.start();
@@ -73,7 +73,7 @@ pub fn main() void {
     // else), and the system manager prepares the card and names the
     // computer for it. It also makes the second OS slot, if that is still
     // to be made, and later installs updates.
-    const system_pid = system.start(card.card, card.mounted, card.slot, card.setup_done);
+    const system_pid = system.start(card.card, card.mounted, card.slot, card.setup_done, log_server_pid);
     const shell_pid = startShell(!card.setup_done);
     // Trying an update: the watchdog runs until it has worked, which is
     // when the shell has run for a while (the timer, a child process that
@@ -83,7 +83,7 @@ pub fn main() void {
         t.watchdog = trial.Watchdog.start();
         t.timer = startTimer(trial.healthy_ns);
     }
-    reapForever(shell_pid, network_pid, devices_pid, media_pid, system_pid, card, &t);
+    reapForever(shell_pid, network_pid, devices_pid, media_pid, system_pid, log_server_pid, card, &t);
 }
 
 fn mountPseudoFilesystems() void {
@@ -285,7 +285,7 @@ fn startTimer(ns: u64) ?linux.pid_t {
 /// Waits for child processes, logging how the shell ends and restarting it.
 /// Processes whose parent exits are re-parented to init, so this also
 /// collects those.
-fn reapForever(first_shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, first_devices_pid: ?linux.pid_t, first_media_pid: ?linux.pid_t, first_system_pid: ?linux.pid_t, card: storage.Boot, t: *Trying) noreturn {
+fn reapForever(first_shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, first_devices_pid: ?linux.pid_t, first_media_pid: ?linux.pid_t, first_system_pid: ?linux.pid_t, log_server_pid: ?linux.pid_t, card: storage.Boot, t: *Trying) noreturn {
     var shell_pid = first_shell_pid;
     var network_pid = first_network_pid;
     var devices_pid = first_devices_pid;
@@ -327,7 +327,7 @@ fn reapForever(first_shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, f
             sys.sleepMs(5000);
             // What it did meanwhile (setup, say) is on the card.
             const now = storage.state(card);
-            system_pid = system.start(now.card, now.mounted, now.slot, now.setup_done);
+            system_pid = system.start(now.card, now.mounted, now.slot, now.setup_done, log_server_pid);
             continue;
         }
         if (t.timer != null and pid == t.timer.?) {

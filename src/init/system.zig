@@ -24,7 +24,7 @@
 //! copy did, it only copies.)
 //!
 //! It also keeps whether the log is served over HTTP (asked for by
-//! Settings; see logserver.zig).
+//! Settings), telling the log server when it changes (see logserver.zig).
 //!
 //! Updating (update.zig): Settings downloads an update and asks for it to
 //! be installed; a child process unpacks it into the OS slot not running
@@ -63,9 +63,10 @@ const Work = struct {
 
 /// Forks the manager. `card` says whether there is an SD card, `mounted`
 /// whether /data is already there (prepared on an earlier run that did not
-/// finish setting up), `slot` which OS slot is running, and `setup_done`
-/// whether setup has finished.
-pub fn start(card: bool, mounted: bool, slot: ?u8, setup_done: bool) ?linux.pid_t {
+/// finish setting up), `slot` which OS slot is running, `setup_done`
+/// whether setup has finished, and `log_server` is the log server's
+/// process.
+pub fn start(card: bool, mounted: bool, slot: ?u8, setup_done: bool, log_server: ?linux.pid_t) ?linux.pid_t {
     const rc = linux.fork();
     switch (linux.errno(rc)) {
         .SUCCESS => if (rc != 0) return @intCast(rc),
@@ -80,6 +81,11 @@ pub fn start(card: bool, mounted: bool, slot: ?u8, setup_done: bool) ?linux.pid_
     };
     sys.ignoreBrokenPipes();
     var m: Manager = .{ .report = .{ .storage = if (mounted) .ready else if (card) .unprepared else .none, .slot = if (card) slot orelse 'a' else null }, .finished = setup_done };
+    // The log server, by a handle that cannot come to mean another process.
+    if (log_server) |pid| {
+        const fd = linux.pidfd_open(pid, 0);
+        if (linux.errno(fd) == .SUCCESS) m.log_server = @intCast(fd);
+    }
     m.run() catch |err| print("dazzle: system: {s}\n", .{@errorName(err)});
     linux.exit(1);
 }
@@ -100,6 +106,8 @@ const Manager = struct {
     finished: bool = false,
     /// Settings asked to restart (once it has its answer).
     restart: bool = false,
+    /// The log server's process (a pidfd), told when its setting changes.
+    log_server: ?linux.fd_t = null,
 
     /// What the slots hold, and which starts next.
     fn readSlots(m: *Manager) void {
@@ -240,14 +248,17 @@ const Manager = struct {
         }
     }
 
-    /// Serves the log over HTTP, or stops (the log server sees the file
-    /// change). Kept in /data/system, so not before setup has made it; the
-    /// report says what the server does now.
+    /// Serves the log over HTTP, or stops: keeps the setting and tells the
+    /// log server. Kept in /data/system, so not before setup has made it;
+    /// the report says what the server does now.
     fn setLogServer(m: *Manager, on: bool) void {
         defer m.report.log_server = proto.logServerOn();
         if (!storage.exists(proto.config_dir)) return;
         writeFile(proto.log_server_file, if (on) "on\n" else "off\n");
         print("dazzle: system: log server {s}\n", .{if (on) "on" else "off"});
+        const fd = m.log_server orelse return;
+        if (linux.errno(linux.pidfd_send_signal(fd, .HUP, null, 0)) != .SUCCESS)
+            print(sys.log_warning ++ "dazzle: system: cannot tell the log server\n", .{});
     }
 
     /// Has the next start give the GPU `mib` MiB (in both slots'
