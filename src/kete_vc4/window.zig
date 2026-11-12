@@ -56,6 +56,10 @@ pub const Window = struct {
     /// The keyboard layout the app chose, rather than the system's
     /// (`Display.setKeyboard`).
     keyboard: ?locale.Keyboard = null,
+    /// Where the pointer is (null if it is not over the window), and the
+    /// last key pressed (a Linux key code): for an app that shows them.
+    pointer: ?[2]f32 = null,
+    last_key: ?u32 = null,
 
     pub fn platform(_: *const Window) kwin.WindowPlatform {
         return .custom;
@@ -238,6 +242,15 @@ pub const Window = struct {
     }
 
     fn convert(w: *Window, e: app.InputEvent) ?kwin.InputEvent {
+        switch (e) {
+            .motion => |pos| w.pointer = pos,
+            .button => |b| w.pointer = b.pos,
+            .leave => w.pointer = null,
+            .key => |k| if (k.pressed) {
+                w.last_key = k.code;
+            },
+            else => {},
+        }
         return switch (e) {
             .motion => |pos| .{ .motion = pos },
             .button => |b| .{ .button = .{ .pos = b.pos, .button = button(b.code), .pressed = b.pressed } },

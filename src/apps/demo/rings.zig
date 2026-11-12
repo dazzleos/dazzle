@@ -2,7 +2,7 @@
 //! cube with the 2D canvas.
 
 const std = @import("std");
-const gfx = @import("gfx");
+const gfx = @import("kete").gfx;
 
 const max_rings = 32;
 

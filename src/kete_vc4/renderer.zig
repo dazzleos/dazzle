@@ -14,6 +14,7 @@ const vc4 = @import("vc4");
 const shader = @import("shader");
 const app = @import("app");
 const dazzle_gfx = @import("gfx");
+const sys = @import("sys");
 
 const kgfx = kete.gfx;
 const render = vc4.render;
@@ -33,6 +34,16 @@ comptime {
 /// tiled, as `render.Target.textureTiling` says for their size): Broadcom's
 /// VC4 T-tiled modifier.
 pub const tiled_modifier: u64 = (0x07 << 56) | 1;
+
+/// The frames drawn: how many, the time spent recording their draws (on
+/// the CPU) and drawing them (from handing them to the GPU to its
+/// finishing), and how many pixels they redrew.
+pub const Stats = struct {
+    frames: u32 = 0,
+    cpu_ns: u64 = 0,
+    gpu_ns: u64 = 0,
+    pixels: f64 = 0,
+};
 
 pub const Renderer = struct {
     dev: vc4.Device,
@@ -56,6 +67,8 @@ pub const Renderer = struct {
     atlas_stale: ?atlas_mod.Rect = null,
     /// The frame being recorded (large: kept here, not on the stack).
     frame: *render.Frame,
+    /// What drawing the frames took, since the app last took it (`takeStats`).
+    stats: Stats = .{},
 
     const ImageTexture = struct {
         bo: vc4.Bo,
@@ -276,6 +289,7 @@ pub const Renderer = struct {
         damage: []const kgfx.Viewport,
     ) !void {
         _ = clear_rects;
+        const started = sys.nowNs();
         const frame = r.frame;
         frame.begin(try targetOf(target), .{ .clear = clear });
         var vps: [kgfx.frame.Damage.max_rects]render.Viewport = undefined;
@@ -288,7 +302,20 @@ pub const Renderer = struct {
             .canvas => |c| try r.recordCanvas(c, frame),
             .gpu => |g| if (frame.covers(viewport(g.area.scissor orelse g.area.viewport))) try g.f(g.ctx, frame, g.area),
         };
+        const issued = sys.nowNs();
         try r.gpu.vtable.run(r.gpu.ptr, frame);
+        r.stats.frames += 1;
+        r.stats.cpu_ns += issued - started;
+        r.stats.gpu_ns += sys.nowNs() - issued;
+        if (n == damage.len) {
+            for (damage) |d| r.stats.pixels += @as(f64, @floatFromInt(d.width)) * @as(f64, @floatFromInt(d.height));
+        } else r.stats.pixels += @as(f64, @floatFromInt(target.width)) * @as(f64, @floatFromInt(target.height));
+    }
+
+    /// What drawing took since the last call.
+    pub fn takeStats(r: *Renderer) Stats {
+        defer r.stats = .{};
+        return r.stats;
     }
 };
 

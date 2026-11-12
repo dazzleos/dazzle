@@ -6,10 +6,10 @@
 //! expanding, fading rings behind the solid.
 //!
 //! It is a native Dazzle app: a window on dazzle-shell (see the `app`
-//! module), built with the `ui` toolkit (see view.zig), drawn with the vc4
-//! API and shaders written in Zig.
+//! module), built with kete (see view.zig) and drawn with the vc4 API and
+//! shaders written in Zig (see kete_vc4).
 //!
-//!     dazzle-demo [font.ttf]
+//!     dazzle-demo
 //!
 //! It runs until it is stopped or its window is closed.
 
@@ -17,12 +17,12 @@ const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
 const locale = @import("locale");
-const font = @import("font");
 const vc4 = @import("vc4");
+const kete = @import("kete");
+const kete_vc4 = @import("kete_vc4");
 const solids = @import("solids.zig");
 const rings_mod = @import("rings.zig");
 const view = @import("view.zig");
-const ui = @import("ui");
 const sysinfo = @import("sysinfo.zig");
 const build_info = @import("build_info");
 
@@ -31,122 +31,107 @@ const print = sys.print;
 /// The clear colour.
 const background = 0xff101830;
 
-pub fn main(init: std.process.Init.Minimal) u8 {
+pub fn main(init: std.process.Init) u8 {
     sys.logToKmsgIfStderr();
-    var args = init.args.iterate();
-    _ = args.skip();
-    var font_buf: [512]u8 = undefined;
-    const font_path: [*:0]const u8 = args.next() orelse sys.fontFile(&font_buf, font.default_font_file);
     print("dazzle: demo (build {s}) running as uid {d}\n", .{ build_info.commit, linux.getuid() });
 
-    run(init, font_path) catch |err| {
+    run(init) catch |err| {
         print(sys.log_error ++ "dazzle: error: {s}\n", .{@errorName(err)});
         return 1;
     };
     return 0;
 }
 
-fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
+/// The window's root: the solid, the rings and the statistics.
+const Root = struct {
+    solids: *solids.Solids,
+    rings: *rings_mod.Rings,
+    status: *const [view.lines][]const u8,
+
+    pub fn build(r: *const Root, cx: *kete.BuildContext) kete.Widget {
+        return cx.make(view.Demo{ .solids = r.solids, .rings = r.rings, .status = r.status.* });
+    }
+};
+
+/// The demo's state (the switches), in the window's widgets.
+fn demoState(window: *kete.App.Window) ?*view.Demo.State {
+    const root = window.ui.root orelse return null;
+    const n = find(root) orelse return null;
+    return n.state(view.Demo.State);
+}
+
+fn find(n: *kete.WidgetNode) ?*kete.WidgetNode {
+    if (n.widget.is(view.Demo)) return n;
+    for (n.children.items) |ch| if (find(ch)) |f| return f;
+    return null;
+}
+
+fn run(init: std.process.Init) !void {
     // The language chosen (in setup, or Settings).
     locale.current = locale.load().language;
     const gpa = std.heap.page_allocator;
-    const a = try ui.App.open(gpa, init.environ, .{
-        .title = "Dazzle demo",
-        .app_id = "dazzle-demo",
-        .size = view.open_size,
-        .min_size = view.min_size,
-        .font_path = font_path,
-        .clear_color = background,
-    });
-    defer a.close();
-    print("dazzle: drawing with the vc4 API, window {d}x{d}\n", .{ a.width, a.height });
+    var host: kete_vc4.Host = undefined;
+    try host.init(gpa, init.io, init.minimal.environ, .{ .app_id = "dazzle-demo" });
+    defer host.deinit();
 
-    var all_solids = try solids.Solids.init(gpa, a.dev);
+    var all_solids = try solids.Solids.init(gpa, host.dev);
     var rings: rings_mod.Rings = .{};
     var status_bufs: [view.lines][96]u8 = undefined;
     var status: [view.lines][]const u8 = @splat("");
-    var input: InputStatus = .{};
     // The CPU's speed is measured against this first sample, taken cool.
     var monitor: sysinfo.Monitor = .{};
     var health = monitor.sample();
+
+    const root: Root = .{ .solids = &all_solids, .rings = &rings, .status = &status };
+    const window = try host.app.openWindow(.{
+        .title = "Demo",
+        .root = .of(&root),
+        .size = view.open_size,
+        .min_size = view.min_size,
+        .clear_color = background,
+        .on_close_request = .close,
+    });
+    const size = window.size();
+    print("dazzle: drawing with the vc4 API, window {d}x{d}\n", .{ size[0], size[1] });
 
     const start = sys.nowNs();
     var stats_window: Stats = .{ .since = start };
     var shown: Stats.Summary = .{};
     var log_window: Stats = .{ .since = start };
     var next_update: u64 = start;
-    // Something outside the UI changed (the size, the statistics): build a
-    // frame. Otherwise frames are built only while a widget asks (for an
-    // animation, or after input), and shown only if they changed.
-    while (try a.step(@max(next_update -| sys.nowNs(), std.time.ns_per_ms))) {
-        if (a.resized) next_update = 0;
-        if (a.suspended_changed) {
-            print("dazzle: {s}\n", .{if (a.suspended) "covered: not drawing" else "in front: drawing"});
-        }
-        const frame_start = sys.nowNs();
-        for (a.win.takeInput()) |e| switch (e) {
-            .motion => |pos| {
-                input.pointer = pos;
-                a.ui.pointerMotion(pos);
-            },
-            .button => |b| {
-                a.ui.pointerButton(b.pos, b.code, b.pressed);
-                a.dirty = true;
-            },
-            .key => |k| if (k.pressed) {
-                input.key = k.code;
-                next_update = 0;
-            },
-            else => a.ui.handleInput(e),
-        };
-
-        // The statistics change twice a second.
-        if (frame_start >= next_update) {
-            next_update = frame_start + std.time.ns_per_s / 2;
-            status = statusLines(&status_bufs, shown, a.width, a.height, a.win.bufferFormat(), input, health);
-            a.dirty = true;
-        }
-
-        a.idle = true;
-        if (!a.suspended and (a.dirty or a.ui.needs_frame)) {
-            a.dirty = false;
-            a.ui.frame(a.width, a.height, a.win.nextPresentationNs(frame_start), view.Demo{
-                .solids = &all_solids,
-                .rings = &rings,
-                .status = status,
-            });
-            // The buffers' format, as the switch says (new buffers take it).
-            if (a.ui.root) |root| a.win.setFormat(if (root.state(view.Demo.State).colour_16) .rgb565 else .xrgb8888);
-            if (a.ui.changed()) {
-                a.idle = false;
-                // Only what changed since the buffer was last drawn is drawn
-                // again; the rest of it already shows this frame.
-                const target = try a.win.beginFrame();
-                const region = a.ui.repaint(a.win.bufferAge());
-                a.frame.begin(target, .{ .clear = background });
-                ui.Ui.limit(&a.frame, &region);
-                try a.ui.render(&a.frame, a.win.flusher());
-                const issued = sys.nowNs();
-                // Render, then hand the frame to the shell (which may wait
-                // for the previous one to be shown), so the GPU's time is
-                // measured alone.
-                try a.win.render(&a.frame);
-                const rendered = sys.nowNs();
-                var damage: [ui.damage.Region.max_rects]vc4.render.Viewport = undefined;
-                try a.win.showDamaged(a.ui.damagedViewports(&damage));
-                stats_window.add(issued - frame_start, rendered - issued, region.slice());
-                log_window.add(issued - frame_start, rendered - issued, region.slice());
-            }
-        }
-
+    var input: InputStatus = .{};
+    var suspended = false;
+    while (try host.step(@max(next_update -| sys.nowNs(), std.time.ns_per_ms))) {
         const now = sys.nowNs();
+        if (window.suspended != suspended) {
+            suspended = window.suspended;
+            print("dazzle: {s}\n", .{if (suspended) "covered: not drawing" else "in front: drawing"});
+        }
+        const win = &(host.display.window orelse continue);
+        // A key pressed shows at once.
+        const seen: InputStatus = .{ .pointer = win.pointer, .key = win.last_key };
+        if (!std.meta.eql(seen.key, input.key)) next_update = 0;
+        input = seen;
+        // The buffers' format, as the switch says (new buffers take it).
+        if (demoState(window)) |st| win.win.setFormat(if (st.colour_16) .rgb565 else .xrgb8888);
+
+        const drawn = host.renderer.takeStats();
+        stats_window.add(drawn);
+        log_window.add(drawn);
+        const wh = window.size();
         if (now - stats_window.since >= std.time.ns_per_s / 2) {
-            shown = stats_window.summary(now, a.width, a.height);
+            shown = stats_window.summary(now, wh[0], wh[1]);
             stats_window = .{ .since = now };
+        }
+        // The statistics change twice a second.
+        if (now >= next_update) {
+            next_update = now + std.time.ns_per_s / 2;
+            status = statusLines(&status_bufs, shown, wh[0], wh[1], win.win.bufferFormat(), input, health);
+            host.redraw();
         }
         // Also log every 5 seconds, for the network log.
         if (now - log_window.since >= 5 * std.time.ns_per_s) {
-            const s = log_window.summary(now, a.width, a.height);
+            const s = log_window.summary(now, wh[0], wh[1]);
             health = monitor.sample();
             var temp_buf: [16]u8 = undefined;
             print("dazzle: {d:.1} fps ({d:.0}% of the window redrawn), GPU {d:.2} ms, CPU {d:.2} ms per frame; SoC {s}, CPU speed {d:.0}%, CPU busy {d:.0}% (demo {d:.0}%, shell {d:.0}%)\n", .{
@@ -179,11 +164,11 @@ const Stats = struct {
         redrawn: f32 = 0,
     };
 
-    fn add(s: *Stats, cpu_ns: u64, gpu_ns: u64, region: []const ui.Rect) void {
-        s.frames += 1;
-        s.cpu_ns += cpu_ns;
-        s.gpu_ns += gpu_ns;
-        for (region) |r| s.pixels += r.w * r.h;
+    fn add(s: *Stats, drawn: kete_vc4.renderer.Stats) void {
+        s.frames += drawn.frames;
+        s.cpu_ns += drawn.cpu_ns;
+        s.gpu_ns += drawn.gpu_ns;
+        s.pixels += drawn.pixels;
     }
 
     fn summary(s: *const Stats, now: u64, width: u32, height: u32) Summary {
