@@ -1215,9 +1215,11 @@ pub fn build(b: *std.Build) void {
         .root_module = addProgramModule(b, "src/apps/terminal/main.zig", target, optimize, pi, shaders, true),
     });
     const install_terminal = b.addInstallArtifact(terminal_exe, .{});
+    const develop_module = addProgramModule(b, "src/apps/develop/main.zig", target, optimize, pi, shaders, true);
+    _ = addKete(b, develop_module, pi, target, optimize, "src/apps/develop");
     const develop_exe = b.addExecutable(.{
         .name = "dazzle-develop",
-        .root_module = addProgramModule(b, "src/apps/develop/main.zig", target, optimize, pi, shaders, true),
+        .root_module = develop_module,
     });
     const install_develop = b.addInstallArtifact(develop_exe, .{});
 
@@ -1362,6 +1364,7 @@ pub fn build(b: *std.Build) void {
     host_terminal.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_develop = addProgramModule(b, "src/apps/develop/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_develop.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
+    _ = addKete(b, host_develop, host, b.graph.host, test_optimize, "src/apps/develop");
     for ([_]*std.Build.Module{
         host.sys,
         host.vc4,
