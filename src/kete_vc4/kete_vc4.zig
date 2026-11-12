@@ -17,6 +17,7 @@ const vc4 = @import("vc4");
 const sys = @import("sys");
 const app = @import("app");
 const ui = @import("ui");
+const dazzle_font = @import("font");
 
 pub const renderer = @import("renderer.zig");
 pub const window = @import("window.zig");
@@ -39,7 +40,8 @@ pub const Host = struct {
     };
 
     /// Opens the GPU, and makes a kete app whose windows are opened on the
-    /// shell in `environ` and drawn by the GPU, in the system's theme.
+    /// shell in `environ` and drawn by the GPU, in the system's theme and
+    /// fonts (kete has none of its own: they are in /os/fonts).
     pub fn init(h: *Host, gpa: std.mem.Allocator, io: std.Io, environ: std.process.Environ, options: Options) !void {
         const name = options.app_id orelse "app";
         h.dev = vc4.device.openRender() catch |err| {
@@ -51,8 +53,12 @@ pub const Host = struct {
         h.display = .{ .gpa = gpa, .gpu = gpu, .environ = environ, .app_id = options.app_id };
         h.renderer = try Renderer.init(gpa, h.dev, gpu);
         errdefer h.renderer.deinit();
+        var font_buf: [256]u8 = undefined;
+        var emoji_buf: [256]u8 = undefined;
         h.app = try kete.App.init(gpa, io, environ, .{
             .app_id = options.app_id,
+            .font_path = sys.fontFile(&font_buf, dazzle_font.default_font_file),
+            .emoji_font_path = sys.fontFile(&emoji_buf, dazzle_font.emoji_font_file),
             .display = h.display.display(),
             .on_last_window_closed = options.on_last_window_closed,
         });
@@ -107,7 +113,7 @@ const Sample = struct {
 test "kete's frames look the same drawn by Dazzle's shaders as by kete's software renderer" {
     const w = 320;
     const h = 240;
-    const f = try kete.font.Font.init(kete.font.default_font_data);
+    const f = try kete.font.Font.init(@embedFile("FiraSans-Regular.ttf"));
     const wui = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer wui.destroy();
     wui.frame(w, h, 0, Sample{});

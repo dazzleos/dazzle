@@ -1,5 +1,6 @@
 const std = @import("std");
 const Icon = @import("src/icons/names.zig").Icon;
+const kete_build = @import("kete");
 
 const Modules = struct {
     sys: *std.Build.Module,
@@ -510,10 +511,20 @@ fn addProgramModule(b: *std.Build, path: []const u8, target: std.Build.ResolvedT
     return module;
 }
 
-/// Gives `module` kete (built without its own backends), and `kete_vc4`,
-/// which draws it with Dazzle's window and GPU.
-fn addKete(b: *std.Build, module: *std.Build.Module, m: Modules, target: std.Build.ResolvedTarget, optimize: std.builtin.Optimize) *std.Build.Module {
-    const kete = b.dependency("kete", .{ .target = target, .optimize = optimize, .backends = false }).module("kete");
+/// Gives `module` kete (built without its own backends, or its fonts: it
+/// reads the system's, in /os/fonts), and `kete_vc4`,
+/// which draws it with Dazzle's window and GPU. Its icon font has only the
+/// icons named in `app_dir`'s source (and kete's and kete_vc4's), not all
+/// of Material Icons: an icon chosen at run time must be named somewhere,
+///
+///     comptime { _ = &[_]kete.IconName{ .cloud, .download }; }
+fn addKete(b: *std.Build, module: *std.Build.Module, m: Modules, target: std.Build.ResolvedTarget, optimize: std.builtin.Optimize, app_dir: []const u8) *std.Build.Module {
+    const dep = b.dependency("kete", .{});
+    const icon_font = kete_build.addIconFontScanned(dep.builder, &.{ b.path(app_dir), b.path("src/kete_vc4") });
+    const kete = kete_build.createModules(dep.builder, b.fmt("kete-{s}-{s}", .{ std.fs.path.basename(app_dir), @tagName(target.result.cpu.arch) }), target, optimize, icon_font, .{
+        .backends = false,
+        .embed_fonts = false,
+    }).kete;
     const kete_vc4 = b.createModule(.{
         .root_source_file = b.path("src/kete_vc4/kete_vc4.zig"),
         .target = target,
@@ -527,6 +538,7 @@ fn addKete(b: *std.Build, module: *std.Build.Module, m: Modules, target: std.Bui
             .{ .name = "gfx", .module = m.gfx },
             .{ .name = "locale", .module = m.locale },
             .{ .name = "ui", .module = m.ui },
+            .{ .name = "font", .module = m.font },
         },
     });
     module.addImport("kete", kete);
@@ -1146,7 +1158,7 @@ pub fn build(b: *std.Build) void {
     const install_showcase = b.addInstallArtifact(showcase_exe, .{});
     // A prototype of an app on kete, drawn by Dazzle's vc4 renderer.
     const kete_demo_module = addProgramModule(b, "src/apps/kete_demo/main.zig", target, optimize, pi, shaders, true);
-    _ = addKete(b, kete_demo_module, pi, target, optimize);
+    _ = addKete(b, kete_demo_module, pi, target, optimize, "src/apps/kete_demo");
     const kete_demo_exe = b.addExecutable(.{
         .name = "dazzle-kete-demo",
         .root_module = kete_demo_module,
@@ -1333,7 +1345,8 @@ pub fn build(b: *std.Build) void {
     const host_showcase = addProgramModule(b, "src/apps/showcase/main.zig", b.graph.host, test_optimize, host, shaders, false);
     // Kete's frames, drawn with Dazzle's shaders in the QPU simulator.
     const host_kete_demo = addProgramModule(b, "src/apps/kete_demo/main.zig", b.graph.host, test_optimize, host, shaders, false);
-    const host_kete_vc4 = addKete(b, host_kete_demo, host, b.graph.host, test_optimize);
+    const host_kete_vc4 = addKete(b, host_kete_demo, host, b.graph.host, test_optimize, "src/apps/kete_demo");
+    host_kete_vc4.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     host_showcase.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_settings = addProgramModule(b, "src/apps/settings/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_settings.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
