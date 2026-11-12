@@ -98,7 +98,7 @@ pub const Icon = enum {
     fullscreen_exit,
     // Develop.
     code,
-    // Showcase.
+    // Kete Demo.
     widgets,
     // Chat.
     chat,
