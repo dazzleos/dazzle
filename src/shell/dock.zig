@@ -10,8 +10,9 @@
 //! runs.
 //!
 //! Apps come and go (setup and Settings install them, and Settings removes
-//! them): `Watch` notices /data/apps changing, and `rescan` lists the apps
-//! again, keeping running ones' processes.
+//! them): `AppsWatch` notices /data/apps changing, and `rescan` lists the
+//! apps again, keeping running ones' processes. The sound and appearance
+//! settings are kept there too, and `AppsWatch` notices those changing.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -262,30 +263,86 @@ pub fn rescan(gpa: std.mem.Allocator, old: []App, dir_path: []const u8, builtin:
     return new;
 }
 
-/// Notices a directory or file changing: an entry added, removed or renamed
-/// (its time of change), or a file created or replaced.
-pub const Watch = struct {
-    path: [*:0]const u8,
-    stamp: ?[5]u64 = null,
-    initialized: bool = false,
+/// Notices what changes in /data/apps, with inotify: apps installed or
+/// removed (each is renamed into or out of place), and the sound and
+/// appearance settings being written. Its descriptor is polled with the
+/// shell's others.
+pub const AppsWatch = struct {
+    fd: ?linux.fd_t,
+    dir: [*:0]const u8,
+    /// The directory is watched (it is not until /data is ready).
+    watching: bool = false,
 
-    /// Whether it changed since the last call (not on the first).
-    pub fn changed(w: *Watch) bool {
-        var stx: linux.Statx = undefined;
-        const mask: linux.STATX = .{ .INO = true, .MTIME = true };
-        const now: ?[5]u64 = if (linux.errno(linux.statx(linux.AT.FDCWD, w.path, 0, mask, &stx)) == .SUCCESS)
-            .{ stx.dev_major, stx.dev_minor, stx.ino, @bitCast(stx.mtime.sec), stx.mtime.nsec }
-        else
-            null;
-        defer {
-            w.stamp = now;
-            w.initialized = true;
+    pub const Changes = struct {
+        apps: bool = false,
+        sound: bool = false,
+        appearance: bool = false,
+
+        pub const all: Changes = .{ .apps = true, .sound = true, .appearance = true };
+
+        pub fn any(c: Changes) bool {
+            return c.apps or c.sound or c.appearance;
         }
-        if (!w.initialized) return false;
-        if (w.stamp == null and now == null) return false;
-        const before = w.stamp orelse return true;
-        const after = now orelse return true;
-        return !std.mem.eql(u64, &before, &after);
+    };
+
+    const mask = linux.IN.CREATE | linux.IN.DELETE | linux.IN.MOVED_FROM | linux.IN.MOVED_TO | linux.IN.CLOSE_WRITE | linux.IN.ONLYDIR;
+    const sound_name = std.fs.path.basename(audio.settings_file);
+    const appearance_name = std.fs.path.basename(appearance_file);
+
+    /// Watches `dir`, if it is there yet (see `retry`).
+    pub fn init(dir: [*:0]const u8) AppsWatch {
+        const rc = linux.inotify_init1(linux.IN.NONBLOCK | linux.IN.CLOEXEC);
+        var w: AppsWatch = .{ .fd = if (linux.errno(rc) == .SUCCESS) @intCast(rc) else null, .dir = dir };
+        _ = w.retry();
+        return w;
+    }
+
+    pub fn deinit(w: *AppsWatch) void {
+        if (w.fd) |fd| sys.close(fd);
+        w.fd = null;
+    }
+
+    /// Watches the directory if it is not yet (it is made once /data is
+    /// ready): true if it now is, having not been, when everything in it
+    /// may have changed meanwhile.
+    pub fn retry(w: *AppsWatch) bool {
+        if (w.watching) return false;
+        const fd = w.fd orelse return false;
+        if (linux.errno(linux.inotify_add_watch(fd, w.dir, mask)) != .SUCCESS) return false;
+        w.watching = true;
+        return true;
+    }
+
+    /// What changed since the last call.
+    pub fn take(w: *AppsWatch) Changes {
+        var c: Changes = .{};
+        const fd = w.fd orelse return c;
+        var buf: [4096]u8 align(@alignOf(linux.inotify_event)) = undefined;
+        while (true) {
+            const rc = linux.read(fd, &buf, buf.len);
+            if (linux.errno(rc) != .SUCCESS or rc == 0) return c;
+            var at: usize = 0;
+            while (at + @sizeOf(linux.inotify_event) <= rc) {
+                const ev: *align(1) const linux.inotify_event = @ptrCast(&buf[at]);
+                const step = @sizeOf(linux.inotify_event) + ev.len;
+                if (at + step > rc) break;
+                const name = std.mem.sliceTo(buf[at + @sizeOf(linux.inotify_event) .. at + step], 0);
+                at += step;
+                // The directory went (or /data was unmounted).
+                if (ev.mask & linux.IN.IGNORED != 0) {
+                    w.watching = false;
+                    continue;
+                }
+                const written = ev.mask & (linux.IN.CLOSE_WRITE | linux.IN.MOVED_TO) != 0;
+                if (std.mem.eql(u8, name, sound_name)) {
+                    if (written) c.sound = true;
+                } else if (std.mem.eql(u8, name, appearance_name)) {
+                    if (written) c.appearance = true;
+                } else if (name.len > 0 and name[0] != '.' and ev.mask & linux.IN.CLOSE_WRITE == 0) {
+                    c.apps = true;
+                }
+            }
+        }
     }
 };
 
@@ -508,24 +565,33 @@ fn roundedRectOutline(c: font.Canvas, x: f32, y: f32, w: f32, h: f32, radius: f3
 
 const testing = std.testing;
 
-test "a watched directory changes when an entry comes or goes" {
+test "the apps and the settings in the apps directory are noticed changing" {
     var path_buf: [64]u8 = undefined;
     const path = try std.mem.printSentinel(&path_buf, "/tmp/dazzle-watch-test-{d}", .{linux.getpid()}, 0);
-    _ = linux.mkdir(path, 0o755);
-    defer _ = linux.rmdir(path);
-    var w: Watch = .{ .path = path };
-    try testing.expect(!w.changed());
-    try testing.expect(!w.changed());
     var sub_buf: [80]u8 = undefined;
     const sub = try std.mem.printSentinel(&sub_buf, "{s}/app", .{path}, 0);
-    // Times of change are in the kernel's clock ticks: a few ms apart.
-    sys.sleepMs(20);
+    var sound_buf: [80]u8 = undefined;
+    const sound = try std.mem.printSentinel(&sound_buf, "{s}/.sound", .{path}, 0);
+
+    // Not there yet: watched once it is.
+    var w: AppsWatch = .init(path);
+    defer w.deinit();
+    try testing.expect(!w.watching);
+    _ = linux.mkdir(path, 0o755);
+    defer _ = linux.rmdir(path);
+    try testing.expect(w.retry());
+    try testing.expect(!w.retry());
+    try testing.expect(!w.take().any());
+
     _ = linux.mkdir(sub, 0o755);
-    try testing.expect(w.changed());
-    try testing.expect(!w.changed());
-    sys.sleepMs(20);
+    try testing.expectEqual(AppsWatch.Changes{ .apps = true }, w.take());
     _ = linux.rmdir(sub);
-    try testing.expect(w.changed());
+    try testing.expectEqual(AppsWatch.Changes{ .apps = true }, w.take());
+
+    try sys.files.writeNew(sound, "volume 50\n");
+    defer _ = linux.unlink(sound);
+    try testing.expectEqual(AppsWatch.Changes{ .sound = true }, w.take());
+    try testing.expect(!w.take().any());
 }
 
 test "app labels drop the dazzle- prefix" {

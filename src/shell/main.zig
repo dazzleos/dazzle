@@ -101,17 +101,11 @@ fn run(init: std.process.Init.Minimal) !void {
     const settings_path = try sys.appFile(&settings_buf, "dazzle-settings");
     const builtin_apps = [_][]const u8{settings_path};
     var apps = try dock_mod.findApps(gpa, dock_mod.apps_dir, &builtin_apps);
-    // Apps installed or removed (from Settings) come and go from the dock.
-    var apps_watch: dock_mod.Watch = .{ .path = dock_mod.apps_dir };
-    _ = apps_watch.changed();
-    // The keyboard's layout, as chosen (in setup or Settings): the clients
-    // are sent its keymap, again when it changes.
-    var locale_watch: dock_mod.Watch = .{ .path = locale.settings_file };
-    _ = locale_watch.changed();
-    var sound_watch: dock_mod.Watch = .{ .path = audio.settings_file };
-    _ = sound_watch.changed();
-    var appearance_watch: dock_mod.Watch = .{ .path = dock_mod.appearance_file };
-    _ = appearance_watch.changed();
+    // Apps installed or removed (from Settings) come and go from the dock,
+    // and the sound and appearance settings kept with them are followed.
+    // (The keyboard's layout comes from the system manager's reports.)
+    var apps_watch: dock_mod.AppsWatch = .init(dock_mod.apps_dir);
+    defer apps_watch.deinit();
     for (apps) |app| print("dazzle-shell: app {s} ({s})\n", .{ app.label, app.path });
     var dock = try dock_mod.Dock.init(gpa, ui_font, apps, renderer.width, renderer.height);
     var net_sub: sys.network.Subscription = .{};
@@ -209,6 +203,8 @@ fn run(init: std.process.Init.Minimal) !void {
     var dock_touches: TouchSet = .{};
     // When a client last had a frame for the screen.
     var client_frame_ns: u64 = 0;
+    // /data/apps has appeared, found too late for this time round.
+    var apps_pending: dock_mod.AppsWatch.Changes = .{};
     watchChildren();
     while (true) {
         if (child_exited.swap(false, .monotonic) and reapChildren(apps, &setup_pid) and dock_shown) {
@@ -220,6 +216,8 @@ fn run(init: std.process.Init.Minimal) !void {
         if (!dock_shown and setup_pid == null) {
             dock_shown = true;
             print("dazzle-shell: setup finished\n", .{});
+            // Setup made /data/apps, and may have installed apps there.
+            if (apps_watch.retry()) apps_pending.apps = true;
             if (net_sub.fd == null) dock.network = dock_mod.readNetworkStatus();
             dock.volume = dock_mod.readVolumeStatus();
             dock.theme = dock_mod.readTheme();
@@ -233,7 +231,7 @@ fn run(init: std.process.Init.Minimal) !void {
         // Wait for clients, input, the display (a page flip completing), or
         // the next clock tick; or not at all if a frame is due and can be
         // drawn.
-        var fds: [5 + max_clients + input.max_devices]linux.pollfd = undefined;
+        var fds: [6 + max_clients + input.max_devices]linux.pollfd = undefined;
         fds[0] = .{ .fd = listener, .events = linux.POLL.IN, .revents = 0 };
         fds[1] = .{ .fd = renderer.dev.fd, .events = linux.POLL.IN, .revents = 0 };
         const n_clients = @min(server.clients.items.len, max_clients);
@@ -249,10 +247,16 @@ fn run(init: std.process.Init.Minimal) !void {
         const opener_index = 2 + n_clients + n_inputs;
         const net_index = opener_index + 1;
         const sys_index = opener_index + 2;
+        const watch_index = opener_index + 3;
         fds[opener_index] = .{ .fd = opener orelse -1, .events = linux.POLL.IN, .revents = 0 };
         fds[net_index] = .{ .fd = net_sub.fd orelse -1, .events = linux.POLL.IN, .revents = 0 };
         fds[sys_index] = .{ .fd = sys_sub.fd orelse -1, .events = linux.POLL.IN, .revents = 0 };
-        _ = linux.poll(&fds, sys_index + 1, timeout);
+        fds[watch_index] = .{ .fd = apps_watch.fd orelse -1, .events = linux.POLL.IN, .revents = 0 };
+        _ = linux.poll(&fds, watch_index + 1, timeout);
+        // What changed in /data/apps, or all of it if it has just appeared
+        // (/data was made ready: the system manager reports it).
+        var apps_changes = apps_pending;
+        apps_pending = .{};
         if (fds[opener_index].revents != 0) if (opener) |l| {
             if (openApp(l, apps, &server, runtime_dir) and dock_shown) {
                 dock.draw();
@@ -278,6 +282,26 @@ fn run(init: std.process.Init.Minimal) !void {
                 print("dazzle-shell: keyboard {s}\n", .{r.locale.keyboard.code()});
                 server.setKeyboard(r.locale.keyboard);
             };
+            if (apps_watch.retry()) apps_changes = .all;
+        }
+        if (fds[watch_index].revents != 0) {
+            const c = apps_watch.take();
+            apps_changes.apps = apps_changes.apps or c.apps;
+            apps_changes.sound = apps_changes.sound or c.sound;
+            apps_changes.appearance = apps_changes.appearance or c.appearance;
+        }
+        if (apps_changes.apps) {
+            if (dock_mod.rescan(gpa, apps, dock_mod.apps_dir, &builtin_apps)) |new| {
+                apps = new;
+                dock.apps = new;
+                dock.hover = null;
+                print("dazzle-shell: {d} apps\n", .{new.len});
+                if (dock_shown) {
+                    dock.draw();
+                    renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+                    panels_damaged = true;
+                }
+            } else |err| print(sys.log_warning ++ "dazzle-shell: cannot list the apps: {s}\n", .{@errorName(err)});
         }
         // The last frame reached the screen: its frame callbacks fire, and
         // the next one can be drawn.
@@ -416,7 +440,7 @@ fn run(init: std.process.Init.Minimal) !void {
 
         const top = server.topWindow();
         const t_now = sys.nowNs();
-        if ((server.damaged or t_now >= next_tick) and sound_watch.changed()) {
+        if (apps_changes.sound) {
             const vol = dock_mod.readVolumeStatus();
             if (!std.meta.eql(vol, dock.volume)) {
                 dock.volume = vol;
@@ -427,7 +451,7 @@ fn run(init: std.process.Init.Minimal) !void {
                 }
             }
         }
-        if ((server.damaged or t_now >= next_tick) and appearance_watch.changed()) {
+        if (apps_changes.appearance) {
             const theme = dock_mod.readTheme();
             if (theme != dock.theme) {
                 dock.theme = theme;
@@ -444,24 +468,6 @@ fn run(init: std.process.Init.Minimal) !void {
             next_tick = start + ((t_now - start) / std.time.ns_per_s + 1) * std.time.ns_per_s;
             // Keyboards and mice plugged in since.
             devices.scan();
-            if (locale_watch.changed()) {
-                const chosen = locale.load();
-                print("dazzle-shell: keyboard {s}\n", .{chosen.keyboard.code()});
-                server.setKeyboard(chosen.keyboard);
-            }
-            if (apps_watch.changed()) {
-                if (dock_mod.rescan(gpa, apps, dock_mod.apps_dir, &builtin_apps)) |new| {
-                    apps = new;
-                    dock.apps = new;
-                    dock.hover = null;
-                    print("dazzle-shell: {d} apps\n", .{new.len});
-                    if (dock_shown) {
-                        dock.draw();
-                        renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
-                        panels_damaged = true;
-                    }
-                } else |err| print(sys.log_warning ++ "dazzle-shell: cannot list the apps: {s}\n", .{@errorName(err)});
-            }
             if (net_sub.fd == null) {
                 net_sub.connect();
                 if (net_sub.poll()) |r| if (!r.denied) {
@@ -482,6 +488,7 @@ fn run(init: std.process.Init.Minimal) !void {
                     print("dazzle-shell: keyboard {s}\n", .{r.locale.keyboard.code()});
                     server.setKeyboard(r.locale.keyboard);
                 };
+                if (apps_watch.retry()) apps_pending = .all;
             }
             if (perf_shown) {
                 var pids: [max_clients]linux.pid_t = undefined;
