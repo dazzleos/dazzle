@@ -1174,9 +1174,11 @@ pub fn build(b: *std.Build) void {
         .root_module = text_editor_module,
     });
     const install_text_editor = b.addInstallArtifact(text_editor_exe, .{});
+    const logger_module = addProgramModule(b, "src/apps/logger/main.zig", target, optimize, pi, shaders, true);
+    _ = addKete(b, logger_module, pi, target, optimize, "src/apps/logger");
     const logger_exe = b.addExecutable(.{
         .name = "dazzle-data-logger",
-        .root_module = addProgramModule(b, "src/apps/logger/main.zig", target, optimize, pi, shaders, true),
+        .root_module = logger_module,
     });
     const install_logger = b.addInstallArtifact(logger_exe, .{});
     const chat_exe = b.addExecutable(.{
@@ -1345,6 +1347,7 @@ pub fn build(b: *std.Build) void {
     host_blocks.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_logger = addProgramModule(b, "src/apps/logger/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_logger.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
+    _ = addKete(b, host_logger, host, b.graph.host, test_optimize, "src/apps/logger");
     const host_chat = addProgramModule(b, "src/apps/chat/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_chat.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_setup = addProgramModule(b, "src/apps/setup/main.zig", b.graph.host, test_optimize, host, shaders, false);
