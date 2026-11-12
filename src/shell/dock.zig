@@ -89,12 +89,84 @@ const dot_color = Theme.dark.colors().dot;
 /// Icon colours, picked by the app's name.
 const palette = [_]u32{ 0xff3f7ee8, 0xffe8743f, 0xff3fb86e, 0xffb04fd6, 0xffe8b33f, 0xff3fb8c4, 0xffe84f6a };
 
+/// How the system is connected, as the dock shows it.
 pub const NetworkStatus = union(enum) {
-    /// Wi-Fi signal strength in bars (0..4).
+    /// Not connected: whether it has Wi-Fi (its icon struck out), or not
+    /// (a globe struck out).
+    offline: struct { wifi: bool = false },
+    /// Joined to a Wi-Fi network, its signal strength in bars (0..4).
     wifi: u8,
-    /// Wired Ethernet (true when carrier/address is present).
-    ethernet: bool,
+    /// Sharing a connection as a Wi-Fi hotspot.
+    hotspot,
+    /// Wired Ethernet, with an address.
+    ethernet,
+
+    pub fn icon(n: NetworkStatus) icons.Icon {
+        return switch (n) {
+            .offline => |o| if (o.wifi) .signal_wifi_off else .public_off,
+            .wifi => |bars| switch (bars) {
+                0 => .signal_wifi_0_bar,
+                1 => .network_wifi_1_bar,
+                2 => .network_wifi_2_bar,
+                3 => .network_wifi_3_bar,
+                else => .signal_wifi_4_bar,
+            },
+            .hotspot => .wifi_tethering,
+            .ethernet => .lan,
+        };
+    }
+
+    pub fn connected(n: NetworkStatus) bool {
+        return n != .offline;
+    }
 };
+
+/// Bytes the network interfaces (all but loopback) have received and sent.
+pub const Traffic = struct {
+    received: u64 = 0,
+    sent: u64 = 0,
+};
+
+/// Whether data moved each way since the last look.
+pub const Activity = struct {
+    receiving: bool = false,
+    sending: bool = false,
+
+    /// What moved between `before` and `now`.
+    pub fn between(before: Traffic, now: Traffic) Activity {
+        return .{ .receiving = now.received != before.received, .sending = now.sent != before.sent };
+    }
+};
+
+/// The interfaces' byte counts, from /sys/class/net/*/statistics.
+pub fn readTraffic() Traffic {
+    var t: Traffic = .{};
+    const dir = sys.open("/sys/class/net", .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }) catch return t;
+    defer sys.close(dir);
+    var buf: [2048]u8 align(8) = undefined;
+    while (true) {
+        const n = sys.check(linux.getdents64(dir, &buf, buf.len)) catch break;
+        if (n == 0) break;
+        var at: usize = 0;
+        while (at < n) {
+            const reclen = std.mem.readInt(u16, buf[at + 16 ..][0..2], .little);
+            const name = std.mem.sliceTo(buf[at + 19 .. at + reclen], 0);
+            at += reclen;
+            if (name.len == 0 or name[0] == '.' or std.mem.eql(u8, name, "lo")) continue;
+            t.received +%= readCounter(name, "rx_bytes");
+            t.sent +%= readCounter(name, "tx_bytes");
+        }
+    }
+    return t;
+}
+
+fn readCounter(interface: []const u8, counter: []const u8) u64 {
+    var pbuf: [128]u8 = undefined;
+    const path = std.mem.printSentinel(&pbuf, "/sys/class/net/{s}/statistics/{s}", .{ interface, counter }, 0) catch return 0;
+    var vbuf: [32]u8 = undefined;
+    const text = sys.readFile(path, &vbuf) orelse return 0;
+    return std.fmt.parseInt(u64, std.mem.trim(u8, text, " \t\r\n"), 10) catch 0;
+}
 
 pub const VolumeStatus = struct {
     volume: u8 = 80,
@@ -116,27 +188,30 @@ pub fn readVolumeStatus() VolumeStatus {
     return .{ .volume = s.volume, .muted = s.muted };
 }
 
+/// The network manager's report, as the dock shows it: Wi-Fi when it is
+/// joined (or sharing a hotspot), else Ethernet once it has an address (a
+/// cable alone is not a connection), else offline.
 pub fn networkStatusFromReport(r: sys.network.Report) NetworkStatus {
-    if (r.ethernetConnected() or r.ethernetCarrier()) return .{ .ethernet = true };
-    if (r.wifiAdapters().len > 0) {
-        if (r.hotspot.state == .active) return .{ .wifi = 4 };
+    const has_wifi = r.wifiAdapters().len > 0;
+    if (has_wifi) {
+        if (r.hotspot.state == .active) return .hotspot;
         if (r.connection.state.joined()) {
             const joined = r.connection.ssid();
             for (r.slice()) |*n| {
-                if (std.mem.eql(u8, n.ssid(), joined)) return .{ .wifi = @max(n.bars(), 1) };
+                if (std.mem.eql(u8, n.ssid(), joined)) return .{ .wifi = n.bars() };
             }
             return .{ .wifi = 4 };
         }
-        return .{ .wifi = 0 };
     }
-    return .{ .ethernet = false };
+    if (r.ethernetConnected()) return .ethernet;
+    return .{ .offline = .{ .wifi = has_wifi } };
 }
 
 pub fn readNetworkStatus() NetworkStatus {
     if (sys.network.ask("status\n")) |r| {
         if (!r.denied) return networkStatusFromReport(r);
     }
-    const dir = sys.open("/sys/class/net", .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }) catch return .{ .ethernet = false };
+    const dir = sys.open("/sys/class/net", .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }) catch return .{ .offline = .{} };
     defer sys.close(dir);
     var has_wifi = false;
     var wifi_up = false;
@@ -169,9 +244,9 @@ pub fn readNetworkStatus() NetworkStatus {
             }
         }
     }
-    if (eth_up) return .{ .ethernet = true };
-    if (has_wifi) return .{ .wifi = if (wifi_up) 4 else 0 };
-    return .{ .ethernet = false };
+    if (wifi_up) return .{ .wifi = 4 };
+    if (eth_up) return .ethernet;
+    return .{ .offline = .{ .wifi = has_wifi } };
 }
 
 pub const App = struct {
@@ -400,7 +475,9 @@ pub const Dock = struct {
     /// The app under the pointer.
     hover: ?usize = null,
     /// Network status shown in the status box on the right of the dock.
-    network: NetworkStatus = .{ .ethernet = false },
+    network: NetworkStatus = .{ .offline = .{} },
+    /// Whether data is moving, shown as arrows beside the network status.
+    activity: Activity = .{},
     /// Volume status shown in the status box beside the network status.
     volume: VolumeStatus = .{},
     /// Light or dark colour scheme (from `/data/apps/.appearance`).
@@ -422,6 +499,9 @@ pub const Dock = struct {
     }
 
     pub const Rect = struct { x: f32, y: f32, size: f32 };
+    /// The status box's width (at 1080p): the volume, the network and its
+    /// activity arrows.
+    const status_box_width = 124;
     pub const StatusRect = struct { x: f32, y: f32, width: f32, height: f32 };
 
     /// Where app `i`'s icon is, in the dock: the icons and the status box
@@ -429,7 +509,7 @@ pub const Dock = struct {
     pub fn iconRect(d: *const Dock, i: usize) Rect {
         const size = 56 * d.scale;
         const gap = 20 * d.scale;
-        const status_width = 104 * d.scale;
+        const status_width = status_box_width * d.scale;
         const row = @as(f32, @floatFromInt(d.apps.len)) * (size + gap) + status_width;
         const x0 = (@as(f32, @floatFromInt(d.width)) - row) / 2;
         return .{ .x = x0 + @as(f32, @floatFromInt(i)) * (size + gap), .y = 6 * d.scale, .size = size };
@@ -438,7 +518,7 @@ pub const Dock = struct {
     /// Where the status box (volume and network) is, to the right of the rightmost app.
     pub fn statusRect(d: *const Dock) StatusRect {
         const r = d.iconRect(d.apps.len);
-        return .{ .x = r.x, .y = r.y, .width = 104 * d.scale, .height = r.size };
+        return .{ .x = r.x, .y = r.y, .width = status_box_width * d.scale, .height = r.size };
     }
 
     /// The app whose icon is at (`x`, `y`) in the dock.
@@ -488,23 +568,21 @@ pub const Dock = struct {
             const pad = @round(10 * d.scale);
             const y = @round(rs.y + (rs.height - size) / 2);
             const vol_x = @round(rs.x + pad);
-            const net_x = @round(rs.x + rs.width - pad - size);
+            const arrow = @round(18 * d.scale);
+            const arrows_x = @round(rs.x + rs.width - pad - arrow);
+            const net_x = @round(arrows_x - 4 * d.scale - size);
             var buf: [4]u8 = undefined;
             const vol_color: u32 = if (d.volume.active()) c.status_active else c.status_inactive;
             _ = font.draw(canvas, &d.cache, .{ .font = f, .size = size, .color = vol_color }, vol_x, y + size, icons.text(d.volume.icon(), &buf)) catch {};
-            switch (d.network) {
-                .wifi => |bars| {
-                    const base_color: u32 = if (bars >= 4) c.status_active else c.status_inactive;
-                    _ = font.draw(canvas, &d.cache, .{ .font = f, .size = size, .color = base_color }, net_x, y + size, icons.text(.wifi, &buf)) catch {};
-                    if (bars > 0 and bars < 4) {
-                        const lit: icons.Icon = if (bars >= 3) .wifi_2_bar else .wifi_1_bar;
-                        _ = font.draw(canvas, &d.cache, .{ .font = f, .size = size, .color = c.status_active }, net_x, y + size, icons.text(lit, &buf)) catch {};
-                    }
-                },
-                .ethernet => |connected| {
-                    const color: u32 = if (connected) c.status_active else c.status_inactive;
-                    _ = font.draw(canvas, &d.cache, .{ .font = f, .size = size, .color = color }, net_x, y + size, icons.text(.lan, &buf)) catch {};
-                },
+            const net_color: u32 = if (d.network.connected()) c.status_active else c.status_inactive;
+            _ = font.draw(canvas, &d.cache, .{ .font = f, .size = size, .color = net_color }, net_x, y + size, icons.text(d.network.icon(), &buf)) catch {};
+            // Sending above receiving, each lit while data moves that way.
+            if (d.network.connected()) {
+                const mid = rs.y + rs.height / 2;
+                const up_color: u32 = if (d.activity.sending) c.status_active else c.status_inactive;
+                const down_color: u32 = if (d.activity.receiving) c.status_active else c.status_inactive;
+                _ = font.draw(canvas, &d.cache, .{ .font = f, .size = arrow, .color = up_color }, arrows_x, @round(mid), icons.text(.arrow_upward, &buf)) catch {};
+                _ = font.draw(canvas, &d.cache, .{ .font = f, .size = arrow, .color = down_color }, arrows_x, @round(mid + arrow), icons.text(.arrow_downward, &buf)) catch {};
             }
         }
     }
@@ -633,7 +711,7 @@ test "icons and the status box are in a row in the middle, and clicks find the a
     try testing.expect(d.pointerAt(r1.x + 1, r1.y + 1));
     try testing.expect(!d.pointerAt(r1.x + 2, r1.y + 2));
     apps[0].pid = 42;
-    d.network = .{ .ethernet = true };
+    d.network = .ethernet;
     d.volume = .{ .volume = 75, .muted = false };
     d.draw();
     const at = struct {
@@ -664,24 +742,64 @@ test "icons and the status box are in a row in the middle, and clicks find the a
     try testing.expectEqual(light.status_border, at(&d, rs.x + rs.width / 2, rs.y + 1));
 }
 
-test "networkStatusFromReport picks Ethernet when Ethernet is connected and Wi-Fi otherwise" {
-    const r_eth_and_wifi = sys.network.Report.parse(
+test "the network status is Wi-Fi when joined, Ethernet with an address, and offline otherwise" {
+    // Joined to Wi-Fi with a cable plugged in too: Wi-Fi, with its signal.
+    const r_both = sys.network.Report.parse(
         \\ethernet eth0 dhcp 10.0.2.15/24 10.0.2.2 up
-        \\wifi adapter wlan0 b8:27:eb:01:02:03 up
-        \\end
-        \\
-    ).?;
-    try testing.expectEqual(NetworkStatus{ .ethernet = true }, networkStatusFromReport(r_eth_and_wifi));
-
-    const r_wifi = sys.network.Report.parse(
-        \\ethernet eth0 dhcp none none down
         \\wifi adapter wlan0 b8:27:eb:01:02:03 up
         \\wifi connection connected none 486f6d65 192.168.1.50
         \\wifi network -6200 2437 wpa2 486f6d65
         \\end
         \\
     ).?;
-    try testing.expectEqual(NetworkStatus{ .wifi = 3 }, networkStatusFromReport(r_wifi));
+    try testing.expectEqual(NetworkStatus{ .wifi = 3 }, networkStatusFromReport(r_both));
+    try testing.expectEqual(icons.Icon.network_wifi_3_bar, networkStatusFromReport(r_both).icon());
+
+    const r_weak = sys.network.Report.parse(
+        \\wifi adapter wlan0 b8:27:eb:01:02:03 up
+        \\wifi connection connected none 486f6d65 192.168.1.50
+        \\wifi network -9000 2437 wpa2 486f6d65
+        \\end
+        \\
+    ).?;
+    try testing.expectEqual(NetworkStatus{ .wifi = 0 }, networkStatusFromReport(r_weak));
+    try testing.expectEqual(icons.Icon.signal_wifi_0_bar, networkStatusFromReport(r_weak).icon());
+
+    // Wi-Fi not joined: Ethernet, if it has an address.
+    const r_eth = sys.network.Report.parse(
+        \\ethernet eth0 dhcp 10.0.2.15/24 10.0.2.2 up
+        \\wifi adapter wlan0 b8:27:eb:01:02:03 up
+        \\end
+        \\
+    ).?;
+    try testing.expectEqual(NetworkStatus.ethernet, networkStatusFromReport(r_eth));
+    try testing.expectEqual(icons.Icon.lan, networkStatusFromReport(r_eth).icon());
+
+    // A cable with no address yet, and Wi-Fi not joined: offline.
+    const r_none = sys.network.Report.parse(
+        \\ethernet eth0 dhcp none none up
+        \\wifi adapter wlan0 b8:27:eb:01:02:03 up
+        \\end
+        \\
+    ).?;
+    try testing.expectEqual(NetworkStatus{ .offline = .{ .wifi = true } }, networkStatusFromReport(r_none));
+    try testing.expectEqual(icons.Icon.signal_wifi_off, networkStatusFromReport(r_none).icon());
+    try testing.expect(!networkStatusFromReport(r_none).connected());
+
+    // No Wi-Fi, and no cable.
+    const r_wired_only = sys.network.Report.parse(
+        \\ethernet eth0 dhcp none none down
+        \\end
+        \\
+    ).?;
+    try testing.expectEqual(icons.Icon.public_off, networkStatusFromReport(r_wired_only).icon());
+}
+
+test "activity is data moving each way since the last look" {
+    const before: Traffic = .{ .received = 100, .sent = 50 };
+    try testing.expectEqual(Activity{}, Activity.between(before, before));
+    try testing.expectEqual(Activity{ .receiving = true }, Activity.between(before, .{ .received = 300, .sent = 50 }));
+    try testing.expectEqual(Activity{ .receiving = true, .sending = true }, Activity.between(before, .{ .received = 300, .sent = 60 }));
 }
 
 test "apps are the directories holding a program of the same name, with builtin apps on the right" {

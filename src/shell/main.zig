@@ -115,6 +115,8 @@ fn run(init: std.process.Init.Minimal) !void {
     defer sys_sub.deinit();
     sys_sub.connect();
     dock.network = if (net_sub.poll()) |r| dock_mod.networkStatusFromReport(r) else dock_mod.readNetworkStatus();
+    // The bytes moved so far, to see each second whether data is moving.
+    var traffic = dock_mod.readTraffic();
     const initial_sound = audio.loadSettings();
     audio.applySettings(initial_sound, &audio.listDevices());
     dock.volume = .{ .volume = initial_sound.volume, .muted = initial_sound.muted };
@@ -473,6 +475,19 @@ fn run(init: std.process.Init.Minimal) !void {
             next_tick = start + ((t_now - start) / std.time.ns_per_s + 1) * std.time.ns_per_s;
             // Keyboards and mice plugged in since.
             devices.scan();
+            // Whether data moved over the network this second (the kernel
+            // tells nothing of it as it happens: its counters are read).
+            const now_traffic = dock_mod.readTraffic();
+            const activity = dock_mod.Activity.between(traffic, now_traffic);
+            traffic = now_traffic;
+            if (!std.meta.eql(activity, dock.activity)) {
+                dock.activity = activity;
+                if (dock_shown) {
+                    dock.draw();
+                    renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+                    panels_damaged = true;
+                }
+            }
             if (net_sub.fd == null) {
                 net_sub.connect();
                 if (net_sub.poll()) |r| if (!r.denied) {

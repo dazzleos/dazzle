@@ -57,6 +57,16 @@ pub const Icon = enum {
     article,
     wifi_1_bar,
     wifi_2_bar,
+    // The network status in the dock.
+    signal_wifi_0_bar,
+    network_wifi_1_bar,
+    network_wifi_2_bar,
+    network_wifi_3_bar,
+    signal_wifi_4_bar,
+    signal_wifi_off,
+    wifi_tethering,
+    public_off,
+    arrow_downward,
     wifi_password,
     // The demo.
     view_in_ar,
