@@ -256,6 +256,9 @@ const Buffer = struct {
     }
 };
 
+/// How many extra files a window's `wait` can wake for (`Window.wake_fds`).
+pub const max_wake_fds = 8;
+
 pub const Window = struct {
     gpa: std.mem.Allocator,
     gpu: Gpu,
@@ -364,7 +367,7 @@ pub const Window = struct {
     /// A file of the app's that `wait` also wakes for when it can be
     /// read (a camera's frames, say), and any extra wake files.
     wake_fd: ?linux.fd_t = null,
-    wake_fds: [4]?linux.fd_t = @splat(null),
+    wake_fds: [max_wake_fds]?linux.fd_t = @splat(null),
     pointer: ?client.Proxy = null,
     keyboard: ?client.Proxy = null,
     /// Keys per second (`wl_keyboard.repeat_info`, 0 disables repeat) and
@@ -757,7 +760,7 @@ pub const Window = struct {
         try w.conn.flush();
         if (try w.conn.dispatchPending() == 0) {
             const ms = @min(timeout_ms, w.clipboard.pasteTimeoutMs() orelse timeout_ms, std.math.maxInt(i32));
-            var fds: [3 + 4]linux.pollfd = undefined;
+            var fds: [3 + max_wake_fds]linux.pollfd = undefined;
             var n: usize = 0;
             for ([_]?linux.fd_t{ w.conn.conn.fd, paste_fd, w.wake_fd }) |fd| if (fd) |f| {
                 fds[n] = .{ .fd = f, .events = linux.POLL.IN, .revents = 0 };

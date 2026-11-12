@@ -142,7 +142,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
 
     var next_update: u64 = sys.nowNs() + std.time.ns_per_s;
     while (true) {
-        a.win.wake_fds = .{ pages_fd, net_sub.fd, updater.sub.fd, if (view.shownPage(a.ui) == .log) syslog.fd else null };
+        a.win.wake_fds = @splat(null);
+        a.win.wake_fds[0..4].* = .{ pages_fd, net_sub.fd, updater.sub.fd, if (view.shownPage(a.ui) == .log) syslog.fd else null };
         const board_page = view.shownPage(a.ui) == .board;
         const base_until = if (a.suspended) sys.nowNs() + 60 * std.time.ns_per_s else if (board_page) @min(next_update, next_levels) else next_update;
         const until = if (test_player != null) @min(base_until, sys.nowNs() + 16 * std.time.ns_per_ms) else base_until;

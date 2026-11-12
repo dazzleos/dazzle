@@ -3,11 +3,15 @@
 //! input and its buffers to draw into with the vc4 renderer
 //! (`renderer.zig`).
 //!
-//! Not yet given to kete: the clipboard, input methods, drag and drop,
-//! popups (menus are drawn in the window) and watched sources (a `Waker`
-//! from another thread).
+//! It waits on kete's watched sources (a `Waker` from another thread,
+//! images loaded) and on the app's own files (`Display.wakeOn`) as well
+//! as the window's events.
+//!
+//! Not yet given to kete: the clipboard, input methods, drag and drop and
+//! popups (menus are drawn in the window).
 
 const std = @import("std");
+const linux = std.os.linux;
 const kete = @import("kete");
 const vc4 = @import("vc4");
 const app = @import("app");
@@ -315,10 +319,74 @@ fn cursorShape(c: kwin.PointerCursor) u32 {
 /// the shell of its own, which `poll` and `wait` are given to).
 pub const Display = struct {
     gpa: std.mem.Allocator,
+    io: std.Io,
     gpu: app.Gpu,
     environ: std.process.Environ,
     app_id: ?[]const u8 = null,
     window: ?Window = null,
+    /// The app's files to wake for (`wakeOn`), and kete's sources (`watch`).
+    wake_fds: [max_app_fds]?linux.fd_t = @splat(null),
+    sources: [max_sources]?kwin.Source = @splat(null),
+
+    const max_app_fds = app.window.max_wake_fds - max_sources;
+    const max_sources = 3;
+
+    /// Wakes the app's loop (`kete.App.step` returns) when `fd` can be
+    /// read, or no longer (`on` false). False if there is no room for it.
+    pub fn wakeOn(d: *Display, fd: linux.fd_t, on: bool) bool {
+        defer d.syncWake();
+        for (&d.wake_fds) |*slot| if (slot.* == fd) {
+            if (!on) slot.* = null;
+            return true;
+        };
+        if (!on) return true;
+        for (&d.wake_fds) |*slot| if (slot.* == null) {
+            slot.* = fd;
+            return true;
+        };
+        return false;
+    }
+
+    /// kete's sources to wait on (and read when they can be).
+    pub fn watch(d: *Display, source: kwin.Source, on: bool) void {
+        defer d.syncWake();
+        for (&d.sources) |*slot| if (slot.*) |s| if (s.eql(source)) {
+            if (!on) slot.* = null;
+            return;
+        };
+        if (!on) return;
+        for (&d.sources) |*slot| if (slot.* == null) {
+            slot.* = source;
+            return;
+        };
+    }
+
+    /// Gives the window the files to wake for.
+    fn syncWake(d: *Display) void {
+        const w = d.openWindowOrNull() orelse return;
+        var fds: [app.window.max_wake_fds]?linux.fd_t = @splat(null);
+        var n: usize = 0;
+        for (d.wake_fds) |fd| if (fd) |f| {
+            fds[n] = f;
+            n += 1;
+        };
+        for (d.sources) |src| if (src) |s| {
+            fds[n] = s.fd;
+            n += 1;
+        };
+        w.win.wake_fds = fds;
+    }
+
+    /// Reads the sources that can be read, giving them what they read.
+    fn serviceSources(d: *Display) void {
+        for (d.sources) |src| if (src) |s| {
+            var pfd = [1]linux.pollfd{.{ .fd = s.fd, .events = linux.POLL.IN, .revents = 0 }};
+            if (linux.poll(&pfd, 1, 0) != 1) continue;
+            const op = s.read(s.ctx) orelse continue;
+            const result = d.io.operate(op) catch continue;
+            s.done(s.ctx, result);
+        };
+    }
 
     pub fn platform(_: *const Display) kwin.WindowPlatform {
         return .custom;
@@ -347,6 +415,7 @@ pub const Display = struct {
         const win = try app.Window.open(d.gpa, d.gpu, d.environ, options);
         d.window = .{ .win = win, .gpa = d.gpa };
         d.window.?.keepTitle(o.title);
+        d.syncWake();
         return &d.window.?;
     }
 
@@ -358,9 +427,11 @@ pub const Display = struct {
 
     pub fn poll(d: *Display) !void {
         if (d.openWindowOrNull()) |w| try w.poll();
+        d.serviceSources();
     }
 
     pub fn wait(d: *Display, timeout_ns: u64) !void {
         if (d.openWindowOrNull()) |w| try w.wait(timeout_ns);
+        d.serviceSources();
     }
 };

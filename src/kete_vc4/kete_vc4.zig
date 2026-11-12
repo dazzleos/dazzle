@@ -9,7 +9,12 @@
 //!     try host.init(gpa, io, environ, .{ .app_id = "dazzle-example" });
 //!     defer host.deinit();
 //!     _ = try host.app.openWindow(.{ .title = "Example", .root = .of(&root) });
-//!     try host.app.run();
+//!     while (try host.step(std.math.maxInt(u64))) {}
+//!
+//! `Host.step` is kete's step, following the system's theme as it is
+//! changed in Settings; an app with things of its own to do between steps
+//! (a socket, a thread's results) has its files wake the loop with
+//! `Host.wakeOn`, and `Host.redraw` once its state has changed.
 
 const std = @import("std");
 const kete = @import("kete");
@@ -18,6 +23,7 @@ const sys = @import("sys");
 const app = @import("app");
 const ui = @import("ui");
 const dazzle_font = @import("font");
+const linux = std.os.linux;
 
 pub const renderer = @import("renderer.zig");
 pub const window = @import("window.zig");
@@ -32,6 +38,7 @@ pub const Host = struct {
     display: Display,
     renderer: Renderer,
     app: *kete.App,
+    theme_watch: ThemeWatch,
 
     pub const Options = struct {
         /// The name the shell knows the app by.
@@ -50,7 +57,7 @@ pub const Host = struct {
         };
         errdefer h.dev.close();
         const gpu: app.Gpu = .device(&h.dev);
-        h.display = .{ .gpa = gpa, .gpu = gpu, .environ = environ, .app_id = options.app_id };
+        h.display = .{ .gpa = gpa, .io = io, .gpu = gpu, .environ = environ, .app_id = options.app_id };
         h.renderer = try Renderer.init(gpa, h.dev, gpu);
         errdefer h.renderer.deinit();
         var font_buf: [256]u8 = undefined;
@@ -64,12 +71,80 @@ pub const Host = struct {
         });
         h.app.shared.attachRenderer(h.renderer.renderer(), false);
         h.app.setTheme(themeMode(ui.theme.loadSettings().theme));
+        h.theme_watch = .init();
+        if (h.theme_watch.fd) |fd| _ = h.display.wakeOn(fd, true);
     }
 
     pub fn deinit(h: *Host) void {
+        h.theme_watch.deinit();
         h.app.deinit();
         h.renderer.deinit();
         h.dev.close();
+    }
+
+    /// kete's step (see `kete.App.step`), and the system's theme taken if
+    /// it changed. False when the app should end.
+    pub fn step(h: *Host, idle_timeout_ns: u64) !bool {
+        const going = try h.app.step(idle_timeout_ns);
+        if (h.theme_watch.changed()) h.app.setTheme(themeMode(ui.theme.loadSettings().theme));
+        return going;
+    }
+
+    /// Wakes `step` when `fd` can be read (or no longer, `on` false).
+    pub fn wakeOn(h: *Host, fd: linux.fd_t, on: bool) void {
+        if (!h.display.wakeOn(fd, on)) sys.print(sys.log_warning ++ "kete_vc4: too many files to wake for\n", .{});
+    }
+
+    /// Draws the windows again (the app's state changed).
+    pub fn redraw(h: *Host) void {
+        for (h.app.windows.items) |w| if (!w.isClosed()) {
+            w.dirty = true;
+        };
+    }
+};
+
+/// Notices the appearance settings being written (in Settings), by
+/// watching their directory.
+const ThemeWatch = struct {
+    fd: ?linux.fd_t,
+
+    const name = std.fs.path.basename(ui.theme.settings_file);
+
+    fn init() ThemeWatch {
+        const rc = linux.inotify_init1(linux.IN.NONBLOCK | linux.IN.CLOEXEC);
+        if (linux.errno(rc) != .SUCCESS) return .{ .fd = null };
+        const fd: linux.fd_t = @intCast(rc);
+        const dir: [*:0]const u8 = sys.system.apps_dir;
+        if (linux.errno(linux.inotify_add_watch(fd, dir, linux.IN.CLOSE_WRITE | linux.IN.MOVED_TO | linux.IN.ONLYDIR)) != .SUCCESS) {
+            sys.close(fd);
+            return .{ .fd = null };
+        }
+        return .{ .fd = fd };
+    }
+
+    fn deinit(w: *ThemeWatch) void {
+        if (w.fd) |fd| sys.close(fd);
+        w.fd = null;
+    }
+
+    /// Whether the settings were written since the last call.
+    fn changed(w: *ThemeWatch) bool {
+        const fd = w.fd orelse return false;
+        var buf: [4096]u8 align(@alignOf(linux.inotify_event)) = undefined;
+        var written = false;
+        while (true) {
+            const rc = linux.read(fd, &buf, buf.len);
+            if (linux.errno(rc) != .SUCCESS or rc == 0) return written;
+            var at: usize = 0;
+            while (at + @sizeOf(linux.inotify_event) <= rc) {
+                const ev: *align(1) const linux.inotify_event = @ptrCast(&buf[at]);
+                const step_len = @sizeOf(linux.inotify_event) + ev.len;
+                if (at + step_len > rc) break;
+                const ev_name = std.mem.sliceTo(buf[at + @sizeOf(linux.inotify_event) .. at + step_len], 0);
+                at += step_len;
+                if (std.mem.eql(u8, ev_name, name)) written = true;
+            }
+        }
     }
 };
 
