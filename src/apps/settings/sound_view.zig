@@ -2,7 +2,7 @@
 //! and a test chime button.
 
 const std = @import("std");
-const ui = @import("ui");
+const kete = @import("kete");
 const audio = @import("audio");
 const view = @import("view.zig");
 
@@ -11,7 +11,7 @@ const Actions = view.Actions;
 const Builder = view.Builder;
 
 pub const label = "Sound";
-pub const icon: ui.icons.Icon = .volume_up;
+pub const icon: kete.IconName = .volume_up;
 
 pub const State = struct {
     picks: [audio.max_devices]Pick = undefined,
@@ -55,7 +55,7 @@ pub const State = struct {
     }
 };
 
-pub fn deviceIcon(kind: audio.Kind) ui.icons.Icon {
+pub fn deviceIcon(kind: audio.Kind) kete.IconName {
     return switch (kind) {
         .headphones => .headphones,
         .hdmi => .tv,
@@ -64,18 +64,18 @@ pub fn deviceIcon(kind: audio.Kind) ui.icons.Icon {
     };
 }
 
-pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
+pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     const cx = b.cx;
     const t = cx.theme();
-    const a = cx.ui.arena();
+    const a = cx.arena;
 
     state.sound = self.sound;
     state.actions = self.actions;
 
-    var rows: std.ArrayList(ui.Widget) = .empty;
+    var rows: std.ArrayList(kete.Widget) = .empty;
 
     // Volume row: mute button, slider, and percentage readout.
-    const vol_icon: ui.icons.Icon = if (self.sound.muted or self.sound.volume == 0)
+    const vol_icon: kete.IconName = if (self.sound.muted or self.sound.volume == 0)
         .volume_off
     else if (self.sound.volume < 50)
         .volume_down
@@ -87,26 +87,26 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
     else
         cx.fmt("{d}%", .{self.sound.volume});
 
-    const vol_controls = cx.make(ui.Row{
+    const vol_controls = cx.make(kete.Row{
         .cross_axis_alignment = .center,
         .spacing = 8,
         .children = &.{
-            cx.make(ui.IconButton{
+            cx.make(kete.IconButton{
                 .icon = vol_icon,
                 .selected = !self.sound.muted and self.sound.volume > 0,
                 .on_press = if (self.actions != null) .of(state, State.onToggleMute) else null,
             }),
-            cx.make(ui.Expanded{
-                .child = cx.make(ui.Slider{
+            cx.make(kete.Expanded{
+                .child = cx.make(kete.Slider{
                     .value = @floatFromInt(self.sound.volume),
                     .min = 0,
                     .max = 100,
                     .on_changed = if (self.actions != null) .of(state, State.onVolumeChange) else null,
                 }),
             }),
-            cx.make(ui.SizedBox{
+            cx.make(kete.SizedBox{
                 .width = 64,
-                .child = cx.make(ui.Text{
+                .child = cx.make(kete.Text{
                     .text = vol_label,
                     .style = .{
                         .size = 18,
@@ -118,12 +118,12 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
         },
     });
 
-    rows.append(a, cx.make(ui.Row{
+    rows.append(a, cx.make(kete.Row{
         .cross_axis_alignment = .center,
         .spacing = 12,
         .children = &.{
             b.label("Volume"),
-            cx.make(ui.Expanded{ .child = vol_controls }),
+            cx.make(kete.Expanded{ .child = vol_controls }),
         },
     })) catch {};
 
@@ -133,7 +133,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
         rows.append(a, b.item("Output", "No audio output devices found")) catch {};
     } else {
         const active = audio.activeDevice(self.audio_devices, &self.sound);
-        var dev_rows: std.ArrayList(ui.Widget) = .empty;
+        var dev_rows: std.ArrayList(kete.Widget) = .empty;
         for (devs, 0..) |*dev, idx| {
             const selected = if (active) |act| std.mem.eql(u8, act.id(), dev.id()) and act.card == dev.card else idx == 0;
             const pick = &state.picks[idx];
@@ -147,18 +147,18 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
             const fg = if (selected) t.on_surface else t.on_surface_variant;
             const bg = if (selected) t.secondary_container else t.surface_container;
 
-            const item_row = cx.make(ui.Decorated{
+            const item_row = cx.make(kete.RoundedBox{
                 .color = bg,
                 .radius = .all(10),
-                .child = cx.make(ui.Padding{
+                .child = cx.make(kete.Padding{
                     .padding = .symmetric(12, 10),
-                    .child = cx.make(ui.Row{
+                    .child = cx.make(kete.Row{
                         .cross_axis_alignment = .center,
                         .spacing = 10,
                         .children = &.{
-                            cx.make(ui.Icon{ .icon = deviceIcon(dev.kind), .size = 22, .color = fg }),
-                            cx.make(ui.Expanded{
-                                .child = cx.make(ui.Text{
+                            cx.make(kete.Icon{ .icon = deviceIcon(dev.kind), .size = 22, .color = fg }),
+                            cx.make(kete.Expanded{
+                                .child = cx.make(kete.Text{
                                     .text = dev.name(),
                                     .style = .{ .size = 18, .color = fg },
                                     .wrap = false,
@@ -166,23 +166,23 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
                                 }),
                             }),
                             if (selected)
-                                cx.make(ui.Icon{ .icon = .check, .size = 20, .color = fg })
+                                cx.make(kete.Icon{ .icon = .check, .size = 20, .color = fg })
                             else
-                                cx.make(ui.Empty{}),
+                                cx.make(kete.SizedBox.empty),
                         },
                     }),
                 }),
             });
 
-            dev_rows.append(a, cx.make(ui.Pressable{
+            dev_rows.append(a, cx.make(kete.Pressable{
                 .on_press = if (self.actions != null and devs.len > 1) .of(pick, State.Pick.press) else null,
                 .child = item_row,
             }).withKey(idx)) catch {};
         }
 
-        dev_rows.append(a, cx.make(ui.Row{
+        dev_rows.append(a, cx.make(kete.Row{
             .children = &.{
-                cx.make(ui.OutlinedButton{
+                cx.make(kete.OutlinedButton{
                     .label = "Test sound",
                     .icon = .volume_up,
                     .on_press = if (self.actions != null) .of(state, State.onTestSound) else null,
@@ -190,15 +190,15 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
             },
         })) catch {};
 
-        rows.append(a, cx.make(ui.Row{
+        rows.append(a, cx.make(kete.Row{
             .cross_axis_alignment = .start,
             .spacing = 12,
             .children = &.{
                 b.label("Output"),
-                cx.make(ui.Expanded{
-                    .child = cx.make(ui.Column{
+                cx.make(kete.Expanded{
+                    .child = cx.make(kete.Column{
                         .cross_axis_alignment = .stretch,
-                        .main_axis_size = .min,
+                        .fill = false,
                         .spacing = 8,
                         .children = dev_rows.items,
                     }),
@@ -211,7 +211,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
 }
 
 const testing = std.testing;
-const font = @import("font");
+const font = kete.font;
 
 pub fn sampleDevices() audio.Devices {
     var d: audio.Devices = .{};
@@ -223,7 +223,7 @@ pub fn sampleDevices() audio.Devices {
 
 test "Sound page shows output devices, adjusts volume, toggles mute and triggers test sound" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const u = try ui.Ui.create(testing.allocator, &f);
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
 
     const d = view.sample();
@@ -259,7 +259,7 @@ test "Sound page shows output devices, adjusts volume, toggles mute and triggers
     try testing.expect(view.findText(u.root.?, "HDMI") != null);
 
     // Selecting HDMI updates actions.sound.output.
-    view.click(u, view.up(view.findText(u.root.?, "HDMI").?, ui.Pressable).?);
+    view.click(u, view.up(view.findText(u.root.?, "HDMI").?, kete.Pressable).?);
     try testing.expectEqualStrings("vc4hdmi", actions.sound.?.output());
     sound = actions.sound.?;
     actions = .{};
@@ -275,11 +275,11 @@ test "Sound page shows output devices, adjusts volume, toggles mute and triggers
         .sound = sound,
         .audio_devices = &devs,
     });
-    view.click(u, view.up(view.findText(u.root.?, "Test sound").?, ui.OutlinedButton).?);
+    view.click(u, view.up(view.findText(u.root.?, "Test sound").?, kete.OutlinedButton).?);
     try testing.expect(actions.test_sound);
     actions = .{};
 
     // Clicking the mute icon button toggles mute.
-    view.click(u, view.findType(u.root.?, ui.IconButton).?);
+    view.click(u, view.findType(u.root.?, kete.IconButton).?);
     try testing.expect(actions.sound.?.muted);
 }

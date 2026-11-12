@@ -5,8 +5,9 @@
 //! on the network can read it).
 
 const std = @import("std");
-const ui = @import("ui");
-const gfx = @import("gfx");
+const kete = @import("kete");
+const kete_vc4 = @import("kete_vc4");
+const gfx = kete.gfx;
 const log = @import("log.zig");
 const view = @import("view.zig");
 
@@ -15,7 +16,7 @@ const Builder = view.Builder;
 const Actions = view.Actions;
 
 pub const label = "Log";
-pub const icon: ui.icons.Icon = .article;
+pub const icon: kete.IconName = .article;
 
 const log_row_height = 26;
 
@@ -31,10 +32,10 @@ pub const State = struct {
     }
 };
 
-pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
+pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     const cx = b.cx;
-    const a = cx.ui.arena();
-    const problems = cx.make(ui.Switch{ .value = state.problems, .on_changed = .of(state, State.setProblems), .label = "Only warnings and errors" });
+    const a = cx.arena;
+    const problems = cx.make(kete.SwitchRow{ .value = state.problems, .on_changed = .of(state, State.setProblems), .label = "Only warnings and errors" });
     const serving = serveRow(self, b);
     const l = self.log orelse return b.page(&.{ serving, problems, b.value("Reading the log…") });
     if (l.failed) return b.page(&.{ serving, b.value("The log cannot be read") });
@@ -44,12 +45,12 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
         const line = l.newest(i);
         if (!state.problems or line.level.problem()) shown.append(a, line) catch break;
     }
-    const lines = a.create(LogLines) catch return cx.make(ui.Empty{});
+    const lines = a.create(LogLines) catch return cx.make(kete.SizedBox.empty);
     lines.* = .{ .lines = shown.items };
     return b.page(&.{
         serving,
         problems,
-        if (shown.items.len == 0) b.value(if (state.problems) "No warnings or errors" else "Nothing yet") else cx.make(ui.LazyGrid{
+        if (shown.items.len == 0) b.value(if (state.problems) "No warnings or errors" else "Nothing yet") else cx.make(kete_vc4.LazyGrid{
             .count = shown.items.len,
             .cell = .{ .w = std.math.inf(f32), .h = log_row_height },
             .item = .of(lines, LogLines.row),
@@ -59,11 +60,11 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
 
 /// Whether the log is served over HTTP, turned on and off here, and where
 /// to read it while it is.
-fn serveRow(self: *const Settings, b: Builder) ui.Widget {
+fn serveRow(self: *const Settings, b: Builder) kete.Widget {
     const cx = b.cx;
     const t = cx.theme();
     // Unknown until the system manager says.
-    const on = self.log_server orelse return cx.make(ui.Empty{});
+    const on = self.log_server orelse return cx.make(kete.SizedBox.empty);
     const host = self.system.hostname.slice();
     const note = if (!on)
         "Lets other computers on the network read the log in a browser. Anyone on the network can read it."
@@ -71,13 +72,13 @@ fn serveRow(self: *const Settings, b: Builder) ui.Widget {
         cx.fmt("Anyone on the network can read the log at http://{s}/ (and http://{s}/follow as it is written).", .{ host, host })
     else
         "Anyone on the network can read the log, at this computer's address.";
-    return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 4, .children = &.{
-        cx.make(ui.Switch{
+    return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 4, .children = &.{
+        cx.make(kete.SwitchRow{
             .value = on,
             .on_changed = if (self.actions) |a| .of(a, setLogServer) else null,
             .label = "Serve the log over HTTP",
         }),
-        cx.make(ui.Text{ .text = note, .style = .{ .size = 14, .color = t.on_surface_variant } }),
+        cx.make(kete.Text{ .text = note, .style = .{ .size = 14, .color = t.on_surface_variant } }),
     } });
 }
 
@@ -89,7 +90,7 @@ fn setLogServer(a: *Actions, on: bool) void {
 const LogLines = struct {
     lines: []const *const log.Line,
 
-    fn row(l: *const LogLines, cx: *ui.Context, i: usize) ui.Widget {
+    fn row(l: *const LogLines, cx: *kete.BuildContext, i: usize) kete.Widget {
         const t = cx.theme();
         const line = l.lines[i];
         var time_buf: [32]u8 = undefined;
@@ -98,19 +99,19 @@ const LogLines = struct {
             .warning => warning_color,
             else => t.on_surface,
         };
-        return cx.make(ui.Row{ .spacing = 12, .cross_axis_alignment = .center, .children = &.{
-            cx.make(ui.SizedBox{ .width = 96, .child = cx.make(ui.Text{ .text = cx.fmt("{s}", .{log.formatUptime(&time_buf, line.usec)}), .style = .{ .size = 14, .color = t.on_surface_variant }, .wrap = false, .text_align = .end }) }),
-            cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = line.text(), .style = .{ .size = 14, .color = color }, .wrap = false, .ellipsis = true }) }),
+        return cx.make(kete.Row{ .spacing = 12, .cross_axis_alignment = .center, .children = &.{
+            cx.make(kete.SizedBox{ .width = 96, .child = cx.make(kete.Text{ .text = cx.fmt("{s}", .{log.formatUptime(&time_buf, line.usec)}), .style = .{ .size = 14, .color = t.on_surface_variant }, .wrap = false, .text_align = .end }) }),
+            cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = line.text(), .style = .{ .size = 14, .color = color }, .wrap = false, .ellipsis = true }) }),
         } });
     }
 };
 
 const testing = std.testing;
-const font = @import("font");
+const font = kete.font;
 
 test "the log: newest first, or only its warnings and errors" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const u = try ui.Ui.create(testing.allocator, &f);
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
     const d = view.sample();
     var l: log.Log = .{};
@@ -134,7 +135,7 @@ test "the log: newest first, or only its warnings and errors" {
     try testing.expect(view.findText(u.root.?, "1:05.000") != null);
     try testing.expect(view.findText(u.root.?, "3.250") != null);
     // Only the problems.
-    view.click(u, view.up(view.findText(u.root.?, "Only warnings and errors").?, ui.Switch).?);
+    view.click(u, view.up(view.findText(u.root.?, "Only warnings and errors").?, kete.SwitchRow).?);
     u.frame(1600, 900, 3, settings);
     try testing.expect(view.findText(u.root.?, "dazzle-shell: started") == null);
     try testing.expect(view.findText(u.root.?, "dazzle-files: error: OutOfMemory") != null);
@@ -144,7 +145,7 @@ test "the log: newest first, or only its warnings and errors" {
     var actions: Actions = .{};
     const off: Settings = .{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .log = &l, .log_server = false, .actions = &actions };
     u.frame(1600, 900, 4, off);
-    view.click(u, view.up(view.findText(u.root.?, "Serve the log over HTTP").?, ui.Switch).?);
+    view.click(u, view.up(view.findText(u.root.?, "Serve the log over HTTP").?, kete.SwitchRow).?);
     u.frame(1600, 900, 5, off);
     try testing.expectEqual(@as(?bool, true), actions.log_server);
     try testing.expect(view.findTextContaining(u.root.?, "http://awesome-elephant/") == null);

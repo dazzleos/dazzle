@@ -1154,9 +1154,11 @@ pub fn build(b: *std.Build) void {
         .root_module = demo_module,
     });
     const install_demo = b.addInstallArtifact(demo_exe, .{});
+    const settings_module = addProgramModule(b, "src/apps/settings/main.zig", target, optimize, pi, shaders, true);
+    _ = addKete(b, settings_module, pi, target, optimize, "src/apps/settings");
     const settings_exe = b.addExecutable(.{
         .name = "dazzle-settings",
-        .root_module = addProgramModule(b, "src/apps/settings/main.zig", target, optimize, pi, shaders, true),
+        .root_module = settings_module,
     });
     const install_settings = b.addInstallArtifact(settings_exe, .{});
     const files_exe = b.addExecutable(.{
@@ -1348,6 +1350,7 @@ pub fn build(b: *std.Build) void {
     _ = addKete(b, host_demo, host, b.graph.host, test_optimize, "src/apps/demo");
     const host_settings = addProgramModule(b, "src/apps/settings/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_settings.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
+    _ = addKete(b, host_settings, host, b.graph.host, test_optimize, "src/apps/settings");
     const host_files = addProgramModule(b, "src/apps/files/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_files.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_camera = addProgramModule(b, "src/apps/camera/main.zig", b.graph.host, test_optimize, host, shaders, false);

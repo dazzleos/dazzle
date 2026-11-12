@@ -3,19 +3,21 @@
 //! networks around, with a form under the chosen network to join it.
 
 const std = @import("std");
-const ui = @import("ui");
-const gfx = @import("gfx");
+const kete = @import("kete");
+const kete_vc4 = @import("kete_vc4");
+const ui_theme = @import("ui").theme;
+const gfx = kete.gfx;
 const info = @import("info.zig");
 const view = @import("view.zig");
 
 const Settings = view.Settings;
 const Actions = view.Actions;
 const Builder = view.Builder;
-const PillBar = ui.PillBar;
-const PillButton = ui.PillButton;
+const PillBar = kete.PillBar;
+const PillButton = kete.PillButton;
 
 pub const label = "Wi-Fi";
-pub const icon: ui.icons.Icon = .wifi;
+pub const icon: kete.IconName = .wifi;
 
 pub const Mode = enum { client, access_point };
 
@@ -102,7 +104,7 @@ pub const State = struct {
     }
 };
 
-pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
+pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     const cx = b.cx;
     const report = self.manager orelse return b.scroll(.wifi, b.page(&.{b.item("Status", "The network manager is not running")}));
     if (report.denied) return b.scroll(.wifi, b.page(&.{b.item("Status", "Not allowed to scan")}));
@@ -111,10 +113,10 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
     const idx = @min(state.adapter, adapters.len - 1);
     state.adapter = idx;
     const adapter = adapters[idx];
-    var rows: std.ArrayList(ui.Widget) = .empty;
-    const a = cx.ui.arena();
+    var rows: std.ArrayList(kete.Widget) = .empty;
+    const a = cx.arena;
     if (adapters.len > 1) {
-        var pills: std.ArrayList(ui.Widget) = .empty;
+        var pills: std.ArrayList(kete.Widget) = .empty;
         for (adapters, 0..) |*ad, i| {
             pills.append(a, cx.make(PillButton{
                 .label = ad.name(),
@@ -124,7 +126,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
                 .on_press = pickAdapter(cx, state, self.actions, i, ad.name()),
             })) catch {};
         }
-        rows.append(a, cx.make(ui.Center{ .height_factor = 1, .child = cx.make(PillBar{ .children = pills.items }) })) catch {};
+        rows.append(a, cx.make(kete.Align{ .height_factor = 1, .child = cx.make(PillBar{ .children = pills.items }) })) catch {};
     }
     const hs = &report.hotspot;
     const on_this_hs = hs.adapter_len == 0 or std.mem.eql(u8, hs.adapter(), adapter.name());
@@ -143,12 +145,12 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
     if (active_hs) {
         const qr_ssid = if (hs.ssid_len > 0) hs.ssid() else state.hotspot_ssid.text();
         const qr_pass = if (hs.passphrase().len > 0) hs.passphrase() else state.hotspot_password.text();
-        rows.append(a, cx.make(ui.Overlay{
+        rows.append(a, cx.make(kete.Overlay{
             .children = &.{
                 b.page(&.{ mode_row, status_row, address_row, mac_row }),
-                cx.make(ui.Align{
+                cx.make(kete.Align{
                     .alignment = .top_right,
-                    .child = cx.make(ui.QrCode{ .text = wifiQrText(a, qr_ssid, qr_pass) }),
+                    .child = cx.make(kete.QrCode{ .text = wifiQrText(a, qr_ssid, qr_pass) }),
                 }),
             },
         })) catch {};
@@ -161,7 +163,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
         return b.scroll(.wifi, b.page(rows.items));
     }
 
-    var list_rows: std.ArrayList(ui.Widget) = .empty;
+    var list_rows: std.ArrayList(kete.Widget) = .empty;
     const nets = report.slice();
     // The chosen network, if it is still around (and not the one joined).
     const conn = &report.connection;
@@ -175,20 +177,20 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
     if (split > 0) list_rows.append(a, networkList(self, b, state, adapter.name(), report, nets[0..split], chosen)) catch {};
     if (form) list_rows.append(a, joinForm(self, b, state, adapter.name(), chosen.?)) catch {};
     if (split < nets.len) {
-        if (form) list_rows.append(a, cx.make(ui.Divider{ .inset = 16 })) catch {};
+        if (form) list_rows.append(a, cx.make(kete.HorizontalDivider{ .inset = 16 })) catch {};
         list_rows.append(a, networkList(self, b, state, adapter.name(), report, nets[split..], chosen)) catch {};
     }
 
     const net_label = if (nets.len > 0)
-        cx.make(ui.Padding{ .padding = .{ .top = 19 }, .child = b.label("Network") })
+        cx.make(kete.Padding{ .padding = .{ .top = 19 }, .child = b.label("Network") })
     else
         b.label("Network");
     const net_content = if (nets.len > 0)
-        cx.make(ui.Card{
+        cx.make(kete.Card{
             .variant = .outlined,
             .padding = .all(4),
-            .child = cx.make(ui.Column{
-                .main_axis_size = .min,
+            .child = cx.make(kete.Column{
+                .fill = false,
                 .cross_axis_alignment = .stretch,
                 .children = list_rows.items,
             }),
@@ -196,10 +198,10 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
     else if (!report.scanning)
         b.value("No networks found")
     else
-        cx.make(ui.Empty{});
-    rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .start, .spacing = 12, .children = &.{
+        cx.make(kete.SizedBox.empty);
+    rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .start, .spacing = 12, .children = &.{
         net_label,
-        cx.make(ui.Expanded{ .child = net_content }),
+        cx.make(kete.Expanded{ .child = net_content }),
     } })) catch {};
 
     return b.scroll(.wifi, b.page(rows.items));
@@ -226,8 +228,8 @@ const PickAdapter = struct {
     }
 };
 
-fn pickAdapter(cx: *ui.Context, state: *State, actions: ?*Actions, index: usize, name: []const u8) ?ui.Callback {
-    const p = cx.ui.arena().create(PickAdapter) catch return null;
+fn pickAdapter(cx: *kete.BuildContext, state: *State, actions: ?*Actions, index: usize, name: []const u8) ?kete.Callback {
+    const p = cx.arena.create(PickAdapter) catch return null;
     p.* = .{ .state = state, .actions = actions, .index = index, .name = .of(name) };
     return .of(p, PickAdapter.press);
 }
@@ -242,7 +244,7 @@ fn statusRow(
     hs: *const info.manager.Hotspot,
     is_hotspot: bool,
     scanning: bool,
-) ui.Widget {
+) kete.Widget {
     const cx = b.cx;
     if (is_hotspot) {
         const text = switch (hs.state) {
@@ -279,7 +281,7 @@ fn addressRow(
     hs: *const info.manager.Hotspot,
     current_hs: bool,
     is_hotspot: bool,
-) ui.Widget {
+) kete.Widget {
     const cx = b.cx;
     const t = cx.theme();
     const active_hs = current_hs and hs.state == .active;
@@ -296,9 +298,9 @@ fn addressRow(
             "Not assigned";
     };
     const can_configure = self.actions != null and (!is_hotspot or !active_hs);
-    return cx.make(ui.Row{ .cross_axis_alignment = .start, .spacing = 12, .children = &.{
-        cx.make(ui.SizedBox{ .width = 150, .child = cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 4, .children = &.{
-            cx.make(ui.Text{ .text = "Address", .style = .{ .size = 18, .color = t.on_surface_variant }, .wrap = false }),
+    return cx.make(kete.Row{ .cross_axis_alignment = .start, .spacing = 12, .children = &.{
+        cx.make(kete.SizedBox{ .width = 150, .child = cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 4, .children = &.{
+            cx.make(kete.Text{ .text = "Address", .style = .{ .size = 18, .color = t.on_surface_variant }, .wrap = false }),
             cx.make(AddressConfigButton{
                 .state = state,
                 .actions = if (can_configure) self.actions else null,
@@ -310,7 +312,7 @@ fn addressRow(
                 .gateway = self.network.gateway,
             }),
         } }) }),
-        cx.make(ui.Expanded{ .child = b.value(addr) }),
+        cx.make(kete.Expanded{ .child = b.value(addr) }),
     } });
 }
 
@@ -332,7 +334,7 @@ pub const AddressConfigButton = struct {
 
     pub const State = BtnState;
     pub const BtnState = struct {
-        node: ?*ui.Node = null,
+        node: ?*kete.WidgetNode = null,
         state: ?*PageState = null,
         actions: ?*Actions = null,
         is_hotspot: bool = false,
@@ -341,7 +343,7 @@ pub const AddressConfigButton = struct {
         ip: ?[4]u8 = null,
         prefix: u6 = 24,
         gateway: ?[4]u8 = null,
-        interaction: ui.Interaction = .{},
+        interaction: kete.PointerInteraction = .{},
 
         fn open(st: *BtnState) void {
             const n = st.node orelse return;
@@ -410,18 +412,18 @@ pub const AddressConfigButton = struct {
             if (st.node) |n| n.ui.closeMenu();
         }
 
-        fn buildPopup(st: *BtnState, cx: *ui.Context) ui.Widget {
-            const page_st = st.state orelse return cx.make(ui.Empty{});
+        fn buildPopup(st: *BtnState, cx: *kete.BuildContext) kete.Widget {
+            const page_st = st.state orelse return cx.make(kete.SizedBox.empty);
             const t = cx.theme();
-            const a = cx.ui.arena();
-            var rows: std.ArrayList(ui.Widget) = .empty;
+            const a = cx.arena;
+            var rows: std.ArrayList(kete.Widget) = .empty;
 
             if (st.is_hotspot) {
-                const on_apply: ?ui.Callback = if (st.actions != null) .of(st, BtnState.applyAp) else null;
+                const on_apply: ?kete.Callback = if (st.actions != null) .of(st, BtnState.applyAp) else null;
                 const key = (@as(u64, page_st.ap_address_id) << 1) | 0x2000_0000;
-                rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-                    cx.make(ui.SizedBox{ .width = 110, .child = cx.make(ui.Text{ .text = "Address", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
-                    cx.make(ui.Expanded{ .child = cx.make(ui.TextField{
+                rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
+                    cx.make(kete.SizedBox{ .width = 110, .child = cx.make(kete.Text{ .text = "Address", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
+                    cx.make(kete.Expanded{ .child = cx.make(kete.TextField{
                         .placeholder = "192.168.4.1/24",
                         .initial = page_st.ap_address.text(),
                         .max_len = 18,
@@ -430,16 +432,16 @@ pub const AddressConfigButton = struct {
                         .on_submit = on_apply,
                     }).withKey(key) }),
                 } })) catch {};
-                if (page_st.ap_address_invalid) rows.append(a, cx.make(ui.Text{
+                if (page_st.ap_address_invalid) rows.append(a, cx.make(kete.Text{
                     .text = "Give a host address and prefix length (192.168.4.1/24)",
                     .style = .{ .size = 15, .color = t.@"error" },
                 })) catch {};
-                rows.append(a, cx.make(ui.Row{ .main_axis_alignment = .end, .children = &.{
-                    cx.make(ui.OutlinedButton{ .label = "Apply", .on_press = on_apply }),
+                rows.append(a, cx.make(kete.Row{ .main_axis_alignment = .end, .children = &.{
+                    cx.make(kete.OutlinedButton{ .label = "Apply", .on_press = on_apply }),
                 } })) catch {};
             } else {
                 const static = page_st.static_form or st.current == .static;
-                rows.append(a, cx.make(ui.Center{ .height_factor = 1, .child = cx.make(PillBar{ .children = &.{
+                rows.append(a, cx.make(kete.Align{ .height_factor = 1, .child = cx.make(PillBar{ .children = &.{
                     cx.make(PillButton{
                         .label = "DHCP",
                         .selected = !static,
@@ -458,9 +460,9 @@ pub const AddressConfigButton = struct {
 
                 if (!static) {
                     const gw_text = if (st.gateway) |g| cx.fmt("{d}.{d}.{d}.{d} (DHCP)", .{ g[0], g[1], g[2], g[3] }) else "None";
-                    rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-                        cx.make(ui.SizedBox{ .width = 110, .child = cx.make(ui.Text{ .text = "Gateway", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
-                        cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = gw_text, .style = .{ .size = 16, .color = t.on_surface }, .wrap = false }) }),
+                    rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
+                        cx.make(kete.SizedBox{ .width = 110, .child = cx.make(kete.Text{ .text = "Gateway", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
+                        cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = gw_text, .style = .{ .size = 16, .color = t.on_surface }, .wrap = false }) }),
                     } })) catch {};
                 } else {
                     if (!page_st.static_filled) {
@@ -484,11 +486,11 @@ pub const AddressConfigButton = struct {
                             },
                         }
                     }
-                    const on_apply: ?ui.Callback = if (st.actions != null) .of(st, BtnState.applyClient) else null;
+                    const on_apply: ?kete.Callback = if (st.actions != null) .of(st, BtnState.applyClient) else null;
                     const key = (@as(u64, page_st.static_id) << 1) | 0x1000_0000;
-                    rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-                        cx.make(ui.SizedBox{ .width = 110, .child = cx.make(ui.Text{ .text = "Address", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
-                        cx.make(ui.Expanded{ .child = cx.make(ui.TextField{
+                    rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
+                        cx.make(kete.SizedBox{ .width = 110, .child = cx.make(kete.Text{ .text = "Address", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
+                        cx.make(kete.Expanded{ .child = cx.make(kete.TextField{
                             .placeholder = "Address/prefix",
                             .initial = page_st.static_address.text(),
                             .max_len = 32,
@@ -497,9 +499,9 @@ pub const AddressConfigButton = struct {
                             .on_submit = on_apply,
                         }).withKey(key) }),
                     } })) catch {};
-                    rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-                        cx.make(ui.SizedBox{ .width = 110, .child = cx.make(ui.Text{ .text = "Gateway", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
-                        cx.make(ui.Expanded{ .child = cx.make(ui.TextField{
+                    rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
+                        cx.make(kete.SizedBox{ .width = 110, .child = cx.make(kete.Text{ .text = "Gateway", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
+                        cx.make(kete.Expanded{ .child = cx.make(kete.TextField{
                             .placeholder = "Gateway",
                             .initial = page_st.static_gateway.text(),
                             .max_len = 32,
@@ -508,29 +510,30 @@ pub const AddressConfigButton = struct {
                             .on_submit = on_apply,
                         }).withKey(key | 1) }),
                     } })) catch {};
-                    if (page_st.static_invalid) rows.append(a, cx.make(ui.Text{
+                    if (page_st.static_invalid) rows.append(a, cx.make(kete.Text{
                         .text = "Give an address and prefix length (192.168.1.50/24), and a gateway or none",
                         .style = .{ .size = 15, .color = t.@"error" },
                     })) catch {};
-                    rows.append(a, cx.make(ui.Row{ .main_axis_alignment = .end, .children = &.{
-                        cx.make(ui.OutlinedButton{ .label = "Apply", .on_press = on_apply }),
+                    rows.append(a, cx.make(kete.Row{ .main_axis_alignment = .end, .children = &.{
+                        cx.make(kete.OutlinedButton{ .label = "Apply", .on_press = on_apply }),
                     } })) catch {};
                 }
             }
 
-            return cx.make(ui.Decorated{
+            return cx.make(kete.RoundedBox{
                 .color = t.surface_container,
-                .border = .{ .width = 1, .color = t.outline_variant },
+                .border_width = 1,
+                .border_color = t.outline_variant,
                 .radius = .all(8),
-                .child = cx.make(ui.SizedBox{ .width = 360, .child = cx.make(ui.Padding{
+                .child = cx.make(kete.SizedBox{ .width = 360, .child = cx.make(kete.Padding{
                     .padding = .all(16),
-                    .child = cx.make(ui.Column{ .main_axis_size = .min, .cross_axis_alignment = .stretch, .spacing = 12, .children = rows.items }),
+                    .child = cx.make(kete.Column{ .fill = false, .cross_axis_alignment = .stretch, .spacing = 12, .children = rows.items }),
                 }) }),
             });
         }
     };
 
-    pub fn build(self: *const AddressConfigButton, cx: *ui.Context, state: *BtnState) ui.Widget {
+    pub fn build(self: *const AddressConfigButton, cx: *kete.BuildContext, state: *BtnState) kete.Widget {
         state.node = cx.node;
         state.state = self.state;
         state.actions = self.actions;
@@ -540,7 +543,7 @@ pub const AddressConfigButton = struct {
         state.ip = self.ip;
         state.prefix = self.prefix;
         state.gateway = self.gateway;
-        return cx.make(ui.IconButton{
+        return cx.make(kete.IconButton{
             .icon = .settings,
             .size = 24,
             .icon_size = 18,
@@ -662,12 +665,12 @@ fn modeRow(
     current_hs: bool,
     is_hotspot: bool,
     upstreams: *const UpstreamList,
-) ui.Widget {
+) kete.Widget {
     const cx = b.cx;
-    const a = cx.ui.arena();
+    const a = cx.arena;
     const mode: Mode = if (is_hotspot) .access_point else .client;
     const default_upstream = if (upstreams.len > 0) upstreams.items[0].name else info.Str(16){};
-    const choice = a.create(ModeChoice) catch return cx.make(ui.Empty{});
+    const choice = a.create(ModeChoice) catch return cx.make(kete.SizedBox.empty);
     choice.* = .{
         .actions = self.actions,
         .state = state,
@@ -684,19 +687,19 @@ fn modeRow(
         .on_changed = if (self.actions != null) .of(choice, ModeChoice.choose) else null,
     });
     if (!is_hotspot) {
-        return cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
+        return cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
             b.label("Mode"),
             mode_menu,
         } });
     }
     const active = current_hs and hs.state == .active;
     const can_start = state.validHotspotNameAndPassword();
-    const on_start: ?ui.Callback = if (self.actions != null and can_start) .of(choice, ModeChoice.start) else null;
-    const on_stop: ?ui.Callback = if (self.actions != null) .of(choice, ModeChoice.stop) else null;
-    return cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
+    const on_start: ?kete.Callback = if (self.actions != null and can_start) .of(choice, ModeChoice.start) else null;
+    const on_stop: ?kete.Callback = if (self.actions != null) .of(choice, ModeChoice.stop) else null;
+    return cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
         b.label("Mode"),
         mode_menu,
-        cx.make(ui.OutlinedButton{
+        cx.make(kete.OutlinedButton{
             .label = if (active) "Stop" else "Start",
             .on_press = if (active) on_stop else on_start,
         }),
@@ -713,10 +716,10 @@ fn hotspotRows(
     hs: *const info.manager.Hotspot,
     current_hs: bool,
     upstreams: *const UpstreamList,
-    rows: *std.ArrayList(ui.Widget),
+    rows: *std.ArrayList(kete.Widget),
 ) void {
     const cx = b.cx;
-    const a = cx.ui.arena();
+    const a = cx.arena;
     const default_upstream = if (upstreams.len > 0) upstreams.items[0].name else info.Str(16){};
     const active = current_hs and hs.state == .active;
     const can_start = state.validHotspotNameAndPassword();
@@ -731,12 +734,12 @@ fn hotspotRows(
         .hostname = self.system.hostname,
         .default_upstream = default_upstream,
     };
-    const on_start: ?ui.Callback = if (self.actions != null and can_start) .of(choice, ModeChoice.start) else null;
+    const on_start: ?kete.Callback = if (self.actions != null and can_start) .of(choice, ModeChoice.start) else null;
 
     const key = (@as(u64, state.form_id) << 2) | 0x4000_0000;
-    rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
+    rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
         b.label("Name"),
-        cx.make(ui.Expanded{ .child = cx.make(ui.TextField{
+        cx.make(kete.Expanded{ .child = cx.make(kete.TextField{
             .placeholder = "Name",
             .initial = state.hotspot_ssid.text(),
             .max_len = 32,
@@ -746,9 +749,9 @@ fn hotspotRows(
             .on_submit = if (!active) on_start else null,
         }).withKey(key) }),
     } })) catch {};
-    rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
+    rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
         b.label("Password"),
-        cx.make(ui.Expanded{ .child = cx.make(ui.TextField{
+        cx.make(kete.Expanded{ .child = cx.make(kete.TextField{
             .placeholder = "Password",
             .initial = state.hotspot_password.text(),
             .max_len = 63,
@@ -783,22 +786,22 @@ fn hotspotRows(
         .selected = selected_upstream,
         .on_selected = if (!active and self.actions != null and upstreams.len > 0) .of(up_pick, UpstreamPick.select) else null,
     });
-    rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
+    rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
         b.label("Upstream"),
         internet_menu,
         if (internet_note) |note|
-            cx.make(ui.Expanded{ .child = cx.make(ui.Text{
+            cx.make(kete.Expanded{ .child = cx.make(kete.Text{
                 .text = note,
-                .style = .{ .size = 16, .color = cx.ui.theme.on_surface_variant },
+                .style = .{ .size = 16, .color = cx.theme().on_surface_variant },
             }) })
         else
-            cx.make(ui.Empty{}),
+            cx.make(kete.SizedBox.empty),
     } })) catch {};
-    if (state.hotspot_invalid) rows.append(a, cx.make(ui.Row{ .spacing = 12, .children = &.{
-        cx.make(ui.SizedBox{ .width = 150 }),
-        cx.make(ui.Expanded{ .child = cx.make(ui.Text{
+    if (state.hotspot_invalid) rows.append(a, cx.make(kete.Row{ .spacing = 12, .children = &.{
+        cx.make(kete.SizedBox{ .width = 150 }),
+        cx.make(kete.Expanded{ .child = cx.make(kete.Text{
             .text = "Give a name (1–32 characters) and a password of 8–63 characters",
-            .style = .{ .size = 16, .color = cx.ui.theme.@"error" },
+            .style = .{ .size = 16, .color = cx.theme().@"error" },
         }) }),
     } })) catch {};
 
@@ -806,7 +809,7 @@ fn hotspotRows(
     if (clients.len == 0) {
         rows.append(a, b.item("Clients", "None")) catch {};
     } else {
-        var client_rows: std.ArrayList(ui.Widget) = .empty;
+        var client_rows: std.ArrayList(kete.Widget) = .empty;
         for (clients) |*cl| {
             const cm = cl.mac;
             const mac_str = cx.fmt("{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}", .{ cm[0], cm[1], cm[2], cm[3], cm[4], cm[5] });
@@ -822,31 +825,33 @@ fn hotspotRows(
                 mac_str;
             client_rows.append(a, b.value(line)) catch {};
         }
-        rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .start, .spacing = 12, .children = &.{
+        rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .start, .spacing = 12, .children = &.{
             b.label("Clients"),
-            cx.make(ui.Expanded{ .child = b.page(client_rows.items) }),
+            cx.make(kete.Expanded{ .child = b.page(client_rows.items) }),
         } })) catch {};
     }
 }
 
 /// The Wi-Fi mode as a menu button: pressing it offers "Client" and
 /// "Access Point" in a menu.
-pub const ModeMenu = ui.Select(Mode);
+pub const ModeMenu = kete.Select(Mode);
 
 const mode_options = [_]ModeMenu.Option{
-    .{ .value = .client, .label = "Client" },
-    .{ .value = .access_point, .label = "Access Point" },
+    .labeled(.client, "Client"),
+    .labeled(.access_point, "Access Point"),
 };
 
 /// The interface whose internet connection is shared over the access point.
 pub const InternetMenu = struct {
     options: []const []const u8,
     selected: ?usize = 0,
-    on_selected: ?ui.ValueCallback(usize) = null,
+    on_selected: ?kete.ValueCallback(usize) = null,
 
-    pub fn build(self: *const InternetMenu, cx: *ui.Context) ui.Widget {
-        return cx.make(ui.DropdownMenu{
-            .options = self.options,
+    pub fn build(self: *const InternetMenu, cx: *kete.BuildContext) kete.Widget {
+        const items = cx.arena.alloc(kete.MenuItem, self.options.len) catch return cx.make(kete.SizedBox.empty);
+        for (items, self.options) |*item, text| item.* = .{ .label = text };
+        return cx.make(kete.DropdownMenu{
+            .options = items,
             .selected = self.selected,
             .on_selected = self.on_selected,
         });
@@ -945,13 +950,13 @@ const ModeChoice = struct {
 };
 
 /// Joining the chosen network: a password field for WPA2/WPA3, and Connect.
-fn joinForm(self: *const Settings, b: Builder, state: *State, adapter_name: []const u8, n: *const info.manager.Network) ui.Widget {
+fn joinForm(self: *const Settings, b: Builder, state: *State, adapter_name: []const u8, n: *const info.manager.Network) kete.Widget {
     const cx = b.cx;
     const t = &cx.ui.theme;
-    const on_connect: ?ui.Callback = if (self.actions) |acts| .of(act(cx, acts, state, adapter_name, n.ssid()), Act.connect) else null;
-    const field: ui.Widget = switch (n.security) {
-        .open => cx.make(ui.Text{ .text = "An open network: what is sent can be seen", .style = .{ .size = 16, .color = t.on_surface_variant } }),
-        .wpa2, .wpa3 => cx.make(ui.TextField{
+    const on_connect: ?kete.Callback = if (self.actions) |acts| .of(act(cx, acts, state, adapter_name, n.ssid()), Act.connect) else null;
+    const field: kete.Widget = switch (n.security) {
+        .open => cx.make(kete.Text{ .text = "An open network: what is sent can be seen", .style = .{ .size = 16, .color = t.on_surface_variant } }),
+        .wpa2, .wpa3 => cx.make(kete.TextField{
             .initial = state.password_buf[0..state.password_len],
             .placeholder = "Password",
             .obscure = true,
@@ -960,17 +965,17 @@ fn joinForm(self: *const Settings, b: Builder, state: *State, adapter_name: []co
             .on_changed = .of(state, State.setPassword),
             .on_submit = on_connect,
         }).withKey(std.hash.Fnv1a_64.hash(n.ssid())),
-        else => cx.make(ui.Text{ .text = cx.fmt("{s} networks are not supported yet", .{n.security.label()}), .style = .{ .size = 16, .color = t.on_surface_variant } }),
+        else => cx.make(kete.Text{ .text = cx.fmt("{s} networks are not supported yet", .{n.security.label()}), .style = .{ .size = 16, .color = t.on_surface_variant } }),
     };
     const supported = n.security == .open or n.security == .wpa2 or n.security == .wpa3;
-    return cx.make(ui.Padding{
+    return cx.make(kete.Padding{
         .padding = .symmetric(16, 8),
-        .child = cx.make(ui.Row{
+        .child = cx.make(kete.Row{
             .cross_axis_alignment = .center,
             .spacing = 12,
             .children = &.{
-                cx.make(ui.Expanded{ .child = field }),
-                cx.make(ui.OutlinedButton{ .label = "Connect", .on_press = if (supported) on_connect else null }),
+                cx.make(kete.Expanded{ .child = field }),
+                cx.make(kete.OutlinedButton{ .label = "Connect", .on_press = if (supported) on_connect else null }),
             },
         }),
     });
@@ -985,9 +990,9 @@ fn networkList(
     report: *const info.manager.Report,
     nets: []const info.manager.Network,
     chosen: ?*const info.manager.Network,
-) ui.Widget {
+) kete.Widget {
     const cx = b.cx;
-    const list = cx.ui.arena().create(Networks) catch return cx.make(ui.Empty{});
+    const list = cx.arena.create(Networks) catch return cx.make(kete.SizedBox.empty);
     const c = &report.connection;
     const on_this = c.adapter_len == 0 or std.mem.eql(u8, c.adapter(), adapter_name);
     list.* = .{
@@ -999,7 +1004,7 @@ fn networkList(
         .nets = nets,
         .chosen = chosen,
     };
-    return cx.make(ui.LazyGrid{
+    return cx.make(kete_vc4.LazyGrid{
         .count = nets.len,
         .cell = .{ .w = std.math.inf(f32), .h = network_row_height },
         .spacing = 0,
@@ -1008,7 +1013,7 @@ fn networkList(
 }
 
 /// How tall a network's row is (including the 1px divider below it).
-const network_row_height = ui.ListItem.one_line_height + 1;
+const network_row_height = kete.ListItem.one_line_height + 1;
 
 /// Networks to make rows of (in the frame's arena).
 const Networks = struct {
@@ -1020,26 +1025,26 @@ const Networks = struct {
     nets: []const info.manager.Network,
     chosen: ?*const info.manager.Network,
 
-    fn row(l: *const Networks, cx: *ui.Context, i: usize) ui.Widget {
+    fn row(l: *const Networks, cx: *kete.BuildContext, i: usize) kete.Widget {
         const n = &l.nets[i];
         const is_chosen = l.chosen != null and n == l.chosen.?;
         const joined = l.on_this and connectionBusy(l.conn) and std.mem.eql(u8, l.conn.ssid(), n.ssid());
-        const on_disconnect: ?ui.Callback = if (joined)
+        const on_disconnect: ?kete.Callback = if (joined)
             (if (l.actions) |acts| .of(act(cx, acts, l.state, l.adapter_name, ""), Act.disconnect) else null)
         else
             null;
         const item = networkRow(cx, n, is_chosen, joined, choose(cx, l.state, n.ssid(), n.passphrase()), on_disconnect);
-        if (i + 1 >= l.nets.len) return cx.make(ui.Column{
-            .main_axis_size = .min,
+        if (i + 1 >= l.nets.len) return cx.make(kete.Column{
+            .fill = false,
             .cross_axis_alignment = .stretch,
             .children = &.{item},
         });
-        return cx.make(ui.Column{
-            .main_axis_size = .min,
+        return cx.make(kete.Column{
+            .fill = false,
             .cross_axis_alignment = .stretch,
             .children = &.{
                 item,
-                cx.make(ui.Divider{ .inset = 16 }),
+                cx.make(kete.HorizontalDivider{ .inset = 16 }),
             },
         });
     }
@@ -1048,17 +1053,17 @@ const Networks = struct {
 /// A Wi-Fi network: its signal, its name, and a Disconnect button when
 /// connected, inside a clickable `ListItem`.
 fn networkRow(
-    cx: *ui.Context,
+    cx: *kete.BuildContext,
     n: *const info.manager.Network,
     chosen: bool,
     joined: bool,
-    on_press: ui.Callback,
-    on_disconnect: ?ui.Callback,
-) ui.Widget {
-    return cx.make(ui.ListItem{
+    on_press: kete.Callback,
+    on_disconnect: ?kete.Callback,
+) kete.Widget {
+    return cx.make(kete.ListItem{
         .headline = printable(cx, n.ssid()),
         .leading = cx.make(Signal{ .bars = n.bars(), .locked = n.security != .open, .size = 20 }),
-        .trailing = if (joined) cx.make(ui.OutlinedButton{ .label = "Disconnect", .on_press = on_disconnect }) else null,
+        .trailing = if (joined) cx.make(kete.OutlinedButton{ .label = "Disconnect", .on_press = on_disconnect }) else null,
         .selected = chosen or joined,
         .on_press = on_press,
     });
@@ -1066,9 +1071,9 @@ fn networkRow(
 
 /// An SSID as text: bytes that are not UTF-8 (SSIDs need not be) become
 /// "?".
-pub fn printable(cx: *ui.Context, ssid: []const u8) []const u8 {
+pub fn printable(cx: *kete.BuildContext, ssid: []const u8) []const u8 {
     if (std.unicode.utf8ValidateSlice(ssid)) return ssid;
-    const out = cx.ui.arena().dupe(u8, ssid) catch return "?";
+    const out = cx.arena.dupe(u8, ssid) catch return "?";
     for (out) |*c| if (c.* >= 0x80 or c.* < 0x20) {
         c.* = '?';
     };
@@ -1143,8 +1148,8 @@ const Choose = struct {
     }
 };
 
-fn choose(cx: *ui.Context, state: *State, ssid: []const u8, passphrase: []const u8) ui.Callback {
-    const c = cx.ui.arena().create(Choose) catch return .of(state, struct {
+fn choose(cx: *kete.BuildContext, state: *State, ssid: []const u8, passphrase: []const u8) kete.Callback {
+    const c = cx.arena.create(Choose) catch return .of(state, struct {
         fn none(_: *State) void {}
     }.none);
     const pass_len: u8 = @intCast(@min(passphrase.len, c.pass_buf.len));
@@ -1177,8 +1182,8 @@ const Act = struct {
     }
 };
 
-fn act(cx: *ui.Context, actions: *Actions, state: *State, adapter: []const u8, ssid: []const u8) *Act {
-    const x = cx.ui.arena().create(Act) catch unreachable;
+fn act(cx: *kete.BuildContext, actions: *Actions, state: *State, adapter: []const u8, ssid: []const u8) *Act {
+    const x = cx.arena.create(Act) catch unreachable;
     x.* = .{ .actions = actions, .state = state, .adapter = .of(adapter), .ssid_buf = undefined, .ssid_len = @intCast(ssid.len) };
     @memcpy(x.ssid_buf[0..ssid.len], ssid);
     return x;
@@ -1192,7 +1197,7 @@ pub const Signal = struct {
     locked: bool = false,
     size: f32,
 
-    pub fn lit(bars: u8, locked: bool) ?ui.icons.Icon {
+    pub fn lit(bars: u8, locked: bool) ?kete.IconName {
         return switch (bars) {
             0 => null,
             1, 2 => .wifi_1_bar,
@@ -1201,24 +1206,24 @@ pub const Signal = struct {
         };
     }
 
-    pub fn build(self: *const Signal, cx: *ui.Context) ui.Widget {
+    pub fn build(self: *const Signal, cx: *kete.BuildContext) kete.Widget {
         const t = cx.theme();
-        const full: ui.icons.Icon = if (self.locked) .wifi_password else .wifi;
-        const back = cx.make(ui.Icon{ .icon = full, .size = self.size, .color = t.on_surface.withAlpha(0.25) });
+        const full: kete.IconName = if (self.locked) .wifi_password else .wifi;
+        const back = cx.make(kete.Icon{ .icon = full, .size = self.size, .color = t.on_surface.withAlpha(0.25) });
         const front = lit(self.bars, self.locked) orelse return back;
-        return cx.make(ui.SizedBox{ .width = self.size, .height = self.size, .child = cx.make(ui.Overlay{ .children = &.{
+        return cx.make(kete.SizedBox{ .width = self.size, .height = self.size, .child = cx.make(kete.Overlay{ .children = &.{
             back,
-            cx.make(ui.Icon{ .icon = front, .size = self.size, .color = t.on_surface }),
+            cx.make(kete.Icon{ .icon = front, .size = self.size, .color = t.on_surface }),
         } }) });
     }
 };
 
 const testing = std.testing;
-const font = @import("font");
+const font = kete.font;
 
 test "the Wi-Fi page says when it cannot list networks" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const u = try ui.Ui.create(testing.allocator, &f);
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
     const d = view.sample();
     const no_adapter: info.manager.Report = .{};
@@ -1241,7 +1246,7 @@ test "the Wi-Fi page says when it cannot list networks" {
 
 test "SSIDs that are not text are shown readably" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const u = try ui.Ui.create(testing.allocator, &f);
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
     const d = view.sample();
     var r: info.manager.Report = .{};
@@ -1258,7 +1263,7 @@ test "SSIDs that are not text are shown readably" {
 
 test "choosing a network, typing its password and connecting" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const u = try ui.Ui.create(testing.allocator, &f);
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
     const d = view.sample();
     const wifi = view.sampleWifi();
@@ -1277,7 +1282,7 @@ test "choosing a network, typing its password and connecting" {
         try testing.expect(!view.overflows(u.root.?));
     };
     u.frame(1920, 960, 3, settings);
-    view.click(u, view.findType(u.root.?, ui.TextField).?);
+    view.click(u, view.findType(u.root.?, kete.TextField).?);
     for ("hunter22") |c| {
         const code: u32 = switch (c) {
             'h' => 35,
@@ -1289,16 +1294,16 @@ test "choosing a network, typing its password and connecting" {
             '2' => 3,
             else => unreachable,
         };
-        u.keyEvent(code, true);
-        u.keyEvent(code, false);
+        u.key(.{ .key = kete.window.evdev.keyOf(code), .pressed = true, .char = c });
+        u.key(.{ .key = kete.window.evdev.keyOf(code), .pressed = false });
     }
-    u.keyEvent(ui.keymap.enter, true);
+    u.keyEvent(.enter, true);
     const j = actions.connect.?;
     try testing.expectEqualStrings("Home", j.ssid());
     try testing.expectEqualStrings("hunter22", j.passphrase());
     // The form closes once asked.
     u.frame(1920, 960, 4, settings);
-    try testing.expect(view.findType(u.root.?, ui.TextField) == null);
+    try testing.expect(view.findType(u.root.?, kete.TextField) == null);
 
     // Connected: the connection row says so (with scanning while scanning), with Disconnect,
     // and the Address row shows the assigned IP address in CIDR format with (DHCP).
@@ -1316,7 +1321,7 @@ test "choosing a network, typing its password and connecting" {
     u.frame(1920, 960, 6, settings);
     view.click(u, view.findText(u.root.?, "Office").?);
     u.frame(1920, 960, 7, settings);
-    try testing.expect(view.findType(u.root.?, ui.TextField) != null);
+    try testing.expect(view.findType(u.root.?, kete.TextField) != null);
     u.root.?.state(Settings.State).wifi.setPassword("wpa3secret");
     view.click(u, view.findText(u.root.?, "Connect").?);
     try testing.expectEqualStrings("Office", actions.connect.?.ssid());
@@ -1356,7 +1361,7 @@ test "choosing a network, typing its password and connecting" {
 
 test "choosing between multiple Wi-Fi adapters with pill buttons" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const u = try ui.Ui.create(testing.allocator, &f);
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
     const d = view.sample();
     var report = view.sampleWifi();
@@ -1384,14 +1389,14 @@ test "choosing between multiple Wi-Fi adapters with pill buttons" {
 
 test "switching to Access Point mode, applying configuration, and returning to Client" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const u = try ui.Ui.create(testing.allocator, &f);
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
     var d = view.sample();
     var report = view.sampleWifi();
     var actions: Actions = .{};
     var frame_no: u64 = 0;
     const Draw = struct {
-        fn draw(uu: *ui.Ui, dd: anytype, r: *const info.manager.Report, acts: *Actions, n: *u64, size: [2]u32) void {
+        fn draw(uu: *kete.ui.WindowUi, dd: anytype, r: *const info.manager.Report, acts: *Actions, n: *u64, size: [2]u32) void {
             n.* += 1;
             uu.frame(size[0], size[1], n.*, Settings{ .commit = "x", .actions = acts, .system = &dd.sys, .usage = dd.usage, .network = &dd.net, .manager = r });
         }
@@ -1416,7 +1421,7 @@ test "switching to Access Point mode, applying configuration, and returning to C
     const status_x = view.findText(u.root.?, "Not connected, scanning…").?.position()[0];
     const addr_x = view.findText(u.root.?, "Not assigned").?.position()[0];
     const mac_x = view.findText(u.root.?, "b8:27:eb:01:02:03").?.position()[0];
-    const net_x = view.findType(u.root.?, ui.Card).?.position()[0];
+    const net_x = view.findType(u.root.?, kete.Card).?.position()[0];
     try testing.expectEqual(status_x, addr_x);
     try testing.expectEqual(status_x, mac_x);
     try testing.expectEqual(status_x, net_x);
@@ -1459,11 +1464,11 @@ test "switching to Access Point mode, applying configuration, and returning to C
     try testing.expect(view.findText(u.root.?, "eth0") == null);
     try testing.expect(view.findText(u.root.?, "Clients") != null);
     try testing.expect(view.findText(u.root.?, "None") != null);
-    const field = view.findType(u.root.?, ui.TextField).?;
-    try testing.expect(field.widget.as(ui.TextField).?.enabled);
-    try testing.expectEqualStrings("awesome-elephant", field.state(ui.TextField.State).text());
+    const field = view.findType(u.root.?, kete.TextField).?;
+    try testing.expect(field.widget.as(kete.TextField).?.enabled);
+    try testing.expectEqualStrings("awesome-elephant", field.state(kete.TextField.State).text());
     try testing.expectEqual(@as(usize, 12), u.root.?.state(Settings.State).wifi.hotspot_password.text().len);
-    try testing.expect(view.up(view.findText(u.root.?, "Start").?, ui.OutlinedButton).?.widget.as(ui.OutlinedButton).?.on_press != null);
+    try testing.expect(view.up(view.findText(u.root.?, "Start").?, kete.OutlinedButton).?.widget.as(kete.OutlinedButton).?.on_press != null);
     for (view.test_sizes) |size| {
         Draw(u, d, &report, &actions, &frame_no, size);
         try testing.expect(!view.overflows(u.root.?));
@@ -1486,13 +1491,13 @@ test "switching to Access Point mode, applying configuration, and returning to C
     d.net.len = 1;
     Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
     try testing.expect(view.findText(view.findType(u.root.?, InternetMenu).?, "Ethernet") != null);
-    try testing.expect(view.findType(view.findType(u.root.?, InternetMenu).?, ui.OutlinedButton).?.widget.as(ui.OutlinedButton).?.on_press != null);
+    try testing.expect(view.findType(view.findType(u.root.?, InternetMenu).?, kete.OutlinedButton).?.widget.as(kete.OutlinedButton).?.on_press != null);
 
     // Without any other network connection, the Upstream menu is disabled with the reason.
     d.net.len = 0;
     Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
     try testing.expect(view.findText(u.root.?, "No other network connection is available") != null);
-    try testing.expect(view.findType(view.findType(u.root.?, InternetMenu).?, ui.OutlinedButton).?.widget.as(ui.OutlinedButton).?.on_press == null);
+    try testing.expect(view.findType(view.findType(u.root.?, InternetMenu).?, kete.OutlinedButton).?.widget.as(kete.OutlinedButton).?.on_press == null);
     d.net.len = 1;
     Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
 
@@ -1501,20 +1506,20 @@ test "switching to Access Point mode, applying configuration, and returning to C
     var st = &u.root.?.state(Settings.State).wifi;
     st.hotspot_password.set("");
     Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
-    try testing.expect(view.up(view.findText(u.root.?, "Start").?, ui.OutlinedButton).?.widget.as(ui.OutlinedButton).?.on_press == null);
+    try testing.expect(view.up(view.findText(u.root.?, "Start").?, kete.OutlinedButton).?.widget.as(kete.OutlinedButton).?.on_press == null);
     view.click(u, view.findText(u.root.?, "Start").?);
     try testing.expect(actions.hotspot == null);
 
     st = &u.root.?.state(Settings.State).wifi;
     st.hotspot_password.set("short");
     Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
-    try testing.expect(view.up(view.findText(u.root.?, "Start").?, ui.OutlinedButton).?.widget.as(ui.OutlinedButton).?.on_press == null);
+    try testing.expect(view.up(view.findText(u.root.?, "Start").?, kete.OutlinedButton).?.widget.as(kete.OutlinedButton).?.on_press == null);
 
     st = &u.root.?.state(Settings.State).wifi;
     st.hotspot_ssid.set("");
     st.hotspot_password.set("secretpass");
     Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
-    try testing.expect(view.up(view.findText(u.root.?, "Start").?, ui.OutlinedButton).?.widget.as(ui.OutlinedButton).?.on_press == null);
+    try testing.expect(view.up(view.findText(u.root.?, "Start").?, kete.OutlinedButton).?.widget.as(kete.OutlinedButton).?.on_press == null);
 
     // Configuring the Access Point CIDR address via the Address popup while stopped:
     // an invalid CIDR is rejected, and a valid host CIDR updates the Address row.
@@ -1524,7 +1529,7 @@ test "switching to Access Point mode, applying configuration, and returning to C
     Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
     view.click(u, view.findType(u.root.?, AddressConfigButton).?);
     Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
-    try testing.expectEqualStrings("192.168.4.1/24", view.findType(u.menu_root.?, ui.TextField).?.state(ui.TextField.State).text());
+    try testing.expectEqualStrings("192.168.4.1/24", view.findType(u.menu_root.?, kete.TextField).?.state(kete.TextField.State).text());
     u.root.?.state(Settings.State).wifi.ap_address.set("10.42.0.0/24");
     view.click(u, view.findText(u.menu_root.?, "Apply").?);
     Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
@@ -1549,7 +1554,7 @@ test "switching to Access Point mode, applying configuration, and returning to C
     // Active access point shows Active status, the assigned CIDR address, a Stop button,
     // disabled AddressConfigButton and config fields, connected clients, and the QR code
     // in the top right.
-    try testing.expect(view.findType(u.root.?, ui.QrCode) == null);
+    try testing.expect(view.findType(u.root.?, kete.QrCode) == null);
     report.hotspot = .{ .state = .active, .address = .{ 10, 42, 0, 254 }, .prefix = 24 };
     report.hotspot.setSsid("DazzleBox");
     report.hotspot.setPassphrase("secretpass");
@@ -1566,11 +1571,11 @@ test "switching to Access Point mode, applying configuration, and returning to C
     try testing.expect(view.findText(u.root.?, "10.42.0.254/24") != null);
     try testing.expect(view.findText(u.root.?, "Stop") != null);
     try testing.expect(view.findText(u.root.?, "Start") == null);
-    try testing.expect(!view.findType(u.root.?, ui.TextField).?.widget.as(ui.TextField).?.enabled);
-    try testing.expect(view.findType(view.findType(u.root.?, InternetMenu).?, ui.OutlinedButton).?.widget.as(ui.OutlinedButton).?.on_press == null);
+    try testing.expect(!view.findType(u.root.?, kete.TextField).?.widget.as(kete.TextField).?.enabled);
+    try testing.expect(view.findType(view.findType(u.root.?, InternetMenu).?, kete.OutlinedButton).?.widget.as(kete.OutlinedButton).?.on_press == null);
     try testing.expect(view.findText(u.root.?, "laptop (10.42.0.10, a4:5e:60:12:34:56)") != null);
-    const qr_node = view.findType(u.root.?, ui.QrCode).?;
-    try testing.expectEqualStrings("WIFI:T:WPA;S:DazzleBox;P:secretpass;;", qr_node.widget.as(ui.QrCode).?.text);
+    const qr_node = view.findType(u.root.?, kete.QrCode).?;
+    try testing.expectEqualStrings("WIFI:T:WPA;S:DazzleBox;P:secretpass;;", qr_node.widget.as(kete.QrCode).?.text);
     try testing.expect(qr_node.position()[0] > view.findText(u.root.?, "Active").?.position()[0]);
     try testing.expect(qr_node.position()[1] <= view.findText(u.root.?, "Status").?.position()[1]);
     // Clicking AddressConfigButton while active does not open the popup.
@@ -1584,11 +1589,11 @@ test "switching to Access Point mode, applying configuration, and returning to C
     actions = .{};
     report.hotspot = .{};
     Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
-    try testing.expect(view.findType(u.root.?, ui.QrCode) == null);
+    try testing.expect(view.findType(u.root.?, kete.QrCode) == null);
     try testing.expect(view.findText(u.root.?, "Inactive") != null);
     try testing.expect(view.findText(u.root.?, "10.42.0.254/24") != null);
     try testing.expect(view.findText(u.root.?, "Start") != null);
-    try testing.expect(view.findType(u.root.?, ui.TextField).?.widget.as(ui.TextField).?.enabled);
+    try testing.expect(view.findType(u.root.?, kete.TextField).?.widget.as(kete.TextField).?.enabled);
 
     // Switching back to Client restores the network list.
     view.click(u, view.findType(u.root.?, ModeMenu).?);

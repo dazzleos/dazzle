@@ -9,8 +9,8 @@
 //! is and (for configurable GPIO pins) a menu button to set its mode.
 
 const std = @import("std");
-const ui = @import("ui");
-const gfx = @import("gfx");
+const kete = @import("kete");
+const gfx = kete.gfx;
 const locale = @import("locale");
 const info = @import("info.zig");
 const board = @import("board.zig");
@@ -26,7 +26,7 @@ const Actions = view.Actions;
 const Builder = view.Builder;
 
 pub const label = "Board";
-pub const icon: ui.icons.Icon = .developer_board;
+pub const icon: kete.IconName = .developer_board;
 
 const default_pins: gpio.Pins = .{ .opened = true };
 
@@ -56,14 +56,14 @@ pub const State = struct {
 };
 
 /// The board, drawn, and about the part picked on it.
-pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
+pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     const cx = b.cx;
     const t = cx.theme();
-    const a = cx.ui.arena();
+    const a = cx.arena;
     const model = self.system.model.slice();
-    var rows: std.ArrayList(ui.Widget) = .empty;
+    var rows: std.ArrayList(kete.Widget) = .empty;
     rows.append(a, b.value(view.orUnknown(model))) catch {};
-    if (self.system.serial.len > 0) rows.append(a, cx.make(ui.Text{ .text = cx.fmt("Serial: {s}", .{self.system.serial.slice()}), .style = .{ .size = 16, .color = t.on_surface_variant } })) catch {};
+    if (self.system.serial.len > 0) rows.append(a, cx.make(kete.Text{ .text = cx.fmt("Serial: {s}", .{self.system.serial.slice()}), .style = .{ .size = 16, .color = t.on_surface_variant } })) catch {};
     const drawing = board.forModel(model) orelse {
         rows.append(a, b.value("There is no drawing of this board")) catch {};
         return b.scroll(.board, b.page(rows.items));
@@ -78,9 +78,9 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
     const part = &drawing.parts[@min(picked, drawing.parts.len - 1)];
     const about = board.describe(part);
     rows.appendSlice(a, &.{
-        cx.make(ui.Padding{ .padding = .symmetric(0, 8), .child = cx.make(ui.Align{ .alignment = .center_left, .child = cx.make(BoardView{ .board = drawing, .selected = picked, .on_select = partPicker(state) }) }) }),
-        cx.make(ui.Text{ .text = if (part.chip.len > 0) cx.fmt("{s}: {s}", .{ about.title, part.chip }) else about.title, .style = .{ .size = 20, .color = t.on_surface } }),
-        cx.make(ui.Text{ .text = cx.fmt("{s}{s}", .{ about.about, if (part.underside) " (underneath the board)" else "" }), .style = .{ .size = 16, .color = t.on_surface_variant } }),
+        cx.make(kete.Padding{ .padding = .symmetric(0, 8), .child = cx.make(kete.Align{ .alignment = .center_left, .child = cx.make(BoardView{ .board = drawing, .selected = picked, .on_select = partPicker(state) }) }) }),
+        cx.make(kete.Text{ .text = if (part.chip.len > 0) cx.fmt("{s}: {s}", .{ about.title, part.chip }) else about.title, .style = .{ .size = 20, .color = t.on_surface } }),
+        cx.make(kete.Text{ .text = cx.fmt("{s}{s}", .{ about.about, if (part.underside) " (underneath the board)" else "" }), .style = .{ .size = 16, .color = t.on_surface_variant } }),
     }) catch {};
     // What it is doing now, where that is known.
     const u = self.usage;
@@ -94,7 +94,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
         .usb, .usb_double, .usb_otg => if (self.usb.len == 0) "Nothing is plugged in" else null,
         else => null,
     };
-    if (now) |text| rows.append(a, cx.make(ui.Text{ .text = text, .style = .{ .size = 16, .color = t.on_surface } })) catch {};
+    if (now) |text| rows.append(a, cx.make(kete.Text{ .text = text, .style = .{ .size = 16, .color = t.on_surface } })) catch {};
     if (part.kind == .usb or part.kind == .usb_double or part.kind == .usb_otg) {
         for (self.usb.slice()) |*d| {
             var name_buf: [64]u8 = undefined;
@@ -105,11 +105,11 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
             const speed = usb.formatSpeed(&speed_buf, d.speed_mbps);
             if (speed.len > 0) detail.print(a, "  \u{b7}  {s}", .{speed}) catch {};
             if (d.built_in) detail.appendSlice(a, "  \u{b7}  Part of the board") catch {};
-            rows.append(a, cx.make(ui.Row{ .spacing = 16, .cross_axis_alignment = .center, .children = &.{
-                cx.make(ui.Icon{ .icon = usbIcon(d.kind), .size = 28, .color = t.on_surface_variant }),
-                cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 2, .children = &.{
-                    cx.make(ui.Text{ .text = cx.fmt("{s}", .{d.name(&name_buf)}), .style = .{ .size = 18 }, .wrap = false, .ellipsis = true }),
-                    cx.make(ui.Text{ .text = detail.items, .style = .{ .size = 15, .color = t.on_surface_variant }, .wrap = false, .ellipsis = true }),
+            rows.append(a, cx.make(kete.Row{ .spacing = 16, .cross_axis_alignment = .center, .children = &.{
+                cx.make(kete.Icon{ .icon = usbIcon(d.kind), .size = 28, .color = t.on_surface_variant }),
+                cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 2, .children = &.{
+                    cx.make(kete.Text{ .text = cx.fmt("{s}", .{d.name(&name_buf)}), .style = .{ .size = 18 }, .wrap = false, .ellipsis = true }),
+                    cx.make(kete.Text{ .text = detail.items, .style = .{ .size = 15, .color = t.on_surface_variant }, .wrap = false, .ellipsis = true }),
                 } }) }),
             } })) catch {};
         }
@@ -133,7 +133,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
         state.last_err_len = n;
         state.dismissed = false;
     }
-    return cx.make(ui.Snackbar{
+    return cx.make(kete.Snackbar{
         .message = if (state.dismissed) "" else err_msg,
         .on_dismiss = .of(state, State.dismiss),
         .child = b.scroll(.board, b.page(rows.items)),
@@ -142,16 +142,16 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
 
 fn appendGpioSection(
     self: *const Settings,
-    cx: *ui.Context,
+    cx: *kete.BuildContext,
     state: *State,
     model: []const u8,
-    rows: *std.ArrayList(ui.Widget),
+    rows: *std.ArrayList(kete.Widget),
 ) void {
     const t = cx.theme();
-    const a = cx.ui.arena();
+    const a = cx.arena;
     const pins = self.gpio orelse &default_pins;
     if (pins.read_failure) |why| {
-        rows.append(a, cx.make(ui.Text{ .text = why, .style = .{ .size = 16, .color = t.on_surface } })) catch {};
+        rows.append(a, cx.make(kete.Text{ .text = why, .style = .{ .size = 16, .color = t.on_surface } })) catch {};
         return;
     }
     const header = gpio.headerFor(model) orelse return;
@@ -159,20 +159,20 @@ fn appendGpioSection(
     state.pin = picked_idx;
 
     // Horizontal 2-row pin diagram (pin 1 at top-left, pin 2 below it).
-    var top_row: std.ArrayList(ui.Widget) = .empty;
-    var bottom_row: std.ArrayList(ui.Widget) = .empty;
+    var top_row: std.ArrayList(kete.Widget) = .empty;
+    var bottom_row: std.ArrayList(kete.Widget) = .empty;
     var i: usize = 0;
     while (i + 1 < header.len) : (i += 2) {
         top_row.append(a, pinDot(cx, state, pins, header[i], i, picked_idx == i)) catch {};
         bottom_row.append(a, pinDot(cx, state, pins, header[i + 1], i + 1, picked_idx == i + 1)) catch {};
     }
-    rows.append(a, cx.make(ui.Padding{ .padding = .{ .top = 6 }, .child = cx.make(ui.Column{
+    rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 6 }, .child = cx.make(kete.Column{
         .cross_axis_alignment = .start,
-        .main_axis_size = .min,
+        .fill = false,
         .spacing = 3,
         .children = &.{
-            cx.make(ui.Row{ .main_axis_size = .min, .spacing = 3, .children = top_row.items }),
-            cx.make(ui.Row{ .main_axis_size = .min, .spacing = 3, .children = bottom_row.items }),
+            cx.make(kete.Row{ .fill = false, .spacing = 3, .children = top_row.items }),
+            cx.make(kete.Row{ .fill = false, .spacing = 3, .children = bottom_row.items }),
         },
     }) })) catch {};
 
@@ -184,13 +184,13 @@ fn appendGpioSection(
 }
 
 fn pinDot(
-    cx: *ui.Context,
+    cx: *kete.BuildContext,
     state: *State,
     pins: *const gpio.Pins,
     pin: Pin,
     index: usize,
     picked: bool,
-) ui.Widget {
+) kete.Widget {
     const t = cx.theme();
     const colour: Color, const filled: bool = switch (pin) {
         .power_5v => .{ red, true },
@@ -206,19 +206,20 @@ fn pinDot(
         },
     };
     const size = 20;
-    const body = cx.make(ui.SizedBox{ .width = size, .height = size, .child = cx.make(ui.Decorated{
+    const body = cx.make(kete.SizedBox{ .width = size, .height = size, .child = cx.make(kete.RoundedBox{
         .color = if (filled) colour else null,
-        .border = if (picked) .{ .width = 3, .color = t.on_surface } else .{ .width = 2, .color = colour },
+        .border_width = if (picked) 3 else 2,
+        .border_color = if (picked) t.on_surface else colour,
         .radius = .all(size / 2),
-        .child = cx.make(ui.Center{ .child = cx.make(ui.Text{
+        .child = cx.make(kete.Align{ .child = cx.make(kete.Text{
             .text = cx.fmt("{d}", .{index + 1}),
             .style = .{ .size = 9, .color = if (filled) .rgb(0xffffff) else t.on_surface },
             .wrap = false,
         }) }),
     }) });
-    const pick = cx.ui.arena().create(PickHeaderPin) catch return body;
+    const pick = cx.arena.create(PickHeaderPin) catch return body;
     pick.* = .{ .state = state, .index = index };
-    return cx.make(ui.Pressable{ .on_press = .of(pick, PickHeaderPin.press), .child = body });
+    return cx.make(kete.Pressable{ .on_press = .of(pick, PickHeaderPin.press), .child = body });
 }
 
 const PickHeaderPin = struct {
@@ -230,9 +231,9 @@ const PickHeaderPin = struct {
     }
 };
 
-fn pinColourKey(cx: *ui.Context) ui.Widget {
+fn pinColourKey(cx: *kete.BuildContext) kete.Widget {
     const t = cx.theme();
-    const a = cx.ui.arena();
+    const a = cx.arena;
     const entries = [_]struct { Color, []const u8 }{
         .{ red, "5V" },
         .{ orange, "3.3V" },
@@ -241,20 +242,20 @@ fn pinColourKey(cx: *ui.Context) ui.Widget {
         .{ green, "Output" },
         .{ purple, "Other" },
     };
-    var items: std.ArrayList(ui.Widget) = .empty;
+    var items: std.ArrayList(kete.Widget) = .empty;
     for (entries) |e| {
-        items.append(a, cx.make(ui.Row{ .main_axis_size = .min, .cross_axis_alignment = .center, .spacing = 6, .children = &.{
-            cx.make(ui.SizedBox{ .width = 12, .height = 12, .child = cx.make(ui.Decorated{
+        items.append(a, cx.make(kete.Row{ .fill = false, .cross_axis_alignment = .center, .spacing = 6, .children = &.{
+            cx.make(kete.SizedBox{ .width = 12, .height = 12, .child = cx.make(kete.RoundedBox{
                 .color = e[0],
                 .radius = .all(6),
             }) }),
-            cx.make(ui.Text{ .text = e[1], .style = .{ .size = 14, .color = t.on_surface_variant }, .wrap = false }),
+            cx.make(kete.Text{ .text = e[1], .style = .{ .size = 14, .color = t.on_surface_variant }, .wrap = false }),
         } })) catch {};
     }
-    return cx.make(ui.Row{ .main_axis_size = .min, .cross_axis_alignment = .center, .spacing = 14, .children = items.items });
+    return cx.make(kete.Row{ .fill = false, .cross_axis_alignment = .center, .spacing = 14, .children = items.items });
 }
 
-fn gpioDoing(cx: *ui.Context, pins: *const gpio.Pins, g: u6) []const u8 {
+fn gpioDoing(cx: *kete.BuildContext, pins: *const gpio.Pins, g: u6) []const u8 {
     const l = &pins.lines[g];
     const level = if (l.high) "high" else "low";
     return switch (l.function) {
@@ -266,27 +267,27 @@ fn gpioDoing(cx: *ui.Context, pins: *const gpio.Pins, g: u6) []const u8 {
 
 fn pinDetail(
     self: *const Settings,
-    cx: *ui.Context,
+    cx: *kete.BuildContext,
     state: *State,
     pins: *const gpio.Pins,
     pin: Pin,
     pin_num: usize,
-) ui.Widget {
+) kete.Widget {
     const t = cx.theme();
-    const a = cx.ui.arena();
-    var rows: std.ArrayList(ui.Widget) = .empty;
+    const a = cx.arena;
+    var rows: std.ArrayList(kete.Widget) = .empty;
     switch (pin) {
         .power_5v => {
-            rows.append(a, cx.make(ui.Text{ .text = cx.fmt("5V, pin {d}", .{pin_num}), .style = .{ .size = 18, .color = t.on_surface } })) catch {};
-            rows.append(a, cx.make(ui.Text{ .text = "5 V power from the board's power supply", .style = .{ .size = 16, .color = t.on_surface_variant } })) catch {};
+            rows.append(a, cx.make(kete.Text{ .text = cx.fmt("5V, pin {d}", .{pin_num}), .style = .{ .size = 18, .color = t.on_surface } })) catch {};
+            rows.append(a, cx.make(kete.Text{ .text = "5 V power from the board's power supply", .style = .{ .size = 16, .color = t.on_surface_variant } })) catch {};
         },
         .power_3v3 => {
-            rows.append(a, cx.make(ui.Text{ .text = cx.fmt("3.3V, pin {d}", .{pin_num}), .style = .{ .size = 18, .color = t.on_surface } })) catch {};
-            rows.append(a, cx.make(ui.Text{ .text = "3.3 V power from the board", .style = .{ .size = 16, .color = t.on_surface_variant } })) catch {};
+            rows.append(a, cx.make(kete.Text{ .text = cx.fmt("3.3V, pin {d}", .{pin_num}), .style = .{ .size = 18, .color = t.on_surface } })) catch {};
+            rows.append(a, cx.make(kete.Text{ .text = "3.3 V power from the board", .style = .{ .size = 16, .color = t.on_surface_variant } })) catch {};
         },
         .ground => {
-            rows.append(a, cx.make(ui.Text{ .text = cx.fmt("Ground, pin {d}", .{pin_num}), .style = .{ .size = 18, .color = t.on_surface } })) catch {};
-            rows.append(a, cx.make(ui.Text{ .text = "Ground (0 V)", .style = .{ .size = 16, .color = t.on_surface_variant } })) catch {};
+            rows.append(a, cx.make(kete.Text{ .text = cx.fmt("Ground, pin {d}", .{pin_num}), .style = .{ .size = 18, .color = t.on_surface } })) catch {};
+            rows.append(a, cx.make(kete.Text{ .text = "Ground (0 V)", .style = .{ .size = 16, .color = t.on_surface_variant } })) catch {};
         },
         .gpio => |g| {
             const l = &pins.lines[g];
@@ -294,15 +295,15 @@ fn pinDetail(
                 cx.fmt("GPIO {d} ({s}), pin {d}", .{ g, u, pin_num })
             else
                 cx.fmt("GPIO {d}, pin {d}", .{ g, pin_num });
-            rows.append(a, cx.make(ui.Text{ .text = title, .style = .{ .size = 18, .color = t.on_surface } })) catch {};
-            rows.append(a, cx.make(ui.Text{ .text = gpioDoing(cx, pins, g), .style = .{ .size = 16, .color = t.on_surface } })) catch {};
-            if (l.function.alt() != null) rows.append(a, cx.make(ui.Text{
+            rows.append(a, cx.make(kete.Text{ .text = title, .style = .{ .size = 18, .color = t.on_surface } })) catch {};
+            rows.append(a, cx.make(kete.Text{ .text = gpioDoing(cx, pins, g), .style = .{ .size = 16, .color = t.on_surface } })) catch {};
+            if (l.function.alt() != null) rows.append(a, cx.make(kete.Text{
                 .text = cx.fmt("It is {s} now", .{if (l.high) "high" else "low"}),
                 .style = .{ .size = 16, .color = t.on_surface_variant },
             })) catch {};
             if (l.used) {
                 const who = l.consumer();
-                rows.append(a, cx.make(ui.Text{
+                rows.append(a, cx.make(kete.Text{
                     .text = if (who.len > 0) cx.fmt("In use by {s}, so it cannot be changed here", .{who}) else "In use by the system, so it cannot be changed here",
                     .style = .{ .size = 15, .color = t.on_surface_variant },
                 })) catch {};
@@ -312,7 +313,7 @@ fn pinDetail(
                     p.* = .{ .actions = acts, .state = state, .pin = g };
                     break :blk p;
                 } else null;
-                rows.append(a, cx.make(ui.Row{ .main_axis_size = .min, .children = &.{
+                rows.append(a, cx.make(kete.Row{ .fill = false, .children = &.{
                     cx.make(PinModeMenu{
                         .options = &mode_options,
                         .value = pins.mode(g),
@@ -323,18 +324,18 @@ fn pinDetail(
             }
         },
     }
-    return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 6, .children = rows.items });
+    return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 6, .children = rows.items });
 }
 
 /// Menu button for configuring a GPIO pin's mode.
-pub const PinModeMenu = ui.Select(Mode);
+pub const PinModeMenu = kete.Select(Mode);
 
 const mode_options = [_]PinModeMenu.Option{
-    .{ .value = .input, .label = "Input" },
-    .{ .value = .input_pull_up, .label = "Input, pulled up" },
-    .{ .value = .input_pull_down, .label = "Input, pulled down" },
-    .{ .value = .output_low, .label = "Output, low" },
-    .{ .value = .output_high, .label = "Output, high" },
+    .labeled(.input, "Input"),
+    .labeled(.input_pull_up, "Input, pulled up"),
+    .labeled(.input_pull_down, "Input, pulled down"),
+    .labeled(.output_low, "Output, low"),
+    .labeled(.output_high, "Output, high"),
 };
 
 const PinPick = struct {
@@ -348,7 +349,7 @@ const PinPick = struct {
     }
 };
 
-fn usbIcon(k: usb.Kind) ui.icons.Icon {
+fn usbIcon(k: usb.Kind) kete.IconName {
     return switch (k) {
         .keyboard => .keyboard,
         .mouse => .mouse,
@@ -365,7 +366,7 @@ fn usbIcon(k: usb.Kind) ui.icons.Icon {
 }
 
 /// Picking a part of the board.
-fn partPicker(state: *State) ?ui.ValueCallback(usize) {
+fn partPicker(state: *State) ?kete.ValueCallback(usize) {
     return .of(state, struct {
         fn set(st: *State, i: usize) void {
             st.part = i;
@@ -380,7 +381,7 @@ const heavy: f32 = 1.75;
 pub const BoardView = struct {
     board: *const board.Board,
     selected: ?usize = null,
-    on_select: ?ui.ValueCallback(usize) = null,
+    on_select: ?kete.ValueCallback(usize) = null,
     /// The biggest it is drawn.
     max_width: f32 = 260,
     max_height: f32 = 170,
@@ -389,7 +390,7 @@ pub const BoardView = struct {
         hovered: ?usize = null,
     };
 
-    pub fn layout(self: *const BoardView, _: *ui.Node, c: ui.Constraints) ui.Size {
+    pub fn layout(self: *const BoardView, _: *kete.WidgetNode, c: kete.Constraints) kete.Size {
         const r = self.board.bounds();
         const w = @min(if (std.math.isFinite(c.max_w)) c.max_w else self.max_width, self.max_width);
         const h = @min(w * r.h / r.w, self.max_height);
@@ -398,7 +399,7 @@ pub const BoardView = struct {
 
     /// Millimetres to the widget's pixels: the scale, and where the
     /// board's origin is.
-    fn transform(self: *const BoardView, size: ui.Size) struct { scale: f32, x: f32, y: f32 } {
+    fn transform(self: *const BoardView, size: kete.Size) struct { scale: f32, x: f32, y: f32 } {
         const r = self.board.bounds();
         const scale = @min(size.w / r.w, size.h / r.h);
         // Centred.
@@ -407,11 +408,11 @@ pub const BoardView = struct {
         return .{ .scale = scale, .x = x, .y = y };
     }
 
-    pub fn event(self: *const BoardView, n: *ui.Node, e: ui.Event) bool {
+    pub fn event(self: *const BoardView, n: *kete.WidgetNode, e: kete.Event) bool {
         const st = n.state(BoardView.State);
         const t = self.transform(n.size);
         const partAt = struct {
-            fn f(v: *const BoardView, tr: @TypeOf(t), p: ui.Point) ?usize {
+            fn f(v: *const BoardView, tr: @TypeOf(t), p: kete.Point) ?usize {
                 return v.board.partAt(.{ (p[0] - tr.x) / tr.scale, (p[1] - tr.y) / tr.scale });
             }
         }.f;
@@ -427,15 +428,15 @@ pub const BoardView = struct {
                 st.hovered = null;
                 n.ui.needs_frame = true;
             },
-            .press => |p| return p.button == ui.btn_left,
+            .press => |p| return p.button == .left,
             .release => |r| if (r.inside) if (partAt(self, t, r.pos)) |i| if (self.on_select) |f| f.call(i),
             else => {},
         }
         return false;
     }
 
-    pub fn paint(self: *const BoardView, n: *ui.Node, p: *ui.Painter) void {
-        const theme = &n.ui.theme;
+    pub fn paint(self: *const BoardView, n: *kete.WidgetNode, p: *kete.Painter) void {
+        const theme = n.theme();
         const t = self.transform(n.size);
         const b = self.board;
         const s = t.scale;
@@ -493,7 +494,7 @@ fn partOverhangsBoard(b: *const board.Board, part: *const board.Part) bool {
     return r.x < 0 or r.y < 0 or (r.x + r.w) > b.width or (r.y + r.h) > b.height;
 }
 
-fn partRadius(part: *const board.Part, s: f32) gfx.Radii {
+fn partRadius(part: *const board.Part, s: f32) kete.CornerRadii {
     return switch (part.kind) {
         .gpio => .all(0),
         .act_led, .pwr_led => .all(0.25 * s),
@@ -521,7 +522,7 @@ fn fillOverhangingPart(c: *gfx.Canvas, part: *const board.Part, r: gfx.Rect, s: 
 /// A part, as lines: its outline, and what makes it recognisable (a
 /// connector's opening, a header's pins, a chip's pin 1).
 fn drawPart(c: *gfx.Canvas, part: *const board.Part, r: gfx.Rect, s: f32, ink: Color) void {
-    const radius: gfx.Radii = .all(0.6 * s);
+    const radius: kete.CornerRadii = .all(0.6 * s);
     switch (part.kind) {
         .soc, .soc_with_ram, .ram, .usb_ethernet, .usb_controller, .southbridge, .ethernet_phy, .wireless, .pmic, .emmc => {
             c.strokeRoundedRect(r, radius, heavy, ink);
@@ -608,18 +609,18 @@ fn drawPart(c: *gfx.Canvas, part: *const board.Part, r: gfx.Rect, s: f32, ink: C
 }
 
 const testing = std.testing;
-const font = @import("font");
+const font = kete.font;
 
 test "the board, drawn: picking a part says what it is" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const u = try ui.Ui.create(testing.allocator, &f);
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
     var d = view.sample();
     const wifi = view.sampleWifi();
     d.sys.model = .of("Raspberry Pi 3 Model B Plus Rev 1.3");
     var n: u64 = 0;
     const draw = struct {
-        fn frame(uu: *ui.Ui, dd: anytype, w: *const info.manager.Report, nn: *u64, size: [2]u32) void {
+        fn frame(uu: *kete.ui.WindowUi, dd: anytype, w: *const info.manager.Report, nn: *u64, size: [2]u32) void {
             nn.* += 1;
             uu.frame(size[0], size[1], nn.*, Settings{ .commit = "574d538", .system = &dd.sys, .usage = dd.usage, .network = &dd.net, .manager = w, .apps = view.sample_apps });
         }
@@ -639,19 +640,19 @@ test "the board, drawn: picking a part says what it is" {
     const origin = bv.position();
     const x0 = origin[0] + (bv.size.w - r.w * scale) / 2 - r.x * scale;
     const y0 = origin[1] + (bv.size.h - r.h * scale) / 2 - r.y * scale;
-    const p: ui.Point = .{ x0 + 76 * scale, y0 + 45 * scale };
+    const p: kete.Point = .{ x0 + 76 * scale, y0 + 45 * scale };
     u.pointerMotion(p);
-    u.pointerButton(p, ui.btn_left, true);
-    u.pointerButton(p, ui.btn_left, false);
+    u.pointerButton(p, .left, true);
+    u.pointerButton(p, .left, false);
     draw(u, &d, &wifi, &n, .{ 1600, 900 });
     try testing.expect(view.findText(u.root.?, "Ethernet") != null);
     try testing.expect(view.findText(u.root.?, "The wired network") != null);
 
     // Clicking a USB connector shows plugged-in USB devices, or "Nothing is plugged in".
-    const usb_pt: ui.Point = .{ x0 + 78 * scale, y0 + 9 * scale };
+    const usb_pt: kete.Point = .{ x0 + 78 * scale, y0 + 9 * scale };
     u.pointerMotion(usb_pt);
-    u.pointerButton(usb_pt, ui.btn_left, true);
-    u.pointerButton(usb_pt, ui.btn_left, false);
+    u.pointerButton(usb_pt, .left, true);
+    u.pointerButton(usb_pt, .left, false);
     draw(u, &d, &wifi, &n, .{ 1600, 900 });
     try testing.expect(view.findText(u.root.?, "USB") != null);
     try testing.expect(view.findText(u.root.?, "Nothing is plugged in") != null);
@@ -683,7 +684,7 @@ test "the board, drawn: picking a part says what it is" {
 
 test "selecting the GPIO header shows the horizontal pin diagram, colour key, and pin mode menu" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const u = try ui.Ui.create(testing.allocator, &f);
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
     var d = view.sample();
     var actions: Actions = .{};
@@ -708,10 +709,10 @@ test "selecting the GPIO header shows the horizontal pin diagram, colour key, an
     const origin = bv.position();
     const x0 = origin[0] + (bv.size.w - r.w * scale) / 2 - r.x * scale;
     const y0 = origin[1] + (bv.size.h - r.h * scale) / 2 - r.y * scale;
-    const gpio_pt: ui.Point = .{ x0 + 32.5 * scale, y0 + 3.5 * scale };
+    const gpio_pt: kete.Point = .{ x0 + 32.5 * scale, y0 + 3.5 * scale };
     u.pointerMotion(gpio_pt);
-    u.pointerButton(gpio_pt, ui.btn_left, true);
-    u.pointerButton(gpio_pt, ui.btn_left, false);
+    u.pointerButton(gpio_pt, .left, true);
+    u.pointerButton(gpio_pt, .left, false);
 
     // Every board with a header fits at every window size when the GPIO header is selected.
     for ([_][]const u8{ "Raspberry Pi 3 Model B Plus Rev 1.3", "Raspberry Pi Model B Rev 1", "Raspberry Pi Zero W Rev 1.1" }) |model| {
@@ -745,14 +746,14 @@ test "selecting the GPIO header shows the horizontal pin diagram, colour key, an
     try testing.expectEqual(Actions.GpioChange{ .pin = 17, .mode = .output_low }, actions.gpio.?);
 
     // Selecting Pin 2 (5V) shows its description without a mode menu.
-    view.click(u, view.up(view.findText(u.root.?, "2").?, ui.Pressable).?);
+    view.click(u, view.up(view.findText(u.root.?, "2").?, kete.Pressable).?);
     u.frame(1600, 900, 6, settings);
     try testing.expect(view.findText(u.root.?, "5V, pin 2") != null);
     try testing.expect(view.findText(u.root.?, "5 V power from the board's power supply") != null);
     try testing.expect(view.findType(u.root.?, PinModeMenu) == null);
 
     // Selecting Pin 8 (GPIO 14, TXD, in use by serial) shows its description and cannot be configured.
-    view.click(u, view.up(view.findText(u.root.?, "8").?, ui.Pressable).?);
+    view.click(u, view.up(view.findText(u.root.?, "8").?, kete.Pressable).?);
     u.frame(1600, 900, 7, settings);
     try testing.expect(view.findText(u.root.?, "GPIO 14 (TXD), pin 8") != null);
     try testing.expect(view.findText(u.root.?, "UART 0 transmit") != null);
@@ -760,7 +761,7 @@ test "selecting the GPIO header shows the horizontal pin diagram, colour key, an
     try testing.expect(view.findType(u.root.?, PinModeMenu) == null);
 
     // Selecting Pin 7 (GPIO 4, GPCLK0) shows its description and can be configured via the menu button.
-    view.click(u, view.up(view.findText(u.root.?, "7").?, ui.Pressable).?);
+    view.click(u, view.up(view.findText(u.root.?, "7").?, kete.Pressable).?);
     u.frame(1600, 900, 8, settings);
     try testing.expect(view.findText(u.root.?, "GPIO 4 (GPCLK0), pin 7") != null);
     view.click(u, view.findType(u.root.?, PinModeMenu).?);

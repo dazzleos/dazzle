@@ -26,8 +26,9 @@ const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
 const locale = @import("locale");
-const font = @import("font");
 const ui = @import("ui");
+const kete = @import("kete");
+const kete_vc4 = @import("kete_vc4");
 const build_info = @import("build_info");
 const info = @import("info.zig");
 const usb = @import("usb.zig");
@@ -43,40 +44,54 @@ const gpio_poll_ns = 100 * std.time.ns_per_ms;
 
 const print = sys.print;
 
-pub fn main(init: std.process.Init.Minimal) u8 {
+pub fn main(init: std.process.Init) u8 {
     sys.logToKmsgIfStderr();
-    var args = init.args.iterate();
+    var args = init.minimal.args.iterate();
     _ = args.skip();
-    var font_buf: [512]u8 = undefined;
-    var font_path: [*:0]const u8 = sys.fontFile(&font_buf, font.default_font_file);
     var page: ?view.Page = null;
     var select_gpio = false;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "gpio")) {
             page = .board;
             select_gpio = true;
-        } else if (std.meta.stringToEnum(view.Page, arg)) |p| page = p else font_path = arg.ptr;
+        } else if (std.meta.stringToEnum(view.Page, arg)) |p| page = p;
     }
-    run(init, font_path, page, select_gpio) catch |err| {
+    run(init, page, select_gpio) catch |err| {
         print(sys.log_error ++ "dazzle-settings: error: {s}\n", .{@errorName(err)});
         return 1;
     };
     return 0;
 }
 
-fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?view.Page, first_gpio: bool) !void {
+/// The window's root: the pages, as last worked out (see `run`).
+const Root = struct {
+    shown: *const view.Settings,
+
+    pub fn build(r: *const Root, cx: *kete.BuildContext) kete.Widget {
+        return cx.make(r.shown.*);
+    }
+};
+
+/// The files that wake the loop, kept in step with kete_vc4's.
+const Wakes = struct {
+    fds: [4]?linux.fd_t = @splat(null),
+
+    fn set(w: *Wakes, host: *kete_vc4.Host, want: [4]?linux.fd_t) void {
+        for (w.fds) |had| if (had) |fd| if (std.mem.indexOfScalar(?linux.fd_t, &want, fd) == null) host.wakeOn(fd, false);
+        for (want) |wanted| if (wanted) |fd| if (std.mem.indexOfScalar(?linux.fd_t, &w.fds, fd) == null) host.wakeOn(fd, true);
+        w.fds = want;
+    }
+};
+
+fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
     // The language chosen (in setup, or here).
     var chosen = locale.load();
     locale.current = chosen.language;
     const gpa = std.heap.page_allocator;
-    const a = try ui.App.open(gpa, init.environ, .{
-        .title = "Settings",
-        .app_id = "dazzle-settings",
-        .size = view.open_size,
-        .min_size = view.min_size,
-        .font_path = font_path,
-    });
-    defer a.close();
+    var host: kete_vc4.Host = undefined;
+    try host.init(gpa, init.io, init.minimal.environ, .{ .app_id = "dazzle-settings" });
+    defer host.deinit();
+    var appearance = ui.theme.loadSettings();
 
     const system = info.System.read();
     print("dazzle-settings: {s}, {d} {s}\n", .{ system.model.slice(), system.cores, if (system.cores == 1) "core" else "cores" });
@@ -140,47 +155,63 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
         _ = linux.unlink(sock_path);
     };
 
+    var shown: view.Settings = .{ .commit = build, .system = &system, .usage = usage, .network = &network };
+    const root: Root = .{ .shown = &shown };
+    const window = try host.app.openWindow(.{
+        .title = "Settings",
+        .root = .of(&root),
+        .size = view.open_size,
+        .min_size = view.min_size,
+        .on_close_request = .close,
+    });
+    var wakes: Wakes = .{};
+    // What the window shows changed: it is worked out again.
+    var dirty = true;
+    var suspended = false;
+    var available_buf: [64]u8 = undefined;
+
     var next_update: u64 = sys.nowNs() + std.time.ns_per_s;
     while (true) {
-        a.win.wake_fds = @splat(null);
-        a.win.wake_fds[0..4].* = .{ pages_fd, net_sub.fd, updater.sub.fd, if (view.shownPage(a.ui) == .log) syslog.fd else null };
-        const board_page = view.shownPage(a.ui) == .board;
-        const base_until = if (a.suspended) sys.nowNs() + 60 * std.time.ns_per_s else if (board_page) @min(next_update, next_levels) else next_update;
+        wakes.set(&host, .{ pages_fd, net_sub.fd, updater.sub.fd, if (view.shownPage(window.ui) == .log) syslog.fd else null });
+        const board_page = view.shownPage(window.ui) == .board;
+        const base_until = if (window.suspended) sys.nowNs() + 60 * std.time.ns_per_s else if (board_page) @min(next_update, next_levels) else next_update;
         const until = if (test_player != null) @min(base_until, sys.nowNs() + 16 * std.time.ns_per_ms) else base_until;
-        if (!try a.step(@max(until -| sys.nowNs(), std.time.ns_per_ms))) return;
+        if (!try host.step(@max(until -| sys.nowNs(), std.time.ns_per_ms))) return;
         // Covered by another window: nothing is read or drawn, and the
         // window in front gets the GPU memory.
-        if (a.suspended_changed and !a.suspended) next_update = 0;
+        if (window.suspended != suspended) {
+            suspended = window.suspended;
+            if (!suspended) next_update = 0;
+        }
         const now = sys.nowNs();
-        a.takeInput();
 
         // The figures change every second.
-        if (!a.suspended and now >= next_update) {
+        if (!window.suspended and now >= next_update) {
             next_update = now + std.time.ns_per_s;
             usage = monitor.read(now);
             network = info.Network.read();
-            if (view.shownPage(a.ui) == .board) {
+            if (view.shownPage(window.ui) == .board) {
                 devices = usb.Devices.read();
                 pins.readUsers();
             }
-            if (view.shownPage(a.ui) == .sound) {
+            if (view.shownPage(window.ui) == .sound) {
                 audio_devices = audio.listDevices();
             }
-            if (view.shownPage(a.ui) == .log) _ = syslog.poll();
-            a.dirty = true;
+            if (view.shownPage(window.ui) == .log) _ = syslog.poll();
+            dirty = true;
         }
-        if (!a.suspended and view.shownPage(a.ui) == .board and now >= next_levels) {
+        if (!window.suspended and view.shownPage(window.ui) == .board and now >= next_levels) {
             next_levels = now + gpio_poll_ns;
             const before = pins.lines;
             pins.readLevels();
             if (!pins_read) pins.readUsers();
-            if (!pins_read or !std.mem.eql(u8, std.mem.asBytes(&before), std.mem.asBytes(&pins.lines))) a.dirty = true;
+            if (!pins_read or !std.mem.eql(u8, std.mem.asBytes(&before), std.mem.asBytes(&pins.lines))) dirty = true;
             pins_read = true;
         }
         if (actions.gpio) |g| {
             actions.gpio = null;
             pins.set(g.pin, g.mode);
-            a.dirty = true;
+            dirty = true;
         }
         if (actions.sound) |s| {
             actions.sound = null;
@@ -188,20 +219,20 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             audio.saveSettings(sound);
             audio.applySettings(sound, &audio_devices);
             if (test_player) |*p| p.updateSettings(sound);
-            a.dirty = true;
+            dirty = true;
         }
         if (actions.test_sound) {
             actions.test_sound = false;
             if (test_player) |*p| p.close();
             test_player = audio.Player.openTestTone(sound);
-            a.dirty = true;
+            dirty = true;
         }
         if (actions.appearance) |ap| {
             actions.appearance = null;
             ui.theme.saveSettings(ap);
-            a.appearance = ap;
-            a.setTheme(ap.theme);
-            a.dirty = true;
+            appearance = ap;
+            host.app.setTheme(kete_vc4.themeMode(ap.theme));
+            dirty = true;
         }
         if (test_player) |*p| {
             if (p.step(now) == null) {
@@ -214,7 +245,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
         if (apps.poll()) {
             updater.loadManifest();
             icons_dirty = true;
-            a.dirty = true;
+            dirty = true;
         }
         if (actions.software_server) |*srv| {
             const raw = srv.slice();
@@ -230,19 +261,19 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             updater.setBaseUrl(server_url);
             apps.refresh(true);
             actions.software_server = null;
-            a.dirty = true;
+            dirty = true;
         }
         if (actions.subscribe_key) |*k| {
             _ = store.subscribeKey(k.slice());
             subscribed_keys = store.loadKeys();
             actions.subscribe_key = null;
-            a.dirty = true;
+            dirty = true;
         }
         if (actions.unsubscribe_key) |*k| {
             store.unsubscribeKey(k.slice());
             subscribed_keys = store.loadKeys();
             actions.unsubscribe_key = null;
-            a.dirty = true;
+            dirty = true;
         }
         if (actions.install != null or actions.remove != null or actions.refresh_apps or actions.check_update) {
             if (actions.install) |*n| apps.install(n.slice());
@@ -258,21 +289,21 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             actions.remove = null;
             actions.refresh_apps = false;
             actions.check_update = false;
-            a.dirty = true;
+            dirty = true;
         }
         // The list is got when the page is first shown.
         // The log is read as soon as its page shows, and whenever new lines arrive.
-        if (view.shownPage(a.ui) == .log and !syslog.failed) {
-            if (syslog.fd == null or syslog.poll()) a.dirty = true;
+        if (view.shownPage(window.ui) == .log and !syslog.failed) {
+            if (syslog.fd == null or syslog.poll()) dirty = true;
         }
-        if (view.shownPage(a.ui) == .apps and !apps.asked) {
+        if (view.shownPage(window.ui) == .apps and !apps.asked) {
             apps.refresh(false);
-            a.dirty = true;
+            dirty = true;
         }
         // Updates: checked for when the Software page is first shown.
-        if (!a.suspended and updater.poll(now)) {
+        if (!window.suspended and updater.poll(now)) {
             icons_dirty = true;
-            a.dirty = true;
+            dirty = true;
         }
         if (actions.download_update or actions.update_all or actions.restart) {
             if (actions.download_update or actions.update_all) updater.download();
@@ -281,7 +312,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             actions.download_update = false;
             actions.update_all = false;
             actions.restart = false;
-            a.dirty = true;
+            dirty = true;
         }
         // A language or keyboard picked: the system manager keeps it (and
         // the shell sends the apps the keyboard's layout).
@@ -295,7 +326,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
                     locale.current = l.language;
                 }
             } else print(sys.log_warning ++ "dazzle-settings: the system did not answer\n", .{});
-            a.dirty = true;
+            dirty = true;
         }
         // Video memory chosen: the system manager has the next start use
         // it, and says what that now is.
@@ -309,7 +340,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             };
             video_memory_failed = if (r) |have| have.denied or have.video_memory_next != mib else true;
             print("dazzle-settings: video memory {d} MiB from the next start{s}\n", .{ mib, if (video_memory_failed) ": refused" else "" });
-            a.dirty = true;
+            dirty = true;
         }
         // Serving the log over HTTP turned on or off: the system manager
         // keeps it, and the log server follows.
@@ -320,7 +351,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
                 updater.report = have;
             };
             if (r == null) print(sys.log_warning ++ "dazzle-settings: the system did not answer\n", .{});
-            a.dirty = true;
+            dirty = true;
         }
         if (actions.wifi_adapter) |ad| wifi_adapter = ad;
         if (actions.connect != null or actions.hotspot != null or actions.disconnect or actions.ethernet != null or actions.wifi_addressing != null or actions.wifi_adapter != null) {
@@ -339,27 +370,27 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
             }
             actions = .{};
             next_scan = sys.nowNs() + 10 * std.time.ns_per_s;
-            a.dirty = true;
+            dirty = true;
         }
-        if (net_sub.fd == null and !a.suspended) net_sub.connect();
+        if (net_sub.fd == null and !window.suspended) net_sub.connect();
         if (net_sub.poll()) |r| if (!r.denied) {
             report = r;
             network = info.Network.read();
-            a.dirty = true;
+            dirty = true;
         };
         // Wi-Fi networks are scanned for only while their page is shown
         // (at once when it is chosen, and periodically when no network is
         // selected); status updates arrive over `net_sub`.
-        const wifi_page = view.shownPage(a.ui) == .wifi;
+        const wifi_page = view.shownPage(window.ui) == .wifi;
         if (wifi_page and !was_wifi_page) next_scan = 0;
         was_wifi_page = wifi_page;
-        if (!a.suspended and wifi_page and now >= next_scan) {
+        if (!window.suspended and wifi_page and now >= next_scan) {
             next_scan = now + 10 * std.time.ns_per_s;
-            if (!view.wifiNetworkSelected(a.ui)) {
+            if (!view.wifiNetworkSelected(window.ui)) {
                 var scan_buf: [64]u8 = undefined;
                 if (info.askManager(info.manager.scanRequest(&scan_buf, wifi_adapter.slice()))) |r| {
                     report = r;
-                    a.dirty = true;
+                    dirty = true;
                 }
             }
         }
@@ -377,18 +408,18 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
                 }
             }
         }
-        if (pending_page) |p| if (view.showPage(a.ui, p)) {
+        if (pending_page) |p| if (view.showPage(window.ui, p)) {
             if (pending_gpio) {
-                _ = view.showGpio(a.ui);
+                _ = view.showGpio(window.ui);
                 pending_gpio = false;
             }
             pending_page = null;
-            a.dirty = true;
+            dirty = true;
         };
 
-        if (!a.suspended and (a.dirty or a.ui.needs_frame)) {
+        if (dirty) {
+            dirty = false;
             const catalogue = apps.apps()[0..@min(apps.apps().len, installed.len)];
-            var available_buf: [64]u8 = undefined;
             for (catalogue, installed[0..catalogue.len], updatable[0..catalogue.len]) |item, *i, *u| {
                 i.* = store.isInstalled(store.apps_dir, item.name);
                 u.* = i.* and store.hasNewerVersion(store.apps_dir, item);
@@ -404,7 +435,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
                     catalogue,
                 );
             }
-            try a.draw(now, view.Settings{
+            shown = .{
                 .commit = build,
                 .locale = chosen,
                 .system = &system,
@@ -435,7 +466,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
                 },
                 .sound = sound,
                 .audio_devices = &audio_devices,
-                .appearance = a.appearance,
+                .appearance = appearance,
                 .update = .{
                     .status = updater.status(),
                     .available = if (updater.available()) |m| std.fmt.bufPrint(&available_buf, "{s} ({s})", .{ m.version, update.formatDate(&date_buf, m.time) }) catch m.version else "",
@@ -443,9 +474,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8, first_page: ?vi
                     .message = updater.message(),
                     .icon = icons.osIcon(),
                 },
-            });
-        } else {
-            a.idle = true;
+            };
+            host.redraw();
         }
     }
 }

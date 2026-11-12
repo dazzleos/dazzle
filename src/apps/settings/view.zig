@@ -5,8 +5,9 @@
 //! goes to the main loop through `Actions`.
 
 const std = @import("std");
-const ui = @import("ui");
-const gfx = @import("gfx");
+const kete = @import("kete");
+const ui_theme = @import("ui").theme;
+const gfx = kete.gfx;
 const info = @import("info.zig");
 const locale = @import("locale");
 const store = @import("store");
@@ -63,7 +64,7 @@ pub const Actions = struct {
     sound: ?audio.Settings = null,
     test_sound: bool = false,
     /// Appearance settings (Dark or Light colour scheme).
-    appearance: ?ui.theme.Settings = null,
+    appearance: ?ui_theme.Settings = null,
     /// Serve the log over HTTP, or stop.
     log_server: ?bool = null,
 
@@ -141,14 +142,9 @@ pub const Settings = struct {
     video_memory: resources_view.VideoMemory = .{},
     sound: audio.Settings = .{},
     audio_devices: *const audio.Devices = &empty_audio_devices,
-    appearance: ui.theme.Settings = .{},
+    appearance: ui_theme.Settings = .{},
     /// The title bar's buttons (close, and maximize, which shows whether
     /// the window is), and pressing the bar (to move the window).
-    on_close: ?ui.Callback = null,
-    on_maximize: ?ui.Callback = null,
-    on_drag: ?ui.Callback = null,
-    maximized: bool = true,
-
     pub const State = struct {
         /// The page shown.
         page: Page = .wifi,
@@ -166,16 +162,16 @@ pub const Settings = struct {
         }
     };
 
-    pub fn build(self: *const Settings, cx: *ui.Context, state: *State) ui.Widget {
+    pub fn build(self: *const Settings, cx: *kete.BuildContext, state: *State) kete.Widget {
         const b: Builder = .{ .cx = cx };
         const t = cx.theme();
         const page_values = @typeInfo(Page).@"enum".field_values;
-        var rail_items: [page_values.len]ui.NavigationRail.Item = undefined;
+        var rail_items: [page_values.len]kete.NavigationRail.Item = undefined;
         inline for (&rail_items, page_values) |*item, value| {
             const p: Page = @enumFromInt(value);
             item.* = .{ .label = p.label(), .icon = p.icon() };
         }
-        const sidebar = cx.make(ui.NavigationRail{
+        const sidebar = cx.make(kete.NavigationRail{
             .items = &rail_items,
             .selected = @intFromEnum(state.page),
             .on_select = .of(state, State.selectPage),
@@ -194,22 +190,15 @@ pub const Settings = struct {
             .language => b.scroll(.language, language_view.build(self, b)),
             .log => b.scroll(.log, log_view.build(self, b, &state.log)),
         };
-        const content = cx.make(ui.Row{ .cross_axis_alignment = .stretch, .children = &.{
+        const content = cx.make(kete.Row{ .cross_axis_alignment = .stretch, .children = &.{
             sidebar,
-            cx.make(ui.Expanded{ .child = cx.make(ui.Decorated{
+            cx.make(kete.Expanded{ .child = cx.make(kete.RoundedBox{
                 .color = t.surface,
                 .child = right,
             }) }),
         } });
-        return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &.{
-            cx.make(ui.TitleBar{
-                .title = "Settings",
-                .on_close = self.on_close,
-                .on_maximize = self.on_maximize,
-                .on_drag = self.on_drag,
-                .maximized = self.maximized,
-            }),
-            cx.make(ui.Expanded{ .child = content }),
+        return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .children = &.{
+            cx.make(kete.Expanded{ .child = content }),
         } });
     }
 };
@@ -242,7 +231,7 @@ pub const Page = enum {
         };
     }
 
-    pub fn icon(p: Page) ui.icons.Icon {
+    pub fn icon(p: Page) kete.IconName {
         return switch (p) {
             .wifi => wifi_view.icon,
             .ethernet => ethernet_view.icon,
@@ -257,34 +246,41 @@ pub const Page = enum {
     }
 };
 
+/// The `Settings` in `u` (the root, or under it), once it is built.
+fn settingsNode(u: *kete.ui.WindowUi) ?*kete.WidgetNode {
+    return findSettings(u.root orelse return null);
+}
+
+fn findSettings(n: *kete.WidgetNode) ?*kete.WidgetNode {
+    if (n.widget.is(Settings)) return n;
+    for (n.children.items) |ch| if (findSettings(ch)) |f| return f;
+    return null;
+}
+
 /// The page `u` (running a `Settings`) shows.
-pub fn shownPage(u: *ui.Ui) Page {
-    const root = u.root orelse return .wifi;
-    if (!root.widget.is(Settings)) return .wifi;
+pub fn shownPage(u: *kete.ui.WindowUi) Page {
+    const root = settingsNode(u) orelse return .wifi;
     return root.state(Settings.State).page;
 }
 
 /// Whether a Wi-Fi network is selected in `u` (so its join form is open).
-pub fn wifiNetworkSelected(u: *ui.Ui) bool {
-    const root = u.root orelse return false;
-    if (!root.widget.is(Settings)) return false;
+pub fn wifiNetworkSelected(u: *kete.ui.WindowUi) bool {
+    const root = settingsNode(u) orelse return false;
     return root.state(Settings.State).wifi.has_selected;
 }
 
 /// Shows page `p` in `u` (running a `Settings`); false if the window is
 /// not built yet.
-pub fn showPage(u: *ui.Ui, p: Page) bool {
-    const root = u.root orelse return false;
-    if (!root.widget.is(Settings)) return false;
+pub fn showPage(u: *kete.ui.WindowUi, p: Page) bool {
+    const root = settingsNode(u) orelse return false;
     root.state(Settings.State).page = p;
     return true;
 }
 
 /// Shows the Board page with the GPIO header selected in `u` (running a
 /// `Settings`); false if the window is not built yet.
-pub fn showGpio(u: *ui.Ui) bool {
-    const root = u.root orelse return false;
-    if (!root.widget.is(Settings)) return false;
+pub fn showGpio(u: *kete.ui.WindowUi) bool {
+    const root = settingsNode(u) orelse return false;
     const st = root.state(Settings.State);
     st.page = .board;
     st.board.part = null;
@@ -298,42 +294,42 @@ pub fn orUnknown(s: []const u8) []const u8 {
 
 /// Makes the pages and their rows.
 pub const Builder = struct {
-    cx: *ui.Context,
+    cx: *kete.BuildContext,
 
-    pub fn page(b: Builder, rows: []const ui.Widget) ui.Widget {
+    pub fn page(b: Builder, rows: []const kete.Widget) kete.Widget {
         const cx = b.cx;
-        const children = cx.ui.arena().dupe(ui.Widget, rows) catch return cx.make(ui.Empty{});
-        return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 10, .children = children });
+        const children = cx.arena.dupe(kete.Widget, rows) catch return cx.make(kete.SizedBox.empty);
+        return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 10, .children = children });
     }
 
-    pub fn scroll(b: Builder, p: Page, child: ui.Widget) ui.Widget {
+    pub fn scroll(b: Builder, p: Page, child: kete.Widget) kete.Widget {
         const cx = b.cx;
-        return cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(24), .child = cx.make(ui.Align{
+        return cx.make(kete.ScrollView{ .child = cx.make(kete.Padding{ .padding = .all(24), .child = cx.make(kete.Align{
             .alignment = .top_center,
-            .child = cx.make(ui.ConstrainedBox{ .constraints = .{ .max_w = max_page_width }, .child = child }),
+            .child = cx.make(kete.ConstrainedBox{ .constraints = .{ .max_w = max_page_width }, .child = child }),
         }) }) }).withKey(@as(u64, @intFromEnum(p)) + 1);
     }
 
-    pub fn label(b: Builder, text: []const u8) ui.Widget {
+    pub fn label(b: Builder, text: []const u8) kete.Widget {
         const cx = b.cx;
-        return cx.make(ui.SizedBox{ .width = 150, .child = cx.make(ui.Text{ .text = text, .style = .{ .size = 18, .color = cx.ui.theme.on_surface_variant }, .wrap = false }) });
+        return cx.make(kete.SizedBox{ .width = 150, .child = cx.make(kete.Text{ .text = text, .style = .{ .size = 18, .color = cx.theme().on_surface_variant }, .wrap = false }) });
     }
 
-    pub fn value(b: Builder, text: []const u8) ui.Widget {
-        return b.cx.make(ui.Text{ .text = text, .style = .{ .size = 18, .color = b.cx.ui.theme.on_surface } });
+    pub fn value(b: Builder, text: []const u8) kete.Widget {
+        return b.cx.make(kete.Text{ .text = text, .style = .{ .size = 18, .color = b.cx.theme().on_surface } });
     }
 
     /// A label and its value.
-    pub fn item(b: Builder, name: []const u8, text: []const u8) ui.Widget {
-        return b.cx.make(ui.Row{ .cross_axis_alignment = .start, .spacing = 12, .children = &.{
+    pub fn item(b: Builder, name: []const u8, text: []const u8) kete.Widget {
+        return b.cx.make(kete.Row{ .cross_axis_alignment = .start, .spacing = 12, .children = &.{
             b.label(name),
-            b.cx.make(ui.Expanded{ .child = b.value(text) }),
+            b.cx.make(kete.Expanded{ .child = b.value(text) }),
         } });
     }
 };
 
 const testing = std.testing;
-const font = @import("font");
+const font = kete.font;
 
 pub const sample_app_list = [_]store.App{
     .{ .name = "dazzle-demo", .title = "Demo", .description = "Spinning shapes, on the GPU", .icon = "dazzle-demo.png", .file = "dazzle-demo.tar.xz", .size = 40 << 10, .sha256 = "" },
@@ -381,15 +377,15 @@ pub fn sampleWifi() info.manager.Report {
     return r;
 }
 
-pub fn texts(node: *ui.Node, out: *std.ArrayList(u8)) void {
-    if (node.widget.is(ui.Text)) {
-        out.appendSlice(testing.allocator, node.widget.as(ui.Text).?.text) catch {};
+pub fn texts(node: *kete.WidgetNode, out: *std.ArrayList(u8)) void {
+    if (node.widget.is(kete.Text)) {
+        out.appendSlice(testing.allocator, node.widget.as(kete.Text).?.text) catch {};
         out.append(testing.allocator, '\n') catch {};
     }
     for (node.children.items) |ch| texts(ch, out);
 }
 
-pub fn overflows(node: *ui.Node) bool {
+pub fn overflows(node: *kete.WidgetNode) bool {
     const o = node.overflow;
     if (o.left > 0 or o.top > 0 or o.right > 0 or o.bottom > 0) return true;
     for (node.children.items) |ch| if (overflows(ch)) return true;
@@ -409,49 +405,49 @@ pub const test_sizes = [_][2]u32{
     .{ 1920, 1036 },
 };
 
-pub fn findText(node: *ui.Node, text: []const u8) ?*ui.Node {
-    if (node.widget.as(ui.Text)) |t| if (std.mem.eql(u8, t.text, text)) return node;
+pub fn findText(node: *kete.WidgetNode, text: []const u8) ?*kete.WidgetNode {
+    if (node.widget.as(kete.Text)) |t| if (std.mem.eql(u8, t.text, text)) return node;
     for (node.children.items) |ch| if (findText(ch, text)) |n| return n;
     return null;
 }
 
 /// The first text with `part` in it.
-pub fn findTextContaining(node: *ui.Node, part: []const u8) ?*ui.Node {
-    if (node.widget.as(ui.Text)) |t| if (std.mem.indexOf(u8, t.text, part) != null) return node;
+pub fn findTextContaining(node: *kete.WidgetNode, part: []const u8) ?*kete.WidgetNode {
+    if (node.widget.as(kete.Text)) |t| if (std.mem.indexOf(u8, t.text, part) != null) return node;
     for (node.children.items) |ch| if (findTextContaining(ch, part)) |n| return n;
     return null;
 }
 
-pub fn findType(node: *ui.Node, comptime T: type) ?*ui.Node {
+pub fn findType(node: *kete.WidgetNode, comptime T: type) ?*kete.WidgetNode {
     if (node.widget.is(T)) return node;
     for (node.children.items) |ch| if (findType(ch, T)) |n| return n;
     return null;
 }
 
-pub fn findIcon(node: *ui.Node, icon: ui.icons.Icon) ?*ui.Node {
-    if (node.widget.as(ui.Icon)) |i| if (i.icon == icon) return node;
+pub fn findIcon(node: *kete.WidgetNode, icon: kete.IconName) ?*kete.WidgetNode {
+    if (node.widget.as(kete.Icon)) |i| if (i.icon == icon) return node;
     for (node.children.items) |ch| if (findIcon(ch, icon)) |n| return n;
     return null;
 }
 
 /// The nearest node above `n` (or `n`) whose widget is a `T`.
-pub fn up(n: *ui.Node, comptime T: type) ?*ui.Node {
-    var at: ?*ui.Node = n;
+pub fn up(n: *kete.WidgetNode, comptime T: type) ?*kete.WidgetNode {
+    var at: ?*kete.WidgetNode = n;
     while (at) |a| : (at = a.parent) if (a.widget.is(T)) return a;
     return null;
 }
 
-pub fn click(u: *ui.Ui, n: *ui.Node) void {
+pub fn click(u: *kete.ui.WindowUi, n: *kete.WidgetNode) void {
     const at = n.position();
-    const p: ui.Point = .{ at[0] + 4, at[1] + n.size.h / 2 };
+    const p: kete.Point = .{ at[0] + 4, at[1] + n.size.h / 2 };
     u.pointerMotion(p);
-    u.pointerButton(p, ui.btn_left, true);
-    u.pointerButton(p, ui.btn_left, false);
+    u.pointerButton(p, .left, true);
+    u.pointerButton(p, .left, false);
 }
 
 test "everything is shown, and fits from the smallest window to the biggest" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const u = try ui.Ui.create(testing.allocator, &f);
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
     var d = sample();
     const wifi = sampleWifi();
@@ -475,14 +471,14 @@ test "everything is shown, and fits from the smallest window to the biggest" {
             d.net.len = 2;
             frame_no += 1;
             u.frame(1920, 1036, frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps, .video_memory = .{ .now = 128, .next = 192 } });
-            click(u, up(findText(u.root.?, "eth1").?, ui.PillButton).?);
+            click(u, up(findText(u.root.?, "eth1").?, kete.PillButton).?);
             frame_no += 1;
             u.frame(1920, 1036, frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps, .video_memory = .{ .now = 128, .next = 192 } });
             texts(u.root.?, &all);
             d.net.len = 1;
         }
         if (page == .apps) {
-            click(u, up(findText(u.root.?, "Dazzle").?, ui.Pressable).?);
+            click(u, up(findText(u.root.?, "Dazzle").?, kete.Pressable).?);
             for (test_sizes) |size| {
                 frame_no += 1;
                 u.frame(size[0], size[1], frame_no, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps, .video_memory = .{ .now = 128, .next = 192 } });
@@ -495,7 +491,7 @@ test "everything is shown, and fits from the smallest window to the biggest" {
         // The next page, from its tab.
         if (@as(usize, @intFromEnum(page)) + 1 < std.enums.values(Page).len) {
             const next: Page = @enumFromInt(@as(usize, @intFromEnum(page)) + 1);
-            click(u, up(findText(u.root.?, next.label()).?, ui.Pressable).?);
+            click(u, up(findText(u.root.?, next.label()).?, kete.Pressable).?);
             try testing.expectEqual(next, shownPage(u));
         }
     }

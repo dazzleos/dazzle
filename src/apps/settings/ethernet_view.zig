@@ -3,18 +3,18 @@
 //! a static address, and to see the gateway), and MAC address.
 
 const std = @import("std");
-const ui = @import("ui");
+const kete = @import("kete");
 const info = @import("info.zig");
 const view = @import("view.zig");
 
 const Settings = view.Settings;
 const Actions = view.Actions;
 const Builder = view.Builder;
-const PillBar = ui.PillBar;
-const PillButton = ui.PillButton;
+const PillBar = kete.PillBar;
+const PillButton = kete.PillButton;
 
 pub const label = "Ethernet";
-pub const icon: ui.icons.Icon = .lan;
+pub const icon: kete.IconName = .lan;
 
 pub const State = struct {
     /// The Ethernet adapter picked, when there is more than one.
@@ -51,11 +51,11 @@ pub const State = struct {
     }
 };
 
-pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
+pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     const cx = b.cx;
     const net = self.network;
-    var rows: std.ArrayList(ui.Widget) = .empty;
-    const a = cx.ui.arena();
+    var rows: std.ArrayList(kete.Widget) = .empty;
+    const a = cx.arena;
     const ifaces = net.slice();
     if (ifaces.len == 0) {
         rows.append(a, b.item("Status", "No adapter: plug in a USB Ethernet adapter")) catch {};
@@ -64,7 +64,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
     const idx = @min(state.adapter, ifaces.len - 1);
     state.adapter = idx;
     if (ifaces.len > 1) {
-        var pills: std.ArrayList(ui.Widget) = .empty;
+        var pills: std.ArrayList(kete.Widget) = .empty;
         for (ifaces, 0..) |*ifc, k| {
             pills.append(a, cx.make(PillButton{
                 .label = ifc.name.slice(),
@@ -74,7 +74,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
                 .on_press = pickAdapter(cx, state, k),
             })) catch {};
         }
-        rows.append(a, cx.make(ui.Center{ .height_factor = 1, .child = cx.make(PillBar{ .children = pills.items }) })) catch {};
+        rows.append(a, cx.make(kete.Align{ .height_factor = 1, .child = cx.make(PillBar{ .children = pills.items }) })) catch {};
     }
     const i = &ifaces[idx];
     const status = if (!std.mem.eql(u8, i.state.slice(), "up") and !i.carrier)
@@ -104,12 +104,12 @@ fn addressRow(
     iface: *const info.Interface,
     current: info.manager.Addressing,
     address_text: []const u8,
-) ui.Widget {
+) kete.Widget {
     const cx = b.cx;
     const t = cx.theme();
-    return cx.make(ui.Row{ .cross_axis_alignment = .start, .spacing = 12, .children = &.{
-        cx.make(ui.SizedBox{ .width = 150, .child = cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 4, .children = &.{
-            cx.make(ui.Text{ .text = "Address", .style = .{ .size = 18, .color = t.on_surface_variant }, .wrap = false }),
+    return cx.make(kete.Row{ .cross_axis_alignment = .start, .spacing = 12, .children = &.{
+        cx.make(kete.SizedBox{ .width = 150, .child = cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 4, .children = &.{
+            cx.make(kete.Text{ .text = "Address", .style = .{ .size = 18, .color = t.on_surface_variant }, .wrap = false }),
             cx.make(AddressConfigButton{
                 .state = state,
                 .actions = if (self.manager != null) self.actions else null,
@@ -120,7 +120,7 @@ fn addressRow(
                 .gateway = self.network.gateway,
             }),
         } }) }),
-        cx.make(ui.Expanded{ .child = b.value(address_text) }),
+        cx.make(kete.Expanded{ .child = b.value(address_text) }),
     } });
 }
 
@@ -138,8 +138,8 @@ const PickAdapter = struct {
     }
 };
 
-fn pickAdapter(cx: *ui.Context, state: *State, index: usize) ?ui.Callback {
-    const p = cx.ui.arena().create(PickAdapter) catch return null;
+fn pickAdapter(cx: *kete.BuildContext, state: *State, index: usize) ?kete.Callback {
+    const p = cx.arena.create(PickAdapter) catch return null;
     p.* = .{ .state = state, .index = index };
     return .of(p, PickAdapter.press);
 }
@@ -165,7 +165,7 @@ pub const AddressConfigButton = struct {
 
     pub const State = BtnState;
     pub const BtnState = struct {
-        node: ?*ui.Node = null,
+        node: ?*kete.WidgetNode = null,
         state: ?*PageState = null,
         actions: ?*Actions = null,
         current: info.manager.Addressing = .dhcp,
@@ -173,7 +173,7 @@ pub const AddressConfigButton = struct {
         ip: ?[4]u8 = null,
         prefix: u8 = 0,
         gateway: ?[4]u8 = null,
-        interaction: ui.Interaction = .{},
+        interaction: kete.PointerInteraction = .{},
 
         fn open(st: *BtnState) void {
             const n = st.node orelse return;
@@ -215,13 +215,13 @@ pub const AddressConfigButton = struct {
             if (st.node) |n| n.ui.closeMenu();
         }
 
-        fn buildPopup(st: *BtnState, cx: *ui.Context) ui.Widget {
-            const page_st = st.state orelse return cx.make(ui.Empty{});
+        fn buildPopup(st: *BtnState, cx: *kete.BuildContext) kete.Widget {
+            const page_st = st.state orelse return cx.make(kete.SizedBox.empty);
             const t = cx.theme();
-            const a = cx.ui.arena();
+            const a = cx.arena;
             const static = page_st.static_form or st.current == .static;
-            var rows: std.ArrayList(ui.Widget) = .empty;
-            rows.append(a, cx.make(ui.Center{ .height_factor = 1, .child = cx.make(PillBar{ .children = &.{
+            var rows: std.ArrayList(kete.Widget) = .empty;
+            rows.append(a, cx.make(kete.Align{ .height_factor = 1, .child = cx.make(PillBar{ .children = &.{
                 cx.make(PillButton{
                     .label = "DHCP",
                     .selected = !static,
@@ -240,9 +240,9 @@ pub const AddressConfigButton = struct {
 
             if (!static) {
                 const gw_text = if (st.gateway) |g| cx.fmt("{d}.{d}.{d}.{d} (DHCP)", .{ g[0], g[1], g[2], g[3] }) else "None";
-                rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-                    cx.make(ui.SizedBox{ .width = 110, .child = cx.make(ui.Text{ .text = "Gateway", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
-                    cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = gw_text, .style = .{ .size = 16, .color = t.on_surface }, .wrap = false }) }),
+                rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
+                    cx.make(kete.SizedBox{ .width = 110, .child = cx.make(kete.Text{ .text = "Gateway", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
+                    cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = gw_text, .style = .{ .size = 16, .color = t.on_surface }, .wrap = false }) }),
                 } })) catch {};
             } else {
                 if (!page_st.form_filled) {
@@ -266,11 +266,11 @@ pub const AddressConfigButton = struct {
                         },
                     }
                 }
-                const on_apply: ?ui.Callback = if (st.actions != null) .of(st, BtnState.apply) else null;
+                const on_apply: ?kete.Callback = if (st.actions != null) .of(st, BtnState.apply) else null;
                 const key = @as(u64, page_st.form_id) << 1;
-                rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-                    cx.make(ui.SizedBox{ .width = 110, .child = cx.make(ui.Text{ .text = "Address", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
-                    cx.make(ui.Expanded{ .child = cx.make(ui.TextField{
+                rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
+                    cx.make(kete.SizedBox{ .width = 110, .child = cx.make(kete.Text{ .text = "Address", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
+                    cx.make(kete.Expanded{ .child = cx.make(kete.TextField{
                         .placeholder = "Address/prefix",
                         .initial = page_st.address.text(),
                         .max_len = page_st.address.buf.len,
@@ -279,9 +279,9 @@ pub const AddressConfigButton = struct {
                         .on_submit = on_apply,
                     }).withKey(key) }),
                 } })) catch {};
-                rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-                    cx.make(ui.SizedBox{ .width = 110, .child = cx.make(ui.Text{ .text = "Gateway", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
-                    cx.make(ui.Expanded{ .child = cx.make(ui.TextField{
+                rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
+                    cx.make(kete.SizedBox{ .width = 110, .child = cx.make(kete.Text{ .text = "Gateway", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
+                    cx.make(kete.Expanded{ .child = cx.make(kete.TextField{
                         .placeholder = "Gateway",
                         .initial = page_st.gateway.text(),
                         .max_len = page_st.gateway.buf.len,
@@ -290,28 +290,29 @@ pub const AddressConfigButton = struct {
                         .on_submit = on_apply,
                     }).withKey(key | 1) }),
                 } })) catch {};
-                if (page_st.static_invalid) rows.append(a, cx.make(ui.Text{
+                if (page_st.static_invalid) rows.append(a, cx.make(kete.Text{
                     .text = "Give an address and prefix length (192.168.1.50/24), and a gateway or none",
                     .style = .{ .size = 15, .color = t.@"error" },
                 })) catch {};
-                rows.append(a, cx.make(ui.Row{ .main_axis_alignment = .end, .children = &.{
-                    cx.make(ui.OutlinedButton{ .label = "Apply", .on_press = on_apply }),
+                rows.append(a, cx.make(kete.Row{ .main_axis_alignment = .end, .children = &.{
+                    cx.make(kete.OutlinedButton{ .label = "Apply", .on_press = on_apply }),
                 } })) catch {};
             }
 
-            return cx.make(ui.Decorated{
+            return cx.make(kete.RoundedBox{
                 .color = t.surface_container,
-                .border = .{ .width = 1, .color = t.outline_variant },
+                .border_width = 1,
+                .border_color = t.outline_variant,
                 .radius = .all(8),
-                .child = cx.make(ui.SizedBox{ .width = 360, .child = cx.make(ui.Padding{
+                .child = cx.make(kete.SizedBox{ .width = 360, .child = cx.make(kete.Padding{
                     .padding = .all(16),
-                    .child = cx.make(ui.Column{ .main_axis_size = .min, .cross_axis_alignment = .stretch, .spacing = 12, .children = rows.items }),
+                    .child = cx.make(kete.Column{ .fill = false, .cross_axis_alignment = .stretch, .spacing = 12, .children = rows.items }),
                 }) }),
             });
         }
     };
 
-    pub fn build(self: *const AddressConfigButton, cx: *ui.Context, state: *BtnState) ui.Widget {
+    pub fn build(self: *const AddressConfigButton, cx: *kete.BuildContext, state: *BtnState) kete.Widget {
         state.node = cx.node;
         state.state = self.state;
         state.actions = self.actions;
@@ -320,7 +321,7 @@ pub const AddressConfigButton = struct {
         state.ip = self.ip;
         state.prefix = self.prefix;
         state.gateway = self.gateway;
-        return cx.make(ui.IconButton{
+        return cx.make(kete.IconButton{
             .icon = .settings,
             .size = 24,
             .icon_size = 18,
@@ -330,11 +331,11 @@ pub const AddressConfigButton = struct {
 };
 
 const testing = std.testing;
-const font = @import("font");
+const font = kete.font;
 
 test "without a network adapter, the Ethernet page says so" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const u = try ui.Ui.create(testing.allocator, &f);
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
     const d = view.sample();
     const none: info.Network = .{};
@@ -347,14 +348,14 @@ test "without a network adapter, the Ethernet page says so" {
 
 test "choosing a static address for Ethernet in the Address popup, and DHCP again" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const u = try ui.Ui.create(testing.allocator, &f);
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
     const d = view.sample();
     var report = view.sampleWifi();
     var actions: Actions = .{};
     var frame_no: u64 = 0;
     const Draw = struct {
-        fn draw(uu: *ui.Ui, dd: anytype, r: *const info.manager.Report, acts: *Actions, n: *u64, size: [2]u32) void {
+        fn draw(uu: *kete.ui.WindowUi, dd: anytype, r: *const info.manager.Report, acts: *Actions, n: *u64, size: [2]u32) void {
             n.* += 1;
             uu.frame(size[0], size[1], n.*, Settings{ .commit = "x", .actions = acts, .system = &dd.sys, .usage = dd.usage, .network = &dd.net, .manager = r });
         }
@@ -380,8 +381,8 @@ test "choosing a static address for Ethernet in the Address popup, and DHCP agai
     // Static opens the form in the popup, filled in with what DHCP gave; it fits.
     view.click(u, view.findText(u.menu_root.?, "Static").?);
     Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
-    const field = view.findType(u.menu_root.?, ui.TextField).?;
-    try testing.expectEqualStrings("192.168.1.42/24", field.state(ui.TextField.State).text());
+    const field = view.findType(u.menu_root.?, kete.TextField).?;
+    try testing.expectEqualStrings("192.168.1.42/24", field.state(kete.TextField.State).text());
     try testing.expect(actions.ethernet == null);
     for ([_][2]u32{ .{ 1920, 960 }, .{ 1280, 600 }, .{ 1024, 668 }, .{ 960, 480 } }) |size| {
         Draw(u, d, &report, &actions, &frame_no, size);
@@ -410,17 +411,17 @@ test "choosing a static address for Ethernet in the Address popup, and DHCP agai
     try testing.expect(view.findText(u.root.?, "192.168.1.42/24 (static)") != null);
     view.click(u, view.findType(u.root.?, AddressConfigButton).?);
     Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
-    try testing.expect(view.findType(u.menu_root.?, ui.TextField) != null);
+    try testing.expect(view.findType(u.menu_root.?, kete.TextField) != null);
     view.click(u, view.findText(u.menu_root.?, "DHCP").?);
     try testing.expect(actions.ethernet.? == .dhcp);
     report.ethernet.addressing = .dhcp;
     Draw(u, d, &report, &actions, &frame_no, .{ 1920, 960 });
-    try testing.expect(view.findType(u.menu_root.?, ui.TextField) == null);
+    try testing.expect(view.findType(u.menu_root.?, kete.TextField) == null);
 }
 
 test "choosing between multiple Ethernet adapters with pill buttons" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const u = try ui.Ui.create(testing.allocator, &f);
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
     var d = view.sample();
     d.net.len = 2;

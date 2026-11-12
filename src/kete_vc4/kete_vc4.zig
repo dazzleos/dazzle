@@ -155,7 +155,7 @@ const ThemeWatch = struct {
 };
 
 /// Dazzle's appearance setting, as kete's theme.
-fn themeMode(m: ui.theme.Mode) kete.ui.theme.ThemeMode {
+pub fn themeMode(m: ui.theme.Mode) kete.ui.theme.ThemeMode {
     return switch (m) {
         inline else => |tag| @field(kete.ui.theme.ThemeMode, @tagName(tag)),
     };

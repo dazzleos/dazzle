@@ -4,8 +4,8 @@
 //! list above a fixed status bar with Update all and Refresh.
 
 const std = @import("std");
-const ui = @import("ui");
-const gfx = @import("gfx");
+const kete = @import("kete");
+const gfx = kete.gfx;
 const store = @import("store");
 const sys_mod = @import("sys");
 const info = @import("info.zig");
@@ -18,7 +18,7 @@ const Builder = view.Builder;
 const Page = view.Page;
 
 pub const label = "Software";
-pub const icon: ui.icons.Icon = .apps;
+pub const icon: kete.IconName = .apps;
 
 /// What the Software page shows of apps.
 pub const Apps = struct {
@@ -112,12 +112,12 @@ pub const State = struct {
     }
 };
 
-pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
+pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     const cx = b.cx;
     const t = &cx.ui.theme;
     const apps = &self.apps;
-    var rows: std.ArrayList(ui.Widget) = .empty;
-    const a = cx.ui.arena();
+    var rows: std.ArrayList(kete.Widget) = .empty;
+    const a = cx.arena;
     const os_busy = self.update.status == .checking or self.update.status == .downloading or self.update.status == .installing;
     const busy = apps.busy != null or os_busy;
     const err_msg = if (apps.message.len > 0 and !std.mem.startsWith(u8, apps.message, "Cannot get the list of apps"))
@@ -143,25 +143,25 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
         const this_busy = if (apps.busy) |n| std.mem.eql(u8, n, app.name) or (std.mem.eql(u8, n, "*") and updatable) else false;
         const enabled = self.actions != null and !busy;
         const x = if (self.actions) |acts| appAct(cx, acts, state, app.name) else null;
-        const button: ui.Widget = if (this_busy)
-            cx.make(ui.Spinner{ .size = 28 })
+        const button: kete.Widget = if (this_busy)
+            cx.make(kete.Spinner{ .size = 28 })
         else if (updatable)
-            cx.make(ui.OutlinedButton{ .label = "Update", .icon = .download, .on_press = if (enabled) .of(x.?, AppAct.install) else null })
+            cx.make(kete.OutlinedButton{ .label = "Update", .icon = .download, .on_press = if (enabled) .of(x.?, AppAct.install) else null })
         else if (installed)
-            cx.make(ui.OutlinedButton{ .icon = .delete, .destructive = true, .on_press = if (enabled) .of(x.?, AppAct.remove) else null })
+            cx.make(kete.OutlinedButton{ .icon = .delete, .destructive = true, .on_press = if (enabled) .of(x.?, AppAct.remove) else null })
         else
-            cx.make(ui.OutlinedButton{ .label = "Install", .icon = .download, .on_press = if (enabled) .of(x.?, AppAct.install) else null });
+            cx.make(kete.OutlinedButton{ .label = "Install", .icon = .download, .on_press = if (enabled) .of(x.?, AppAct.install) else null });
         var size_buf: [32]u8 = undefined;
         const detail = if (app.description.len > 0)
             cx.fmt("{s} · {s}", .{ app.description, info.formatBytes(&size_buf, app.size) })
         else
             cx.fmt("{s}", .{info.formatBytes(&size_buf, app.size)});
         const app_icon: ?*const gfx.Image = if (i < apps.icons.len) apps.icons[i] else null;
-        rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = &.{
+        rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = &.{
             softwareIcon(cx, app_icon),
-            cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 2, .children = &.{
-                cx.make(ui.Text{ .text = app.title, .style = .{ .size = 18, .color = t.on_surface }, .wrap = false, .ellipsis = true }),
-                cx.make(ui.Text{ .text = detail, .style = .{ .size = 15, .color = t.on_surface_variant } }),
+            cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 2, .children = &.{
+                cx.make(kete.Text{ .text = app.title, .style = .{ .size = 18, .color = t.on_surface }, .wrap = false, .ellipsis = true }),
+                cx.make(kete.Text{ .text = detail, .style = .{ .size = 15, .color = t.on_surface_variant } }),
             } }) }),
             button,
         } })) catch {};
@@ -180,16 +180,16 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
         "No list of apps yet: is the network up?"
     else
         "All apps updated";
-    var footer_children: std.ArrayList(ui.Widget) = .empty;
-    footer_children.append(a, cx.make(ui.Expanded{ .child = b.value(status) })) catch {};
+    var footer_children: std.ArrayList(kete.Widget) = .empty;
+    footer_children.append(a, cx.make(kete.Expanded{ .child = b.value(status) })) catch {};
     if (updates > 0) {
-        footer_children.append(a, cx.make(ui.OutlinedButton{
+        footer_children.append(a, cx.make(kete.OutlinedButton{
             .label = "Update all",
             .icon = .download,
             .on_press = if (self.actions != null and !busy) .of(appAct(cx, self.actions.?, state, ""), AppAct.updateAll) else null,
         })) catch {};
     }
-    footer_children.append(a, cx.make(ui.OutlinedButton{
+    footer_children.append(a, cx.make(kete.OutlinedButton{
         .label = "Refresh",
         .icon = .refresh,
         .on_press = if (self.actions != null and !busy) .of(appAct(cx, self.actions.?, state, ""), AppAct.refresh) else null,
@@ -202,25 +202,25 @@ pub fn build(self: *const Settings, b: Builder, state: *State) ui.Widget {
         .default_key = if (apps.default_key.len > 0) apps.default_key else store.default_signing_key,
         .subscribed_keys = apps.subscribed_keys,
     })) catch {};
-    const footer = cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = footer_children.items });
-    return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &.{
-        cx.make(ui.Expanded{ .child = cx.make(ui.Snackbar{
+    const footer = cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = footer_children.items });
+    return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .children = &.{
+        cx.make(kete.Expanded{ .child = cx.make(kete.Snackbar{
             .message = snackbar_msg,
             .on_dismiss = .of(state, State.dismissMessage),
-            .child = cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{
+            .child = cx.make(kete.ScrollView{ .child = cx.make(kete.Padding{
                 .padding = .{ .left = 24, .top = 24, .right = 24, .bottom = 12 },
-                .child = cx.make(ui.Align{
+                .child = cx.make(kete.Align{
                     .alignment = .top_center,
-                    .child = cx.make(ui.ConstrainedBox{ .constraints = .{ .max_w = view.max_page_width }, .child = b.page(rows.items) }),
+                    .child = cx.make(kete.ConstrainedBox{ .constraints = .{ .max_w = view.max_page_width }, .child = b.page(rows.items) }),
                 }),
             }) }).withKey(@as(u64, @intFromEnum(Page.apps)) + 1),
         }) }),
-        cx.make(ui.Padding{
+        cx.make(kete.Padding{
             .padding = .{ .left = 24, .top = 12, .right = 24, .bottom = 24 },
-            .child = cx.make(ui.Align{
+            .child = cx.make(kete.Align{
                 .alignment = .center,
                 .height_factor = 1,
-                .child = cx.make(ui.ConstrainedBox{ .constraints = .{ .max_w = view.max_page_width }, .child = footer }),
+                .child = cx.make(kete.ConstrainedBox{ .constraints = .{ .max_w = view.max_page_width }, .child = footer }),
             }),
         }),
     } });
@@ -237,17 +237,17 @@ fn restartNow(a: *Actions) void {
 /// Dazzle itself, at the head of the Software list: how updates stand
 /// (with Update or Restart), and an expander showing the build and
 /// kernel version.
-fn dazzleRows(self: *const Settings, b: Builder, state: *State, rows: *std.ArrayList(ui.Widget)) void {
+fn dazzleRows(self: *const Settings, b: Builder, state: *State, rows: *std.ArrayList(kete.Widget)) void {
     const cx = b.cx;
     const t = &cx.ui.theme;
-    const a = cx.ui.arena();
+    const a = cx.arena;
     const u = &self.update;
     var size_buf: [32]u8 = undefined;
     const detail = if (self.usage.storage.system > 0)
         cx.fmt("The operating system · {s}", .{info.formatBytes(&size_buf, self.usage.storage.system)})
     else
         "The operating system";
-    const Button = struct { label: []const u8, icon: ui.icons.Icon, flag: enum { download, restart } };
+    const Button = struct { label: []const u8, icon: kete.IconName, flag: enum { download, restart } };
     const available_text = if (u.message.len > 0)
         u.message
     else if (u.size > 0)
@@ -262,35 +262,35 @@ fn dazzleRows(self: *const Settings, b: Builder, state: *State, rows: *std.Array
         .installing => .{ "Installing the update…", null, true },
         .ready => .{ if (u.message.len > 0) u.message else "The update is installed: restart to use it", Button{ .label = "Restart", .icon = .restart_alt, .flag = .restart }, false },
     };
-    const end: ui.Widget = if (busy) cx.make(ui.Spinner{ .size = 28 }) else if (button) |btn| cx.make(ui.OutlinedButton{
+    const end: kete.Widget = if (busy) cx.make(kete.Spinner{ .size = 28 }) else if (button) |btn| cx.make(kete.OutlinedButton{
         .label = btn.label,
         .icon = btn.icon,
         .on_press = if (self.actions) |acts| switch (btn.flag) {
             .download => .of(acts, downloadUpdate),
             .restart => .of(acts, restartNow),
         } else null,
-    }) else cx.make(ui.Empty{});
-    const header = cx.make(ui.Pressable{
+    }) else cx.make(kete.SizedBox.empty);
+    const header = cx.make(kete.Pressable{
         .on_press = .of(state, State.toggleDazzle),
-        .child = cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = &.{
+        .child = cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = &.{
             softwareIcon(cx, u.icon),
-            cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 2, .children = &.{
-                cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 4, .children = &.{
-                    cx.make(ui.Text{ .text = "Dazzle", .style = .{ .size = 18, .color = t.on_surface }, .wrap = false }),
-                    cx.make(ui.Icon{ .icon = if (state.dazzle_expanded) .expand_more else .chevron_right, .size = 20, .color = t.on_surface_variant }),
+            cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 2, .children = &.{
+                cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 4, .children = &.{
+                    cx.make(kete.Text{ .text = "Dazzle", .style = .{ .size = 18, .color = t.on_surface }, .wrap = false }),
+                    cx.make(kete.Icon{ .icon = if (state.dazzle_expanded) .expand_more else .chevron_right, .size = 20, .color = t.on_surface_variant }),
                 } }),
-                cx.make(ui.Text{ .text = text, .style = .{ .size = 15, .color = t.on_surface_variant } }),
+                cx.make(kete.Text{ .text = text, .style = .{ .size = 15, .color = t.on_surface_variant } }),
             } }) }),
         } }),
     });
-    rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = &.{
-        cx.make(ui.Expanded{ .child = header }),
+    rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = &.{
+        cx.make(kete.Expanded{ .child = header }),
         end,
     } })) catch {};
     if (state.dazzle_expanded) {
-        rows.append(a, cx.make(ui.Padding{ .padding = .{ .left = 80 }, .child = cx.make(ui.Column{
+        rows.append(a, cx.make(kete.Padding{ .padding = .{ .left = 80 }, .child = cx.make(kete.Column{
             .cross_axis_alignment = .stretch,
-            .main_axis_size = .min,
+            .fill = false,
             .spacing = 4,
             .children = &.{
                 dazzleDetail(cx, "Build", self.commit),
@@ -300,11 +300,11 @@ fn dazzleRows(self: *const Settings, b: Builder, state: *State, rows: *std.Array
     }
 }
 
-fn dazzleDetail(cx: *ui.Context, name: []const u8, text: []const u8) ui.Widget {
+fn dazzleDetail(cx: *kete.BuildContext, name: []const u8, text: []const u8) kete.Widget {
     const t = &cx.ui.theme;
-    return cx.make(ui.Row{ .cross_axis_alignment = .start, .spacing = 12, .children = &.{
-        cx.make(ui.SizedBox{ .width = 80, .child = cx.make(ui.Text{ .text = name, .style = .{ .size = 15, .color = t.on_surface_variant }, .wrap = false }) }),
-        cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = text, .style = .{ .size = 15, .color = t.on_surface } }) }),
+    return cx.make(kete.Row{ .cross_axis_alignment = .start, .spacing = 12, .children = &.{
+        cx.make(kete.SizedBox{ .width = 80, .child = cx.make(kete.Text{ .text = name, .style = .{ .size = 15, .color = t.on_surface_variant }, .wrap = false }) }),
+        cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = text, .style = .{ .size = 15, .color = t.on_surface } }) }),
     } });
 }
 
@@ -337,8 +337,8 @@ const AppAct = struct {
     }
 };
 
-fn appAct(cx: *ui.Context, actions: *Actions, state: *State, name: []const u8) *AppAct {
-    const x = cx.ui.arena().create(AppAct) catch unreachable;
+fn appAct(cx: *kete.BuildContext, actions: *Actions, state: *State, name: []const u8) *AppAct {
+    const x = cx.arena.create(AppAct) catch unreachable;
     x.* = .{ .actions = actions, .state = state, .name = .init(name) };
     return x;
 }
@@ -352,8 +352,8 @@ const KeyAct = struct {
     }
 };
 
-fn keyAct(cx: *ui.Context, actions: *Actions, key: [store.key_hex_len]u8) *KeyAct {
-    const x = cx.ui.arena().create(KeyAct) catch unreachable;
+fn keyAct(cx: *kete.BuildContext, actions: *Actions, key: [store.key_hex_len]u8) *KeyAct {
+    const x = cx.arena.create(KeyAct) catch unreachable;
     x.* = .{ .actions = actions, .key = key };
     return x;
 }
@@ -371,7 +371,7 @@ pub const ServerConfigButton = struct {
 
     pub const State = BtnState;
     pub const BtnState = struct {
-        node: ?*ui.Node = null,
+        node: ?*kete.WidgetNode = null,
         state: ?*PageState = null,
         actions: ?*Actions = null,
         source: []const u8 = store.default_url,
@@ -438,21 +438,21 @@ pub const ServerConfigButton = struct {
             }
         }
 
-        fn buildPopup(st: *BtnState, cx: *ui.Context) ui.Widget {
-            const page_st = st.state orelse return cx.make(ui.Empty{});
+        fn buildPopup(st: *BtnState, cx: *kete.BuildContext) kete.Widget {
+            const page_st = st.state orelse return cx.make(kete.SizedBox.empty);
             const t = cx.theme();
-            const a = cx.ui.arena();
+            const a = cx.arena;
             const custom = page_st.custom_form or st.isCustom();
-            var rows: std.ArrayList(ui.Widget) = .empty;
-            rows.append(a, cx.make(ui.Center{ .height_factor = 1, .child = cx.make(ui.PillBar{ .children = &.{
-                cx.make(ui.PillButton{
+            var rows: std.ArrayList(kete.Widget) = .empty;
+            rows.append(a, cx.make(kete.Align{ .height_factor = 1, .child = cx.make(kete.PillBar{ .children = &.{
+                cx.make(kete.PillButton{
                     .label = "Default",
                     .selected = !custom,
                     .first = true,
                     .last = false,
                     .on_press = if (st.actions != null) .of(st, BtnState.chooseDefault) else null,
                 }),
-                cx.make(ui.PillButton{
+                cx.make(kete.PillButton{
                     .label = "Custom",
                     .selected = custom,
                     .first = false,
@@ -462,9 +462,9 @@ pub const ServerConfigButton = struct {
             } }) })) catch {};
 
             if (!custom) {
-                rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-                    cx.make(ui.SizedBox{ .width = 70, .child = cx.make(ui.Text{ .text = "Server", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
-                    cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = st.default_source, .style = .{ .size = 16, .color = t.on_surface } }) }),
+                rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
+                    cx.make(kete.SizedBox{ .width = 70, .child = cx.make(kete.Text{ .text = "Server", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
+                    cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = st.default_source, .style = .{ .size = 16, .color = t.on_surface } }) }),
                 } })) catch {};
             } else {
                 if (!page_st.form_filled) {
@@ -473,11 +473,11 @@ pub const ServerConfigButton = struct {
                     page_st.server_invalid = false;
                     page_st.server_url.set(if (st.isCustom()) st.source else "https://");
                 }
-                const on_apply: ?ui.Callback = if (st.actions != null) .of(st, BtnState.apply) else null;
+                const on_apply: ?kete.Callback = if (st.actions != null) .of(st, BtnState.apply) else null;
                 const key = @as(u64, page_st.form_id);
-                rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-                    cx.make(ui.SizedBox{ .width = 70, .child = cx.make(ui.Text{ .text = "Server", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
-                    cx.make(ui.Expanded{ .child = cx.make(ui.TextField{
+                rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
+                    cx.make(kete.SizedBox{ .width = 70, .child = cx.make(kete.Text{ .text = "Server", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
+                    cx.make(kete.Expanded{ .child = cx.make(kete.TextField{
                         .placeholder = "https://example.com/dazzle",
                         .initial = page_st.server_url.text(),
                         .max_len = page_st.server_url.buf.len,
@@ -486,26 +486,26 @@ pub const ServerConfigButton = struct {
                         .on_submit = on_apply,
                     }).withKey(key) }),
                 } })) catch {};
-                if (page_st.server_invalid) rows.append(a, cx.make(ui.Text{
+                if (page_st.server_invalid) rows.append(a, cx.make(kete.Text{
                     .text = "Give an https:// URL",
                     .style = .{ .size = 15, .color = t.@"error" },
                 })) catch {};
-                rows.append(a, cx.make(ui.Row{ .main_axis_alignment = .end, .children = &.{
-                    cx.make(ui.OutlinedButton{ .label = "Apply", .on_press = on_apply }),
+                rows.append(a, cx.make(kete.Row{ .main_axis_alignment = .end, .children = &.{
+                    cx.make(kete.OutlinedButton{ .label = "Apply", .on_press = on_apply }),
                 } })) catch {};
             }
 
-            rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-                cx.make(ui.SizedBox{ .width = 70, .child = cx.make(ui.Text{ .text = "Keys", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
-                cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = st.default_key, .style = .{ .size = 15, .color = t.on_surface }, .wrap = false, .ellipsis = true }) }),
+            rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
+                cx.make(kete.SizedBox{ .width = 70, .child = cx.make(kete.Text{ .text = "Keys", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
+                cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = st.default_key, .style = .{ .size = 15, .color = t.on_surface }, .wrap = false, .ellipsis = true }) }),
             } })) catch {};
             for (st.subscribed_keys) |k| {
                 const key_str = cx.fmt("{s}", .{&k});
-                const on_unsub: ?ui.Callback = if (st.actions) |acts| .of(keyAct(cx, acts, k), KeyAct.unsubscribe) else null;
-                rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-                    cx.make(ui.SizedBox{ .width = 70, .child = cx.make(ui.Empty{}) }),
-                    cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = key_str, .style = .{ .size = 15, .color = t.on_surface }, .wrap = false, .ellipsis = true }) }),
-                    cx.make(ui.IconButton{
+                const on_unsub: ?kete.Callback = if (st.actions) |acts| .of(keyAct(cx, acts, k), KeyAct.unsubscribe) else null;
+                rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
+                    cx.make(kete.SizedBox{ .width = 70, .child = cx.make(kete.SizedBox.empty) }),
+                    cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = key_str, .style = .{ .size = 15, .color = t.on_surface }, .wrap = false, .ellipsis = true }) }),
+                    cx.make(kete.IconButton{
                         .icon = .delete,
                         .size = 28,
                         .icon_size = 18,
@@ -513,9 +513,9 @@ pub const ServerConfigButton = struct {
                     }),
                 } })) catch {};
             }
-            const on_subscribe: ?ui.Callback = if (st.actions != null) .of(st, BtnState.subscribeKey) else null;
-            rows.append(a, cx.make(ui.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-                cx.make(ui.Expanded{ .child = cx.make(ui.TextField{
+            const on_subscribe: ?kete.Callback = if (st.actions != null) .of(st, BtnState.subscribeKey) else null;
+            rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
+                cx.make(kete.Expanded{ .child = cx.make(kete.TextField{
                     .placeholder = "Ed25519 public key (64 hex characters)",
                     .initial = page_st.key_input.text(),
                     .max_len = store.key_hex_len,
@@ -523,26 +523,27 @@ pub const ServerConfigButton = struct {
                     .on_changed = .of(page_st, PageState.setKeyInput),
                     .on_submit = on_subscribe,
                 }).withKey(@as(u64, page_st.key_form_id)) }),
-                cx.make(ui.OutlinedButton{ .label = "Subscribe", .on_press = on_subscribe }),
+                cx.make(kete.OutlinedButton{ .label = "Subscribe", .on_press = on_subscribe }),
             } })) catch {};
-            if (page_st.key_invalid) rows.append(a, cx.make(ui.Text{
+            if (page_st.key_invalid) rows.append(a, cx.make(kete.Text{
                 .text = "Give a 64-character hex Ed25519 public key",
                 .style = .{ .size = 15, .color = t.@"error" },
             })) catch {};
 
-            return cx.make(ui.Decorated{
+            return cx.make(kete.RoundedBox{
                 .color = t.surface_container,
-                .border = .{ .width = 1, .color = t.outline_variant },
+                .border_width = 1,
+                .border_color = t.outline_variant,
                 .radius = .all(8),
-                .child = cx.make(ui.SizedBox{ .width = 420, .child = cx.make(ui.Padding{
+                .child = cx.make(kete.SizedBox{ .width = 420, .child = cx.make(kete.Padding{
                     .padding = .all(16),
-                    .child = cx.make(ui.Column{ .main_axis_size = .min, .cross_axis_alignment = .stretch, .spacing = 12, .children = rows.items }),
+                    .child = cx.make(kete.Column{ .fill = false, .cross_axis_alignment = .stretch, .spacing = 12, .children = rows.items }),
                 }) }),
             });
         }
     };
 
-    pub fn build(self: *const ServerConfigButton, cx: *ui.Context, state: *BtnState) ui.Widget {
+    pub fn build(self: *const ServerConfigButton, cx: *kete.BuildContext, state: *BtnState) kete.Widget {
         state.node = cx.node;
         state.state = self.state;
         state.actions = self.actions;
@@ -550,7 +551,7 @@ pub const ServerConfigButton = struct {
         state.default_source = self.default_source;
         state.default_key = self.default_key;
         state.subscribed_keys = self.subscribed_keys;
-        return cx.make(ui.IconButton{
+        return cx.make(kete.IconButton{
             .icon = .settings,
             .size = 36,
             .icon_size = 20,
@@ -561,12 +562,12 @@ pub const ServerConfigButton = struct {
 
 /// Renders a 64x64 PNG icon, or the fallback `.apps` icon when no icon
 /// can be found.
-fn softwareIcon(cx: *ui.Context, image: ?*const gfx.Image) ui.Widget {
+fn softwareIcon(cx: *kete.BuildContext, image: ?*const gfx.Image) kete.Widget {
     const t = &cx.ui.theme;
     if (image) |img| {
-        return cx.make(ui.SizedBox{ .width = 64, .height = 64, .child = cx.make(ui.Image{ .image = img }) });
+        return cx.make(kete.SizedBox{ .width = 64, .height = 64, .child = cx.make(kete.Image{ .source = .{ .image = img } }) });
     }
-    return cx.make(ui.SizedBox{ .width = 64, .height = 64, .child = cx.make(ui.Center{ .child = cx.make(ui.Icon{ .icon = .apps, .size = 48, .color = t.on_surface_variant }) }) });
+    return cx.make(kete.SizedBox{ .width = 64, .height = 64, .child = cx.make(kete.Align{ .child = cx.make(kete.Icon{ .icon = .apps, .size = 48, .color = t.on_surface_variant }) }) });
 }
 
 pub const max_icons = 64;
@@ -666,11 +667,11 @@ fn loadAppIcon(gpa: std.mem.Allocator, dir: []const u8, icons_path: []const u8, 
 }
 
 const testing = std.testing;
-const font = @import("font");
+const font = kete.font;
 
 test "installing and removing apps, and getting their list again" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const u = try ui.Ui.create(testing.allocator, &f);
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
     const d = view.sample();
     var actions: Actions = .{};
@@ -680,11 +681,11 @@ test "installing and removing apps, and getting their list again" {
     u.frame(1920, 960, 1, settings);
     try testing.expect(view.findText(u.root.?, "All apps updated") != null);
     try testing.expect(view.findText(u.root.?, "Update all") == null);
-    view.click(u, view.up(view.findText(u.root.?, "Install").?, ui.OutlinedButton).?);
+    view.click(u, view.up(view.findText(u.root.?, "Install").?, kete.OutlinedButton).?);
     try testing.expectEqualStrings("dazzle-files", actions.install.?.slice());
-    view.click(u, view.up(view.findIcon(u.root.?, .delete).?, ui.OutlinedButton).?);
+    view.click(u, view.up(view.findIcon(u.root.?, .delete).?, kete.OutlinedButton).?);
     try testing.expectEqualStrings("dazzle-demo", actions.remove.?.slice());
-    view.click(u, view.up(view.findText(u.root.?, "Refresh").?, ui.OutlinedButton).?);
+    view.click(u, view.up(view.findText(u.root.?, "Refresh").?, kete.OutlinedButton).?);
     try testing.expect(actions.refresh_apps);
 
     // While one installs: a spinner in its place, and nothing else can be
@@ -694,16 +695,16 @@ test "installing and removing apps, and getting their list again" {
     u.frame(1920, 960, 2, settings);
     try testing.expect(view.findText(u.root.?, "Install") == null);
     try testing.expect(view.findText(u.root.?, "Installing…") != null);
-    view.click(u, view.up(view.findIcon(u.root.?, .delete).?, ui.OutlinedButton).?);
+    view.click(u, view.up(view.findIcon(u.root.?, .delete).?, kete.OutlinedButton).?);
     try testing.expect(actions.remove == null);
 
     // An install error shows in a dismissible snackbar.
     settings.apps = view.sample_apps;
     settings.apps.message = "Cannot install Files: the server could not be reached (is the network up?)";
     u.frame(1920, 960, 3, settings);
-    const snack = view.findType(u.root.?, ui.Snackbar).?;
+    const snack = view.findType(u.root.?, kete.Snackbar).?;
     try testing.expect(view.findText(snack, "Cannot install Files: the server could not be reached (is the network up?)") != null);
-    view.click(u, view.findType(snack, ui.IconButton).?);
+    view.click(u, view.findType(snack, kete.IconButton).?);
     u.frame(1920, 960, 4, settings);
     try testing.expect(view.findText(u.root.?, "Cannot install Files: the server could not be reached (is the network up?)") == null);
 
@@ -716,7 +717,7 @@ test "installing and removing apps, and getting their list again" {
 
 test "updates: offered, downloaded, installed, then a restart" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const u = try ui.Ui.create(testing.allocator, &f);
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
     const d = view.sample();
     var actions: Actions = .{};
@@ -727,8 +728,8 @@ test "updates: offered, downloaded, installed, then a restart" {
     try testing.expect(view.findText(u.root.?, "Dazzle 0123abc (8 October 2026) is available · 4.0 MB") != null);
     try testing.expect(view.findText(u.root.?, "1 update available") != null);
     // "Update all" is to the left of "Refresh".
-    const update_all_btn = view.up(view.findText(u.root.?, "Update all").?, ui.OutlinedButton).?;
-    const refresh_btn = view.up(view.findText(u.root.?, "Refresh").?, ui.OutlinedButton).?;
+    const update_all_btn = view.up(view.findText(u.root.?, "Update all").?, kete.OutlinedButton).?;
+    const refresh_btn = view.up(view.findText(u.root.?, "Refresh").?, kete.OutlinedButton).?;
     try testing.expect(update_all_btn.position()[0] < refresh_btn.position()[0]);
     view.click(u, update_all_btn);
     try testing.expect(actions.update_all);
@@ -742,11 +743,11 @@ test "updates: offered, downloaded, installed, then a restart" {
 
     // Build and kernel details are shown when Dazzle is expanded.
     try testing.expect(view.findText(u.root.?, "de14aa2 (7 October 2026)") == null);
-    view.click(u, view.up(view.findText(u.root.?, "Dazzle").?, ui.Pressable).?);
+    view.click(u, view.up(view.findText(u.root.?, "Dazzle").?, kete.Pressable).?);
     u.frame(1920, 960, 3, settings);
     try testing.expect(view.findText(u.root.?, "de14aa2 (7 October 2026)") != null);
     try testing.expect(view.findText(u.root.?, "6.12.0 (armv6l)") != null);
-    view.click(u, view.up(view.findText(u.root.?, "Update").?, ui.OutlinedButton).?);
+    view.click(u, view.up(view.findText(u.root.?, "Update").?, kete.OutlinedButton).?);
     try testing.expect(actions.download_update);
 
     // Under way: no update buttons on Dazzle.
@@ -754,13 +755,13 @@ test "updates: offered, downloaded, installed, then a restart" {
     for ([_]update.Status{ .checking, .downloading, .installing }) |s| {
         settings.update = .{ .status = s };
         u.frame(1920, 960, 4, settings);
-        try testing.expect(view.up(view.findText(u.root.?, "Dazzle").?, ui.Row) != null);
+        try testing.expect(view.up(view.findText(u.root.?, "Dazzle").?, kete.Row) != null);
         try testing.expect(view.findText(u.root.?, "Update") == null and view.findText(u.root.?, "Restart") == null);
     }
     settings.update = .{ .status = .ready };
     u.frame(1920, 960, 5, settings);
     try testing.expect(view.findText(u.root.?, "The update is installed: restart to use it") != null);
-    view.click(u, view.up(view.findText(u.root.?, "Restart").?, ui.OutlinedButton).?);
+    view.click(u, view.up(view.findText(u.root.?, "Restart").?, kete.OutlinedButton).?);
     try testing.expect(actions.restart);
 
     settings.update = .{ .status = .current };
@@ -768,7 +769,7 @@ test "updates: offered, downloaded, installed, then a restart" {
     try testing.expect(view.findText(u.root.?, "The operating system · 600 KB") != null);
     try testing.expect(view.findText(u.root.?, "All apps updated") != null);
     try testing.expect(view.findText(u.root.?, "Update all") == null);
-    view.click(u, view.up(view.findText(u.root.?, "Refresh").?, ui.OutlinedButton).?);
+    view.click(u, view.up(view.findText(u.root.?, "Refresh").?, kete.OutlinedButton).?);
     try testing.expect(actions.check_update and actions.refresh_apps);
 
     settings.update = .{ .status = .unknown, .message = "Cannot check for updates: the server could not be reached (is the network up?)" };
@@ -865,7 +866,7 @@ test "software icons: installed when up to date, server when uninstalled, missin
 
 test "the software list scrolls vertically while the bottom bar stays visible" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const u = try ui.Ui.create(testing.allocator, &f);
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
     const d = view.sample();
     const many_apps = [_]store.App{
@@ -910,7 +911,7 @@ test "the software list scrolls vertically while the bottom bar stays visible" {
 
 test "changing the software server to a custom https URL and back to default" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const u = try ui.Ui.create(testing.allocator, &f);
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
     const d = view.sample();
     var actions: Actions = .{};
@@ -924,7 +925,7 @@ test "changing the software server to a custom https URL and back to default" {
     };
     var frame_no: u64 = 0;
     const draw = struct {
-        fn call(uu: *ui.Ui, s: Settings, n: *u64) void {
+        fn call(uu: *kete.ui.WindowUi, s: Settings, n: *u64) void {
             n.* += 1;
             uu.frame(1920, 960, n.*, s);
         }
@@ -947,8 +948,8 @@ test "changing the software server to a custom https URL and back to default" {
     // Choosing Custom shows the URL text field starting with "https://".
     view.click(u, view.findText(u.menu_root.?, "Custom").?);
     draw(u, settings, &frame_no);
-    const field = view.findType(u.menu_root.?, ui.TextField).?;
-    try testing.expectEqualStrings("https://", field.state(ui.TextField.State).text());
+    const field = view.findType(u.menu_root.?, kete.TextField).?;
+    try testing.expectEqualStrings("https://", field.state(kete.TextField.State).text());
     try testing.expect(!view.overflows(u.menu_root.?));
 
     // Non-https URL is rejected with an error message.
@@ -971,14 +972,14 @@ test "changing the software server to a custom https URL and back to default" {
     draw(u, settings, &frame_no);
     view.click(u, view.findType(u.root.?, ServerConfigButton).?);
     draw(u, settings, &frame_no);
-    try testing.expect(view.findType(u.menu_root.?, ui.TextField) != null);
+    try testing.expect(view.findType(u.menu_root.?, kete.TextField) != null);
     view.click(u, view.findText(u.menu_root.?, "Default").?);
     try testing.expectEqualStrings("", actions.software_server.?.slice());
 }
 
 test "subscribing and removing Ed25519 signing keys in the software settings popup" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const u = try ui.Ui.create(testing.allocator, &f);
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
     const d = view.sample();
     var actions: Actions = .{};
@@ -995,7 +996,7 @@ test "subscribing and removing Ed25519 signing keys in the software settings pop
     };
     var frame_no: u64 = 0;
     const draw = struct {
-        fn call(uu: *ui.Ui, s: Settings, n: *u64) void {
+        fn call(uu: *kete.ui.WindowUi, s: Settings, n: *u64) void {
             n.* += 1;
             uu.frame(1920, 960, n.*, s);
         }
@@ -1033,6 +1034,6 @@ test "subscribing and removing Ed25519 signing keys in the software settings pop
     try testing.expect(view.findText(u.menu_root.?, &pub_hex) != null);
     try testing.expect(!view.overflows(u.menu_root.?));
     const del_icon = view.findIcon(u.menu_root.?, .delete).?;
-    view.click(u, view.up(del_icon, ui.IconButton).?);
+    view.click(u, view.up(del_icon, kete.IconButton).?);
     try testing.expectEqualStrings(&pub_hex, actions.unsubscribe_key.?.slice());
 }
