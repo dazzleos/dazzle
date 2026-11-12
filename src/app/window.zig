@@ -581,6 +581,13 @@ pub const Window = struct {
         w.conn.flush() catch {};
     }
 
+    /// Changes the title the shell shows for it.
+    pub fn setTitle(w: *Window, title: []const u8) void {
+        var m = w.toplevel.request(p.xdg_toplevel.request.set_title) catch return;
+        m.string(title).end();
+        w.conn.flush() catch {};
+    }
+
     /// Tells the shell how small the window may be made: as small as its
     /// content can be shown in.
     pub fn setMinSize(w: *Window, width: u32, height: u32) void {

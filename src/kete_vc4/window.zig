@@ -34,8 +34,9 @@ const btn_extra = 0x114;
 
 pub const Window = struct {
     win: *app.Window,
-    /// Its title, as kete set it.
-    title: []const u8,
+    /// Its title, as kete set it (as much as fits).
+    title_buf: [256]u8 = undefined,
+    title_len: usize = 0,
     /// What kete has been given of its input, converted from Dazzle's.
     input: std.ArrayList(kwin.InputEvent) = .empty,
     gpa: std.mem.Allocator,
@@ -70,7 +71,20 @@ pub const Window = struct {
     }
 
     pub fn getTitle(w: *const Window) []const u8 {
-        return w.title;
+        return w.title_buf[0..w.title_len];
+    }
+
+    pub fn setTitle(w: *Window, title: []const u8) void {
+        w.keepTitle(title);
+        w.win.setTitle(w.getTitle());
+    }
+
+    fn keepTitle(w: *Window, title: []const u8) void {
+        var n = @min(title.len, w.title_buf.len);
+        // Not cutting a character in two.
+        while (n > 0 and n < title.len and title[n] & 0xc0 == 0x80) n -= 1;
+        @memcpy(w.title_buf[0..n], title[0..n]);
+        w.title_len = n;
     }
 
     pub fn poll(w: *Window) !void {
@@ -331,7 +345,8 @@ pub const Display = struct {
             side.* = v;
         };
         const win = try app.Window.open(d.gpa, d.gpu, d.environ, options);
-        d.window = .{ .win = win, .title = o.title, .gpa = d.gpa };
+        d.window = .{ .win = win, .gpa = d.gpa };
+        d.window.?.keepTitle(o.title);
         return &d.window.?;
     }
 

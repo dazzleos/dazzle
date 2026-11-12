@@ -1175,9 +1175,11 @@ pub fn build(b: *std.Build) void {
         .root_module = addProgramModule(b, "src/apps/camera/main.zig", target, optimize, pi, shaders, true),
     });
     const install_camera = b.addInstallArtifact(camera_exe, .{});
+    const text_editor_module = addProgramModule(b, "src/apps/text_editor/main.zig", target, optimize, pi, shaders, true);
+    _ = addKete(b, text_editor_module, pi, target, optimize, "src/apps/text_editor");
     const text_editor_exe = b.addExecutable(.{
         .name = "dazzle-text-editor",
-        .root_module = addProgramModule(b, "src/apps/text_editor/main.zig", target, optimize, pi, shaders, true),
+        .root_module = text_editor_module,
     });
     const install_text_editor = b.addInstallArtifact(text_editor_exe, .{});
     const logger_exe = b.addExecutable(.{
@@ -1349,6 +1351,7 @@ pub fn build(b: *std.Build) void {
     host_camera.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_text_editor = addProgramModule(b, "src/apps/text_editor/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_text_editor.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
+    _ = addKete(b, host_text_editor, host, b.graph.host, test_optimize, "src/apps/text_editor");
     const host_blocks = addProgramModule(b, "src/apps/blocks/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_blocks.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_logger = addProgramModule(b, "src/apps/logger/main.zig", b.graph.host, test_optimize, host, shaders, false);
