@@ -1196,9 +1196,11 @@ pub fn build(b: *std.Build) void {
         .root_module = chat_module,
     });
     const install_chat = b.addInstallArtifact(chat_exe, .{});
+    const blocks_module = addProgramModule(b, "src/apps/blocks/main.zig", target, optimize, pi, shaders, true);
+    _ = addKete(b, blocks_module, pi, target, optimize, "src/apps/blocks");
     const blocks_exe = b.addExecutable(.{
         .name = "dazzle-blocks",
-        .root_module = addProgramModule(b, "src/apps/blocks/main.zig", target, optimize, pi, shaders, true),
+        .root_module = blocks_module,
     });
     const install_blocks = b.addInstallArtifact(blocks_exe, .{});
     const setup_module = addProgramModule(b, "src/apps/setup/main.zig", target, optimize, pi, shaders, true);
@@ -1366,6 +1368,7 @@ pub fn build(b: *std.Build) void {
     host_kete_vc4.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_blocks = addProgramModule(b, "src/apps/blocks/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_blocks.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
+    _ = addKete(b, host_blocks, host, b.graph.host, test_optimize, "src/apps/blocks");
     const host_logger = addProgramModule(b, "src/apps/logger/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_logger.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     _ = addKete(b, host_logger, host, b.graph.host, test_optimize, "src/apps/logger");

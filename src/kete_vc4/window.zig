@@ -36,6 +36,22 @@ const btn_middle = 0x112;
 const btn_side = 0x113;
 const btn_extra = 0x114;
 
+/// Sees Dazzle's input before kete does, and takes what it wants (true):
+/// for a game that has the mouse, say (`Display.input_filter`).
+pub const InputFilter = struct {
+    ctx: *anyopaque,
+    f: *const fn (ctx: *anyopaque, e: app.InputEvent) bool,
+
+    pub fn of(ptr: anytype, comptime f: fn (@TypeOf(ptr), app.InputEvent) bool) InputFilter {
+        const P = @TypeOf(ptr);
+        return .{ .ctx = @ptrCast(ptr), .f = struct {
+            fn call(ctx: *anyopaque, e: app.InputEvent) bool {
+                return f(@as(P, @ptrCast(@alignCast(ctx))), e);
+            }
+        }.call };
+    }
+};
+
 /// A key going down or up, for an app's own shortcuts (`Display.on_key`):
 /// its Linux key code, and whether Control is held.
 pub const KeyPress = struct {
@@ -70,6 +86,8 @@ pub const Window = struct {
     last_key: ?u32 = null,
     /// Told of each key before kete is (`Display.on_key`).
     on_key: ?kete.ValueCallback(KeyPress) = null,
+    /// Takes the input it wants before kete sees it (`Display.input_filter`).
+    input_filter: ?InputFilter = null,
 
     pub fn platform(_: *const Window) kwin.WindowPlatform {
         return .custom;
@@ -245,9 +263,11 @@ pub const Window = struct {
     /// Dazzle's input since the last call, as kete's.
     pub fn takeInput(w: *Window) []const kwin.InputEvent {
         w.input.clearRetainingCapacity();
-        for (w.win.takeInput()) |e| if (w.convert(e)) |k| {
+        for (w.win.takeInput()) |e| {
+            if (w.input_filter) |f| if (f.f(f.ctx, e)) continue;
+            const k = w.convert(e) orelse continue;
             w.input.append(w.gpa, k) catch break;
-        };
+        }
         return w.input.items;
     }
 
@@ -367,6 +387,8 @@ pub const Display = struct {
     /// Told of each key before kete is: for an app's shortcuts that work
     /// whatever has the keyboard (or nothing does).
     on_key: ?kete.ValueCallback(KeyPress) = null,
+    /// Sees the input first, and takes what it wants from kete.
+    input_filter: ?InputFilter = null,
 
     const max_app_fds = app.window.max_wake_fds - max_sources;
     const max_sources = 3;
@@ -459,7 +481,7 @@ pub const Display = struct {
             side.* = v;
         };
         const win = try app.Window.open(d.gpa, d.gpu, d.environ, options);
-        d.window = .{ .win = win, .gpa = d.gpa, .drawn_by = d.decorations, .keyboard = d.keyboard, .on_key = d.on_key };
+        d.window = .{ .win = win, .gpa = d.gpa, .drawn_by = d.decorations, .keyboard = d.keyboard, .on_key = d.on_key, .input_filter = d.input_filter };
         d.window.?.keepTitle(o.title);
         d.syncWake();
         return &d.window.?;

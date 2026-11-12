@@ -69,6 +69,9 @@ pub const Renderer = struct {
     frame: *render.Frame,
     /// What drawing the frames took, since the app last took it (`takeStats`).
     stats: Stats = .{},
+    /// Frames are drawn 4x multisampled (antialiased; see
+    /// `render.Frame.beginMultisampled`).
+    multisampled: bool = false,
 
     const ImageTexture = struct {
         bo: vc4.Bo,
@@ -291,7 +294,7 @@ pub const Renderer = struct {
         _ = clear_rects;
         const started = sys.nowNs();
         const frame = r.frame;
-        frame.begin(try targetOf(target), .{ .clear = clear });
+        if (r.multisampled) frame.beginMultisampled(try targetOf(target), clear) else frame.begin(try targetOf(target), .{ .clear = clear });
         var vps: [kgfx.frame.Damage.max_rects]render.Viewport = undefined;
         const n = @min(damage.len, vps.len);
         for (damage[0..n], vps[0..n]) |d, *v| v.* = viewport(d);
