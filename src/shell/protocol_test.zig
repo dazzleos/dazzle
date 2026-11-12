@@ -226,6 +226,21 @@ const Window = struct {
         try peer.show(win.surface, try peer.shmBuffer(shm, 800, 560));
         try peer.world.pump();
     }
+
+    /// Acknowledges the last configure (after its state changed, say), as
+    /// a client does before it draws again.
+    fn ack(win: *Window, peer: *Peer) !void {
+        try peer.world.pump();
+        var m = try win.xdg.request(p.xdg_surface.request.ack_configure);
+        m.uint(@intCast(win.xdg_heard.args[0])).end();
+    }
+
+    /// Acknowledges the last configure, and draws at `width` by `height`.
+    fn redraw(win: *Window, peer: *Peer, shm: client.Proxy, width: i32, height: i32) !void {
+        try win.ack(peer);
+        try peer.show(win.surface, try peer.shmBuffer(shm, width, height));
+        try peer.world.pump();
+    }
 };
 
 test "the output describes the screen, and windows are on it" {
@@ -252,6 +267,47 @@ test "the output describes the screen, and windows are on it" {
     try win.open(a, compositor, wm_base, shm, surface_heard.listener());
     try testing.expectEqual(p.wl_surface.event.enter, surface_heard.last_opcode);
     try testing.expectEqual(@as(i64, output.id), surface_heard.args[0]);
+}
+
+test "a window's last frame stays where it was until it draws as it is told to be" {
+    var w: World = .{};
+    w.init();
+    defer w.deinit();
+    const a = try w.connect();
+    const compositor = try a.bind(p.wl_compositor.name, 4, null);
+    const wm_base = try a.bind(p.xdg_wm_base.name, 6, null);
+    const shm = try a.bind(p.wl_shm.name, 1, null);
+    var win: Window = .{ .surface = undefined, .xdg = undefined, .toplevel = undefined };
+    try win.open(a, compositor, wm_base, shm, null);
+    var quads: [16]Server.Quad = undefined;
+    const maximized = w.drawn(&quads)[0];
+
+    // Restored: the maximized frame is where it was, not in the restored
+    // window's place, until a frame comes at the restored size.
+    var m = try win.toplevel.request(p.xdg_toplevel.request.unset_maximized);
+    m.end();
+    try win.ack(a);
+    try w.pump();
+    var drawn = w.drawn(&quads)[0];
+    try testing.expectEqual(maximized.x, drawn.x);
+    try testing.expectEqual(maximized.y, drawn.y);
+    try a.show(win.surface, try a.shmBuffer(shm, 400, 280));
+    try w.pump();
+    drawn = w.drawn(&quads)[0];
+    try testing.expectEqual(@as(i32, 200), drawn.x);
+    try testing.expectEqual(@as(i32, 180), drawn.y);
+
+    // Maximized again: the restored frame stays put until the maximized one.
+    m = try win.toplevel.request(p.xdg_toplevel.request.set_maximized);
+    m.end();
+    try win.ack(a);
+    try w.pump();
+    drawn = w.drawn(&quads)[0];
+    try testing.expectEqual(@as(i32, 200), drawn.x);
+    try win.redraw(a, shm, 800, 560);
+    drawn = w.drawn(&quads)[0];
+    try testing.expectEqual(maximized.x, drawn.x);
+    try testing.expectEqual(maximized.y, drawn.y);
 }
 
 test "subsurfaces are drawn above their parent, where it says, and take the pointer" {
@@ -672,7 +728,7 @@ test "touches go to the surface they went down on, and can move its window" {
     // more.
     m = try win.toplevel.request(p.xdg_toplevel.request.unset_maximized);
     m.end();
-    try w.pump();
+    try win.redraw(a, shm, 400, 280);
     w.server.touchDown(4, 5, 250, 200);
     try w.pump();
     const serial: u32 = @intCast(touch_heard.args[0]);
@@ -714,7 +770,7 @@ test "pressing in a window keeps the pointer when dragging and releasing outside
     // Restore to 400x280 at 200,180.
     m = try win.toplevel.request(p.xdg_toplevel.request.unset_maximized);
     m.end();
-    try w.pump();
+    try win.redraw(a, shm, 400, 280);
 
     // Press inside the window (at 250,200), drag outside the window and
     // below the work area (into the dock area at y=580), and release there.
@@ -828,7 +884,8 @@ test "dragging from one client and dropping on another negotiates actions, draws
     m.end();
     m = try b.win.toplevel.request(p.xdg_toplevel.request.unset_maximized);
     m.end();
-    try w.pump();
+    try a.win.ack(a.peer);
+    try b.win.ack(b.peer);
     try a.peer.show(a.win.surface, try a.peer.shmBuffer(a.shm, 400, 280));
     try b.peer.show(b.win.surface, try b.peer.shmBuffer(b.shm, 400, 280));
     try w.pump();
@@ -1299,6 +1356,7 @@ test "xdg_surface window geometry, xdg_toplevel parent/app_id/close, and xdg_wm_
     m.uint(0).uint(0).int(20).int(20).end();
     m = try win.toplevel.request(p.xdg_toplevel.request.set_minimized);
     m.end();
+    try win.ack(a);
     try a.show(win.surface, try a.shmBuffer(shm, 420, 310));
     try w.pump();
 
@@ -1380,6 +1438,7 @@ test "surface buffer scale and transform determine logical size, and unmapping s
     m.int(2).end();
     m = try win.surface.request(p.wl_surface.request.set_buffer_transform);
     m.int(p.wl_output.transform.@"90").end();
+    try win.ack(a);
     try a.show(win.surface, try a.shmBuffer(shm, 400, 600));
     try w.pump();
 

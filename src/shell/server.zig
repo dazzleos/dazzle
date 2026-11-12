@@ -475,6 +475,11 @@ pub const Toplevel = struct {
     /// Filling the whole screen, over the dock (whether maximized or not
     /// is kept for when it leaves fullscreen).
     fullscreen: bool = false,
+    /// Maximized and fullscreen as it is shown: as it last drew, after
+    /// being told. Until it draws as it is now told, its last frame stays
+    /// where it was, rather than showing where the next one will go.
+    shown_maximized: bool = false,
+    shown_fullscreen: bool = false,
     x: i32 = 0,
     y: i32 = 0,
     /// Restored before, so `x`, `y` and its size are where and how big it
@@ -1032,22 +1037,27 @@ pub const Server = struct {
         return .{ .x = 0, .y = 0, .width = s.output.width, .height = s.output.height };
     }
 
-    /// The area a window fills, maximized: the screen if fullscreen,
-    /// otherwise the work area.
+    /// The area a window fills, maximized, as it is shown: the screen if
+    /// fullscreen, otherwise the work area.
     fn areaOf(s: *const Server, t: *const Toplevel) Rect {
+        return if (t.shown_fullscreen) s.screen() else s.work_area;
+    }
+
+    /// The area a window is told it can fill.
+    fn toldAreaOf(s: *const Server, t: *const Toplevel) Rect {
         return if (t.fullscreen) s.screen() else s.work_area;
     }
 
     /// The top window fills the screen: the shell's panels are hidden.
     pub fn fullscreenTop(s: *const Server) bool {
         const t = s.topWindow() orelse return false;
-        return t.fullscreen;
+        return t.shown_fullscreen;
     }
 
     /// The dma-buf buffer a window shows, if it can go on the display as it
     /// is: maximized or fullscreen, and the size of the area it fills.
     pub fn scanoutBuffer(s: *const Server, t: *const Toplevel) ?*Buffer {
-        if (!t.maximized and !t.fullscreen) return null;
+        if (!t.shown_maximized and !t.shown_fullscreen) return null;
         const surf = t.xdg.surface orelse return null;
         if (surf.scale != 1 or surf.transform != 0) return null;
         if (t.xdg.geometry) |g| if (g.x != 0 or g.y != 0) return null;
@@ -1158,7 +1168,7 @@ pub const Server = struct {
     /// Where a window is on the screen, at the logical size of what it shows.
     pub fn windowRect(s: *const Server, t: *const Toplevel) Rect {
         const sz = toplevelLogicalSize(t);
-        if (t.maximized or t.fullscreen) {
+        if (t.shown_maximized or t.shown_fullscreen) {
             const area = s.areaOf(t);
             return .{ .x = area.x, .y = area.y, .width = sz[0], .height = sz[1] };
         }
@@ -3978,6 +3988,12 @@ pub const Server = struct {
 
     fn drewConfigure(s: *Server, c: *Client, t: *Toplevel) void {
         t.drawn = true;
+        if (t.shown_maximized != t.maximized or t.shown_fullscreen != t.fullscreen) {
+            t.shown_maximized = t.maximized;
+            t.shown_fullscreen = t.fullscreen;
+            s.damaged = true;
+            s.replacePopups(t);
+        }
         if (t.resend) {
             t.resend = false;
             s.configure(c, t);
@@ -3998,7 +4014,7 @@ pub const Server = struct {
             t.capabilities_sent = true;
         }
         // The biggest it can usefully be: the work area (or the screen).
-        const bounds = s.areaOf(t);
+        const bounds = s.toldAreaOf(t);
         if (t.xdg.version >= 4) sendTo(c, t.id, p.xdg_toplevel.event.configure_bounds, .{ @as(i32, @intCast(bounds.width)), @as(i32, @intCast(bounds.height)) });
         if (c.send(t.id, p.xdg_toplevel.event.configure)) |m0| {
             var e = m0;

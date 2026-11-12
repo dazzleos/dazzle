@@ -1208,6 +1208,7 @@ test "a restored window is half the size, moves by its grab, and windows are cli
     try testing.expectEqual(@as(i32, 400), second.state.configure_width);
     try testing.expectEqual(@as(i32, 280), second.state.configure_height);
     try testing.expect(second.state.activated);
+    try second.ackAndDraw();
     try first.waitFor(&first.state, Cond.visible);
     try testing.expect(!first.state.activated);
     try testing.expectEqual(@as(i32, 200), st.second_x.load(.monotonic));
@@ -1304,6 +1305,7 @@ test "a restored window is half the size, moves by its grab, and windows are cli
     try second.d.flush();
     try second.waitFor(&second.state, Cond.maximized);
     try testing.expectEqual(@as(i32, 800), second.state.configure_width);
+    try second.ackAndDraw();
     try second.waitFor(&second.state, Cond.suspended);
 
     first.d.disconnect();
