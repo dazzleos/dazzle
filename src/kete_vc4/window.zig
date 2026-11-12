@@ -47,11 +47,19 @@ pub const Window = struct {
     /// Not yet closed (`close`): `win` is gone once it is.
     open: bool = true,
 
-    pub const platform: kwin.WindowPlatform = .custom;
-    pub const buffer_transport: kwin.WindowBufferTransport = .linux_dmabuf;
+    pub fn platform(_: *const Window) kwin.WindowPlatform {
+        return .custom;
+    }
+
+    pub fn bufferTransport(_: *const Window) kwin.WindowBufferTransport {
+        return .linux_dmabuf;
+    }
+
     /// Dazzle's shell draws no decorations: kete draws the title bar (with
     /// no shadow: the buffers it is given have no frame).
-    pub const decorations: kwin.WindowDecorations = .toolkit;
+    pub fn decorations(_: *const Window) kwin.WindowDecorations {
+        return .toolkit;
+    }
 
     pub fn bufferSync(_: *const Window) kwin.WindowBufferSync {
         return .implicit;
@@ -298,7 +306,9 @@ pub const Display = struct {
     app_id: ?[]const u8 = null,
     window: ?Window = null,
 
-    pub const platform: kwin.WindowPlatform = .custom;
+    pub fn platform(_: *const Display) kwin.WindowPlatform {
+        return .custom;
+    }
 
     pub fn display(d: *Display) kwin.Display {
         return .of(d);
