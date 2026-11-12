@@ -72,7 +72,7 @@ const Mount = struct {
     }
 
     fn path(m: *const Mount, buf: []u8) ?[:0]const u8 {
-        return std.fmt.bufPrintZ(buf, "{s}/{s}", .{ proto.media_dir, m.name() }) catch null;
+        return std.mem.printSentinel(buf, "{s}/{s}", .{ proto.media_dir, m.name() }, 0) catch null;
     }
 };
 
@@ -161,7 +161,7 @@ const Manager = struct {
             if (s.* == null) break s;
         } else return;
         var dev_path_buf: [32]u8 = undefined;
-        const dev_path = std.fmt.bufPrintZ(&dev_path_buf, "/dev/{s}", .{dev}) catch return;
+        const dev_path = std.mem.printSentinel(&dev_path_buf, "/dev/{s}", .{dev}, 0) catch return;
         const vol = probe(dev_path) orelse return;
 
         var mt: Mount = .{ .dev_len = dev.len };
@@ -184,8 +184,8 @@ const Manager = struct {
         const options: ?[:0]const u8 = switch (vol.kind) {
             // The user's (FAT, exFAT and NTFS have no owners of their own),
             // with no file a program.
-            .fat => std.fmt.bufPrintZ(&options_buf, "uid={d},gid={d},fmask=0133,dmask=0022,utf8,shortname=mixed,flush", .{ sys.user.uid, sys.user.gid }) catch null,
-            .exfat, .ntfs => std.fmt.bufPrintZ(&options_buf, "uid={d},gid={d},fmask=0133,dmask=0022", .{ sys.user.uid, sys.user.gid }) catch null,
+            .fat => std.mem.printSentinel(&options_buf, "uid={d},gid={d},fmask=0133,dmask=0022,utf8,shortname=mixed,flush", .{ sys.user.uid, sys.user.gid }, 0) catch null,
+            .exfat, .ntfs => std.mem.printSentinel(&options_buf, "uid={d},gid={d},fmask=0133,dmask=0022", .{ sys.user.uid, sys.user.gid }, 0) catch null,
             .ext => null,
         };
         const flags = linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOATIME;

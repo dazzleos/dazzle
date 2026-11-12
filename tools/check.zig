@@ -40,7 +40,7 @@ fn onPath(path_env: []const u8, program: []const u8) bool {
     var buf: [4096]u8 = undefined;
     while (it.next()) |dir| {
         if (dir.len == 0) continue;
-        const full = std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ dir, program }) catch continue;
+        const full = std.mem.printSentinel(&buf, "{s}/{s}", .{ dir, program }, 0) catch continue;
         if (linux.access(full.ptr, linux.X_OK) == 0) return true;
     }
     return false;

@@ -419,7 +419,7 @@ pub const fonts_dir = "/os/fonts";
 /// The path of the font file `name`: in /os/fonts, or (run elsewhere, as on
 /// Raspberry Pi OS) beside the running program.
 pub fn fontFile(buf: []u8, name: []const u8) [:0]const u8 {
-    const shared = std.fmt.bufPrintZ(buf, "{s}/{s}", .{ fonts_dir, name }) catch return fonts_dir;
+    const shared = std.mem.printSentinel(buf, "{s}/{s}", .{ fonts_dir, name }, 0) catch return fonts_dir;
     if (linux.errno(linux.access(shared, linux.F_OK)) == .SUCCESS) return shared;
     return appFile(buf, name) catch shared;
 }
@@ -431,5 +431,5 @@ pub fn appFile(buf: []u8, name: []const u8) ![:0]const u8 {
     var exe: [512]u8 = undefined;
     const n = try check(linux.readlink("/proc/self/exe", &exe, exe.len));
     const dir = std.fs.path.dirname(exe[0..n]) orelse "/";
-    return std.fmt.bufPrintZ(buf, "{s}/{s}", .{ dir, name }) catch error.OutOfMemory;
+    return std.mem.printSentinel(buf, "{s}/{s}", .{ dir, name }, 0) catch error.OutOfMemory;
 }

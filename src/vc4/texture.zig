@@ -619,7 +619,7 @@ test "16-bit images: 8x4 micro-tiles, 64x32 tiles, sized as the kernel checks" {
 test "every texel lands in a distinct slot inside the image" {
     const w = 96;
     const h = 64;
-    var seen = [_]bool{false} ** (imageSize(w, h) / 4);
+    var seen: [imageSize(w, h) / 4]bool = @splat(false);
     for (0..h) |y| for (0..w) |x| {
         const off = texelOffset(w, h, @intCast(x), @intCast(y));
         try testing.expect(off % 4 == 0 and off / 4 < seen.len);

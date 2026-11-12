@@ -111,7 +111,7 @@ const max_cards = 4;
 /// Whether DRM card `n` is bound to `driver_suffix` (e.g. "/vc4-drm" or "/v3d").
 fn isDrmDriverCard(n: usize, driver_suffix: []const u8) bool {
     var path_buf: [64]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "/sys/class/drm/card{d}/device/driver", .{n}) catch return false;
+    const path = std.mem.printSentinel(&path_buf, "/sys/class/drm/card{d}/device/driver", .{n}, 0) catch return false;
     var link: [256]u8 = undefined;
     const len = sys.check(linux.readlink(path.ptr, &link, link.len)) catch return false;
     return std.mem.endsWith(u8, link[0..len], driver_suffix);
@@ -164,19 +164,19 @@ fn reportDisplayDevices() void {
 fn reportDevice(base: []const u8, name: []const u8) void {
     var path_buf: [256]u8 = undefined;
     var link: [256]u8 = undefined;
-    const driver = std.fmt.bufPrintZ(&path_buf, "{s}/{s}/driver", .{ base, name }) catch return;
+    const driver = std.mem.printSentinel(&path_buf, "{s}/{s}/driver", .{ base, name }, 0) catch return;
     if (sys.check(linux.readlink(driver.ptr, &link, link.len))) |len| {
         const d = link[0..len];
         print("dazzle: display part {s}: driver {s}\n", .{ name, d[(std.mem.lastIndexOfScalar(u8, d, '/') orelse 0) + 1 ..] });
         return;
     } else |_| {}
     var buf: [32]u8 = undefined;
-    const waiting_path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}/waiting_for_supplier", .{ base, name }) catch return;
+    const waiting_path = std.mem.printSentinel(&path_buf, "{s}/{s}/waiting_for_supplier", .{ base, name }, 0) catch return;
     const waiting = std.mem.trim(u8, sys.readFile(waiting_path.ptr, &buf) orelse "?", " \n");
     print(sys.log_warning ++ "dazzle: display part {s}: no driver (waiting for a supplier: {s})\n", .{ name, waiting });
     // Its suppliers: links named supplier:<bus>:<device>, each with a
     // status ("available" once the supplier has its driver).
-    const dev_path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ base, name }) catch return;
+    const dev_path = std.mem.printSentinel(&path_buf, "{s}/{s}", .{ base, name }, 0) catch return;
     const dir = sys.open(dev_path.ptr, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }) catch return;
     defer sys.close(dir);
     var dents: [4096]u8 align(8) = undefined;
@@ -190,7 +190,7 @@ fn reportDevice(base: []const u8, name: []const u8) void {
             at += reclen;
             if (!std.mem.startsWith(u8, entry, "supplier:")) continue;
             var status_path_buf: [320]u8 = undefined;
-            const status_path = std.fmt.bufPrintZ(&status_path_buf, "{s}/{s}/{s}/status", .{ base, name, entry }) catch continue;
+            const status_path = std.mem.printSentinel(&status_path_buf, "{s}/{s}/{s}/status", .{ base, name, entry }, 0) catch continue;
             var status_buf: [32]u8 = undefined;
             const status = std.mem.trim(u8, sys.readFile(status_path.ptr, &status_buf) orelse "?", " \n");
             print("dazzle:   {s}: {s}\n", .{ entry["supplier:".len..], status });
@@ -223,7 +223,7 @@ fn grantGpuAccess() void {
     var path_buf: [32]u8 = undefined;
     for (0..max_cards) |n| {
         for ([_]struct { []const u8, usize }{ .{ "card", n }, .{ "renderD", 128 + n } }) |node| {
-            const path = std.fmt.bufPrintZ(&path_buf, "/dev/dri/{s}{d}", .{ node[0], node[1] }) catch continue;
+            const path = std.mem.printSentinel(&path_buf, "/dev/dri/{s}{d}", .{ node[0], node[1] }, 0) catch continue;
             _ = sys.check(linux.chown(path.ptr, sys.user.uid, sys.user.gid)) catch continue;
             _ = linux.fchmodat(linux.AT.FDCWD, path.ptr, 0o660);
         }
@@ -293,7 +293,7 @@ fn reapForever(first_shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, f
     var system_pid = first_system_pid;
     while (true) {
         var status: u32 = 0;
-        const rc = linux.wait4(-1, &status, 0, null);
+        const rc = linux.wait4(-1, @ptrCast(&status), 0, null);
         switch (linux.errno(rc)) {
             .SUCCESS => {},
             // No children left: wait for signals forever.

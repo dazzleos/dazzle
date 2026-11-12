@@ -80,7 +80,7 @@ pub const Program = struct {
             else => {},
         };
         const vs_entry = vertex orelse return link(diag, "no vertex shader (export fn ... callconv(.spirv_vertex))", .{});
-        const fs_entry = fragment orelse return link(diag, "no fragment shader (export fn ... callconv(.spirv_fragment))", .{});
+        const fs_entry = fragment orelse return link(diag, "no fragment shader (export fn ... callconv(.{{ .spirv_fragment = .{{}} }}))", .{});
 
         var p: Program = .{ .fs = undefined, .fs_ms = undefined, .vs = undefined, .cs = undefined, .options = options };
 

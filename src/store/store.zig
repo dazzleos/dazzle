@@ -158,14 +158,14 @@ pub fn validIconPng(bytes: []const u8) bool {
 /// Whether app `name` is in `dir` (its folder, with its program).
 pub fn isInstalled(dir: []const u8, name: []const u8) bool {
     var buf: [256]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&buf, "{s}/{s}/{s}", .{ dir, name, name }) catch return false;
+    const path = std.mem.printSentinel(&buf, "{s}/{s}/{s}", .{ dir, name, name }, 0) catch return false;
     return linux.errno(linux.access(path, linux.X_OK)) == .SUCCESS;
 }
 
 /// The version of app `name` installed in `dir`, from `<dir>/<name>/version`.
 pub fn installedVersion(dir: []const u8, name: []const u8) ?sys.system.Version {
     var path_buf: [256]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}/{s}", .{ dir, name, sys.system.Version.file_name }) catch return null;
+    const path = std.mem.printSentinel(&path_buf, "{s}/{s}/{s}", .{ dir, name, sys.system.Version.file_name }, 0) catch return null;
     var buf: [96]u8 = undefined;
     const text = sys.readFile(path, &buf) orelse return null;
     return sys.system.Version.parse(text);
@@ -203,15 +203,15 @@ pub fn resolveAppIcon(buf: []u8, dir: []const u8, icons_path: []const u8, app: A
     const installed = isInstalled(dir, app.name);
     const use_installed_first = installed and !hasNewerVersion(dir, app);
     if (use_installed_first) {
-        if (std.fmt.bufPrintZ(buf, "{s}/{s}/icon.png", .{ dir, app.name })) |p| {
+        if (std.mem.printSentinel(buf, "{s}/{s}/icon.png", .{ dir, app.name }, 0)) |p| {
             if (hasValidIconFile(p)) return p;
         } else |_| {}
     }
-    if (std.fmt.bufPrintZ(buf, "{s}/{s}.png", .{ icons_path, app.name })) |p| {
+    if (std.mem.printSentinel(buf, "{s}/{s}.png", .{ icons_path, app.name }, 0)) |p| {
         if (hasValidIconFile(p)) return p;
     } else |_| {}
     if (!use_installed_first and installed) {
-        if (std.fmt.bufPrintZ(buf, "{s}/{s}/icon.png", .{ dir, app.name })) |p| {
+        if (std.mem.printSentinel(buf, "{s}/{s}/icon.png", .{ dir, app.name }, 0)) |p| {
             if (hasValidIconFile(p)) return p;
         } else |_| {}
     }
@@ -395,12 +395,12 @@ pub fn verifyWithKeys(archive: []const u8, app: App, extra_keys: []const [key_he
 pub fn unpack(gpa: std.mem.Allocator, archive: []const u8, dir: []const u8, name: []const u8) !void {
     if (!validName(name)) return error.BadName;
     var staging_buf: [256]u8 = undefined;
-    const staging = try std.fmt.bufPrintZ(&staging_buf, "{s}/.install-{s}", .{ dir, name });
+    const staging = try std.mem.printSentinel(&staging_buf, "{s}/.install-{s}", .{ dir, name }, 0);
     sys.files.removeTree(staging);
     _ = try sys.check(linux.mkdir(staging, 0o755));
     defer sys.files.removeTree(staging);
     var new_buf: [512]u8 = undefined;
-    const new = try std.fmt.bufPrintZ(&new_buf, "{s}/{s}", .{ staging, name });
+    const new = try std.mem.printSentinel(&new_buf, "{s}/{s}", .{ staging, name }, 0);
     _ = try sys.check(linux.mkdir(new, 0o755));
     // Only the app's own folder.
     try sys.archive.extract(gpa, archive, name, new);
@@ -409,8 +409,8 @@ pub fn unpack(gpa: std.mem.Allocator, archive: []const u8, dir: []const u8, name
     // Into place: an installed copy out of the way first.
     var app_buf: [256]u8 = undefined;
     var old_buf: [256]u8 = undefined;
-    const app_path = try std.fmt.bufPrintZ(&app_buf, "{s}/{s}", .{ dir, name });
-    const old = try std.fmt.bufPrintZ(&old_buf, "{s}/.old-{s}", .{ dir, name });
+    const app_path = try std.mem.printSentinel(&app_buf, "{s}/{s}", .{ dir, name }, 0);
+    const old = try std.mem.printSentinel(&old_buf, "{s}/.old-{s}", .{ dir, name }, 0);
     sys.files.removeTree(old);
     const replacing = linux.errno(linux.access(app_path, linux.F_OK)) == .SUCCESS;
     if (replacing) _ = try sys.check(linux.rename(app_path, old));
@@ -426,8 +426,8 @@ pub fn remove(dir: []const u8, name: []const u8) !void {
     if (!validName(name)) return error.BadName;
     var app_buf: [256]u8 = undefined;
     var gone_buf: [256]u8 = undefined;
-    const app_path = try std.fmt.bufPrintZ(&app_buf, "{s}/{s}", .{ dir, name });
-    const gone = try std.fmt.bufPrintZ(&gone_buf, "{s}/.remove-{s}", .{ dir, name });
+    const app_path = try std.mem.printSentinel(&app_buf, "{s}/{s}", .{ dir, name }, 0);
+    const gone = try std.mem.printSentinel(&gone_buf, "{s}/.remove-{s}", .{ dir, name }, 0);
     sys.files.removeTree(gone);
     // Out of sight at once (the dock follows), then deleted.
     _ = try sys.check(linux.rename(app_path, gone));
@@ -511,8 +511,8 @@ pub fn fetchOs(client: *Client, gpa: std.mem.Allocator, base_url: []const u8, di
     if (sys.system.Version.init(m.time, m.version) == null or !(std.mem.endsWith(u8, m.file, ".tar.xz") and validName(m.file[0 .. m.file.len - ".tar.xz".len])) or m.sha256.len != 64) return error.BadManifest;
     var man_buf: [256]u8 = undefined;
     var tmp_buf: [256]u8 = undefined;
-    const man_path = try std.fmt.bufPrintZ(&man_buf, "{s}/os.json", .{dir});
-    const tmp = try std.fmt.bufPrintZ(&tmp_buf, "{s}/os.json.new", .{dir});
+    const man_path = try std.mem.printSentinel(&man_buf, "{s}/os.json", .{dir}, 0);
+    const tmp = try std.mem.printSentinel(&tmp_buf, "{s}/os.json.new", .{dir}, 0);
     _ = linux.unlink(tmp);
     try sys.files.writeNew(tmp, json);
     _ = try sys.check(linux.rename(tmp, man_path));
@@ -525,8 +525,8 @@ pub fn fetchOs(client: *Client, gpa: std.mem.Allocator, base_url: []const u8, di
         if (validIconPng(png)) {
             var icon_tmp_buf: [256]u8 = undefined;
             var icon_dst_buf: [256]u8 = undefined;
-            if (std.fmt.bufPrintZ(&icon_tmp_buf, "{s}/icon.png.new", .{dir})) |icon_tmp| {
-                if (std.fmt.bufPrintZ(&icon_dst_buf, "{s}/icon.png", .{dir})) |icon_dst| {
+            if (std.mem.printSentinel(&icon_tmp_buf, "{s}/icon.png.new", .{dir}, 0)) |icon_tmp| {
+                if (std.mem.printSentinel(&icon_dst_buf, "{s}/icon.png", .{dir}, 0)) |icon_dst| {
                     _ = linux.unlink(icon_tmp);
                     if (sys.files.writeNew(icon_tmp, png)) |_| {
                         _ = linux.rename(icon_tmp, icon_dst);
@@ -549,14 +549,14 @@ pub fn fetchCatalogue(client: *Client, gpa: std.mem.Allocator, base_url: []const
     defer parsed.deinit();
     var cat_buf: [256]u8 = undefined;
     var tmp_buf: [256]u8 = undefined;
-    const cat_path = try std.fmt.bufPrintZ(&cat_buf, "{s}/.catalogue.json", .{dir});
-    const tmp = try std.fmt.bufPrintZ(&tmp_buf, "{s}/.catalogue.json.new", .{dir});
+    const cat_path = try std.mem.printSentinel(&cat_buf, "{s}/.catalogue.json", .{dir}, 0);
+    const tmp = try std.mem.printSentinel(&tmp_buf, "{s}/.catalogue.json.new", .{dir}, 0);
     _ = linux.unlink(tmp);
     try sys.files.writeNew(tmp, json);
     _ = try sys.check(linux.rename(tmp, cat_path));
 
     var icons_buf: [256]u8 = undefined;
-    const icons_path = try std.fmt.bufPrintZ(&icons_buf, "{s}/.icons", .{dir});
+    const icons_path = try std.mem.printSentinel(&icons_buf, "{s}/.icons", .{dir}, 0);
     _ = linux.mkdir(icons_path, 0o755);
     for (parsed.value.apps) |a| {
         var rel_buf: [96]u8 = undefined;
@@ -571,8 +571,8 @@ pub fn fetchCatalogue(client: *Client, gpa: std.mem.Allocator, base_url: []const
         if (!validIconPng(png)) continue;
         var icon_tmp_buf: [256]u8 = undefined;
         var icon_dst_buf: [256]u8 = undefined;
-        const icon_tmp = std.fmt.bufPrintZ(&icon_tmp_buf, "{s}/{s}.png.new", .{ icons_path, a.name }) catch continue;
-        const icon_dst = std.fmt.bufPrintZ(&icon_dst_buf, "{s}/{s}.png", .{ icons_path, a.name }) catch continue;
+        const icon_tmp = std.mem.printSentinel(&icon_tmp_buf, "{s}/{s}.png.new", .{ icons_path, a.name }, 0) catch continue;
+        const icon_dst = std.mem.printSentinel(&icon_dst_buf, "{s}/{s}.png", .{ icons_path, a.name }, 0) catch continue;
         _ = linux.unlink(icon_tmp);
         sys.files.writeNew(icon_tmp, png) catch continue;
         _ = linux.rename(icon_tmp, icon_dst);
@@ -661,11 +661,11 @@ pub const Job = struct {
     /// If the job has finished: null if it worked, else why not (in `buf`).
     pub fn finished(j: *Job, buf: []u8) ??[]const u8 {
         var status: u32 = 0;
-        const rc = linux.wait4(j.pid, &status, linux.W.NOHANG, null);
+        const rc = linux.wait4(j.pid, @ptrCast(&status), linux.W.NOHANG, null);
         if (linux.errno(rc) == .SUCCESS and rc == 0) {
             if (sys.nowNs() -| j.started < time_limit) return null;
             _ = linux.kill(j.pid, .KILL);
-            _ = linux.wait4(j.pid, &status, 0, null);
+            _ = linux.wait4(j.pid, @ptrCast(&status), 0, null);
             sys.close(j.result);
             return @as(?[]const u8, "it took too long");
         }
@@ -750,7 +750,7 @@ pub const Store = struct {
         if (s.job) |*j| if (j.kind == .catalogue) {
             var status: u32 = 0;
             _ = linux.kill(j.pid, .KILL);
-            _ = linux.wait4(j.pid, &status, 0, null);
+            _ = linux.wait4(j.pid, @ptrCast(&status), 0, null);
             sys.close(j.result);
             s.job = null;
         };
@@ -909,13 +909,13 @@ test "a download is checked against the catalogue and its Ed25519 signature" {
     wrong.size += 1;
     try testing.expectError(error.WrongSize, verifyWithKeys(fixture, wrong, &.{}));
     wrong = signed;
-    wrong.sha256 = "00" ** 32;
+    wrong.sha256 = &@as([64]u8, @splat('0'));
     try testing.expectError(error.WrongChecksum, verifyWithKeys(fixture, wrong, &.{}));
 
     // Missing or tampered signature is rejected.
     try testing.expectError(error.BadSignature, verifyWithKeys(fixture, fixture_app, &.{}));
     wrong = signed;
-    wrong.signature = "00" ** 64;
+    wrong.signature = &@as([128]u8, @splat('0'));
     try testing.expectError(error.BadSignature, verifyWithKeys(fixture, wrong, &.{}));
 
     // Signed with another key: rejected until that key is subscribed.
@@ -930,14 +930,14 @@ test "a download is checked against the catalogue and its Ed25519 signature" {
     try testing.expectError(error.BadSignature, verifyWithKeys(fixture, third_party, &.{}));
 
     var keys_path_buf: [64]u8 = undefined;
-    const keys_path = try std.fmt.bufPrintZ(&keys_path_buf, "/tmp/dazzle-keys-test-{d}", .{linux.getpid()});
+    const keys_path = try std.mem.printSentinel(&keys_path_buf, "/tmp/dazzle-keys-test-{d}", .{linux.getpid()}, 0);
     defer _ = linux.unlink(keys_path);
 
     try testing.expect(!subscribeKeyAt(keys_path, "not-a-valid-key"));
     // Weak (small-order torsion) Ed25519 public keys are rejected:
     // 00..00 (order 4) and 0100..00 (the identity point, order 1).
-    try testing.expect(!subscribeKeyAt(keys_path, "00" ** 32));
-    try testing.expect(!subscribeKeyAt(keys_path, "01" ++ "00" ** 31));
+    try testing.expect(!subscribeKeyAt(keys_path, &@as([64]u8, @splat('0'))));
+    try testing.expect(!subscribeKeyAt(keys_path, "01" ++ &@as([62]u8, @splat('0'))));
     try testing.expect(subscribeKeyAt(keys_path, &other_pub_hex));
     const loaded = loadKeysFrom(keys_path);
     try testing.expectEqual(@as(usize, 1), loaded.len);
@@ -949,13 +949,13 @@ test "a download is checked against the catalogue and its Ed25519 signature" {
 
 test "installing unpacks the app's folder into place, again replaces it, removing deletes it" {
     var dir_buf: [64]u8 = undefined;
-    const dir = try std.fmt.bufPrintZ(&dir_buf, "/tmp/dazzle-store-test-{d}", .{linux.getpid()});
+    const dir = try std.mem.printSentinel(&dir_buf, "/tmp/dazzle-store-test-{d}", .{linux.getpid()}, 0);
     _ = linux.mkdir(dir, 0o755);
     defer sys.files.removeTree(dir);
     try unpack(testing.allocator, fixture, dir, "hello");
     try testing.expect(isInstalled(dir, "hello"));
     var buf: [128]u8 = undefined;
-    const icon = try std.fmt.bufPrintZ(&buf, "{s}/hello/hello.icon", .{dir});
+    const icon = try std.mem.printSentinel(&buf, "{s}/hello/hello.icon", .{dir}, 0);
     var read_buf: [16]u8 = undefined;
     try testing.expectEqualStrings("apps\n", sys.readFile(icon, &read_buf).?);
     try testing.expect(linux.errno(linux.access(icon, linux.X_OK)) != .SUCCESS);
@@ -1047,13 +1047,13 @@ test "keep-alive fetches os.json, icon.png, apps.json and <app>.png on a single 
     defer thread.join();
 
     var dir_buf: [64]u8 = undefined;
-    const dir = try std.fmt.bufPrintZ(&dir_buf, "/tmp/dazzle-keepalive-test-{d}", .{linux.getpid()});
+    const dir = try std.mem.printSentinel(&dir_buf, "/tmp/dazzle-keepalive-test-{d}", .{linux.getpid()}, 0);
     _ = linux.mkdir(dir, 0o755);
     defer sys.files.removeTree(dir);
     var os_dir_buf: [80]u8 = undefined;
     var apps_dir_buf: [80]u8 = undefined;
-    const os_dir = try std.fmt.bufPrintZ(&os_dir_buf, "{s}/update", .{dir});
-    const app_dir = try std.fmt.bufPrintZ(&apps_dir_buf, "{s}/apps", .{dir});
+    const os_dir = try std.mem.printSentinel(&os_dir_buf, "{s}/update", .{dir}, 0);
+    const app_dir = try std.mem.printSentinel(&apps_dir_buf, "{s}/apps", .{dir}, 0);
     _ = linux.mkdir(os_dir, 0o755);
     _ = linux.mkdir(app_dir, 0o755);
 
@@ -1066,9 +1066,9 @@ test "keep-alive fetches os.json, icon.png, apps.json and <app>.png on a single 
 
     var path_buf: [128]u8 = undefined;
     var read_buf: [256]u8 = undefined;
-    const os_icon = try std.fmt.bufPrintZ(&path_buf, "{s}/icon.png", .{os_dir});
+    const os_icon = try std.mem.printSentinel(&path_buf, "{s}/icon.png", .{os_dir}, 0);
     try testing.expectEqualStrings(png_64 ++ "OS", sys.readFile(os_icon, &read_buf).?);
-    const demo_icon = try std.fmt.bufPrintZ(&path_buf, "{s}/.icons/dazzle-demo.png", .{app_dir});
+    const demo_icon = try std.mem.printSentinel(&path_buf, "{s}/.icons/dazzle-demo.png", .{app_dir}, 0);
     try testing.expectEqualStrings(png_64 ++ "DEMO", sys.readFile(demo_icon, &read_buf).?);
 }
 
@@ -1093,7 +1093,7 @@ test "parsing and saving custom https software server URLs" {
     try testing.expect(parseHttpsUrl("https://example.com/has space") == null);
 
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, "/tmp/dazzle-server-test-{d}", .{linux.getpid()});
+    const path = try std.mem.printSentinel(&path_buf, "/tmp/dazzle-server-test-{d}", .{linux.getpid()}, 0);
     defer _ = linux.unlink(path);
 
     var buf: [max_url_len]u8 = undefined;
@@ -1174,13 +1174,13 @@ test "HTTPS client trusts the Dazzle Test CA and fetches over TLS 1.3 keep-alive
     defer thread.join();
 
     var dir_buf: [64]u8 = undefined;
-    const dir = try std.fmt.bufPrintZ(&dir_buf, "/tmp/dazzle-https-test-{d}", .{linux.getpid()});
+    const dir = try std.mem.printSentinel(&dir_buf, "/tmp/dazzle-https-test-{d}", .{linux.getpid()}, 0);
     _ = linux.mkdir(dir, 0o755);
     defer sys.files.removeTree(dir);
     var os_dir_buf: [80]u8 = undefined;
     var apps_dir_buf: [80]u8 = undefined;
-    const os_dir = try std.fmt.bufPrintZ(&os_dir_buf, "{s}/update", .{dir});
-    const app_dir = try std.fmt.bufPrintZ(&apps_dir_buf, "{s}/apps", .{dir});
+    const os_dir = try std.mem.printSentinel(&os_dir_buf, "{s}/update", .{dir}, 0);
+    const app_dir = try std.mem.printSentinel(&apps_dir_buf, "{s}/apps", .{dir}, 0);
     _ = linux.mkdir(os_dir, 0o755);
     _ = linux.mkdir(app_dir, 0o755);
 
@@ -1193,8 +1193,8 @@ test "HTTPS client trusts the Dazzle Test CA and fetches over TLS 1.3 keep-alive
 
     var path_buf: [128]u8 = undefined;
     var read_buf: [256]u8 = undefined;
-    const os_icon = try std.fmt.bufPrintZ(&path_buf, "{s}/icon.png", .{os_dir});
+    const os_icon = try std.mem.printSentinel(&path_buf, "{s}/icon.png", .{os_dir}, 0);
     try testing.expectEqualStrings(png_64 ++ "TLS-OS", sys.readFile(os_icon, &read_buf).?);
-    const demo_icon = try std.fmt.bufPrintZ(&path_buf, "{s}/.icons/dazzle-demo.png", .{app_dir});
+    const demo_icon = try std.mem.printSentinel(&path_buf, "{s}/.icons/dazzle-demo.png", .{app_dir}, 0);
     try testing.expectEqualStrings(png_64 ++ "TLS-DEMO", sys.readFile(demo_icon, &read_buf).?);
 }

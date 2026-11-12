@@ -1133,7 +1133,7 @@ fn imdctShort(spec: *const [128]f32, out: *[256]f32) void {
 fn fft(comptime n: usize, re: *[n]f32, im: *[n]f32) void {
     const log_n = @ctz(@as(usize, n));
     for (0..n) |i| {
-        const j = @bitReverse(@as(std.meta.Int(.unsigned, log_n), @intCast(i)));
+        const j = @bitReverse(@as(@Int(.unsigned, log_n), @intCast(i)));
         if (i < j) {
             std.mem.swap(f32, &re[i], &re[j]);
             std.mem.swap(f32, &im[i], &im[j]);

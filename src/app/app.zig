@@ -72,14 +72,14 @@ pub const ChildEnv = struct {
         env.len = 0;
         if (default_home) |fallback| {
             const home = std.process.Environ.getPosix(environ, "HOME") orelse fallback;
-            if (std.fmt.bufPrintZ(&env.bufs[env.len], "HOME={s}", .{home})) |s| {
+            if (std.mem.printSentinel(&env.bufs[env.len], "HOME={s}", .{home}, 0)) |s| {
                 env.vars[env.len] = s.ptr;
                 env.len += 1;
             } else |_| {}
         }
         for ([_][]const u8{ "XDG_RUNTIME_DIR", "WAYLAND_DISPLAY" }) |name| {
             const value = std.process.Environ.getPosix(environ, name) orelse continue;
-            if (std.fmt.bufPrintZ(&env.bufs[env.len], "{s}={s}", .{ name, value })) |s| {
+            if (std.mem.printSentinel(&env.bufs[env.len], "{s}={s}", .{ name, value }, 0)) |s| {
                 env.vars[env.len] = s.ptr;
                 env.len += 1;
             } else |_| {}

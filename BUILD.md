@@ -11,7 +11,7 @@ Dazzle builds on Linux (x86-64 or ARM64).
   sudo apt install make flex bison bc git curl xz-utils gcc-arm-linux-gnueabihf gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
   ```
 
-- Zig 0.16.0. `scripts/zig` downloads it on first use if it is not on your
+- Zig 0.17.1. `scripts/zig` downloads it on first use if it is not on your
   PATH.
 - Optionally, QEMU and `fdtput`, to boot the system without a Pi
   (`sudo apt install qemu-system-arm device-tree-compiler`).

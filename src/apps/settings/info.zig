@@ -237,7 +237,7 @@ pub const Tally = struct {
     pub fn add(t: *Tally, path: []const u8, depth: u32) void {
         if (depth > 16) return;
         var path_buf: [512]u8 = undefined;
-        const dir_path = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return;
+        const dir_path = std.mem.printSentinel(&path_buf, "{s}", .{path}, 0) catch return;
         const dir = sys.open(dir_path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }) catch return;
         defer sys.close(dir);
         var buf: [2048]u8 align(8) = undefined;
@@ -254,7 +254,7 @@ pub const Tally = struct {
                 if (depth == 0 and (std.mem.eql(u8, name, "proc") or std.mem.eql(u8, name, "sys") or std.mem.eql(u8, name, "dev") or std.mem.eql(u8, name, "data") or std.mem.eql(u8, name, "boot"))) continue;
                 var child_buf: [512]u8 = undefined;
                 const sep: []const u8 = if (std.mem.endsWith(u8, path, "/")) "" else "/";
-                const child = std.fmt.bufPrintZ(&child_buf, "{s}{s}{s}", .{ path, sep, name }) catch continue;
+                const child = std.mem.printSentinel(&child_buf, "{s}{s}{s}", .{ path, sep, name }, 0) catch continue;
                 const dt_dir = 4;
                 const dt_reg = 8;
                 if (kind == dt_dir) {
@@ -363,7 +363,7 @@ fn readInterface(name: []const u8, sock: ?linux.fd_t) Interface {
 
 fn sysfs(iface: []const u8, file: []const u8, buf: []u8) ?[]const u8 {
     var path_buf: [96]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "/sys/class/net/{s}/{s}", .{ iface, file }) catch return null;
+    const path = std.mem.printSentinel(&path_buf, "/sys/class/net/{s}/{s}", .{ iface, file }, 0) catch return null;
     return sys.readFile(path, buf);
 }
 
@@ -436,7 +436,7 @@ test "the cores and serial number" {
     try testing.expectEqual(@as(u32, 4), q.cores);
     try testing.expectEqual(@as(usize, 0), q.serial.len);
     try testing.expectEqualStrings("a1b2c3d4", serialFromDeviceTree(&.{ 0, 0, 0, 0, 0xa1, 0xb2, 0xc3, 0xd4 }).slice());
-    try testing.expectEqual(@as(usize, 0), serialFromDeviceTree(&(.{0} ** 8)).len);
+    try testing.expectEqual(@as(usize, 0), serialFromDeviceTree(&@as([8]u8, @splat(0))).len);
 }
 
 test "memory, CPU time, routes and the command line" {
@@ -470,18 +470,18 @@ test "sizes and durations read naturally" {
 
 test "files are counted, without the kernel's filesystems" {
     var root_buf: [64]u8 = undefined;
-    const root = try std.fmt.bufPrintZ(&root_buf, "/tmp/dazzle-tally-{d}", .{linux.getpid()});
+    const root = try std.mem.printSentinel(&root_buf, "/tmp/dazzle-tally-{d}", .{linux.getpid()}, 0);
     var b: [128]u8 = undefined;
     _ = linux.mkdir(root, 0o755);
-    _ = linux.mkdir(try std.fmt.bufPrintZ(&b, "{s}/sub", .{root}), 0o755);
+    _ = linux.mkdir(try std.mem.printSentinel(&b, "{s}/sub", .{root}, 0), 0o755);
     defer {
         for ([_][]const u8{ "/sub/b", "/a", "/sub", "" }) |p| {
-            const path = std.fmt.bufPrintZ(&b, "{s}{s}", .{ root, p }) catch unreachable;
+            const path = std.mem.printSentinel(&b, "{s}{s}", .{ root, p }, 0) catch unreachable;
             if (linux.errno(linux.unlink(path)) != .SUCCESS) _ = linux.rmdir(path);
         }
     }
     for ([_][]const u8{ "/a", "/sub/b" }, [_]usize{ 100, 23 }) |p, size| {
-        const fd = try sys.open(try std.fmt.bufPrintZ(&b, "{s}{s}", .{ root, p }), .{ .ACCMODE = .WRONLY, .CREAT = true, .CLOEXEC = true });
+        const fd = try sys.open(try std.mem.printSentinel(&b, "{s}{s}", .{ root, p }, 0), .{ .ACCMODE = .WRONLY, .CREAT = true, .CLOEXEC = true });
         var data: [100]u8 = @splat('x');
         _ = linux.write(fd, &data, size);
         sys.close(fd);

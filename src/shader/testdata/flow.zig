@@ -24,7 +24,7 @@ fn band(x: f32) f32 {
 
 const weights = [_]f32{ 0.5, 0.25, 0.125 };
 
-export fn fragment() callconv(.spirv_fragment) void {
+export fn fragment() callconv(.{ .spirv_fragment = .{} }) void {
     const c = in_v.*;
 
     var r = c[0];

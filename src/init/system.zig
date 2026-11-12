@@ -496,7 +496,7 @@ fn client(fd: linux.fd_t) ?proto.Client {
     var len: linux.socklen_t = @sizeOf(Ucred);
     if (linux.errno(linux.getsockopt(fd, linux.SOL.SOCKET, linux.SO.PEERCRED, @ptrCast(&cred), &len)) != .SUCCESS) return null;
     var path_buf: [32]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "/proc/{d}/exe", .{cred.pid}) catch return null;
+    const path = std.mem.printSentinel(&path_buf, "/proc/{d}/exe", .{cred.pid}, 0) catch return null;
     var exe: [256]u8 = undefined;
     const n = sys.check(linux.readlink(path.ptr, &exe, exe.len)) catch return null;
     if (std.mem.eql(u8, exe[0..n], proto.setup_program)) return .setup;

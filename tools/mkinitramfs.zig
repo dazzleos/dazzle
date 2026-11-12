@@ -48,7 +48,7 @@ const S_IFCHR = 0o020000;
 
 fn writeEntry(out: *std.ArrayList(u8), gpa: std.mem.Allocator, ino: u32, e: Entry) !void {
     var header: [110]u8 = undefined;
-    _ = try std.fmt.bufPrint(&header, "070701" ++ "{x:0>8}" ** 13, .{
+    _ = try std.fmt.bufPrint(&header, "070701" ++ "{x:0>8}{x:0>8}{x:0>8}{x:0>8}{x:0>8}{x:0>8}{x:0>8}{x:0>8}{x:0>8}{x:0>8}{x:0>8}{x:0>8}{x:0>8}", .{
         ino,
         e.mode,
         e.uid,

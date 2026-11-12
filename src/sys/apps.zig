@@ -19,7 +19,7 @@ pub fn handler(buf: []u8, mime: []const u8) ?[:0]const u8 {
 
 pub fn handlerIn(dir_path: []const u8, buf: []u8, mime: []const u8) ?[:0]const u8 {
     var dir_buf: [256]u8 = undefined;
-    const dir_z = std.fmt.bufPrintZ(&dir_buf, "{s}", .{dir_path}) catch return null;
+    const dir_z = std.mem.printSentinel(&dir_buf, "{s}", .{dir_path}, 0) catch return null;
     const dir = sys.open(dir_z, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }) catch return null;
     defer sys.close(dir);
     var dents: [2048]u8 align(8) = undefined;
@@ -44,13 +44,13 @@ pub fn handlerIn(dir_path: []const u8, buf: []u8, mime: []const u8) ?[:0]const u
     }
     const b = best orelse return null;
     const name = b[0..best_len];
-    return std.fmt.bufPrintZ(buf, "{s}/{s}/{s}", .{ dir_path, name, name }) catch null;
+    return std.mem.printSentinel(buf, "{s}/{s}/{s}", .{ dir_path, name, name }, 0) catch null;
 }
 
 /// Whether the app `name` in `dir_path` says it opens `mime`.
 fn handles(dir_path: []const u8, name: []const u8, mime: []const u8) bool {
     var path_buf: [384]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}/{s}.handles", .{ dir_path, name, name }) catch return false;
+    const path = std.mem.printSentinel(&path_buf, "{s}/{s}/{s}.handles", .{ dir_path, name, name }, 0) catch return false;
     var buf: [1024]u8 = undefined;
     const text = sys.readFile(path, &buf) orelse return false;
     var lines = std.mem.tokenizeAny(u8, text, "\n\r");
@@ -82,20 +82,20 @@ pub fn launch(program: [:0]const u8, arg: [:0]const u8, env: []const [*:0]const 
         linux.exit(0);
     }
     var status: u32 = 0;
-    _ = linux.wait4(@intCast(rc), &status, 0, null);
+    _ = linux.wait4(@intCast(rc), @ptrCast(&status), 0, null);
 }
 
 const testing = std.testing;
 
 test "the app that opens a kind of file" {
     var dir_buf: [64]u8 = undefined;
-    const dir = try std.fmt.bufPrintZ(&dir_buf, "/tmp/dazzle-apps-test-{d}", .{linux.getpid()});
+    const dir = try std.mem.printSentinel(&dir_buf, "/tmp/dazzle-apps-test-{d}", .{linux.getpid()}, 0);
     _ = linux.mkdir(dir, 0o755);
     defer sys.files.removeTree(dir);
     var buf: [256]u8 = undefined;
-    for ([_][]const u8{ "viewer", "editor", "camera" }) |name| _ = linux.mkdir(try std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ dir, name }), 0o755);
-    try sys.files.writeNew(try std.fmt.bufPrintZ(&buf, "{s}/editor/editor.handles", .{dir}), "text/plain\ntext/markdown\n");
-    try sys.files.writeNew(try std.fmt.bufPrintZ(&buf, "{s}/viewer/viewer.handles", .{dir}), "image/png\nText/Plain\n");
+    for ([_][]const u8{ "viewer", "editor", "camera" }) |name| _ = linux.mkdir(try std.mem.printSentinel(&buf, "{s}/{s}", .{ dir, name }, 0), 0o755);
+    try sys.files.writeNew(try std.mem.printSentinel(&buf, "{s}/editor/editor.handles", .{dir}, 0), "text/plain\ntext/markdown\n");
+    try sys.files.writeNew(try std.mem.printSentinel(&buf, "{s}/viewer/viewer.handles", .{dir}, 0), "image/png\nText/Plain\n");
     var out: [256]u8 = undefined;
     // Two do: the first by name.
     try testing.expect(std.mem.endsWith(u8, handlerIn(dir, &out, text_plain).?, "/editor/editor"));

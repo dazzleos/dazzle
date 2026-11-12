@@ -157,16 +157,17 @@ pub const Settings = struct {
         log: log_view.State = .{},
 
         fn selectPage(st: *State, idx: usize) void {
-            if (idx < std.meta.fields(Page).len) st.page = @enumFromInt(idx);
+            if (idx < @typeInfo(Page).@"enum".field_values.len) st.page = @enumFromInt(idx);
         }
     };
 
     pub fn build(self: *const Settings, cx: *ui.Context, state: *State) ui.Widget {
         const b: Builder = .{ .cx = cx };
         const t = cx.theme();
-        var rail_items: [std.meta.fields(Page).len]ui.NavigationRail.Item = undefined;
-        inline for (&rail_items, std.meta.fields(Page)) |*item, field| {
-            const p: Page = @enumFromInt(field.value);
+        const page_values = @typeInfo(Page).@"enum".field_values;
+        var rail_items: [page_values.len]ui.NavigationRail.Item = undefined;
+        inline for (&rail_items, page_values) |*item, value| {
+            const p: Page = @enumFromInt(value);
             item.* = .{ .label = p.label(), .icon = p.icon() };
         }
         const sidebar = cx.make(ui.NavigationRail{

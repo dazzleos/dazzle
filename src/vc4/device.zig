@@ -235,7 +235,7 @@ fn queryV3dVersion(fd: linux.fd_t) struct { ver: u8, rev: u8 } {
 fn openV3dNode() ?linux.fd_t {
     var path_buf: [32]u8 = undefined;
     for (128..132) |n| {
-        const path = std.fmt.bufPrintZ(&path_buf, "/dev/dri/renderD{d}", .{n}) catch continue;
+        const path = std.mem.printSentinel(&path_buf, "/dev/dri/renderD{d}", .{n}, 0) catch continue;
         const fd = sys.open(path.ptr, .{ .ACCMODE = .RDWR, .CLOEXEC = true }) catch continue;
         var name_buf: [32]u8 = undefined;
         const name = drm.driverName(fd, &name_buf) catch "";
@@ -296,7 +296,7 @@ pub fn open() !Device {
 pub fn openRender() !Device {
     var path_buf: [32]u8 = undefined;
     for (128..132) |n| {
-        const path = std.fmt.bufPrintZ(&path_buf, "/dev/dri/renderD{d}", .{n}) catch continue;
+        const path = std.mem.printSentinel(&path_buf, "/dev/dri/renderD{d}", .{n}, 0) catch continue;
         const fd = sys.open(path.ptr, .{ .ACCMODE = .RDWR, .CLOEXEC = true }) catch continue;
         var name_buf: [32]u8 = undefined;
         const name = drm.driverName(fd, &name_buf) catch "";

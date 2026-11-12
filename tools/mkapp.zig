@@ -78,7 +78,7 @@ fn walkDir(
     excludes: []const []const u8,
     files: *std.ArrayList(Entry),
 ) !void {
-    const src_z = try arena.dupeZ(u8, src_dir);
+    const src_z = try arena.dupeSentinel(u8, src_dir, 0);
     const rc = linux.open(src_z.ptr, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, 0);
     if (linux.errno(rc) != .SUCCESS) return error.OpenDirFailed;
     const fd: linux.fd_t = @intCast(rc);

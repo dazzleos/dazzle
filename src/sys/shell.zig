@@ -42,7 +42,7 @@ fn validWord(w: []const u8) bool {
 
 /// The socket an app listens on for what to show: /os/sockets/app-<name>.
 pub fn appSocket(buf: []u8, name: []const u8) ?[:0]const u8 {
-    return std.fmt.bufPrintZ(buf, "/os/sockets/app-{s}", .{name}) catch null;
+    return std.mem.printSentinel(buf, "/os/sockets/app-{s}", .{name}, 0) catch null;
 }
 
 /// Asks the shell to open `app`, showing `what`. Returns whether it did.
@@ -122,7 +122,7 @@ test "an app's socket, and a line over it" {
     var buf: [64]u8 = undefined;
     try testing.expectEqualStrings("/os/sockets/app-dazzle-settings", appSocket(&buf, "dazzle-settings").?);
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, "/tmp/dazzle-shell-test-{d}", .{linux.getpid()});
+    const path = try std.mem.printSentinel(&path_buf, "/tmp/dazzle-shell-test-{d}", .{linux.getpid()}, 0);
     const l = try listen(path);
     defer {
         sys.close(l);

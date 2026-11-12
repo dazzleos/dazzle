@@ -290,7 +290,7 @@ const Paths = struct {
 
     fn consider(p: *Paths, entry: []const u8) void {
         var name_path_buf: [96]u8 = undefined;
-        const name_path = std.fmt.bufPrintZ(&name_path_buf, "{s}/{s}/name", .{ sysfs, entry }) catch return;
+        const name_path = std.mem.printSentinel(&name_path_buf, "{s}/{s}/name", .{ sysfs, entry }, 0) catch return;
         var name_buf: [64]u8 = undefined;
         const name = std.mem.trim(u8, sys.readFile(name_path, &name_buf) orelse return, " \n");
         if (std.mem.startsWith(u8, entry, "video")) {
@@ -310,9 +310,9 @@ const Paths = struct {
 
     fn path(p: *Paths, which: Which) [:0]const u8 {
         return switch (which) {
-            .video => std.fmt.bufPrintZ(&p.buf, "/dev/video{d}", .{p.video_n.?}),
-            .sensor => std.fmt.bufPrintZ(&p.buf, "/dev/v4l-subdev{d}", .{p.sensor_n.?}),
-            .unicam => std.fmt.bufPrintZ(&p.buf, "/dev/v4l-subdev{d}", .{p.unicam_n.?}),
+            .video => std.mem.printSentinel(&p.buf, "/dev/video{d}", .{p.video_n.?}, 0),
+            .sensor => std.mem.printSentinel(&p.buf, "/dev/v4l-subdev{d}", .{p.sensor_n.?}, 0),
+            .unicam => std.mem.printSentinel(&p.buf, "/dev/v4l-subdev{d}", .{p.unicam_n.?}, 0),
         } catch unreachable;
     }
 };

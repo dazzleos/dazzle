@@ -48,7 +48,7 @@ pub const Monitor = struct {
         };
         if (sys.readFile("/proc/self/stat", &buf)) |stat| now.demo = processTicks(stat) orelse 0;
         var path_buf: [32]u8 = undefined;
-        const shell_path = std.fmt.bufPrintZ(&path_buf, "/proc/{d}/stat", .{linux.getppid()}) catch unreachable;
+        const shell_path = std.mem.printSentinel(&path_buf, "/proc/{d}/stat", .{linux.getppid()}, 0) catch unreachable;
         if (sys.readFile(shell_path, &buf)) |stat| now.shell = processTicks(stat) orelse 0;
 
         const elapsed = now.total -| m.last.total;

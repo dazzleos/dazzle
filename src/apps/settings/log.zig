@@ -111,7 +111,7 @@ test "the newest lines are kept" {
     try testing.expectEqual(@as(usize, max_lines), l.count);
     try testing.expectEqualStrings(try std.fmt.bufPrint(&buf, "line {d}", .{max_lines + 4}), l.newest(0).text());
     try testing.expectEqualStrings("line 5", l.newest(max_lines - 1).text());
-    l.add("3,999,1,-;" ++ "x" ** 300 ++ "\n");
+    l.add("3,999,1,-;" ++ &@as([300]u8, @splat('x')) ++ "\n");
     try testing.expectEqual(sys.log.Level.@"error", l.newest(0).level);
     try testing.expectEqual(@as(usize, max_text), l.newest(0).text().len);
     // Not a record: nothing.

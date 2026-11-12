@@ -1797,7 +1797,7 @@ fn openDevice(wanted_fourcc: u32) !linux.fd_t {
 
 fn tryDevice(n: usize, wanted_fourcc: u32) ?linux.fd_t {
     var path_buf: [32]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "/dev/video{d}", .{n}) catch return null;
+    const path = std.mem.printSentinel(&path_buf, "/dev/video{d}", .{n}, 0) catch return null;
     const fd = sys.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true, .CLOEXEC = true }) catch return null;
     var cap: v4l2.Capability = undefined;
     if (linux.errno(linux.ioctl(fd, v4l2.querycap, @intFromPtr(&cap))) != .SUCCESS) {
@@ -2260,7 +2260,7 @@ fn openEncoderDevice(wanted_fourcc: u32) !linux.fd_t {
 
 fn tryEncoderDevice(n: usize, wanted_fourcc: u32) ?linux.fd_t {
     var path_buf: [32]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "/dev/video{d}", .{n}) catch return null;
+    const path = std.mem.printSentinel(&path_buf, "/dev/video{d}", .{n}, 0) catch return null;
     const fd = sys.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true, .CLOEXEC = true }) catch return null;
     var cap: v4l2.Capability = undefined;
     if (linux.errno(linux.ioctl(fd, v4l2.querycap, @intFromPtr(&cap))) != .SUCCESS) {
@@ -3131,7 +3131,7 @@ test "MP4 demuxing, avcC to Annex-B conversion and keyframe seeking" {
     try testing.expect(looksLikeVideo(mp4));
 
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, "/tmp/dazzle-video-test-{d}.mp4", .{linux.getpid()});
+    const path = try std.mem.printSentinel(&path_buf, "/tmp/dazzle-video-test-{d}.mp4", .{linux.getpid()}, 0);
     defer _ = linux.unlink(path);
     try sys.files.writeNew(path, mp4);
 
@@ -3197,7 +3197,7 @@ test "YUV420 and NV12 conversion produces opaque ARGB pixels" {
 
 test "Mp4Muxer streams Annex-B H.264 packets into a valid playable MP4" {
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, "/tmp/dazzle-mux-test-{d}.mp4", .{linux.getpid()});
+    const path = try std.mem.printSentinel(&path_buf, "/tmp/dazzle-mux-test-{d}.mp4", .{linux.getpid()}, 0);
     defer _ = linux.unlink(path);
 
     const fd: linux.fd_t = @intCast(try sys.check(linux.open(

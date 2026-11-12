@@ -1299,7 +1299,9 @@ const Lowerer = struct {
                 for (o[4..], out) |c, *r| r.* = if (c == 0xffffffff) .{ .scalar = l.k(0) } else if (c < xs.len) xs[c] else ys[c - xs.len];
                 try frame.put(l.a, o[1], .{ .list = out });
             },
-            Op.copy_object => try frame.put(l.a, o[1], try l.keep(frame, o[2])),
+            // A copy between types laid out differently (a uniform's
+            // explicitly laid out array, and the plain one): the same values.
+            Op.copy_object, Op.copy_logical => try frame.put(l.a, o[1], try l.keep(frame, o[2])),
             Op.undef => try frame.put(l.a, o[1], try l.zero(o[0])),
             Op.f_add => try frame.put(l.a, o[1], try l.map2(try l.val(frame, o[2]), try l.val(frame, o[3]), add)),
             Op.f_sub => try frame.put(l.a, o[1], try l.map2(try l.val(frame, o[2]), try l.val(frame, o[3]), sub)),
@@ -1310,6 +1312,12 @@ const Lowerer = struct {
             Op.convert_s_to_f, Op.convert_u_to_f => try frame.put(l.a, o[1], try l.intToFloat(try l.val(frame, o[2]))),
             Op.convert_f_to_s, Op.convert_f_to_u => try frame.put(l.a, o[1], try l.floatToInt(try l.val(frame, o[2]))),
             Op.u_convert, Op.s_convert => try frame.put(l.a, o[1], try l.keep(frame, o[2])),
+            // Between integers of the same width (Zig 0.17 casts loop
+            // indices this way): the same value, as for the conversions.
+            Op.bitcast => switch (l.m.typeOf(o[0])) {
+                .int => try frame.put(l.a, o[1], try l.keep(frame, o[2])),
+                else => return l.fail(inst, "bit casts are only supported between integers", .{}),
+            },
             Op.i_add, Op.i_sub, Op.i_mul => try frame.put(l.a, o[1], try l.intArith(inst, try l.keep(frame, o[2]), try l.keep(frame, o[3]), inst.op)),
             Op.s_negate => try frame.put(l.a, o[1], try l.intArith(inst, .{ .int = 0 }, try l.keep(frame, o[2]), Op.i_sub)),
             Op.ext_inst => {

@@ -42,7 +42,7 @@ pub const Interface = struct {
     /// Reads /sys/class/net/<name>/<attr>.
     fn attr(i: *const Interface, comptime a: []const u8, buf: []u8) ?[]const u8 {
         var path_buf: [64]u8 = undefined;
-        const path = std.fmt.bufPrintZ(&path_buf, "/sys/class/net/{s}/" ++ a, .{i.name()}) catch return null;
+        const path = std.mem.printSentinel(&path_buf, "/sys/class/net/{s}/" ++ a, .{i.name()}, 0) catch return null;
         const text = sys.readFile(path.ptr, buf) orelse return null;
         return std.mem.trimEnd(u8, text, "\n");
     }
@@ -120,7 +120,7 @@ fn ifreqFor(ifc: *const Interface) linux.ifreq {
 
 fn sockaddr(ip: Ip4) linux.sockaddr {
     const in: linux.sockaddr.in = .{ .port = 0, .addr = @bitCast(ip) };
-    return @bitCast(in);
+    return @as(*const linux.sockaddr, @ptrCast(&in)).*;
 }
 
 fn ioctl(fd: linux.fd_t, request: u32, arg: anytype) sys.Error!void {

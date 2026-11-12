@@ -249,7 +249,7 @@ pub const SNDRV_PCM_IOCTL_WRITEI_FRAMES = linux.IOCTL.IOW('A', 0x50, SndXferi);
 /// `vc4-hdmi`, which relies on software volume scaling).
 pub fn setCardVolume(card: u8, volume_pct: u8, muted: bool) bool {
     var path_buf: [32]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "/dev/snd/controlC{d}", .{card}) catch return false;
+    const path = std.mem.printSentinel(&path_buf, "/dev/snd/controlC{d}", .{card}, 0) catch return false;
     const fd = sys.open(path, .{ .ACCMODE = .RDWR, .CLOEXEC = true }) catch return false;
     defer sys.close(fd);
 
@@ -372,7 +372,7 @@ pub const PcmOutput = struct {
 
     pub fn open(card: u8, device: u8, preferred_rate: u32) ?PcmOutput {
         var path_buf: [32]u8 = undefined;
-        const path = std.fmt.bufPrintZ(&path_buf, "/dev/snd/pcmC{d}D{d}p", .{ card, device }) catch return null;
+        const path = std.mem.printSentinel(&path_buf, "/dev/snd/pcmC{d}D{d}p", .{ card, device }, 0) catch return null;
         const fd = sys.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true, .CLOEXEC = true }) catch return null;
         errdefer sys.close(fd);
 

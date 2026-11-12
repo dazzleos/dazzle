@@ -112,7 +112,7 @@ fn userDevice(msg: []const u8) ?[]const u8 {
 /// Gives the user the device node /dev/`name`.
 fn grant(name: []const u8, log: bool) void {
     var path_buf: [64]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "/dev/{s}", .{name}) catch return;
+    const path = std.mem.printSentinel(&path_buf, "/dev/{s}", .{name}, 0) catch return;
     // devtmpfs creates the node before the uevent goes out, but be lenient.
     var attempt: u32 = 0;
     while (true) : (attempt += 1) {

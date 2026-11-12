@@ -24,11 +24,11 @@ const chunk = 256 * 1024;
 
 /// A slot's directory: /boot/slot-<slot><suffix>.
 pub fn slotPath(buf: []u8, slot: u8, suffix: []const u8) [:0]const u8 {
-    return std.fmt.bufPrintZ(buf, "{s}/slot-{c}{s}", .{ storage.boot_dir, slot, suffix }) catch unreachable;
+    return std.mem.printSentinel(buf, "{s}/slot-{c}{s}", .{ storage.boot_dir, slot, suffix }, 0) catch unreachable;
 }
 
 fn filePath(buf: []u8, dir: []const u8, name: []const u8) ?[:0]const u8 {
-    return std.fmt.bufPrintZ(buf, "{s}/{s}", .{ dir, name }) catch null;
+    return std.mem.printSentinel(buf, "{s}/{s}", .{ dir, name }, 0) catch null;
 }
 
 pub fn other(slot: u8) u8 {

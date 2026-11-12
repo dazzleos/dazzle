@@ -121,7 +121,7 @@ const Scanout = struct { bo: vc4.Bo, fb_id: u32 };
 
 /// The shell's own panels on the screen, drawn on the CPU.
 pub const PanelId = enum { dock, perf };
-const n_panels = @typeInfo(PanelId).@"enum".fields.len;
+const n_panels = @typeInfo(PanelId).@"enum".field_names.len;
 
 /// A panel's picture, copied where it is needed when a frame is drawn: into
 /// an overlay plane's buffer above a window shown directly, or (when the
@@ -145,7 +145,7 @@ const Panel = struct {
     hidden: bool = false,
 };
 
-const n_cursors = @typeInfo(cursor.Shape).@"enum".fields.len;
+const n_cursors = @typeInfo(cursor.Shape).@"enum".field_names.len;
 
 pub const Renderer = struct {
     gpa: std.mem.Allocator,

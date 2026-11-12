@@ -419,7 +419,7 @@ test "layouts" {
 
 test "a formatted partition has a valid superblock and root directory" {
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, "/tmp/dazzle-mkfs-test-{d}", .{linux.getpid()});
+    const path = try std.mem.printSentinel(&path_buf, "/tmp/dazzle-mkfs-test-{d}", .{linux.getpid()}, 0);
     const fd = try sys.open(path, .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true, .CLOEXEC = true });
     defer {
         sys.close(fd);

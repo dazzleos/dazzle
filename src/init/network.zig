@@ -82,7 +82,7 @@ const Slot = struct {
         const pid = s.dhcp_pid orelse return;
         _ = linux.kill(pid, .TERM);
         var status: u32 = 0;
-        _ = linux.wait4(pid, &status, 0, null);
+        _ = linux.wait4(pid, @ptrCast(&status), 0, null);
         s.dhcp_pid = null;
     }
 };
@@ -352,7 +352,7 @@ fn allowed(fd: linux.fd_t) bool {
     var len: linux.socklen_t = @sizeOf(Ucred);
     if (linux.errno(linux.getsockopt(fd, linux.SOL.SOCKET, linux.SO.PEERCRED, @ptrCast(&cred), &len)) != .SUCCESS) return false;
     var path_buf: [32]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "/proc/{d}/exe", .{cred.pid}) catch return false;
+    const path = std.mem.printSentinel(&path_buf, "/proc/{d}/exe", .{cred.pid}, 0) catch return false;
     var exe: [256]u8 = undefined;
     const n = sys.check(linux.readlink(path.ptr, &exe, exe.len)) catch return false;
     const ok = isAllowedProgram(exe[0..n]);

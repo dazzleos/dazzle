@@ -49,7 +49,7 @@ const f_uv = gpu.fragmentInput(Vec2, 0);
 const f_tint = gpu.fragmentInput(Vec3, 1);
 const f_shade = gpu.fragmentInput(f32, 2);
 
-export fn fragment() callconv(.spirv_fragment) void {
+export fn fragment() callconv(.{ .spirv_fragment = .{} }) void {
     const t = gpu.texture(f_uv.*);
     const k = u.options[1];
     const tint = f_tint.*;

@@ -579,9 +579,9 @@ pub const IconSet = struct {
     gpa: std.mem.Allocator,
     os_decoded: ?gfx.png.Decoded = null,
     os_image: ?gfx.Image = null,
-    app_decoded: [max_icons]?gfx.png.Decoded = .{null} ** max_icons,
+    app_decoded: [max_icons]?gfx.png.Decoded = @splat(null),
     app_images: [max_icons]gfx.Image = undefined,
-    app_ptrs: [max_icons]?*const gfx.Image = .{null} ** max_icons,
+    app_ptrs: [max_icons]?*const gfx.Image = @splat(null),
 
     pub fn init(gpa: std.mem.Allocator) IconSet {
         return .{ .gpa = gpa };
@@ -651,8 +651,8 @@ fn loadOsIcon(gpa: std.mem.Allocator, installed_path: [:0]const u8, server_path:
 fn loadAppIcon(gpa: std.mem.Allocator, dir: []const u8, icons_path: []const u8, app: store.App) ?gfx.png.Decoded {
     var installed_buf: [256]u8 = undefined;
     var server_buf: [256]u8 = undefined;
-    const installed_path = std.fmt.bufPrintZ(&installed_buf, "{s}/{s}/icon.png", .{ dir, app.name }) catch null;
-    const server_path = std.fmt.bufPrintZ(&server_buf, "{s}/{s}.png", .{ icons_path, app.name }) catch null;
+    const installed_path = std.mem.printSentinel(&installed_buf, "{s}/{s}/icon.png", .{ dir, app.name }, 0) catch null;
+    const server_path = std.mem.printSentinel(&server_buf, "{s}/{s}.png", .{ icons_path, app.name }, 0) catch null;
     const installed = store.isInstalled(dir, app.name);
     const use_installed_first = installed and !store.hasNewerVersion(dir, app);
     if (use_installed_first) {
@@ -782,16 +782,16 @@ test "updates: offered, downloaded, installed, then a restart" {
 test "software icons: installed when up to date, server when uninstalled, missing on disk or newer available, else fallback" {
     const linux = std.os.linux;
     var dir_buf: [64]u8 = undefined;
-    const root = try std.fmt.bufPrintZ(&dir_buf, "/tmp/dazzle-icons-test-{d}", .{linux.getpid()});
+    const root = try std.mem.printSentinel(&dir_buf, "/tmp/dazzle-icons-test-{d}", .{linux.getpid()}, 0);
     _ = linux.mkdir(root, 0o755);
     defer sys_mod.files.removeTree(root);
 
     var os_dir_buf: [96]u8 = undefined;
     var apps_dir_buf: [96]u8 = undefined;
     var icons_dir_buf: [96]u8 = undefined;
-    const os_dir = try std.fmt.bufPrintZ(&os_dir_buf, "{s}/os", .{root});
-    const apps_dir = try std.fmt.bufPrintZ(&apps_dir_buf, "{s}/apps", .{root});
-    const icons_dir = try std.fmt.bufPrintZ(&icons_dir_buf, "{s}/apps/.icons", .{root});
+    const os_dir = try std.mem.printSentinel(&os_dir_buf, "{s}/os", .{root}, 0);
+    const apps_dir = try std.mem.printSentinel(&apps_dir_buf, "{s}/apps", .{root}, 0);
+    const icons_dir = try std.mem.printSentinel(&icons_dir_buf, "{s}/apps/.icons", .{root}, 0);
     _ = linux.mkdir(os_dir, 0o755);
     _ = linux.mkdir(apps_dir, 0o755);
     _ = linux.mkdir(icons_dir, 0o755);
@@ -808,30 +808,30 @@ test "software icons: installed when up to date, server when uninstalled, missin
 
     var os_installed_buf: [128]u8 = undefined;
     var os_server_buf: [128]u8 = undefined;
-    const os_installed = try std.fmt.bufPrintZ(&os_installed_buf, "{s}/icon.png", .{os_dir});
-    const os_server = try std.fmt.bufPrintZ(&os_server_buf, "{s}/server-os-icon.png", .{os_dir});
+    const os_installed = try std.mem.printSentinel(&os_installed_buf, "{s}/icon.png", .{os_dir}, 0);
+    const os_server = try std.mem.printSentinel(&os_server_buf, "{s}/server-os-icon.png", .{os_dir}, 0);
     try makePng(testing.allocator, os_installed, 0xff112233);
     try makePng(testing.allocator, os_server, 0xffaabbcc);
 
     // Installed app "dazzle-demo" at version 1000 abc, with an installed icon (0x10) and server icon (0x20).
     var path_buf: [160]u8 = undefined;
-    _ = linux.mkdir(try std.fmt.bufPrintZ(&path_buf, "{s}/dazzle-demo", .{apps_dir}), 0o755);
-    const demo_bin = try std.fmt.bufPrintZ(&path_buf, "{s}/dazzle-demo/dazzle-demo", .{apps_dir});
+    _ = linux.mkdir(try std.mem.printSentinel(&path_buf, "{s}/dazzle-demo", .{apps_dir}, 0), 0o755);
+    const demo_bin = try std.mem.printSentinel(&path_buf, "{s}/dazzle-demo/dazzle-demo", .{apps_dir}, 0);
     try sys_mod.files.writeNew(demo_bin, "bin");
     _ = linux.chmod(demo_bin, 0o755);
-    try sys_mod.files.writeNew(try std.fmt.bufPrintZ(&path_buf, "{s}/dazzle-demo/version", .{apps_dir}), "1000 abc\n");
-    try makePng(testing.allocator, try std.fmt.bufPrintZ(&path_buf, "{s}/dazzle-demo/icon.png", .{apps_dir}), 0xff100000);
-    try makePng(testing.allocator, try std.fmt.bufPrintZ(&path_buf, "{s}/dazzle-demo.png", .{icons_dir}), 0xff200000);
+    try sys_mod.files.writeNew(try std.mem.printSentinel(&path_buf, "{s}/dazzle-demo/version", .{apps_dir}, 0), "1000 abc\n");
+    try makePng(testing.allocator, try std.mem.printSentinel(&path_buf, "{s}/dazzle-demo/icon.png", .{apps_dir}, 0), 0xff100000);
+    try makePng(testing.allocator, try std.mem.printSentinel(&path_buf, "{s}/dazzle-demo.png", .{icons_dir}, 0), 0xff200000);
 
     // Installed app "dazzle-files" with NO icon on disk, only a server icon (0x30).
-    _ = linux.mkdir(try std.fmt.bufPrintZ(&path_buf, "{s}/dazzle-files", .{apps_dir}), 0o755);
-    const files_bin = try std.fmt.bufPrintZ(&path_buf, "{s}/dazzle-files/dazzle-files", .{apps_dir});
+    _ = linux.mkdir(try std.mem.printSentinel(&path_buf, "{s}/dazzle-files", .{apps_dir}, 0), 0o755);
+    const files_bin = try std.mem.printSentinel(&path_buf, "{s}/dazzle-files/dazzle-files", .{apps_dir}, 0);
     try sys_mod.files.writeNew(files_bin, "bin");
     _ = linux.chmod(files_bin, 0o755);
-    try makePng(testing.allocator, try std.fmt.bufPrintZ(&path_buf, "{s}/dazzle-files.png", .{icons_dir}), 0xff300000);
+    try makePng(testing.allocator, try std.mem.printSentinel(&path_buf, "{s}/dazzle-files.png", .{icons_dir}, 0), 0xff300000);
 
     // Uninstalled app "dazzle-camera" with a server icon (0x40), and "dazzle-maps" with NO icon anywhere.
-    try makePng(testing.allocator, try std.fmt.bufPrintZ(&path_buf, "{s}/dazzle-camera.png", .{icons_dir}), 0xff400000);
+    try makePng(testing.allocator, try std.mem.printSentinel(&path_buf, "{s}/dazzle-camera.png", .{icons_dir}, 0), 0xff400000);
 
     var list = [_]store.App{
         .{ .name = "dazzle-demo", .title = "Demo", .version = "abc", .time = 1000, .icon = "dazzle-demo.png", .file = "dazzle-demo.tar.xz", .size = 1, .sha256 = "" },

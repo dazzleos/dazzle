@@ -578,7 +578,7 @@ test "messages that are no good are not kept" {
     try testing.expect(!try say(&l, 1, 1, 0, "no number"));
     try testing.expect(!try say(&l, 0, 1, 1, "no time"));
     try testing.expect(!try say(&l, max_lamport, 1, 1, "far future"));
-    try testing.expect(!try say(&l, 1, 1, 1, "x" ** (max_text + 1)));
+    try testing.expect(!try say(&l, 1, 1, 1, &@as([max_text + 1]u8, @splat('x'))));
     try testing.expect(!try say(&l, 1, 1, 1, "bad \xff text"));
     try testing.expectEqual(@as(usize, 0), l.items.items.len);
 }
@@ -628,7 +628,11 @@ test "a client with part of the history gets the rest from another" {
 test "names are cut to fit, and stay text" {
     try testing.expectEqualStrings("kitchen", Name.init("kitchen").get());
     try testing.expectEqualStrings("ab", Name.init("a\nb").get());
-    const long = Name.init("é" ** 40);
+    const long = Name.init(comptime e40: {
+        var s: []const u8 = "";
+        for (0..40) |_| s = s ++ "é";
+        break :e40 s;
+    });
     try testing.expect(long.len <= max_name);
     try testing.expect(std.unicode.utf8ValidateSlice(long.get()));
 }

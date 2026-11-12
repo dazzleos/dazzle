@@ -709,7 +709,7 @@ pub const Manager = struct {
         const pid = j.dhcp_pid orelse return;
         _ = linux.kill(pid, .TERM);
         var status: u32 = 0;
-        _ = linux.wait4(pid, &status, 0, null);
+        _ = linux.wait4(pid, @ptrCast(&status), 0, null);
         j.dhcp_pid = null;
     }
 

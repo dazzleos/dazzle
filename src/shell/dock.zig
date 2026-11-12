@@ -151,9 +151,9 @@ pub fn readNetworkStatus() NetworkStatus {
             at += reclen;
             if (name.len == 0 or name[0] == '.' or std.mem.eql(u8, name, "lo")) continue;
             var pbuf: [128]u8 = undefined;
-            const phy = std.fmt.bufPrintZ(&pbuf, "/sys/class/net/{s}/phy80211/name", .{name}) catch continue;
+            const phy = std.mem.printSentinel(&pbuf, "/sys/class/net/{s}/phy80211/name", .{name}, 0) catch continue;
             const is_wifi = linux.errno(linux.access(phy, linux.F_OK)) == .SUCCESS;
-            const state_path = std.fmt.bufPrintZ(&pbuf, "/sys/class/net/{s}/operstate", .{name}) catch continue;
+            const state_path = std.mem.printSentinel(&pbuf, "/sys/class/net/{s}/operstate", .{name}, 0) catch continue;
             var sbuf: [32]u8 = undefined;
             const up = if (sys.open(state_path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true })) |fd| blk: {
                 defer sys.close(fd);
@@ -219,7 +219,7 @@ pub fn findApps(gpa: std.mem.Allocator, dir_path: []const u8, builtin: []const [
     var apps: std.ArrayList(App) = .empty;
     errdefer apps.deinit(gpa);
     var path_buf: [256]u8 = undefined;
-    const dir_z = try std.fmt.bufPrintZ(&path_buf, "{s}", .{dir_path});
+    const dir_z = try std.mem.printSentinel(&path_buf, "{s}", .{dir_path}, 0);
     if (sys.open(dir_z, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true })) |dir| {
         defer sys.close(dir);
         try addDir(gpa, &apps, dir, dir_path);
@@ -230,7 +230,7 @@ pub fn findApps(gpa: std.mem.Allocator, dir_path: []const u8, builtin: []const [
         }
     }.lessThan);
     for (builtin) |p| {
-        const path = try gpa.dupeZ(u8, p);
+        const path = try gpa.dupeSentinel(u8, p, 0);
         if (linux.errno(linux.access(path, linux.X_OK)) != .SUCCESS) {
             gpa.free(path);
             continue;
@@ -314,7 +314,7 @@ fn addDir(gpa: std.mem.Allocator, apps: *std.ArrayList(App), dir: linux.fd_t, di
 /// The icon named in `<program>.icon`, if there is one Dazzle has.
 fn iconOf(program: []const u8) ?icons.Icon {
     var path_buf: [300]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "{s}.icon", .{program}) catch return null;
+    const path = std.mem.printSentinel(&path_buf, "{s}.icon", .{program}, 0) catch return null;
     const fd = sys.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }) catch return null;
     defer sys.close(fd);
     var buf: [64]u8 = undefined;
@@ -510,14 +510,14 @@ const testing = std.testing;
 
 test "a watched directory changes when an entry comes or goes" {
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, "/tmp/dazzle-watch-test-{d}", .{linux.getpid()});
+    const path = try std.mem.printSentinel(&path_buf, "/tmp/dazzle-watch-test-{d}", .{linux.getpid()}, 0);
     _ = linux.mkdir(path, 0o755);
     defer _ = linux.rmdir(path);
     var w: Watch = .{ .path = path };
     try testing.expect(!w.changed());
     try testing.expect(!w.changed());
     var sub_buf: [80]u8 = undefined;
-    const sub = try std.fmt.bufPrintZ(&sub_buf, "{s}/app", .{path});
+    const sub = try std.mem.printSentinel(&sub_buf, "{s}/app", .{path}, 0);
     // Times of change are in the kernel's clock ticks: a few ms apart.
     sys.sleepMs(20);
     _ = linux.mkdir(sub, 0o755);
@@ -622,35 +622,35 @@ test "networkStatusFromReport picks Ethernet when Ethernet is connected and Wi-F
 test "apps are the directories holding a program of the same name, with builtin apps on the right" {
     const a = testing.allocator;
     var tmp_buf: [64]u8 = undefined;
-    const root = try std.fmt.bufPrintZ(&tmp_buf, "/tmp/dazzle-dock-test-{d}", .{linux.getpid()});
+    const root = try std.mem.printSentinel(&tmp_buf, "/tmp/dazzle-dock-test-{d}", .{linux.getpid()}, 0);
     defer {
         var b: [128]u8 = undefined;
         for ([_][]const u8{ "/zeta/zeta", "/alpha/alpha", "/alpha/alpha.icon", "/dazzle-settings", "/zeta", "/alpha", "/notes", "" }) |p| {
-            const path = std.fmt.bufPrintZ(&b, "{s}{s}", .{ root, p }) catch unreachable;
+            const path = std.mem.printSentinel(&b, "{s}{s}", .{ root, p }, 0) catch unreachable;
             if (linux.errno(linux.unlink(path)) != .SUCCESS) _ = linux.rmdir(path);
         }
     }
     try testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.mkdir(root, 0o755)));
     var b: [128]u8 = undefined;
     for ([_][]const u8{ "zeta", "alpha", "notes" }) |name| {
-        _ = linux.mkdir(try std.fmt.bufPrintZ(&b, "{s}/{s}", .{ root, name }), 0o755);
+        _ = linux.mkdir(try std.mem.printSentinel(&b, "{s}/{s}", .{ root, name }, 0), 0o755);
     }
     // Programs for two of them; "notes" has none.
     for ([_][]const u8{ "zeta", "alpha" }) |name| {
-        const fd = try sys.open(try std.fmt.bufPrintZ(&b, "{s}/{s}/{s}", .{ root, name, name }), .{ .ACCMODE = .WRONLY, .CREAT = true, .CLOEXEC = true });
+        const fd = try sys.open(try std.mem.printSentinel(&b, "{s}/{s}/{s}", .{ root, name, name }, 0), .{ .ACCMODE = .WRONLY, .CREAT = true, .CLOEXEC = true });
         _ = linux.fchmod(fd, 0o755);
         sys.close(fd);
     }
     // Alpha's icon is named beside it.
     {
-        const fd = try sys.open(try std.fmt.bufPrintZ(&b, "{s}/alpha/alpha.icon", .{root}), .{ .ACCMODE = .WRONLY, .CREAT = true, .CLOEXEC = true });
+        const fd = try sys.open(try std.mem.printSentinel(&b, "{s}/alpha/alpha.icon", .{root}, 0), .{ .ACCMODE = .WRONLY, .CREAT = true, .CLOEXEC = true });
         _ = linux.fchmod(fd, 0o644);
         _ = linux.write(fd, "folder\n", 7);
         sys.close(fd);
     }
     // And a program of the shell's own whose name sorts before "zeta", to check it stays rightmost.
     var own_buf: [128]u8 = undefined;
-    const own_z = try std.fmt.bufPrintZ(&own_buf, "{s}/dazzle-settings", .{root});
+    const own_z = try std.mem.printSentinel(&own_buf, "{s}/dazzle-settings", .{root}, 0);
     {
         const fd = try sys.open(own_z, .{ .ACCMODE = .WRONLY, .CREAT = true, .CLOEXEC = true });
         _ = linux.fchmod(fd, 0o755);

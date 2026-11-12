@@ -254,7 +254,7 @@ pub const Devices = struct {
         const slot = &d.fds[n];
         if (slot.* != null) return;
         var path_buf: [32]u8 = undefined;
-        const path = std.fmt.bufPrintZ(&path_buf, "/dev/input/event{d}", .{n}) catch return;
+        const path = std.mem.printSentinel(&path_buf, "/dev/input/event{d}", .{n}, 0) catch return;
         // Not handed to the user yet: tried again at the next scan.
         const fd = sys.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }) catch return;
         slot.* = fd;

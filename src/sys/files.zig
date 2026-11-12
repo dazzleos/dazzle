@@ -13,7 +13,7 @@ pub fn numberedName(buf: []u8, dir: []const u8, prefix: []const u8, ext: []const
     var n: u32 = 1;
     while (n < 100_000) : (n += 1) {
         if (taken(dir, prefix, n)) continue;
-        return std.fmt.bufPrintZ(buf, "{s}/{s} {d}.{s}", .{ dir, prefix, n, ext }) catch null;
+        return std.mem.printSentinel(buf, "{s}/{s} {d}.{s}", .{ dir, prefix, n, ext }, 0) catch null;
     }
     return null;
 }
@@ -21,7 +21,7 @@ pub fn numberedName(buf: []u8, dir: []const u8, prefix: []const u8, ext: []const
 /// Whether a file numbered `n` is in `dir`.
 fn taken(dir: []const u8, prefix: []const u8, n: u32) bool {
     var z: [256]u8 = undefined;
-    const dir_z = std.fmt.bufPrintZ(&z, "{s}", .{dir}) catch return false;
+    const dir_z = std.mem.printSentinel(&z, "{s}", .{dir}, 0) catch return false;
     const fd = sys.open(dir_z, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }) catch return false;
     defer sys.close(fd);
     var numbered_buf: [64]u8 = undefined;
@@ -71,7 +71,7 @@ pub fn removeTree(path: [:0]const u8) void {
                 at += reclen;
                 if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
                 var child_buf: [512]u8 = undefined;
-                const child = std.fmt.bufPrintZ(&child_buf, "{s}/{s}", .{ path, name }) catch continue;
+                const child = std.mem.printSentinel(&child_buf, "{s}/{s}", .{ path, name }, 0) catch continue;
                 if (kind == 4) removeTree(child) else _ = linux.unlink(child);
             }
         }
@@ -86,16 +86,16 @@ test "names are numbered, after those already there" {
     var dir_buf: [64]u8 = undefined;
     const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/dazzle-names-test-{d}", .{linux.getpid()});
     var z: [128]u8 = undefined;
-    _ = linux.mkdir(try std.fmt.bufPrintZ(&z, "{s}", .{dir}), 0o755);
-    defer _ = linux.rmdir(std.fmt.bufPrintZ(&z, "{s}", .{dir}) catch unreachable);
+    _ = linux.mkdir(try std.mem.printSentinel(&z, "{s}", .{dir}, 0), 0o755);
+    defer _ = linux.rmdir(std.mem.printSentinel(&z, "{s}", .{dir}, 0) catch unreachable);
     var buf: [256]u8 = undefined;
     const first = numberedName(&buf, dir, "Screenshot", "png").?;
     try testing.expect(std.mem.endsWith(u8, first, "/Screenshot 1.png"));
     var made: [3][128]u8 = undefined;
     const names = [_][:0]const u8{
-        try std.fmt.bufPrintZ(&made[0], "{s}/Screenshot 1.png", .{dir}),
-        try std.fmt.bufPrintZ(&made[1], "{s}/Screenshot 2 of the dock.png", .{dir}),
-        try std.fmt.bufPrintZ(&made[2], "{s}/Photo 1.png", .{dir}),
+        try std.mem.printSentinel(&made[0], "{s}/Screenshot 1.png", .{dir}, 0),
+        try std.mem.printSentinel(&made[1], "{s}/Screenshot 2 of the dock.png", .{dir}, 0),
+        try std.mem.printSentinel(&made[2], "{s}/Photo 1.png", .{dir}, 0),
     };
     defer for (names) |p| {
         _ = linux.unlink(p);

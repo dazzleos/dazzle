@@ -38,7 +38,7 @@ pub fn headerBus() u8 {
     var buf: [128]u8 = undefined;
     var path_buf: [64]u8 = undefined;
     for (0..8) |n| {
-        const path = std.fmt.bufPrintZ(&path_buf, "/sys/class/i2c-dev/i2c-{d}/device/of_node", .{n}) catch continue;
+        const path = std.mem.printSentinel(&path_buf, "/sys/class/i2c-dev/i2c-{d}/device/of_node", .{n}, 0) catch continue;
         const rc = linux.readlink(path, &buf, buf.len);
         if (linux.errno(rc) != .SUCCESS) continue;
         if (std.mem.indexOf(u8, buf[0..rc], "7e804000") != null) return @intCast(n);
@@ -51,7 +51,7 @@ pub const Bus = struct {
 
     pub fn open(number: u8) !Bus {
         var buf: [32]u8 = undefined;
-        const path = std.fmt.bufPrintZ(&buf, "/dev/i2c-{d}", .{number}) catch unreachable;
+        const path = std.mem.printSentinel(&buf, "/dev/i2c-{d}", .{number}, 0) catch unreachable;
         return .{ .fd = try sys.open(path, .{ .ACCMODE = .RDWR, .CLOEXEC = true }) };
     }
 

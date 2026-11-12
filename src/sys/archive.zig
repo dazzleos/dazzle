@@ -40,7 +40,7 @@ pub fn extract(gpa: std.mem.Allocator, archive: []const u8, root: []const u8, de
             continue;
         }
         var path_buf: [512]u8 = undefined;
-        const path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ dest, rel }) catch return error.BadArchive;
+        const path = std.mem.printSentinel(&path_buf, "{s}/{s}", .{ dest, rel }, 0) catch return error.BadArchive;
         switch (f.kind) {
             .directory => switch (linux.errno(linux.mkdir(path, 0o755))) {
                 .SUCCESS, .EXIST => {},

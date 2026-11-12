@@ -110,7 +110,7 @@ pub fn listDevices() Devices {
         if (list.len >= max_devices) break;
         const card: u8 = @intCast(card_usize);
         var ctl_path_buf: [32]u8 = undefined;
-        const ctl_path = std.fmt.bufPrintZ(&ctl_path_buf, "/dev/snd/controlC{d}", .{card}) catch continue;
+        const ctl_path = std.mem.printSentinel(&ctl_path_buf, "/dev/snd/controlC{d}", .{card}, 0) catch continue;
         const ctl_fd = sys.open(ctl_path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }) catch continue;
         defer sys.close(ctl_fd);
 
@@ -146,7 +146,7 @@ fn findPlaybackDevice(ctl_fd: linux.fd_t, card: u8) ?u8 {
     }
     // Fallback: check whether /dev/snd/pcmC<card>D0p exists.
     var path_buf: [32]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "/dev/snd/pcmC{d}D0p", .{card}) catch return null;
+    const path = std.mem.printSentinel(&path_buf, "/dev/snd/pcmC{d}D0p", .{card}, 0) catch return null;
     if (linux.errno(linux.access(path, linux.F_OK)) == .SUCCESS) return 0;
     return null;
 }

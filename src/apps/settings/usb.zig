@@ -183,7 +183,7 @@ fn interfacesKind(dir: []const u8, port: []const u8) Kind {
 
 fn driverKind(dir: []const u8, interface: []const u8) Kind {
     var path_buf: [256]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}/driver", .{ dir, interface }) catch return .other;
+    const path = std.mem.printSentinel(&path_buf, "{s}/{s}/driver", .{ dir, interface }, 0) catch return .other;
     var target: [256]u8 = undefined;
     const n = sys.check(linux.readlink(path, &target, target.len)) catch return .other;
     const driver = std.fs.path.basename(target[0..n]);
@@ -196,7 +196,7 @@ fn driverKind(dir: []const u8, interface: []const u8) Kind {
 /// A device's (or interface's) attribute, trimmed.
 fn attr(buf: []u8, dir: []const u8, entry: []const u8, name: []const u8) ?[]const u8 {
     var path_buf: [256]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}/{s}", .{ dir, entry, name }) catch return null;
+    const path = std.mem.printSentinel(&path_buf, "{s}/{s}/{s}", .{ dir, entry, name }, 0) catch return null;
     const text = sys.readFile(path, buf) orelse return null;
     return std.mem.trim(u8, text, " \n\x00");
 }
@@ -217,7 +217,7 @@ const FakeSysfs = struct {
     path: [:0]const u8 = "",
 
     fn init(f: *FakeSysfs) !void {
-        f.path = try std.fmt.bufPrintZ(&f.path_buf, "/tmp/dazzle-usb-test-{d}", .{linux.getpid()});
+        f.path = try std.mem.printSentinel(&f.path_buf, "/tmp/dazzle-usb-test-{d}", .{linux.getpid()}, 0);
         _ = linux.mkdir(f.path, 0o755);
     }
 
@@ -227,8 +227,8 @@ const FakeSysfs = struct {
 
     fn add(f: *FakeSysfs, entry: []const u8, attrs: []const [2][]const u8) !void {
         var buf: [256]u8 = undefined;
-        _ = linux.mkdir(try std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ f.path, entry }), 0o755);
-        for (attrs) |a| try sys.files.writeNew(try std.fmt.bufPrintZ(&buf, "{s}/{s}/{s}", .{ f.path, entry, a[0] }), a[1]);
+        _ = linux.mkdir(try std.mem.printSentinel(&buf, "{s}/{s}", .{ f.path, entry }, 0), 0o755);
+        for (attrs) |a| try sys.files.writeNew(try std.mem.printSentinel(&buf, "{s}/{s}/{s}", .{ f.path, entry, a[0] }, 0), a[1]);
     }
 };
 

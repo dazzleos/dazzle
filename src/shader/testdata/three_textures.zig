@@ -13,7 +13,7 @@ export fn vertex() callconv(.spirv_vertex) void {
 
 const uv = gpu.fragmentInput(gpu.Vec2, 0);
 
-export fn fragment() callconv(.spirv_fragment) void {
+export fn fragment() callconv(.{ .spirv_fragment = .{} }) void {
     const a = gpu.texture(uv.*);
     const b = gpu.texture1(uv.*);
     const c = gpu.texture2(uv.*);

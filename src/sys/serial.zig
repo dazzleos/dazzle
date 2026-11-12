@@ -36,7 +36,7 @@ pub fn ports() Ports {
     const serial0 = sys.readFile("/proc/device-tree/aliases/serial0", &alias_buf) orelse "";
     p.add(if (std.mem.indexOf(u8, serial0, "7e215040") != null) "ttyS0" else "ttyAMA0");
     for ([_][]const u8{ "ttyUSB", "ttyACM" }) |prefix| for (0..4) |n| {
-        const dev = std.fmt.bufPrintZ(&buf, "/dev/{s}{d}", .{ prefix, n }) catch continue;
+        const dev = std.mem.printSentinel(&buf, "/dev/{s}{d}", .{ prefix, n }, 0) catch continue;
         if (linux.access(dev, linux.F_OK) == 0) p.add(dev["/dev/".len..]);
     };
     return p;
@@ -74,7 +74,7 @@ pub const Port = struct {
     /// Opens /dev/`name` at `baud`, for reading without waiting.
     pub fn open(name: []const u8, baud: u32) !Port {
         var buf: [32]u8 = undefined;
-        const path = try std.fmt.bufPrintZ(&buf, "/dev/{s}", .{name});
+        const path = try std.mem.printSentinel(&buf, "/dev/{s}", .{name}, 0);
         const fd = try sys.open(path, .{ .ACCMODE = .RDWR, .NOCTTY = true, .NONBLOCK = true, .CLOEXEC = true });
         errdefer sys.close(fd);
         var t: Termios2 = undefined;

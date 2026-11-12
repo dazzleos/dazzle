@@ -60,7 +60,7 @@ pub fn nextName(buf: []u8, dir: []const u8) ?[:0]const u8 {
 test "saving a screenshot on a 1 MiB thread stack" {
     const gpa = std.testing.allocator;
     var dir_buf: [64]u8 = undefined;
-    const dir = try std.fmt.bufPrintZ(&dir_buf, "/tmp/dazzle-screenshot-test-{d}", .{linux.getpid()});
+    const dir = try std.mem.printSentinel(&dir_buf, "/tmp/dazzle-screenshot-test-{d}", .{linux.getpid()}, 0);
     _ = linux.mkdir(dir, 0o755);
     defer sys.files.removeTree(dir);
 
@@ -70,7 +70,7 @@ test "saving a screenshot on a 1 MiB thread stack" {
     t.join();
 
     var path_buf: [512]u8 = undefined;
-    const saved = try std.fmt.bufPrintZ(&path_buf, "{s}/Screenshot 1.png", .{dir});
+    const saved = try std.mem.printSentinel(&path_buf, "{s}/Screenshot 1.png", .{dir}, 0);
     const data = try sys.readFileAlloc(gpa, saved, 64 * 1024);
     defer gpa.free(data);
     const decoded = try png.decode(gpa, data);

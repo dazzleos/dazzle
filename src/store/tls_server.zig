@@ -256,7 +256,7 @@ pub const Conn = struct {
         }
 
         const peer_pub = client_x25519 orelse return error.TlsIllegalParameter;
-        const server_x25519 = X25519.KeyPair.generateDeterministic("dazzle-test-x25519-ephemeral-key".*) catch unreachable;
+        const server_x25519 = X25519.KeyPair.generateDeterministic("dazzle-test-x25519-ephemeral-key".*);
         const shared_secret = try X25519.scalarmult(server_x25519.secret_key, peer_pub);
 
         var transcript = Sha256.init(.{});
@@ -298,7 +298,7 @@ pub const Conn = struct {
 
         // 3. Derive handshake traffic secrets
         const hello_hash = transcript.peek();
-        const zeroes = [_]u8{0} ** 32;
+        const zeroes = @as([32]u8, @splat(0));
         const early_secret = HkdfSha256.extract(&[_]u8{0}, &zeroes);
         const empty_hash = tls.emptyHash(Sha256);
         const hs_derived = tls.hkdfExpandLabel(HkdfSha256, early_secret, "derived", &empty_hash, 32);
@@ -354,7 +354,7 @@ pub const Conn = struct {
         transcript.update(cert_hs);
         try hs_conn.writeRecord(.handshake, cert_hs);
 
-        const cv_prefix = " " ** 64 ++ "TLS 1.3, server CertificateVerify\x00";
+        const cv_prefix = @as([64]u8, @splat(' ')) ++ "TLS 1.3, server CertificateVerify\x00";
         const cv_hash = transcript.peek();
         var cv_msg: [cv_prefix.len + 32]u8 = undefined;
         @memcpy(cv_msg[0..cv_prefix.len], cv_prefix);

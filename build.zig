@@ -164,7 +164,7 @@ fn addMapData(b: *std.Build) std.Build.LazyPath {
 ///   matched to its source; `commit_time`, when it was committed (newer
 ///   systems have later times: see Settings' updates); and `apps_url`,
 ///   where apps and updates are downloaded from
-fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, shaders: []const ShaderBlob, icon_font: IconFont) Modules {
+fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.Optimize, shaders: []const ShaderBlob, icon_font: IconFont) Modules {
     const sys, const vc4, const shader = addGpuModules(b, target, optimize);
     const wayland = b.createModule(.{
         .root_source_file = b.path("src/wayland/wayland.zig"),
@@ -263,7 +263,7 @@ fn addModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
 
 /// `sys`, `vc4` and `shader`: what the GPU's users need, and what the
 /// shader compiler needs on the build machine.
-fn addGpuModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) struct { *std.Build.Module, *std.Build.Module, *std.Build.Module } {
+fn addGpuModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.Optimize) struct { *std.Build.Module, *std.Build.Module, *std.Build.Module } {
     const locale = b.createModule(.{
         .root_source_file = b.path("src/locale/locale.zig"),
         .target = target,
@@ -344,7 +344,7 @@ const ShaderBlob = struct {
 /// target).
 fn addShaders(b: *std.Build) []const ShaderBlob {
     const shaderc = hostTool(b, "shaderc");
-    _, _, const shader = addGpuModules(b, b.graph.host, .ReleaseSafe);
+    _, _, const shader = addGpuModules(b, b.graph.host, .safe);
     shaderc.root_module.addImport("shader", shader);
 
     const blobs = b.allocator.alloc(ShaderBlob, shader_programs.len) catch @panic("OOM");
@@ -366,14 +366,14 @@ fn addSpirv(b: *std.Build, name: []const u8, source: []const u8) std.Build.LazyP
     const gpu = b.createModule(.{
         .root_source_file = b.path("src/shader/gpu.zig"),
         .target = spirv_target,
-        .optimize = .ReleaseFast,
+        .optimize = .fast,
     });
     const obj = b.addObject(.{
         .name = name,
         .root_module = b.createModule(.{
             .root_source_file = b.path(source),
             .target = spirv_target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
             .imports = &.{.{ .name = "gpu", .module = gpu }},
         }),
         .use_llvm = false,
@@ -423,6 +423,7 @@ fn signingKey(b: *std.Build) SigningKey {
         if (trimmed.len == 64 and isHexSlice(trimmed)) {
             _ = std.fmt.hexToBytes(&seed, trimmed) catch @panic("invalid -Dsigning-key hex");
         } else if (trimmed.len > 0) {
+            b.graph.poisonCache();
             const file_bytes = std.Io.Dir.cwd().readFileAlloc(b.graph.io, trimmed, b.allocator, .limited(4096)) catch @panic("cannot read signing key file");
             const file_hex = std.mem.trim(u8, file_bytes, " \t\r\n");
             if (file_hex.len != 64 or !isHexSlice(file_hex)) @panic("signing key file must contain 64 hex digits (32-byte Ed25519 seed)");
@@ -443,10 +444,24 @@ fn isHexSlice(s: []const u8) bool {
     return true;
 }
 
+/// The project's directory (where build.zig is).
+fn rootDir(b: *std.Build) []const u8 {
+    const dir = b.root.root_dir.path orelse ".";
+    return if (b.root.sub_path.len == 0) dir else b.pathJoin(&.{ dir, b.root.sub_path });
+}
+
+/// A path in the project's directory.
+fn fromRoot(b: *std.Build, sub_path: []const u8) []const u8 {
+    return b.pathJoin(&.{ rootDir(b), sub_path });
+}
+
 /// The short hash of the checked-out commit, "-dirty" if tracked files
 /// have changed, or "unknown" outside a git checkout.
 fn gitCommit(b: *std.Build) []const u8 {
-    const root = b.build_root.path orelse ".";
+    // What git says can change without build.zig knowing: configure again
+    // each build.
+    b.graph.poisonCache();
+    const root = rootDir(b);
     var code: u8 = 0;
     const out = b.runAllowFail(&.{ "git", "-C", root, "rev-parse", "--short", "HEAD" }, &code, .ignore) catch return "unknown";
     const hash = std.mem.trim(u8, out, " \n");
@@ -457,7 +472,8 @@ fn gitCommit(b: *std.Build) []const u8 {
 /// When the checked-out commit was made, in seconds since 1970 (0 if
 /// unknown).
 fn gitCommitTime(b: *std.Build) u64 {
-    const root = b.build_root.path orelse ".";
+    b.graph.poisonCache();
+    const root = rootDir(b);
     var code: u8 = 0;
     const out = b.runAllowFail(&.{ "git", "-C", root, "log", "-1", "--format=%ct" }, &code, .ignore) catch return 0;
     return std.fmt.parseInt(u64, std.mem.trim(u8, out, " \n"), 10) catch 0;
@@ -465,12 +481,12 @@ fn gitCommitTime(b: *std.Build) u64 {
 
 /// A program's root module. The Pi builds (`pi_build`) are stripped (unless
 /// built for debugging); host tests keep their symbols.
-fn addProgramModule(b: *std.Build, path: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, m: Modules, shaders: []const ShaderBlob, pi_build: bool) *std.Build.Module {
+fn addProgramModule(b: *std.Build, path: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.Optimize, m: Modules, shaders: []const ShaderBlob, pi_build: bool) *std.Build.Module {
     const module = b.createModule(.{
         .root_source_file = b.path(path),
         .target = target,
         .optimize = optimize,
-        .strip = if (pi_build) optimize != .Debug else null,
+        .strip = if (pi_build) optimize != .debug else null,
         .imports = &.{
             .{ .name = "sys", .module = m.sys },
             .{ .name = "vc4", .module = m.vc4 },
@@ -501,7 +517,7 @@ fn hostTool(b: *std.Build, name: []const u8) *std.Build.Step.Compile {
         .root_module = b.createModule(.{
             .root_source_file = b.path(b.fmt("tools/{s}.zig", .{name})),
             .target = b.graph.host,
-            .optimize = .Debug,
+            .optimize = .debug,
         }),
     });
 }
@@ -517,6 +533,8 @@ fn requireTools(b: *std.Build, tools: []const []const u8) *std.Build.Step.Run {
 }
 
 fn exists(b: *std.Build, path: []const u8) bool {
+    // Files fetched or removed outside the build change the steps.
+    b.graph.poisonCache();
     std.Io.Dir.cwd().access(b.graph.io, path, .{}) catch return false;
     return true;
 }
@@ -629,10 +647,10 @@ const Kernel = struct {
 fn addKernel(b: *std.Build) Kernel {
     const own_tree = b.option([]const u8, "linux", "Linux source tree to build, as it is (default: build/linux-rpi, the Raspberry Pi kernel's default branch, fetched again at every build)");
     const offline = b.option(bool, "offline", "Do not fetch the latest Raspberry Pi kernel (build what build/linux-rpi has)") orelse false;
-    const linux_dir = own_tree orelse b.pathFromRoot("build/linux-rpi");
+    const linux_dir = own_tree orelse fromRoot(b, "build/linux-rpi");
     const cross = b.option([]const u8, "cross-compile", "The GCC cross compiler prefix for 32-bit ARM kernels (default: arm-linux-gnueabihf-)") orelse "arm-linux-gnueabihf-";
     const cross64 = b.option([]const u8, "cross-compile-arm64", "The GCC cross compiler prefix for the 64-bit ARM kernel (default: aarch64-linux-gnu-)") orelse "aarch64-linux-gnu-";
-    const out = b.pathFromRoot("build/kernel");
+    const out = fromRoot(b, "build/kernel");
     const jobs = std.Thread.getCpuCount() catch 4;
 
     var tools: std.ArrayList([]const u8) = .empty;
@@ -788,7 +806,7 @@ const ca_certificates = [_]struct { name: []const u8, sha256: []const u8 }{
 };
 
 fn fetchCaCertificates(b: *std.Build) *std.Build.Step {
-    return fetchPinned(b, b.pathFromRoot("build/firmware/certs"), ca_certificates, struct {
+    return fetchPinned(b, fromRoot(b, "build/firmware/certs"), ca_certificates, struct {
         fn url(bb: *std.Build, f: @TypeOf(ca_certificates[0])) []const u8 {
             return bb.fmt("https://raw.githubusercontent.com/certifi/python-certifi/{s}/certifi/{s}", .{ ca_certificates_tag, f.name });
         }
@@ -796,7 +814,7 @@ fn fetchCaCertificates(b: *std.Build) *std.Build.Step {
 }
 
 fn fetchWifiFirmware(b: *std.Build) *std.Build.Step {
-    return fetchPinned(b, b.pathFromRoot("build/firmware/wifi"), wifi_firmware, struct {
+    return fetchPinned(b, fromRoot(b, "build/firmware/wifi"), wifi_firmware, struct {
         fn url(bb: *std.Build, f: @TypeOf(wifi_firmware[0])) []const u8 {
             return bb.fmt("https://raw.githubusercontent.com/RPi-Distro/firmware-nonfree/{s}/debian/added-firmware/{s}", .{ wifi_firmware_commit, f.source });
         }
@@ -805,13 +823,13 @@ fn fetchWifiFirmware(b: *std.Build) *std.Build.Step {
 
 /// The ARM Linux Zig compiler bundled into the Develop app, pinned by
 /// version and checksum.
-const zig_version = "0.16.0";
+const zig_version = "0.17.1";
 const zig_arm_archive = [_]struct { name: []const u8, sha256: []const u8 }{
-    .{ .name = "zig-arm-linux-" ++ zig_version ++ ".tar.xz", .sha256 = "f85116bf2f9189bb6ae280c7f92f03b89c2551a88e17881c0c2df86bf4e42c50" },
+    .{ .name = "zig-arm-linux-" ++ zig_version ++ ".tar.xz", .sha256 = "45b5262ef4d4d1e70d21683b2ef4c1b765b067f34a13e2aa57d5f92bb02382a9" },
 };
 
 fn fetchArmZig(b: *std.Build) *std.Build.Step {
-    const dir = b.pathFromRoot("build/zig");
+    const dir = fromRoot(b, "build/zig");
     const verify = fetchPinned(b, dir, zig_arm_archive, struct {
         fn url(bb: *std.Build, f: @TypeOf(zig_arm_archive[0])) []const u8 {
             return bb.fmt("https://ziglang.org/download/{s}/{s}", .{ zig_version, f.name });
@@ -856,7 +874,7 @@ const boot_partition_mib = 128;
 /// /data is the partition the system makes in the rest of the card on the
 /// first start, after growing this one.
 fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.Build.Step {
-    const dir = b.pathFromRoot("build/firmware");
+    const dir = fromRoot(b, "build/firmware");
     // Download what is missing, then check everything.
     const verify_step = fetchPinned(b, dir, firmware, struct {
         fn url(bb: *std.Build, f: @TypeOf(firmware[0])) []const u8 {
@@ -878,7 +896,8 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.B
     }) catch @panic("OOM");
     // Slot A: a whole system. Its command line says which slot it is. The
     // system makes slot B, a copy, on the card on the first start.
-    const cmdline = std.mem.trimEnd(u8, std.Io.Dir.cwd().readFileAlloc(b.graph.io, b.pathFromRoot("boot/cmdline.txt"), b.allocator, .limited(4096)) catch @panic("cannot read boot/cmdline.txt"), "\n");
+    b.graph.poisonCache();
+    const cmdline = std.mem.trimEnd(u8, std.Io.Dir.cwd().readFileAlloc(b.graph.io, fromRoot(b, "boot/cmdline.txt"), b.allocator, .limited(4096)) catch @panic("cannot read boot/cmdline.txt"), "\n");
     // What system this is: Dazzle's commit and the kernel's, and the later
     // of the times they were made (so a build with a newer kernel is a
     // newer system, offered as an update even without a change to Dazzle).
@@ -1012,7 +1031,7 @@ fn addQemu(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) void {
     const program = if (board.aarch64()) "qemu-system-aarch64" else "qemu-system-arm";
     const tools = requireTools(b, &.{ b.fmt("{s}:{s}", .{ program, program }), "fdtput:device-tree-compiler" });
     // QEMU lacks the power management block the watchdog driver waits for.
-    const dtb = b.pathFromRoot(b.fmt("build/qemu-{s}", .{board.dtb()}));
+    const dtb = fromRoot(b, b.fmt("build/qemu-{s}", .{board.dtb()}));
     const copy = b.addSystemCommand(&.{"cp"});
     copy.addFileArg(kernel.deviceTree(b, board.dtb()));
     copy.addArg(dtb);
@@ -1050,7 +1069,7 @@ fn addQemu(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) void {
     // The console: the PL011, the first serial port; on the Pi 3s the mini
     // UART, the second (the PL011 is the Bluetooth chip's there).
     if (board.aarch64()) qemu.addArgs(&.{ "-serial", "null", "-serial", "mon:stdio" }) else qemu.addArgs(&.{ "-serial", "mon:stdio" });
-    if (b.args) |args| qemu.addArgs(args);
+    qemu.addPassthruArgs();
     qemu.step.dependOn(&usb.step);
     qemu.stdio = .inherit;
     qemu.has_side_effects = true;
@@ -1072,13 +1091,13 @@ pub fn build(b: *std.Build) void {
     // The Pi programs are optimized for speed unless told otherwise (a
     // Debug build is far too slow on a Pi Zero); host tests default to
     // Debug, for their safety checks.
-    const explicit_optimize = b.option(std.builtin.OptimizeMode, "optimize", "Optimization mode (default: ReleaseFast for the Pi, Debug for host tests)");
-    const optimize: std.builtin.OptimizeMode = explicit_optimize orelse switch (b.release_mode) {
-        .off, .any, .fast => .ReleaseFast,
-        .small => .ReleaseSmall,
-        .safe => .ReleaseSafe,
+    const explicit_optimize = b.option(std.builtin.Optimize, "optimize", "Optimization mode (default: fast for the Pi, debug for host tests)");
+    const optimize: std.builtin.Optimize = explicit_optimize orelse switch (b.graph.release_mode) {
+        .off, .any, .fast => .fast,
+        .small => .small,
+        .safe => .safe,
     };
-    const test_optimize = explicit_optimize orelse .Debug;
+    const test_optimize = explicit_optimize orelse .debug;
 
     const shaders = addShaders(b);
     const icon_font = addIconFont(b);
@@ -1170,7 +1189,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/mkinitramfs.zig"),
             .target = b.graph.host,
-            .optimize = .Debug,
+            .optimize = .debug,
         }),
     });
     const run_mkinitramfs = b.addRunArtifact(mkinitramfs);
@@ -1187,7 +1206,7 @@ pub fn build(b: *std.Build) void {
     // The Wi-Fi chips' firmware, for the kernel to load.
     run_mkinitramfs.step.dependOn(fetchWifiFirmware(b));
     for (wifi_firmware) |f| {
-        run_mkinitramfs.addArg(b.fmt("--file=os/firmware/brcm/{s}={s}", .{ f.name, b.pathJoin(&.{ b.pathFromRoot("build/firmware/wifi"), f.name }) }));
+        run_mkinitramfs.addArg(b.fmt("--file=os/firmware/brcm/{s}={s}", .{ f.name, b.pathJoin(&.{ fromRoot(b, "build/firmware/wifi"), f.name }) }));
     }
     run_mkinitramfs.addPrefixedFileArg("--file=os/firmware/brcm/LICENCE.cypress=", b.path("firmware/LICENCE.cypress"));
     // The shell's own apps, beside it in /shell (they cannot be removed).
@@ -1199,12 +1218,12 @@ pub fn build(b: *std.Build) void {
     // The certificates of the authorities HTTPS trusts, for setup and
     // Settings to download apps and updates.
     run_mkinitramfs.step.dependOn(fetchCaCertificates(b));
-    run_mkinitramfs.addArg(b.fmt("--file=os/certs/ca-certificates.pem={s}", .{b.pathJoin(&.{ b.pathFromRoot("build/firmware/certs"), ca_certificates[0].name })}));
+    run_mkinitramfs.addArg(b.fmt("--file=os/certs/ca-certificates.pem={s}", .{b.pathJoin(&.{ fromRoot(b, "build/firmware/certs"), ca_certificates[0].name })}));
     // The apps, each in /data/apps/<name> and listed in the shell's dock,
     // are not part of the system or the image: each is an archive to
     // download and install, in setup or from Settings (zig-out/apps/, with
     // the catalogue).
-    const zig_root = b.pathFromRoot("build/zig/zig-arm-linux-" ++ zig_version);
+    const zig_root = fromRoot(b, "build/zig/zig-arm-linux-" ++ zig_version);
     const apps = [_]App{
         .{ .exe = demo_exe, .icon = .view_in_ar, .title = "Demo" },
         .{ .exe = showcase_exe, .icon = .widgets, .title = "Widget Showcase" },
@@ -1362,7 +1381,7 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_serve.step);
     const run_serve = b.addRunArtifact(serve_exe);
     run_serve.step.dependOn(&install_serve.step);
-    if (b.args) |args| run_serve.addArgs(args);
+    run_serve.addPassthruArgs();
     run_serve.stdio = .inherit;
     run_serve.has_side_effects = true;
     const serve_step = b.step("serve", "Serve zig-out/os and zig-out/apps over HTTPS for testing (arguments after -- go to dazzle-serve)");

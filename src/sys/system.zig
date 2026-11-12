@@ -490,6 +490,16 @@ pub const Subscription = struct {
 
 const testing = std.testing;
 
+/// `text` `n` times over.
+fn comptimeRepeat(comptime text: []const u8, comptime n: usize) *const [text.len * n]u8 {
+    const result = comptime result: {
+        var out: [text.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * text.len ..][0..text.len], text);
+        break :result out;
+    };
+    return &result;
+}
+
 test "hostnames" {
     try testing.expectEqualStrings("awesome-elephant", Hostname.parse("awesome-elephant").?.slice());
     try testing.expect(Hostname.parse("pi4") != null);
@@ -498,7 +508,7 @@ test "hostnames" {
     try testing.expect(Hostname.parse("pi-") == null);
     try testing.expect(Hostname.parse("My-Pi") == null);
     try testing.expect(Hostname.parse("pi.local") == null);
-    try testing.expect(Hostname.parse("a" ** 64) == null);
+    try testing.expect(Hostname.parse(&@as([64]u8, @splat('a'))) == null);
 }
 
 test "requests and reports go through the socket" {
@@ -512,14 +522,14 @@ test "requests and reports go through the socket" {
     try testing.expect(Request.parse("reboot\n") == null);
     try testing.expect(Request.parse("restart\n").? == .restart);
     const sum = "F3e817e51826f4ca7b7d334af8f857d9c42416073f44c7429e1bfda7f097a753";
-    const sig = "A1" ++ "02" ** 63;
+    const sig = "A1" ++ comptimeRepeat("02", 63);
     const upd = Request.parse("update " ++ sum ++ " " ++ sig ++ "\n").?.update;
     try testing.expectEqualStrings("f3e817e51826f4ca7b7d334af8f857d9c42416073f44c7429e1bfda7f097a753", &upd.sha256);
-    try testing.expectEqualStrings("a1" ++ "02" ** 63, &upd.signature);
+    try testing.expectEqualStrings("a1" ++ comptimeRepeat("02", 63), &upd.signature);
     try testing.expect(Request.parse("update " ++ sum ++ "\n") == null);
     try testing.expect(Request.parse("update abc\n") == null);
-    try testing.expect(Request.parse("update " ++ "g" ** 64 ++ " " ++ sig) == null);
-    try testing.expect(Request.parse("update " ++ sum ++ " " ++ "g" ** 128) == null);
+    try testing.expect(Request.parse("update " ++ &@as([64]u8, @splat('g')) ++ " " ++ sig) == null);
+    try testing.expect(Request.parse("update " ++ sum ++ " " ++ &@as([128]u8, @splat('g'))) == null);
     // Who may ask what.
     try testing.expect(Request.allowedFor(.status, .settings));
     try testing.expect(Request.allowedFor(.subscribe, .shell));

@@ -14,7 +14,7 @@
 //!     }
 //!
 //!     const color = gpu.fragmentInput(gpu.Vec4, 0);
-//!     export fn fragment() callconv(.spirv_fragment) void {
+//!     export fn fragment() callconv(.{ .spirv_fragment = .{} }) void {
 //!         gpu.color.* = color.*;
 //!     }
 //!
@@ -32,13 +32,13 @@ pub const Vec3 = @Vector(3, f32);
 pub const Vec4 = @Vector(4, f32);
 
 /// The vertex's position in clip space (vertex shaders write it).
-pub const position = std.gpu.position_out;
+pub const position = std.spirv.position_out;
 
 /// The fragment's colour, straight (not premultiplied) RGBA.
 pub const color = @extern(*addrspace(.output) Vec4, .{ .name = "dazzle_color", .decoration = .{ .location = 0 } });
 
 // Names for the variables at each location. (Literals: names built with
-// std.fmt.comptimePrint crash Zig 0.16's SPIR-V backend.)
+// std.fmt.comptimePrint crashed Zig 0.16's SPIR-V backend.)
 const max_locations = 8;
 const vin_names = [max_locations][]const u8{ "dazzle_vin0", "dazzle_vin1", "dazzle_vin2", "dazzle_vin3", "dazzle_vin4", "dazzle_vin5", "dazzle_vin6", "dazzle_vin7" };
 const vout_names = [max_locations][]const u8{ "dazzle_vout0", "dazzle_vout1", "dazzle_vout2", "dazzle_vout3", "dazzle_vout4", "dazzle_vout5", "dazzle_vout6", "dazzle_vout7" };

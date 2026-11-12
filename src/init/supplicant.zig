@@ -931,7 +931,7 @@ test "the PMK from a passphrase (IEEE 802.11 test vector)" {
     try testing.expect(validPassphrase("password"));
     try testing.expect(!validPassphrase("short"));
     try testing.expect(!validPassphrase("tab\there!"));
-    try testing.expect(!validPassphrase("x" ** 64));
+    try testing.expect(!validPassphrase(&@as([64]u8, @splat('x'))));
 }
 
 test "the PTK (checked against the PRF computed independently)" {

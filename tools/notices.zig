@@ -21,7 +21,7 @@ pub fn main(init: std.process.Init) !void {
     try out.print(arena, "Third-party software in {s}\n\nThe following are built into {s}, under the licences given.\n", .{ args[2], args[2] });
     for (args[3..]) |path| {
         const section = try cwd.readFileAlloc(init.io, path, arena, .limited(1 << 20));
-        try out.appendSlice(arena, "\n" ++ "=" ** 80 ++ "\n");
+        try out.appendSlice(arena, "\n" ++ &@as([80]u8, @splat('=')) ++ "\n");
         try out.appendSlice(arena, section);
         if (!std.mem.endsWith(u8, section, "\n")) try out.append(arena, '\n');
     }

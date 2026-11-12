@@ -47,7 +47,7 @@ pub fn saveName(path: [:0]const u8, name: []const u8, default: []const u8) []con
 test "the name is the computer's until another is chosen" {
     const testing = std.testing;
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, "/tmp/dazzle-chat-name-{d}", .{linux.getpid()});
+    const path = try std.mem.printSentinel(&path_buf, "/tmp/dazzle-chat-name-{d}", .{linux.getpid()}, 0);
     _ = linux.unlink(path);
     defer _ = linux.unlink(path);
     var buf: [64]u8 = undefined;

@@ -165,7 +165,7 @@ fn run(init: std.process.Init.Minimal) !void {
     };
 
     var path_buf: [108]u8 = undefined;
-    const path = if (runtime_dir) |dir| try std.fmt.bufPrintZ(&path_buf, "{s}/wayland-0", .{dir}) else wayland.client.default_socket;
+    const path = if (runtime_dir) |dir| try std.mem.printSentinel(&path_buf, "{s}/wayland-0", .{dir}, 0) else wayland.client.default_socket;
     const listener = try listen(path);
     print("dazzle-shell: listening on {s}\n", .{path});
 
@@ -733,7 +733,7 @@ fn openApp(listener: linux.fd_t, apps: []dock_mod.App, server: *server_mod.Serve
         return false;
     }
     var arg_buf: [80]u8 = undefined;
-    const arg: ?[*:0]const u8 = if (req.what) |w| (std.fmt.bufPrintZ(&arg_buf, "{s}", .{w}) catch return false).ptr else null;
+    const arg: ?[*:0]const u8 = if (req.what) |w| (std.mem.printSentinel(&arg_buf, "{s}", .{w}, 0) catch return false).ptr else null;
     print("dazzle-shell: opening {s}{s}{s}\n", .{ app.name, if (req.what != null) " at " else "", req.what orelse "" });
     app.pid = spawn(app.path, arg, runtime_dir);
     return true;
@@ -764,7 +764,7 @@ fn activateApp(
 /// with a runtime directory (run elsewhere) they are told where it is.
 fn spawn(program: [*:0]const u8, arg: ?[*:0]const u8, runtime_dir: ?[:0]const u8) ?linux.pid_t {
     var env_buf: [160]u8 = undefined;
-    const runtime_env: ?[*:0]const u8 = if (runtime_dir) |dir| (std.fmt.bufPrintZ(&env_buf, "XDG_RUNTIME_DIR={s}", .{dir}) catch return null).ptr else null;
+    const runtime_env: ?[*:0]const u8 = if (runtime_dir) |dir| (std.mem.printSentinel(&env_buf, "XDG_RUNTIME_DIR={s}", .{dir}, 0) catch return null).ptr else null;
     const rc = linux.fork();
     if (linux.errno(rc) != .SUCCESS) {
         print(sys.log_error ++ "dazzle-shell: cannot start {s}: fork failed\n", .{program});
@@ -823,7 +823,7 @@ fn reapChildren(apps: []dock_mod.App, setup_pid: *?linux.pid_t) bool {
     var app_exited = false;
     while (true) {
         var status: u32 = 0;
-        const rc = linux.wait4(-1, &status, linux.W.NOHANG, null);
+        const rc = linux.wait4(-1, @ptrCast(&status), linux.W.NOHANG, null);
         if (linux.errno(rc) != .SUCCESS or rc == 0) return app_exited;
         for (apps) |*app| if (app.pid == @as(linux.pid_t, @intCast(rc))) {
             app.pid = null;

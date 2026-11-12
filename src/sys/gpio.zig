@@ -276,7 +276,7 @@ pub const Chip = struct {
         var buf: [32]u8 = undefined;
         var denied = false;
         for (0..8) |n| {
-            const path = std.fmt.bufPrintZ(&buf, "/dev/gpiochip{d}", .{n}) catch unreachable;
+            const path = std.mem.printSentinel(&buf, "/dev/gpiochip{d}", .{n}, 0) catch unreachable;
             const fd = sys.open(path, .{ .ACCMODE = .RDWR, .CLOEXEC = true }) catch |err| {
                 if (err == error.AccessDenied) denied = true;
                 continue;

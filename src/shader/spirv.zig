@@ -119,6 +119,7 @@ pub const Op = struct {
     pub const return_value = 254;
     pub const @"unreachable" = 255;
     pub const no_line = 317;
+    pub const copy_logical = 400;
 };
 
 pub const Decoration = struct {
@@ -378,7 +379,7 @@ pub fn resultId(inst: Inst) ?u32 {
         Op.vector_shuffle...Op.copy_object, Op.sampled_image...Op.image_sample_explicit_lod => true,
         // Conversions, arithmetic, comparisons and logic.
         Op.convert_f_to_u...230 => true,
-        Op.phi => true,
+        Op.phi, Op.copy_logical => true,
         else => false,
     };
     return if (typed and o.len > 1) o[1] else null;

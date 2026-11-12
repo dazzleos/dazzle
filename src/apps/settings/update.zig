@@ -107,7 +107,7 @@ pub const Updater = struct {
         if (u.job) |*j| if (j.kind == .os_check) {
             var wstatus: u32 = 0;
             _ = linux.kill(j.pid, .KILL);
-            _ = linux.wait4(j.pid, &wstatus, 0, null);
+            _ = linux.wait4(j.pid, @ptrCast(&wstatus), 0, null);
             sys.close(j.result);
             u.job = null;
         };
@@ -276,8 +276,8 @@ test "an update is offered when it is newer and in neither slot" {
     try testing.expect(offered(m, running, &report));
 
     // Manifests that are not right.
-    try testing.expectError(error.BadManifest, Manifest.parse(testing.allocator, "{\"version\": \"x y\", \"time\": 1, \"file\": \"a.tar.xz\", \"size\": 1, \"sha256\": \"" ++ "0" ** 64 ++ "\"}"));
-    try testing.expectError(error.BadManifest, Manifest.parse(testing.allocator, "{\"version\": \"abc\", \"time\": 1, \"file\": \"../a\", \"size\": 1, \"sha256\": \"" ++ "0" ** 64 ++ "\"}"));
+    try testing.expectError(error.BadManifest, Manifest.parse(testing.allocator, "{\"version\": \"x y\", \"time\": 1, \"file\": \"a.tar.xz\", \"size\": 1, \"sha256\": \"" ++ &@as([64]u8, @splat('0')) ++ "\"}"));
+    try testing.expectError(error.BadManifest, Manifest.parse(testing.allocator, "{\"version\": \"abc\", \"time\": 1, \"file\": \"../a\", \"size\": 1, \"sha256\": \"" ++ &@as([64]u8, @splat('0')) ++ "\"}"));
     try testing.expectError(error.BadManifest, Manifest.parse(testing.allocator, "[]"));
 }
 

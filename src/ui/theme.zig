@@ -237,7 +237,7 @@ test "appearance settings parse, format, save and load" {
     try testing.expectEqual(Mode.dark, Settings.parse("theme invalid\n").theme);
 
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, "/tmp/dazzle-appearance-test-{d}", .{linux.getpid()});
+    const path = try std.mem.printSentinel(&path_buf, "/tmp/dazzle-appearance-test-{d}", .{linux.getpid()}, 0);
     defer _ = linux.unlink(path);
 
     var watch: Watch = .{ .path = path };

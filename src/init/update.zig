@@ -66,7 +66,7 @@ pub const Installer = struct {
     /// If installing has finished: how it went.
     pub fn finished(i: *Installer) ?proto.UpdateFailure {
         var status: u32 = 0;
-        const rc = linux.wait4(i.pid, &status, linux.W.NOHANG, null);
+        const rc = linux.wait4(i.pid, @ptrCast(&status), linux.W.NOHANG, null);
         if (linux.errno(rc) == .SUCCESS and rc == 0) return null;
         var buf: [32]u8 = undefined;
         const n = sys.check(linux.read(i.result, &buf, buf.len)) catch 0;
@@ -112,16 +112,16 @@ fn install(gpa: std.mem.Allocator, sha256: []const u8, signature: []const u8, ru
     try sys.archive.extract(gpa, archive, "os", new);
     var path_buf: [128]u8 = undefined;
     for ([_][]const u8{ "kernel.img", "kernel7.img", "kernel8.img", "initramfs.cpio", proto.Version.file_name }) |name| {
-        const path = try std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ new, name });
+        const path = try std.mem.printSentinel(&path_buf, "{s}/{s}", .{ new, name }, 0);
         if (!storage.exists(path)) return error.Incomplete;
     }
 
     // The running slot's command line, for the new slot.
-    const from_cmdline = try std.fmt.bufPrintZ(&path_buf, "{s}/cmdline.txt", .{slots.slotPath(&from_buf, running, "")});
+    const from_cmdline = try std.mem.printSentinel(&path_buf, "{s}/cmdline.txt", .{slots.slotPath(&from_buf, running, "")}, 0);
     var cmdline_buf: [1024]u8 = undefined;
     const cmdline = sys.readFile(from_cmdline, &cmdline_buf) orelse return error.NotFound;
     var out: [1024 + 16]u8 = undefined;
-    const to_cmdline = try std.fmt.bufPrintZ(&path_buf, "{s}/cmdline.txt", .{new});
+    const to_cmdline = try std.mem.printSentinel(&path_buf, "{s}/cmdline.txt", .{new}, 0);
     const fd = try sys.open(to_cmdline, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true });
     {
         defer sys.close(fd);
@@ -149,7 +149,7 @@ test "update archive checks SHA-256 and Ed25519 signature" {
     const sig = store.signHex(data, store.default_seed);
 
     try verifyArchive(data, &sha256, &sig, &.{});
-    try std.testing.expectError(error.WrongArchive, verifyArchive(data, "00" ** 32, &sig, &.{}));
-    try std.testing.expectError(error.BadSignature, verifyArchive(data, &sha256, "00" ** 64, &.{}));
+    try std.testing.expectError(error.WrongArchive, verifyArchive(data, &@as([64]u8, @splat('0')), &sig, &.{}));
+    try std.testing.expectError(error.BadSignature, verifyArchive(data, &sha256, &@as([128]u8, @splat('0')), &.{}));
     try std.testing.expectEqual(proto.UpdateFailure.archive, failure(error.BadSignature));
 }

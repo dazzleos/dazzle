@@ -244,7 +244,7 @@ fn readDrmEngineNs(client_pids: []const linux.pid_t) ?u64 {
                     at += reclen;
                     if (name.len == 0 or name[0] == '.') continue;
                     var path_buf: [96]u8 = undefined;
-                    const p = std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ std.mem.sliceTo(dir_path, 0), name }) catch continue;
+                    const p = std.mem.printSentinel(&path_buf, "{s}/{s}", .{ std.mem.sliceTo(dir_path, 0), name }, 0) catch continue;
                     var fbuf: [1024]u8 = undefined;
                     const text = sys.readFile(p, &fbuf) orelse continue;
                     const info = parseDrmFdinfo(text) orelse continue;
@@ -267,7 +267,7 @@ fn readDrmEngineNs(client_pids: []const linux.pid_t) ?u64 {
     for (client_pids) |pid| {
         if (pid <= 0) continue;
         var dir_buf: [64]u8 = undefined;
-        const dir_path = std.fmt.bufPrintZ(&dir_buf, "/proc/{d}/fdinfo", .{pid}) catch continue;
+        const dir_path = std.mem.printSentinel(&dir_buf, "/proc/{d}/fdinfo", .{pid}, 0) catch continue;
         scanPid(dir_path, &seen_ids, &n_seen, &total_ns, &any);
     }
     return if (any) total_ns else null;

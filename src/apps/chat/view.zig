@@ -410,7 +410,7 @@ test "the settings change the name" {
     u.frame(1280, 720, 0, chat);
     try testing.expect(findText(u.root.?, "You are Alice") != null);
     // A long name still fits.
-    u.frame(min_size[0], min_size[1], 0, Chat{ .node = 1, .ads = &.{}, .room = null, .name = "W" ** protocol.max_name, .default_name = "kitchen-pi", .actions = &actions });
+    u.frame(min_size[0], min_size[1], 0, Chat{ .node = 1, .ads = &.{}, .room = null, .name = &@as([protocol.max_name]u8, @splat('W')), .default_name = "kitchen-pi", .actions = &actions });
     try testing.expect(!overflows(u.root.?));
     u.frame(1280, 720, 0, chat);
     try testing.expect(findText(u.root.?, "Settings") == null);
