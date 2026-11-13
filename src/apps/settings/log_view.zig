@@ -50,11 +50,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     return b.page(&.{
         serving,
         problems,
-        if (shown.items.len == 0) b.value(if (state.problems) "No warnings or errors" else "Nothing yet") else cx.make(kete_vc4.LazyGrid{
-            .count = shown.items.len,
-            .cell = .{ .w = std.math.inf(f32), .h = log_row_height },
-            .item = .of(lines, LogLines.row),
-        }),
+        if (shown.items.len == 0) b.value(if (state.problems) "No warnings or errors" else "Nothing yet") else cx.make(kete.Grid.list(shown.items.len, log_row_height, .of(lines, LogLines.row))),
     });
 }
 

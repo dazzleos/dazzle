@@ -1004,12 +1004,7 @@ fn networkList(
         .nets = nets,
         .chosen = chosen,
     };
-    return cx.make(kete_vc4.LazyGrid{
-        .count = nets.len,
-        .cell = .{ .w = std.math.inf(f32), .h = network_row_height },
-        .spacing = 0,
-        .item = .of(list, Networks.row),
-    });
+    return cx.make(kete.Grid.list(nets.len, network_row_height, .of(list, Networks.row)));
 }
 
 /// How tall a network's row is (including the 1px divider below it).
