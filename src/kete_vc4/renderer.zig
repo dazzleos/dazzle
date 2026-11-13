@@ -91,6 +91,13 @@ pub const Renderer = struct {
     other_vbo: ?vc4.Bo = null,
     other_atlas_bo: ?vc4.Bo = null,
     other_atlas_stale: ?atlas_mod.Rect = null,
+    /// The frame being drawn is a window's that does not fill the screen
+    /// or the work area (see `Window.beginDmabufFrame`): a 1-pixel border
+    /// is drawn along its edges, in `border_color` (the theme's outline
+    /// variant), so windows over each other do not run together.
+    outline: bool = false,
+    border_color: kgfx.Color = .rgb(0x49454f),
+    border: Canvas,
 
     const ImageTexture = struct {
         bo: vc4.Bo,
@@ -112,7 +119,7 @@ pub const Renderer = struct {
         var image = try shader.Pipeline.init(gpa, dev, shaders.image(), shaders.text_layout);
         errdefer image.deinit(dev);
         const frame = try gpa.create(render.Frame);
-        return .{ .dev = dev, .gpu = gpu, .gpa = gpa, .shape = shape, .solid = solid, .@"opaque" = opaque_solid, .text = text, .image = image, .frame = frame };
+        return .{ .dev = dev, .gpu = gpu, .gpa = gpa, .shape = shape, .solid = solid, .@"opaque" = opaque_solid, .text = text, .image = image, .frame = frame, .border = .init(gpa) };
     }
 
     pub fn deinit(r: *Renderer) void {
@@ -129,6 +136,7 @@ pub const Renderer = struct {
         if (r.atlas_bo) |bo| r.dev.destroyBo(bo);
         if (r.other_atlas_bo) |bo| r.dev.destroyBo(bo);
         r.gpa.destroy(r.frame);
+        r.border.deinit();
     }
 
     pub fn renderer(r: *Renderer) kgfx.Renderer {
@@ -345,11 +353,28 @@ pub const Renderer = struct {
         for (damage[0..n], vps[0..n]) |d, *v| v.* = viewport(d);
         // More than it can say: all of it.
         frame.limitTo(if (n == damage.len) vps[0..n] else null);
-        try r.prepare(canvases);
+        // The window's border, over what it shows.
+        const outlined = r.outline and target.width > 2 and target.height > 2;
+        r.outline = false;
+        if (outlined) {
+            const w: f32 = @floatFromInt(target.width);
+            const h: f32 = @floatFromInt(target.height);
+            r.border.begin(target.width, target.height);
+            r.border.fillRect(.{ .x = 0, .y = 0, .w = w, .h = 1 }, r.border_color);
+            r.border.fillRect(.{ .x = 0, .y = h - 1, .w = w, .h = 1 }, r.border_color);
+            r.border.fillRect(.{ .x = 0, .y = 1, .w = 1, .h = h - 2 }, r.border_color);
+            r.border.fillRect(.{ .x = w - 1, .y = 1, .w = 1, .h = h - 2 }, r.border_color);
+        }
+        const all = try r.gpa.alloc(*const Canvas, canvases.len + 1);
+        defer r.gpa.free(all);
+        @memcpy(all[0..canvases.len], canvases);
+        all[canvases.len] = &r.border;
+        try r.prepare(if (outlined) all else canvases);
         for (segments) |s| switch (s) {
             .canvas => |c| try r.recordCanvas(c, frame),
             .gpu => |g| if (frame.covers(viewport(g.area.scissor orelse g.area.viewport))) try g.f(g.ctx, frame, g.area),
         };
+        if (outlined) try r.recordCanvas(&r.border, frame);
         const issued = sys.nowNs();
         if (r.pipelined) {
             r.pending = try r.gpu.vtable.submit.?(r.gpu.ptr, frame);

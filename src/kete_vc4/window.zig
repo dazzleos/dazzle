@@ -88,8 +88,9 @@ pub const Window = struct {
     on_key: ?kete.ValueCallback(KeyPress) = null,
     /// Takes the input it wants before kete sees it (`Display.input_filter`).
     input_filter: ?InputFilter = null,
-    /// The renderer, when it leaves frames with the GPU: the frame it left
-    /// is kept in flight (`Display.renderer`).
+    /// The renderer: it draws the window's border, and when it leaves
+    /// frames with the GPU, the frame it left is kept in flight
+    /// (`Display.renderer`).
     renderer: ?*renderer_mod.Renderer = null,
 
     pub fn platform(_: *const Window) kwin.WindowPlatform {
@@ -229,6 +230,8 @@ pub const Window = struct {
     /// the `id`), format and tiling.
     pub fn beginDmabufFrame(w: *Window) ?kgfx.DmabufTarget {
         const t = w.win.beginFrame() catch return null;
+        // Not filling the work area or the screen, it has a border.
+        if (w.renderer) |r| r.outline = !w.win.maximized and !w.win.fullscreen;
         return .{
             .id = t.handle,
             .fd = -1,
@@ -399,8 +402,9 @@ pub const Display = struct {
     on_key: ?kete.ValueCallback(KeyPress) = null,
     /// Sees the input first, and takes what it wants from kete.
     input_filter: ?InputFilter = null,
-    /// The renderer, if it leaves frames with the GPU (see
-    /// `Renderer.pipelined`): the windows keep its frame in flight.
+    /// The renderer: it draws the windows' borders, and if it leaves
+    /// frames with the GPU (see `Renderer.pipelined`), the windows keep its
+    /// frame in flight.
     renderer: ?*renderer_mod.Renderer = null,
 
     const max_app_fds = app.window.max_wake_fds - max_sources;
@@ -495,7 +499,7 @@ pub const Display = struct {
         };
         const win = try app.Window.open(d.gpa, d.gpu, d.environ, options);
         d.window = .{ .win = win, .gpa = d.gpa, .drawn_by = d.decorations, .keyboard = d.keyboard, .on_key = d.on_key, .input_filter = d.input_filter, .renderer = d.renderer };
-        if (d.renderer != null) try win.setPipelined(true);
+        if (d.renderer) |r| if (r.pipelined) try win.setPipelined(true);
         d.window.?.keepTitle(o.title);
         d.syncWake();
         return &d.window.?;

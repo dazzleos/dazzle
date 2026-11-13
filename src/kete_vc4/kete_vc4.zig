@@ -70,7 +70,8 @@ pub const Host = struct {
         h.display = .{ .gpa = gpa, .io = io, .gpu = gpu, .environ = environ, .app_id = options.app_id, .decorations = options.decorations };
         h.renderer = try Renderer.init(gpa, h.dev, gpu);
         errdefer h.renderer.deinit();
-        if (options.pipelined and h.renderer.setPipelined(true)) h.display.renderer = &h.renderer;
+        if (options.pipelined) _ = h.renderer.setPipelined(true);
+        h.display.renderer = &h.renderer;
         var font_buf: [256]u8 = undefined;
         var emoji_buf: [256]u8 = undefined;
         h.app = try kete.App.init(gpa, io, environ, .{
@@ -81,7 +82,7 @@ pub const Host = struct {
             .on_last_window_closed = options.on_last_window_closed,
         });
         h.app.shared.attachRenderer(h.renderer.renderer(), false);
-        h.app.setTheme(themeMode(appearance.loadSettings().theme));
+        followThemeOf(h);
         h.theme_watch = .init();
         if (h.theme_watch.fd) |fd| _ = h.display.wakeOn(fd, true);
     }
@@ -97,7 +98,7 @@ pub const Host = struct {
     /// it changed. False when the app should end.
     pub fn step(h: *Host, idle_timeout_ns: u64) !bool {
         const going = try h.app.step(idle_timeout_ns);
-        if (h.theme_watch.changed()) h.app.setTheme(themeMode(appearance.loadSettings().theme));
+        if (h.theme_watch.changed()) followThemeOf(h);
         return going;
     }
 
@@ -158,6 +159,14 @@ const ThemeWatch = struct {
         }
     }
 };
+
+/// Dazzle's appearance setting, as kete's theme (and the windows'
+/// borders' colour).
+fn followThemeOf(h: *Host) void {
+    const mode = themeMode(appearance.loadSettings().theme);
+    h.app.setTheme(mode);
+    h.renderer.border_color = mode.scheme().outline_variant;
+}
 
 /// Dazzle's appearance setting, as kete's theme.
 pub fn themeMode(m: appearance.Mode) kete.ui.theme.ThemeMode {
