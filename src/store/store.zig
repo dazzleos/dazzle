@@ -44,7 +44,8 @@ pub const sig_hex_len = Ed25519.Signature.encoded_length * 2;
 pub const max_keys = 16;
 pub const default_signing_key: []const u8 = build_info.signing_key;
 pub const default_seed: [32]u8 = "dazzle-signing-key-seed-00000001".*;
-const catalogue_file = apps_dir ++ "/.catalogue.json";
+/// The apps' catalogue, as last downloaded.
+pub const catalogue_file = apps_dir ++ "/.catalogue.json";
 const ca_file = "/os/certs/ca-certificates.pem";
 
 /// The most an archive or the catalogue may be.
@@ -759,7 +760,8 @@ pub const Store = struct {
         s.message_len = 0;
     }
 
-    fn loadCatalogue(s: *Store) void {
+    /// Reads the catalogue downloaded last (by this or another program).
+    pub fn loadCatalogue(s: *Store) void {
         const json = sys.readFileAlloc(s.gpa, catalogue_file, max_download) catch return;
         defer s.gpa.free(json);
         const parsed = parseCatalogue(s.gpa, json) catch return;
@@ -861,6 +863,61 @@ pub const Store = struct {
         return true;
     }
 };
+
+/// The system offered as an update (os.json, beside the apps' catalogue:
+/// see `fetchOs`), once downloaded: kept in `os_manifest_file`.
+pub const os_manifest_file = sys.system.update_dir ++ "/os.json";
+
+pub const OsManifest = struct {
+    name: []const u8 = "dazzle",
+    title: []const u8 = "Dazzle",
+    description: []const u8 = "",
+    version: []const u8,
+    time: u64,
+    icon: []const u8 = "",
+    file: []const u8,
+    size: u64,
+    sha256: []const u8,
+    signature: []const u8 = "",
+
+    pub fn parse(gpa: std.mem.Allocator, json: []const u8) !std.json.Parsed(OsManifest) {
+        const parsed = std.json.parseFromSlice(OsManifest, gpa, json, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return error.BadManifest;
+        errdefer parsed.deinit();
+        const m = parsed.value;
+        if (sys.system.Version.init(m.time, m.version) == null or !(std.mem.endsWith(u8, m.file, ".tar.xz") and validName(m.file[0 .. m.file.len - ".tar.xz".len])) or m.sha256.len != 64) return error.BadManifest;
+        return parsed;
+    }
+
+    pub fn versionOf(m: *const OsManifest) sys.system.Version {
+        return sys.system.Version.init(m.time, m.version).?;
+    }
+};
+
+/// Whether `m` should be offered: newer than the running system, and in
+/// neither slot.
+pub fn osOffered(m: *const OsManifest, running: sys.system.Version, report: ?*const sys.system.Report) bool {
+    const v = m.versionOf();
+    if (v.time <= running.time or v.eql(&running)) return false;
+    if (report) |r| if (r.holds(&v)) return false;
+    return true;
+}
+
+/// The running system's version: the running slot's (with its kernel's
+/// commit and time), as the system manager says in `report`; else `built`,
+/// the one the program was built with.
+pub fn runningVersion(report: ?*const sys.system.Report, built: sys.system.Version) sys.system.Version {
+    const r = report orelse return built;
+    const s = r.slot orelse return built;
+    return if (r.version(s)) |v| v.* else built;
+}
+
+/// The system update downloaded last (`os_manifest_file`), if there is
+/// one that reads well.
+pub fn loadOsManifest(gpa: std.mem.Allocator) ?std.json.Parsed(OsManifest) {
+    const json = sys.readFileAlloc(gpa, os_manifest_file, 64 * 1024) catch return null;
+    defer gpa.free(json);
+    return OsManifest.parse(gpa, json) catch null;
+}
 
 const testing = std.testing;
 
@@ -1197,4 +1254,29 @@ test "HTTPS client trusts the Dazzle Test CA and fetches over TLS 1.3 keep-alive
     try testing.expectEqualStrings(png_64 ++ "TLS-OS", sys.readFile(os_icon, &read_buf).?);
     const demo_icon = try std.mem.printSentinel(&path_buf, "{s}/.icons/dazzle-demo.png", .{app_dir}, 0);
     try testing.expectEqualStrings(png_64 ++ "TLS-DEMO", sys.readFile(demo_icon, &read_buf).?);
+}
+
+test "an update is offered when it is newer and in neither slot" {
+    const json =
+        \\{"version": "0123abc", "time": 1791400000, "file": "dazzle-os.tar.xz", "size": 4000000,
+        \\ "sha256": "f3e817e51826f4ca7b7d334af8f857d9c42416073f44c7429e1bfda7f097a753"}
+    ;
+    const parsed = try OsManifest.parse(testing.allocator, json);
+    defer parsed.deinit();
+    const m = &parsed.value;
+    const running = sys.system.Version.init(1791331200, "de14aa2").?;
+    try testing.expect(osOffered(m, running, null));
+    // Older or the same: not.
+    try testing.expect(!osOffered(m, sys.system.Version.init(1791500000, "fffffff").?, null));
+    try testing.expect(!osOffered(m, sys.system.Version.init(1791400000, "0123abc").?, null));
+    // Already in the other slot (downloaded before): not.
+    var report: sys.system.Report = .{ .slot = 'a', .next = 'a', .versions = .{ running, sys.system.Version.init(1791400000, "0123abc").? } };
+    try testing.expect(!osOffered(m, running, &report));
+    report.versions[1] = sys.system.Version.init(1791000000, "0000aaa").?;
+    try testing.expect(osOffered(m, running, &report));
+
+    // Manifests that are not right.
+    try testing.expectError(error.BadManifest, OsManifest.parse(testing.allocator, "{\"version\": \"x y\", \"time\": 1, \"file\": \"a.tar.xz\", \"size\": 1, \"sha256\": \"" ++ &@as([64]u8, @splat('0')) ++ "\"}"));
+    try testing.expectError(error.BadManifest, OsManifest.parse(testing.allocator, "{\"version\": \"abc\", \"time\": 1, \"file\": \"../a\", \"size\": 1, \"sha256\": \"" ++ &@as([64]u8, @splat('0')) ++ "\"}"));
+    try testing.expectError(error.BadManifest, OsManifest.parse(testing.allocator, "[]"));
 }

@@ -21,6 +21,7 @@ const font = @import("font");
 const icons = @import("icons");
 const audio = @import("audio");
 const theme_settings = @import("appearance");
+const store = @import("store");
 
 pub const apps_dir = sys.system.apps_dir;
 pub const appearance_file = theme_settings.settings_file;
@@ -352,17 +353,20 @@ pub const AppsWatch = struct {
         apps: bool = false,
         sound: bool = false,
         appearance: bool = false,
+        /// The apps' catalogue (and so what updates there are).
+        catalogue: bool = false,
 
-        pub const all: Changes = .{ .apps = true, .sound = true, .appearance = true };
+        pub const all: Changes = .{ .apps = true, .sound = true, .appearance = true, .catalogue = true };
 
         pub fn any(c: Changes) bool {
-            return c.apps or c.sound or c.appearance;
+            return c.apps or c.sound or c.appearance or c.catalogue;
         }
     };
 
     const mask = linux.IN.CREATE | linux.IN.DELETE | linux.IN.MOVED_FROM | linux.IN.MOVED_TO | linux.IN.CLOSE_WRITE | linux.IN.ONLYDIR;
     const sound_name = std.fs.path.basename(audio.settings_file);
     const appearance_name = std.fs.path.basename(appearance_file);
+    const catalogue_name = std.fs.path.basename(store.catalogue_file);
 
     /// Watches `dir`, if it is there yet (see `retry`).
     pub fn init(dir: [*:0]const u8) AppsWatch {
@@ -413,6 +417,8 @@ pub const AppsWatch = struct {
                     if (written) c.sound = true;
                 } else if (std.mem.eql(u8, name, appearance_name)) {
                     if (written) c.appearance = true;
+                } else if (std.mem.eql(u8, name, catalogue_name)) {
+                    if (written) c.catalogue = true;
                 } else if (name.len > 0 and name[0] != '.' and ev.mask & linux.IN.CLOSE_WRITE == 0) {
                     c.apps = true;
                 }
@@ -478,6 +484,9 @@ pub const Dock = struct {
     network: NetworkStatus = .{ .offline = .{} },
     /// Whether data is moving, shown as arrows beside the network status.
     activity: Activity = .{},
+    /// There are updates (of the system or apps): an icon says so, first
+    /// in the status box.
+    updates: bool = false,
     /// Volume status shown in the status box beside the network status.
     volume: VolumeStatus = .{},
     /// Light or dark colour scheme (from `/data/apps/.appearance`).
@@ -502,6 +511,14 @@ pub const Dock = struct {
     /// The status box's width (at 1080p): the volume, the network and its
     /// activity arrows.
     const status_box_width = 124;
+    /// How much wider the status box is with the update icon in it.
+    const update_icon_width = 46;
+
+    /// The status box's width, in pixels.
+    fn statusWidth(d: *const Dock) f32 {
+        const w: f32 = if (d.updates) status_box_width + update_icon_width else status_box_width;
+        return w * d.scale;
+    }
     pub const StatusRect = struct { x: f32, y: f32, width: f32, height: f32 };
 
     /// Where app `i`'s icon is, in the dock: the icons and the status box
@@ -509,7 +526,7 @@ pub const Dock = struct {
     pub fn iconRect(d: *const Dock, i: usize) Rect {
         const size = 56 * d.scale;
         const gap = 20 * d.scale;
-        const status_width = status_box_width * d.scale;
+        const status_width = d.statusWidth();
         const row = @as(f32, @floatFromInt(d.apps.len)) * (size + gap) + status_width;
         const x0 = (@as(f32, @floatFromInt(d.width)) - row) / 2;
         return .{ .x = x0 + @as(f32, @floatFromInt(i)) * (size + gap), .y = 6 * d.scale, .size = size };
@@ -518,7 +535,7 @@ pub const Dock = struct {
     /// Where the status box (volume and network) is, to the right of the rightmost app.
     pub fn statusRect(d: *const Dock) StatusRect {
         const r = d.iconRect(d.apps.len);
-        return .{ .x = r.x, .y = r.y, .width = status_box_width * d.scale, .height = r.size };
+        return .{ .x = r.x, .y = r.y, .width = d.statusWidth(), .height = r.size };
     }
 
     /// The app whose icon is at (`x`, `y`) in the dock.
@@ -567,11 +584,13 @@ pub const Dock = struct {
             const size = @round(36 * d.scale);
             const pad = @round(10 * d.scale);
             const y = @round(rs.y + (rs.height - size) / 2);
-            const vol_x = @round(rs.x + pad);
+            const update_x = @round(rs.x + pad);
+            const vol_x = if (d.updates) @round(update_x + update_icon_width * d.scale) else update_x;
             const arrow = @round(18 * d.scale);
             const arrows_x = @round(rs.x + rs.width - pad - arrow);
             const net_x = @round(arrows_x - 4 * d.scale - size);
             var buf: [4]u8 = undefined;
+            if (d.updates) _ = font.draw(canvas, &d.cache, .{ .font = f, .size = size, .color = c.dot }, update_x, y + size, icons.text(.system_update_alt, &buf)) catch {};
             const vol_color: u32 = if (d.volume.active()) c.status_active else c.status_inactive;
             _ = font.draw(canvas, &d.cache, .{ .font = f, .size = size, .color = vol_color }, vol_x, y + size, icons.text(d.volume.icon(), &buf)) catch {};
             const net_color: u32 = if (d.network.connected()) c.status_active else c.status_inactive;
@@ -740,6 +759,34 @@ test "icons and the status box are in a row in the middle, and clicks find the a
     try testing.expectEqual(light.dot, at(&d, r0.x + r0.size / 2, r0.y + r0.size + 6));
     try testing.expectEqual(light.hover_background, at(&d, r1.x - 2, r1.y + r1.size / 2));
     try testing.expectEqual(light.status_border, at(&d, rs.x + rs.width / 2, rs.y + 1));
+}
+
+test "with updates, the status box is wider and starts with the update icon" {
+    var apps = [_]App{.{ .name = "a", .label = "A", .path = "/apps/a/a", .icon = .folder }};
+    var d = try Dock.init(testing.allocator, null, &apps, 1920, 1080);
+    defer testing.allocator.free(d.pixels);
+    defer d.cache.deinit();
+    const without = d.statusRect();
+    d.draw();
+    const box_middle_y: usize = @intFromFloat(without.y + without.height / 2);
+    const at = struct {
+        fn f(dock: *const Dock, x: f32, y: usize) u32 {
+            return dock.pixels[y * dock.width + @as(usize, @intFromFloat(x))];
+        }
+    }.f;
+    d.updates = true;
+    const with = d.statusRect();
+    try testing.expectApproxEqAbs(without.width + 46, with.width, 0.01);
+    // Still in the middle: the row grew to the left too.
+    try testing.expect(with.x < without.x);
+    d.draw();
+    // The icon, in the accent the running dots have, where the volume was.
+    var accent = false;
+    var x = with.x + 10;
+    while (x < with.x + 46) : (x += 1) {
+        if (at(&d, x, box_middle_y) == dot_color) accent = true;
+    }
+    try testing.expect(accent);
 }
 
 test "the network status is Wi-Fi when joined, Ethernet with an address, and offline otherwise" {

@@ -67,6 +67,7 @@ pub const Icon = enum {
     wifi_tethering,
     public_off,
     arrow_downward,
+    system_update_alt,
     wifi_password,
     // The demo.
     view_in_ar,

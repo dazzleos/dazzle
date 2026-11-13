@@ -24,32 +24,9 @@ const store = @import("store");
 
 const proto = sys.system;
 
-pub const manifest_file = proto.update_dir ++ "/os.json";
-
-pub const Manifest = struct {
-    name: []const u8 = "dazzle",
-    title: []const u8 = "Dazzle",
-    description: []const u8 = "",
-    version: []const u8,
-    time: u64,
-    icon: []const u8 = "",
-    file: []const u8,
-    size: u64,
-    sha256: []const u8,
-    signature: []const u8 = "",
-
-    pub fn parse(gpa: std.mem.Allocator, json: []const u8) !std.json.Parsed(Manifest) {
-        const parsed = std.json.parseFromSlice(Manifest, gpa, json, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return error.BadManifest;
-        errdefer parsed.deinit();
-        const m = parsed.value;
-        if (proto.Version.init(m.time, m.version) == null or !(std.mem.endsWith(u8, m.file, ".tar.xz") and store.validName(m.file[0 .. m.file.len - ".tar.xz".len])) or m.sha256.len != 64) return error.BadManifest;
-        return parsed;
-    }
-
-    pub fn versionOf(m: *const Manifest) proto.Version {
-        return proto.Version.init(m.time, m.version).?;
-    }
-};
+pub const manifest_file = store.os_manifest_file;
+pub const Manifest = store.OsManifest;
+pub const offered = store.osOffered;
 
 /// What the Software page shows of updates.
 pub const Status = enum {
@@ -65,15 +42,6 @@ pub const Status = enum {
     /// Nothing newer.
     current,
 };
-
-/// Whether `m` should be offered: newer than the running system, and in
-/// neither slot.
-pub fn offered(m: *const Manifest, running: proto.Version, report: ?*const proto.Report) bool {
-    const v = m.versionOf();
-    if (v.time <= running.time or v.eql(&running)) return false;
-    if (report) |r| if (r.holds(&v)) return false;
-    return true;
-}
 
 pub const Updater = struct {
     gpa: std.mem.Allocator,
@@ -136,10 +104,7 @@ pub const Updater = struct {
     pub fn available(u: *const Updater) ?*const Manifest {
         const m = if (u.manifest) |*p| &p.value else return null;
         const report = if (u.report) |*r| r else null;
-        // The running slot's version (with its kernel's commit and time), as
-        // the system manager says; else the one this was built with.
-        const running = if (report) |r| (if (r.slot) |s| (if (r.version(s)) |v| v.* else u.running) else u.running) else u.running;
-        return if (offered(m, running, report)) m else null;
+        return if (offered(m, store.runningVersion(report, u.running), report)) m else null;
     }
 
     pub fn status(u: *const Updater) Status {
@@ -255,31 +220,6 @@ pub fn formatDate(buf: []u8, seconds: u64) []const u8 {
 }
 
 const testing = std.testing;
-
-test "an update is offered when it is newer and in neither slot" {
-    const json =
-        \\{"version": "0123abc", "time": 1791400000, "file": "dazzle-os.tar.xz", "size": 4000000,
-        \\ "sha256": "f3e817e51826f4ca7b7d334af8f857d9c42416073f44c7429e1bfda7f097a753"}
-    ;
-    const parsed = try Manifest.parse(testing.allocator, json);
-    defer parsed.deinit();
-    const m = &parsed.value;
-    const running = proto.Version.init(1791331200, "de14aa2").?;
-    try testing.expect(offered(m, running, null));
-    // Older or the same: not.
-    try testing.expect(!offered(m, proto.Version.init(1791500000, "fffffff").?, null));
-    try testing.expect(!offered(m, proto.Version.init(1791400000, "0123abc").?, null));
-    // Already in the other slot (downloaded before): not.
-    var report: proto.Report = .{ .slot = 'a', .next = 'a', .versions = .{ running, proto.Version.init(1791400000, "0123abc").? } };
-    try testing.expect(!offered(m, running, &report));
-    report.versions[1] = proto.Version.init(1791000000, "0000aaa").?;
-    try testing.expect(offered(m, running, &report));
-
-    // Manifests that are not right.
-    try testing.expectError(error.BadManifest, Manifest.parse(testing.allocator, "{\"version\": \"x y\", \"time\": 1, \"file\": \"a.tar.xz\", \"size\": 1, \"sha256\": \"" ++ &@as([64]u8, @splat('0')) ++ "\"}"));
-    try testing.expectError(error.BadManifest, Manifest.parse(testing.allocator, "{\"version\": \"abc\", \"time\": 1, \"file\": \"../a\", \"size\": 1, \"sha256\": \"" ++ &@as([64]u8, @splat('0')) ++ "\"}"));
-    try testing.expectError(error.BadManifest, Manifest.parse(testing.allocator, "[]"));
-}
 
 test "dates" {
     var buf: [32]u8 = undefined;

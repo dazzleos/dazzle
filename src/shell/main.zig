@@ -37,6 +37,7 @@ const server_mod = @import("server.zig");
 const render = @import("render.zig");
 const input = @import("input.zig");
 const dock_mod = @import("dock.zig");
+const updates_mod = @import("updates.zig");
 const perf_mod = @import("perf.zig");
 const keyboard = @import("keyboard.zig");
 const screenshot = @import("screenshot.zig");
@@ -120,6 +121,11 @@ fn run(init: std.process.Init.Minimal) !void {
     const initial_sound = audio.loadSettings();
     audio.applySettings(initial_sound, &audio.listDevices());
     dock.volume = .{ .volume = initial_sound.volume, .muted = initial_sound.muted };
+    // Updates of the system and the apps: checked for a minute from now,
+    // then daily.
+    var updates: updates_mod.Updates = undefined;
+    updates.init(gpa, sys.nowNs());
+    dock.updates = updates.available;
     const appearance = dock_mod.readAppearance();
     dock.theme = appearance.theme;
     renderer.background = appearance.background;
@@ -281,10 +287,15 @@ fn run(init: std.process.Init.Minimal) !void {
                 }
             };
         }
+        // Whether there are updates changed: the dock shows it.
+        var updates_changed = false;
         if (fds[sys_index].revents != 0) {
-            if (sys_sub.poll()) |r| if (!r.denied and r.locale.keyboard != server.keyboard_layout) {
-                print("dazzle-shell: keyboard {s}\n", .{r.locale.keyboard.code()});
-                server.setKeyboard(r.locale.keyboard);
+            if (sys_sub.poll()) |r| if (!r.denied) {
+                if (r.locale.keyboard != server.keyboard_layout) {
+                    print("dazzle-shell: keyboard {s}\n", .{r.locale.keyboard.code()});
+                    server.setKeyboard(r.locale.keyboard);
+                }
+                if (updates.setReport(r)) updates_changed = true;
             };
             if (apps_watch.retry()) apps_changes = .all;
         }
@@ -293,7 +304,10 @@ fn run(init: std.process.Init.Minimal) !void {
             apps_changes.apps = apps_changes.apps or c.apps;
             apps_changes.sound = apps_changes.sound or c.sound;
             apps_changes.appearance = apps_changes.appearance or c.appearance;
+            apps_changes.catalogue = apps_changes.catalogue or c.catalogue;
         }
+        // Settings fetched the catalogue, or installed or removed apps.
+        if ((apps_changes.apps or apps_changes.catalogue) and updates.reload()) updates_changed = true;
         if (apps_changes.apps) {
             if (dock_mod.rescan(gpa, apps, dock_mod.apps_dir, &builtin_apps)) |new| {
                 apps = new;
@@ -504,18 +518,33 @@ fn run(init: std.process.Init.Minimal) !void {
             }
             if (sys_sub.fd == null) {
                 sys_sub.connect();
-                if (sys_sub.poll()) |r| if (!r.denied and r.locale.keyboard != server.keyboard_layout) {
-                    print("dazzle-shell: keyboard {s}\n", .{r.locale.keyboard.code()});
-                    server.setKeyboard(r.locale.keyboard);
+                if (sys_sub.poll()) |r| if (!r.denied) {
+                    if (r.locale.keyboard != server.keyboard_layout) {
+                        print("dazzle-shell: keyboard {s}\n", .{r.locale.keyboard.code()});
+                        server.setKeyboard(r.locale.keyboard);
+                    }
+                    if (updates.setReport(r)) updates_changed = true;
                 };
                 if (apps_watch.retry()) apps_pending = .all;
             }
+            // The daily check for updates, when it is due.
+            if (updates.tick(t_now)) updates_changed = true;
             if (perf_shown) {
                 var pids: [max_clients]linux.pid_t = undefined;
                 perf.draw(perf_monitor.sample(t_now, perf_frames, perf_gpu_ns, clientPids(&server, &pids)));
                 perf_frames = 0;
                 perf_gpu_ns = 0;
                 renderer.setPanelAt(.perf, perf.pixels, perf.width, perf.height, perf.x, perf.y);
+                panels_damaged = true;
+            }
+        }
+
+        if (updates_changed) {
+            dock.updates = updates.available;
+            print("dazzle-shell: {s}\n", .{if (updates.available) "updates available" else "up to date"});
+            if (dock_shown) {
+                dock.draw();
+                renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
                 panels_damaged = true;
             }
         }
@@ -883,6 +912,7 @@ test {
     _ = @import("input.zig");
     _ = @import("cursor.zig");
     _ = @import("dock.zig");
+    _ = @import("updates.zig");
     _ = @import("perf.zig");
     _ = @import("screenshot.zig");
     _ = @import("keyboard.zig");
