@@ -75,7 +75,8 @@ fn run(init: std.process.Init) !void {
     // The sockets wake the loop.
     host.wakeOn(network.epfd, true);
 
-    var actions: view.Actions = .{};
+    var actions: view.Actions = .init(gpa);
+    defer actions.deinit();
     const root: Root = .{ .network = &network, .host = host_name, .actions = &actions };
     const window = try host.app.openWindow(.{
         .title = "Chat",
@@ -108,13 +109,13 @@ fn apply(actions: *view.Actions, network: *net.Net, host: []const u8, now: u64) 
     if (actions.open_settings) {
         actions.open_settings = false;
         actions.settings_open = true;
-        actions.setTypedName(network.name.get());
+        actions.name.setText(network.name.get());
         changed = true;
     }
     if (actions.save_settings) {
         actions.save_settings = false;
         actions.settings_open = false;
-        network.rename(settings.saveName(settings.name_file, actions.typedName(), host));
+        network.rename(settings.saveName(settings.name_file, actions.name.text(), host));
         changed = true;
     }
     if (actions.dismiss) {
@@ -125,31 +126,30 @@ fn apply(actions: *view.Actions, network: *net.Net, host: []const u8, now: u64) 
     if (actions.join) |room| {
         actions.join = null;
         network.join(room, now);
-        actions.draft_len = 0;
+        actions.draft.setText("");
         changed = true;
     }
     if (actions.create) {
         actions.create = false;
-        const typed = std.mem.trim(u8, actions.roomName(), " \t");
+        const typed = std.mem.trim(u8, actions.room_name.text(), " \t");
         network.create(if (typed.len == 0) default_room_name else typed, now);
-        actions.room_name_len = 0;
-        actions.draft_len = 0;
+        actions.room_name.setText("");
+        actions.draft.setText("");
         changed = true;
     }
     if (actions.leave) {
         actions.leave = false;
         network.leave();
-        actions.room_name_len = 0;
-        actions.draft_len = 0;
+        actions.room_name.setText("");
+        actions.draft.setText("");
         changed = true;
     }
     if (actions.send) {
         actions.send = false;
-        if (std.mem.trim(u8, actions.draft(), " \t").len > 0) {
-            network.say(actions.draft());
+        if (std.mem.trim(u8, actions.draft.text(), " \t").len > 0) {
+            network.say(actions.draft.text());
             // The field starts again, empty.
-            actions.draft_len = 0;
-            actions.draft_key += 1;
+            actions.draft.setText("");
             changed = true;
         }
     }

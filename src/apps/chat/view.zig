@@ -12,14 +12,14 @@ const protocol = @import("protocol.zig");
 pub const min_size = [2]u32{ 420, 360 };
 pub const open_size = [2]u32{ 800, 640 };
 
-/// What the window asked for, for the app to do (see main.zig).
+/// What the window asked for, for the app to do (see main.zig), and what
+/// is typed in its fields.
 pub const Actions = struct {
-    room_name_buf: [kete.TextField.capacity]u8 = undefined,
-    room_name_len: usize = 0,
-    draft_buf: [kete.TextField.capacity]u8 = undefined,
-    draft_len: usize = 0,
-    /// The message field starts again (empty) when this changes.
-    draft_key: u64 = 1,
+    /// A new room's name, what is to be said, and (in the settings) the
+    /// name others see: the fields' text, which the app reads and clears.
+    room_name: kete.TextDocument,
+    draft: kete.TextDocument,
+    name: kete.TextDocument,
     create: bool = false,
     leave: bool = false,
     send: bool = false,
@@ -28,25 +28,17 @@ pub const Actions = struct {
     dismiss: bool = false,
     /// The settings are shown, with the name being typed.
     settings_open: bool = false,
-    name_buf: [kete.TextField.capacity]u8 = undefined,
-    name_len: usize = 0,
     open_settings: bool = false,
     save_settings: bool = false,
 
-    pub fn roomName(a: *const Actions) []const u8 {
-        return a.room_name_buf[0..a.room_name_len];
+    pub fn init(gpa: std.mem.Allocator) Actions {
+        return .{ .room_name = .{ .gpa = gpa }, .draft = .{ .gpa = gpa }, .name = .{ .gpa = gpa } };
     }
 
-    pub fn draft(a: *const Actions) []const u8 {
-        return a.draft_buf[0..a.draft_len];
-    }
-
-    fn setRoomName(a: *Actions, text: []const u8) void {
-        a.room_name_len = copyText(&a.room_name_buf, text);
-    }
-
-    fn setDraft(a: *Actions, text: []const u8) void {
-        a.draft_len = copyText(&a.draft_buf, text);
+    pub fn deinit(a: *Actions) void {
+        a.room_name.deinit();
+        a.draft.deinit();
+        a.name.deinit();
     }
 
     fn requestCreate(a: *Actions) void {
@@ -65,14 +57,6 @@ pub const Actions = struct {
         a.dismiss = true;
     }
 
-    pub fn typedName(a: *const Actions) []const u8 {
-        return a.name_buf[0..a.name_len];
-    }
-
-    pub fn setTypedName(a: *Actions, text: []const u8) void {
-        a.name_len = copyText(&a.name_buf, text);
-    }
-
     fn requestSettings(a: *Actions) void {
         a.open_settings = true;
     }
@@ -85,14 +69,6 @@ pub const Actions = struct {
         a.settings_open = false;
     }
 };
-
-/// Copies as much of `text` as fits (whole characters).
-fn copyText(buf: []u8, text: []const u8) usize {
-    var n = @min(text.len, buf.len);
-    while (n > 0 and n < text.len and text[n] & 0xc0 == 0x80) n -= 1;
-    @memcpy(buf[0..n], text[0..n]);
-    return n;
-}
 
 const JoinPress = struct {
     actions: *Actions,
@@ -128,12 +104,11 @@ pub const Chat = struct {
             .title = "Settings",
             .description = cx.fmt("The name others see you as. Leave it empty to use this computer's name ({s}).", .{self.default_name}),
             .content = cx.make(kete.TextField{
-                .initial = self.name,
+                .doc = &self.actions.name,
                 .placeholder = self.default_name,
                 .width = std.math.inf(f32),
                 .max_len = protocol.max_name,
                 .autofocus = true,
-                .on_changed = .of(self.actions, Actions.setTypedName),
                 .on_submit = .of(self.actions, Actions.requestSaveSettings),
             }),
             .confirm_label = "Save",
@@ -197,11 +172,11 @@ pub const Chat = struct {
                             } }),
                             cx.make(kete.Row{ .spacing = 12, .cross_axis_alignment = .center, .children = &.{
                                 cx.make(kete.Expanded{ .child = cx.make(kete.TextField{
+                                    .doc = &self.actions.room_name,
                                     .placeholder = "Name for a new room",
                                     .width = std.math.inf(f32),
                                     .max_len = protocol.max_name,
                                     .autofocus = true,
-                                    .on_changed = .of(self.actions, Actions.setRoomName),
                                     .on_submit = .of(self.actions, Actions.requestCreate),
                                 }) }),
                                 cx.make(kete.FilledButton{
@@ -294,13 +269,13 @@ pub const Chat = struct {
                     .cross_axis_alignment = .center,
                     .children = &.{
                         cx.make(kete.Expanded{ .child = cx.make(kete.TextField{
+                            .doc = &self.actions.draft,
                             .placeholder = "Say something",
                             .width = std.math.inf(f32),
                             .max_len = protocol.max_text,
                             .autofocus = true,
-                            .on_changed = .of(self.actions, Actions.setDraft),
                             .on_submit = .of(self.actions, Actions.requestSend),
-                        }).withKey(self.actions.draft_key) }),
+                        }) }),
                         cx.make(kete.IconButton{
                             .icon = .send,
                             .on_press = .of(self.actions, Actions.requestSend),
@@ -364,7 +339,8 @@ test "the lobby lists rooms to join and a way to start one" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
     const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
-    var actions: Actions = .{};
+    var actions: Actions = .init(testing.allocator);
+    defer actions.deinit();
     const none: Chat = .{ .node = 1, .ads = &.{}, .room = null, .name = "kitchen-pi", .default_name = "kitchen-pi", .actions = &actions };
     for ([_][2]u32{ min_size, .{ 1280, 720 }, .{ 1920, 1036 } }) |size| {
         u.frame(size[0], size[1], 0, none);
@@ -408,7 +384,8 @@ test "the settings change the name" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
     const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
-    var actions: Actions = .{};
+    var actions: Actions = .init(testing.allocator);
+    defer actions.deinit();
     const chat: Chat = .{ .node = 1, .ads = &.{}, .room = null, .name = "Alice", .default_name = "kitchen-pi", .actions = &actions };
     u.frame(1280, 720, 0, chat);
     try testing.expect(findText(u.root.?, "You are Alice") != null);
@@ -422,6 +399,7 @@ test "the settings change the name" {
 
     // Opened (main.zig does that), it has the name to change.
     actions.settings_open = true;
+    actions.name.setText("Alice");
     for ([_][2]u32{ min_size, .{ 1280, 720 } }) |size| {
         u.frame(size[0], size[1], 1, chat);
         try testing.expect(!overflows(u.root.?));
@@ -439,7 +417,8 @@ test "a room shows who is there and what was said, and sending asks to send" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
     const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
-    var actions: Actions = .{};
+    var actions: Actions = .init(testing.allocator);
+    defer actions.deinit();
     var room: net.Room = .{ .id = 1, .name = protocol.Name.init("Lounge"), .log = protocol.Log.init(testing.allocator), .connected = true };
     defer room.log.deinit();
     _ = try room.log.add(.{ .lamport = 1, .author = 2, .seq = 1, .name = "bob", .text = "Hello!" });
@@ -458,6 +437,14 @@ test "a room shows who is there and what was said, and sending asks to send" {
     // Its own are "You"; others' are by name.
     try testing.expect(findText(u.root.?, "You") != null);
     try testing.expect(findText(u.root.?, "bob") != null);
+
+    // What is to be said is the draft's; once sent, the app empties it.
+    actions.draft.setText("See you");
+    u.frame(1280, 720, 0, chat);
+    try testing.expect(findField(u.root.?, "See you") != null);
+    actions.draft.setText("");
+    u.frame(1280, 720, 0, chat);
+    try testing.expect(findField(u.root.?, "See you") == null);
 
     click(u, up(findText(u.root.?, "Leave").?, kete.TonalButton).?);
     try testing.expect(actions.leave);
