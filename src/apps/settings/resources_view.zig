@@ -153,7 +153,7 @@ fn storageRow(b: Builder, st: info.Storage) kete.Widget {
                     .spacing = 6,
                     .children = &.{
                         // On as many lines as it takes.
-                        cx.make(kete.Grid.fixed(cx, key, .{ .w = 140, .h = 22 }, 6)),
+                        cx.make(kete.Grid.fixed(cx, key, .{ .w = 200, .h = 22 }, 6)),
                         cx.make(SegmentBar{ .segments = segments, .height = @max(8, 4) }),
                     },
                 }),
