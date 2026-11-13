@@ -90,6 +90,8 @@ fn quad(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, index: us
         .{ x0, y0, uv[0][0], uv[0][1] }, .{ x0, y1, uv[1][0], uv[1][1] }, .{ x1, y0, uv[2][0], uv[2][1] },
         .{ x1, y0, uv[2][0], uv[2][1] }, .{ x0, y1, uv[1][0], uv[1][1] }, .{ x1, y1, uv[3][0], uv[3][1] },
     };
+    // Drawn smaller (in the overview), it is filtered, not sampled.
+    const filter: texture.Filter = if (qw < t.width or qh < t.height) .linear else .nearest;
     const offset: u32 = @intCast(index * @sizeOf(@TypeOf(verts)));
     @memcpy(vbo.map[offset..][0..@sizeOf(@TypeOf(verts))], std.mem.asBytes(&verts));
     try pipeline.draw(frame, .{
@@ -101,8 +103,8 @@ fn quad(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, index: us
             .type = t.format.textureType(),
             .width = t.width,
             .height = t.height,
-            .mag_filter = .nearest,
-            .min_filter = .nearest,
+            .mag_filter = filter,
+            .min_filter = filter,
             .wrap_s = .clamp,
             .wrap_t = .clamp,
         } },

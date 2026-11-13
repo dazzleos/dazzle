@@ -29,7 +29,9 @@
 //! and the top one has the keyboard. Windows hidden behind others are
 //! covered: they get xdg_toplevel's suspended state, their frame callbacks
 //! wait until they can be seen again, and what they commit meanwhile does
-//! not make the shell draw a frame. The server does not draw: it keeps the
+//! not make the shell draw a frame. In the overview (Super, tapped) every
+//! window is drawn smaller, side by side in the work area, without being
+//! told, for one to be picked (`setOverview`). The server does not draw: it keeps the
 //! state the renderer needs (`visibleWindows`), and gets textures from the
 //! renderer through `Backend`, so it can run without a GPU in tests.
 //!
@@ -96,6 +98,9 @@ pub const Backend = struct {
 };
 
 pub const Rect = struct { x: i32, y: i32, width: u32, height: u32 };
+
+/// KEY_ESC (linux/input-event-codes.h).
+pub const key_esc = 1;
 
 const globals = [_]struct { name: []const u8, version: u32 }{
     .{ .name = p.wl_compositor.name, .version = p.wl_compositor.version },
@@ -599,6 +604,11 @@ pub const Server = struct {
     serial: u32 = 0,
     /// Something visible changed since the last frame.
     damaged: bool = true,
+    /// The overview (Super, tapped): every window drawn smaller, side by
+    /// side in the work area (`overviewLayout`), for one to be picked. The
+    /// windows are not told their size changed: only how they are drawn
+    /// does, and they have neither the pointer nor the keyboard meanwhile.
+    overview: bool = false,
     /// Frame callbacks for the next frame drawn.
     frame_callbacks: std.ArrayList(FrameCallback) = .empty,
     /// Frame callbacks for the frame drawn and waiting to reach the screen.
@@ -1050,6 +1060,8 @@ pub const Server = struct {
 
     /// The top window fills the screen: the shell's panels are hidden.
     pub fn fullscreenTop(s: *const Server) bool {
+        // The overview is in the work area, with the dock.
+        if (s.overview) return false;
         const t = s.topWindow() orelse return false;
         return t.shown_fullscreen;
     }
@@ -1058,6 +1070,7 @@ pub const Server = struct {
     /// is: maximized or fullscreen, and the size of the area it fills.
     pub fn scanoutBuffer(s: *const Server, t: *const Toplevel) ?*Buffer {
         if (!t.shown_maximized and !t.shown_fullscreen) return null;
+        if (s.overview) return null;
         const surf = t.xdg.surface orelse return null;
         if (surf.scale != 1 or surf.transform != 0) return null;
         if (t.xdg.geometry) |g| if (g.x != 0 or g.y != 0) return null;
@@ -1094,6 +1107,93 @@ pub const Server = struct {
         c.ponged = false;
         broadcast(c, .wm_base, p.xdg_wm_base.event.ping, 1, .{serial});
         return serial;
+    }
+
+    /// Where a window goes in the overview.
+    pub const OverviewSlot = struct { t: *Toplevel, rect: Rect };
+
+    /// Space around the overview's windows, and between them.
+    const overview_gap = 32;
+
+    /// Shows the overview, or ends it. It shows only when there are
+    /// windows, and not while a window is moved or something dragged.
+    pub fn setOverview(s: *Server, on: bool) void {
+        if (on == s.overview) return;
+        if (on) {
+            if (s.topWindow() == null or s.drag != null) return;
+            if (s.grab != null) s.endGrab();
+            s.dismissGrabs();
+            s.breakLock();
+        }
+        s.overview = on;
+        s.damaged = true;
+        // The windows lose the pointer and keyboard, or have them again, and
+        // none is covered in the overview.
+        s.updateFocus();
+    }
+
+    /// Picks a window in the overview: it comes to the top, with the
+    /// keyboard, and the overview ends.
+    pub fn overviewPick(s: *Server, t: *Toplevel) void {
+        s.raiseToplevel(t);
+        s.setOverview(false);
+    }
+
+    /// The window in the overview at (`x`, `y`) on the screen, if any.
+    pub fn overviewAt(s: *const Server, x: f64, y: f64) ?*Toplevel {
+        var buf: [32]OverviewSlot = undefined;
+        for (s.overviewLayout(&buf)) |slot| {
+            const r = slot.rect;
+            if (x >= @as(f64, @floatFromInt(r.x)) and y >= @as(f64, @floatFromInt(r.y)) and
+                x < @as(f64, @floatFromInt(r.x + @as(i32, @intCast(r.width)))) and
+                y < @as(f64, @floatFromInt(r.y + @as(i32, @intCast(r.height))))) return slot.t;
+        }
+        return null;
+    }
+
+    /// Where each window shown goes in the overview, the top one first: in
+    /// rows and columns (as near square as they go) filling the work area,
+    /// each made as big as fits its cell (but no bigger than it is), in the
+    /// middle of it, the last row's in the middle too.
+    pub fn overviewLayout(s: *const Server, buf: []OverviewSlot) []OverviewSlot {
+        var n: usize = 0;
+        var i = s.toplevels.items.len;
+        while (i > 0 and n < buf.len) {
+            i -= 1;
+            const t = s.toplevels.items[i];
+            if (!t.shown()) continue;
+            buf[n] = .{ .t = t, .rect = undefined };
+            n += 1;
+        }
+        if (n == 0) return buf[0..0];
+        const cols: usize = @intFromFloat(@ceil(@sqrt(@as(f64, @floatFromInt(n)))));
+        const rows = (n + cols - 1) / cols;
+        const wa = s.work_area;
+        const gap: f64 = overview_gap;
+        const cell_w = @max((@as(f64, @floatFromInt(wa.width)) - gap * @as(f64, @floatFromInt(cols + 1))) / @as(f64, @floatFromInt(cols)), 1);
+        const cell_h = @max((@as(f64, @floatFromInt(wa.height)) - gap * @as(f64, @floatFromInt(rows + 1))) / @as(f64, @floatFromInt(rows)), 1);
+        for (buf[0..n], 0..) |*slot, k| {
+            const row = k / cols;
+            const col = k % cols;
+            // The last row's cells, in the middle.
+            const in_row = if (row == rows - 1) n - row * cols else cols;
+            const row_x = (@as(f64, @floatFromInt(cols - in_row)) * (cell_w + gap)) / 2;
+            const r = s.windowRect(slot.t);
+            const rw: f64 = @floatFromInt(@max(r.width, 1));
+            const rh: f64 = @floatFromInt(@max(r.height, 1));
+            const scale = @min(@min(cell_w / rw, cell_h / rh), 1);
+            const w = @max(@round(rw * scale), 1);
+            const h = @max(@round(rh * scale), 1);
+            const cx = @as(f64, @floatFromInt(wa.x)) + gap + row_x + @as(f64, @floatFromInt(col)) * (cell_w + gap);
+            const cy = @as(f64, @floatFromInt(wa.y)) + gap + @as(f64, @floatFromInt(row)) * (cell_h + gap);
+            slot.rect = .{
+                .x = @intFromFloat(@round(cx + (cell_w - w) / 2)),
+                .y = @intFromFloat(@round(cy + (cell_h - h) / 2)),
+                .width = @intFromFloat(w),
+                .height = @intFromFloat(h),
+            };
+        }
+        return buf[0..n];
     }
 
     /// Raises the top window of the client with process `pid` above the
@@ -2828,8 +2928,21 @@ pub const Server = struct {
     /// subsurfaces, then its popups, a drag icon, and a custom cursor
     /// surface on top (the top ones, if there are more than fit in `buf`).
     pub fn drawList(s: *const Server, buf: []Quad) []Quad {
-        var shown: [32]*Toplevel = undefined;
         var list: std.ArrayList(Quad) = .initBuffer(buf);
+        if (s.overview) {
+            // Each window in its place, smaller: the top one drawn last.
+            var slots: [32]OverviewSlot = undefined;
+            const layout = s.overviewLayout(&slots);
+            var k = layout.len;
+            while (k > 0) {
+                k -= 1;
+                const slot = layout[k];
+                const surf = slot.t.xdg.surface orelse continue;
+                s.addTreeScaled(&list, surf, s.windowRect(slot.t), slot.rect);
+            }
+            return list.items;
+        }
+        var shown: [32]*Toplevel = undefined;
         for (s.visibleWindows(&shown)) |t| {
             const surf = t.xdg.surface orelse continue;
             // Clipped to the work area, or the screen for a fullscreen one.
@@ -2852,6 +2965,28 @@ pub const Server = struct {
             list.appendAssumeCapacity(.{ .texture = tex, .x = o[0], .y = o[1], .width = sz[0], .height = sz[1], .transform = surf.transform, .clip = clip });
         }
         for (surf.subsurfaces.items) |sub| if (sub.surface) |child| s.addTree(list, child, clip);
+    }
+
+    /// A window's surface and its subsurfaces, drawn with the window (at
+    /// `from` on the screen) at `to` instead, as much smaller as that is,
+    /// and clipped to it.
+    fn addTreeScaled(s: *const Server, list: *std.ArrayList(Quad), surf: *const Surface, from: Rect, to: Rect) void {
+        const o = s.surfaceOrigin(surf) orelse return;
+        const f = @as(f64, @floatFromInt(to.width)) / @as(f64, @floatFromInt(@max(from.width, 1)));
+        if (surf.texture()) |tex| {
+            const sz = surf.size().?;
+            if (list.items.len == list.capacity) _ = list.orderedRemove(0);
+            list.appendAssumeCapacity(.{
+                .texture = tex,
+                .x = to.x + @as(i32, @intFromFloat(@round(@as(f64, @floatFromInt(o[0] - from.x)) * f))),
+                .y = to.y + @as(i32, @intFromFloat(@round(@as(f64, @floatFromInt(o[1] - from.y)) * f))),
+                .width = @max(@as(u32, @intFromFloat(@round(@as(f64, @floatFromInt(sz[0])) * f))), 1),
+                .height = @max(@as(u32, @intFromFloat(@round(@as(f64, @floatFromInt(sz[1])) * f))), 1),
+                .transform = surf.transform,
+                .clip = to,
+            });
+        }
+        for (surf.subsurfaces.items) |sub| if (sub.surface) |child| s.addTreeScaled(list, child, from, to);
     }
 
     /// The topmost surface of a tree (`surf` and its subsurfaces) at
@@ -3522,6 +3657,8 @@ pub const Server = struct {
     /// `key` is a Linux key code (KEY_A, ...).
     pub fn keyboardKey(s: *Server, time_ms: u32, key: u32, pressed: bool) void {
         const changed = s.modifiers.update(key, pressed);
+        // Escape ends the overview (no window has the keyboard in it).
+        if (s.overview and pressed and key == key_esc) return s.setOverview(false);
         const surf = s.keyboard_focus orelse return;
         const state: u32 = if (pressed) p.wl_keyboard.key_state.pressed else p.wl_keyboard.key_state.released;
         broadcast(surf.client, .keyboard, p.wl_keyboard.event.key, 1, .{ s.nextSerial(), time_ms, key, state });
@@ -3537,7 +3674,8 @@ pub const Server = struct {
         const top = s.topWindow();
         for (s.toplevels.items, 0..) |t, i| {
             if (!t.shown()) continue;
-            const covered = s.isCovered(t, s.toplevels.items[i + 1 ..]);
+            // In the overview, every window can be seen.
+            const covered = !s.overview and s.isCovered(t, s.toplevels.items[i + 1 ..]);
             const activated = t == top;
             if (covered == t.suspended and activated == t.activated) continue;
             const uncovered = t.suspended and !covered;
@@ -3577,8 +3715,8 @@ pub const Server = struct {
         s.updateLock();
         // The top window has the keyboard, or its topmost grabbing popup
         // (a menu) has.
-        var top: ?*Surface = if (s.topWindow()) |t| t.xdg.surface else null;
-        if (s.topWindow()) |t| for (s.popups.items) |pp| if (pp.grab) if (pp.xdg.surface) |ps| if (s.rootToplevel(ps) == t) {
+        var top: ?*Surface = if (s.overview) null else if (s.topWindow()) |t| t.xdg.surface else null;
+        if (!s.overview) if (s.topWindow()) |t| for (s.popups.items) |pp| if (pp.grab) if (pp.xdg.surface) |ps| if (s.rootToplevel(ps) == t) {
             top = ps;
         };
         if (top == s.keyboard_focus) return;
@@ -3694,7 +3832,7 @@ pub const Server = struct {
     /// is over none; while a button is held down, the surface it was
     /// pressed on keeps the pointer until the button is released.
     fn updatePointerFocus(s: *Server) bool {
-        const under = if (s.grab != null or s.drag != null)
+        const under = if (s.grab != null or s.drag != null or s.overview)
             null
         else if (s.buttons_down != 0)
             (if (s.pointer_focus) |surf| if (surf.texture() != null and s.surfaceOrigin(surf) != null) surf else null else null)

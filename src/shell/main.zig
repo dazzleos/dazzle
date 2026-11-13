@@ -135,6 +135,9 @@ fn run(init: std.process.Init.Minimal) !void {
     var perf_monitor: perf_mod.Monitor = .{};
     var perf_shown = false;
     var shortcut_key: ?u32 = null;
+    // Super is down, and nothing else has been pressed with it: let go, it
+    // was tapped (which shows the overview, or ends it).
+    var super_alone = false;
     var perf_frames: u32 = 0;
     var perf_gpu_ns: u64 = 0;
     renderer.setPanelHidden(.perf, true);
@@ -350,6 +353,18 @@ fn run(init: std.process.Init.Minimal) !void {
                 // Super+I toggles the performance overlay; Super+S opens
                 // Settings, and Super+1..9,0 open the app at that dock
                 // position.
+                var super_tapped = false;
+                if (e == .key) {
+                    if (e.key.code == key_left_meta or e.key.code == key_right_meta) {
+                        if (e.key.pressed) {
+                            super_alone = true;
+                        } else if (super_alone) {
+                            super_alone = false;
+                            super_tapped = true;
+                        }
+                    } else if (e.key.pressed) super_alone = false;
+                }
+                if (e == .button and e.button.pressed) super_alone = false;
                 if (e == .key) {
                     if (!e.key.pressed and shortcut_key == e.key.code) {
                         shortcut_key = null;
@@ -374,6 +389,7 @@ fn run(init: std.process.Init.Minimal) !void {
                         }
                         if (dock_shown) if (dock_mod.shortcutApp(apps, e.key.code)) |i| {
                             shortcut_key = e.key.code;
+                            server.setOverview(false);
                             activateApp(&apps[i], &server, &dock, &renderer, dock_y, runtime_dir, &panels_damaged);
                             continue;
                         };
@@ -391,6 +407,11 @@ fn run(init: std.process.Init.Minimal) !void {
                         .down => if (on_dock) {
                             dock_touches.set(t.id);
                             dock_tap = .{ x, y };
+                        } else if (server.overview) {
+                            // The shell's: it picks a window, or ends the
+                            // overview.
+                            dock_touches.set(t.id);
+                            if (server.overviewAt(x, y)) |win| server.overviewPick(win) else server.setOverview(false);
                         } else server.touchDown(time_ms, t.id, x, y),
                         .motion => if (!dock_touches.has(t.id)) server.touchMotion(time_ms, t.id, x, y),
                         .up => if (!dock_touches.unset(t.id)) server.touchUp(time_ms, t.id),
@@ -402,6 +423,7 @@ fn run(init: std.process.Init.Minimal) !void {
                 if (dock_tap != null or (dock_visible and e == .button and e.button.pressed and server.grab == null and server.drag == null and server.buttons_down == 0 and pointer.y >= @as(f64, @floatFromInt(dock_y)))) {
                     if (dock_tap == null and e.button.code != btn_left) continue;
                     const at = dock_tap orelse [2]f64{ pointer.x, pointer.y };
+                    server.setOverview(false);
                     // The update icon: Settings' Software page, to update.
                     if (dock.hitUpdates(at[0], at[1] - @as(f64, @floatFromInt(dock_y)))) {
                         for (apps) |*a| if (std.mem.eql(u8, a.name, "dazzle-settings")) {
@@ -417,8 +439,17 @@ fn run(init: std.process.Init.Minimal) !void {
                     activateApp(&apps[i], &server, &dock, &renderer, dock_y, runtime_dir, &panels_damaged);
                     continue;
                 }
+                // In the overview, the buttons are the shell's: the left
+                // one picks a window, or (elsewhere) ends it.
+                if (server.overview and e == .button) {
+                    if (e.button.pressed and e.button.code == btn_left) {
+                        if (server.overviewAt(pointer.x, pointer.y)) |win| server.overviewPick(win) else server.setOverview(false);
+                    }
+                    continue;
+                }
                 pointer.handle(&server, time_ms, e);
                 if (e == .frame) server.touchFrame();
+                if (super_tapped) server.setOverview(!server.overview);
             }
             if (pointer.moved) {
                 pointer.moved = false;
@@ -658,6 +689,8 @@ const max_clients = 32;
 /// The pointer: input events move it and go to the server.
 /// KEY_LEFTMETA (linux/input-event-codes.h).
 const key_left_meta = 125;
+/// KEY_RIGHTMETA.
+const key_right_meta = 126;
 
 const Pointer = struct {
     x: f64,

@@ -358,6 +358,67 @@ test "a window leaving fullscreen goes back to where and how big it was" {
     try testing.expectEqual(@as(u32, 280), drawn.height);
 }
 
+test "the overview shows every window smaller, side by side, without telling them, and one picked comes to the top" {
+    var w: World = .{};
+    w.init();
+    defer w.deinit();
+    const a = try w.connect();
+    const compositor = try a.bind(p.wl_compositor.name, 4, null);
+    const wm_base = try a.bind(p.xdg_wm_base.name, 6, null);
+    const shm = try a.bind(p.wl_shm.name, 1, null);
+    // A maximized (800 by 560), and B above it, restored at 400 by 280.
+    var win_a: Window = .{ .surface = undefined, .xdg = undefined, .toplevel = undefined };
+    try win_a.open(a, compositor, wm_base, shm, null);
+    var win_b: Window = .{ .surface = undefined, .xdg = undefined, .toplevel = undefined };
+    try win_b.open(a, compositor, wm_base, shm, null);
+    var m = try win_b.toplevel.request(p.xdg_toplevel.request.unset_maximized);
+    m.end();
+    try win_b.redraw(a, shm, 400, 280);
+    const t_a = w.server.toplevels.items[0];
+    const t_b = w.server.toplevels.items[1];
+    try testing.expectEqual(t_b, w.server.topWindow().?);
+
+    w.server.setOverview(true);
+    try w.pump();
+    try testing.expect(w.server.overview);
+    // Two cells across the work area (32 around and between them), each
+    // 352 by 496: B (the top one) on the left, A on the right, each as big
+    // as fits its cell, in the middle of it. A is drawn first, below.
+    var quads: [16]Server.Quad = undefined;
+    const drawn = w.drawn(&quads);
+    try testing.expectEqual(@as(usize, 2), drawn.len);
+    try testing.expectEqual(t_a.xdg.surface.?.texture().?.handle, drawn[0].texture.handle);
+    try testing.expectEqual(@as(i32, 32 + 352 + 32), drawn[0].x);
+    try testing.expectEqual(@as(i32, w.server.work_area.y + 32 + (496 - 246) / 2), drawn[0].y);
+    try testing.expectEqual(@as(u32, 352), drawn[0].width);
+    try testing.expectEqual(@as(u32, 246), drawn[0].height);
+    try testing.expectEqual(@as(i32, 32), drawn[1].x);
+    try testing.expectEqual(@as(u32, 352), drawn[1].width);
+    // Neither has the pointer or keyboard; each is still the size it was.
+    try testing.expect(w.server.keyboard_focus == null);
+    w.server.pointerMotion(0, 500, 300);
+    try testing.expect(w.server.pointer_focus == null);
+    try testing.expect(w.server.scanoutBuffer(t_a) == null);
+    try testing.expectEqual([2]u32{ 800, 560 }, w.server.configuredSize(t_a));
+    try testing.expectEqual([2]u32{ 400, 280 }, w.server.configuredSize(t_b));
+    try testing.expectEqual(@as(?*server_mod.Toplevel, t_a), w.server.overviewAt(500, 300));
+    try testing.expectEqual(@as(?*server_mod.Toplevel, t_b), w.server.overviewAt(100, 300));
+    try testing.expectEqual(@as(?*server_mod.Toplevel, null), w.server.overviewAt(5, 5));
+
+    // Picking A: it is on top, with the keyboard, and the overview ends.
+    w.server.overviewPick(t_a);
+    try w.pump();
+    try testing.expect(!w.server.overview);
+    try testing.expectEqual(t_a, w.server.topWindow().?);
+    try testing.expectEqual(win_a.surface.id, w.server.keyboard_focus.?.id);
+    try testing.expectEqual(@as(i32, 0), w.drawn(&quads)[w.drawn(&quads).len - 1].x);
+
+    // Escape ends it too.
+    w.server.setOverview(true);
+    w.server.keyboardKey(0, server_mod.key_esc, true);
+    try testing.expect(!w.server.overview);
+}
+
 test "subsurfaces are drawn above their parent, where it says, and take the pointer" {
     var w: World = .{};
     w.init();
