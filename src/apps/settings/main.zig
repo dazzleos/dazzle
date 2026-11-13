@@ -134,6 +134,12 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
     apps.check_os = true;
     var installed: [64]bool = undefined;
     var updatable: [64]bool = undefined;
+    // The apps listed: the catalogue's, then those installed that it does
+    // not have (which can only be removed).
+    var listed: std.ArrayList(store.App) = .empty;
+    defer listed.deinit(gpa);
+    var not_offered: []store.App = &.{};
+    defer store.freeInstalledOnly(gpa, not_offered);
     // Updates of the system, and which system this is.
     var updater: update.Updater = .init(gpa, server_url, sys.system.Version.init(build_info.commit_time, build_info.commit) orelse .{});
     defer updater.deinit();
@@ -419,7 +425,16 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
 
         if (dirty) {
             dirty = false;
-            const catalogue = apps.apps()[0..@min(apps.apps().len, installed.len)];
+            const offered = apps.apps();
+            if (store.installedOnly(gpa, store.apps_dir, offered)) |now_not_offered| {
+                if (!sameNames(not_offered, now_not_offered)) icons_dirty = true;
+                store.freeInstalledOnly(gpa, not_offered);
+                not_offered = now_not_offered;
+            } else |_| {}
+            listed.clearRetainingCapacity();
+            listed.appendSlice(gpa, offered) catch {};
+            listed.appendSlice(gpa, not_offered) catch {};
+            const catalogue = listed.items[0..@min(listed.items.len, installed.len)];
             for (catalogue, installed[0..catalogue.len], updatable[0..catalogue.len]) |item, *i, *u| {
                 i.* = store.isInstalled(store.apps_dir, item.name);
                 u.* = i.* and store.hasNewerVersion(store.apps_dir, item);
@@ -449,6 +464,7 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
                 .actions = &actions,
                 .apps = .{
                     .list = catalogue,
+                    .offered = @min(offered.len, catalogue.len),
                     .installed = installed[0..catalogue.len],
                     .updatable = updatable[0..catalogue.len],
                     .icons = icons.appIcons(catalogue.len),
@@ -478,6 +494,13 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
             host.redraw();
         }
     }
+}
+
+/// Whether two lists of apps are the same apps.
+fn sameNames(a: []const store.App, b: []const store.App) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| if (!std.mem.eql(u8, x.name, y.name)) return false;
+    return true;
 }
 
 test {

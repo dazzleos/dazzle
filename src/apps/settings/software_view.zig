@@ -25,6 +25,9 @@ pub const Apps = struct {
     /// The catalogue's apps, whether each is installed, and whether each
     /// installed app has a newer version in the catalogue.
     list: []const store.App = &.{},
+    /// How many of `list` (from its start) the catalogue offers; the rest
+    /// are installed, and no longer offered (they can be removed).
+    offered: usize = std.math.maxInt(usize),
     installed: []const bool = &.{},
     updatable: []const bool = &.{},
     /// Each app's 64x64 icon (installed, or from the server when
@@ -152,7 +155,9 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
         else
             cx.make(kete.OutlinedButton{ .label = "Install", .icon = .download, .on_press = if (enabled) .of(x.?, AppAct.install) else null });
         var size_buf: [32]u8 = undefined;
-        const detail = if (app.description.len > 0)
+        const detail = if (i >= apps.offered)
+            "Installed, and no longer offered"
+        else if (app.description.len > 0)
             cx.fmt("{s} · {s}", .{ app.description, info.formatBytes(&size_buf, app.size) })
         else
             cx.fmt("{s}", .{info.formatBytes(&size_buf, app.size)});
@@ -713,6 +718,32 @@ test "installing and removing apps, and getting their list again" {
     u.frame(1920, 960, 5, settings);
     try testing.expect(view.findText(u.root.?, "No list of apps yet: is the network up?") != null);
     try testing.expect(view.findText(u.root.?, "Cannot get the list of apps: the server could not be reached (is the network up?)") == null);
+}
+
+test "an installed app the catalogue no longer offers is listed, and can be removed" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
+    defer u.destroy();
+    const d = view.sample();
+    var actions: Actions = .{};
+    // The catalogue offers Files; Kete Demo is installed, and not offered.
+    const list = [_]store.App{
+        .{ .name = "dazzle-files", .title = "Files", .file = "dazzle-files.tar.xz", .size = 1000, .sha256 = "" },
+        .{ .name = "dazzle-kete-demo", .title = "Kete Demo", .file = "", .size = 0, .sha256 = "" },
+    };
+    const settings: Settings = .{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .apps = .{
+        .list = &list,
+        .offered = 1,
+        .installed = &.{ false, true },
+        .updatable = &.{ false, false },
+    } };
+    u.frame(1920, 960, 0, settings);
+    u.root.?.state(Settings.State).page = .apps;
+    u.frame(1920, 960, 1, settings);
+    try testing.expect(view.findText(u.root.?, "Kete Demo") != null);
+    try testing.expect(view.findText(u.root.?, "Installed, and no longer offered") != null);
+    view.click(u, view.up(view.findIcon(u.root.?, .delete).?, kete.OutlinedButton).?);
+    try testing.expectEqualStrings("dazzle-kete-demo", actions.remove.?.slice());
 }
 
 test "updates: offered, downloaded, installed, then a restart" {

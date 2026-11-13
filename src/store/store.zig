@@ -163,6 +163,72 @@ pub fn isInstalled(dir: []const u8, name: []const u8) bool {
     return linux.errno(linux.access(path, linux.X_OK)) == .SUCCESS;
 }
 
+/// The apps installed in `dir` that `catalogue` does not have (it no
+/// longer offers them, or they came from another server): as catalogue
+/// entries, with a title made from the name ("dazzle-kete-demo" is "Kete
+/// Demo"), in `gpa` (free with `freeInstalledOnly`), sorted by name.
+pub fn installedOnly(gpa: std.mem.Allocator, dir: []const u8, catalogue: []const App) ![]App {
+    var list: std.ArrayList(App) = .empty;
+    errdefer freeInstalledOnly(gpa, list.items);
+    var dir_buf: [256]u8 = undefined;
+    const dir_z = std.mem.printSentinel(&dir_buf, "{s}", .{dir}, 0) catch return error.NameTooLong;
+    const fd = sys.open(dir_z, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }) catch return list.toOwnedSlice(gpa);
+    defer sys.close(fd);
+    var buf: [2048]u8 align(8) = undefined;
+    while (true) {
+        const n = sys.check(linux.getdents64(fd, &buf, buf.len)) catch break;
+        if (n == 0) break;
+        var at: usize = 0;
+        while (at < n) {
+            const reclen = std.mem.readInt(u16, buf[at + 16 ..][0..2], .little);
+            const name = std.mem.sliceTo(buf[at + 19 .. at + reclen], 0);
+            at += reclen;
+            if (name.len == 0 or name[0] == '.' or !validName(name) or !isInstalled(dir, name)) continue;
+            const offered = for (catalogue) |a| {
+                if (std.mem.eql(u8, a.name, name)) break true;
+            } else false;
+            if (offered) continue;
+            const owned = try gpa.dupe(u8, name);
+            errdefer gpa.free(owned);
+            const title = try titleOf(gpa, name);
+            errdefer gpa.free(title);
+            try list.append(gpa, .{ .name = owned, .title = title, .file = "", .size = 0, .sha256 = "" });
+        }
+    }
+    std.mem.sort(App, list.items, {}, struct {
+        fn lt(_: void, a: App, b: App) bool {
+            return std.mem.lessThan(u8, a.name, b.name);
+        }
+    }.lt);
+    return list.toOwnedSlice(gpa);
+}
+
+pub fn freeInstalledOnly(gpa: std.mem.Allocator, list: []const App) void {
+    for (list) |a| {
+        gpa.free(a.name);
+        gpa.free(a.title);
+    }
+    gpa.free(list);
+}
+
+/// A title for an app known only by its name: without "dazzle-", its words
+/// (between dashes) capitalised.
+fn titleOf(gpa: std.mem.Allocator, name: []const u8) ![]u8 {
+    const base = if (std.mem.startsWith(u8, name, "dazzle-") and name.len > "dazzle-".len) name["dazzle-".len..] else name;
+    const out = try gpa.dupe(u8, base);
+    var start = true;
+    for (out) |*c| {
+        if (c.* == '-' or c.* == '_') {
+            c.* = ' ';
+            start = true;
+        } else {
+            if (start) c.* = std.ascii.toUpper(c.*);
+            start = false;
+        }
+    }
+    return out;
+}
+
 /// The version of app `name` installed in `dir`, from `<dir>/<name>/version`.
 pub fn installedVersion(dir: []const u8, name: []const u8) ?sys.system.Version {
     var path_buf: [256]u8 = undefined;
@@ -1279,4 +1345,27 @@ test "an update is offered when it is newer and in neither slot" {
     try testing.expectError(error.BadManifest, OsManifest.parse(testing.allocator, "{\"version\": \"x y\", \"time\": 1, \"file\": \"a.tar.xz\", \"size\": 1, \"sha256\": \"" ++ &@as([64]u8, @splat('0')) ++ "\"}"));
     try testing.expectError(error.BadManifest, OsManifest.parse(testing.allocator, "{\"version\": \"abc\", \"time\": 1, \"file\": \"../a\", \"size\": 1, \"sha256\": \"" ++ &@as([64]u8, @splat('0')) ++ "\"}"));
     try testing.expectError(error.BadManifest, OsManifest.parse(testing.allocator, "[]"));
+}
+
+test "installed apps the catalogue does not have are listed, with titles from their names" {
+    var dir_buf: [64]u8 = undefined;
+    const dir = try std.mem.printSentinel(&dir_buf, "/tmp/dazzle-installed-only-{d}", .{linux.getpid()}, 0);
+    _ = linux.mkdir(dir, 0o755);
+    defer sys.files.removeTree(dir);
+    var buf: [128]u8 = undefined;
+    for ([_][]const u8{ "dazzle-kete-demo", "dazzle-files", "notes" }) |name| {
+        _ = linux.mkdir(try std.mem.printSentinel(&buf, "{s}/{s}", .{ dir, name }, 0), 0o755);
+        const program = try std.mem.printSentinel(&buf, "{s}/{s}/{s}", .{ dir, name, name }, 0);
+        try sys.files.writeNew(program, "");
+        _ = linux.chmod(program, 0o755);
+    }
+    // A folder with no program is not an app.
+    _ = linux.mkdir(try std.mem.printSentinel(&buf, "{s}/empty", .{dir}, 0), 0o755);
+    const catalogue = [_]App{.{ .name = "dazzle-files", .title = "Files", .file = "dazzle-files.tar.xz", .size = 1, .sha256 = "" }};
+    const extra = try installedOnly(testing.allocator, dir, &catalogue);
+    defer freeInstalledOnly(testing.allocator, extra);
+    try testing.expectEqual(@as(usize, 2), extra.len);
+    try testing.expectEqualStrings("dazzle-kete-demo", extra[0].name);
+    try testing.expectEqualStrings("Kete Demo", extra[0].title);
+    try testing.expectEqualStrings("Notes", extra[1].title);
 }
