@@ -538,6 +538,15 @@ pub const Dock = struct {
         return .{ .x = r.x, .y = r.y, .width = d.statusWidth(), .height = r.size };
     }
 
+    /// Whether (`x`, `y`) in the dock is on the update icon (when there is
+    /// one): the part of the status box before the volume.
+    pub fn hitUpdates(d: *const Dock, x: f64, y: f64) bool {
+        if (!d.updates) return false;
+        const rs = d.statusRect();
+        const w = (update_icon_width + 10) * d.scale;
+        return x >= rs.x and x < rs.x + w and y >= rs.y and y < rs.y + rs.height;
+    }
+
     /// The app whose icon is at (`x`, `y`) in the dock.
     pub fn hit(d: *const Dock, x: f64, y: f64) ?usize {
         for (0..d.apps.len) |i| {
@@ -779,6 +788,11 @@ test "with updates, the status box is wider and starts with the update icon" {
     try testing.expectApproxEqAbs(without.width + 46, with.width, 0.01);
     // Still in the middle: the row grew to the left too.
     try testing.expect(with.x < without.x);
+    // Pressing the icon is pressing it (Settings opens), and the rest of
+    // the box is not; without updates there is nothing to press.
+    try testing.expect(d.hitUpdates(with.x + 20, with.y + with.height / 2));
+    try testing.expect(!d.hitUpdates(with.x + with.width - 20, with.y + with.height / 2));
+    try testing.expectEqual(@as(?usize, null), d.hit(with.x + 20, with.y + with.height / 2));
     d.draw();
     // The icon, in the accent the running dots have, where the volume was.
     var accent = false;
@@ -787,6 +801,8 @@ test "with updates, the status box is wider and starts with the update icon" {
         if (at(&d, x, box_middle_y) == dot_color) accent = true;
     }
     try testing.expect(accent);
+    d.updates = false;
+    try testing.expect(!d.hitUpdates(with.x + 20, with.y + with.height / 2));
 }
 
 test "the network status is Wi-Fi when joined, Ethernet with an address, and offline otherwise" {

@@ -402,6 +402,17 @@ fn run(init: std.process.Init.Minimal) !void {
                 if (dock_tap != null or (dock_visible and e == .button and e.button.pressed and server.grab == null and server.drag == null and server.buttons_down == 0 and pointer.y >= @as(f64, @floatFromInt(dock_y)))) {
                     if (dock_tap == null and e.button.code != btn_left) continue;
                     const at = dock_tap orelse [2]f64{ pointer.x, pointer.y };
+                    // The update icon: Settings' Software page, to update.
+                    if (dock.hitUpdates(at[0], at[1] - @as(f64, @floatFromInt(dock_y)))) {
+                        for (apps) |*a| if (std.mem.eql(u8, a.name, "dazzle-settings")) {
+                            if (openAt(a, "apps", &server, runtime_dir)) {
+                                dock.draw();
+                                renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+                                panels_damaged = true;
+                            }
+                        };
+                        continue;
+                    }
                     const i = dock.hit(at[0], at[1] - @as(f64, @floatFromInt(dock_y))) orelse continue;
                     activateApp(&apps[i], &server, &dock, &renderer, dock_y, runtime_dir, &panels_damaged);
                     continue;
@@ -775,22 +786,29 @@ fn openApp(listener: linux.fd_t, apps: []dock_mod.App, server: *server_mod.Serve
         return false;
     };
     _ = linux.write(got.fd, "opened\n", 7);
+    return openAt(app, req.what, server, runtime_dir);
+}
+
+/// Opens `app` at `what` (a page of it, a file: what it takes as its
+/// argument), or raises it and tells it `what` if it is already running.
+/// Returns whether it was started (the dock then shows it running).
+fn openAt(app: *dock_mod.App, what: ?[]const u8, server: *server_mod.Server, runtime_dir: ?[:0]const u8) bool {
     if (app.pid) |pid| {
         _ = server.raise(pid);
-        if (req.what) |what| {
+        if (what) |w| {
             var path_buf: [96]u8 = undefined;
             var line_buf: [80]u8 = undefined;
             var none: [0]u8 = .{};
             if (sys.shell.appSocket(&path_buf, app.name)) |path| {
-                const line = std.fmt.bufPrint(&line_buf, "{s}\n", .{what}) catch return false;
+                const line = std.fmt.bufPrint(&line_buf, "{s}\n", .{w}) catch return false;
                 _ = sys.shell.send(path, line, &none);
             }
         }
         return false;
     }
     var arg_buf: [80]u8 = undefined;
-    const arg: ?[*:0]const u8 = if (req.what) |w| (std.mem.printSentinel(&arg_buf, "{s}", .{w}, 0) catch return false).ptr else null;
-    print("dazzle-shell: opening {s}{s}{s}\n", .{ app.name, if (req.what != null) " at " else "", req.what orelse "" });
+    const arg: ?[*:0]const u8 = if (what) |w| (std.mem.printSentinel(&arg_buf, "{s}", .{w}, 0) catch return false).ptr else null;
+    print("dazzle-shell: opening {s}{s}{s}\n", .{ app.name, if (what != null) " at " else "", what orelse "" });
     app.pid = spawn(app.path, arg, runtime_dir);
     return true;
 }
