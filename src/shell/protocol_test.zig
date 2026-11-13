@@ -310,6 +310,54 @@ test "a window's last frame stays where it was until it draws as it is told to b
     try testing.expectEqual(maximized.y, drawn.y);
 }
 
+test "a window leaving fullscreen goes back to where and how big it was" {
+    var w: World = .{};
+    w.init();
+    defer w.deinit();
+    const a = try w.connect();
+    const compositor = try a.bind(p.wl_compositor.name, 4, null);
+    const wm_base = try a.bind(p.xdg_wm_base.name, 6, null);
+    const shm = try a.bind(p.wl_shm.name, 1, null);
+    var win: Window = .{ .surface = undefined, .xdg = undefined, .toplevel = undefined };
+    try win.open(a, compositor, wm_base, shm, null);
+    var quads: [16]Server.Quad = undefined;
+
+    // Restored, at 200,180 and 400 by 280.
+    var m = try win.toplevel.request(p.xdg_toplevel.request.unset_maximized);
+    m.end();
+    try win.redraw(a, shm, 400, 280);
+    var drawn = w.drawn(&quads)[0];
+    try testing.expectEqual(@as(i32, 200), drawn.x);
+    try testing.expectEqual(@as(i32, 180), drawn.y);
+
+    // Fullscreen: the whole screen.
+    m = try win.toplevel.request(p.xdg_toplevel.request.set_fullscreen);
+    m.uint(0).end();
+    try w.pump();
+    try win.redraw(a, shm, @intCast(w.server.output.width), @intCast(w.server.output.height));
+    drawn = w.drawn(&quads)[0];
+    try testing.expectEqual(@as(i32, 0), drawn.x);
+    try testing.expectEqual(@as(i32, 0), drawn.y);
+    // Its client says how small it may be (as kete does as its content
+    // changes): that is not its size when restored.
+    m = try win.toplevel.request(p.xdg_toplevel.request.set_min_size);
+    m.int(300).int(200).end();
+    try w.pump();
+
+    // Back: where it was, as big as it was.
+    m = try win.toplevel.request(p.xdg_toplevel.request.unset_fullscreen);
+    m.end();
+    try w.pump();
+    const t = w.server.toplevels.items[0];
+    try testing.expectEqual([2]u32{ 400, 280 }, w.server.configuredSize(t));
+    try win.redraw(a, shm, 400, 280);
+    drawn = w.drawn(&quads)[0];
+    try testing.expectEqual(@as(i32, 200), drawn.x);
+    try testing.expectEqual(@as(i32, 180), drawn.y);
+    try testing.expectEqual(@as(u32, 400), drawn.width);
+    try testing.expectEqual(@as(u32, 280), drawn.height);
+}
+
 test "subsurfaces are drawn above their parent, where it says, and take the pointer" {
     var w: World = .{};
     w.init();

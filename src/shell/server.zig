@@ -1283,13 +1283,18 @@ pub const Server = struct {
         s.sizeLimitsChanged(c, t);
     }
 
+    /// Its restored size is kept within the new limits (whether it is
+    /// restored now, or maximized or fullscreen and will be again); a
+    /// window restored now is told.
     fn sizeLimitsChanged(s: *Server, c: *Client, t: *Toplevel) void {
-        if (t.maximized or !t.placed) return;
-        const size = s.configuredSize(t);
-        if (size[0] == t.width and size[1] == t.height) return;
-        t.width = size[0];
-        t.height = size[1];
-        if (t.xdg.configured) s.requestConfigure(c, t);
+        if (!t.placed) return;
+        const wa = s.work_area;
+        const w = s.clampWidth(t, t.width, wa.width);
+        const h = s.clampHeight(t, t.height, wa.height);
+        if (w == t.width and h == t.height) return;
+        t.width = w;
+        t.height = h;
+        if (!t.maximized and !t.fullscreen and t.xdg.configured) s.requestConfigure(c, t);
     }
 
     /// Moves a restored window, keeping `grip` of it in the work area (and
