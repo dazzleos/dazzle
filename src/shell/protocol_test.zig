@@ -281,6 +281,8 @@ test "a window's last frame stays where it was until it draws as it is told to b
     try win.open(a, compositor, wm_base, shm, null);
     var quads: [16]Server.Quad = undefined;
     const maximized = w.drawn(&quads)[0];
+    // Filling the work area, it has no border.
+    try testing.expectEqual(@as(?server_mod.Rect, null), maximized.outline);
 
     // Restored: the maximized frame is where it was, not in the restored
     // window's place, until a frame comes at the restored size.
@@ -296,6 +298,8 @@ test "a window's last frame stays where it was until it draws as it is told to b
     drawn = w.drawn(&quads)[0];
     try testing.expectEqual(@as(i32, 200), drawn.x);
     try testing.expectEqual(@as(i32, 180), drawn.y);
+    // Restored, it has a border around it.
+    try testing.expectEqual(@as(?server_mod.Rect, .{ .x = 200, .y = 180, .width = 400, .height = 280 }), drawn.outline);
 
     // Maximized again: the restored frame stays put until the maximized one.
     m = try win.toplevel.request(p.xdg_toplevel.request.set_maximized);
@@ -308,6 +312,7 @@ test "a window's last frame stays where it was until it draws as it is told to b
     drawn = w.drawn(&quads)[0];
     try testing.expectEqual(maximized.x, drawn.x);
     try testing.expectEqual(maximized.y, drawn.y);
+    try testing.expectEqual(@as(?server_mod.Rect, null), drawn.outline);
 }
 
 test "subsurfaces are drawn above their parent, where it says, and take the pointer" {

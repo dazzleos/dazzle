@@ -129,6 +129,7 @@ fn run(init: std.process.Init.Minimal) !void {
     const appearance = dock_mod.readAppearance();
     dock.theme = appearance.theme;
     renderer.background = appearance.background;
+    renderer.border = borderOf(appearance.theme);
     const dock_y: u32 = renderer.height - dock.height;
     const with_dock: server_mod.Rect = .{ .x = 0, .y = 0, .width = renderer.width, .height = dock_y };
     var perf = try perf_mod.Overlay.init(gpa, ui_font, renderer.width, renderer.height);
@@ -232,6 +233,7 @@ fn run(init: std.process.Init.Minimal) !void {
             const chosen = dock_mod.readAppearance();
             dock.theme = chosen.theme;
             renderer.background = chosen.background;
+            renderer.border = borderOf(chosen.theme);
             dock.draw();
             renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
             server.setWorkArea(with_dock);
@@ -484,6 +486,7 @@ fn run(init: std.process.Init.Minimal) !void {
             const chosen = dock_mod.readAppearance();
             if (chosen.theme != dock.theme) {
                 dock.theme = chosen.theme;
+                renderer.border = borderOf(chosen.theme);
                 if (dock_shown) {
                     dock.draw();
                     renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
@@ -855,6 +858,11 @@ fn spawn(program: [*:0]const u8, arg: ?[*:0]const u8, runtime_dir: ?[:0]const u8
     linux.exit(127);
 }
 
+/// The windows' borders' colour, in a scheme.
+fn borderOf(theme: dock_mod.Theme) u32 {
+    return if (theme == .dark) render.border_dark else render.border_light;
+}
+
 /// The surfaces that can be seen (windows, their subsurfaces and popups),
 /// bottom first, as the renderer draws them.
 fn frameWindows(server: *server_mod.Server, out: *[render.max_windows]render.Window) []const render.Window {
@@ -868,6 +876,7 @@ fn frameWindows(server: *server_mod.Server, out: *[render.max_windows]render.Win
         .height = q.height,
         .transform = q.transform,
         .clip = q.clip,
+        .outline = q.outline,
     };
     return out[0..list.len];
 }
