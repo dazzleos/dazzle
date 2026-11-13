@@ -313,6 +313,8 @@ const shader_programs = [_]struct { source: []const u8, name: ?[]const u8 = null
     .{ .source = "src/apps/blocks/shaders/sky.zig", .owner = .blocks, .args = &.{"--depth-test"} },
     .{ .source = "src/apps/blocks/shaders/line.zig", .owner = .blocks, .args = &.{"--depth-test"} },
     .{ .source = "src/shell/shaders/quad.zig", .owner = .shell, .args = &.{} },
+    // The same, blended: the shaded preview of where a window will go.
+    .{ .source = "src/shell/shaders/quad.zig", .name = "quad_blend", .owner = .shell, .args = &.{"--blend=source-over"} },
     .{ .source = "src/apps/maps/shaders/globe.zig", .owner = .maps, .args = &.{"--depth-test"} },
 };
 

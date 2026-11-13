@@ -38,7 +38,13 @@ pub const Window = struct {
     height: u32 = 0,
     transform: u3 = 0,
     clip: server.Rect,
+    /// Not a surface: the shaded preview of what a window dragged to an
+    /// edge will fill (drawn blended, in `preview_color`).
+    preview: bool = false,
 };
+
+/// The preview's shade: the dark scheme's primary, a third of the way.
+pub const preview_color = 0x55d0bcff;
 
 /// The most surfaces a frame draws (windows, their subsurfaces and popups:
 /// the vertex buffer holds this many quads besides the panels').
@@ -50,10 +56,15 @@ pub const PanelQuad = struct { texture: server.Texture, x: i32 = 0, y: i32 };
 /// Records a frame (after `frame.begin`): the windows (bottom first, at
 /// most `max_windows`) and the panels above them as quads. `vbo` holds the
 /// quads' vertices and must stay untouched until the frame has rendered.
-pub fn recordFrame(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, panels: []const ?PanelQuad, windows: []const Window) !void {
+pub fn recordFrame(frame: *render.Frame, pipeline: *shader.Pipeline, blended: *shader.Pipeline, preview: server.Texture, vbo: vc4.Bo, panels: []const ?PanelQuad, windows: []const Window) !void {
     std.debug.assert(windows.len <= max_windows);
     var quads: usize = 0;
     for (windows) |w| {
+        if (w.preview) {
+            try quad(frame, blended, vbo, quads, preview, w.x, w.y, w.width, w.height, 0, .{ .x = w.clip.x, .y = w.clip.y, .width = w.clip.width, .height = w.clip.height });
+            quads += 1;
+            continue;
+        }
         const qw = if (w.width != 0) w.width else w.texture.width;
         const qh = if (w.height != 0) w.height else w.texture.height;
         try quad(frame, pipeline, vbo, quads, w.texture, w.x, w.y, qw, qh, w.transform, .{ .x = w.clip.x, .y = w.clip.y, .width = w.clip.width, .height = w.clip.height });
@@ -155,8 +166,11 @@ pub const Renderer = struct {
     display: vc4.display.Display,
     width: u32,
     height: u32,
-    /// Draws textures as quads.
+    /// Draws textures as quads; and blended, for the snap preview (with a
+    /// little texture of its shade, made when first drawn).
     quads: shader.Pipeline,
+    blended: shader.Pipeline,
+    preview_texture: ?server.Texture = null,
     /// Vertices for this frame's quads.
     vbo: vc4.Bo,
     /// Buffers backing the textures the renderer allocated (shm copies), by
@@ -187,6 +201,7 @@ pub const Renderer = struct {
             .width = display.width,
             .height = display.height,
             .quads = try shader.Pipeline.init(gpa, dev, shader.Program.decode(@embedFile("quad.shader")) catch unreachable, layout),
+            .blended = try shader.Pipeline.init(gpa, dev, shader.Program.decode(@embedFile("quad_blend.shader")) catch unreachable, layout),
             .vbo = try dev.createBo(vbo_size),
         };
     }
@@ -382,11 +397,20 @@ pub const Renderer = struct {
         const t0 = sys.nowNs();
         const quads = try r.panelQuads();
         static_frame.begin(r.display.backTarget(), .{ .clear = r.background });
-        try recordFrame(&static_frame, &r.quads, r.vbo, &quads, windows);
+        try recordFrame(&static_frame, &r.quads, &r.blended, try r.previewTexture(), r.vbo, &quads, windows);
         const t1 = sys.nowNs();
         const seqno = try r.dev.submit(static_frame.finish());
         try r.dev.waitSeqno(seqno, std.time.ns_per_s);
         return .{ .cpu_ns = t1 - t0, .gpu_ns = sys.nowNs() - t1 };
+    }
+
+    /// A texture of the snap preview's shade (4 by 4, all of it).
+    fn previewTexture(r: *Renderer) !server.Texture {
+        if (r.preview_texture == null) {
+            const pixels: [16]u32 = @splat(preview_color);
+            r.preview_texture = try uploadPixels(r, null, std.mem.sliceAsBytes(&pixels), 4, 4, 16, .argb8888);
+        }
+        return r.preview_texture.?;
     }
 
     /// The panels as textures, with their latest pictures.
@@ -413,7 +437,7 @@ pub const Renderer = struct {
         const bo = try r.dev.createBo(pitch * r.height);
         defer r.dev.destroyBo(bo);
         capture_frame.begin(.{ .handle = bo.handle, .width = @intCast(r.width), .height = @intCast(r.height), .tiling = .linear }, .{ .clear = r.background });
-        try recordFrame(&capture_frame, &r.quads, r.vbo, &quads, windows);
+        try recordFrame(&capture_frame, &r.quads, &r.blended, try r.previewTexture(), r.vbo, &quads, windows);
         const seqno = try r.dev.submit(capture_frame.finish());
         try r.dev.waitSeqno(seqno, std.time.ns_per_s);
         const pixels = try gpa.alloc(u32, @as(usize, r.width) * r.height);

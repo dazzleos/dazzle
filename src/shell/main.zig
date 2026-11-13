@@ -905,6 +905,7 @@ fn frameWindows(server: *server_mod.Server, out: *[render.max_windows]render.Win
         .height = q.height,
         .transform = q.transform,
         .clip = q.clip,
+        .preview = q.preview,
     };
     return out[0..list.len];
 }

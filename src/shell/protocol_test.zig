@@ -875,6 +875,106 @@ test "touches go to the surface they went down on, and can move its window" {
     try testing.expectEqual(@as(u32, 1), touch_heard.counts[p.wl_touch.event.up]);
 }
 
+test "a window dragged to the left or right edge fills that half, to the top fills the work area, and dragged away is restored" {
+    var w: World = .{};
+    w.init();
+    defer w.deinit();
+    const a = try w.connect();
+    const compositor = try a.bind(p.wl_compositor.name, 4, null);
+    const wm_base = try a.bind(p.xdg_wm_base.name, 6, null);
+    const shm = try a.bind(p.wl_shm.name, 1, null);
+    const seat = try a.bind(p.wl_seat.name, 5, null);
+    const pointer = try a.d.newObject(null);
+    var m = try seat.request(p.wl_seat.request.get_pointer);
+    m.uint(pointer.id).end();
+    var win: Window = .{ .surface = undefined, .xdg = undefined, .toplevel = undefined };
+    try win.open(a, compositor, wm_base, shm, null);
+    m = try win.toplevel.request(p.xdg_toplevel.request.unset_maximized);
+    m.end();
+    try win.redraw(a, shm, 400, 280);
+    const t = w.server.topWindow().?;
+    const wa = w.server.work_area;
+    var quads: [16]Server.Quad = undefined;
+
+    const Drag = struct {
+        /// Presses at (`x`, `y`), asks to move the window from there, and
+        /// moves the pointer to (`to_x`, `to_y`).
+        fn to(ww: *World, win_: *Window, seat_: client.Proxy, x: f64, y: f64, to_x: f64, to_y: f64) !void {
+            ww.server.pointerMotion(1, x, y);
+            ww.server.pointerFrame();
+            ww.server.pointerButton(2, p.input.btn_left, true);
+            ww.server.pointerFrame();
+            try ww.pump();
+            var mm = try win_.toplevel.request(p.xdg_toplevel.request.move);
+            mm.uint(seat_.id).uint(ww.server.press_serial).end();
+            try ww.pump();
+            ww.server.pointerMotion(3, to_x, to_y);
+            try ww.pump();
+        }
+
+        fn release(ww: *World) !void {
+            ww.server.pointerButton(4, p.input.btn_left, false);
+            ww.server.pointerFrame();
+            try ww.pump();
+        }
+    };
+
+    // Dragged to the left edge: the left half is shown, shaded, under it,
+    // and let go, it fills that half, told it is tiled.
+    try Drag.to(&w, &win, seat, 250, 200, 1, 300);
+    try testing.expectEqual(@as(?server_mod.Snap, .left), w.server.snap);
+    const drawn = w.drawn(&quads);
+    try testing.expect(drawn[0].preview);
+    try testing.expectEqual(wa.x + 8, drawn[0].x);
+    try testing.expectEqual(wa.width / 2 - 16, drawn[0].width);
+    try testing.expect(!drawn[1].preview);
+    try Drag.release(&w);
+    try testing.expectEqual(@as(?server_mod.Tile, .left), t.tiled);
+    try testing.expectEqual(@as(?server_mod.Snap, null), w.server.snap);
+    try testing.expectEqual([2]u32{ wa.width / 2, wa.height }, w.server.configuredSize(t));
+    try win.redraw(a, shm, @intCast(wa.width / 2), @intCast(wa.height));
+    try testing.expectEqual(server_mod.Rect{ .x = wa.x, .y = wa.y, .width = wa.width / 2, .height = wa.height }, w.server.windowRect(t));
+    // It is not resized from its edges.
+    w.server.pointerMotion(1, 200, 300);
+    w.server.pointerButton(2, p.input.btn_left, true);
+    try w.pump();
+    m = try win.toplevel.request(p.xdg_toplevel.request.resize);
+    m.uint(seat.id).uint(w.server.press_serial).uint(8).end();
+    try w.pump();
+    try testing.expect(w.server.grab == null);
+    try Drag.release(&w);
+
+    // Pressed and moved a little, it stays; dragged away, it is restored,
+    // under the pointer, and not let go at an edge, stays so.
+    try Drag.to(&w, &win, seat, 100, 300, 105, 302);
+    try testing.expectEqual(@as(?server_mod.Tile, .left), t.tiled);
+    w.server.pointerMotion(5, 300, 300);
+    try w.pump();
+    try testing.expectEqual(@as(?server_mod.Tile, null), t.tiled);
+    try testing.expectEqual([2]u32{ 400, 280 }, w.server.configuredSize(t));
+    try Drag.release(&w);
+    try testing.expect(!t.maximized and t.tiled == null);
+    try win.redraw(a, shm, 400, 280);
+
+    // Dragged to the top edge, it fills the work area.
+    const r = w.server.windowRect(t);
+    try Drag.to(&w, &win, seat, @floatFromInt(r.x + 50), @floatFromInt(r.y + 10), 400, @floatFromInt(wa.y));
+    try testing.expectEqual(@as(?server_mod.Snap, .maximize), w.server.snap);
+    try Drag.release(&w);
+    try testing.expect(t.maximized);
+    try win.redraw(a, shm, @intCast(wa.width), @intCast(wa.height));
+
+    // From there, dragged to the right edge: restored on the way, then
+    // the right half.
+    try Drag.to(&w, &win, seat, 400, @floatFromInt(wa.y + 10), @floatFromInt(wa.width - 1), 300);
+    try testing.expect(!t.maximized);
+    try testing.expectEqual(@as(?server_mod.Snap, .right), w.server.snap);
+    try Drag.release(&w);
+    try testing.expectEqual(@as(?server_mod.Tile, .right), t.tiled);
+    try win.redraw(a, shm, @intCast(wa.width - wa.width / 2), @intCast(wa.height));
+    try testing.expectEqual(wa.x + @as(i32, @intCast(wa.width / 2)), w.server.windowRect(t).x);
+}
+
 test "pressing in a window keeps the pointer when dragging and releasing outside it, or moving quickly" {
     var w: World = .{};
     w.init();

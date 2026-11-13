@@ -21,7 +21,8 @@
 //! a quarter of the GPU's memory would still be free; otherwise frames go
 //! one at a time, as `present` does.
 //!
-//! The window is resized by dragging its edges when it is not maximized:
+//! The window is resized by dragging its edges when it is not maximized
+//! (or tiled: xdg_toplevel's tiled states, filling half the work area):
 //! a press within `resize_border` of an edge (inside the window: it has
 //! nothing outside) asks the shell to resize it (xdg_toplevel.resize)
 //! rather than going to the app, and the pointer shows a resize arrow
@@ -288,6 +289,9 @@ pub const Window = struct {
     maximized: bool = false,
     /// On the whole screen, over the shell's dock (see `setFullscreen`).
     fullscreen: bool = false,
+    /// Filling half the work area, against its edges (dragged to the
+    /// screen's left or right edge): not resized from its edges either.
+    tiled: bool = false,
     /// The serial of the last active pointer/touch press, for asking the
     /// shell to move the window from it (0 once released).
     press_serial: u32 = 0,
@@ -600,9 +604,9 @@ pub const Window = struct {
     }
 
     /// The edges a press at `pos` would resize the window by (0 for none:
-    /// a maximized window is not resized).
+    /// a maximized or tiled window is not resized).
     pub fn edgesAt(w: *const Window, pos: [2]f32) u32 {
-        if (w.maximized or w.fullscreen) return 0;
+        if (w.maximized or w.fullscreen or w.tiled) return 0;
         const width: f32 = @floatFromInt(w.width);
         const height: f32 = @floatFromInt(w.height);
         const x = pos[0];
@@ -1486,17 +1490,20 @@ pub const Window = struct {
                 var suspended = false;
                 var maximized = false;
                 var fullscreen = false;
+                var tiled = false;
                 var i: usize = 0;
                 while (i + 4 <= states.len) : (i += 4) switch (std.mem.readInt(u32, states[i..][0..4], .little)) {
                     p.xdg_toplevel.state.suspended => suspended = true,
                     p.xdg_toplevel.state.maximized => maximized = true,
                     p.xdg_toplevel.state.fullscreen => fullscreen = true,
+                    p.xdg_toplevel.state.tiled_left, p.xdg_toplevel.state.tiled_right, p.xdg_toplevel.state.tiled_top, p.xdg_toplevel.state.tiled_bottom => tiled = true,
                     else => {},
                 };
                 if (suspended) w.repeat = null;
                 w.suspended = suspended;
                 w.maximized = maximized;
                 w.fullscreen = fullscreen;
+                w.tiled = tiled;
             },
             p.xdg_toplevel.event.close => w.closed = true,
             else => {},

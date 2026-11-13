@@ -25,6 +25,10 @@
 //! over their windows with wp_cursor_shape_v1 (an arrow, or a resize).
 //! A window can also fill the whole screen, over the dock
 //! (xdg_toplevel.set_fullscreen): the dock is hidden while it is on top.
+//! A window being moved to the work area's left or right edge fills that
+//! half when let go (xdg_toplevel's tiled states), and to its top edge,
+//! all of it; what it will fill is shown, shaded, under it meanwhile.
+//! Moved from there, it is restored under the pointer.
 //! They are stacked most recently mapped (or raised, or clicked) on top,
 //! and the top one has the keyboard. Windows hidden behind others are
 //! covered: they get xdg_toplevel's suspended state, their frame callbacks
@@ -459,6 +463,13 @@ pub const XdgSurface = struct {
     geometry: ?Rect = null,
 };
 
+/// A half of the work area a window can fill.
+pub const Tile = enum { left, right };
+
+/// Where a window dragged to an edge goes when it is let go: filling the
+/// work area (the top edge), or half of it (the left or right).
+pub const Snap = enum { maximize, left, right };
+
 pub const Toplevel = struct {
     xdg: *XdgSurface,
     id: u32,
@@ -485,6 +496,10 @@ pub const Toplevel = struct {
     /// where it was, rather than showing where the next one will go.
     shown_maximized: bool = false,
     shown_fullscreen: bool = false,
+    /// Filling the left or right half of the work area (dragged to that
+    /// edge), and as it is shown; maximized and fullscreen come first.
+    tiled: ?Tile = null,
+    shown_tiled: ?Tile = null,
     x: i32 = 0,
     y: i32 = 0,
     /// Restored before, so `x`, `y` and its size are where and how big it
@@ -609,6 +624,9 @@ pub const Server = struct {
     /// windows are not told their size changed: only how they are drawn
     /// does, and they have neither the pointer nor the keyboard meanwhile.
     overview: bool = false,
+    /// Where the window being moved goes if it is let go now (the pointer
+    /// is at an edge of the work area); shown, shaded, under it.
+    snap: ?Snap = null,
     /// How far into the overview the windows are drawn: 0 where they are,
     /// 1 in their places in it; between, on their way in or out (see
     /// `animateOverview`).
@@ -677,7 +695,16 @@ pub const Server = struct {
     active_lock: ?*PointerLock = null,
 
     /// A move or resize: by the pointer, or by a touch (`touch`: its ID).
-    const Grab = struct { t: *Toplevel, dx: f64, dy: f64, resize: ?Resize = null, touch: ?i32 = null };
+    /// A window moved or resized. A maximized or tiled window being moved
+    /// stays as it is (`unsnap`) until the pointer has gone `unsnap_after`
+    /// from where it was pressed (`x`, `y`), then is restored under it.
+    const Grab = struct { t: *Toplevel, dx: f64, dy: f64, resize: ?Resize = null, touch: ?i32 = null, unsnap: bool = false, x: f64 = 0, y: f64 = 0 };
+
+    /// How far a maximized or tiled window is dragged before it is
+    /// restored, and how near an edge of the work area the pointer is for
+    /// a window dragged there to fill it (or half of it).
+    const unsnap_after = 12;
+    const snap_edge = 6;
 
     /// A drag-and-drop operation: by the pointer, or by a touch (`touch`:
     /// its ID).
@@ -1081,7 +1108,7 @@ pub const Server = struct {
     /// is: maximized or fullscreen, and the size of the area it fills.
     pub fn scanoutBuffer(s: *const Server, t: *const Toplevel) ?*Buffer {
         if (!t.shown_maximized and !t.shown_fullscreen) return null;
-        if (s.overviewShown()) return null;
+        if (s.overviewShown() or s.snap != null) return null;
         const surf = t.xdg.surface orelse return null;
         if (surf.scale != 1 or surf.transform != 0) return null;
         if (t.xdg.geometry) |g| if (g.x != 0 or g.y != 0) return null;
@@ -1330,6 +1357,10 @@ pub const Server = struct {
             const area = s.areaOf(t);
             return .{ .x = area.x, .y = area.y, .width = sz[0], .height = sz[1] };
         }
+        if (t.shown_tiled) |side| {
+            const half = s.tileRect(side);
+            return .{ .x = half.x, .y = half.y, .width = sz[0], .height = sz[1] };
+        }
         return .{
             .x = if (t.anchor_right) |r| r - @as(i32, @intCast(sz[0])) else t.x,
             .y = if (t.anchor_bottom) |b| b - @as(i32, @intCast(sz[1])) else t.y,
@@ -1357,6 +1388,10 @@ pub const Server = struct {
         const wa = s.work_area;
         if (t.fullscreen) return .{ s.output.width, s.output.height };
         if (t.maximized) return .{ wa.width, wa.height };
+        if (t.tiled) |side| {
+            const r = s.tileRect(side);
+            return .{ s.clampWidth(t, r.width, wa.width), r.height };
+        }
         const w = if (t.width != 0) t.width else wa.width / 2;
         const h = if (t.height != 0) t.height else wa.height / 2;
         return .{ s.clampWidth(t, w, wa.width), s.clampHeight(t, h, wa.height) };
@@ -1380,6 +1415,8 @@ pub const Server = struct {
         if (t.maximized == on) return;
         if (s.grab) |g| if (g.t == t) s.endGrab();
         t.maximized = on;
+        // Maximized, or restored, it no longer fills a half.
+        t.tiled = null;
         if (!on and !t.placed) {
             // Restored the first time: half the work area (or its minimum
             // size), in the middle.
@@ -1477,7 +1514,15 @@ pub const Server = struct {
     fn startMove(s: *Server, t: *Toplevel, serial: u32) void {
         const by = s.clientGrabAllowed(t, serial) orelse return;
         s.settle(t, true);
-        const g: Grab = .{ .t = t, .dx = by.press_x - @as(f64, @floatFromInt(t.x)), .dy = by.press_y - @as(f64, @floatFromInt(t.y)), .touch = by.touch };
+        const g: Grab = .{
+            .t = t,
+            .dx = by.press_x - @as(f64, @floatFromInt(t.x)),
+            .dy = by.press_y - @as(f64, @floatFromInt(t.y)),
+            .touch = by.touch,
+            .unsnap = t.maximized or t.tiled != null,
+            .x = by.press_x,
+            .y = by.press_y,
+        };
         s.grab = g;
         s.takeInput(by.touch);
         s.grabTo(g, by.x, by.y);
@@ -1486,6 +1531,7 @@ pub const Server = struct {
     /// A client asked to resize its window by `edges` with the pointer, as
     /// for `startMove`.
     fn clientResize(s: *Server, t: *Toplevel, serial: u32, edges: u32) void {
+        if (t.maximized or t.tiled != null) return;
         const by = s.clientGrabAllowed(t, serial) orelse return;
         const valid = edges != 0 and edges & (edge_top | edge_bottom) != edge_top | edge_bottom and edges & (edge_left | edge_right) != edge_left | edge_right;
         if (!valid or edges > 15) return;
@@ -1499,7 +1545,7 @@ pub const Server = struct {
     /// `serial`: a button press it is still holding on the window, or a
     /// touch still down on it; and from where.
     fn clientGrabAllowed(s: *const Server, t: *const Toplevel, serial: u32) ?GrabBy {
-        if (t.maximized or t.fullscreen or !t.shown() or s.grab != null or s.drag != null) return null;
+        if (t.fullscreen or !t.shown() or s.grab != null or s.drag != null) return null;
         const surf = t.xdg.surface orelse return null;
         if (s.buttons_down != 0 and serial == s.press_serial and s.pointer_focus == surf) return .{ .press_x = s.press_x, .press_y = s.press_y, .x = s.pointer_x, .y = s.pointer_y };
         if (serial == s.touch_serial) if (s.touchPoint(s.touch_serial_id)) |tp| if (tp.surface == surf) return .{ .press_x = tp.press_x, .press_y = tp.press_y, .x = tp.x, .y = tp.y, .touch = tp.id };
@@ -1598,8 +1644,25 @@ pub const Server = struct {
     fn endGrab(s: *Server) void {
         const g = s.grab orelse return;
         s.grab = null;
+        s.setSnap(null);
         s.settle(g.t, false);
         if (s.updatePointerFocus()) s.pointerFrame();
+    }
+
+    /// The buttons (or touch) driving a move or resize were let go: a
+    /// window moved to an edge fills the work area, or half of it.
+    fn dropGrab(s: *Server) void {
+        const g = s.grab orelse return;
+        const snap = s.snap;
+        s.endGrab();
+        const sn = snap orelse return;
+        if (g.resize != null) return;
+        const c = (g.t.xdg.surface orelse return).client;
+        switch (sn) {
+            .maximize => s.setMaximized(c, g.t, true),
+            .left => s.setTiled(c, g.t, .left),
+            .right => s.setTiled(c, g.t, .right),
+        }
     }
 
     /// The picture shown for a cursor-shape protocol shape (null if there
@@ -2980,7 +3043,9 @@ pub const Server = struct {
 
     /// Something to draw: a surface's picture, at a place on the screen,
     /// with its logical size and buffer transform, clipped to an area.
-    pub const Quad = struct { texture: Texture, x: i32, y: i32, width: u32 = 0, height: u32 = 0, transform: u3 = 0, clip: Rect };
+    /// A `preview` is not a surface's: it shows, shaded, what a window
+    /// dragged to an edge will fill (its texture is not drawn).
+    pub const Quad = struct { texture: Texture, x: i32, y: i32, width: u32 = 0, height: u32 = 0, transform: u3 = 0, clip: Rect, preview: bool = false };
 
     /// What to draw, bottom first: each window that can be seen, with its
     /// subsurfaces, then its popups, a drag icon, and a custom cursor
@@ -3008,6 +3073,20 @@ pub const Server = struct {
             const surf = t.xdg.surface orelse continue;
             // Clipped to the work area, or the screen for a fullscreen one.
             const clip = s.areaOf(t);
+            // Under the window being moved, what it will fill.
+            if (s.grab) |g| if (g.t == t) if (s.snapRect()) |r| if (surf.texture()) |tex| {
+                const inset = 8;
+                if (list.items.len == list.capacity) _ = list.orderedRemove(0);
+                list.appendAssumeCapacity(.{
+                    .texture = tex,
+                    .x = r.x + inset,
+                    .y = r.y + inset,
+                    .width = r.width -| 2 * inset,
+                    .height = r.height -| 2 * inset,
+                    .clip = s.work_area,
+                    .preview = true,
+                });
+            };
             s.addTree(&list, surf, clip);
             for (s.popups.items) |pp| if (pp.xdg.surface) |ps| if (s.rootToplevel(ps) == t) s.addTree(&list, ps, clip);
         }
@@ -3429,9 +3508,99 @@ pub const Server = struct {
     }
 
     /// A move or resize follows the pointer or touch to (`x`, `y`).
-    fn grabTo(s: *Server, g: Grab, x: f64, y: f64) void {
+    fn grabTo(s: *Server, g0: Grab, x: f64, y: f64) void {
+        var g = g0;
         if (g.resize) |r| return s.resizeTo(g.t, r, x, y);
+        if (g.unsnap) {
+            // Maximized or tiled: it stays so until dragged a way.
+            if (@abs(x - g.x) < unsnap_after and @abs(y - g.y) < unsnap_after) return;
+            g = s.unsnap(g);
+            s.grab = g;
+        }
         s.moveWindow(g.t, x - g.dx, y - g.dy);
+        s.setSnap(s.snapAt(x, y));
+    }
+
+    /// A maximized or tiled window dragged away is restored to its own
+    /// size, under the pointer: as far along it (across) as the pointer
+    /// was along the window, and as far down (its title bar, still under
+    /// the pointer). Returns the grab, from there.
+    fn unsnap(s: *Server, g: Grab) Grab {
+        const t = g.t;
+        const was = s.windowRect(t);
+        // (Not with setMaximized, which ends the move.)
+        t.maximized = false;
+        t.tiled = null;
+        const size = s.configuredSize(t);
+        t.width = size[0];
+        t.height = size[1];
+        if (t.xdg.configured) s.configure(t.xdg.surface.?.client, t);
+        s.replacePopups(t);
+        const along = std.math.clamp((g.x - @as(f64, @floatFromInt(was.x))) / @as(f64, @floatFromInt(@max(was.width, 1))), 0, 1);
+        const down = std.math.clamp(g.y - @as(f64, @floatFromInt(was.y)), 0, @as(f64, @floatFromInt(size[1])) - 1);
+        var out = g;
+        out.unsnap = false;
+        out.dx = along * @as(f64, @floatFromInt(size[0]));
+        out.dy = down;
+        // It is no longer anchored to an edge, and is drawn where it goes.
+        t.anchor_right = null;
+        t.anchor_bottom = null;
+        t.placed = true;
+        s.damaged = true;
+        return out;
+    }
+
+    /// Where a window let go with the pointer at (`x`, `y`) goes: at the
+    /// work area's top edge, filling it; at its left or right edge, the
+    /// half there.
+    fn snapAt(s: *const Server, x: f64, y: f64) ?Snap {
+        const wa = s.work_area;
+        const left: f64 = @floatFromInt(wa.x);
+        const right: f64 = @floatFromInt(wa.x + @as(i32, @intCast(wa.width)));
+        const top: f64 = @floatFromInt(wa.y);
+        if (y < top + snap_edge) return .maximize;
+        if (x < left + snap_edge) return .left;
+        if (x >= right - snap_edge) return .right;
+        return null;
+    }
+
+    fn setSnap(s: *Server, snap: ?Snap) void {
+        if (snap == s.snap) return;
+        s.snap = snap;
+        s.damaged = true;
+    }
+
+    /// The half of the work area a window tiled there fills.
+    pub fn tileRect(s: *const Server, side: Tile) Rect {
+        const wa = s.work_area;
+        const left_w = wa.width / 2;
+        return switch (side) {
+            .left => .{ .x = wa.x, .y = wa.y, .width = left_w, .height = wa.height },
+            .right => .{ .x = wa.x + @as(i32, @intCast(left_w)), .y = wa.y, .width = wa.width - left_w, .height = wa.height },
+        };
+    }
+
+    /// What the window being moved will fill if it is let go now: shown,
+    /// shaded, under it.
+    pub fn snapRect(s: *const Server) ?Rect {
+        const snap = s.snap orelse return null;
+        return switch (snap) {
+            .maximize => s.work_area,
+            .left => s.tileRect(.left),
+            .right => s.tileRect(.right),
+        };
+    }
+
+    /// Fills half the work area with a window, or not.
+    fn setTiled(s: *Server, c: *Client, t: *Toplevel, side: ?Tile) void {
+        if (t.tiled == side and !t.maximized) return;
+        t.maximized = false;
+        t.tiled = side;
+        t.anchor_right = null;
+        t.anchor_bottom = null;
+        if (t.xdg.configured) s.configure(c, t);
+        s.damaged = true;
+        s.replacePopups(t);
     }
 
     /// A touch went down at (`x`, `y`) on the screen: on the surface there,
@@ -3480,7 +3649,7 @@ pub const Server = struct {
             slot.* = null;
             break;
         };
-        if (s.grab) |g| if (g.touch == id) return s.endGrab();
+        if (s.grab) |g| if (g.touch == id) return s.dropGrab();
         if (s.drag) |d| if (d.touch == id) return s.endDrag();
         const sf = surf orelse return;
         broadcast(sf.client, .touch, p.wl_touch.event.up, 1, .{ s.nextSerial(), time_ms, @as(u32, @bitCast(id)) });
@@ -3679,7 +3848,7 @@ pub const Server = struct {
         if (s.grab) |g| {
             // The move ends when the buttons are released, which are not
             // passed on (a touch's ends when it comes up).
-            if (s.buttons_down == 0 and g.touch == null) s.endGrab();
+            if (s.buttons_down == 0 and g.touch == null) s.dropGrab();
             return;
         }
         if (s.drag) |d| {
@@ -4213,9 +4382,10 @@ pub const Server = struct {
 
     fn drewConfigure(s: *Server, c: *Client, t: *Toplevel) void {
         t.drawn = true;
-        if (t.shown_maximized != t.maximized or t.shown_fullscreen != t.fullscreen) {
+        if (t.shown_maximized != t.maximized or t.shown_fullscreen != t.fullscreen or t.shown_tiled != t.tiled) {
             t.shown_maximized = t.maximized;
             t.shown_fullscreen = t.fullscreen;
+            t.shown_tiled = t.tiled;
             s.damaged = true;
             s.replacePopups(t);
         }
@@ -4243,7 +4413,7 @@ pub const Server = struct {
         if (t.xdg.version >= 4) sendTo(c, t.id, p.xdg_toplevel.event.configure_bounds, .{ @as(i32, @intCast(bounds.width)), @as(i32, @intCast(bounds.height)) });
         if (c.send(t.id, p.xdg_toplevel.event.configure)) |m0| {
             var e = m0;
-            var states: [16]u8 = undefined;
+            var states: [32]u8 = undefined;
             var n: usize = 0;
             const set = [_]struct { bool, u32 }{
                 .{ t.maximized and !t.fullscreen, p.xdg_toplevel.state.maximized },
@@ -4251,6 +4421,11 @@ pub const Server = struct {
                 .{ s.resizing(t), p.xdg_toplevel.state.resizing },
                 .{ t.activated, p.xdg_toplevel.state.activated },
                 .{ t.suspended and t.xdg.version >= 6, p.xdg_toplevel.state.suspended },
+                // Tiled: against the work area's edges on three sides.
+                .{ t.tiled == .left and !t.maximized and !t.fullscreen and t.xdg.version >= 2, p.xdg_toplevel.state.tiled_left },
+                .{ t.tiled == .right and !t.maximized and !t.fullscreen and t.xdg.version >= 2, p.xdg_toplevel.state.tiled_right },
+                .{ t.tiled != null and !t.maximized and !t.fullscreen and t.xdg.version >= 2, p.xdg_toplevel.state.tiled_top },
+                .{ t.tiled != null and !t.maximized and !t.fullscreen and t.xdg.version >= 2, p.xdg_toplevel.state.tiled_bottom },
             };
             for (set) |st| if (st[0]) {
                 std.mem.writeInt(u32, states[n..][0..4], st[1], .little);
