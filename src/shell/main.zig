@@ -251,6 +251,9 @@ fn run(init: std.process.Init.Minimal) !void {
         for (server.clients.items[0..n_clients], 2..) |c, i| fds[i] = .{ .fd = c.conn.fd, .events = linux.POLL.IN, .revents = 0 };
         const n_inputs = devices.pollFds(fds[2 + n_clients ..]);
         const now = sys.nowNs();
+        // The windows on their way into or out of the overview: a frame
+        // each refresh until they are there.
+        _ = server.animateOverview(now);
         var wake = next_tick;
         if (!renderer.flipPending()) {
             if (server.damaged) wake = now;
@@ -597,6 +600,7 @@ fn run(init: std.process.Init.Minimal) !void {
         // out with its next frame: otherwise it would take the next
         // vertical blank, and the client's frame would be shown a refresh
         // late.
+        if (!renderer.flipPending()) _ = server.animateOverview(sys.nowNs());
         const dock_due = panels_damaged and sys.nowNs() >= client_frame_ns + panel_grace_ns;
         if ((server.damaged or dock_due) and !renderer.flipPending()) {
             const count_frame = server.damaged;

@@ -609,6 +609,17 @@ pub const Server = struct {
     /// windows are not told their size changed: only how they are drawn
     /// does, and they have neither the pointer nor the keyboard meanwhile.
     overview: bool = false,
+    /// How far into the overview the windows are drawn: 0 where they are,
+    /// 1 in their places in it; between, on their way in or out (see
+    /// `animateOverview`).
+    overview_t: f32 = 0,
+    /// The way in or out under way: when it started (from the next
+    /// `animateOverview`, if not yet), and from where.
+    overview_anim: ?struct { start_ns: ?u64 = null, from: f32 } = null,
+    /// The windows' order in the overview (the top one first), fixed as it
+    /// starts, so that one picked does not change places on its way back.
+    overview_order: [32]*Toplevel = undefined,
+    overview_n: usize = 0,
     /// Frame callbacks for the next frame drawn.
     frame_callbacks: std.ArrayList(FrameCallback) = .empty,
     /// Frame callbacks for the frame drawn and waiting to reach the screen.
@@ -1061,7 +1072,7 @@ pub const Server = struct {
     /// The top window fills the screen: the shell's panels are hidden.
     pub fn fullscreenTop(s: *const Server) bool {
         // The overview is in the work area, with the dock.
-        if (s.overview) return false;
+        if (s.overviewShown()) return false;
         const t = s.topWindow() orelse return false;
         return t.shown_fullscreen;
     }
@@ -1070,7 +1081,7 @@ pub const Server = struct {
     /// is: maximized or fullscreen, and the size of the area it fills.
     pub fn scanoutBuffer(s: *const Server, t: *const Toplevel) ?*Buffer {
         if (!t.shown_maximized and !t.shown_fullscreen) return null;
-        if (s.overview) return null;
+        if (s.overviewShown()) return null;
         const surf = t.xdg.surface orelse return null;
         if (surf.scale != 1 or surf.transform != 0) return null;
         if (t.xdg.geometry) |g| if (g.x != 0 or g.y != 0) return null;
@@ -1115,6 +1126,9 @@ pub const Server = struct {
     /// Space around the overview's windows, and between them.
     const overview_gap = 32;
 
+    /// How long the windows take to go into the overview, or out of it.
+    pub const overview_ns = 250 * std.time.ns_per_ms;
+
     /// Shows the overview, or ends it. It shows only when there are
     /// windows, and not while a window is moved or something dragged.
     pub fn setOverview(s: *Server, on: bool) void {
@@ -1125,11 +1139,47 @@ pub const Server = struct {
             s.dismissGrabs();
             s.breakLock();
         }
+        if (on and s.overview_t == 0) {
+            // Their places, top first, for the way in and out.
+            s.overview_n = 0;
+            var i = s.toplevels.items.len;
+            while (i > 0 and s.overview_n < s.overview_order.len) {
+                i -= 1;
+                const t = s.toplevels.items[i];
+                if (!t.shown()) continue;
+                s.overview_order[s.overview_n] = t;
+                s.overview_n += 1;
+            }
+        }
         s.overview = on;
+        s.overview_anim = .{ .from = s.overview_t };
         s.damaged = true;
         // The windows lose the pointer and keyboard, or have them again, and
         // none is covered in the overview.
         s.updateFocus();
+    }
+
+    /// Moves the way into or out of the overview on to `now_ns`. Returns
+    /// whether it is still under way (and a frame is to be drawn).
+    pub fn animateOverview(s: *Server, now_ns: u64) bool {
+        const a = &(s.overview_anim orelse return false);
+        const start = a.start_ns orelse blk: {
+            a.start_ns = now_ns;
+            break :blk now_ns;
+        };
+        const to: f32 = if (s.overview) 1 else 0;
+        const k: f32 = @floatCast(@min(@as(f64, @floatFromInt(now_ns -| start)) / overview_ns, 1));
+        s.overview_t = a.from + (to - a.from) * k;
+        s.damaged = true;
+        if (k < 1) return true;
+        s.overview_anim = null;
+        if (!s.overview) s.overview_n = 0;
+        return false;
+    }
+
+    /// The overview is drawn, all or part of the way in.
+    pub fn overviewShown(s: *const Server) bool {
+        return s.overview or s.overview_t > 0;
     }
 
     /// Picks a window in the overview: it comes to the top, with the
@@ -1157,11 +1207,19 @@ pub const Server = struct {
     /// middle of it, the last row's in the middle too.
     pub fn overviewLayout(s: *const Server, buf: []OverviewSlot) []OverviewSlot {
         var n: usize = 0;
+        // In the order they had as it started (those still shown), then any
+        // since, the top one first.
+        for (s.overview_order[0..s.overview_n]) |t| {
+            if (n == buf.len) break;
+            if (std.mem.indexOfScalar(*Toplevel, s.toplevels.items, t) == null or !t.shown()) continue;
+            buf[n] = .{ .t = t, .rect = undefined };
+            n += 1;
+        }
         var i = s.toplevels.items.len;
         while (i > 0 and n < buf.len) {
             i -= 1;
             const t = s.toplevels.items[i];
-            if (!t.shown()) continue;
+            if (!t.shown() or std.mem.indexOfScalar(*Toplevel, s.overview_order[0..s.overview_n], t) != null) continue;
             buf[n] = .{ .t = t, .rect = undefined };
             n += 1;
         }
@@ -2929,16 +2987,19 @@ pub const Server = struct {
     /// surface on top (the top ones, if there are more than fit in `buf`).
     pub fn drawList(s: *const Server, buf: []Quad) []Quad {
         var list: std.ArrayList(Quad) = .initBuffer(buf);
-        if (s.overview) {
-            // Each window in its place, smaller: the top one drawn last.
+        if (s.overviewShown()) {
+            // Each window in its place, smaller (or on its way there), in
+            // their stacking order: the top one drawn last.
             var slots: [32]OverviewSlot = undefined;
             const layout = s.overviewLayout(&slots);
-            var k = layout.len;
-            while (k > 0) {
-                k -= 1;
-                const slot = layout[k];
-                const surf = slot.t.xdg.surface orelse continue;
-                s.addTreeScaled(&list, surf, s.windowRect(slot.t), slot.rect);
+            const e = easeInOut(s.overview_t);
+            for (s.toplevels.items) |t| {
+                const slot = for (layout) |sl| {
+                    if (sl.t == t) break sl;
+                } else continue;
+                const surf = t.xdg.surface orelse continue;
+                const from = s.windowRect(t);
+                s.addTreeScaled(&list, surf, from, lerpRect(from, slot.rect, e));
             }
             return list.items;
         }
@@ -2965,6 +3026,27 @@ pub const Server = struct {
             list.appendAssumeCapacity(.{ .texture = tex, .x = o[0], .y = o[1], .width = sz[0], .height = sz[1], .transform = surf.transform, .clip = clip });
         }
         for (surf.subsurfaces.items) |sub| if (sub.surface) |child| s.addTree(list, child, clip);
+    }
+
+    /// Slow at the start and the end, quick between (cubic).
+    fn easeInOut(t: f32) f32 {
+        const x = std.math.clamp(t, 0, 1);
+        if (x < 0.5) return 4 * x * x * x;
+        const u = -2 * x + 2;
+        return 1 - u * u * u / 2;
+    }
+
+    /// `a`, `k` of the way to `b`.
+    fn lerpRect(a: Rect, b: Rect, k: f32) Rect {
+        const f = struct {
+            fn i(x: i32, y: i32, t: f32) i32 {
+                return x + @as(i32, @intFromFloat(@round(@as(f32, @floatFromInt(y - x)) * t)));
+            }
+            fn u(x: u32, y: u32, t: f32) u32 {
+                return @intCast(@max(i(@intCast(x), @intCast(y), t), 1));
+            }
+        };
+        return .{ .x = f.i(a.x, b.x, k), .y = f.i(a.y, b.y, k), .width = f.u(a.width, b.width, k), .height = f.u(a.height, b.height, k) };
     }
 
     /// A window's surface and its subsurfaces, drawn with the window (at

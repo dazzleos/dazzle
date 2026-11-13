@@ -381,10 +381,16 @@ test "the overview shows every window smaller, side by side, without telling the
     w.server.setOverview(true);
     try w.pump();
     try testing.expect(w.server.overview);
+    var quads: [16]Server.Quad = undefined;
+    // On their way: half the time is half the way (slow, quick, slow).
+    try testing.expect(w.server.animateOverview(1000));
+    try testing.expectEqual(@as(u32, 800), w.drawn(&quads)[0].width);
+    try testing.expect(w.server.animateOverview(1000 + Server.overview_ns / 2));
+    try testing.expectEqual(@as(u32, (800 + 352) / 2), w.drawn(&quads)[0].width);
+    try testing.expect(!w.server.animateOverview(1000 + Server.overview_ns));
     // Two cells across the work area (32 around and between them), each
     // 352 by 496: B (the top one) on the left, A on the right, each as big
     // as fits its cell, in the middle of it. A is drawn first, below.
-    var quads: [16]Server.Quad = undefined;
     const drawn = w.drawn(&quads);
     try testing.expectEqual(@as(usize, 2), drawn.len);
     try testing.expectEqual(t_a.xdg.surface.?.texture().?.handle, drawn[0].texture.handle);
@@ -406,12 +412,21 @@ test "the overview shows every window smaller, side by side, without telling the
     try testing.expectEqual(@as(?*server_mod.Toplevel, null), w.server.overviewAt(5, 5));
 
     // Picking A: it is on top, with the keyboard, and the overview ends.
+    // On their way back, A (now on top) is drawn last, from where it was
+    // in the overview: it does not change places.
     w.server.overviewPick(t_a);
     try w.pump();
     try testing.expect(!w.server.overview);
     try testing.expectEqual(t_a, w.server.topWindow().?);
     try testing.expectEqual(win_a.surface.id, w.server.keyboard_focus.?.id);
-    try testing.expectEqual(@as(i32, 0), w.drawn(&quads)[w.drawn(&quads).len - 1].x);
+    try testing.expect(w.server.animateOverview(5000));
+    var back = w.drawn(&quads);
+    try testing.expectEqual(t_a.xdg.surface.?.texture().?.handle, back[back.len - 1].texture.handle);
+    try testing.expectEqual(@as(i32, 32 + 352 + 32), back[back.len - 1].x);
+    try testing.expect(!w.server.animateOverview(5000 + Server.overview_ns));
+    back = w.drawn(&quads);
+    try testing.expectEqual(@as(i32, 0), back[back.len - 1].x);
+    try testing.expectEqual(@as(u32, 800), back[back.len - 1].width);
 
     // Escape ends it too.
     w.server.setOverview(true);
