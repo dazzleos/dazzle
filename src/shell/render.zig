@@ -5,9 +5,6 @@
 //! overlay planes; a fullscreen window the size of the screen alone, on
 //! the display's primary plane.
 //!
-//! A window not maximized or fullscreen has a 1-pixel border around it, so
-//! windows over each other (and the background) do not run together.
-//!
 //! Window contents are textures: clients' dma-bufs used in place (they
 //! render in the GPU's T-tiled layout, which the texture unit reads), or
 //! copies of shared-memory buffers, in 32-bit or RGB565 pixels. The quad
@@ -27,10 +24,6 @@ const texture = vc4.texture;
 
 pub const background = 0xff101830;
 
-/// The windows' borders, in each scheme: Material 3's outline variant.
-pub const border_dark = 0xff49454f;
-pub const border_light = 0xffcac4d0;
-
 /// Frames are large; the shell has one (and one for screenshots).
 var static_frame: render.Frame = undefined;
 var capture_frame: render.Frame = undefined;
@@ -45,9 +38,6 @@ pub const Window = struct {
     height: u32 = 0,
     transform: u3 = 0,
     clip: server.Rect,
-    /// A window's own surface: the window on the screen, a border drawn
-    /// around it (outside it), under it.
-    outline: ?server.Rect = null,
 };
 
 /// The most surfaces a frame draws (windows, their subsurfaces and popups:
@@ -58,28 +48,12 @@ pub const max_windows = 48;
 pub const PanelQuad = struct { texture: server.Texture, x: i32 = 0, y: i32 };
 
 /// Records a frame (after `frame.begin`): the windows (bottom first, at
-/// most `max_windows`, each with its border, in `border`'s colour) and the
-/// panels above them as quads. `vbo` holds the quads' vertices and must
-/// stay untouched until the frame has rendered.
-pub fn recordFrame(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, panels: []const ?PanelQuad, windows: []const Window, border: server.Texture) !void {
+/// most `max_windows`) and the panels above them as quads. `vbo` holds the
+/// quads' vertices and must stay untouched until the frame has rendered.
+pub fn recordFrame(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, panels: []const ?PanelQuad, windows: []const Window) !void {
     std.debug.assert(windows.len <= max_windows);
     var quads: usize = 0;
     for (windows) |w| {
-        if (w.outline) |o| {
-            // Four strips, a pixel wide, just outside it.
-            const ow: u32 = o.width + 2;
-            const strips = [4][4]i32{
-                .{ o.x - 1, o.y - 1, @intCast(ow), 1 },
-                .{ o.x - 1, o.y + @as(i32, @intCast(o.height)), @intCast(ow), 1 },
-                .{ o.x - 1, o.y, 1, @intCast(o.height) },
-                .{ o.x + @as(i32, @intCast(o.width)), o.y, 1, @intCast(o.height) },
-            };
-            for (strips) |r| {
-                if (r[2] <= 0 or r[3] <= 0) continue;
-                try quad(frame, pipeline, vbo, quads, border, r[0], r[1], @intCast(r[2]), @intCast(r[3]), 0, .{ .x = w.clip.x, .y = w.clip.y, .width = w.clip.width, .height = w.clip.height });
-                quads += 1;
-            }
-        }
         const qw = if (w.width != 0) w.width else w.texture.width;
         const qh = if (w.height != 0) w.height else w.texture.height;
         try quad(frame, pipeline, vbo, quads, w.texture, w.x, w.y, qw, qh, w.transform, .{ .x = w.clip.x, .y = w.clip.y, .width = w.clip.width, .height = w.clip.height });
@@ -135,11 +109,11 @@ fn quad(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, index: us
     });
 }
 
-/// Room for the panels' and windows' quads, and four for each window's
-/// border (each two triangles of four floats per vertex).
-const vbo_size = 24576;
+/// Room for the panels' and windows' quads (each two triangles of four
+/// floats per vertex).
+const vbo_size = 8192;
 comptime {
-    std.debug.assert((n_panels + max_windows * 5) * 6 * 4 * @sizeOf(f32) <= vbo_size);
+    std.debug.assert((n_panels + max_windows) * 6 * 4 * @sizeOf(f32) <= vbo_size);
 }
 
 /// A buffer the display can show.
@@ -195,10 +169,6 @@ pub const Renderer = struct {
     cursor_shape: ?cursor.Shape = null,
     cursor_move_failed: bool = false,
     background: u32 = background,
-    /// The windows' borders' colour, and a little texture of it.
-    border: u32 = border_dark,
-    border_texture: ?server.Texture = null,
-    border_drawn: u32 = 0,
 
     pub fn init(gpa: std.mem.Allocator, dev: vc4.Device, output: vc4.drm.Output) !Renderer {
         // The screen stays 32-bit: it is what everything is composited
@@ -410,21 +380,11 @@ pub const Renderer = struct {
         const t0 = sys.nowNs();
         const quads = try r.panelQuads();
         static_frame.begin(r.display.backTarget(), .{ .clear = r.background });
-        try recordFrame(&static_frame, &r.quads, r.vbo, &quads, windows, try r.borderTexture());
+        try recordFrame(&static_frame, &r.quads, r.vbo, &quads, windows);
         const t1 = sys.nowNs();
         const seqno = try r.dev.submit(static_frame.finish());
         try r.dev.waitSeqno(seqno, std.time.ns_per_s);
         return .{ .cpu_ns = t1 - t0, .gpu_ns = sys.nowNs() - t1 };
-    }
-
-    /// A texture of the borders' colour (4 by 4, all of it).
-    fn borderTexture(r: *Renderer) !server.Texture {
-        if (r.border_texture == null or r.border_drawn != r.border) {
-            const pixels: [16]u32 = @splat(r.border);
-            r.border_texture = try uploadPixels(r, r.border_texture, std.mem.sliceAsBytes(&pixels), 4, 4, 16, .xrgb8888);
-            r.border_drawn = r.border;
-        }
-        return r.border_texture.?;
     }
 
     /// The panels as textures, with their latest pictures.
@@ -451,7 +411,7 @@ pub const Renderer = struct {
         const bo = try r.dev.createBo(pitch * r.height);
         defer r.dev.destroyBo(bo);
         capture_frame.begin(.{ .handle = bo.handle, .width = @intCast(r.width), .height = @intCast(r.height), .tiling = .linear }, .{ .clear = r.background });
-        try recordFrame(&capture_frame, &r.quads, r.vbo, &quads, windows, try r.borderTexture());
+        try recordFrame(&capture_frame, &r.quads, r.vbo, &quads, windows);
         const seqno = try r.dev.submit(capture_frame.finish());
         try r.dev.waitSeqno(seqno, std.time.ns_per_s);
         const pixels = try gpa.alloc(u32, @as(usize, r.width) * r.height);

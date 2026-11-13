@@ -2817,9 +2817,7 @@ pub const Server = struct {
 
     /// Something to draw: a surface's picture, at a place on the screen,
     /// with its logical size and buffer transform, clipped to an area.
-    /// A window's own surface (not maximized or fullscreen) has `outline`:
-    /// the window on the screen, to draw a border around.
-    pub const Quad = struct { texture: Texture, x: i32, y: i32, width: u32 = 0, height: u32 = 0, transform: u3 = 0, clip: Rect, outline: ?Rect = null };
+    pub const Quad = struct { texture: Texture, x: i32, y: i32, width: u32 = 0, height: u32 = 0, transform: u3 = 0, clip: Rect };
 
     /// What to draw, bottom first: each window that can be seen, with its
     /// subsurfaces, then its popups, a drag icon, and a custom cursor
@@ -2831,27 +2829,24 @@ pub const Server = struct {
             const surf = t.xdg.surface orelse continue;
             // Clipped to the work area, or the screen for a fullscreen one.
             const clip = s.areaOf(t);
-            // A border around it, unless it fills the area.
-            const outline = if (t.shown_maximized or t.shown_fullscreen) null else s.windowRect(t);
-            s.addTree(&list, surf, clip, outline);
-            for (s.popups.items) |pp| if (pp.xdg.surface) |ps| if (s.rootToplevel(ps) == t) s.addTree(&list, ps, clip, null);
+            s.addTree(&list, surf, clip);
+            for (s.popups.items) |pp| if (pp.xdg.surface) |ps| if (s.rootToplevel(ps) == t) s.addTree(&list, ps, clip);
         }
-        if (s.drag) |d| if (d.icon) |icon| s.addTree(&list, icon, s.screen(), null);
-        if (s.cursor_surface) |cs| if (s.pointer_focus != null and s.grab == null and !s.pointerLocked()) s.addTree(&list, cs, s.screen(), null);
+        if (s.drag) |d| if (d.icon) |icon| s.addTree(&list, icon, s.screen());
+        if (s.cursor_surface) |cs| if (s.pointer_focus != null and s.grab == null and !s.pointerLocked()) s.addTree(&list, cs, s.screen());
         return list.items;
     }
 
-    /// A surface (with `outline`, if it is a window's) and its subsurfaces,
-    /// above it.
-    fn addTree(s: *const Server, list: *std.ArrayList(Quad), surf: *const Surface, clip: Rect, outline: ?Rect) void {
+    /// A surface and its subsurfaces, above it.
+    fn addTree(s: *const Server, list: *std.ArrayList(Quad), surf: *const Surface, clip: Rect) void {
         const o = s.surfaceOrigin(surf) orelse return;
         if (surf.texture()) |tex| {
             const sz = surf.size().?;
             // Over the most there is room for: the newest, at the top.
             if (list.items.len == list.capacity) _ = list.orderedRemove(0);
-            list.appendAssumeCapacity(.{ .texture = tex, .x = o[0], .y = o[1], .width = sz[0], .height = sz[1], .transform = surf.transform, .clip = clip, .outline = outline });
+            list.appendAssumeCapacity(.{ .texture = tex, .x = o[0], .y = o[1], .width = sz[0], .height = sz[1], .transform = surf.transform, .clip = clip });
         }
-        for (surf.subsurfaces.items) |sub| if (sub.surface) |child| s.addTree(list, child, clip, null);
+        for (surf.subsurfaces.items) |sub| if (sub.surface) |child| s.addTree(list, child, clip);
     }
 
     /// The topmost surface of a tree (`surf` and its subsurfaces) at
