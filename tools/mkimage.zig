@@ -407,12 +407,16 @@ fn shortName(name: []const u8, taken: []const [11]u8) [11]u8 {
         stem[n] = std.ascii.toUpper(c);
         n += 1;
     };
-    var k: u8 = 1;
+    // ~1 to ~9, then ~10 and on with a shorter stem (a 10th '0' + k would
+    // be ':', which no 8.3 name may have).
+    var k: u32 = 1;
     while (true) : (k += 1) {
+        var tail_buf: [8]u8 = undefined;
+        const tail = std.fmt.bufPrint(&tail_buf, "~{d}", .{k}) catch unreachable;
+        const keep = @min(n, 8 - tail.len);
         var candidate = out;
-        @memcpy(candidate[0..n], stem[0..n]);
-        candidate[n] = '~';
-        candidate[n + 1] = '0' + k;
+        @memcpy(candidate[0..keep], stem[0..keep]);
+        @memcpy(candidate[keep..][0..tail.len], tail);
         for (taken) |t| {
             if (std.mem.eql(u8, &t, &candidate)) break;
         } else return candidate;
@@ -451,6 +455,10 @@ test "short names" {
     try std.testing.expectEqualStrings("BCM283~1DTB", &shortName("bcm2835-rpi-zero.dtb", &.{}));
     try std.testing.expectEqualStrings("BCM283~2DTB", &shortName("bcm2835-rpi-zero-w.dtb", &.{"BCM283~1DTB".*}));
     try std.testing.expectEqualStrings("LICENC~1BRO", &shortName("LICENCE.broadcom", &.{}));
+    // Past ~9 the number takes a letter of the name.
+    var nine: [9][11]u8 = undefined;
+    for (&nine, 1..) |*t, k| _ = std.fmt.bufPrint(t, "BCM271~{d}DTB", .{k}) catch unreachable;
+    try std.testing.expectEqualStrings("BCM27~10DTB", &shortName("bcm2712-rpi-500.dtb", &nine));
 }
 
 test "an image has a valid partition and boot sector, and is as big as it needs" {
