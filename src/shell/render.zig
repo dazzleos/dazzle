@@ -25,6 +25,7 @@ const cursor = @import("cursor.zig");
 const shader = @import("shader");
 
 const background_mod = @import("background.zig");
+const glass = @import("glass.zig");
 
 const render = vc4.render;
 const texture = vc4.texture;
@@ -78,9 +79,9 @@ pub const preview_color = 0x55d0bcff;
 /// the vertex buffer holds this many quads besides the panels').
 pub const max_windows = 48;
 
-/// A panel's picture, drawn at (`x`, `y`) on the screen (blended, if it
+/// A panel's picture, drawn at (`x`, `y`) on the screen (blended, as it
 /// is see-through in places).
-pub const PanelQuad = struct { texture: server.Texture, x: i32 = 0, y: i32, blended: bool = false };
+pub const PanelQuad = struct { texture: server.Texture, x: i32 = 0, y: i32 };
 
 /// The programs a frame is drawn with: textures as they are, blended (the
 /// snap preview), and rounded windows' corners and shadows.
@@ -123,7 +124,7 @@ pub fn recordFrame(frame: *render.Frame, pipelines: Pipelines, preview: server.T
         quads += 1;
     }
     for (panels) |panel| if (panel) |pq| {
-        try quad(frame, if (pq.blended) pipelines.blended else pipeline, vbo, quads, pq.texture, pq.x, pq.y, pq.texture.width, pq.texture.height, 0, null);
+        try quad(frame, pipelines.blended, vbo, quads, pq.texture, pq.x, pq.y, pq.texture.width, pq.texture.height, 0, null);
         quads += 1;
     };
 }
@@ -270,18 +271,15 @@ comptime {
 const Scanout = struct { bo: vc4.Bo, fb_id: u32 };
 
 /// The shell's own panels on the screen, drawn on the CPU: the dock, the
-/// performance overlay, and the dock's tooltip.
+/// performance overlay, and the dock's tooltip. Each is see-through in
+/// places (its pixels' alpha says where), and drawn blended. On an overlay
+/// plane, it is in a band if it has one (`setPanelBand`), which the plane
+/// fills, with the background drawn behind it; otherwise alone, the
+/// display blending it over what is under it.
 pub const PanelId = enum {
     dock,
     perf,
     tooltip,
-
-    /// See-through in places (its pixels' alpha says where): drawn
-    /// blended. On an overlay plane only if it has a band (`setPanelBand`),
-    /// which the plane fills, with the background drawn behind it.
-    fn blended(id: PanelId) bool {
-        return id == .tooltip or id == .dock;
-    }
 };
 const n_panels = @typeInfo(PanelId).@"enum".field_names.len;
 
@@ -321,8 +319,8 @@ pub const Renderer = struct {
     display: vc4.display.Display,
     width: u32,
     height: u32,
-    /// Draws textures as quads; and blended, for the snap preview (with a
-    /// little texture of its shade, made when first drawn).
+    /// Draws textures as quads; and blended, for the panels and the snap
+    /// preview (with a little texture of its shade, made when first drawn).
     quads: shader.Pipeline,
     blended: shader.Pipeline,
     rounded: shader.Pipeline,
@@ -476,8 +474,6 @@ pub const Renderer = struct {
         var out: vc4.kms.Overlays = @splat(null);
         for (&r.panels, 0..) |*p, i| {
             if (p.width == 0 or p.height == 0 or p.hidden) continue;
-            // One that is see-through is composited, but in a band.
-            if (@as(PanelId, @enumFromInt(i)).blended() and p.band_y == null) return null;
             if (i >= kms.overlays.len or kms.overlays[i] == null) return null;
             out[i] = r.panelLayer(p) orelse return null;
         }
@@ -560,7 +556,10 @@ pub const Renderer = struct {
         const size = p.plane_size;
         const dst = std.mem.bytesAsSlice(u32, plane.bo.map[0 .. size[0] * size[1] * 4]);
         const band_y = p.band_y orelse {
-            @memcpy(dst, p.pixels[0 .. p.width * p.height]);
+            const src = p.pixels[0 .. p.width * p.height];
+            if (alphaPlane(p)) {
+                for (dst, src) |*d, s| d.* = glass.premultiply(s);
+            } else @memcpy(dst, src);
             return;
         };
         p.band_stamp = r.band_stamp;
@@ -586,6 +585,12 @@ pub const Renderer = struct {
         }
     }
 
+    /// Whether a panel's overlay plane has an alpha channel: it is alone,
+    /// not in a band.
+    fn alphaPlane(p: *const Panel) bool {
+        return p.band_y == null;
+    }
+
     /// `src` (0xAARRGGBB, not premultiplied) over the opaque `dst`, as the
     /// GPU blends it.
     fn over(dst: u32, src: u32) u32 {
@@ -604,7 +609,8 @@ pub const Renderer = struct {
     fn panelPlane(r: *Renderer, p: *Panel, i: u1, size: [2]u32) ?Scanout {
         if (p.planes[i]) |plane| return plane;
         const bo = r.dev.createBo(size[0] * size[1] * 4) catch return null;
-        const fb = vc4.drm.addFramebuffer(r.dev.fd, bo.kmsHandle(), size[0], size[1], size[0] * 4, vc4.drm.format_xrgb8888) catch {
+        const format = if (alphaPlane(p)) vc4.drm.format_argb8888 else vc4.drm.format_xrgb8888;
+        const fb = vc4.drm.addFramebuffer(r.dev.fd, bo.kmsHandle(), size[0], size[1], size[0] * 4, format) catch {
             r.dev.destroyBo(bo);
             return null;
         };
@@ -766,14 +772,13 @@ pub const Renderer = struct {
     /// The panels as textures, with their latest pictures.
     fn panelQuads(r: *Renderer) ![n_panels]?PanelQuad {
         var quads: [n_panels]?PanelQuad = @splat(null);
-        for (&r.panels, &quads, 0..) |*p, *q, i| {
+        for (&r.panels, &quads) |*p, *q| {
             if (p.width == 0 or p.height == 0 or p.hidden) continue;
-            const blended = @as(PanelId, @enumFromInt(i)).blended();
             if (p.texture_stale) {
-                p.texture = try uploadPixels(r, p.texture, std.mem.sliceAsBytes(p.pixels), p.width, p.height, p.width * 4, if (blended) .argb8888 else .xrgb8888);
+                p.texture = try uploadPixels(r, p.texture, std.mem.sliceAsBytes(p.pixels), p.width, p.height, p.width * 4, .argb8888);
                 p.texture_stale = false;
             }
-            q.* = .{ .texture = p.texture.?, .x = p.x, .y = p.y, .blended = blended };
+            q.* = .{ .texture = p.texture.?, .x = p.x, .y = p.y };
         }
         return quads;
     }

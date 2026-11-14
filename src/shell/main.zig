@@ -398,8 +398,8 @@ fn run(init: std.process.Init.Minimal) !void {
                                 perf_frames = 0;
                                 perf_gpu_ns = 0;
                                 var pids: [max_clients]linux.pid_t = undefined;
-                                perf.draw(perf_monitor.sample(now_ns, 0, 0, clientPids(&server, &pids)));
-                                renderer.setPanelAt(.perf, perf.pixels, perf.width, perf.height, perf.x, perf.y);
+                                perf.draw(perf_monitor.sample(now_ns, 0, 0, clientPids(&server, &pids)), dock.theme);
+                                renderer.setPanelAt(.perf, perf.picture(), perf.width, perf.height, perf.x, perf.y);
                             }
                             panels_damaged = true;
                             continue;
@@ -622,10 +622,10 @@ fn run(init: std.process.Init.Minimal) !void {
             if (updates.tick(t_now)) updates_changed = true;
             if (perf_shown) {
                 var pids: [max_clients]linux.pid_t = undefined;
-                perf.draw(perf_monitor.sample(t_now, perf_frames, perf_gpu_ns, clientPids(&server, &pids)));
+                perf.draw(perf_monitor.sample(t_now, perf_frames, perf_gpu_ns, clientPids(&server, &pids)), dock.theme);
                 perf_frames = 0;
                 perf_gpu_ns = 0;
-                renderer.setPanelAt(.perf, perf.pixels, perf.width, perf.height, perf.x, perf.y);
+                renderer.setPanelAt(.perf, perf.picture(), perf.width, perf.height, perf.x, perf.y);
                 panels_damaged = true;
             }
         }
@@ -1045,6 +1045,7 @@ test {
     _ = @import("dock.zig");
     _ = @import("updates.zig");
     _ = @import("perf.zig");
+    _ = @import("glass.zig");
     _ = @import("screenshot.zig");
     _ = @import("keyboard.zig");
     _ = @import("protocol_test.zig");

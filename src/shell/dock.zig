@@ -21,6 +21,7 @@ const linux = std.os.linux;
 const sys = @import("sys");
 const evdev = sys.evdev;
 const font = @import("font");
+const glass = @import("glass.zig");
 const icons = @import("icons");
 const audio = @import("audio");
 const theme_settings = @import("appearance");
@@ -97,6 +98,10 @@ pub fn readAppearance() Appearance {
 }
 
 const background = Theme.dark.colors().background;
+/// The box's colour as it is drawn: see-through.
+fn glassy(color: u32) u32 {
+    return @as(u32, glass.alpha) << 24 | (color & 0x00ffffff);
+}
 const hover_background = Theme.dark.colors().hover_background;
 const status_border = Theme.dark.colors().status_border;
 const dot_color = Theme.dark.colors().dot;
@@ -482,7 +487,9 @@ pub const Dock = struct {
     icon_font: ?font.Font,
     cache: font.GlyphCache,
     /// The box's picture, `width` by `height` (rows `width` apart), see-
-    /// through outside its rounded corners. Room for the screen's width.
+    /// through (`glass`), and wholly outside its rounded corners. Room for
+    /// the screen's width, twice: the second is where it is drawn over
+    /// white.
     pixels: []u32,
     width: u32,
     height: u32,
@@ -530,7 +537,7 @@ pub const Dock = struct {
             .font = f,
             .icon_font = font.Font.init(icons.font_data) catch null,
             .cache = font.GlyphCache.init(gpa),
-            .pixels = try gpa.alloc(u32, @as(usize, screen_width) * height),
+            .pixels = try gpa.alloc(u32, 2 * @as(usize, screen_width) * height),
             .tooltip_pixels = try gpa.alloc(u32, @as(usize, tooltipMaxWidth(scale)) * tooltipHeight(scale)),
             .screen_height = screen_height,
             .screen_width = screen_width,
@@ -561,8 +568,8 @@ pub const Dock = struct {
     /// running app's dot is in the padding below its icon).
     const box_pad = 12;
     /// Between the box and the bottom of the screen (and the work area).
-    const margin = 8;
-    const box_radius = 18;
+    pub const margin = 8;
+    pub const box_radius = 18;
 
     /// The box's width, in pixels: the icons and the status box in a row,
     /// padded; no wider than the screen.
@@ -673,10 +680,21 @@ pub const Dock = struct {
     }
 
     pub fn draw(d: *Dock) void {
-        const c = d.theme.colors();
         d.width = d.boxWidth();
-        const canvas: font.Canvas = .{ .pixels = d.pixels[0 .. @as(usize, d.width) * d.height], .width = d.width, .height = d.height, .stride = d.width };
-        canvas.fill(0, 0, d.width, d.height, c.background);
+        const n = @as(usize, d.width) * d.height;
+        const over_black: font.Canvas = .{ .pixels = d.pixels[0..n], .width = d.width, .height = d.height, .stride = d.width };
+        const over_white: font.Canvas = .{ .pixels = d.pixels[n .. 2 * n], .width = d.width, .height = d.height, .stride = d.width };
+        d.drawContents(over_black, glass.black);
+        d.drawContents(over_white, glass.white);
+        // In a see-through box, its corners rounded.
+        glass.compose(over_black.pixels, over_white.pixels, d.theme.colors().background);
+        glass.cutCorners(over_black, @round(box_radius * d.scale));
+    }
+
+    /// What is in the box, over `base`.
+    fn drawContents(d: *Dock, canvas: font.Canvas, base: u32) void {
+        const c = d.theme.colors();
+        canvas.fill(0, 0, d.width, d.height, base);
         const icon_font: ?*const font.Font = if (d.icon_font) |*f| f else null;
         for (d.apps, 0..) |*app, i| {
             const r = d.iconRect(i);
@@ -730,8 +748,6 @@ pub const Dock = struct {
                 _ = font.draw(canvas, &d.cache, .{ .font = f, .size = arrow, .color = down_color }, arrows_x, @round(mid + arrow), icons.text(.arrow_downward, &buf)) catch {};
             }
         }
-        // Rounded: what is outside its corners is see-through.
-        cutCorners(canvas, @round(box_radius * d.scale));
     }
 
     /// Moves the hover highlight for the pointer at (`x`, `y`) in the dock
@@ -793,7 +809,7 @@ pub const Dock = struct {
         const baseline = @round(fh / 2 + style.ascent() * 0.36);
         _ = font.draw(canvas, &d.cache, style, pad, baseline, text) catch {};
         // Rounded: what is outside its corners is see-through.
-        cutCorners(canvas, @round(6 * d.scale));
+        glass.cutCorners(canvas, @round(6 * d.scale));
         // Above the icon, clear of the dock, and on the screen.
         const r = d.iconRect(i);
         const at = d.place();
@@ -808,28 +824,6 @@ fn easeInOut(t: f32) f32 {
     if (x < 0.5) return 4 * x * x * x;
     const u = -2 * x + 2;
     return 1 - u * u * u / 2;
-}
-
-/// Makes the canvas's corners, outside a rounded rectangle of `radius`,
-/// see-through (in the pixels' alpha), anti-aliased.
-fn cutCorners(c: font.Canvas, radius: f32) void {
-    const w: f32 = @floatFromInt(c.width);
-    const h: f32 = @floatFromInt(c.height);
-    const r = @min(radius, @min(w, h) / 2);
-    const n: u32 = @intFromFloat(@ceil(r));
-    for (0..c.height) |py| {
-        // Only the rows and columns of the corners.
-        if (py >= n and py + n < c.height) continue;
-        for (0..c.width) |px| {
-            if (px >= n and px + n < c.width) continue;
-            const qx = @abs(@as(f32, @floatFromInt(px)) + 0.5 - w / 2) - (w / 2 - r);
-            const qy = @abs(@as(f32, @floatFromInt(py)) + 0.5 - h / 2) - (h / 2 - r);
-            const outside = std.math.hypot(@max(qx, 0), @max(qy, 0)) + @min(@max(qx, qy), 0) - r;
-            const coverage = std.math.clamp(0.5 - outside, 0, 1);
-            const p = &c.pixels[py * c.stride + px];
-            p.* = (p.* & 0x00ffffff) | (@as(u32, @intFromFloat(@round(coverage * 255))) << 24);
-        }
-    }
 }
 
 /// Fills a rectangle with rounded corners, anti-aliased.
@@ -955,16 +949,16 @@ test "icons and the status box are in a row in a box, and clicks find the apps" 
             return dock.pixels[@as(usize, @intFromFloat(y)) * dock.width + @as(usize, @intFromFloat(x))];
         }
     }.f;
-    try testing.expectEqual(@as(u32, background), at(&d, @floatFromInt(d.width / 2), 2));
+    try testing.expectEqual(@as(u32, glassy(background)), at(&d, @floatFromInt(d.width / 2), 2));
     try testing.expectEqual(apps[0].color(), at(&d, r0.x + r0.size / 2, r0.y + 4));
     try testing.expectEqual(@as(u32, dot_color), at(&d, r0.x + r0.size / 2, r0.y + r0.size + 6));
-    try testing.expectEqual(@as(u32, background), at(&d, r1.x + r1.size / 2, r1.y + r1.size + 6));
+    try testing.expectEqual(@as(u32, glassy(background)), at(&d, r1.x + r1.size / 2, r1.y + r1.size + 6));
     try testing.expectEqual(@as(u32, hover_background), at(&d, r1.x - 2, r1.y + r1.size / 2));
     // The first app's icon is drawn in white in the middle of its square.
     try testing.expectEqual(@as(u32, 0xffffffff), at(&d, r0.x + r0.size / 2, r0.y + r0.size / 2));
     // The status box has an outline at its top edge, is unfilled inside its padding, and draws the volume and network icons inside it.
     try testing.expectEqual(@as(u32, status_border), at(&d, rs.x + rs.width / 2, rs.y + 1));
-    try testing.expectEqual(@as(u32, background), at(&d, rs.x + rs.width / 2, rs.y + 5));
+    try testing.expectEqual(@as(u32, glassy(background)), at(&d, rs.x + rs.width / 2, rs.y + 5));
 
     // Switching to the light theme updates the dock background, hover, running dot, and status border.
     try testing.expectEqual(Appearance{}, Appearance.parse(""));
@@ -972,7 +966,7 @@ test "icons and the status box are in a row in a box, and clicks find the apps" 
     d.theme = .light;
     d.draw();
     const light = Theme.light.colors();
-    try testing.expectEqual(light.background, at(&d, @floatFromInt(d.width / 2), 2));
+    try testing.expectEqual(glassy(light.background), at(&d, @floatFromInt(d.width / 2), 2));
     try testing.expectEqual(light.dot, at(&d, r0.x + r0.size / 2, r0.y + r0.size + 6));
     try testing.expectEqual(light.hover_background, at(&d, r1.x - 2, r1.y + r1.size / 2));
     try testing.expectEqual(light.status_border, at(&d, rs.x + rs.width / 2, rs.y + 1));
@@ -1001,10 +995,10 @@ test "the dock floats in a rounded box in the middle of the bottom, and slides d
     try testing.expectApproxEqAbs(first.y, first.x, 0.5);
     try testing.expectApproxEqAbs(first.y, @as(f32, @floatFromInt(d.height)) - (first.y + first.size), 0.5);
     try testing.expectApproxEqAbs(first.y, @as(f32, @floatFromInt(d.width)) - (status.x + status.width), 1);
-    // See-through outside its corners, solid in the middle.
+    // Wholly see-through outside its corners, partly in the middle.
     try testing.expectEqual(@as(u32, 0), d.picture()[0] >> 24);
     try testing.expectEqual(@as(u32, 0), d.picture()[d.width - 1] >> 24);
-    try testing.expectEqual(@as(u32, 0xff), d.picture()[d.width / 2] >> 24);
+    try testing.expectEqual(@as(u32, glass.alpha), d.picture()[d.width / 2] >> 24);
     // The screen's points map into it, or are beside it.
     const r0 = d.iconRect(0);
     const l = d.local(@as(f64, @floatFromInt(at.x)) + r0.x + 1, @as(f64, @floatFromInt(at.y)) + r0.y + 1).?;

@@ -166,6 +166,9 @@ pub fn fourcc(comptime s: *const [4]u8) u32 {
 
 /// 32-bit xRGB, stored as B, G, R, x bytes in memory.
 pub const format_xrgb8888 = fourcc("XR24");
+/// 32-bit ARGB (premultiplied, as the display blends it), stored as B, G,
+/// R, A bytes in memory.
+pub const format_argb8888 = fourcc("AR24");
 
 pub const IOCTL_MODE_GETRESOURCES = IOWR(0xa0, ModeCardRes);
 pub const IOCTL_MODE_SETCRTC = IOWR(0xa2, ModeCrtc);

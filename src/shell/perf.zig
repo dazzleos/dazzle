@@ -1,17 +1,23 @@
 //! The performance overlay, toggled with Super+I: a small panel in the
-//! top right of the screen showing FPS, CPU, GPU and memory use, refreshed
-//! every second while it is shown.
+//! bottom right of the screen showing FPS, CPU, GPU and memory use,
+//! refreshed every second while it is shown; in a see-through box like the
+//! dock's.
 
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
 const font = @import("font");
+const glass = @import("glass.zig");
+const dock = @import("dock.zig");
 
-const background = 0xff1c2a4a;
-const border_color = 0xff2c3e66;
-const track_color = 0xff101830;
-const label_color = 0xff9ab0d8;
-const value_color = 0xffe8eefc;
+/// Text and the bars' tracks, in each theme.
+const Colors = struct { label: u32, value: u32, track: u32 };
+fn colors(theme: dock.Theme) Colors {
+    return switch (theme) {
+        .dark => .{ .label = 0xff9ab0d8, .value = 0xffe8eefc, .track = 0x60000000 },
+        .light => .{ .label = 0xff4a5a7a, .value = 0xff1c2a4a, .track = 0x401c2a4a },
+    };
+}
 
 const fps_color = 0xff3fb86e;
 const fps_low_color = 0xffe8b33f;
@@ -285,14 +291,15 @@ pub const Overlay = struct {
         const scale = @max(raw_scale, 0.5);
         const width: u32 = @min(screen_width, @as(u32, @intFromFloat(@round(280 * scale))));
         const height: u32 = @min(screen_height, @as(u32, @intFromFloat(@round(180 * scale))));
-        const margin_x: i32 = @intFromFloat(@round(16 * scale));
-        const margin_y: i32 = @intFromFloat(@round(56 * scale));
-        const x: i32 = @max(0, @as(i32, @intCast(screen_width)) - @as(i32, @intCast(width)) - margin_x);
-        const y: i32 = @min(margin_y, @max(0, @as(i32, @intCast(screen_height)) - @as(i32, @intCast(height))));
+        // As far from the bottom (and the right) as the dock is.
+        const margin: i32 = @intFromFloat(@round(dock.Dock.margin * scale));
+        const x: i32 = @max(0, @as(i32, @intCast(screen_width)) - @as(i32, @intCast(width)) - margin);
+        const y: i32 = @max(0, @as(i32, @intCast(screen_height)) - @as(i32, @intCast(height)) - margin);
         return .{
             .font = f,
             .cache = font.GlyphCache.init(gpa),
-            .pixels = try gpa.alloc(u32, @as(usize, width) * height),
+            // Twice: the second is where it is drawn over white.
+            .pixels = try gpa.alloc(u32, 2 * @as(usize, width) * height),
             .width = width,
             .height = height,
             .x = x,
@@ -306,13 +313,24 @@ pub const Overlay = struct {
         o.cache.deinit();
     }
 
-    pub fn draw(o: *Overlay, stats: Stats) void {
-        const canvas: font.Canvas = .{ .pixels = o.pixels, .width = o.width, .height = o.height, .stride = o.width };
-        canvas.fill(0, 0, o.width, o.height, border_color);
-        const border: u32 = @max(1, @as(u32, @intFromFloat(@round(2 * o.scale))));
-        if (o.width > 2 * border and o.height > 2 * border) {
-            canvas.fill(@intCast(border), @intCast(border), o.width - 2 * border, o.height - 2 * border, background);
-        }
+    /// Its picture, `width` by `height`.
+    pub fn picture(o: *const Overlay) []const u32 {
+        return o.pixels[0 .. @as(usize, o.width) * o.height];
+    }
+
+    /// Draws `stats` in a see-through box like the dock's, in `theme`.
+    pub fn draw(o: *Overlay, stats: Stats, theme: dock.Theme) void {
+        const n = @as(usize, o.width) * o.height;
+        const over_black: font.Canvas = .{ .pixels = o.pixels[0..n], .width = o.width, .height = o.height, .stride = o.width };
+        const over_white: font.Canvas = .{ .pixels = o.pixels[n .. 2 * n], .width = o.width, .height = o.height, .stride = o.width };
+        o.drawContents(over_black, glass.black, stats, colors(theme));
+        o.drawContents(over_white, glass.white, stats, colors(theme));
+        glass.compose(over_black.pixels, over_white.pixels, theme.colors().background);
+        glass.cutCorners(over_black, @round(dock.Dock.box_radius * o.scale));
+    }
+
+    fn drawContents(o: *Overlay, canvas: font.Canvas, base: u32, stats: Stats, c: Colors) void {
+        canvas.fill(0, 0, o.width, o.height, base);
 
         const lines = formatLines(stats);
         const gpu_frac: f32 = (stats.gpu_busy orelse 0) / 100;
@@ -376,8 +394,8 @@ pub const Overlay = struct {
         for (rows, 0..) |r, i| {
             const y0 = pad_y + @as(f32, @floatFromInt(i)) * row_h;
             if (o.font) |*f| {
-                const label_style: font.Style = .{ .font = f, .size = text_size, .color = label_color };
-                const value_style: font.Style = .{ .font = f, .size = text_size, .color = value_color };
+                const label_style: font.Style = .{ .font = f, .size = text_size, .color = c.label };
+                const value_style: font.Style = .{ .font = f, .size = text_size, .color = c.value };
                 const baseline = @round(y0 + label_style.ascent());
                 _ = font.draw(canvas, &o.cache, label_style, @round(pad_x), baseline, r.label) catch {};
                 const lw = font.measure(label_style, r.label);
@@ -386,7 +404,7 @@ pub const Overlay = struct {
                 _ = font.draw(canvas, &o.cache, value_style, @round(vx), baseline, r.value) catch {};
             }
             const bar_y = @round(y0 + 21 * o.scale);
-            roundedRect(canvas, pad_x, bar_y, bar_w, bar_h, bar_h / 2, track_color);
+            roundedRect(canvas, pad_x, bar_y, bar_w, bar_h, bar_h / 2, c.track);
             const clamped = std.math.clamp(if (std.math.isFinite(r.fraction)) r.fraction else 0, 0, 1);
             if (clamped > 0) {
                 const fill_w = @max(bar_h, bar_w * clamped);
@@ -396,7 +414,8 @@ pub const Overlay = struct {
     }
 };
 
-/// Fills a rectangle with rounded corners, anti-aliased.
+/// Fills a rectangle with rounded corners, anti-aliased (blended, if the
+/// colour is see-through).
 fn roundedRect(c: font.Canvas, x: f32, y: f32, w: f32, h: f32, radius: f32, color: u32) void {
     const x0: u32 = @intFromFloat(std.math.clamp(@floor(x), 0, @as(f32, @floatFromInt(c.width))));
     const y0: u32 = @intFromFloat(std.math.clamp(@floor(y), 0, @as(f32, @floatFromInt(c.height))));
@@ -412,7 +431,9 @@ fn roundedRect(c: font.Canvas, x: f32, y: f32, w: f32, h: f32, radius: f32, colo
         const coverage = std.math.clamp(0.5 - outside, 0, 1);
         if (coverage <= 0) continue;
         const p = &c.pixels[py * c.stride + px];
-        p.* = font.text.blend(p.*, color, @intFromFloat(@round(coverage * 255)));
+        // As much as the colour is opaque.
+        const a: f32 = @floatFromInt(color >> 24);
+        p.* = font.text.blend(p.*, color, @intFromFloat(@round(coverage * a)));
     };
 }
 
@@ -470,13 +491,13 @@ test "formatting FPS, CPU, GPU, memory and GPU memory lines" {
     try testing.expectEqualStrings("25%  ·  16 MB / 64 MB", cma_only.gpuMemText());
 }
 
-test "overlay draws background, border and meter bars in the top right" {
+test "overlay draws a see-through box like the dock's, with meter bars, in the bottom right" {
     var o = try Overlay.init(testing.allocator, null, 1920, 1080);
     defer o.deinit(testing.allocator);
     try testing.expectEqual(@as(u32, 280), o.width);
     try testing.expectEqual(@as(u32, 180), o.height);
-    try testing.expectEqual(@as(i32, 1920 - 280 - 16), o.x);
-    try testing.expectEqual(@as(i32, 56), o.y);
+    try testing.expectEqual(@as(i32, 1920 - 280 - 8), o.x);
+    try testing.expectEqual(@as(i32, 1080 - 180 - 8), o.y);
 
     o.draw(.{
         .fps = 60,
@@ -486,20 +507,25 @@ test "overlay draws background, border and meter bars in the top right" {
         .mem_total = 512 * 1024 * 1024,
         .gpu_used = 64 * 1024 * 1024,
         .gpu_total = 128 * 1024 * 1024,
-    });
-    // Border at (0, 0) and background inside.
-    try testing.expectEqual(@as(u32, border_color), o.pixels[0]);
-    try testing.expectEqual(@as(u32, background), o.pixels[4 * o.width + 4]);
+    }, .dark);
+    const box = dock.Theme.dark.colors().background;
+    const track = o.pixels[65 * o.width + o.width - 30];
+    // Rounded: none of it at the corner; the box's colour, see-through,
+    // inside.
+    try testing.expectEqual(@as(u32, 0), o.pixels[0] >> 24);
+    try testing.expectEqual(@as(u32, glass.alpha) << 24 | (box & 0xffffff), o.pixels[o.height / 2 * o.width + 4]);
+    // The tracks are darker than the box, and more opaque.
+    try testing.expect(track >> 24 > glass.alpha and track >> 24 < 0xff);
+    try testing.expect((track & 0xff) < (box & 0xff));
     // First row (FPS = 60, full green bar) at y = 10 + 21 + 2 = 33.
     try testing.expectEqual(@as(u32, fps_color), o.pixels[33 * o.width + o.width / 2]);
     // Second row (CPU = 50%, half blue bar, half track) at y = 10 + 32 + 21 + 2 = 65.
     try testing.expectEqual(@as(u32, cpu_color), o.pixels[65 * o.width + 30]);
-    try testing.expectEqual(@as(u32, track_color), o.pixels[65 * o.width + o.width - 30]);
     // Third row (GPU = 95% >= 90%, high_color) at y = 10 + 64 + 21 + 2 = 97.
     try testing.expectEqual(@as(u32, high_color), o.pixels[97 * o.width + 30]);
     // Fifth row (GPU Memory = 50%, gpu_mem_color) at y = 10 + 128 + 21 + 2 = 161.
     try testing.expectEqual(@as(u32, gpu_mem_color), o.pixels[161 * o.width + 30]);
-    try testing.expectEqual(@as(u32, track_color), o.pixels[161 * o.width + o.width - 30]);
+    try testing.expectEqual(track, o.pixels[161 * o.width + o.width - 30]);
 }
 
 test "monitor samples this machine" {
