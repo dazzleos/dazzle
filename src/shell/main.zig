@@ -159,6 +159,8 @@ fn run(init: std.process.Init.Minimal) !void {
     var perf_monitor: perf_mod.Monitor = .{};
     var perf_shown = false;
     var shortcut_key: ?u32 = null;
+    // The last frame was a window's buffer, shown directly.
+    var shown_directly = false;
     // Super is down, and nothing else has been pressed with it: let go, it
     // was tapped (which shows the overview, or ends it).
     var super_alone = false;
@@ -796,6 +798,13 @@ fn run(init: std.process.Init.Minimal) !void {
                     on_screen = at_once;
                 }
             };
+            // Said when it changes: a window shown directly costs the GPU
+            // nothing more; composited, a copy of it each frame.
+            const now_direct = on_screen != null;
+            if (now_direct != shown_directly) {
+                shown_directly = now_direct;
+                if (now_direct) print("dazzle-shell: showing \"{s}\" directly\n", .{top.?.title()}) else print("dazzle-shell: compositing\n", .{});
+            }
             if (on_screen == null) {
                 var windows: [render.max_windows]render.Window = undefined;
                 if (renderer.composite(frameWindows(&server, &windows))) |timing| {

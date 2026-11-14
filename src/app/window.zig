@@ -58,6 +58,10 @@ const p = wayland.protocol;
 const wire = wayland.wire;
 
 /// What a window needs from the GPU.
+/// How long this process has waited for the GPU to finish its frames,
+/// in all (to see how much of a frame's time is the GPU's).
+pub var gpu_waited_ns: u64 = 0;
+
 pub const Gpu = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
@@ -108,6 +112,8 @@ pub const Gpu = struct {
     fn devWait(ptr: *anyopaque, seqno: u64) anyerror!void {
         if (seqno == 0) return;
         const dev = devOf(ptr);
+        const started = sys.nowNs();
+        defer gpu_waited_ns +%= sys.nowNs() - started;
         dev.waitSeqno(seqno, std.time.ns_per_s) catch |err| {
             if (err != error.TimedOut) return err;
             // Slow, or stuck: the kernel resets a GPU that is stuck, which
