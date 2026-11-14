@@ -978,6 +978,18 @@ test "a window dragged to the left or right edge fills that half, to the top fil
     try testing.expectEqual(@as(?server_mod.Tile, .right), t.tiled);
     try win.redraw(a, shm, @intCast(wa.width - wa.width / 2), @intCast(wa.height));
     try testing.expectEqual(wa.x + @as(i32, @intCast(wa.width / 2)), w.server.windowRect(t).x);
+
+    // Asking to be wider than half, it is still told half; drawn wider
+    // anyway, it is cut to its half.
+    m = try win.toplevel.request(p.xdg_toplevel.request.set_min_size);
+    m.int(@intCast(wa.width / 2 + 100)).int(0).end();
+    try w.pump();
+    try testing.expectEqual([2]u32{ wa.width - wa.width / 2, wa.height }, w.server.configuredSize(t));
+    m = try win.toplevel.request(p.xdg_toplevel.request.set_min_size);
+    m.int(0).int(0).end();
+    try win.redraw(a, shm, @intCast(wa.width / 2 + 100), @intCast(wa.height));
+    const wide = w.drawn(&quads);
+    try testing.expectEqual(server_mod.Rect{ .x = wa.x + @as(i32, @intCast(wa.width / 2)), .y = wa.y, .width = wa.width - wa.width / 2, .height = wa.height }, wide[wide.len - 1].clip);
 }
 
 test "pressing in a window keeps the pointer when dragging and releasing outside it, or moving quickly" {

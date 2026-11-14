@@ -1494,9 +1494,11 @@ pub const Server = struct {
         const wa = s.work_area;
         if (t.fullscreen) return .{ s.output.width, s.output.height };
         if (t.maximized) return .{ wa.width, wa.height };
+        // Tiled: exactly half, even if the window asks to be wider (it
+        // would cover the other half).
         if (t.tiled) |side| {
             const r = s.tileRect(side);
-            return .{ s.clampWidth(t, r.width, wa.width), r.height };
+            return .{ r.width, r.height };
         }
         const w = if (t.width != 0) t.width else wa.width / 2;
         const h = if (t.height != 0) t.height else wa.height / 2;
@@ -3261,7 +3263,9 @@ pub const Server = struct {
                 s.addTreeScaled(&list, surf, to, lerpRect(a.from, to, easeInOut(a.k)), rounding(t));
                 continue;
             }
-            s.addTree(&list, surf, clip, .{ .radius = rounding(t), .shadow = true, .shadow_clip = s.work_area });
+            // A tiled window drawn wider than its half is cut to it.
+            const win_clip = if (t.shown_tiled) |side| s.tileRect(side) else clip;
+            s.addTree(&list, surf, win_clip, .{ .radius = rounding(t), .shadow = true, .shadow_clip = s.work_area });
             for (s.popups.items) |pp| if (pp.xdg.surface) |ps| if (s.rootToplevel(ps) == t) s.addTree(&list, ps, clip, .{});
         }
         if (s.drag) |d| if (d.icon) |icon| s.addTree(&list, icon, s.screen(), .{});
