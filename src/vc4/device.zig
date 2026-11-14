@@ -113,6 +113,54 @@ pub const IOCTL_CREATE_BO = drm.IOWR(drm.command_base + 0x03, CreateBo);
 pub const IOCTL_MMAP_BO = drm.IOWR(drm.command_base + 0x04, MmapBo);
 pub const IOCTL_CREATE_SHADER_BO = drm.IOWR(drm.command_base + 0x05, CreateShaderBo);
 pub const IOCTL_GET_PARAM = drm.IOWR(drm.command_base + 0x07, GetParam);
+pub const IOCTL_PERFMON_CREATE = drm.IOWR(drm.command_base + 0x0c, PerfmonCreate);
+pub const IOCTL_PERFMON_DESTROY = drm.IOWR(drm.command_base + 0x0d, PerfmonDestroy);
+pub const IOCTL_PERFMON_GET_VALUES = drm.IOWR(drm.command_base + 0x0e, PerfmonGetValues);
+
+/// The GPU's performance counters (VC4 only: the Pi Zero to Pi 3), from
+/// the kernel's vc4_drm.h. A set of up to `max_counters`, attached to the
+/// jobs to count (`SubmitCl.perfmonid`), adds up what happens in them.
+pub const PerfCounter = enum(u8) {
+    fep_valid_prims_no_render = 0,
+    fep_valid_prims_render = 1,
+    fep_clipped_quads = 2,
+    fep_valid_quads = 3,
+    tlb_quads_not_passing_stencil = 4,
+    tlb_quads_not_passing_z_and_stencil = 5,
+    tlb_quads_passing_z_and_stencil = 6,
+    tlb_quads_zero_coverage = 7,
+    tlb_quads_non_zero_coverage = 8,
+    tlb_quads_written_to_color_buf = 9,
+    plb_prims_outside_viewport = 10,
+    plb_prims_need_clipping = 11,
+    pse_prims_reversed = 12,
+    qpu_idle_cycles = 13,
+    qpu_vertex_coord_shading_cycles = 14,
+    qpu_fragment_shading_cycles = 15,
+    qpu_valid_instruction_cycles = 16,
+    qpu_waiting_tmus_cycles = 17,
+    qpu_waiting_scoreboard_cycles = 18,
+    qpu_waiting_varyings_cycles = 19,
+    qpu_inst_cache_hits = 20,
+    qpu_inst_cache_misses = 21,
+    qpu_uniform_cache_hits = 22,
+    qpu_uniform_cache_misses = 23,
+    tmu_texture_quads = 24,
+    tmu_texture_cache_misses = 25,
+    vpm_vdw_stalled_cycles = 26,
+    vpm_vcd_stalled_cycles = 27,
+    l2_cache_hits = 28,
+    l2_cache_misses = 29,
+};
+pub const max_counters = 16;
+
+const PerfmonCreate = extern struct {
+    id: u32 = 0,
+    ncounters: u32,
+    events: [max_counters]u8 = @splat(0),
+};
+const PerfmonDestroy = extern struct { id: u32 };
+const PerfmonGetValues = extern struct { id: u32, values_ptr: u64 };
 
 // --- V3D (VideoCore VI / BCM2711) ioctls (`include/uapi/drm/v3d_drm.h`) ---
 
@@ -216,7 +264,7 @@ pub const Bo = struct {
 };
 
 fn getV3dParam(fd: linux.fd_t, param: V3dParam) ?u64 {
-    var arg: V3dGetParam = .{ .param = @intFromEnum(param) };
+    var arg: V3dGetParam = .{ .param = @backingInt(param) };
     drm.ioctl(fd, IOCTL_V3D_GET_PARAM, &arg) catch return null;
     return arg.value;
 }
@@ -339,7 +387,7 @@ pub const Device = struct {
     }
 
     pub fn getParam(dev: Device, param: Param) !u64 {
-        var arg: GetParam = .{ .param = @intFromEnum(param) };
+        var arg: GetParam = .{ .param = @backingInt(param) };
         try drm.ioctl(dev.fd, IOCTL_GET_PARAM, &arg);
         return arg.value;
     }
@@ -492,6 +540,28 @@ pub const Device = struct {
         }
         try drm.ioctl(dev.fd, IOCTL_SUBMIT_CL, job);
         return job.seqno;
+    }
+
+    /// A set of performance counters (see `PerfCounter`), counting from 0
+    /// in the jobs it is attached to.
+    pub fn createPerfmon(dev: Device, counters: []const PerfCounter) !u32 {
+        std.debug.assert(counters.len > 0 and counters.len <= max_counters);
+        var arg: PerfmonCreate = .{ .ncounters = @intCast(counters.len) };
+        for (counters, 0..) |c, i| arg.events[i] = @backingInt(c);
+        try drm.ioctl(dev.fd, IOCTL_PERFMON_CREATE, &arg);
+        return arg.id;
+    }
+
+    pub fn destroyPerfmon(dev: Device, id: u32) void {
+        var arg: PerfmonDestroy = .{ .id = id };
+        drm.ioctl(dev.fd, IOCTL_PERFMON_DESTROY, &arg) catch {};
+    }
+
+    /// The counters' totals (one for each counter it was made with), once
+    /// the jobs it was attached to are done.
+    pub fn perfmonValues(dev: Device, id: u32, out: []u64) !void {
+        var arg: PerfmonGetValues = .{ .id = id, .values_ptr = @intFromPtr(out.ptr) };
+        try drm.ioctl(dev.fd, IOCTL_PERFMON_GET_VALUES, &arg);
     }
 
     pub fn waitSeqno(dev: Device, seqno: u64, timeout_ns: u64) !void {
