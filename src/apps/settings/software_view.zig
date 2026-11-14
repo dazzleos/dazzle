@@ -149,7 +149,10 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
         const button: kete.Widget = if (this_busy)
             cx.make(kete.Spinner{ .size = 28 })
         else if (updatable)
-            cx.make(kete.OutlinedButton{ .label = "Update", .icon = .download, .on_press = if (enabled) .of(x.?, AppAct.install) else null })
+            cx.make(kete.Row{ .fill = false, .cross_axis_alignment = .center, .spacing = 8, .children = cx.makeAll(.{
+                kete.OutlinedButton{ .label = "Update", .icon = .download, .on_press = if (enabled) .of(x.?, AppAct.install) else null },
+                kete.OutlinedButton{ .icon = .delete, .destructive = true, .on_press = if (enabled) .of(x.?, AppAct.remove) else null },
+            }) })
         else if (installed)
             cx.make(kete.OutlinedButton{ .icon = .delete, .destructive = true, .on_press = if (enabled) .of(x.?, AppAct.remove) else null })
         else
@@ -770,7 +773,14 @@ test "updates: offered, downloaded, installed, then a restart" {
     settings.apps.updatable = &.{ true, false };
     u.frame(1920, 960, 2, settings);
     try testing.expect(view.findText(u.root.?, "2 updates available") != null);
-    try testing.expect(view.findIcon(u.root.?, .delete) == null);
+    // An app with an update can still be removed: its delete button is
+    // to the right of its Update.
+    const app_delete = view.up(view.findIcon(u.root.?, .delete).?, kete.OutlinedButton).?;
+    const app_update = view.up(view.findText(view.up(app_delete, kete.Row).?, "Update").?, kete.OutlinedButton).?;
+    try testing.expect(app_delete.position()[0] > app_update.position()[0]);
+    view.click(u, app_delete);
+    try testing.expectEqualStrings("dazzle-demo", actions.remove.?.slice());
+    actions = .{};
 
     // Build and kernel details are shown when Dazzle is expanded.
     try testing.expect(view.findText(u.root.?, "de14aa2 (7 October 2026)") == null);
