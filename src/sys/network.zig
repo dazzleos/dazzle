@@ -19,7 +19,7 @@
 //!
 //! and the report:
 //!
-//!     ethernet eth0 b8:27:eb:01:02:03 up carrier 100 static 192.168.1.50/24 192.168.1.1 192.168.1.50 24 192.168.1.1 1024 2048
+//!     ethernet eth0 static 192.168.1.50/24 192.168.1.1 up speed 100 192.168.1.50
 //!     wifi adapter wlan0 b8:27:eb:01:02:03 up
 //!     wifi address dhcp - -
 //!     wifi scanning
@@ -32,9 +32,10 @@
 //! Each line before "end" starts with what it is about: "ethernet" or
 //! "wifi". "status" only reports; "wifi scan" also scans for Wi-Fi networks
 //! if the last scan is old. "ethernet" reports each wired adapter (or "-"
-//! while there is none), its link state, how it gets its address ("dhcp" or
-//! "static"), its current IPv4 address, prefix and gateway, and its RX/TX
-//! byte counters. "wifi adapter" names each Wi-Fi adapter (or "wifi none"
+//! while there is none), how it gets its address ("dhcp", or "static"
+//! with its address, prefix and gateway), "up" if a cable is plugged in
+//! (with the link's speed in Mb/s, if known), and its current IPv4
+//! address. "wifi adapter" names each Wi-Fi adapter (or "wifi none"
 //! says there is none); "wifi address" reports how the Wi-Fi client gets
 //! its address; "wifi scanning" says a scan is under way; each "wifi
 //! network" is one scanned network: its signal in mBm (hundredths of dBm),
@@ -722,6 +723,8 @@ pub const Adapter = struct {
     name_len: u8 = 0,
     mac: [6]u8 = @splat(0),
     up: bool = false,
+    /// A wired adapter's link speed, in Mb/s (0: not known, or not up).
+    speed: u32 = 0,
 
     pub fn name(a: *const Adapter) []const u8 {
         return a.name_buf[0..a.name_len];
@@ -854,7 +857,10 @@ pub const Report = struct {
             .dhcp => w.writeAll("dhcp") catch {},
             .static => |st| w.print("static {f}", .{st}) catch {},
         }
-        if (e.adapter) |*a| if (a.up) w.writeAll(" up") catch {};
+        if (e.adapter) |*a| if (a.up) {
+            w.writeAll(" up") catch {};
+            if (a.speed > 0) w.print(" speed {d}", .{a.speed}) catch {};
+        };
         if (e.address) |ip| w.print(" {d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] }) catch {};
         w.writeAll("\n") catch {};
     }
@@ -959,6 +965,9 @@ pub const Report = struct {
                 while (f.next()) |tok| {
                     if (std.mem.eql(u8, tok, "up")) {
                         if (e.adapter) |*a| a.up = true;
+                    } else if (std.mem.eql(u8, tok, "speed")) {
+                        const mbps = std.fmt.parseInt(u32, f.next() orelse break, 10) catch 0;
+                        if (e.adapter) |*a| a.speed = mbps;
                     } else if (parseIp4(tok)) |ip| {
                         e.address = ip;
                     }
@@ -1361,12 +1370,13 @@ test "the wired adapter's addressing goes through the socket" {
     try testing.expect(Report.parse("ethernet - dhcp\nwifi none\nend\n").?.ethernet.adapter == null);
 
     var r2: Report = .{ .ready = true };
-    var a3: Adapter = .{ .up = true };
+    var a3: Adapter = .{ .up = true, .speed = 100 };
     a3.setName("eth0");
     r2.addEthernet(.{ .adapter = a3, .addressing = .dhcp, .address = .{ 192, 168, 1, 20 } });
     const back2 = Report.parse(r2.write(&out)).?;
     try testing.expect(back2.ethernetCarrier());
     try testing.expect(back2.ethernetConnected());
+    try testing.expectEqual(@as(u32, 100), back2.ethernet.adapter.?.speed);
     try testing.expectEqual(Ip4{ 192, 168, 1, 20 }, back2.ethernet.address.?);
     try testing.expect(back2.ready);
 

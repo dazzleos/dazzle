@@ -271,7 +271,7 @@ comptime {
 const Scanout = struct { bo: vc4.Bo, fb_id: u32 };
 
 /// The shell's own panels on the screen, drawn on the CPU: the dock, the
-/// performance overlay, and the dock's tooltip. Each is see-through in
+/// performance overlay, the dock's tooltip and its quick settings. Each is see-through in
 /// places (its pixels' alpha says where), and drawn blended. On an overlay
 /// plane, it is in a band if it has one (`setPanelBand`), which the plane
 /// fills, with the background drawn behind it; otherwise alone, the
@@ -280,6 +280,8 @@ pub const PanelId = enum {
     dock,
     perf,
     tooltip,
+    /// The dock's quick settings.
+    quick,
 };
 const n_panels = @typeInfo(PanelId).@"enum".field_names.len;
 

@@ -67,6 +67,28 @@ pub fn cutCorners(c: font.Canvas, radius: f32) void {
     }
 }
 
+/// Fills a rectangle with rounded corners, anti-aliased, blended (as
+/// much as the colour is opaque).
+pub fn fillRounded(c: font.Canvas, x: f32, y: f32, w: f32, h: f32, radius: f32, color: u32) void {
+    const x0: u32 = @intFromFloat(std.math.clamp(@floor(x), 0, @as(f32, @floatFromInt(c.width))));
+    const y0: u32 = @intFromFloat(std.math.clamp(@floor(y), 0, @as(f32, @floatFromInt(c.height))));
+    const x1: u32 = @intFromFloat(std.math.clamp(@ceil(x + w), 0, @as(f32, @floatFromInt(c.width))));
+    const y1: u32 = @intFromFloat(std.math.clamp(@ceil(y + h), 0, @as(f32, @floatFromInt(c.height))));
+    const cx = x + w / 2;
+    const cy = y + h / 2;
+    const r = @min(radius, @min(w, h) / 2);
+    const opacity: f32 = @floatFromInt(color >> 24);
+    for (y0..y1) |py| for (x0..x1) |px| {
+        const qx = @abs(@as(f32, @floatFromInt(px)) + 0.5 - cx) - (w / 2 - r);
+        const qy = @abs(@as(f32, @floatFromInt(py)) + 0.5 - cy) - (h / 2 - r);
+        const outside = std.math.hypot(@max(qx, 0), @max(qy, 0)) + @min(@max(qx, qy), 0) - r;
+        const coverage = std.math.clamp(0.5 - outside, 0, 1);
+        if (coverage <= 0) continue;
+        const p = &c.pixels[py * c.stride + px];
+        p.* = font.text.blend(p.*, color, @intFromFloat(@round(coverage * opacity)));
+    };
+}
+
 /// `p` premultiplied by its alpha, as the display's planes take it.
 pub fn premultiply(p: u32) u32 {
     const a = p >> 24;

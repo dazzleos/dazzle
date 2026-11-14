@@ -162,6 +162,7 @@ const Ethernet = struct {
         r.ethernet_len = 0;
         for (e.slots) |slot| if (slot) |*s| {
             var a: proto.Adapter = .{ .mac = s.ifc.mac, .up = s.ifc.carrier() };
+            if (a.up) a.speed = s.ifc.speed();
             a.setName(s.ifc.name());
             r.addEthernet(.{
                 .adapter = a,

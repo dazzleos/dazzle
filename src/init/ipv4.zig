@@ -57,6 +57,14 @@ pub const Interface = struct {
         const c = i.attr("carrier", &buf) orelse return false;
         return std.mem.eql(u8, c, "1");
     }
+
+    /// The link's speed in Mb/s (0: not known: down, or not reported).
+    pub fn speed(i: *const Interface) u32 {
+        var buf: [16]u8 = undefined;
+        const s = i.attr("speed", &buf) orelse return 0;
+        const mbps = std.fmt.parseInt(i64, s, 10) catch return 0;
+        return if (mbps > 0) @intCast(@min(mbps, std.math.maxInt(u32))) else 0;
+    }
 };
 
 /// All wired Ethernet interfaces (sysfs type 1, not Wi-Fi), sorted by name.

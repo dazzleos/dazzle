@@ -128,4 +128,7 @@ pub const Icon = enum {
     palette,
     dark_mode,
     light_mode,
+    // The dock's quick settings.
+    power_settings_new,
+    wifi_off,
 };

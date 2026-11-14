@@ -41,6 +41,7 @@ const dock_mod = @import("dock.zig");
 const background_mod = @import("background.zig");
 const updates_mod = @import("updates.zig");
 const perf_mod = @import("perf.zig");
+const quick_mod = @import("quick.zig");
 const keyboard = @import("keyboard.zig");
 const screenshot = @import("screenshot.zig");
 const audio = @import("audio");
@@ -108,17 +109,28 @@ fn run(init: std.process.Init.Minimal) !void {
     defer apps_watch.deinit();
     for (apps) |app| print("dazzle-shell: app {s} ({s})\n", .{ app.label, app.path });
     var dock = try dock_mod.Dock.init(gpa, ui_font, apps, renderer.width, renderer.height);
+    // The quick settings, over the status box when it is clicked: the
+    // volume, the network, updates and powering off.
+    var quick = try quick_mod.Quick.init(gpa, ui_font, dock.scale);
+    // It needs drawing again (while shown).
+    var quick_dirty = false;
+    // The touch dragging its slider.
+    var quick_touch: ?i32 = null;
+    var audio_devices = audio.listDevices();
     var net_sub: sys.network.Subscription = .{};
     defer net_sub.deinit();
     net_sub.connect();
     var sys_sub: sys.system.Subscription = .{};
     defer sys_sub.deinit();
     sys_sub.connect();
-    dock.network = if (net_sub.poll()) |r| dock_mod.networkStatusFromReport(r) else dock_mod.readNetworkStatus();
+    if (net_sub.poll()) |r| {
+        dock.network = dock_mod.networkStatusFromReport(r);
+        quick.network = .fromReport(&r);
+    } else dock.network = dock_mod.readNetworkStatus();
     // The bytes moved so far, to see each second whether data is moving.
     var traffic = dock_mod.readTraffic();
     const initial_sound = audio.loadSettings();
-    audio.applySettings(initial_sound, &audio.listDevices());
+    audio.applySettings(initial_sound, &audio_devices);
     dock.volume = .{ .volume = initial_sound.volume, .muted = initial_sound.muted };
     // Updates of the system and the apps: checked for a minute from now,
     // then daily.
@@ -147,6 +159,7 @@ fn run(init: std.process.Init.Minimal) !void {
     var perf_frames: u32 = 0;
     var perf_gpu_ns: u64 = 0;
     renderer.setPanelHidden(.perf, true);
+    renderer.setPanelHidden(.quick, true);
 
     // On the first run (--setup), the setup app has the whole screen, and
     // the dock shows once it has finished.
@@ -296,6 +309,8 @@ fn run(init: std.process.Init.Minimal) !void {
         };
         if (fds[net_index].revents != 0) {
             if (net_sub.poll()) |r| if (!r.denied) {
+                quick.network = .fromReport(&r);
+                quick_dirty = true;
                 const net = dock_mod.networkStatusFromReport(r);
                 if (!std.meta.eql(net, dock.network)) {
                     dock.network = net;
@@ -387,6 +402,13 @@ fn run(init: std.process.Init.Minimal) !void {
                         shortcut_key = null;
                         continue;
                     }
+                    // Escape closes the quick settings.
+                    if (e.key.pressed and e.key.code == evdev.key_esc and quick.shown) {
+                        shortcut_key = e.key.code;
+                        quick.close();
+                        panels_damaged = true;
+                        continue;
+                    }
                     if (e.key.pressed and (server.modifiers.depressed() & keyboard.mod4) != 0) {
                         if (e.key.code == evdev.key_i) {
                             shortcut_key = e.key.code;
@@ -421,7 +443,20 @@ fn run(init: std.process.Init.Minimal) !void {
                     const y = t.y * @as(f64, @floatFromInt(renderer.height - 1));
                     const on_dock = dock_visible and dock.local(x, y) != null;
                     switch (t.kind) {
-                        .down => if (on_dock) {
+                        .down => if (quick.local(x, y)) |at| {
+                            // On the quick settings: pressed there, and
+                            // the slider dragged along.
+                            dock_touches.set(t.id);
+                            const action = quick.press(at[0], at[1]);
+                            if (quick.dragging) quick_touch = t.id;
+                            quickAction(action, &quick, &dock, &renderer, apps, &server, runtime_dir, &audio_devices, &quick_dirty);
+                        } else if (quick.shown and !(on_dock and dock.hitStatus((dock.local(x, y) orelse continue)[0], dock.local(x, y).?[1]))) {
+                            // Elsewhere, it closes (the status box toggles
+                            // it, below), and that is all the touch does.
+                            dock_touches.set(t.id);
+                            quick.close();
+                            panels_damaged = true;
+                        } else if (on_dock) {
                             dock_touches.set(t.id);
                             dock_tap = .{ x, y };
                         } else if (server.overview) {
@@ -430,12 +465,42 @@ fn run(init: std.process.Init.Minimal) !void {
                             dock_touches.set(t.id);
                             if (server.overviewAt(x, y)) |win| server.overviewPick(win) else server.setOverview(false);
                         } else server.touchDown(time_ms, t.id, x, y),
-                        .motion => if (!dock_touches.has(t.id)) server.touchMotion(time_ms, t.id, x, y),
-                        .up => if (!dock_touches.unset(t.id)) server.touchUp(time_ms, t.id),
+                        .motion => if (quick_touch == t.id) {
+                            if (quick.drag(x - @as(f64, @floatFromInt(quick.x)))) |v| setVolume(v, false, &quick, &dock, &renderer, &audio_devices, &quick_dirty);
+                        } else if (!dock_touches.has(t.id)) server.touchMotion(time_ms, t.id, x, y),
+                        .up => {
+                            if (quick_touch == t.id) {
+                                quick_touch = null;
+                                if (quick.release()) setVolume(quick.volume, true, &quick, &dock, &renderer, &audio_devices, &quick_dirty);
+                            }
+                            if (!dock_touches.unset(t.id)) server.touchUp(time_ms, t.id);
+                        },
                     }
                     if (dock_tap == null) continue;
                 }
                 if (e == .button) pointer.flushMotion(&server, time_ms);
+                // While the quick settings are shown, the left button is
+                // theirs: pressed on them, it does what is there; pressed
+                // elsewhere (but the status box, which toggles them), it
+                // closes them and does nothing more. Let go, the slider is.
+                if (dock_tap == null and quick.shown and e == .button and e.button.code == evdev.btn_left) {
+                    if (!e.button.pressed) {
+                        if (quick.release()) {
+                            setVolume(quick.volume, true, &quick, &dock, &renderer, &audio_devices, &quick_dirty);
+                            continue;
+                        }
+                    } else if (quick.local(pointer.x, pointer.y)) |at| {
+                        quickAction(quick.press(at[0], at[1]), &quick, &dock, &renderer, apps, &server, runtime_dir, &audio_devices, &quick_dirty);
+                        continue;
+                    } else {
+                        const on_status = if (dock_visible) if (dock.local(pointer.x, pointer.y)) |at| dock.hitStatus(at[0], at[1]) else false else false;
+                        if (!on_status) {
+                            quick.close();
+                            panels_damaged = true;
+                            continue;
+                        }
+                    }
+                }
                 // Buttons pressed over the dock (when not dragging) are the shell's.
                 if (dock_tap != null or (dock_visible and e == .button and e.button.pressed and server.grab == null and server.drag == null and server.buttons_down == 0 and dock.local(pointer.x, pointer.y) != null)) {
                     if (dock_tap == null and e.button.code != evdev.btn_left) continue;
@@ -445,15 +510,17 @@ fn run(init: std.process.Init.Minimal) !void {
                     if (dock.tooltip_shown != null) panels_damaged = true;
                     dock.dismissTooltip();
                     server.setOverview(false);
-                    // The update icon: Settings' Software page, to update.
-                    if (dock.hitUpdates(at[0], at[1])) {
-                        for (apps) |*a| if (std.mem.eql(u8, a.name, "dazzle-settings")) {
-                            if (openAt(a, "apps", &server, runtime_dir)) {
-                                dock.draw();
-                                showDock(&renderer, &dock);
-                                panels_damaged = true;
-                            }
-                        };
+                    // The status box: the quick settings open, or close.
+                    if (dock.hitStatus(at[0], at[1])) {
+                        if (quick.shown) {
+                            quick.close();
+                        } else {
+                            // Sound cards plugged in since are set too.
+                            audio_devices = audio.listDevices();
+                            quick.shown = true;
+                            quick_dirty = true;
+                        }
+                        panels_damaged = true;
                         continue;
                     }
                     const i = dock.hit(at[0], at[1]) orelse continue;
@@ -476,6 +543,10 @@ fn run(init: std.process.Init.Minimal) !void {
                 pointer.moved = false;
                 renderer.moveCursor(@intFromFloat(pointer.x), @intFromFloat(pointer.y));
             }
+            // The slider follows the pointer while it is dragged; the
+            // quick settings highlight what is under it.
+            if (quick.drag(pointer.x - @as(f64, @floatFromInt(quick.x)))) |v| setVolume(v, false, &quick, &dock, &renderer, &audio_devices, &quick_dirty);
+            if (quick.pointerAt(if (server.grab == null and server.drag == null) quick.local(pointer.x, pointer.y) else null)) quick_dirty = true;
             const in_dock = dock_visible and server.grab == null and server.drag == null and server.buttons_down == 0;
             const on = if (in_dock) dock.local(pointer.x, pointer.y) else null;
             if (dock.pointerAt(if (on) |l| l[0] else null, if (on) |l| l[1] else 0, sys.nowNs())) {
@@ -550,8 +621,9 @@ fn run(init: std.process.Init.Minimal) !void {
         const t_now = sys.nowNs();
         if (apps_changes.sound) {
             const vol = dock_mod.readVolumeStatus();
-            if (!std.meta.eql(vol, dock.volume)) {
+            if (!std.meta.eql(vol, dock.volume) and !quick.dragging) {
                 dock.volume = vol;
+                quick_dirty = true;
                 if (dock_shown) {
                     dock.draw();
                     showDock(&renderer, &dock);
@@ -563,6 +635,7 @@ fn run(init: std.process.Init.Minimal) !void {
             const chosen = dock_mod.readAppearance();
             if (chosen.theme != dock.theme) {
                 dock.theme = chosen.theme;
+                quick_dirty = true;
                 if (dock_shown) {
                     dock.draw();
                     showDock(&renderer, &dock);
@@ -596,6 +669,8 @@ fn run(init: std.process.Init.Minimal) !void {
             if (net_sub.fd == null) {
                 net_sub.connect();
                 if (net_sub.poll()) |r| if (!r.denied) {
+                    quick.network = .fromReport(&r);
+                    quick_dirty = true;
                     const net = dock_mod.networkStatusFromReport(r);
                     if (!std.meta.eql(net, dock.network)) {
                         dock.network = net;
@@ -630,8 +705,28 @@ fn run(init: std.process.Init.Minimal) !void {
             }
         }
 
+        // Gone with the dock (a fullscreen window came on top); or drawn
+        // again, as it is now.
+        if (quick.shown and (!dock_shown or server.fullscreenTop())) {
+            quick.close();
+            panels_damaged = true;
+        }
+        if (quick_dirty) panels_damaged = true;
+        if (quick_dirty and quick.shown) {
+            quick.theme = dock.theme;
+            quick.volume = dock.volume;
+            quick.updates = .of(updates.system, updates.apps_newer);
+            quick.draw();
+            const box = dock.place();
+            const status = dock.statusRect();
+            quick.place(box.x + @as(i32, @intFromFloat(@round(status.x + status.width))), box.y, renderer.width);
+            renderer.setPanelAt(.quick, quick.picture(), quick.width, quick.height, quick.x, quick.y);
+            panels_damaged = true;
+        }
+        quick_dirty = false;
         if (updates_changed) {
             dock.updates = updates.available;
+            quick_dirty = true;
             print("dazzle-shell: {s}\n", .{if (updates.available) "updates available" else "up to date"});
             if (dock_shown) {
                 dock.draw();
@@ -661,6 +756,7 @@ fn run(init: std.process.Init.Minimal) !void {
             renderer.setPanelHidden(.dock, !dock_shown or dock.offScreen());
             renderer.setPanelHidden(.tooltip, !dock_shown or server.fullscreenTop() or dock.slide > 0 or dock.tooltip_shown == null);
             renderer.setPanelHidden(.perf, !perf_shown);
+            renderer.setPanelHidden(.quick, !quick.shown);
             // A maximized, full-size window on top goes straight onto the
             // display, with the dock on a plane below it; a fullscreen one,
             // alone. Otherwise (or if the display cannot show it) the frame
@@ -907,6 +1003,58 @@ fn wantBackground(loader: *background_mod.Loader, renderer: *render.Renderer, a:
     loader.want(path, if (path != null) renderer.backgroundKind() else .rgb565);
 }
 
+/// Sets the volume (as the quick settings' slider or mute say): on the
+/// sound cards at once, and kept (`save`) once it is chosen (not while the
+/// slider is still dragged).
+fn setVolume(v: dock_mod.VolumeStatus, save: bool, quick: *quick_mod.Quick, dock: *dock_mod.Dock, renderer: *render.Renderer, devices: *const audio.Devices, quick_dirty: *bool) void {
+    var s = audio.loadSettings();
+    s.volume = v.volume;
+    s.muted = v.muted;
+    audio.applySettings(s, devices);
+    if (save) audio.saveSettings(s);
+    dock.volume = v;
+    quick.volume = v;
+    quick_dirty.* = true;
+    dock.draw();
+    showDock(renderer, dock);
+}
+
+/// Does what pressing the quick settings asked.
+fn quickAction(
+    action: quick_mod.Quick.Action,
+    quick: *quick_mod.Quick,
+    dock: *dock_mod.Dock,
+    renderer: *render.Renderer,
+    apps: []dock_mod.App,
+    server: *server_mod.Server,
+    runtime_dir: ?[:0]const u8,
+    devices: *const audio.Devices,
+    quick_dirty: *bool,
+) void {
+    switch (action) {
+        .none => {},
+        .redraw => quick_dirty.* = true,
+        .volume => |v| setVolume(v, !quick.dragging, quick, dock, renderer, devices, quick_dirty),
+        // Settings' Software page, to update.
+        .updates => {
+            quick.close();
+            quick_dirty.* = true;
+            for (apps) |*a| if (std.mem.eql(u8, a.name, "dazzle-settings")) {
+                if (openAt(a, "apps", server, runtime_dir)) {
+                    dock.draw();
+                    showDock(renderer, dock);
+                }
+            };
+        },
+        .power_off => {
+            print("dazzle-shell: powering off\n", .{});
+            if (sys.system.ask("power_off\n", 3000) == null) print(sys.log_warning ++ "dazzle-shell: cannot power off: the system did not answer\n", .{});
+            quick.power_armed = false;
+            quick_dirty.* = true;
+        },
+    }
+}
+
 /// Gives the renderer the dock's latest picture, where it is.
 fn showDock(renderer: *render.Renderer, dock: *const dock_mod.Dock) void {
     const at = dock.place();
@@ -1045,6 +1193,7 @@ test {
     _ = @import("dock.zig");
     _ = @import("updates.zig");
     _ = @import("perf.zig");
+    _ = @import("quick.zig");
     _ = @import("glass.zig");
     _ = @import("screenshot.zig");
     _ = @import("keyboard.zig");

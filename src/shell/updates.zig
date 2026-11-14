@@ -29,8 +29,10 @@ pub const Updates = struct {
     /// What the system manager last said (which slots hold what).
     report: ?sys.system.Report = null,
     next_check: u64,
-    /// There is an update, of the system or an app.
+    /// There is an update, of the system or an app; and which.
     available: bool = false,
+    system: bool = false,
+    apps_newer: bool = false,
 
     /// Starts watching for updates (in place: `apps` keeps a pointer into
     /// `url_buf`). The first check is in a minute.
@@ -47,7 +49,7 @@ pub const Updates = struct {
 
     /// Starts the check when it is due, and follows it (the shell's reaper
     /// may reap its child first: the job still reads its result). Returns
-    /// whether `available` changed.
+    /// whether what there are updates of changed.
     pub fn tick(u: *Updates, now: u64) bool {
         if (now >= u.next_check and u.apps.job == null) {
             u.next_check = now + check_every_ns;
@@ -60,25 +62,27 @@ pub const Updates = struct {
         return false;
     }
 
-    /// What the system manager says now. Returns whether `available`
-    /// changed.
+    /// What the system manager says now. Returns whether what there are
+    /// updates of changed.
     pub fn setReport(u: *Updates, r: sys.system.Report) bool {
         u.report = r;
         return u.recompute();
     }
 
     /// The catalogue, os.json or the apps changed (Settings fetched them,
-    /// or installed or removed apps): read again. Returns whether
-    /// `available` changed.
+    /// or installed or removed apps): read again. Returns whether what
+    /// there are updates of changed.
     pub fn reload(u: *Updates) bool {
         u.apps.loadCatalogue();
         return u.recompute();
     }
 
     fn recompute(u: *Updates) bool {
-        const was = u.available;
-        u.available = appsNewer(store.apps_dir, u.apps.apps()) or u.systemNewer();
-        return u.available != was;
+        const was = .{ u.system, u.apps_newer };
+        u.apps_newer = appsNewer(store.apps_dir, u.apps.apps());
+        u.system = u.systemNewer();
+        u.available = u.system or u.apps_newer;
+        return u.system != was[0] or u.apps_newer != was[1];
     }
 
     fn systemNewer(u: *const Updates) bool {

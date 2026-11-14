@@ -18,6 +18,8 @@
 //!                              into the slot not in use, and start that
 //!                              slot next time (settings)
 //!     restart                  restart the computer (settings)
+//!     power_off                turn the computer off (the shell's quick
+//!                              settings, and settings)
 //!     locale <language> <keyboard>
 //!                              the language and keyboard (setup and
 //!                              settings): kept in /data/system/locale
@@ -165,6 +167,7 @@ pub const Request = union(enum) {
     finish: Hostname,
     update: Update,
     restart,
+    power_off,
     locale: locale.Settings,
     /// In MiB, one of `video_memory_sizes`.
     video_memory: u16,
@@ -180,6 +183,7 @@ pub const Request = union(enum) {
         if (std.mem.eql(u8, kind, "hostname")) return .{ .hostname = Hostname.parse(f.next() orelse return null) orelse return null };
         if (std.mem.eql(u8, kind, "finish")) return .{ .finish = Hostname.parse(f.next() orelse return null) orelse return null };
         if (std.mem.eql(u8, kind, "restart")) return .restart;
+        if (std.mem.eql(u8, kind, "power_off")) return .power_off;
         if (std.mem.eql(u8, kind, "locale")) return .{ .locale = .{
             .language = locale.Language.fromCode(f.next() orelse return null) orelse return null,
             .keyboard = locale.Keyboard.fromCode(f.next() orelse return null) orelse return null,
@@ -211,6 +215,7 @@ pub const Request = union(enum) {
             .prepare, .hostname, .finish => client == .setup,
             .update, .restart, .video_memory, .log_server => client == .settings,
             .locale => client == .setup or client == .settings,
+            .power_off => client == .shell or client == .settings,
         };
     }
 };
@@ -563,6 +568,10 @@ test "requests and reports go through the socket" {
     try testing.expect(Request.parse("finish Bad!\n") == null);
     try testing.expect(Request.parse("reboot\n") == null);
     try testing.expect(Request.parse("restart\n").? == .restart);
+    try testing.expect(Request.parse("power_off\n").? == .power_off);
+    try testing.expect(Request.allowedFor(.power_off, .shell));
+    try testing.expect(Request.allowedFor(.power_off, .settings));
+    try testing.expect(!Request.allowedFor(.power_off, .setup));
     const sum = "F3e817e51826f4ca7b7d334af8f857d9c42416073f44c7429e1bfda7f097a753";
     const sig = "A1" ++ comptimeRepeat("02", 63);
     const upd = Request.parse("update " ++ sum ++ " " ++ sig ++ "\n").?.update;

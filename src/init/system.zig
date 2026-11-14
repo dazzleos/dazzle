@@ -7,10 +7,11 @@
 //! mounting it and setting the hostname (CAP_SYS_ADMIN), writing the card's
 //! device, the root-owned /data and the boot partition (CAP_DAC_OVERRIDE),
 //! giving /data/system to root (CAP_CHOWN), and restarting the computer
-//! (CAP_SYS_BOOT). It listens on /os/sockets/system (see `sys.system` for
-//! the protocol) and answers only the setup and settings apps, each only
-//! what is theirs to ask: the program the connecting process runs must be
-//! /os/shell/dazzle-setup or /os/shell/dazzle-settings.
+//! or turning it off (CAP_SYS_BOOT). It listens on /os/sockets/system (see
+//! `sys.system` for the protocol) and answers only the setup and settings
+//! apps and the shell, each only what is theirs to ask: the program the
+//! connecting process runs must be /os/shell/dazzle-setup,
+//! /os/shell/dazzle-settings or the shell.
 //!
 //! Preparing (asked for when setup starts, so it goes on while the user
 //! fills in the pages): a partition after the system's to the end of the
@@ -106,6 +107,9 @@ const Manager = struct {
     finished: bool = false,
     /// Settings asked to restart (once it has its answer).
     restart: bool = false,
+    /// The shell (or Settings) asked to turn the computer off (once it has
+    /// its answer).
+    power_off: bool = false,
     /// The log server's process (a pidfd), told when its setting changes.
     log_server: ?linux.fd_t = null,
 
@@ -225,6 +229,7 @@ const Manager = struct {
                 c.* = null;
             }
             if (m.restart) restart();
+            if (m.power_off) powerOff();
         }
     }
 
@@ -239,6 +244,7 @@ const Manager = struct {
             .finish => |h| m.finish(h),
             .update => |u| m.startUpdate(u),
             .restart => m.restart = true,
+            .power_off => m.power_off = true,
             .locale => |l| {
                 m.report.locale = l;
                 if (m.report.storage == .ready) m.keepLocale();
@@ -511,6 +517,15 @@ fn restart() noreturn {
     linux.sync();
     _ = linux.reboot(.MAGIC1, .MAGIC2, .RESTART, null);
     print(sys.log_warning ++ "dazzle: system: cannot restart\n", .{});
+    linux.exit(1);
+}
+
+/// Turns the computer off: what is written goes to the card first.
+fn powerOff() noreturn {
+    print("dazzle: system: turning off\n", .{});
+    linux.sync();
+    _ = linux.reboot(.MAGIC1, .MAGIC2, .POWER_OFF, null);
+    print(sys.log_warning ++ "dazzle: system: cannot turn off\n", .{});
     linux.exit(1);
 }
 
