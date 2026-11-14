@@ -1,6 +1,6 @@
 //! The Appearance page: system colour scheme (Dark or Light), and the
-//! desktop's background: one of the built-in photos, picked here, or a
-//! picture chosen in Files.
+//! desktop's background: one of the built-in photos, picked here (or a
+//! picture chosen in Files).
 
 const std = @import("std");
 const kete = @import("kete");
@@ -92,7 +92,6 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
         .children = cx.makeAll(.{
             b.label("Background"),
             photoRow(cx, self, state),
-            imageRow(cx, self),
         }),
     })) catch {};
 
@@ -113,7 +112,7 @@ fn photoRow(cx: *kete.BuildContext, self: *const Settings, state: *State) kete.W
                 .child = cx.make(kete.RoundedBox{
                     .border_width = if (is_chosen) ring else 0,
                     .border_color = if (is_chosen) t.primary else null,
-                    .radius = .all(4 + ring + ring_gap),
+                    .radius = .all(tile_radius + ring + ring_gap),
                     .child = cx.make(kete.Padding{
                         .padding = .all(ring + ring_gap),
                         .child = cx.make(kete.SizedBox{
@@ -142,26 +141,34 @@ fn thumbnail(comptime i: usize) ?*const gfx.Image {
         defer std.heap.smp_allocator.free(decoded.pixels);
         if (decoded.width != builtin.thumbnail_width or decoded.height != builtin.thumbnail_height) return null;
         @memcpy(&thumbnail_pixels[i], decoded.pixels);
+        roundCorners(&thumbnail_pixels[i], decoded.width, decoded.height, tile_radius);
         thumbnails[i] = .init(&thumbnail_pixels[i], decoded.width, decoded.height);
     }
     return &thumbnails[i].?;
 }
 
-/// The background chosen: a built-in photo by name and who took it, or a
-/// picture chosen in Files by its file's name; and where another is chosen.
-fn imageRow(cx: *kete.BuildContext, self: *const Settings) kete.Widget {
-    const t = cx.theme();
-    const path = self.appearance.image.slice() orelse "";
-    const name = if (builtin.find(path)) |bg|
-        cx.fmt("{s}, a photo by {s} on Unsplash", .{ bg.name, bg.photographer })
-    else
-        path[if (std.mem.lastIndexOfScalar(u8, path, '/')) |slash| slash + 1 else 0..];
-    return cx.make(kete.Column{ .cross_axis_alignment = .start, .spacing = 4, .children = cx.makeAll(.{
-        kete.Text{ .text = name, .style = .{ .size = 15, .color = t.on_surface }, .wrap = false, .ellipsis = true },
-        kete.Text{ .text = "Or choose a picture of your own in Files (Set as background)", .style = .{ .size = 15, .color = t.on_surface_variant } },
-    }) });
+/// Makes the corners of `pixels` (`w` by `h`), outside a rounded rectangle
+/// of `radius`, see-through (anti-aliased).
+fn roundCorners(pixels: []u32, w: u32, h: u32, radius: f32) void {
+    const fw: f32 = @floatFromInt(w);
+    const fh: f32 = @floatFromInt(h);
+    const n: u32 = @intFromFloat(@ceil(radius));
+    for (0..h) |py| {
+        if (py >= n and py + n < h) continue;
+        for (0..w) |px| {
+            if (px >= n and px + n < w) continue;
+            const qx = @abs(@as(f32, @floatFromInt(px)) + 0.5 - fw / 2) - (fw / 2 - radius);
+            const qy = @abs(@as(f32, @floatFromInt(py)) + 0.5 - fh / 2) - (fh / 2 - radius);
+            const outside = std.math.hypot(@max(qx, 0), @max(qy, 0)) + @min(@max(qx, qy), 0) - radius;
+            const coverage = std.math.clamp(0.5 - outside, 0, 1);
+            const p = &pixels[py * w + px];
+            p.* = (p.* & 0x00ffffff) | @as(u32, @intFromFloat(@round(coverage * 255))) << 24;
+        }
+    }
 }
 
+/// The radius of a photo tile's corners.
+const tile_radius = 10;
 /// The ring around the chosen photo, and the gap inside it.
 const ring = 3;
 const ring_gap = 3;
@@ -208,7 +215,7 @@ test "Appearance page toggles between Dark and Light theme" {
     try testing.expectEqual(appearance_settings.Mode.dark, actions.appearance.?.theme);
 }
 
-test "a built-in photo is picked as the background, shown by its thumbnail and named with who took it" {
+test "a built-in photo is picked as the background, shown by its rounded thumbnail" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
     const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
@@ -228,7 +235,9 @@ test "a built-in photo is picked as the background, shown by its thumbnail and n
     }
     try testing.expect(ringed(u.root.?, "Forest"));
     try testing.expect(!ringed(u.root.?, "Seashore"));
-    try testing.expect(view.findText(u.root.?, "Forest, a photo by Dan Otis on Unsplash") != null);
+    // Rounded: see-through at the corners.
+    try testing.expectEqual(@as(u32, 0), thumbnail(0).?.pixels[0] >> 24);
+    try testing.expectEqual(@as(u32, 0xff), thumbnail(0).?.pixels[builtin.thumbnail_width * 30 + 50] >> 24);
 
     view.click(u, findTile(u.root.?, "Seashore").?.child(0));
     try testing.expectEqualStrings("/os/backgrounds/seashore.etc1", actions.appearance.?.image.slice().?);
@@ -237,9 +246,8 @@ test "a built-in photo is picked as the background, shown by its thumbnail and n
     try testing.expect(ringed(u.root.?, "Seashore"));
     try testing.expect(!ringed(u.root.?, "Forest"));
 
-    // A picture chosen in Files: named by its file; no photo ringed.
+    // A picture chosen in Files: no photo ringed.
     settings.appearance = .{ .image = .of("/data/user/Pictures/sea.png") };
     u.frame(1280, 720, 4, settings);
-    try testing.expect(view.findText(u.root.?, "sea.png") != null);
     inline for (builtin.all) |bg| try testing.expect(!ringed(u.root.?, bg.name));
 }
