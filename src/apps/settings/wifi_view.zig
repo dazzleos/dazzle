@@ -185,26 +185,28 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
         cx.make(kete.Padding{ .padding = .{ .top = 19 }, .child = b.label("Network") })
     else
         b.label("Network");
+    // The networks scroll in their card, which takes the height left;
+    // the rest of the page stays where it is.
     const net_content = if (nets.len > 0)
         cx.make(kete.Card{
             .variant = .outlined,
             .padding = .all(4),
-            .child = cx.make(kete.Column{
+            .child = cx.make(kete.ScrollView{ .child = cx.make(kete.Column{
                 .fill = false,
                 .cross_axis_alignment = .stretch,
                 .children = list_rows.items,
-            }),
+            }) }),
         })
     else if (!report.scanning)
         b.value("No networks found")
     else
         cx.make(kete.SizedBox.empty);
-    rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .start, .spacing = 12, .children = &.{
+    rows.append(a, cx.make(kete.Expanded{ .child = cx.make(kete.Row{ .cross_axis_alignment = .start, .spacing = 12, .children = &.{
         net_label,
         cx.make(kete.Expanded{ .child = net_content }),
-    } })) catch {};
+    } }) })) catch {};
 
-    return b.scroll(.wifi, b.page(rows.items));
+    return b.fixed(.wifi, rows.items);
 }
 
 const PickAdapter = struct {
@@ -1237,6 +1239,19 @@ test "the Wi-Fi page says when it cannot list networks" {
         view.texts(u.root.?, &all);
         try testing.expect(std.mem.indexOf(u8, all.items, case[1]) != null);
     }
+}
+
+test "only the networks scroll; the rest of the Wi-Fi page stays where it is" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
+    defer u.destroy();
+    const d = view.sample();
+    const wifi = view.sampleWifi();
+    u.frame(1280, 720, 1, Settings{ .commit = "x", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi });
+    u.frame(1280, 720, 2, Settings{ .commit = "x", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi });
+    try testing.expect(view.up(view.findText(u.root.?, "MAC address").?, kete.ScrollView) == null);
+    try testing.expect(view.up(view.findText(u.root.?, "Home").?, kete.ScrollView) != null);
+    try testing.expect(!view.overflows(u.root.?));
 }
 
 test "SSIDs that are not text are shown readably" {
