@@ -2053,3 +2053,26 @@ test "a window maximized, restored or fullscreen is drawn on its way from where 
     try testing.expect(t.anim == null);
     try testing.expectEqual(@as(u32, 0), w.renderer.live);
 }
+
+test "the pointer over the shell's parts of the screen (the dock) is no window's" {
+    var w: World = .{};
+    w.init();
+    defer w.deinit();
+    const a = try w.connect();
+    const compositor = try a.bind(p.wl_compositor.name, 4, null);
+    const wm_base = try a.bind(p.xdg_wm_base.name, 6, null);
+    const shm = try a.bind(p.wl_shm.name, 1, null);
+    var win: Window = .{ .surface = undefined, .xdg = undefined, .toplevel = undefined };
+    try win.open(a, compositor, wm_base, shm, null);
+    w.server.pointerMotion(1, 400, 500);
+    try testing.expectEqual(win.surface.id, w.server.pointer_focus.?.id);
+    // The dock comes over the window there: the pointer leaves it, and
+    // the window's cursor is not shown.
+    w.server.shell_areas[0] = .{ .x = 300, .y = 450, .width = 200, .height = 100 };
+    w.server.updateFocus();
+    try testing.expect(w.server.pointer_focus == null);
+    try testing.expectEqual(Server.Cursor.arrow, w.server.cursor());
+    // Off the dock, the window has it again.
+    w.server.pointerMotion(2, 400, 200);
+    try testing.expectEqual(win.surface.id, w.server.pointer_focus.?.id);
+}

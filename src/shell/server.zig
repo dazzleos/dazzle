@@ -689,6 +689,10 @@ pub const Server = struct {
     toplevels: std.ArrayList(*Toplevel) = .empty,
     /// Where windows go.
     work_area: Rect,
+    /// The shell's own parts of the screen, over the windows (the dock,
+    /// its quick settings): the pointer there is the shell's, not a
+    /// window's (none has it, and the shell picks its cursor).
+    shell_areas: [2]?Rect = @splat(null),
     serial: u32 = 0,
     /// Something visible changed since the last frame.
     damaged: bool = true,
@@ -4318,13 +4322,17 @@ pub const Server = struct {
     }
 
     /// The surface at (`x`, `y`) on the screen, if any: the top one there.
+    fn rectHas(r: Rect, x: f64, y: f64) bool {
+        return x >= @as(f64, @floatFromInt(r.x)) and y >= @as(f64, @floatFromInt(r.y)) and
+            x < @as(f64, @floatFromInt(r.x + @as(i32, @intCast(r.width)))) and
+            y < @as(f64, @floatFromInt(r.y + @as(i32, @intCast(r.height))));
+    }
+
     fn surfaceAt(s: *Server, x: f64, y: f64) ?*Surface {
-        // Windows can be anywhere on the screen (the shell takes what is
-        // on the dock, over them, first).
-        const wa = s.screen();
-        if (x < @as(f64, @floatFromInt(wa.x)) or y < @as(f64, @floatFromInt(wa.y)) or
-            x >= @as(f64, @floatFromInt(wa.x + @as(i32, @intCast(wa.width)))) or
-            y >= @as(f64, @floatFromInt(wa.y + @as(i32, @intCast(wa.height))))) return null;
+        // Windows can be anywhere on the screen, but the shell's parts of
+        // it are over them.
+        if (!rectHas(s.screen(), x, y)) return null;
+        for (s.shell_areas) |area| if (area) |r| if (rectHas(r, x, y)) return null;
         var i = s.toplevels.items.len;
         while (i > 0) {
             i -= 1;

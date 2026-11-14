@@ -614,7 +614,12 @@ fn run(init: std.process.Init.Minimal) !void {
         if (server.damaged) client_frame_ns = sys.nowNs();
 
         // The window under the pointer, and the one with the keyboard, may
-        // have changed.
+        // have changed; the pointer over the dock or its quick settings is
+        // the shell's.
+        server.shell_areas = .{
+            if (dock_shown and !server.fullscreenTop() and dock.slide == 0) dockArea(&dock) else null,
+            if (quick.shown) .{ .x = quick.x, .y = quick.y, .width = quick.width, .height = quick.height } else null,
+        };
         server.updateFocus();
 
         const top = server.topWindow();
@@ -806,10 +811,15 @@ fn run(init: std.process.Init.Minimal) !void {
                 } else |err| print(sys.log_warning ++ "dazzle-shell: no cursor: {s}\n", .{@errorName(err)});
             }
         }
-        // The pointer's picture: a resize while one is under way, or what
-        // the window under it chose.
-        if (renderer.cursor_shape) |shown| if (server.cursor() != shown) {
-            if (renderer.showCursor(server.cursor())) {
+        // The pointer's picture: a hand over what can be clicked on the
+        // dock and its quick settings, a resize while one is under way, or
+        // what the window under it chose.
+        const over_shell = server.grab == null and server.drag == null and
+            (quick.dragging or quick.hover != null or
+                (if (server.shell_areas[0] != null) if (dock.local(pointer.x, pointer.y)) |at| dock.hit(at[0], at[1]) != null or dock.hitStatus(at[0], at[1]) else false else false));
+        const want: server_mod.Server.Cursor = if (over_shell) .pointer else server.cursor();
+        if (renderer.cursor_shape) |shown| if (want != shown) {
+            if (renderer.showCursor(want)) {
                 renderer.moveCursor(@intFromFloat(pointer.x), @intFromFloat(pointer.y));
             } else |err| print(sys.log_warning ++ "dazzle-shell: cannot change the cursor: {s}\n", .{@errorName(err)});
         };
@@ -1053,6 +1063,12 @@ fn quickAction(
             quick_dirty.* = true;
         },
     }
+}
+
+/// Where the dock's box is on the screen.
+fn dockArea(dock: *const dock_mod.Dock) server_mod.Rect {
+    const at = dock.place();
+    return .{ .x = at.x, .y = at.y, .width = dock.width, .height = dock.height };
 }
 
 /// Gives the renderer the dock's latest picture, where it is.
