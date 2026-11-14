@@ -7,8 +7,9 @@
 //! 2. The updated system's init, first thing, marks the trial "<x> started"
 //!    and switches os_prefix back to the other slot: if this start fails
 //!    (the system stops, hangs or is turned off), the next start is the
-//!    system that was there before. Meanwhile the SoC's watchdog runs
-//!    (`Watchdog`): if the system hangs, the Pi restarts by itself.
+//!    system that was there before. The SoC's watchdog (`Watchdog`, which
+//!    runs at every start, not only in a trial) restarts the Pi if the
+//!    system hangs.
 //! 3. Once the shell has run for `healthy_ns` the update has worked:
 //!    os_prefix is switched to it again and the trial ends (`commit`). If
 //!    the shell stops before then, init restarts the Pi.
@@ -135,14 +136,18 @@ pub fn restart() noreturn {
     while (true) _ = linux.pause();
 }
 
-/// The SoC's watchdog, kept fed by a child process while the trial runs:
-/// if the system hangs, it stops being fed and the Pi restarts.
+/// The SoC's watchdog, kept fed by a child process for as long as the
+/// system runs: if the system hangs, it stops being fed and the Pi
+/// restarts.
 pub const Watchdog = struct {
     pid: linux.pid_t,
     /// Closing it stops the watchdog.
     stop: linux.fd_t,
 
     const device = "/dev/watchdog";
+    /// The feeder's exit status when there is no watchdog to feed (in
+    /// QEMU, say): it is not started again.
+    pub const absent = 2;
     /// As long as the BCM2835's allows (about 16 s).
     const timeout_s = 15;
     const feed_ms = 4000;
@@ -158,18 +163,26 @@ pub const Watchdog = struct {
         }
         if (rc == 0) {
             sys.close(fds[1]);
-            feed(fds[0]);
+            if (!feed(fds[0])) linux.exit(absent);
             linux.exit(0);
         }
         sys.close(fds[0]);
         return .{ .pid = @intCast(rc), .stop = fds[1] };
     }
 
-    fn feed(stop: linux.fd_t) void {
+    /// Feeds the watchdog until `stop` is closed; false if there is none.
+    fn feed(stop: linux.fd_t) bool {
         const fd = sys.open(device, .{ .ACCMODE = .WRONLY, .CLOEXEC = true }) catch |err| {
-            print(sys.log_warning ++ "dazzle: trial: no watchdog ({s})\n", .{@errorName(err)});
-            return;
+            print(sys.log_warning ++ "dazzle: no watchdog ({s})\n", .{@errorName(err)});
+            return false;
         };
+        // Out of memory, the kernel kills a process to free some: never
+        // this one (which would restart the Pi, though the system might
+        // well go on).
+        if (sys.open("/proc/self/oom_score_adj", .{ .ACCMODE = .WRONLY, .CLOEXEC = true })) |adj| {
+            _ = linux.write(adj, "-1000", 5);
+            sys.close(adj);
+        } else |_| {}
         // WDIOC_SETTIMEOUT: _IOWR('W', 6, int).
         var timeout: c_int = timeout_s;
         _ = linux.ioctl(fd, linux.IOCTL.IOWR('W', 6, c_int), @intFromPtr(&timeout));
@@ -181,6 +194,7 @@ pub const Watchdog = struct {
         // The magic close: the watchdog stops.
         _ = linux.write(fd, "V", 1);
         sys.close(fd);
+        return true;
     }
 
     /// Stops the watchdog.

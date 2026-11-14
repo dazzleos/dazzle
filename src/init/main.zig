@@ -5,7 +5,8 @@
 //! 1. mounts /proc, /sys and /dev, and sends its messages to the kernel log;
 //! 2. waits a moment for the SD card and mounts its space for files at
 //!    /data (if setup has prepared it), and names the computer as kept
-//!    there (or "dazzle");
+//!    there (or "dazzle"); starts the SoC's watchdog, which restarts the
+//!    Pi if the system hangs;
 //! 3. starts the network manager (see
 //!    network.zig), which brings the wired and Wi-Fi network up in the
 //!    background and answers the settings app, and the log server (which
@@ -62,6 +63,9 @@ pub fn main() void {
     // The card's files (and the computer's name, kept there once setup has
     // finished; until then, setup names it).
     const card = storage.boot();
+    // From here on, a system that hangs (runs out of memory, say) restarts
+    // by itself rather than sitting there with nothing on the screen.
+    var watchdog = trial.Watchdog.start();
     const name = card.hostname.slice();
     if (name.len > 0) _ = linux.syscall2(.sethostname, @intFromPtr(name.ptr), name.len);
     const network_pid = network.start();
@@ -75,15 +79,11 @@ pub fn main() void {
     // to be made, and later installs updates.
     const system_pid = system.start(card.card, card.mounted, card.slot, card.setup_done, log_server_pid);
     const shell_pid = startShell(!card.setup_done);
-    // Trying an update: the watchdog runs until it has worked, which is
-    // when the shell has run for a while (the timer, a child process that
-    // ends then).
+    // Trying an update: it has worked when the shell has run for a while
+    // (the timer, a child process that ends then).
     var t: Trying = .{};
-    if (card.trial == .trying) {
-        t.watchdog = trial.Watchdog.start();
-        t.timer = startTimer(trial.healthy_ns);
-    }
-    reapForever(shell_pid, network_pid, devices_pid, media_pid, system_pid, log_server_pid, card, &t);
+    if (card.trial == .trying) t.timer = startTimer(trial.healthy_ns);
+    reapForever(shell_pid, network_pid, devices_pid, media_pid, system_pid, log_server_pid, card, &t, &watchdog);
 }
 
 fn mountPseudoFilesystems() void {
@@ -266,7 +266,6 @@ fn startShell(setup: bool) ?linux.pid_t {
 
 /// An update being tried.
 const Trying = struct {
-    watchdog: ?trial.Watchdog = null,
     /// Ends when the update has run long enough.
     timer: ?linux.pid_t = null,
 };
@@ -285,7 +284,7 @@ fn startTimer(ns: u64) ?linux.pid_t {
 /// Waits for child processes, logging how the shell ends and restarting it.
 /// Processes whose parent exits are re-parented to init, so this also
 /// collects those.
-fn reapForever(first_shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, first_devices_pid: ?linux.pid_t, first_media_pid: ?linux.pid_t, first_system_pid: ?linux.pid_t, log_server_pid: ?linux.pid_t, card: storage.Boot, t: *Trying) noreturn {
+fn reapForever(first_shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, first_devices_pid: ?linux.pid_t, first_media_pid: ?linux.pid_t, first_system_pid: ?linux.pid_t, log_server_pid: ?linux.pid_t, card: storage.Boot, t: *Trying, watchdog: *?trial.Watchdog) noreturn {
     var shell_pid = first_shell_pid;
     var network_pid = first_network_pid;
     var devices_pid = first_devices_pid;
@@ -334,8 +333,16 @@ fn reapForever(first_shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, f
             // The shell has run all this while: the update works.
             t.timer = null;
             trial.commit(card.slot orelse 'a');
-            if (t.watchdog) |w| w.end();
-            t.watchdog = null;
+            continue;
+        }
+        if (watchdog.* != null and pid == watchdog.*.?.pid) {
+            // Its feeder stopped: the watchdog still runs, so another must
+            // take over within its timeout.
+            watchdog.*.?.end();
+            watchdog.* = null;
+            if (linux.W.IFEXITED(status) and linux.W.EXITSTATUS(status) == trial.Watchdog.absent) continue;
+            print(sys.log_warning ++ "dazzle: watchdog feeder stopped (status 0x{x}); restarting it\n", .{status});
+            watchdog.* = trial.Watchdog.start();
             continue;
         }
         if (pid != shell_pid) continue;
