@@ -9,6 +9,7 @@ const appearance_settings = @import("appearance");
 const builtin = appearance_settings.backgrounds;
 const view = @import("view.zig");
 const gfx = kete.gfx;
+const sys = @import("sys");
 
 const Settings = view.Settings;
 const Actions = view.Actions;
@@ -98,34 +99,100 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     return b.page(rows.items);
 }
 
-/// The built-in photos, each a tile of it; the one chosen is ringed.
+/// The built-in photos, each a tile of it, and the picture chosen in Files
+/// if it is the background; the one chosen is ringed.
 fn photoRow(cx: *kete.BuildContext, self: *const Settings, state: *State) kete.Widget {
+    var tiles: [builtin.all.len + 1]kete.Widget = undefined;
+    const chosen = self.appearance.image.slice() orelse "";
+    inline for (builtin.all, tiles[0..builtin.all.len], 0..) |bg, *t, i| {
+        t.* = tile(cx, bg.name, thumbnail(i), std.mem.eql(u8, chosen, builtin.path(bg)), if (self.actions != null) .of(state, State.setImage(bg)) else null);
+    }
+    var count: usize = builtin.all.len;
+    if (chosen.len > 0 and builtin.find(chosen) == null) {
+        const name = chosen[if (std.mem.lastIndexOfScalar(u8, chosen, '/')) |slash| slash + 1 else 0..];
+        tiles[count] = tile(cx, name, customThumbnail(chosen), true, null);
+        count += 1;
+    }
+    return cx.make(kete.Row{ .spacing = 8, .children = cx.arena.dupe(kete.Widget, tiles[0..count]) catch &.{} });
+}
+
+/// A picture's tile: its thumbnail, rounded, named by its tooltip, and
+/// ringed in the theme's primary colour when it is the one chosen.
+fn tile(cx: *kete.BuildContext, name: []const u8, image: ?*const gfx.Image, chosen: bool, on_press: ?kete.Callback) kete.Widget {
     const t = cx.theme();
-    var tiles: [builtin.all.len]kete.Widget = undefined;
-    const chosen = self.appearance.image.slice();
-    inline for (builtin.all, &tiles, 0..) |bg, *tile, i| {
-        const is_chosen = if (chosen) |p| std.mem.eql(u8, p, builtin.path(bg)) else false;
-        tile.* = cx.make(kete.Tooltip{
-            .text = bg.name,
-            .child = cx.make(kete.Pressable{
-                .on_press = if (self.actions != null) .of(state, State.setImage(bg)) else null,
-                .child = cx.make(kete.RoundedBox{
-                    .border_width = if (is_chosen) ring else 0,
-                    .border_color = if (is_chosen) t.primary else null,
-                    .radius = .all(tile_radius + ring + ring_gap),
-                    .child = cx.make(kete.Padding{
-                        .padding = .all(ring + ring_gap),
-                        .child = cx.make(kete.SizedBox{
-                            .width = builtin.thumbnail_width,
-                            .height = builtin.thumbnail_height,
-                            .child = if (thumbnail(i)) |img| cx.make(kete.Image{ .source = .{ .image = img } }) else cx.make(kete.SizedBox.empty),
-                        }),
+    return cx.make(kete.Tooltip{
+        .text = name,
+        .child = cx.make(kete.Pressable{
+            .on_press = on_press,
+            .child = cx.make(kete.RoundedBox{
+                .border_width = if (chosen) ring else 0,
+                .border_color = if (chosen) t.primary else null,
+                .radius = .all(tile_radius + ring + ring_gap),
+                .child = cx.make(kete.Padding{
+                    .padding = .all(ring + ring_gap),
+                    .child = cx.make(kete.SizedBox{
+                        .width = builtin.thumbnail_width,
+                        .height = builtin.thumbnail_height,
+                        .child = if (image) |img| cx.make(kete.Image{ .source = .{ .image = img } }) else cx.make(kete.SizedBox.empty),
                     }),
                 }),
             }),
-        });
+        }),
+    });
+}
+
+/// The picture chosen in Files, as a thumbnail: made when it is first
+/// shown (and again when another is chosen).
+var custom_path: appearance_settings.ImagePath = .{};
+var custom_pixels: [builtin.thumbnail_width * builtin.thumbnail_height]u32 = undefined;
+var custom_image: ?gfx.Image = null;
+
+fn customThumbnail(path: []const u8) ?*const gfx.Image {
+    if (!std.mem.eql(u8, custom_path.slice() orelse "", path)) {
+        custom_path = .of(path);
+        custom_image = null;
+        if (makeThumbnail(path, &custom_pixels)) custom_image = .init(&custom_pixels, builtin.thumbnail_width, builtin.thumbnail_height);
     }
-    return cx.make(kete.Row{ .spacing = 8, .children = cx.arena.dupe(kete.Widget, &tiles) catch &.{} });
+    return if (custom_image) |*img| img else null;
+}
+
+/// Reads the PNG at `path` into `out`, as a thumbnail: scaled to cover it
+/// (cropped in the middle), each pixel the average of those it covers, its
+/// corners rounded. Returns whether it could.
+fn makeThumbnail(path: []const u8, out: []u32) bool {
+    const gpa = std.heap.smp_allocator;
+    var path_buf: [appearance_settings.ImagePath.max_len + 1]u8 = undefined;
+    const pathz = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch return false;
+    const bytes = sys.readFileAlloc(gpa, pathz, 64 * 1024 * 1024) catch return false;
+    defer gpa.free(bytes);
+    const img = gfx.png.decode(gpa, bytes) catch return false;
+    defer gpa.free(img.pixels);
+    const tw: u32 = builtin.thumbnail_width;
+    const th: u32 = builtin.thumbnail_height;
+    if (img.width == 0 or img.height == 0) return false;
+    // The part of the picture shown: as wide, or as tall, as it can be.
+    const scale = @max(@as(f64, tw) / @as(f64, @floatFromInt(img.width)), @as(f64, th) / @as(f64, @floatFromInt(img.height)));
+    const vw = @as(f64, tw) / scale;
+    const vh = @as(f64, th) / scale;
+    const ox = (@as(f64, @floatFromInt(img.width)) - vw) / 2;
+    const oy = (@as(f64, @floatFromInt(img.height)) - vh) / 2;
+    for (0..th) |y| for (0..tw) |x| {
+        const x0: usize = @intFromFloat(@floor(ox + @as(f64, @floatFromInt(x)) / scale));
+        const y0: usize = @intFromFloat(@floor(oy + @as(f64, @floatFromInt(y)) / scale));
+        const x1 = @min(@max(@as(usize, @intFromFloat(@floor(ox + @as(f64, @floatFromInt(x + 1)) / scale))), x0 + 1), img.width);
+        const y1 = @min(@max(@as(usize, @intFromFloat(@floor(oy + @as(f64, @floatFromInt(y + 1)) / scale))), y0 + 1), img.height);
+        var sum: [3]u64 = .{ 0, 0, 0 };
+        for (y0..y1) |sy| for (x0..x1) |sx| {
+            const px = img.pixels[sy * img.width + sx];
+            sum[0] += px >> 16 & 0xff;
+            sum[1] += px >> 8 & 0xff;
+            sum[2] += px & 0xff;
+        };
+        const n = @max((y1 - y0) * (x1 - x0), 1);
+        out[y * tw + x] = @intCast(0xff000000 | (sum[0] / n) << 16 | (sum[1] / n) << 8 | sum[2] / n);
+    };
+    roundCorners(out, tw, th, tile_radius);
+    return true;
 }
 
 /// The built-in photos' thumbnails (made at build time), decoded the first
@@ -228,8 +295,8 @@ test "a built-in photo is picked as the background, shown by its rounded thumbna
     // A tile of each, its thumbnail's pixels given (not bytes to load);
     // the forest, to start with, is ringed.
     inline for (builtin.all) |bg| {
-        const tile = findTile(u.root.?, bg.name).?;
-        var at = tile;
+        const found = findTile(u.root.?, bg.name).?;
+        var at = found;
         while (!at.widget.is(kete.Image)) at = at.children.items[0];
         try testing.expect(at.widget.as(kete.Image).?.source == .image);
     }
@@ -246,8 +313,38 @@ test "a built-in photo is picked as the background, shown by its rounded thumbna
     try testing.expect(ringed(u.root.?, "Seashore"));
     try testing.expect(!ringed(u.root.?, "Forest"));
 
-    // A picture chosen in Files: no photo ringed.
-    settings.appearance = .{ .image = .of("/data/user/Pictures/sea.png") };
-    u.frame(1280, 720, 4, settings);
+    // Without a picture chosen in Files: just the built-in photos.
+    try testing.expect(view.up(findTile(u.root.?, "Forest").?, kete.Row).?.children.items.len == builtin.all.len);
+}
+
+test "a picture chosen in Files is a fourth tile, ringed, with its thumbnail" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
+    defer u.destroy();
+    // A 40 by 10 picture: red on the left, blue on the right.
+    var pixels: [40 * 10]u32 = undefined;
+    for (&pixels, 0..) |*px, i| px.* = if (i % 40 < 20) 0xffff0000 else 0xff0000ff;
+    const png = try gfx.png.encode(testing.allocator, &pixels, 40, 10);
+    defer testing.allocator.free(png);
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&path_buf, "/tmp/dazzle-settings-sea-{d}.png", .{std.os.linux.getpid()}, 0);
+    _ = std.os.linux.unlink(path);
+    try sys.files.writeNew(path, png);
+    defer _ = std.os.linux.unlink(path);
+
+    const d = view.sample();
+    var actions: Actions = .{};
+    const settings: Settings = .{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .appearance = .{ .image = .of(path) } };
+    u.frame(1280, 720, 1, settings);
+    _ = view.showPage(u, .appearance);
+    u.frame(1280, 720, 2, settings);
+    const name = path[std.mem.lastIndexOfScalar(u8, path, '/').? + 1 ..];
+    try testing.expect(ringed(u.root.?, name));
     inline for (builtin.all) |bg| try testing.expect(!ringed(u.root.?, bg.name));
+    try testing.expectEqual(builtin.all.len + 1, view.up(findTile(u.root.?, name).?, kete.Row).?.children.items.len);
+    // Its thumbnail: the middle of it, scaled; corners rounded.
+    const thumb = customThumbnail(path).?;
+    try testing.expectEqual(@as(u32, 0xffff0000), thumb.pixels[30 * builtin.thumbnail_width + 10]);
+    try testing.expectEqual(@as(u32, 0xff0000ff), thumb.pixels[30 * builtin.thumbnail_width + builtin.thumbnail_width - 10]);
+    try testing.expectEqual(@as(u32, 0), thumb.pixels[0] >> 24);
 }
