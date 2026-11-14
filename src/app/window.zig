@@ -106,8 +106,25 @@ pub const Gpu = struct {
         return seqno;
     }
     fn devWait(ptr: *anyopaque, seqno: u64) anyerror!void {
-        if (seqno != 0) try devOf(ptr).waitSeqno(seqno, std.time.ns_per_s);
+        if (seqno == 0) return;
+        const dev = devOf(ptr);
+        dev.waitSeqno(seqno, std.time.ns_per_s) catch |err| {
+            if (err != error.TimedOut) return err;
+            // Slow, or stuck: the kernel resets a GPU that is stuck, which
+            // ends the job (a frame is lost, not the app). Said, with how
+            // much of the GPU's memory is free, and waited for longer.
+            var comm_buf: [32]u8 = undefined;
+            const comm = std.mem.trimEnd(u8, sys.readFile("/proc/self/comm", &comm_buf) orelse "app", "\n");
+            const mi = sys.meminfo() orelse sys.Meminfo{};
+            sys.print(sys.log_warning ++ "{s}: a frame is not drawn after a second ({d} of {d} MB of GPU memory free); waiting for it\n", .{ comm, mi.cma_free >> 20, mi.cma_total >> 20 });
+            try dev.waitSeqno(seqno, gpu_patience_ns);
+        };
     }
+
+    /// How long a frame is waited for, at the most, after the first
+    /// second: longer than the kernel takes to notice the GPU is stuck and
+    /// reset it.
+    const gpu_patience_ns = 10 * std.time.ns_per_s;
     fn devMemory(_: *anyopaque) ?[2]u64 {
         const mi = sys.meminfo() orelse return null;
         if (mi.cma_total == 0) return null;
