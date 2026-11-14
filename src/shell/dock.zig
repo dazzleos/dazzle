@@ -525,7 +525,7 @@ pub const Dock = struct {
 
     pub fn init(gpa: std.mem.Allocator, f: ?font.Font, apps: []App, screen_width: u32, screen_height: u32) !Dock {
         const scale = @min(@as(f32, @floatFromInt(screen_width)) / 1920, @as(f32, @floatFromInt(screen_height)) / 1080);
-        const height: u32 = @intFromFloat(@round(76 * scale));
+        const height: u32 = @intFromFloat(@round((icon_size + 2 * box_pad) * scale));
         return .{
             .font = f,
             .icon_font = font.Font.init(icons.font_data) catch null,
@@ -557,8 +557,9 @@ pub const Dock = struct {
 
     const icon_size = 56;
     const icon_gap = 20;
-    /// Between the box's sides and what is in it.
-    const side_pad = 10;
+    /// Between the box's edges and what is in it, the same all round (a
+    /// running app's dot is in the padding below its icon).
+    const box_pad = 12;
     /// Between the box and the bottom of the screen (and the work area).
     const margin = 8;
     const box_radius = 18;
@@ -567,7 +568,7 @@ pub const Dock = struct {
     /// padded; no wider than the screen.
     pub fn boxWidth(d: *const Dock) u32 {
         const row = @as(f32, @floatFromInt(d.apps.len)) * (icon_size + icon_gap) * d.scale + d.statusWidth();
-        return @min(@as(u32, @intFromFloat(@ceil(row + 2 * side_pad * d.scale))), d.screen_width);
+        return @min(@as(u32, @intFromFloat(@ceil(row + 2 * box_pad * d.scale))), d.screen_width);
     }
 
     /// The gap between the box and the bottom of the screen, in pixels.
@@ -644,7 +645,7 @@ pub const Dock = struct {
         const status_width = d.statusWidth();
         const row = @as(f32, @floatFromInt(d.apps.len)) * (size + gap) + status_width;
         const x0 = (@as(f32, @floatFromInt(d.boxWidth())) - row) / 2;
-        return .{ .x = x0 + @as(f32, @floatFromInt(i)) * (size + gap), .y = 6 * d.scale, .size = size };
+        return .{ .x = x0 + @as(f32, @floatFromInt(i)) * (size + gap), .y = box_pad * d.scale, .size = size };
     }
 
     /// Where the status box (volume and network) is, to the right of the rightmost app.
@@ -925,7 +926,7 @@ test "icons and the status box are in a row in a box, and clicks find the apps" 
     defer testing.allocator.free(d.pixels);
     defer testing.allocator.free(d.tooltip_pixels);
     defer d.cache.deinit();
-    try testing.expectEqual(@as(u32, 76), d.height);
+    try testing.expectEqual(@as(u32, 80), d.height);
     const r0 = d.iconRect(0);
     const r1 = d.iconRect(1);
     const rs = d.statusRect();
@@ -990,10 +991,16 @@ test "the dock floats in a rounded box in the middle of the bottom, and slides d
     // Just big enough: the icons and status box, padded.
     try testing.expect(d.width < 500);
     try testing.expectEqual(d.width, d.boxWidth());
-    try testing.expectEqual(@as(u32, 76 + 2 * 8), d.bandHeight());
+    try testing.expectEqual(@as(u32, 80 + 2 * 8), d.bandHeight());
     const at = d.place();
     try testing.expectEqual(@as(i32, @intCast((1920 - d.width) / 2)), at.x);
-    try testing.expectEqual(@as(i32, 1080 - 8 - 76), at.y);
+    try testing.expectEqual(@as(i32, 1080 - 8 - 80), at.y);
+    // The same space around the icons on every side.
+    const first = d.iconRect(0);
+    const status = d.statusRect();
+    try testing.expectApproxEqAbs(first.y, first.x, 0.5);
+    try testing.expectApproxEqAbs(first.y, @as(f32, @floatFromInt(d.height)) - (first.y + first.size), 0.5);
+    try testing.expectApproxEqAbs(first.y, @as(f32, @floatFromInt(d.width)) - (status.x + status.width), 1);
     // See-through outside its corners, solid in the middle.
     try testing.expectEqual(@as(u32, 0), d.picture()[0] >> 24);
     try testing.expectEqual(@as(u32, 0), d.picture()[d.width - 1] >> 24);
