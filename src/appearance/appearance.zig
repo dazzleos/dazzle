@@ -62,6 +62,9 @@ pub const Settings = struct {
     /// The image filling the screen behind the windows: a built-in one
     /// (`backgrounds`), or a PNG.
     image: ImagePath = default_image,
+    /// The last picture chosen in Files: Settings offers it beside the
+    /// built-in ones (while its file is there), whichever is shown.
+    custom: ImagePath = .{},
 
     pub const default_image: ImagePath = .of(backgrounds.path(backgrounds.all[0]));
 
@@ -74,24 +77,38 @@ pub const Settings = struct {
             const val = tok.next() orelse continue;
             if (std.mem.eql(u8, key, "theme")) {
                 if (Mode.fromCode(val)) |m| s.theme = m;
-            } else if (std.mem.eql(u8, key, "image")) {
+            } else if (std.mem.eql(u8, key, "image") or std.mem.eql(u8, key, "custom")) {
                 // The rest of the line: a path may have spaces.
                 const start = @intFromPtr(val.ptr) - @intFromPtr(line.ptr);
-                s.image = .of(std.mem.trimEnd(u8, line[start..], " \t\r"));
+                const path: ImagePath = .of(std.mem.trimEnd(u8, line[start..], " \t\r"));
+                if (key[0] == 'i') s.image = path else s.custom = path;
             }
         }
+        // Written before the last picture from Files was kept apart: the
+        // one shown, if it is one.
+        if (s.custom.slice() == null) if (s.image.slice()) |p| if (backgrounds.find(p) == null) {
+            s.custom = s.image;
+        };
         return s;
+    }
+
+    /// Shows `path`, a picture chosen in Files, and keeps it as the one
+    /// Settings offers.
+    pub fn chooseCustom(s: *Settings, path: []const u8) void {
+        s.image = .of(path);
+        s.custom = s.image;
     }
 
     pub fn formatBuf(s: Settings, buf: []u8) []const u8 {
         const head = std.fmt.bufPrint(buf, "theme {s}\n", .{s.theme.code()}) catch return "";
-        const path = s.image.slice() orelse return head;
-        const tail = std.fmt.bufPrint(buf[head.len..], "image {s}\n", .{path}) catch return "";
-        return buf[0 .. head.len + tail.len];
+        var len = head.len;
+        if (s.image.slice()) |path| len += (std.fmt.bufPrint(buf[len..], "image {s}\n", .{path}) catch return "").len;
+        if (s.custom.slice()) |path| len += (std.fmt.bufPrint(buf[len..], "custom {s}\n", .{path}) catch return "").len;
+        return buf[0..len];
     }
 
     /// The most `formatBuf` writes.
-    pub const max_text = 64 + ImagePath.max_len;
+    pub const max_text = 64 + 2 * ImagePath.max_len;
 };
 
 pub fn loadSettings() Settings {
@@ -145,11 +162,25 @@ test "the forest is the background to start with, and before there was a choice 
     try testing.expectEqualStrings("/os/backgrounds/forest.etc1", old.image.slice().?);
 }
 
-test "the background image is kept, with spaces in its path" {
-    const s: Settings = .{ .theme = .dark, .image = .of("/data/user/My Pictures/sea.png") };
+test "the last picture chosen in Files is kept while a built-in one shows" {
+    var s: Settings = .{};
+    s.chooseCustom("/data/user/sea.png");
+    s.image = .of(backgrounds.path(backgrounds.all[0]));
     var buf: [Settings.max_text]u8 = undefined;
     const text = s.formatBuf(&buf);
-    try std.testing.expectEqualStrings("theme dark\nimage /data/user/My Pictures/sea.png\n", text);
+    try testing.expectEqualStrings("theme dark\nimage /os/backgrounds/forest.etc1\ncustom /data/user/sea.png\n", text);
+    try testing.expectEqual(s, Settings.parse(text));
+    // Written before it was kept apart: the picture shown is it.
+    try testing.expectEqualStrings("/data/user/old.png", Settings.parse("theme dark\nimage /data/user/old.png\n").custom.slice().?);
+    try testing.expect(Settings.parse("theme dark\nimage /os/backgrounds/forest.etc1\n").custom.slice() == null);
+}
+
+test "the background image is kept, with spaces in its path" {
+    var s: Settings = .{};
+    s.chooseCustom("/data/user/My Pictures/sea.png");
+    var buf: [Settings.max_text]u8 = undefined;
+    const text = s.formatBuf(&buf);
+    try std.testing.expectEqualStrings("theme dark\nimage /data/user/My Pictures/sea.png\ncustom /data/user/My Pictures/sea.png\n", text);
     const back = Settings.parse(text);
     try std.testing.expectEqual(s, back);
     try std.testing.expectEqualStrings("/data/user/My Pictures/sea.png", back.image.slice().?);

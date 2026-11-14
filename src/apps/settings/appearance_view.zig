@@ -36,6 +36,13 @@ pub const State = struct {
         acts.appearance = next;
     }
 
+    fn setCustom(st: *State) void {
+        const acts = st.actions orelse return;
+        var next = acts.appearance orelse st.appearance;
+        next.image = next.custom;
+        acts.appearance = next;
+    }
+
     fn setImage(comptime bg: builtin.BuiltIn) fn (*State) void {
         return struct {
             fn set(st: *State) void {
@@ -108,12 +115,20 @@ fn photoRow(cx: *kete.BuildContext, self: *const Settings, state: *State) kete.W
         t.* = tile(cx, bg.name, thumbnail(i), std.mem.eql(u8, chosen, builtin.path(bg)), if (self.actions != null) .of(state, State.setImage(bg)) else null);
     }
     var count: usize = builtin.all.len;
-    if (chosen.len > 0 and builtin.find(chosen) == null) {
-        const name = chosen[if (std.mem.lastIndexOfScalar(u8, chosen, '/')) |slash| slash + 1 else 0..];
-        tiles[count] = tile(cx, name, customThumbnail(chosen), true, null);
+    // The last picture chosen in Files, while its file is there.
+    if (self.appearance.custom.slice()) |custom| if (exists(custom)) {
+        const name = custom[if (std.mem.lastIndexOfScalar(u8, custom, '/')) |slash| slash + 1 else 0..];
+        tiles[count] = tile(cx, name, customThumbnail(custom), std.mem.eql(u8, chosen, custom), if (self.actions != null) .of(state, State.setCustom) else null);
         count += 1;
-    }
+    };
     return cx.make(kete.Row{ .spacing = 8, .children = cx.arena.dupe(kete.Widget, tiles[0..count]) catch &.{} });
+}
+
+/// Whether there is a file at `path`.
+fn exists(path: []const u8) bool {
+    var buf: [appearance_settings.ImagePath.max_len + 1]u8 = undefined;
+    const pathz = std.fmt.bufPrintSentinel(&buf, "{s}", .{path}, 0) catch return false;
+    return std.os.linux.errno(std.os.linux.access(pathz, std.os.linux.F_OK)) == .SUCCESS;
 }
 
 /// A picture's tile: its thumbnail, rounded, named by its tooltip, and
@@ -334,7 +349,9 @@ test "a picture chosen in Files is a fourth tile, ringed, with its thumbnail" {
 
     const d = view.sample();
     var actions: Actions = .{};
-    const settings: Settings = .{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .appearance = .{ .image = .of(path) } };
+    var chosen: appearance_settings.Settings = .{};
+    chosen.chooseCustom(path);
+    var settings: Settings = .{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .appearance = chosen };
     u.frame(1280, 720, 1, settings);
     _ = view.showPage(u, .appearance);
     u.frame(1280, 720, 2, settings);
@@ -347,4 +364,21 @@ test "a picture chosen in Files is a fourth tile, ringed, with its thumbnail" {
     try testing.expectEqual(@as(u32, 0xffff0000), thumb.pixels[30 * builtin.thumbnail_width + 10]);
     try testing.expectEqual(@as(u32, 0xff0000ff), thumb.pixels[30 * builtin.thumbnail_width + builtin.thumbnail_width - 10]);
     try testing.expectEqual(@as(u32, 0), thumb.pixels[0] >> 24);
+
+    // A built-in one picked: the picture stays, not ringed, and can be
+    // picked again.
+    view.click(u, findTile(u.root.?, "Forest").?.child(0));
+    settings.appearance = actions.appearance.?;
+    try testing.expectEqualStrings(path, settings.appearance.custom.slice().?);
+    u.frame(1280, 720, 3, settings);
+    try testing.expect(ringed(u.root.?, "Forest"));
+    try testing.expect(!ringed(u.root.?, name));
+    actions = .{};
+    view.click(u, findTile(u.root.?, name).?.child(0));
+    try testing.expectEqualStrings(path, actions.appearance.?.image.slice().?);
+
+    // Its file gone: so is its tile.
+    _ = std.os.linux.unlink(path);
+    u.frame(1280, 720, 4, settings);
+    try testing.expect(findTile(u.root.?, name) == null);
 }
