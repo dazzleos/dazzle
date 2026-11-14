@@ -7,6 +7,9 @@ const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
 
+/// The backgrounds built into the system.
+pub const backgrounds = @import("backgrounds.zig");
+
 pub const settings_file = sys.system.apps_dir ++ "/.appearance";
 
 /// Whether the system uses the dark or light Material 3 colour scheme.
@@ -104,8 +107,8 @@ pub const ImagePath = struct {
 pub const Settings = struct {
     theme: Mode = .dark,
     background: Background = .navy,
-    /// An image (PNG) to show over the background colour, filling the
-    /// screen, if any.
+    /// An image to show over the background colour, filling the screen,
+    /// if any: a PNG, or a built-in one (`backgrounds`).
     image: ImagePath = .{},
 
     pub fn parse(text: []const u8) Settings {

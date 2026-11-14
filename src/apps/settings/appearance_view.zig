@@ -1,12 +1,13 @@
 //! The Appearance page: system colour scheme (Dark or Light), and the
 //! desktop's background colour (the same in either), picked from swatches;
-//! and the image over it, if one was chosen (in Files), which can be
-//! removed here.
+//! and the image over it: one of the built-in photos, picked here, or one
+//! chosen in Files, which can be removed here.
 
 const std = @import("std");
 const kete = @import("kete");
 const kete_vc4 = @import("kete_vc4");
 const appearance_settings = @import("appearance");
+const builtin = appearance_settings.backgrounds;
 const view = @import("view.zig");
 
 const Settings = view.Settings;
@@ -42,6 +43,17 @@ pub const State = struct {
                 next.background = bg;
                 // The colour is what shows: no image over it.
                 next.image = .{};
+                acts.appearance = next;
+            }
+        }.set;
+    }
+
+    fn setImage(comptime bg: builtin.BuiltIn) fn (*State) void {
+        return struct {
+            fn set(st: *State) void {
+                const acts = st.actions orelse return;
+                var next = acts.appearance orelse st.appearance;
+                next.image = .of(builtin.path(bg));
                 acts.appearance = next;
             }
         }.set;
@@ -111,6 +123,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
         .children = &.{
             b.label("Background"),
             cx.make(kete.Column{ .cross_axis_alignment = .start, .spacing = 4, .children = a.dupe(kete.Widget, &swatch_rows) catch &.{} }),
+            photoRow(cx, self, state),
             imageRow(cx, self, state),
         },
     })) catch {};
@@ -118,14 +131,47 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     return b.page(rows.items);
 }
 
-/// The image over the colour, by name, and a button to remove it; or, with
-/// none, where one is chosen.
+/// The built-in photos, each a tile of it; the one chosen is ringed.
+fn photoRow(cx: *kete.BuildContext, self: *const Settings, state: *State) kete.Widget {
+    const t = cx.theme();
+    var tiles: [builtin.all.len]kete.Widget = undefined;
+    const chosen = self.appearance.image.slice();
+    inline for (builtin.all, &tiles) |bg, *tile| {
+        const is_chosen = if (chosen) |p| std.mem.eql(u8, p, builtin.path(bg)) else false;
+        tile.* = cx.make(kete.Tooltip{
+            .text = bg.name,
+            .child = cx.make(kete.Pressable{
+                .on_press = if (self.actions != null) .of(state, State.setImage(bg)) else null,
+                .child = cx.make(kete.RoundedBox{
+                    .border_width = if (is_chosen) ring else 0,
+                    .border_color = if (is_chosen) t.primary else null,
+                    .radius = .all(4 + ring + ring_gap),
+                    .child = cx.make(kete.Padding{
+                        .padding = .all(ring + ring_gap),
+                        .child = cx.make(kete.SizedBox{
+                            .width = builtin.thumbnail_width,
+                            .height = builtin.thumbnail_height,
+                            .child = cx.make(kete.Image{ .source = .{ .bytes = @embedFile("background-" ++ bg.file ++ ".png") } }),
+                        }),
+                    }),
+                }),
+            }),
+        });
+    }
+    return cx.make(kete.Row{ .spacing = 8, .children = cx.arena.dupe(kete.Widget, &tiles) catch &.{} });
+}
+
+/// The image over the colour, by name (a built-in photo's, and who took
+/// it), and a button to remove it; or, with none, where one is chosen.
 fn imageRow(cx: *kete.BuildContext, self: *const Settings, state: *State) kete.Widget {
     const t = cx.theme();
     const style: kete.TextStyle = .{ .size = 15, .color = t.on_surface_variant };
     const path = self.appearance.image.slice() orelse
-        return cx.make(kete.Text{ .text = "An image can be the background too: choose one in Files (Set as background)", .style = style });
-    const name = path[(std.mem.lastIndexOfScalar(u8, path, '/') orelse return cx.make(kete.SizedBox.empty)) + 1 ..];
+        return cx.make(kete.Text{ .text = "Or pick a photo above, or choose your own in Files (Set as background)", .style = style });
+    const name = if (builtin.find(path)) |bg|
+        cx.fmt("{s} (photo by {s} on Unsplash)", .{ bg.name, bg.photographer })
+    else
+        path[(std.mem.lastIndexOfScalar(u8, path, '/') orelse return cx.make(kete.SizedBox.empty)) + 1 ..];
     return cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = cx.makeAll(.{
         kete.Icon{ .icon = .wallpaper, .size = 20, .color = t.on_surface_variant },
         kete.Expanded{ .child = cx.make(kete.Text{ .text = cx.fmt("Image: {s}", .{name}), .style = .{ .size = 15, .color = t.on_surface }, .wrap = false, .ellipsis = true }) },
@@ -279,7 +325,7 @@ test "an image over the background is named, and can be removed; picking a colou
     _ = view.showPage(u, .appearance);
     u.frame(1280, 720, 2, settings);
     // None: where to choose one.
-    try testing.expect(view.findTextContaining(u.root.?, "choose one in Files") != null);
+    try testing.expect(view.findTextContaining(u.root.?, "choose your own in Files") != null);
 
     settings.appearance = .{ .background = .teal, .image = .of("/data/user/Pictures/sea.png") };
     u.frame(1280, 720, 3, settings);
@@ -292,4 +338,31 @@ test "an image over the background is named, and can be removed; picking a colou
     view.click(u, findSwatch(u.root.?, .plum).?.child(0));
     try testing.expect(actions.appearance.?.image.slice() == null);
     try testing.expectEqual(appearance_settings.Background.plum, actions.appearance.?.background);
+}
+
+test "a built-in photo can be picked as the background, and is named with who took it" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
+    defer u.destroy();
+    const d = view.sample();
+    var actions: Actions = .{};
+    var settings: Settings = .{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .appearance = .{ .background = .teal } };
+    u.frame(1280, 720, 1, settings);
+    _ = view.showPage(u, .appearance);
+    u.frame(1280, 720, 2, settings);
+    // A tile of each, named by its tooltip; picking one keeps the colour.
+    const forest = findTooltip(u.root.?, "Forest").?;
+    try testing.expect(findTooltip(u.root.?, "Seashore") != null);
+    view.click(u, forest.child(0));
+    try testing.expectEqualStrings("/os/backgrounds/forest.etc1", actions.appearance.?.image.slice().?);
+    try testing.expectEqual(appearance_settings.Background.teal, actions.appearance.?.background);
+    settings.appearance = actions.appearance.?;
+    u.frame(1280, 720, 3, settings);
+    try testing.expect(view.findText(u.root.?, "Image: Forest (photo by Dan Otis on Unsplash)") != null);
+}
+
+fn findTooltip(n: *kete.WidgetNode, text: []const u8) ?*kete.WidgetNode {
+    if (n.widget.as(kete.Tooltip)) |tip| if (std.mem.eql(u8, tip.text, text)) return n;
+    for (n.children.items) |ch| if (findTooltip(ch, text)) |found| return found;
+    return null;
 }

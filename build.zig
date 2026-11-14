@@ -1,5 +1,6 @@
 const std = @import("std");
 const Icon = @import("src/icons/names.zig").Icon;
+const builtin_backgrounds = @import("src/appearance/backgrounds.zig");
 const kete_build = @import("kete");
 
 const Modules = struct {
@@ -132,6 +133,50 @@ fn addIconFont(b: *std.Build) IconFont {
     run.addFileArg(b.path("fonts/MaterialIcons-Regular.codepoints"));
     const ttf = run.addOutputFileArg("MaterialIcons.ttf");
     return .{ .ttf = ttf, .codepoints = run.addOutputFileArg("icon_codepoints.zig") };
+}
+
+/// A built-in desktop background, made ready by `tools/mkbackground.zig`:
+/// the ETC1 file the shell shows, and Settings' thumbnail of it.
+const ReadyBackground = struct { etc1: std.Build.LazyPath, thumbnail: std.Build.LazyPath };
+
+/// Each of `builtin_backgrounds.all` (from backgrounds/<file>.png), made
+/// ready once.
+fn addBackgrounds(b: *std.Build) []const ReadyBackground {
+    const State = struct {
+        var ready: ?[builtin_backgrounds.all.len]ReadyBackground = null;
+    };
+    if (State.ready) |*r| return r;
+    const tool = b.addExecutable(.{
+        .name = "mkbackground",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/mkbackground.zig"),
+            .target = b.graph.host,
+            // Compressing 1080p photos takes a while unoptimized.
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "etc1", .module = b.createModule(.{ .root_source_file = b.path("src/vc4/etc1.zig") }) },
+                .{ .name = "png", .module = b.createModule(.{ .root_source_file = b.path("src/gfx/png.zig") }) },
+            },
+        }),
+    });
+    var ready: [builtin_backgrounds.all.len]ReadyBackground = undefined;
+    inline for (builtin_backgrounds.all, &ready) |bg, *r| {
+        const run = b.addRunArtifact(tool);
+        run.addFileArg(b.path("backgrounds/" ++ bg.file ++ ".png"));
+        r.etc1 = run.addOutputFileArg(bg.file ++ ".etc1");
+        r.thumbnail = run.addOutputFileArg(bg.file ++ "-thumbnail.png");
+        run.addArgs(&.{ b.fmt("{d}", .{builtin_backgrounds.thumbnail_width}), b.fmt("{d}", .{builtin_backgrounds.thumbnail_height}) });
+    }
+    State.ready = ready;
+    return &State.ready.?;
+}
+
+/// Settings shows the built-in backgrounds' thumbnails:
+/// `@embedFile("background-<file>.png")`.
+fn addBackgroundThumbnails(b: *std.Build, m: *std.Build.Module) void {
+    for (builtin_backgrounds.all, addBackgrounds(b)) |bg, r| {
+        m.addAnonymousImport(b.fmt("background-{s}.png", .{bg.file}), .{ .root_source_file = r.thumbnail });
+    }
 }
 
 /// The Natural Earth 110m and 50m Admin-0 Countries vector datasets,
@@ -1152,6 +1197,7 @@ pub fn build(b: *std.Build) void {
     const install_demo = b.addInstallArtifact(demo_exe, .{});
     const settings_module = addProgramModule(b, "src/apps/settings/main.zig", target, optimize, pi, shaders, true);
     _ = addKete(b, settings_module, pi, target, optimize, "src/apps/settings");
+    addBackgroundThumbnails(b, settings_module);
     const settings_exe = b.addExecutable(.{
         .name = "dazzle-settings",
         .root_module = settings_module,
@@ -1263,6 +1309,12 @@ pub fn build(b: *std.Build) void {
     // The shell's own apps, beside it in /shell (they cannot be removed).
     run_mkinitramfs.addPrefixedArtifactArg("--shell=", settings_exe);
     run_mkinitramfs.addPrefixedArtifactArg("--shell=", setup_exe);
+    // The built-in desktop backgrounds, ready for the GPU, and who took
+    // them.
+    for (builtin_backgrounds.all, addBackgrounds(b)) |bg, r| {
+        run_mkinitramfs.addPrefixedFileArg(b.fmt("--file=os/backgrounds/{s}.etc1=", .{bg.file}), r.etc1);
+    }
+    run_mkinitramfs.addPrefixedFileArg("--file=os/backgrounds/CREDITS.txt=", b.path("backgrounds/CREDITS.txt"));
     // Dazzle's icon in /os/icon.png, and the dock's icons beside each program.
     run_mkinitramfs.addPrefixedFileArg("--file=os/icon.png=", b.path("icon.png"));
     addAppIcon(b, run_mkinitramfs, "os/shell/dazzle-settings", .settings);
@@ -1354,6 +1406,7 @@ pub fn build(b: *std.Build) void {
     const host_settings = addProgramModule(b, "src/apps/settings/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_settings.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     _ = addKete(b, host_settings, host, b.graph.host, test_optimize, "src/apps/settings");
+    addBackgroundThumbnails(b, host_settings);
     const host_files = addProgramModule(b, "src/apps/files/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_files.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     _ = addKete(b, host_files, host, b.graph.host, test_optimize, "src/apps/files");

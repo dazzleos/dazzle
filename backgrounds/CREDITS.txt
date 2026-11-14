@@ -1,0 +1,10 @@
+Dazzle's built-in desktop backgrounds are photos from Unsplash
+(https://unsplash.com), free to use under the Unsplash License
+(https://unsplash.com/license). They are cropped and scaled to 1920 by 1080.
+
+forest.png    Aerial view of pine trees in mist, by Dan Otis
+              https://unsplash.com/photos/OYFHT4X5isg
+seashore.png  Bird's eye view of seashore, by Nattu Adnan
+              https://unsplash.com/photos/Ai2TRdvI6gM
+sunrays.png   Trees with sun rays, by Dave Hoefler
+              https://unsplash.com/photos/vA80ZTVyooc

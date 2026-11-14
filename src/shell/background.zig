@@ -9,6 +9,11 @@
 //! rather than 8 MB at 32 bits a pixel. Where ETC1 cannot be used (the
 //! renderer checks the GPU decodes it as expected, `Renderer.etc1Order`),
 //! it is RGB565 instead (4 MB), dithered so smooth skies do not band.
+//!
+//! The built-in backgrounds are ETC1 already (made at build time by
+//! tools/mkbackground.zig, at 1920 by 1080): on a screen that size, their
+//! blocks are used as they are; otherwise they are decoded, and made ready
+//! as a PNG is.
 
 const std = @import("std");
 const sys = @import("sys");
@@ -46,13 +51,15 @@ pub const Prepared = struct {
 /// The biggest image file read.
 pub const max_file_size = 64 * 1024 * 1024;
 
-/// Reads the PNG at `path` and makes it ready for a screen `width` by
-/// `height`, as `kind`, with its last `bottom_rows` rows as shown.
+/// Reads the image at `path` (a PNG, or a built-in background's ETC1
+/// file) and makes it ready for a screen `width` by `height`, as `kind`,
+/// with its last `bottom_rows` rows as shown.
 pub fn prepare(gpa: std.mem.Allocator, path: []const u8, width: u32, height: u32, kind: Kind, bottom_rows: u32) !Prepared {
     var path_buf: [appearance.ImagePath.max_len + 1]u8 = undefined;
     const pathz = try std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0);
     const data = try sys.readFileAlloc(gpa, pathz, max_file_size);
     defer gpa.free(data);
+    if (std.mem.endsWith(u8, path, ".etc1")) return fromEtc1File(gpa, data, width, height, kind, bottom_rows);
     const image = try png.decode(gpa, data);
     defer gpa.free(image.pixels);
     const pixels = try gpa.alloc(u32, @as(usize, width) * height);
@@ -61,30 +68,73 @@ pub fn prepare(gpa: std.mem.Allocator, path: []const u8, width: u32, height: u32
     return fromPixels(gpa, pixels, width, height, kind, bottom_rows);
 }
 
+/// A built-in background's ETC1 file (`data`: "DZE1", its width and height,
+/// then its blocks, see tools/mkbackground.zig) ready for a screen `width`
+/// by `height`, as `kind`, with its last `bottom_rows` rows as shown.
+pub fn fromEtc1File(gpa: std.mem.Allocator, data: []const u8, width: u32, height: u32, kind: Kind, bottom_rows: u32) !Prepared {
+    if (data.len < 12 or !std.mem.eql(u8, data[0..4], "DZE1")) return error.NotEtc1;
+    const w = std.mem.readInt(u32, data[4..8], .little);
+    const h = std.mem.readInt(u32, data[8..12], .little);
+    const n = etc1.blocksOf(w, h);
+    if (w == 0 or h == 0 or data.len != 12 + @as(usize, n[0]) * n[1] * 8) return error.NotEtc1;
+    const blocks = try gpa.alloc(u64, n[0] * n[1]);
+    defer gpa.free(blocks);
+    for (blocks, 0..) |*b, i| b.* = std.mem.readInt(u64, data[12 + i * 8 ..][0..8], .little);
+    // The screen's size, for the GPU's ETC1: as it is.
+    if (kind == .etc1 and w == width and h == height) return fromBlocks(gpa, blocks, width, height, kind.etc1, bottom_rows);
+    // Otherwise, its pixels, made ready as a PNG's are.
+    const pixels = try gpa.alloc(u32, @as(usize, w) * h);
+    defer gpa.free(pixels);
+    for (0..n[1]) |by| for (0..n[0]) |bx| {
+        const decoded = etc1.decodeBlock(blocks[by * n[0] + bx]);
+        for (0..4) |y| for (0..4) |x| {
+            const px = bx * 4 + x;
+            const py = by * 4 + y;
+            if (px < w and py < h) pixels[py * w + px] = decoded[y * 4 + x];
+        };
+    };
+    if (w == width and h == height) return fromPixels(gpa, pixels, width, height, kind, bottom_rows);
+    const scaled = try gpa.alloc(u32, @as(usize, width) * height);
+    defer gpa.free(scaled);
+    cover(pixels, w, h, scaled, width, height);
+    return fromPixels(gpa, scaled, width, height, kind, bottom_rows);
+}
+
+/// ETC1 `blocks` (`width` by `height` pixels) laid out for the GPU in
+/// `order`, with the last `bottom_rows` rows as shown.
+fn fromBlocks(gpa: std.mem.Allocator, blocks: []const u64, width: u32, height: u32, order: etc1.ByteOrder, bottom_rows: u32) !Prepared {
+    const rows = @min(bottom_rows, height);
+    const first = height - rows;
+    const n = etc1.blocksOf(width, height);
+    const bottom = try gpa.alloc(u32, @as(usize, width) * rows);
+    errdefer gpa.free(bottom);
+    const out = try gpa.alloc(u8, etc1.imageSize(width, height));
+    @memset(out, 0);
+    etc1.upload(out, width, height, blocks, order);
+    for (0..rows) |row| for (0..width) |x| {
+        const y = first + row;
+        const decoded = etc1.decodeBlock(blocks[(y / 4) * n[0] + x / 4]);
+        bottom[row * width + x] = decoded[(y % 4) * 4 + x % 4];
+    };
+    return .{ .data = out, .width = width, .height = height, .kind = .{ .etc1 = order }, .bottom = bottom };
+}
+
 /// `pixels` (`width` by `height`) ready for the GPU, as `kind`, with its
 /// last `bottom_rows` rows as shown.
 pub fn fromPixels(gpa: std.mem.Allocator, pixels: []const u32, width: u32, height: u32, kind: Kind, bottom_rows: u32) !Prepared {
-    const rows = @min(bottom_rows, height);
-    const first = height - rows;
-    const bottom = try gpa.alloc(u32, @as(usize, width) * rows);
-    errdefer gpa.free(bottom);
     switch (kind) {
         .etc1 => |order| {
             const n = etc1.blocksOf(width, height);
             const blocks = try gpa.alloc(u64, n[0] * n[1]);
             defer gpa.free(blocks);
             etc1.encode(pixels, width, height, blocks);
-            const out = try gpa.alloc(u8, etc1.imageSize(width, height));
-            @memset(out, 0);
-            etc1.upload(out, width, height, blocks, order);
-            for (0..rows) |row| for (0..width) |x| {
-                const y = first + row;
-                const decoded = etc1.decodeBlock(blocks[(y / 4) * n[0] + x / 4]);
-                bottom[row * width + x] = decoded[(y % 4) * 4 + x % 4];
-            };
-            return .{ .data = out, .width = width, .height = height, .kind = kind, .bottom = bottom };
+            return fromBlocks(gpa, blocks, width, height, order, bottom_rows);
         },
         .rgb565 => {
+            const rows = @min(bottom_rows, height);
+            const first = height - rows;
+            const bottom = try gpa.alloc(u32, @as(usize, width) * rows);
+            errdefer gpa.free(bottom);
             const out = try gpa.alloc(u8, @as(usize, width) * height * 2);
             for (0..height) |y| for (0..width) |x| {
                 const px = pixels[y * width + x];
@@ -189,7 +239,7 @@ pub const Loader = struct {
         image: Prepared,
         /// No image is wanted any more.
         none,
-        /// It could not be read (or is not a PNG).
+        /// It could not be read (or is not a PNG or a built-in one).
         failed: anyerror,
     };
 
@@ -330,4 +380,33 @@ test "the loader makes the image wanted on a thread, and says when none is" {
         std.Thread.yield() catch {};
     };
     try testing.expect(missing == .failed);
+}
+
+test "a built-in background's blocks are used as they are at its size, and decoded for another" {
+    var pixels: [8 * 8]u32 = undefined;
+    for (&pixels, 0..) |*px, i| px.* = 0xff000000 | @as(u32, @intCast(i * 4)) << 16 | 0x2040;
+    var blocks: [4]u64 = undefined;
+    etc1.encode(&pixels, 8, 8, &blocks);
+    var file: [12 + 4 * 8]u8 = undefined;
+    @memcpy(file[0..4], "DZE1");
+    std.mem.writeInt(u32, file[4..8], 8, .little);
+    std.mem.writeInt(u32, file[8..12], 8, .little);
+    for (blocks, 0..) |b, i| std.mem.writeInt(u64, file[12 + i * 8 ..][0..8], b, .little);
+
+    // The same size, as ETC1: the blocks, laid out, not compressed again.
+    var same = try fromEtc1File(testing.allocator, &file, 8, 8, .{ .etc1 = .reversed }, 2);
+    defer same.deinit(testing.allocator);
+    var want: [etc1.imageSize(8, 8)]u8 = @splat(0);
+    etc1.upload(&want, 8, 8, &blocks, .reversed);
+    try testing.expectEqualSlices(u8, &want, same.data);
+    try testing.expectEqual(etc1.decodeBlock(blocks[2])[3 * 4 + 1], same.bottom[1 * 8 + 1]);
+
+    // Another size, or RGB565: decoded and scaled, as a PNG would be.
+    var small = try fromEtc1File(testing.allocator, &file, 4, 4, .rgb565, 0);
+    defer small.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 4 * 4 * 2), small.data.len);
+
+    // Not one: refused.
+    try testing.expectError(error.NotEtc1, fromEtc1File(testing.allocator, "PNG?", 8, 8, .rgb565, 0));
+    try testing.expectError(error.NotEtc1, fromEtc1File(testing.allocator, file[0..20], 8, 8, .rgb565, 0));
 }

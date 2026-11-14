@@ -16,6 +16,8 @@
 //!                                               (firmware_class.path=/os/firmware)
 //!     /os/certs/ca-certificates.pem             the certificate authorities
 //!                                               HTTPS trusts (Mozilla's)
+//!     /os/backgrounds/<name>.etc1               the built-in desktop
+//!                                               backgrounds (and CREDITS.txt)
 //!     /os/sockets/                              (empty)
 //!     /etc/resolv.conf                          (empty; the user's: the
 //!                                               network manager writes it)
