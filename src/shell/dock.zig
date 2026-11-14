@@ -72,12 +72,11 @@ pub const Theme = enum {
     }
 };
 
-/// The theme and the desktop's colour (and image, if any), as chosen in
-/// Settings (and Files).
+/// The theme and the desktop's background image, as chosen in Settings
+/// (and Files).
 pub const Appearance = struct {
     theme: Theme = .dark,
-    background: u32 = theme_settings.Background.navy.argb(),
-    image: theme_settings.ImagePath = .{},
+    image: theme_settings.ImagePath = theme_settings.Settings.default_image,
 
     pub fn parse(text: []const u8) Appearance {
         const s = theme_settings.Settings.parse(text);
@@ -86,7 +85,6 @@ pub const Appearance = struct {
                 .dark => .dark,
                 .light => .light,
             },
-            .background = s.background.argb(),
             .image = s.image,
         };
     }
@@ -960,7 +958,7 @@ test "icons and the status box are in a row in a box, and clicks find the apps" 
 
     // Switching to the light theme updates the dock background, hover, running dot, and status border.
     try testing.expectEqual(Appearance{}, Appearance.parse(""));
-    try testing.expectEqual(Appearance{ .theme = .light, .background = 0xff000000 }, Appearance.parse("theme light\nbackground black\n"));
+    try testing.expectEqual(Appearance{ .theme = .light, .image = .of("/data/user/sea.png") }, Appearance.parse("theme light\nimage /data/user/sea.png\n"));
     d.theme = .light;
     d.draw();
     const light = Theme.light.colors();

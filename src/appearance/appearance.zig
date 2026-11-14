@@ -1,6 +1,7 @@
 //! The system's appearance, as chosen in Settings: the dark or light
-//! theme, and the desktop's background: a colour, and perhaps an image
-//! over it (chosen in Files). Kept in `settings_file`, which Settings and
+//! theme, and the desktop's background: one of the photos built into the
+//! system (`backgrounds`; the forest to start with), or an image chosen in
+//! Files. Kept in `settings_file`, which Settings and
 //! Files write and the shell and the apps read (and watch).
 
 const std = @import("std");
@@ -33,54 +34,6 @@ pub const Mode = enum {
     }
 };
 
-/// The colour of the desktop behind the windows: the same in either
-/// theme, and dark, so the windows and the dock stand out on it.
-pub const Background = enum {
-    navy,
-    teal,
-    green,
-    olive,
-    brown,
-    maroon,
-    plum,
-    black,
-
-    pub fn name(bg: Background) []const u8 {
-        return switch (bg) {
-            .navy => "Navy",
-            .teal => "Teal",
-            .green => "Green",
-            .olive => "Olive",
-            .brown => "Brown",
-            .maroon => "Maroon",
-            .plum => "Plum",
-            .black => "Black",
-        };
-    }
-
-    pub fn code(bg: Background) []const u8 {
-        return @tagName(bg);
-    }
-
-    pub fn fromCode(text: []const u8) ?Background {
-        return std.meta.stringToEnum(Background, text);
-    }
-
-    /// 0xAARRGGBB.
-    pub fn argb(bg: Background) u32 {
-        return switch (bg) {
-            .navy => 0xff101830,
-            .teal => 0xff0e2a2c,
-            .green => 0xff12261c,
-            .olive => 0xff262612,
-            .brown => 0xff2a1c12,
-            .maroon => 0xff2c1216,
-            .plum => 0xff241628,
-            .black => 0xff000000,
-        };
-    }
-};
-
 /// An image file's path, kept in the settings (a value, so they can be
 /// copied and compared).
 pub const ImagePath = struct {
@@ -106,10 +59,11 @@ pub const ImagePath = struct {
 /// Persistent appearance settings stored in `settings_file`.
 pub const Settings = struct {
     theme: Mode = .dark,
-    background: Background = .navy,
-    /// An image to show over the background colour, filling the screen,
-    /// if any: a PNG, or a built-in one (`backgrounds`).
-    image: ImagePath = .{},
+    /// The image filling the screen behind the windows: a built-in one
+    /// (`backgrounds`), or a PNG.
+    image: ImagePath = default_image,
+
+    pub const default_image: ImagePath = .of(backgrounds.path(backgrounds.all[0]));
 
     pub fn parse(text: []const u8) Settings {
         var s: Settings = .{};
@@ -120,8 +74,6 @@ pub const Settings = struct {
             const val = tok.next() orelse continue;
             if (std.mem.eql(u8, key, "theme")) {
                 if (Mode.fromCode(val)) |m| s.theme = m;
-            } else if (std.mem.eql(u8, key, "background")) {
-                if (Background.fromCode(val)) |bg| s.background = bg;
             } else if (std.mem.eql(u8, key, "image")) {
                 // The rest of the line: a path may have spaces.
                 const start = @intFromPtr(val.ptr) - @intFromPtr(line.ptr);
@@ -132,7 +84,7 @@ pub const Settings = struct {
     }
 
     pub fn formatBuf(s: Settings, buf: []u8) []const u8 {
-        const head = std.fmt.bufPrint(buf, "theme {s}\nbackground {s}\n", .{ s.theme.code(), s.background.code() }) catch return "";
+        const head = std.fmt.bufPrint(buf, "theme {s}\n", .{s.theme.code()}) catch return "";
         const path = s.image.slice() orelse return head;
         const tail = std.fmt.bufPrint(buf[head.len..], "image {s}\n", .{path}) catch return "";
         return buf[0 .. head.len + tail.len];
@@ -180,28 +132,25 @@ test "appearance settings parse, format, save and load" {
     try testing.expectEqual(Mode.dark, loadSettingsFrom(path).theme);
     saveSettingsTo(path, .{ .theme = .light });
     try testing.expectEqual(Mode.light, loadSettingsFrom(path).theme);
-    saveSettingsTo(path, .{ .theme = .dark, .background = .teal });
-    try testing.expectEqual(Settings{ .theme = .dark, .background = .teal }, loadSettingsFrom(path));
+    const sea: Settings = .{ .theme = .dark, .image = .of(backgrounds.path(backgrounds.all[1])) };
+    saveSettingsTo(path, sea);
+    try testing.expectEqual(sea, loadSettingsFrom(path));
 }
 
-test "the appearance settings keep the theme and the background" {
-    const s: Settings = .{ .theme = .light, .background = .plum };
-    var buf: [64]u8 = undefined;
-    try std.testing.expectEqual(s, Settings.parse(s.formatBuf(&buf)));
-    // Written before there was a choice of background.
-    try std.testing.expectEqual(Settings{ .theme = .light, .background = .navy }, Settings.parse("theme light\n"));
-    // A colour no longer offered (grey was) is the default.
-    try std.testing.expectEqual(Settings{ .theme = .light, .background = .navy }, Settings.parse("theme light\nbackground grey\n"));
+test "the forest is the background to start with, and before there was a choice of photos" {
+    try testing.expectEqualStrings("/os/backgrounds/forest.etc1", Settings.parse("").image.slice().?);
+    // Written when the background was a colour: the colour is forgotten.
+    const old = Settings.parse("theme light\nbackground teal\n");
+    try testing.expectEqual(Mode.light, old.theme);
+    try testing.expectEqualStrings("/os/backgrounds/forest.etc1", old.image.slice().?);
 }
 
-test "an image over the background is kept, with spaces in its path" {
-    const s: Settings = .{ .theme = .dark, .background = .teal, .image = .of("/data/user/My Pictures/sea.png") };
+test "the background image is kept, with spaces in its path" {
+    const s: Settings = .{ .theme = .dark, .image = .of("/data/user/My Pictures/sea.png") };
     var buf: [Settings.max_text]u8 = undefined;
     const text = s.formatBuf(&buf);
-    try std.testing.expectEqualStrings("theme dark\nbackground teal\nimage /data/user/My Pictures/sea.png\n", text);
+    try std.testing.expectEqualStrings("theme dark\nimage /data/user/My Pictures/sea.png\n", text);
     const back = Settings.parse(text);
     try std.testing.expectEqual(s, back);
     try std.testing.expectEqualStrings("/data/user/My Pictures/sea.png", back.image.slice().?);
-    // None: no line for it.
-    try std.testing.expect(Settings.parse("theme dark\n").image.slice() == null);
 }

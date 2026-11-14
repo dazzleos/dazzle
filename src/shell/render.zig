@@ -454,13 +454,6 @@ pub const Renderer = struct {
         r.panels[@intFromEnum(id)].band_y = y;
     }
 
-    /// Changes the background's colour.
-    pub fn setBackgroundColor(r: *Renderer, color: u32) void {
-        if (color == r.background) return;
-        r.background = color;
-        r.band_stamp +%= 1;
-    }
-
     /// Hides a panel, or shows it again.
     pub fn setPanelHidden(r: *Renderer, id: PanelId, hidden: bool) void {
         r.panels[@intFromEnum(id)].hidden = hidden;

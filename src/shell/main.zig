@@ -139,7 +139,6 @@ fn run(init: std.process.Init.Minimal) !void {
     dock.updates = updates.available;
     const appearance = dock_mod.readAppearance();
     dock.theme = appearance.theme;
-    renderer.setBackgroundColor(appearance.background);
     // The background image, if any: made ready on a thread of its own.
     var background_image: background_mod.Loader = .init(gpa, renderer.width, renderer.height, dock.bandHeight());
     defer background_image.deinit();
@@ -253,7 +252,6 @@ fn run(init: std.process.Init.Minimal) !void {
             dock.volume = dock_mod.readVolumeStatus();
             const chosen = dock_mod.readAppearance();
             dock.theme = chosen.theme;
-            renderer.setBackgroundColor(chosen.background);
             wantBackground(&background_image, &renderer, chosen);
             dock.draw();
             showDock(&renderer, &dock);
@@ -645,10 +643,6 @@ fn run(init: std.process.Init.Minimal) !void {
                     dock.draw();
                     showDock(&renderer, &dock);
                 }
-                panels_damaged = true;
-            }
-            if (chosen.background != renderer.background) {
-                renderer.setBackgroundColor(chosen.background);
                 panels_damaged = true;
             }
             wantBackground(&background_image, &renderer, chosen);
