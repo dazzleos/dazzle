@@ -219,7 +219,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
                 .padding = .{ .left = 24, .top = 24, .right = 24, .bottom = 12 },
                 .child = cx.make(kete.Align{
                     .alignment = .top_center,
-                    .child = cx.make(kete.ConstrainedBox{ .constraints = .{ .max_w = view.max_page_width }, .child = b.page(rows.items) }),
+                    .child = cx.make(view.PageWidth{ .child = b.page(rows.items) }),
                 }),
             }) }).withKey(@as(u64, @intFromEnum(Page.apps)) + 1),
         }) }),
@@ -228,7 +228,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
             .child = cx.make(kete.Align{
                 .alignment = .center,
                 .height_factor = 1,
-                .child = cx.make(kete.ConstrainedBox{ .constraints = .{ .max_w = view.max_page_width }, .child = footer }),
+                .child = cx.make(view.PageWidth{ .child = footer }),
             }),
         }),
     } });

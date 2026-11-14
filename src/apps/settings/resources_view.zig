@@ -63,8 +63,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
             .child = cx.make(kete.Align{
                 .alignment = .center,
                 .height_factor = 1,
-                .child = cx.make(kete.ConstrainedBox{
-                    .constraints = .{ .max_w = view.max_page_width },
+                .child = cx.make(view.PageWidth{
                     .child = cx.make(kete.Row{ .children = &.{
                         cx.make(kete.Expanded{ .child = cx.make(kete.Text{
                             .text = "Press Meta+I to toggle the resource overlay",

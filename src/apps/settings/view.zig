@@ -116,6 +116,25 @@ pub const open_size = [2]u32{ 1000, 680 };
 /// The widest a page is.
 pub const max_page_width = 960;
 
+/// A page's content, at most `max_page_width` wide. Not a ConstrainedBox:
+/// a column stretched across it would say it needs all that width, and
+/// the window could then be no narrower; this needs only what its child
+/// needs.
+pub const PageWidth = struct {
+    child: kete.Widget,
+
+    pub fn layout(_: *const PageWidth, n: *kete.WidgetNode, c: kete.Constraints) kete.Size {
+        var inner = c;
+        inner.max_w = @min(c.max_w, max_page_width);
+        inner.min_w = @min(c.min_w, inner.max_w);
+        return n.child(0).layout(inner);
+    }
+
+    pub fn minSize(_: *const PageWidth, n: *kete.WidgetNode, c: kete.Constraints) kete.Size {
+        return n.child(0).minSize(c);
+    }
+};
+
 pub const Settings = struct {
     commit: []const u8,
     /// The language and keyboard in use.
@@ -306,7 +325,7 @@ pub const Builder = struct {
         const cx = b.cx;
         return cx.make(kete.ScrollView{ .child = cx.make(kete.Padding{ .padding = .all(24), .child = cx.make(kete.Align{
             .alignment = .top_center,
-            .child = cx.make(kete.ConstrainedBox{ .constraints = .{ .max_w = max_page_width }, .child = child }),
+            .child = cx.make(PageWidth{ .child = child }),
         }) }) }).withKey(@as(u64, @intFromEnum(p)) + 1);
     }
 
@@ -318,7 +337,7 @@ pub const Builder = struct {
         const children = cx.arena.dupe(kete.Widget, rows) catch return cx.make(kete.SizedBox.empty);
         return cx.make(kete.Padding{ .padding = .all(24), .child = cx.make(kete.Align{
             .alignment = .top_center,
-            .child = cx.make(kete.ConstrainedBox{ .constraints = .{ .max_w = max_page_width }, .child = cx.make(kete.Column{
+            .child = cx.make(PageWidth{ .child = cx.make(kete.Column{
                 .cross_axis_alignment = .stretch,
                 .spacing = 10,
                 .children = children,
@@ -568,5 +587,23 @@ test "everything is shown, and fits from the smallest window to the biggest" {
     // is the board alone; Catalogue/2 apps/From url and dBm/adapter name/WPA2/GHz on Wi-Fi are gone.
     for ([_][]const u8{ "Dazzle build", "Hardware\n", "Chip", "GPU\n", "Revision", "In use", "Up for", "Hostname", "Catalogue", "2 apps", "From https://example.com/apps", "dBm", "wlan0", "WPA2", "GHz", "Traffic", "Gateway" }) |gone| {
         try testing.expect(std.mem.indexOf(u8, all.items, gone) == null);
+    }
+}
+
+test "no page needs the window wider than the least it can be" {
+    const f = try kete.font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
+    defer u.destroy();
+    const d = sample();
+    const wifi = sampleWifi();
+    var n: u64 = 0;
+    inline for (comptime std.enums.values(Page)) |pg| {
+        n += 1;
+        u.frame(1000, 680, n, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps });
+        _ = showPage(u, pg);
+        n += 1;
+        u.frame(1000, 680, n, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps });
+        errdefer std.debug.print("the {s} page needs {d} pixels\n", .{ @tagName(pg), u.min_size[0] });
+        try testing.expect(u.min_size[0] <= min_size[0]);
     }
 }
