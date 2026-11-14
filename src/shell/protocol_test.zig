@@ -990,6 +990,26 @@ test "a window dragged to the left or right edge fills that half, to the top fil
     try win.redraw(a, shm, @intCast(wa.width / 2 + 100), @intCast(wa.height));
     const wide = w.drawn(&quads);
     try testing.expectEqual(server_mod.Rect{ .x = wa.x + @as(i32, @intCast(wa.width / 2)), .y = wa.y, .width = wa.width - wa.width / 2, .height = wa.height }, wide[wide.len - 1].clip);
+    try win.redraw(a, shm, @intCast(wa.width - wa.width / 2), @intCast(wa.height));
+
+    // With a dock below the work area: dragged away and down, restored, it
+    // goes under the dock, drawn there (the dock over it); maximized, it
+    // leaves the dock room.
+    w.server.setWorkArea(.{ .x = 0, .y = 40, .width = 800, .height = 480 });
+    try Drag.to(&w, &win, seat, 600, 100, 300, 300);
+    try Drag.release(&w);
+    try win.redraw(a, shm, 400, 280);
+    try testing.expect(t.tiled == null);
+    try Drag.to(&w, &win, seat, 300, 300, 300, 560);
+    try Drag.release(&w);
+    const low = w.server.windowRect(t);
+    try testing.expect(low.y + @as(i32, @intCast(low.height)) > 520);
+    const under = w.drawn(&quads);
+    try testing.expectEqual(w.server.screen(), under[under.len - 1].clip);
+    m = try win.toplevel.request(p.xdg_toplevel.request.set_maximized);
+    m.end();
+    try w.pump();
+    try testing.expectEqual([2]u32{ 800, 480 }, w.server.configuredSize(t));
 }
 
 test "pressing in a window keeps the pointer when dragging and releasing outside it, or moving quickly" {
@@ -1902,7 +1922,7 @@ test "a window whose client asks is drawn rounded, with a shadow, unless square;
     try testing.expect(!drawn[0].shadow);
     try testing.expectEqual(@as(u16, server_mod.corner_radius), drawn[1].radius);
     try testing.expect(drawn[1].shadow);
-    try testing.expectEqual(w.server.work_area, drawn[1].shadow_clip);
+    try testing.expectEqual(w.server.screen(), drawn[1].shadow_clip);
     // The window behind, the same size in the same place, can be seen at
     // its corners: it is not covered.
     w.server.updateFocus();

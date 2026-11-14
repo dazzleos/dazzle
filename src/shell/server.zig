@@ -12,14 +12,15 @@
 //! (pointer lock and relative motion), and wl_data_device_manager (copy and
 //! paste: see `setSelection`; drag and drop: see `startDrag`).
 //!
-//! Windows go in the work area above the shell's dock: restored (as they
-//! start, at the size the client chooses when told 0 by 0, in the middle
-//! of the work area; or, restored from maximized without one, half the
-//! work area), or maximized (filling it),
+//! Windows go anywhere on the screen, the shell's dock drawn over them,
+//! but maximized and tiled ones stay in the work area above the dock:
+//! restored (as they start, at the size the client chooses when told 0 by
+//! 0, in the middle of the work area; or, restored from maximized without
+//! one, half the work area), or maximized (filling the work area),
 //! where the client can move them with xdg_toplevel.move (dragging its
 //! title bar) and resize with xdg_toplevel.resize (dragging an edge), no
 //! smaller than the size it asks for with xdg_toplevel.set_min_size, nor
-//! bigger than the work area. While a window is resized, it is told a new
+//! bigger than the screen. While a window is resized, it is told a new
 //! size only once it has drawn at the last one, so a slow client is not
 //! sent sizes it cannot keep up with. Clients choose the pointer's picture
 //! over their windows with wp_cursor_shape_v1 (an arrow, or a resize).
@@ -1163,10 +1164,13 @@ pub const Server = struct {
         return .{ .x = 0, .y = 0, .width = s.output.width, .height = s.output.height };
     }
 
-    /// The area a window fills, maximized, as it is shown: the screen if
-    /// fullscreen, otherwise the work area.
+    /// The area a window is in, as it is shown: the work area if it is
+    /// maximized or tiled (leaving the dock room), otherwise the screen
+    /// (fullscreen, or restored: the dock is drawn over it there).
     fn areaOf(s: *const Server, t: *const Toplevel) Rect {
-        return if (t.shown_fullscreen) s.screen() else s.work_area;
+        if (t.shown_fullscreen) return s.screen();
+        if (t.shown_maximized or t.shown_tiled != null) return s.work_area;
+        return s.screen();
     }
 
     /// The area a window is told it can fill.
@@ -1196,6 +1200,9 @@ pub const Server = struct {
         if (s.drag) |d| if (d.icon) |icon| if (icon.texture() != null) return null;
         if (s.cursor_surface) |cs| if (cs.texture() != null and s.pointer_focus != null) return null;
         for (s.popups.items) |pp| if (pp.xdg.surface) |ps| if (s.rootToplevel(ps) == t) return null;
+        // Another window that can be seen (below the work area, around the
+        // dock) would not be.
+        for (s.toplevels.items) |u| if (u != t and u.shown() and !u.suspended) return null;
         const b = surf.buffer orelse return null;
         const area = s.areaOf(t);
         if (b.dmabuf == null or b.width != area.width or b.height != area.height) return null;
@@ -1489,7 +1496,7 @@ pub const Server = struct {
 
     /// The size a window is told to be: the work area's, or its restored
     /// size (at first half the work area), no smaller than its minimum
-    /// nor bigger than the work area.
+    /// nor bigger than the work area (maximized or tiled) or the screen.
     pub fn configuredSize(s: *const Server, t: *const Toplevel) [2]u32 {
         const wa = s.work_area;
         if (t.fullscreen) return .{ s.output.width, s.output.height };
@@ -1500,9 +1507,10 @@ pub const Server = struct {
             const r = s.tileRect(side);
             return .{ r.width, r.height };
         }
+        // Restored, it can be as big as the screen (under the dock).
         const w = if (t.width != 0) t.width else wa.width / 2;
         const h = if (t.height != 0) t.height else wa.height / 2;
-        return .{ s.clampWidth(t, w, wa.width), s.clampHeight(t, h, wa.height) };
+        return .{ s.clampWidth(t, w, s.output.width), s.clampHeight(t, h, s.output.height) };
     }
 
     /// A width for `t` between its minimum and maximum, and no more than
@@ -1591,7 +1599,7 @@ pub const Server = struct {
     /// window restored now is told.
     fn sizeLimitsChanged(s: *Server, c: *Client, t: *Toplevel) void {
         if (!t.placed) return;
-        const wa = s.work_area;
+        const wa = s.screen();
         const w = s.clampWidth(t, t.width, wa.width);
         const h = s.clampHeight(t, t.height, wa.height);
         if (w == t.width and h == t.height) return;
@@ -1600,16 +1608,17 @@ pub const Server = struct {
         if (!t.maximized and !t.fullscreen and t.xdg.configured) s.requestConfigure(c, t);
     }
 
-    /// Moves a restored window, keeping `grip` of it in the work area (and
-    /// its top, with its title bar, below the work area's).
+    /// Moves a restored window, keeping `grip` of it on the screen (and its
+    /// top, with its title bar, below the work area's).
     fn moveWindow(s: *Server, t: *Toplevel, x: f64, y: f64) void {
-        const wa = s.work_area;
+        const wa = s.screen();
         const w: i32 = @intCast(s.windowRect(t).width);
         const left = wa.x + grip - w;
         const right = wa.x + @as(i32, @intCast(wa.width)) - grip;
         const bottom = wa.y + @as(i32, @intCast(wa.height)) - grip;
         const nx = std.math.clamp(@as(i32, @intFromFloat(@round(x))), @min(left, right), right);
-        const ny = std.math.clamp(@as(i32, @intFromFloat(@round(y))), wa.y, @max(bottom, wa.y));
+        const top = s.work_area.y;
+        const ny = std.math.clamp(@as(i32, @intFromFloat(@round(y))), top, @max(bottom, top));
         if (nx == t.x and ny == t.y) return;
         t.x = nx;
         t.y = ny;
@@ -1701,7 +1710,7 @@ pub const Server = struct {
 
     /// The pointer moved to (`x`, `y`) while resizing.
     fn resizeTo(s: *Server, t: *Toplevel, r: Resize, x: f64, y: f64) void {
-        const wa = s.work_area;
+        const wa = s.screen();
         const dx: i32 = @intFromFloat(@round(x - r.x));
         const dy: i32 = @intFromFloat(@round(y - r.y));
         const w0: i32 = @intCast(r.rect.width);
@@ -1717,7 +1726,7 @@ pub const Server = struct {
         if (r.edges & edge_top != 0) {
             // Its top stays below the work area's.
             const bottom = r.rect.y + h0;
-            h = s.clampHeight(t, @intCast(@max(h0 - dy, 1)), @intCast(@max(bottom - wa.y, 1)));
+            h = s.clampHeight(t, @intCast(@max(h0 - dy, 1)), @intCast(@max(bottom - s.work_area.y, 1)));
             t.anchor_bottom = bottom;
         }
         if (w == t.width and h == t.height) return;
@@ -3254,8 +3263,6 @@ pub const Server = struct {
                     .preview = true,
                 });
             };
-            // Rounded windows' shadows fall over the work area (not the
-            // dock).
             // On its way to its place, after its state changed: what it
             // shows now, as big as the window is on the way.
             if (t.anim) |a| {
@@ -3265,7 +3272,7 @@ pub const Server = struct {
             }
             // A tiled window drawn wider than its half is cut to it.
             const win_clip = if (t.shown_tiled) |side| s.tileRect(side) else clip;
-            s.addTree(&list, surf, win_clip, .{ .radius = rounding(t), .shadow = true, .shadow_clip = s.work_area });
+            s.addTree(&list, surf, win_clip, .{ .radius = rounding(t), .shadow = true, .shadow_clip = s.screen() });
             for (s.popups.items) |pp| if (pp.xdg.surface) |ps| if (s.rootToplevel(ps) == t) s.addTree(&list, ps, clip, .{});
         }
         if (s.drag) |d| if (d.icon) |icon| s.addTree(&list, icon, s.screen(), .{});
@@ -4245,9 +4252,9 @@ pub const Server = struct {
 
     /// The surface at (`x`, `y`) on the screen, if any: the top one there.
     fn surfaceAt(s: *Server, x: f64, y: f64) ?*Surface {
-        // Only what is in the work area can be seen (or, under a fullscreen
-        // window, the screen).
-        const wa = if (s.fullscreenTop()) s.screen() else s.work_area;
+        // Windows can be anywhere on the screen (the shell takes what is
+        // on the dock, over them, first).
+        const wa = s.screen();
         if (x < @as(f64, @floatFromInt(wa.x)) or y < @as(f64, @floatFromInt(wa.y)) or
             x >= @as(f64, @floatFromInt(wa.x + @as(i32, @intCast(wa.width)))) or
             y >= @as(f64, @floatFromInt(wa.y + @as(i32, @intCast(wa.height))))) return null;
