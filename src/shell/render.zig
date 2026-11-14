@@ -9,6 +9,11 @@
 //! render in the GPU's T-tiled layout, which the texture unit reads), or
 //! copies of shared-memory buffers, in 32-bit or RGB565 pixels. The quad
 //! shader is shaders/quad.zig.
+//!
+//! A rounded window (one whose client asked, with dazzle_decoration_v1)
+//! is drawn in pieces: most of it as it is, and its corners blended, cut
+//! to its radius, with its shadow in strips around it (shaders/window.zig).
+//! It needs no buffer of its own, nor an alpha channel in the client's.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -41,6 +46,23 @@ pub const Window = struct {
     /// Not a surface: the shaded preview of what a window dragged to an
     /// edge will fill (drawn blended, in `preview_color`).
     preview: bool = false,
+    /// The radius of its corners (0: square), and whether it has a shadow,
+    /// drawn within `shadow_clip`.
+    radius: u16 = 0,
+    shadow: bool = false,
+    shadow_clip: server.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+};
+
+/// A rounded window's shadow: how dark under the window, how far it fades
+/// out, and how much lower than the window it is.
+pub const shadow_alpha = 0.4;
+pub const shadow_blur = 24;
+pub const shadow_offset = 6;
+
+/// shaders/window.zig's uniforms.
+const RoundedUniforms = extern struct {
+    shape: [4]f32,
+    shadow: [4]f32,
 };
 
 /// The preview's shade: the dark scheme's primary, a third of the way.
@@ -53,27 +75,104 @@ pub const max_windows = 48;
 /// A panel's picture, drawn at (`x`, `y`) on the screen.
 pub const PanelQuad = struct { texture: server.Texture, x: i32 = 0, y: i32 };
 
+/// The programs a frame is drawn with: textures as they are, blended (the
+/// snap preview), and rounded windows' corners and shadows.
+pub const Pipelines = struct {
+    quads: *shader.Pipeline,
+    blended: *shader.Pipeline,
+    rounded: *shader.Pipeline,
+};
+
 /// Records a frame (after `frame.begin`): the windows (bottom first, at
 /// most `max_windows`) and the panels above them as quads. `vbo` holds the
 /// quads' vertices and must stay untouched until the frame has rendered.
-pub fn recordFrame(frame: *render.Frame, pipeline: *shader.Pipeline, blended: *shader.Pipeline, preview: server.Texture, vbo: vc4.Bo, panels: []const ?PanelQuad, windows: []const Window) !void {
+pub fn recordFrame(frame: *render.Frame, pipelines: Pipelines, preview: server.Texture, vbo: vc4.Bo, panels: []const ?PanelQuad, windows: []const Window) !void {
     std.debug.assert(windows.len <= max_windows);
+    const pipeline = pipelines.quads;
     var quads: usize = 0;
     for (windows) |w| {
         if (w.preview) {
-            try quad(frame, blended, vbo, quads, preview, w.x, w.y, w.width, w.height, 0, .{ .x = w.clip.x, .y = w.clip.y, .width = w.clip.width, .height = w.clip.height });
+            try quad(frame, pipelines.blended, vbo, quads, preview, w.x, w.y, w.width, w.height, 0, viewportOf(w.clip));
             quads += 1;
             continue;
         }
         const qw = if (w.width != 0) w.width else w.texture.width;
         const qh = if (w.height != 0) w.height else w.texture.height;
-        try quad(frame, pipeline, vbo, quads, w.texture, w.x, w.y, qw, qh, w.transform, .{ .x = w.clip.x, .y = w.clip.y, .width = w.clip.width, .height = w.clip.height });
+        if (w.radius > 0 and w.transform == 0 and 2 * @as(u32, w.radius) <= @min(qw, qh)) {
+            try roundedWindow(frame, pipelines, vbo, &quads, w, qw, qh);
+            continue;
+        }
+        try quad(frame, pipeline, vbo, quads, w.texture, w.x, w.y, qw, qh, w.transform, viewportOf(w.clip));
         quads += 1;
     }
     for (panels) |panel| if (panel) |pq| {
         try quad(frame, pipeline, vbo, quads, pq.texture, pq.x, pq.y, pq.texture.width, pq.texture.height, 0, null);
         quads += 1;
     };
+}
+
+fn viewportOf(r: server.Rect) render.Viewport {
+    return .{ .x = r.x, .y = r.y, .width = r.width, .height = r.height };
+}
+
+/// The most quads a window is drawn in: rounded, three pieces of it as it
+/// is, four corners, and four strips of shadow.
+const max_pieces = 11;
+
+/// A rounded window, `qw` by `qh` on the screen: its middle as it is, its
+/// corners cut, and its shadow around it.
+fn roundedWindow(frame: *render.Frame, pipelines: Pipelines, vbo: vc4.Bo, quads: *usize, w: Window, qw: u32, qh: u32) !void {
+    const fw: f32 = @floatFromInt(qw);
+    const fh: f32 = @floatFromInt(qh);
+    const radius: i32 = w.radius;
+    const ww: i32 = @intCast(qw);
+    const wh: i32 = @intCast(qh);
+    const uniforms: RoundedUniforms = .{
+        .shape = .{ fw / 2, fh / 2, @floatFromInt(radius), 0 },
+        .shadow = if (w.shadow) .{ shadow_alpha, shadow_blur, shadow_offset, 0 } else .{ 0, 1, 0, 0 },
+    };
+    pipelines.rounded.setUniforms(std.mem.asBytes(&uniforms));
+    const filter: texture.Filter = if (qw < w.texture.width or qh < w.texture.height) .linear else .nearest;
+    const Piece = struct { x: i32, y: i32, w: i32, h: i32 };
+    const piece = struct {
+        fn draw(f: *render.Frame, pl: *shader.Pipeline, b: vc4.Bo, n: *usize, win: Window, sw: f32, sh: f32, flt: texture.Filter, r: Piece, clip: server.Rect) !void {
+            if (r.w <= 0 or r.h <= 0) return;
+            // Its texture coordinates, as a part of the window (beyond it,
+            // for the shadow).
+            const u_0 = @as(f32, @floatFromInt(r.x - win.x)) / sw;
+            const u_1 = @as(f32, @floatFromInt(r.x + r.w - win.x)) / sw;
+            const v_0 = @as(f32, @floatFromInt(r.y - win.y)) / sh;
+            const v_1 = @as(f32, @floatFromInt(r.y + r.h - win.y)) / sh;
+            try rect(f, pl, b, n.*, win.texture, r.x, r.y, @intCast(r.w), @intCast(r.h), .{ .{ u_0, v_0 }, .{ u_0, v_1 }, .{ u_1, v_0 }, .{ u_1, v_1 } }, flt, viewportOf(clip));
+            n.* += 1;
+        }
+    }.draw;
+    const x = w.x;
+    const y = w.y;
+    // The shadow, in strips around the window (none under it, where it
+    // would not be seen).
+    if (w.shadow) {
+        const s = shadow_blur + shadow_offset;
+        for ([_]Piece{
+            .{ .x = x - s, .y = y - s, .w = ww + 2 * s, .h = s },
+            .{ .x = x - s, .y = y + wh, .w = ww + 2 * s, .h = s },
+            .{ .x = x - s, .y = y, .w = s, .h = wh },
+            .{ .x = x + ww, .y = y, .w = s, .h = wh },
+        }) |r| try piece(frame, pipelines.rounded, vbo, quads, w, fw, fh, filter, r, w.shadow_clip);
+    }
+    // All but the corners, as it is.
+    for ([_]Piece{
+        .{ .x = x, .y = y + radius, .w = ww, .h = wh - 2 * radius },
+        .{ .x = x + radius, .y = y, .w = ww - 2 * radius, .h = radius },
+        .{ .x = x + radius, .y = y + wh - radius, .w = ww - 2 * radius, .h = radius },
+    }) |r| try piece(frame, pipelines.quads, vbo, quads, w, fw, fh, filter, r, w.clip);
+    // The corners, cut (over their shadow).
+    for ([_]Piece{
+        .{ .x = x, .y = y, .w = radius, .h = radius },
+        .{ .x = x + ww - radius, .y = y, .w = radius, .h = radius },
+        .{ .x = x, .y = y + wh - radius, .w = radius, .h = radius },
+        .{ .x = x + ww - radius, .y = y + wh - radius, .w = radius, .h = radius },
+    }) |r| try piece(frame, pipelines.rounded, vbo, quads, w, fw, fh, filter, r, w.clip);
 }
 
 fn quadUvs(transform: u3) [4][2]f32 {
@@ -89,6 +188,15 @@ fn quadUvs(transform: u3) [4][2]f32 {
 
 /// Draws a texture with its top left at (x, y) and logical size (qw, qh).
 fn quad(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, index: usize, t: server.Texture, x: i32, y: i32, qw: u32, qh: u32, transform: u3, scissor: ?render.Viewport) !void {
+    // Drawn smaller (in the overview), it is filtered, not sampled.
+    const filter: texture.Filter = if (qw < t.width or qh < t.height) .linear else .nearest;
+    try rect(frame, pipeline, vbo, index, t, x, y, qw, qh, quadUvs(transform), filter, scissor);
+}
+
+/// Draws the rectangle at (x, y), (qw, qh) big, with texture coordinates
+/// `uv` at its top left, bottom left, top right and bottom right corners.
+fn rect(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, index: usize, t: server.Texture, x: i32, y: i32, qw: u32, qh: u32, uv: [4][2]f32, filter: texture.Filter, scissor: ?render.Viewport) !void {
+    std.debug.assert(index < max_quads);
     // Two triangles, in clip space, with texture coordinates.
     const w: f32 = @floatFromInt(frame.target.width);
     const h: f32 = @floatFromInt(frame.target.height);
@@ -96,13 +204,10 @@ fn quad(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, index: us
     const x1 = @as(f32, @floatFromInt(x + @as(i32, @intCast(qw)))) / w * 2 - 1;
     const y0 = 1 - @as(f32, @floatFromInt(y)) / h * 2;
     const y1 = 1 - @as(f32, @floatFromInt(y + @as(i32, @intCast(qh)))) / h * 2;
-    const uv = quadUvs(transform);
     const verts = [6][4]f32{
         .{ x0, y0, uv[0][0], uv[0][1] }, .{ x0, y1, uv[1][0], uv[1][1] }, .{ x1, y0, uv[2][0], uv[2][1] },
         .{ x1, y0, uv[2][0], uv[2][1] }, .{ x0, y1, uv[1][0], uv[1][1] }, .{ x1, y1, uv[3][0], uv[3][1] },
     };
-    // Drawn smaller (in the overview), it is filtered, not sampled.
-    const filter: texture.Filter = if (qw < t.width or qh < t.height) .linear else .nearest;
     const offset: u32 = @intCast(index * @sizeOf(@TypeOf(verts)));
     @memcpy(vbo.map[offset..][0..@sizeOf(@TypeOf(verts))], std.mem.asBytes(&verts));
     try pipeline.draw(frame, .{
@@ -123,10 +228,11 @@ fn quad(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, index: us
 }
 
 /// Room for the panels' and windows' quads (each two triangles of four
-/// floats per vertex).
-const vbo_size = 8192;
+/// floats per vertex), every window rounded.
+const max_quads = n_panels + max_windows * max_pieces;
+const vbo_size = 51200;
 comptime {
-    std.debug.assert((n_panels + max_windows) * 6 * 4 * @sizeOf(f32) <= vbo_size);
+    std.debug.assert(max_quads * 6 * 4 * @sizeOf(f32) <= vbo_size);
 }
 
 /// A buffer the display can show.
@@ -170,6 +276,7 @@ pub const Renderer = struct {
     /// little texture of its shade, made when first drawn).
     quads: shader.Pipeline,
     blended: shader.Pipeline,
+    rounded: shader.Pipeline,
     preview_texture: ?server.Texture = null,
     /// Vertices for this frame's quads.
     vbo: vc4.Bo,
@@ -202,6 +309,7 @@ pub const Renderer = struct {
             .height = display.height,
             .quads = try shader.Pipeline.init(gpa, dev, shader.Program.decode(@embedFile("quad.shader")) catch unreachable, layout),
             .blended = try shader.Pipeline.init(gpa, dev, shader.Program.decode(@embedFile("quad_blend.shader")) catch unreachable, layout),
+            .rounded = try shader.Pipeline.init(gpa, dev, shader.Program.decode(@embedFile("window.shader")) catch unreachable, layout),
             .vbo = try dev.createBo(vbo_size),
         };
     }
@@ -397,11 +505,15 @@ pub const Renderer = struct {
         const t0 = sys.nowNs();
         const quads = try r.panelQuads();
         static_frame.begin(r.display.backTarget(), .{ .clear = r.background });
-        try recordFrame(&static_frame, &r.quads, &r.blended, try r.previewTexture(), r.vbo, &quads, windows);
+        try recordFrame(&static_frame, r.pipelines(), try r.previewTexture(), r.vbo, &quads, windows);
         const t1 = sys.nowNs();
         const seqno = try r.dev.submit(static_frame.finish());
         try r.dev.waitSeqno(seqno, std.time.ns_per_s);
         return .{ .cpu_ns = t1 - t0, .gpu_ns = sys.nowNs() - t1 };
+    }
+
+    fn pipelines(r: *Renderer) Pipelines {
+        return .{ .quads = &r.quads, .blended = &r.blended, .rounded = &r.rounded };
     }
 
     /// A texture of the snap preview's shade (4 by 4, all of it).
@@ -437,7 +549,7 @@ pub const Renderer = struct {
         const bo = try r.dev.createBo(pitch * r.height);
         defer r.dev.destroyBo(bo);
         capture_frame.begin(.{ .handle = bo.handle, .width = @intCast(r.width), .height = @intCast(r.height), .tiling = .linear }, .{ .clear = r.background });
-        try recordFrame(&capture_frame, &r.quads, &r.blended, try r.previewTexture(), r.vbo, &quads, windows);
+        try recordFrame(&capture_frame, r.pipelines(), try r.previewTexture(), r.vbo, &quads, windows);
         const seqno = try r.dev.submit(capture_frame.finish());
         try r.dev.waitSeqno(seqno, std.time.ns_per_s);
         const pixels = try gpa.alloc(u32, @as(usize, r.width) * r.height);
@@ -466,3 +578,77 @@ pub const Renderer = struct {
         return r.display.handleEvents();
     }
 };
+
+// --- Tests ------------------------------------------------------------------
+
+const testing = std.testing;
+const sim = vc4.qpu_sim;
+
+test "a rounded window's corners are cut, and its shadow fades out around it (shaders/window.zig, in the QPU simulator)" {
+    // A window 100 by 60 at (0, 0) on the screen, in a blue-grey, over
+    // white.
+    const ww = 100;
+    const wh = 60;
+    const window_color = 0xff3080c0;
+    const white = 0xffffffff;
+    const program = shader.Program.decode(@embedFile("window.shader")) catch unreachable;
+    var decoded_buf: [vc4.compiler.max_code]sim.DecodedInst = undefined;
+    const decoded = sim.decodeProgram(program.fs.code(), &decoded_buf);
+    var tex_memory: [texture.imageSizeOf(.xrgb8888, 4, 4)]u8 = undefined;
+    const tex_pixels: [16]u32 = @splat(window_color);
+    texture.uploadRectOf(.xrgb8888, &tex_memory, 4, 4, .{ .x = 0, .y = 0, .width = 4, .height = 4 }, std.mem.sliceAsBytes(&tex_pixels), 16);
+    const cfg: texture.Config = .{ .type = vc4.Format.xrgb8888.textureType(), .width = 4, .height = 4, .mag_filter = .nearest, .min_filter = .nearest, .wrap_s = .clamp, .wrap_t = .clamp };
+    const values: RoundedUniforms = .{ .shape = .{ ww / 2, wh / 2, 12, 0 }, .shadow = .{ shadow_alpha, shadow_blur, shadow_offset, 0 } };
+    const words = std.mem.bytesAsSlice(u32, std.mem.asBytes(&values));
+    var uniforms: [32]u32 = undefined;
+    for (program.fs.uniforms(), uniforms[0..program.fs.uniforms().len]) |u, *out| out.* = switch (u) {
+        .user => |i| words[i],
+        .tex_p0 => texture.p0(cfg),
+        .tex_p1 => texture.p1(cfg),
+        .constant => |v| v,
+    };
+
+    // Pixels (their centres) on the screen, and what each should be.
+    const Want = union(enum) { window, grey: [2]u8 };
+    const cases = [_]struct { x: f32, y: f32, want: Want }{
+        // Inside: the window, also near its square edges and inside the
+        // curve of a corner.
+        .{ .x = 50.5, .y = 30.5, .want = .window },
+        .{ .x = 50.5, .y = 0.5, .want = .window },
+        .{ .x = 0.5, .y = 30.5, .want = .window },
+        .{ .x = 6.5, .y = 6.5, .want = .window },
+        .{ .x = 93.5, .y = 53.5, .want = .window },
+        // At the very corner: cut, its shadow behind (a light grey).
+        .{ .x = 0.5, .y = 0.5, .want = .{ .grey = .{ 150, 230 } } },
+        .{ .x = 99.5, .y = 59.5, .want = .{ .grey = .{ 120, 200 } } },
+        // Just under the window, the shadow is darkest; further away, it
+        // fades to nothing.
+        .{ .x = 50.5, .y = 61.5, .want = .{ .grey = .{ 140, 170 } } },
+        .{ .x = 50.5, .y = 75.5, .want = .{ .grey = .{ 175, 245 } } },
+        .{ .x = 50.5, .y = 89.5, .want = .{ .grey = .{ 250, 255 } } },
+        .{ .x = 50.5, .y = -17.5, .want = .{ .grey = .{ 250, 255 } } },
+        .{ .x = 125.5, .y = 30.5, .want = .{ .grey = .{ 250, 255 } } },
+    };
+    var u_lanes: sim.Vec = undefined;
+    var v_lanes: sim.Vec = undefined;
+    for (0..sim.lanes) |lane| {
+        const c = cases[@min(lane, cases.len - 1)];
+        u_lanes[lane] = @bitCast(c.x / ww);
+        v_lanes[lane] = @bitCast(c.y / wh);
+    }
+    const r = try sim.runFragmentDecoded(decoded, .{ .uniforms = &uniforms, .varyings = &.{ u_lanes, v_lanes }, .tlb_color_in = @splat(white), .texture_memory = &tex_memory });
+    for (cases, 0..) |c, lane| {
+        const px = r.tlb_color.?[lane];
+        const red: u8 = @truncate(px >> 16);
+        const green: u8 = @truncate(px >> 8);
+        const blue: u8 = @truncate(px);
+        errdefer std.debug.print("at ({d}, {d}): 0x{x:0>8}\n", .{ c.x, c.y, px });
+        switch (c.want) {
+            .window => try testing.expect(@abs(@as(i32, red) - 0x30) <= 2 and @abs(@as(i32, green) - 0x80) <= 2 and @abs(@as(i32, blue) - 0xc0) <= 2),
+            .grey => |range| {
+                try testing.expect(red == green and green == blue);
+                try testing.expect(red >= range[0] and red <= range[1]);
+            },
+        }
+    }
+}

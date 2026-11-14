@@ -292,6 +292,11 @@ pub const Window = struct {
     /// Filling half the work area, against its edges (dragged to the
     /// screen's left or right edge): not resized from its edges either.
     tiled: bool = false,
+    /// Rounded by the shell (`Options.rounded`): its corners' radius, as
+    /// the shell last said (0 while square: maximized, fullscreen or
+    /// tiled). What it shows should keep inside it.
+    decoration: ?client.Proxy = null,
+    corner_radius: u32 = 0,
     /// The serial of the last active pointer/touch press, for asking the
     /// shell to move the window from it (0 once released).
     press_serial: u32 = 0,
@@ -421,6 +426,11 @@ pub const Window = struct {
         min_size: ?[2]u32 = null,
         /// Open maximized instead.
         maximized: bool = false,
+        /// Ask the shell to round its corners and draw a shadow
+        /// (dazzle_decoration_v1), for a window that draws its own title
+        /// bar and border to match (see `corner_radius`). Ignored by a
+        /// shell that does not.
+        rounded: bool = false,
     };
 
     /// Opens a window on an existing connection, which the window then
@@ -471,6 +481,12 @@ pub const Window = struct {
         w.toplevel = try conn.newObject(.{ .ptr = w, .handler = toplevelEvent });
         m = try w.xdg_surface.request(p.xdg_surface.request.get_toplevel);
         m.uint(w.toplevel.id).end();
+        if (options.rounded) if (try w.globals.bind(registry, p.dazzle_decoration_manager_v1.name, 1, null)) |mgr| {
+            const deco = try conn.newObject(.{ .ptr = w, .handler = decorationEvent });
+            m = try mgr.request(p.dazzle_decoration_manager_v1.request.get_decoration);
+            m.uint(deco.id).uint(w.toplevel.id).end();
+            w.decoration = deco;
+        };
         m = try w.toplevel.request(p.xdg_toplevel.request.set_title);
         m.string(title).end();
         if (options.app_id) |app_id| {
@@ -1479,6 +1495,11 @@ pub const Window = struct {
     fn xdgSurfaceEvent(ptr: ?*anyopaque, _: *client.Display, _: u32, opcode: u16, r: *wire.Reader) void {
         const w: *Window = @ptrCast(@alignCast(ptr.?));
         if (opcode == p.xdg_surface.event.configure) w.pending_serial = r.uint() catch return;
+    }
+
+    fn decorationEvent(ptr: ?*anyopaque, _: *client.Display, _: u32, opcode: u16, r: *wire.Reader) void {
+        const w: *Window = @ptrCast(@alignCast(ptr.?));
+        if (opcode == p.dazzle_decoration_v1.event.corner_radius) w.corner_radius = r.uint() catch return;
     }
 
     fn toplevelEvent(ptr: ?*anyopaque, _: *client.Display, _: u32, opcode: u16, r: *wire.Reader) void {

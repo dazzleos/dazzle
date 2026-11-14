@@ -1837,3 +1837,80 @@ test "zwp_text_input_v3 sends enter/leave with focus, commits client state, and 
     try testing.expectEqualStrings("你好", ti_ev.commit[0..ti_ev.commit_len]);
     try testing.expectEqual(@as(u32, 1), ti_ev.done_serial);
 }
+
+test "a window whose client asks is drawn rounded, with a shadow, unless square; other windows are drawn as they are" {
+    var w: World = .{};
+    w.init();
+    defer w.deinit();
+    var quads: [16]Server.Quad = undefined;
+
+    // A window that did not ask, at the bottom.
+    const b = try w.connect();
+    const b_compositor = try b.bind(p.wl_compositor.name, 4, null);
+    const b_wm_base = try b.bind(p.xdg_wm_base.name, 6, null);
+    const b_shm = try b.bind(p.wl_shm.name, 1, null);
+    var plain: Window = .{ .surface = undefined, .xdg = undefined, .toplevel = undefined };
+    try plain.open(b, b_compositor, b_wm_base, b_shm, null);
+    var m = try plain.toplevel.request(p.xdg_toplevel.request.unset_maximized);
+    m.end();
+    try plain.redraw(b, b_shm, 400, 280);
+    const plain_t = w.server.topWindow().?;
+
+    // One that asks, over it.
+    const a = try w.connect();
+    const compositor = try a.bind(p.wl_compositor.name, 4, null);
+    const wm_base = try a.bind(p.xdg_wm_base.name, 6, null);
+    const shm = try a.bind(p.wl_shm.name, 1, null);
+    const mgr = try a.bind(p.dazzle_decoration_manager_v1.name, 1, null);
+    var win: Window = .{ .surface = undefined, .xdg = undefined, .toplevel = undefined };
+    try win.open(a, compositor, wm_base, shm, null);
+    var deco_heard: Heard = .{};
+    const deco = try a.d.newObject(deco_heard.listener());
+    m = try mgr.request(p.dazzle_decoration_manager_v1.request.get_decoration);
+    m.uint(deco.id).uint(win.toplevel.id).end();
+    try w.pump();
+    // Maximized, it is told it is square.
+    try testing.expectEqual(@as(u32, 1), deco_heard.counts[p.dazzle_decoration_v1.event.corner_radius]);
+    try testing.expectEqual(@as(i64, 0), deco_heard.args[0]);
+    try testing.expectEqual(@as(u16, 0), w.drawn(&quads)[0].radius);
+
+    // Restored, it is told its radius, and drawn so once it has drawn.
+    m = try win.toplevel.request(p.xdg_toplevel.request.unset_maximized);
+    m.end();
+    try win.redraw(a, shm, 400, 280);
+    try testing.expectEqual(@as(i64, server_mod.corner_radius), deco_heard.args[0]);
+    var drawn = w.drawn(&quads);
+    try testing.expectEqual(@as(usize, 2), drawn.len);
+    try testing.expectEqual(@as(u16, 0), drawn[0].radius);
+    try testing.expect(!drawn[0].shadow);
+    try testing.expectEqual(@as(u16, server_mod.corner_radius), drawn[1].radius);
+    try testing.expect(drawn[1].shadow);
+    try testing.expectEqual(w.server.work_area, drawn[1].shadow_clip);
+    // The window behind, the same size in the same place, can be seen at
+    // its corners: it is not covered.
+    w.server.updateFocus();
+    try testing.expectEqual(w.server.windowRect(plain_t), w.server.windowRect(w.server.topWindow().?));
+    try testing.expect(!plain_t.suspended);
+
+    // Maximized again: square, once drawn so.
+    m = try win.toplevel.request(p.xdg_toplevel.request.set_maximized);
+    m.end();
+    try w.pump();
+    try testing.expectEqual(@as(i64, 0), deco_heard.args[0]);
+    try win.redraw(a, shm, 800, 560);
+    try testing.expectEqual(@as(u16, 0), w.drawn(&quads)[0].radius);
+
+    // Without its decoration, drawn as it is; and the window behind,
+    // hidden, is covered.
+    m = try win.toplevel.request(p.xdg_toplevel.request.unset_maximized);
+    m.end();
+    try win.redraw(a, shm, 400, 280);
+    try testing.expectEqual(@as(u16, server_mod.corner_radius), w.drawn(&quads)[1].radius);
+    m = try deco.request(p.dazzle_decoration_v1.request.destroy);
+    m.end();
+    try w.pump();
+    w.server.updateFocus();
+    drawn = w.drawn(&quads);
+    try testing.expectEqual(@as(u16, 0), drawn[drawn.len - 1].radius);
+    try testing.expect(plain_t.suspended);
+}

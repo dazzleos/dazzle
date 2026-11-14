@@ -230,8 +230,12 @@ pub const Window = struct {
     /// the `id`), format and tiling.
     pub fn beginDmabufFrame(w: *Window) ?kgfx.DmabufTarget {
         const t = w.win.beginFrame() catch return null;
-        // Not filling the work area or the screen, it has a border.
-        if (w.renderer) |r| r.outline = !w.win.maximized and !w.win.fullscreen;
+        // Not filling the work area or the screen, it has a border,
+        // rounded as the shell rounds the window.
+        if (w.renderer) |r| {
+            r.outline = !w.win.maximized and !w.win.fullscreen;
+            r.outline_radius = @floatFromInt(w.win.corner_radius);
+        }
         return .{
             .id = t.handle,
             .fd = -1,
@@ -493,6 +497,8 @@ pub const Display = struct {
             .app_id = d.app_id,
             .min_size = o.min_size,
             .maximized = o.maximized,
+            // kete draws the title bar and border: the shell rounds them.
+            .rounded = d.decorations == .toolkit,
         };
         for (o.size, &options.size) |given, *side| if (given) |v| {
             side.* = v;

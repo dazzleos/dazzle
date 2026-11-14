@@ -811,6 +811,43 @@ pub const zwp_text_input_v3 = struct {
     };
 };
 
+/// Dazzle's own: windows the shell draws with rounded corners and a
+/// shadow. Only a client that asks gets them (other clients' windows are
+/// drawn as they are): it makes a `dazzle_decoration_v1` for its toplevel,
+/// before the toplevel's first commit, and draws its contents (its own
+/// title bar and border) rounded to the radius it is told.
+pub const dazzle_decoration_manager_v1 = struct {
+    pub const name = "dazzle_decoration_manager_v1";
+    pub const version = 1;
+    pub const request = struct {
+        pub const destroy = 0;
+        /// get_decoration(new_id dazzle_decoration_v1, object xdg_toplevel)
+        pub const get_decoration = 1;
+    };
+    pub const err = struct {
+        /// The toplevel already has a decoration.
+        pub const already_constructed = 0;
+    };
+};
+
+/// A toplevel the shell draws rounded, with a shadow. Destroying it (or
+/// the toplevel) ends that.
+pub const dazzle_decoration_v1 = struct {
+    pub const name = "dazzle_decoration_v1";
+    pub const request = struct {
+        pub const destroy = 0;
+    };
+    pub const event = struct {
+        /// corner_radius(uint radius): sent before each xdg_surface.configure
+        /// (with xdg_toplevel.configure), for the buffer that acknowledges
+        /// it. The shell cuts the window's corners to this radius, in
+        /// surface pixels, so the client keeps its contents (and draws its
+        /// border) inside them. 0 when the window is square: maximized,
+        /// fullscreen or tiled.
+        pub const corner_radius = 0;
+    };
+};
+
 /// Linux input event codes (linux/input-event-codes.h) used by Dazzle.
 pub const input = struct {
     pub const btn_left = 0x110;

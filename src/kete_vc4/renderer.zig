@@ -96,6 +96,8 @@ pub const Renderer = struct {
     /// is drawn along its edges, in `border_color` (the theme's outline
     /// variant), so windows over each other do not run together.
     outline: bool = false,
+    /// The radius of the window's corners, as the shell rounds them.
+    outline_radius: f32 = 0,
     border_color: kgfx.Color = .rgb(0x49454f),
     border: Canvas,
 
@@ -360,10 +362,14 @@ pub const Renderer = struct {
             const w: f32 = @floatFromInt(target.width);
             const h: f32 = @floatFromInt(target.height);
             r.border.begin(target.width, target.height);
-            r.border.fillRect(.{ .x = 0, .y = 0, .w = w, .h = 1 }, r.border_color);
-            r.border.fillRect(.{ .x = 0, .y = h - 1, .w = w, .h = 1 }, r.border_color);
-            r.border.fillRect(.{ .x = 0, .y = 1, .w = 1, .h = h - 2 }, r.border_color);
-            r.border.fillRect(.{ .x = w - 1, .y = 1, .w = 1, .h = h - 2 }, r.border_color);
+            if (r.outline_radius > 0) {
+                r.border.strokeRoundedRect(.{ .x = 0, .y = 0, .w = w, .h = h }, .all(r.outline_radius), 1, r.border_color);
+            } else {
+                r.border.fillRect(.{ .x = 0, .y = 0, .w = w, .h = 1 }, r.border_color);
+                r.border.fillRect(.{ .x = 0, .y = h - 1, .w = w, .h = 1 }, r.border_color);
+                r.border.fillRect(.{ .x = 0, .y = 1, .w = 1, .h = h - 2 }, r.border_color);
+                r.border.fillRect(.{ .x = w - 1, .y = 1, .w = 1, .h = h - 2 }, r.border_color);
+            }
         }
         const all = try r.gpa.alloc(*const Canvas, canvases.len + 1);
         defer r.gpa.free(all);

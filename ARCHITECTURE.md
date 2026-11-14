@@ -177,6 +177,14 @@ when requested). The shell composites visible windows into the screen
 buffer and presents frames via KMS page flips at vertical blank. Both apps
 and the shell track damage and redraw only regions that changed.
 
+Dazzle's apps ask the shell, with its own Wayland protocol
+(`dazzle_decoration_manager_v1`), to round their windows' corners and draw
+shadows under them. The shell draws both in its shaders as it composites
+(the window in pieces: most of it as it is, its corners and the shadow
+around it blended), so app buffers need no alpha channel or margins, and
+there is no extra GPU memory per window. Other Wayland clients' windows
+are drawn as they are.
+
 When a single maximized or fullscreen window covers the screen, the shell
 bypasses GPU compositing and scans the app's buffer out directly on the
 display hardware (placing the dock on an overlay plane when maximized).

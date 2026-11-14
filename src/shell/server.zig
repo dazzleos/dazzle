@@ -29,6 +29,11 @@
 //! half when let go (xdg_toplevel's tiled states), and to its top edge,
 //! all of it; what it will fill is shown, shaded, under it meanwhile.
 //! Moved from there, it is restored under the pointer.
+//! A window whose client asks (dazzle_decoration_manager_v1, Dazzle's
+//! own) is drawn with rounded corners and a shadow, unless it is square
+//! against the edges (maximized, fullscreen or tiled); the client is told
+//! the radius, to draw its border to match. Other clients' windows are
+//! drawn as they are.
 //! They are stacked most recently mapped (or raised, or clicked) on top,
 //! and the top one has the keyboard. Windows hidden behind others are
 //! covered: they get xdg_toplevel's suspended state, their frame callbacks
@@ -120,7 +125,12 @@ const globals = [_]struct { name: []const u8, version: u32 }{
     .{ .name = p.zwp_relative_pointer_manager_v1.name, .version = p.zwp_relative_pointer_manager_v1.version },
     .{ .name = p.wp_presentation.name, .version = p.wp_presentation.version },
     .{ .name = p.zwp_text_input_manager_v3.name, .version = p.zwp_text_input_manager_v3.version },
+    .{ .name = p.dazzle_decoration_manager_v1.name, .version = p.dazzle_decoration_manager_v1.version },
 };
+
+/// The radius of the corners of windows the shell rounds (those whose
+/// clients ask, with dazzle_decoration_v1), and of their shadow.
+pub const corner_radius = 12;
 
 /// The screen, as wl_output describes it.
 pub const Output = struct {
@@ -172,6 +182,15 @@ const Object = union(enum) {
     presentation_feedback,
     text_input_manager,
     text_input: *TextInput,
+    decoration_manager,
+    decoration: *Decoration,
+};
+
+/// A toplevel's dazzle_decoration_v1: the shell rounds its corners and
+/// draws its shadow. Outlives the toplevel (without it) until destroyed.
+pub const Decoration = struct {
+    id: u32,
+    toplevel: ?*Toplevel,
 };
 
 pub const TextInput = struct {
@@ -500,6 +519,8 @@ pub const Toplevel = struct {
     /// edge), and as it is shown; maximized and fullscreen come first.
     tiled: ?Tile = null,
     shown_tiled: ?Tile = null,
+    /// Its client asked for rounded corners and a shadow.
+    decoration: ?*Decoration = null,
     x: i32 = 0,
     y: i32 = 0,
     /// Restored before, so `x`, `y` and its size are where and how big it
@@ -526,6 +547,20 @@ pub const Toplevel = struct {
     drawn: bool = true,
     /// Its size changed while it was drawing: it is told once it has.
     resend: bool = false,
+
+    /// The radius its corners are drawn with, as it is shown: rounded if
+    /// its client asked, unless it is square against the work area's or
+    /// screen's edges.
+    pub fn shownRadius(t: *const Toplevel) u32 {
+        if (t.decoration == null or t.shown_maximized or t.shown_fullscreen or t.shown_tiled != null) return 0;
+        return corner_radius;
+    }
+
+    /// The radius it is told to draw for, in its next configure.
+    fn toldRadius(t: *const Toplevel) u32 {
+        if (t.decoration == null or t.maximized or t.fullscreen or t.tiled != null) return 0;
+        return corner_radius;
+    }
 
     /// Mapped, with something to show.
     fn shown(t: *const Toplevel) bool {
@@ -915,8 +950,17 @@ pub const Server = struct {
             .subsurface => |sub| s.destroySubsurface(sub),
             .locked_pointer, .confined_pointer => |lock| s.destroyLock(lock),
             .text_input => |ti| s.destroyTextInput(ti),
+            .decoration => |d| s.destroyDecoration(d),
             else => {},
         }
+    }
+
+    fn destroyDecoration(s: *Server, d: *Decoration) void {
+        if (d.toplevel) |t| {
+            t.decoration = null;
+            s.damaged = true;
+        }
+        s.gpa.destroy(d);
     }
 
     fn destroyTextInput(s: *Server, ti: *TextInput) void {
@@ -1023,6 +1067,7 @@ pub const Server = struct {
     }
 
     fn destroyToplevel(s: *Server, t: *Toplevel) void {
+        if (t.decoration) |d| d.toplevel = null;
         for (s.toplevels.items) |other| if (other.parent == t) {
             other.parent = null;
         };
@@ -2501,6 +2546,34 @@ pub const Server = struct {
                 else => return error.InvalidOpcode,
             },
             .presentation_feedback => return error.InvalidOpcode,
+            .decoration_manager => switch (m.opcode) {
+                p.dazzle_decoration_manager_v1.request.destroy => c.deleteId(m.object),
+                p.dazzle_decoration_manager_v1.request.get_decoration => {
+                    const id = try r.uint();
+                    const t = switch (c.objects.get(try r.uint()) orelse return error.InvalidObject) {
+                        .toplevel => |x| x,
+                        else => return error.InvalidObject,
+                    };
+                    if (t.decoration != null) return c.postError(m.object, p.dazzle_decoration_manager_v1.err.already_constructed, "the toplevel already has a decoration", .{});
+                    const d = try s.gpa.create(Decoration);
+                    d.* = .{ .id = id, .toplevel = t };
+                    c.addObject(id, .{ .decoration = d }) catch |e| {
+                        s.gpa.destroy(d);
+                        return e;
+                    };
+                    t.decoration = d;
+                    // Configured already: told its radius with a new one.
+                    if (t.configure_serial != 0) s.configure(c, t);
+                },
+                else => return error.InvalidOpcode,
+            },
+            .decoration => |d| switch (m.opcode) {
+                p.dazzle_decoration_v1.request.destroy => {
+                    c.deleteId(m.object);
+                    s.destroyDecoration(d);
+                },
+                else => return error.InvalidOpcode,
+            },
             .text_input_manager => switch (m.opcode) {
                 p.zwp_text_input_manager_v3.request.destroy => c.deleteId(m.object),
                 p.zwp_text_input_manager_v3.request.get_text_input => {
@@ -2648,6 +2721,7 @@ pub const Server = struct {
                 sendTo(c, id, p.wp_presentation.event.clock_id, .{@as(u32, p.wp_presentation.clock.monotonic)});
             },
             13 => try c.addObject(id, .text_input_manager),
+            14 => try c.addObject(id, .decoration_manager),
             9 => {
                 try c.addObject(id, .{ .output = version });
                 s.describeOutput(c, id, version);
@@ -3067,7 +3141,37 @@ pub const Server = struct {
     /// with its logical size and buffer transform, clipped to an area.
     /// A `preview` is not a surface's: it shows, shaded, what a window
     /// dragged to an edge will fill (its texture is not drawn).
-    pub const Quad = struct { texture: Texture, x: i32, y: i32, width: u32 = 0, height: u32 = 0, transform: u3 = 0, clip: Rect, preview: bool = false };
+    pub const Quad = struct {
+        texture: Texture,
+        x: i32,
+        y: i32,
+        width: u32 = 0,
+        height: u32 = 0,
+        transform: u3 = 0,
+        clip: Rect,
+        preview: bool = false,
+        /// A rounded window: its corners' radius on the screen, and
+        /// whether it has a shadow, drawn within `shadow_clip`.
+        radius: u16 = 0,
+        shadow: bool = false,
+        shadow_clip: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+    };
+
+    /// How a window's main surface is drawn: rounded, with a shadow.
+    const Rounding = struct { radius: u32 = 0, shadow: bool = false, shadow_clip: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 } };
+
+    /// How `t` is rounded: only if its client asked, its surface is the
+    /// window (no geometry within it) and it is shown in the usual way.
+    fn rounding(t: *const Toplevel) u32 {
+        const r = t.shownRadius();
+        if (r == 0) return 0;
+        const surf = t.xdg.surface orelse return 0;
+        if (surf.transform != 0) return 0;
+        const sz = surf.size() orelse return 0;
+        if (t.xdg.geometry) |g| if (g.x != 0 or g.y != 0 or g.width != sz[0] or g.height != sz[1]) return 0;
+        if (sz[0] < 2 * r or sz[1] < 2 * r) return 0;
+        return r;
+    }
 
     /// What to draw, bottom first: each window that can be seen, with its
     /// subsurfaces, then its popups, a drag icon, and a custom cursor
@@ -3086,7 +3190,7 @@ pub const Server = struct {
                 } else continue;
                 const surf = t.xdg.surface orelse continue;
                 const from = s.windowRect(t);
-                s.addTreeScaled(&list, surf, from, lerpRect(from, slot.rect, e));
+                s.addTreeScaled(&list, surf, from, lerpRect(from, slot.rect, e), rounding(t));
             }
             return list.items;
         }
@@ -3109,24 +3213,38 @@ pub const Server = struct {
                     .preview = true,
                 });
             };
-            s.addTree(&list, surf, clip);
-            for (s.popups.items) |pp| if (pp.xdg.surface) |ps| if (s.rootToplevel(ps) == t) s.addTree(&list, ps, clip);
+            // Rounded windows' shadows fall over the work area (not the
+            // dock).
+            s.addTree(&list, surf, clip, .{ .radius = rounding(t), .shadow = true, .shadow_clip = s.work_area });
+            for (s.popups.items) |pp| if (pp.xdg.surface) |ps| if (s.rootToplevel(ps) == t) s.addTree(&list, ps, clip, .{});
         }
-        if (s.drag) |d| if (d.icon) |icon| s.addTree(&list, icon, s.screen());
-        if (s.cursor_surface) |cs| if (s.pointer_focus != null and s.grab == null and !s.pointerLocked()) s.addTree(&list, cs, s.screen());
+        if (s.drag) |d| if (d.icon) |icon| s.addTree(&list, icon, s.screen(), .{});
+        if (s.cursor_surface) |cs| if (s.pointer_focus != null and s.grab == null and !s.pointerLocked()) s.addTree(&list, cs, s.screen(), .{});
         return list.items;
     }
 
-    /// A surface and its subsurfaces, above it.
-    fn addTree(s: *const Server, list: *std.ArrayList(Quad), surf: *const Surface, clip: Rect) void {
+    /// A surface and its subsurfaces, above it; the surface rounded as
+    /// `round` says (not its subsurfaces).
+    fn addTree(s: *const Server, list: *std.ArrayList(Quad), surf: *const Surface, clip: Rect, round: Rounding) void {
         const o = s.surfaceOrigin(surf) orelse return;
         if (surf.texture()) |tex| {
             const sz = surf.size().?;
             // Over the most there is room for: the newest, at the top.
             if (list.items.len == list.capacity) _ = list.orderedRemove(0);
-            list.appendAssumeCapacity(.{ .texture = tex, .x = o[0], .y = o[1], .width = sz[0], .height = sz[1], .transform = surf.transform, .clip = clip });
+            list.appendAssumeCapacity(.{
+                .texture = tex,
+                .x = o[0],
+                .y = o[1],
+                .width = sz[0],
+                .height = sz[1],
+                .transform = surf.transform,
+                .clip = clip,
+                .radius = @intCast(round.radius),
+                .shadow = round.radius > 0 and round.shadow,
+                .shadow_clip = round.shadow_clip,
+            });
         }
-        for (surf.subsurfaces.items) |sub| if (sub.surface) |child| s.addTree(list, child, clip);
+        for (surf.subsurfaces.items) |sub| if (sub.surface) |child| s.addTree(list, child, clip, .{});
     }
 
     /// Slow at the start and the end, quick between (cubic).
@@ -3152,8 +3270,9 @@ pub const Server = struct {
 
     /// A window's surface and its subsurfaces, drawn with the window (at
     /// `from` on the screen) at `to` instead, as much smaller as that is,
-    /// and clipped to it.
-    fn addTreeScaled(s: *const Server, list: *std.ArrayList(Quad), surf: *const Surface, from: Rect, to: Rect) void {
+    /// and clipped to it; the window's surface with its corners rounded by
+    /// `radius` (as much smaller), without a shadow.
+    fn addTreeScaled(s: *const Server, list: *std.ArrayList(Quad), surf: *const Surface, from: Rect, to: Rect, radius: u32) void {
         const o = s.surfaceOrigin(surf) orelse return;
         const f = @as(f64, @floatFromInt(to.width)) / @as(f64, @floatFromInt(@max(from.width, 1)));
         if (surf.texture()) |tex| {
@@ -3167,9 +3286,10 @@ pub const Server = struct {
                 .height = @max(@as(u32, @intFromFloat(@round(@as(f64, @floatFromInt(sz[1])) * f))), 1),
                 .transform = surf.transform,
                 .clip = to,
+                .radius = @intFromFloat(@round(@as(f64, @floatFromInt(radius)) * f)),
             });
         }
-        for (surf.subsurfaces.items) |sub| if (sub.surface) |child| s.addTreeScaled(list, child, from, to);
+        for (surf.subsurfaces.items) |sub| if (sub.surface) |child| s.addTreeScaled(list, child, from, to, 0);
     }
 
     /// The topmost surface of a tree (`surf` and its subsurfaces) at
@@ -3970,12 +4090,19 @@ pub const Server = struct {
         for (above) |u| {
             if (!u.shown()) continue;
             if (u.xdg.surface) |us| if (us.input_region != null) continue;
-            const a = s.visibleRect(u);
+            // A rounded window does not hide what is behind its corners.
+            const a = insetRect(s.visibleRect(u), @intCast(u.shownRadius()));
             if (a.x <= r.x and a.y <= r.y and
                 a.x + @as(i32, @intCast(a.width)) >= r.x + @as(i32, @intCast(r.width)) and
                 a.y + @as(i32, @intCast(a.height)) >= r.y + @as(i32, @intCast(r.height))) return true;
         }
         return false;
+    }
+
+    /// `r`, `by` smaller on each side.
+    fn insetRect(r: Rect, by: u32) Rect {
+        if (by == 0) return r;
+        return .{ .x = r.x + @as(i32, @intCast(by)), .y = r.y + @as(i32, @intCast(by)), .width = r.width -| 2 * by, .height = r.height -| 2 * by };
     }
 
     /// Moves the focus after the windows change: the keyboard to the top
@@ -4457,6 +4584,7 @@ pub const Server = struct {
             const size: [2]u32 = if (!t.placed and !t.maximized and !t.fullscreen) .{ 0, 0 } else s.configuredSize(t);
             e.int(@intCast(size[0])).int(@intCast(size[1])).array(states[0..n]).end();
         }
+        if (t.decoration) |d| sendTo(c, d.id, p.dazzle_decoration_v1.event.corner_radius, .{t.toldRadius()});
         if (c.send(t.xdg.id, p.xdg_surface.event.configure)) |m0| {
             var e = m0;
             t.configure_serial = s.nextSerial();

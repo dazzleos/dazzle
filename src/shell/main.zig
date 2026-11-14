@@ -914,6 +914,9 @@ fn frameWindows(server: *server_mod.Server, out: *[render.max_windows]render.Win
         .transform = q.transform,
         .clip = q.clip,
         .preview = q.preview,
+        .radius = q.radius,
+        .shadow = q.shadow,
+        .shadow_clip = q.shadow_clip,
     };
     return out[0..list.len];
 }
@@ -982,4 +985,5 @@ test {
     _ = @import("keyboard.zig");
     _ = @import("protocol_test.zig");
     _ = @import("placement.zig");
+    _ = @import("render.zig");
 }
