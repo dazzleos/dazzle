@@ -710,6 +710,40 @@ pub const zwp_relative_pointer_v1 = struct {
 };
 
 /// Presentation timing feedback (`presentation-time.xml`).
+/// Surfaces shown at a size of the client's choosing, whatever their
+/// buffer's (viewporter.xml): an app draws a smaller buffer, and the shell
+/// (or the display) stretches it.
+pub const wp_viewporter = struct {
+    pub const name = "wp_viewporter";
+    pub const version = 1;
+    pub const request = struct {
+        pub const destroy = 0;
+        /// get_viewport(new_id wp_viewport, object wl_surface)
+        pub const get_viewport = 1;
+    };
+    pub const err = struct {
+        pub const viewport_exists = 0;
+    };
+};
+
+pub const wp_viewport = struct {
+    pub const request = struct {
+        pub const destroy = 0;
+        /// set_source(fixed x, fixed y, fixed width, fixed height): the part
+        /// of the buffer shown (all -1: all of it).
+        pub const set_source = 1;
+        /// set_destination(int width, int height): the surface's size (-1,
+        /// -1: its buffer's).
+        pub const set_destination = 2;
+    };
+    pub const err = struct {
+        pub const bad_value = 0;
+        pub const bad_size = 1;
+        pub const out_of_buffer = 2;
+        pub const no_surface = 3;
+    };
+};
+
 pub const wp_presentation = struct {
     pub const name = "wp_presentation";
     pub const version = 1;

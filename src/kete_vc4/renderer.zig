@@ -98,6 +98,11 @@ pub const Renderer = struct {
     /// together.
     outline: bool = false,
     border_color: kgfx.Color = .rgb(0x49454f),
+    /// The window's buffer's pixels to each of its own (less than 1 when
+    /// it draws a smaller buffer, which the shell stretches): what kete
+    /// lays out at the window's size is drawn this much smaller. Set for
+    /// each frame (see `Window.beginDmabufFrame`).
+    scale: f32 = 1,
     border: Canvas,
 
     const ImageTexture = struct {
@@ -271,6 +276,11 @@ pub const Renderer = struct {
         try r.recordCanvas(c, frame);
     }
 
+    /// `v` (laid out at the window's size) in the buffer being drawn.
+    pub fn scaled(r: *const Renderer, v: kgfx.Viewport) render.Viewport {
+        return scaledViewport(v, r.scale);
+    }
+
     /// Records a canvas into `frame`, leaving out batches outside the parts
     /// being rendered (see `render.Frame.limitTo`). When the frame fills
     /// up, it is rendered and drawing goes on.
@@ -279,7 +289,7 @@ pub const Renderer = struct {
             const data = std.mem.sliceAsBytes(b.floats.items);
             if (data.len == 0) continue;
             const area = if (b.clip) |clip| b.bounds.intersect(clip) orelse continue else b.bounds;
-            if (!frame.covers(scissor(area))) continue;
+            if (!frame.covers(scissor(area, r.scale))) continue;
             const vbo = r.vbo orelse return error.NotPrepared;
             if (!frame.hasRoom(max_uniform_words)) {
                 try r.gpu.vtable.run(r.gpu.ptr, frame);
@@ -303,8 +313,9 @@ pub const Renderer = struct {
                         .type = vc4.Format.a8.textureType(),
                         .width = atlas_mod.width,
                         .height = atlas_mod.height,
-                        .mag_filter = .nearest,
-                        .min_filter = .nearest,
+                        // Drawn smaller, smoothly.
+                        .mag_filter = if (r.scale < 1) .linear else .nearest,
+                        .min_filter = if (r.scale < 1) .linear else .nearest,
                         .wrap_s = .clamp,
                         .wrap_t = .clamp,
                     },
@@ -327,7 +338,7 @@ pub const Renderer = struct {
                 .vertex_offset = offset,
                 .count = b.vertexCount(),
                 .texture = texture,
-                .scissor = if (b.clip) |clip| scissor(clip) else null,
+                .scissor = if (b.clip) |clip| scissor(clip, r.scale) else null,
             });
         }
     }
@@ -352,8 +363,8 @@ pub const Renderer = struct {
         var vps: [kgfx.frame.Damage.max_rects]render.Viewport = undefined;
         const n = @min(damage.len, vps.len);
         for (damage[0..n], vps[0..n]) |d, *v| v.* = viewport(d);
-        // More than it can say: all of it.
-        frame.limitTo(if (n == damage.len) vps[0..n] else null);
+        // More than it can say, or drawn smaller: all of it.
+        frame.limitTo(if (n == damage.len and r.scale == 1) vps[0..n] else null);
         // The window's border, over what it shows.
         const outlined = r.outline and target.width > 2 and target.height > 2;
         r.outline = false;
@@ -373,7 +384,7 @@ pub const Renderer = struct {
         try r.prepare(if (outlined) all else canvases);
         for (segments) |s| switch (s) {
             .canvas => |c| try r.recordCanvas(c, frame),
-            .gpu => |g| if (frame.covers(viewport(g.area.scissor orelse g.area.viewport))) try g.f(g.ctx, frame, g.area),
+            .gpu => |g| if (frame.covers(r.scaled(g.area.scissor orelse g.area.viewport))) try g.f(g.ctx, frame, g.area),
         };
         if (outlined) try r.recordCanvas(&r.border, frame);
         const issued = sys.nowNs();
@@ -411,13 +422,24 @@ pub fn viewport(v: kgfx.Viewport) render.Viewport {
     return .{ .x = v.x, .y = v.y, .width = v.width, .height = v.height };
 }
 
+/// `v` (laid out at the window's size) in the window's buffer, if that is
+/// smaller (`scale`).
+pub fn scaledViewport(v: kgfx.Viewport, scale: f32) render.Viewport {
+    if (scale == 1) return viewport(v);
+    const x0 = @round(@as(f32, @floatFromInt(v.x)) * scale);
+    const y0 = @round(@as(f32, @floatFromInt(v.y)) * scale);
+    const x1 = @round(@as(f32, @floatFromInt(v.x + @as(i32, @intCast(v.width)))) * scale);
+    const y1 = @round(@as(f32, @floatFromInt(v.y + @as(i32, @intCast(v.height)))) * scale);
+    return .{ .x = @intFromFloat(x0), .y = @intFromFloat(y0), .width = @intFromFloat(@max(x1 - x0, 0)), .height = @intFromFloat(@max(y1 - y0, 0)) };
+}
+
 /// More than any of the canvas shaders' draws uses.
 const max_uniform_words = 256;
 
-fn scissor(clip: kgfx.Rect) render.Viewport {
-    const x0 = @floor(@max(clip.x, 0));
-    const y0 = @floor(@max(clip.y, 0));
-    const x1 = @max(@ceil(clip.x + clip.w), x0);
-    const y1 = @max(@ceil(clip.y + clip.h), y0);
+fn scissor(clip: kgfx.Rect, scale: f32) render.Viewport {
+    const x0 = @floor(@max(clip.x * scale, 0));
+    const y0 = @floor(@max(clip.y * scale, 0));
+    const x1 = @max(@ceil((clip.x + clip.w) * scale), x0);
+    const y1 = @max(@ceil((clip.y + clip.h) * scale), y0);
     return .{ .x = @intFromFloat(@min(x0, 1e6)), .y = @intFromFloat(@min(y0, 1e6)), .width = @intFromFloat(@min(x1 - x0, 1e6)), .height = @intFromFloat(@min(y1 - y0, 1e6)) };
 }

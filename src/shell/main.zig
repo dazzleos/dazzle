@@ -909,7 +909,7 @@ fn run(init: std.process.Init.Minimal) !void {
             // Not while the dock slides: it would leave its band.
             if (top) |t| if (!dock.sliding()) if (server.scanoutBuffer(t)) |b| {
                 const at = server.windowRect(t);
-                if (renderer.showDirect(b.dmabuf.?, at.x, at.y)) |at_once| {
+                if (renderer.showDirect(b.dmabuf.?, at.x, at.y, .{ at.width, at.height })) |at_once| {
                     server.holdBuffer(b);
                     scanout.queued = b;
                     if (count_frame) perf_frames += 1;

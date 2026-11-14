@@ -192,6 +192,8 @@ pub const Window = struct {
         // not if the shell rounds it, as it then draws a shadow around it.
         if (w.renderer) |r| {
             r.outline = !w.win.maximized and !w.win.fullscreen and w.win.corner_radius == 0;
+            // A buffer smaller than the window: drawn as much smaller.
+            r.scale = @as(f32, @floatFromInt(t.width)) / @as(f32, @floatFromInt(@max(w.win.width, 1)));
         }
         return .{
             .id = t.handle,
@@ -223,7 +225,9 @@ pub const Window = struct {
     /// the one before.
     pub fn showDamaged(w: *Window, damage: ?[]const kgfx.Viewport) !void {
         var vps: [kgfx.frame.Damage.max_rects]vc4.render.Viewport = undefined;
-        const rects: ?[]const vc4.render.Viewport = if (damage) |d| if (d.len <= vps.len) blk: {
+        // Drawn smaller: all of it changed, in the buffer's pixels.
+        const scaled = if (w.renderer) |r| r.scale != 1 else false;
+        const rects: ?[]const vc4.render.Viewport = if (scaled) null else if (damage) |d| if (d.len <= vps.len) blk: {
             for (d, vps[0..d.len]) |v, *o| o.* = renderer_mod.viewport(v);
             break :blk vps[0..d.len];
         } else null else null;

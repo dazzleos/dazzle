@@ -2076,3 +2076,50 @@ test "the pointer over the shell's parts of the screen (the dock) is no window's
     w.server.pointerMotion(2, 400, 200);
     try testing.expectEqual(win.surface.id, w.server.pointer_focus.?.id);
 }
+
+test "a surface with a viewport is shown at its destination's size, whatever its buffer's" {
+    var w: World = .{};
+    w.init();
+    defer w.deinit();
+    const a = try w.connect();
+    const compositor = try a.bind(p.wl_compositor.name, 4, null);
+    const wm_base = try a.bind(p.xdg_wm_base.name, 6, null);
+    const shm = try a.bind(p.wl_shm.name, 1, null);
+    const viewporter = try a.bind(p.wp_viewporter.name, 1, null);
+    var win: Window = .{ .surface = undefined, .xdg = undefined, .toplevel = undefined };
+    try win.open(a, compositor, wm_base, shm, null);
+    var quads: [16]Server.Quad = undefined;
+    const wa = w.server.work_area;
+    try testing.expectEqual(wa.width, w.drawn(&quads)[0].width);
+
+    // Drawn half as big across and down, stretched to the window's size.
+    const vp = try a.d.newObject(null);
+    var m = try viewporter.request(p.wp_viewporter.request.get_viewport);
+    m.uint(vp.id).uint(win.surface.id).end();
+    m = try vp.request(p.wp_viewport.request.set_destination);
+    m.int(@intCast(wa.width)).int(@intCast(wa.height)).end();
+    try a.show(win.surface, try a.shmBuffer(shm, @intCast(wa.width / 2), @intCast(wa.height / 2)));
+    try w.pump();
+    const surf = w.server.topWindow().?.xdg.surface.?;
+    try testing.expectEqual([2]u32{ wa.width, wa.height }, surf.size().?);
+    try testing.expectEqual([2]u32{ wa.width / 2, wa.height / 2 }, surf.bufferSize().?);
+    const q = w.drawn(&quads)[0];
+    try testing.expectEqual(wa.width, q.width);
+    try testing.expectEqual(wa.height, q.height);
+    try testing.expectEqual(wa.width / 2, q.texture.width);
+
+    // Unset: as big as its buffer again, from its next commit.
+    m = try vp.request(p.wp_viewport.request.set_destination);
+    m.int(-1).int(-1).end();
+    m = try win.surface.request(p.wl_surface.request.commit);
+    m.end();
+    try w.pump();
+    try testing.expectEqual([2]u32{ wa.width / 2, wa.height / 2 }, surf.size().?);
+
+    // A second viewport for the surface is an error.
+    const again = try a.d.newObject(null);
+    m = try viewporter.request(p.wp_viewporter.request.get_viewport);
+    m.uint(again.id).uint(win.surface.id).end();
+    try w.pump();
+    try testing.expect(a.gone);
+}

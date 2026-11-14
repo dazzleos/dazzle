@@ -30,6 +30,10 @@
 //! half when let go (xdg_toplevel's tiled states), and to its top edge,
 //! all of it; what it will fill is shown, shaded, under it meanwhile.
 //! Moved from there, it is restored under the pointer.
+//! A surface can be shown at a size other than its buffer's (wp_viewport's
+//! destination; its source, a part of the buffer, is not supported): an
+//! app draws a smaller buffer to draw faster, and it is stretched, by the
+//! GPU, or by the display when it is shown directly.
 //! A window whose client asks (dazzle_decoration_manager_v1, Dazzle's
 //! own) is drawn with rounded corners and a shadow, unless it is square
 //! against the edges (maximized, fullscreen or tiled); the client is told
@@ -127,6 +131,7 @@ const globals = [_]struct { name: []const u8, version: u32 }{
     .{ .name = p.wp_presentation.name, .version = p.wp_presentation.version },
     .{ .name = p.zwp_text_input_manager_v3.name, .version = p.zwp_text_input_manager_v3.version },
     .{ .name = p.dazzle_decoration_manager_v1.name, .version = p.dazzle_decoration_manager_v1.version },
+    .{ .name = p.wp_viewporter.name, .version = p.wp_viewporter.version },
 };
 
 /// The radius of the corners of windows the shell rounds (those whose
@@ -184,6 +189,8 @@ const Object = union(enum) {
     text_input_manager,
     text_input: *TextInput,
     decoration_manager,
+    viewporter,
+    viewport: *Viewport,
     decoration: *Decoration,
 };
 
@@ -210,6 +217,16 @@ pub const OldFrame = struct {
     height: u32,
     transform: u3 = 0,
     radius: u32 = 0,
+};
+
+/// What a surface's size is to be, from its next commit.
+pub const Destination = union(enum) { none, size: [2]u32 };
+
+/// A surface's wp_viewport. Outlives its surface (without it) until
+/// destroyed.
+pub const Viewport = struct {
+    id: u32,
+    surface: ?*Surface,
 };
 
 /// A toplevel's dazzle_decoration_v1: the shell rounds its corners and
@@ -365,6 +382,11 @@ pub const Surface = struct {
     pending_feedback: std.ArrayList(u32) = .empty,
     pending_scale: ?u32 = null,
     scale: u32 = 1,
+    /// Its size, if not its buffer's (wp_viewport's destination), and a new
+    /// one (or none: `.none`) to take when it is next committed.
+    destination: ?[2]u32 = null,
+    pending_destination: ?Destination = null,
+    viewport: ?*Viewport = null,
     pending_transform: ?u3 = null,
     transform: u3 = 0,
     pending_input_region: ?[]RegionOp = null,
@@ -397,9 +419,17 @@ pub const Surface = struct {
     /// Logical surface dimensions after applying buffer transform and scale.
     pub fn size(s: *const Surface) ?[2]u32 {
         const tex = s.texture() orelse return null;
+        if (s.destination) |d| return d;
         const bw = if (s.transform & 1 != 0) tex.height else tex.width;
         const bh = if (s.transform & 1 != 0) tex.width else tex.height;
         return .{ @max(bw / s.scale, 1), @max(bh / s.scale, 1) };
+    }
+
+    /// Its buffer's size, in pixels (as it is in the buffer: before its
+    /// transform).
+    pub fn bufferSize(s: *const Surface) ?[2]u32 {
+        const tex = s.texture() orelse return null;
+        return .{ tex.width, tex.height };
     }
 
     pub fn hasRole(s: *const Surface) bool {
@@ -990,6 +1020,7 @@ pub const Server = struct {
             .locked_pointer, .confined_pointer => |lock| s.destroyLock(lock),
             .text_input => |ti| s.destroyTextInput(ti),
             .decoration => |d| s.destroyDecoration(d),
+            .viewport => |v| s.destroyViewport(v),
             else => {},
         }
     }
@@ -1000,6 +1031,16 @@ pub const Server = struct {
             s.damaged = true;
         }
         s.gpa.destroy(d);
+    }
+
+    /// A surface's viewport goes: its size is its buffer's again, from its
+    /// next commit.
+    fn destroyViewport(s: *Server, v: *Viewport) void {
+        if (v.surface) |surf| {
+            surf.viewport = null;
+            surf.pending_destination = .none;
+        }
+        s.gpa.destroy(v);
     }
 
     fn destroyTextInput(s: *Server, ti: *TextInput) void {
@@ -1041,6 +1082,7 @@ pub const Server = struct {
     }
 
     fn destroySurface(s: *Server, surf: *Surface) void {
+        if (surf.viewport) |v| v.surface = null;
         // A lock on it ends.
         for (s.locks.items) |lock| if (lock.surface == surf) {
             lock.surface = null;
@@ -1233,7 +1275,10 @@ pub const Server = struct {
         for (s.toplevels.items) |u| if (u != t and u.shown() and !u.suspended) return null;
         const b = surf.buffer orelse return null;
         const area = s.areaOf(t);
-        if (b.dmabuf == null or b.width != area.width or b.height != area.height) return null;
+        // As big as the area (its buffer may be smaller: the display
+        // stretches it).
+        const sz = surf.size() orelse return null;
+        if (b.dmabuf == null or sz[0] != area.width or sz[1] != area.height) return null;
         return b;
     }
 
@@ -2656,6 +2701,47 @@ pub const Server = struct {
                 },
                 else => return error.InvalidOpcode,
             },
+            .viewporter => switch (m.opcode) {
+                p.wp_viewporter.request.destroy => c.deleteId(m.object),
+                p.wp_viewporter.request.get_viewport => {
+                    const id = try r.uint();
+                    const surf = switch (c.objects.get(try r.uint()) orelse return error.InvalidObject) {
+                        .surface => |x| x,
+                        else => return error.InvalidObject,
+                    };
+                    if (surf.viewport != null) return c.postError(m.object, p.wp_viewporter.err.viewport_exists, "the surface already has a viewport", .{});
+                    const v = try s.gpa.create(Viewport);
+                    v.* = .{ .id = id, .surface = surf };
+                    c.addObject(id, .{ .viewport = v }) catch |e| {
+                        s.gpa.destroy(v);
+                        return e;
+                    };
+                    surf.viewport = v;
+                },
+                else => return error.InvalidOpcode,
+            },
+            .viewport => |v| switch (m.opcode) {
+                p.wp_viewport.request.destroy => {
+                    c.deleteId(m.object);
+                    s.destroyViewport(v);
+                },
+                p.wp_viewport.request.set_source => {
+                    // All of the buffer is shown: a part of it is not
+                    // supported, and taken as all of it.
+                    for (0..4) |_| _ = try r.int();
+                },
+                p.wp_viewport.request.set_destination => {
+                    const w = try r.int();
+                    const h = try r.int();
+                    const surf = v.surface orelse return c.postError(m.object, p.wp_viewport.err.no_surface, "the surface is gone", .{});
+                    if (w == -1 and h == -1) {
+                        surf.pending_destination = .none;
+                    } else if (w <= 0 or h <= 0) {
+                        return c.postError(m.object, p.wp_viewport.err.bad_value, "a destination must be positive, or -1 by -1", .{});
+                    } else surf.pending_destination = .{ .size = .{ @intCast(w), @intCast(h) } };
+                },
+                else => return error.InvalidOpcode,
+            },
             .decoration => |d| switch (m.opcode) {
                 p.dazzle_decoration_v1.request.destroy => {
                     c.deleteId(m.object);
@@ -2811,6 +2897,7 @@ pub const Server = struct {
             },
             13 => try c.addObject(id, .text_input_manager),
             14 => try c.addObject(id, .decoration_manager),
+            15 => try c.addObject(id, .viewporter),
             9 => {
                 try c.addObject(id, .{ .output = version });
                 s.describeOutput(c, id, version);
@@ -4525,6 +4612,13 @@ pub const Server = struct {
         if (surf.pending_transform) |tf| {
             surf.transform = tf;
             surf.pending_transform = null;
+        }
+        if (surf.pending_destination) |d| {
+            surf.destination = switch (d) {
+                .none => null,
+                .size => |sz| sz,
+            };
+            surf.pending_destination = null;
         }
         if (surf.pending_input_region_set) {
             if (surf.input_region) |old| s.gpa.free(old);

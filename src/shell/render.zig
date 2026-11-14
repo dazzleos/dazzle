@@ -479,30 +479,30 @@ pub const Renderer = struct {
     }
 
     /// Shows a client's buffer directly on the display's primary plane at
-    /// (`x`, `y`), with the panels on overlay planes, so nothing
-    /// is composited. Returns null if the display cannot (the buffer is not
+    /// (`x`, `y`), stretched to `size` (if smaller: the display scales it),
+    /// with the panels on overlay planes, so nothing is composited. Returns null if the display cannot (the buffer is not
     /// T-tiled, or the planes are not available), and the frame must be
     /// composited instead; otherwise whether it is already on the screen,
     /// as `show` does. Only while no flip is pending.
-    pub fn showDirect(r: *Renderer, t: server.Texture, x: i32, y: i32) ?bool {
+    pub fn showDirect(r: *Renderer, t: server.Texture, x: i32, y: i32, size: [2]u32) ?bool {
         if (r.dev.is_v3d or r.display.kms == null) return null;
         if (vc4.render.Target.textureTiling(t.format, t.width, t.height) != .t) return null;
         const panels = r.panelLayers() orelse return null;
-        const fb = r.clientFramebuffer(t, x, y, panels) orelse return null;
-        return r.display.queueLayers(windowLayer(fb, t, x, y), panels) catch |err| {
+        const fb = r.clientFramebuffer(t, x, y, size, panels) orelse return null;
+        return r.display.queueLayers(windowLayer(fb, t, x, y, size), panels) catch |err| {
             sys.print(sys.log_warning ++ "dazzle-shell: cannot show the window directly: {s}\n", .{@errorName(err)});
             return null;
         };
     }
 
-    fn windowLayer(fb: u32, t: server.Texture, x: i32, y: i32) vc4.kms.Layer {
-        return .{ .fb_id = fb, .src_width = t.width, .src_height = t.height, .x = x, .y = y, .width = t.width, .height = t.height };
+    fn windowLayer(fb: u32, t: server.Texture, x: i32, y: i32, size: [2]u32) vc4.kms.Layer {
+        return .{ .fb_id = fb, .src_width = t.width, .src_height = t.height, .x = x, .y = y, .width = size[0], .height = size[1] };
     }
 
     /// A framebuffer for a client's buffer, made (and checked with the
     /// display, with the window at `x`, `y` under `panels`) the first time
     /// it is shown.
-    fn clientFramebuffer(r: *Renderer, t: server.Texture, x: i32, y: i32, panels: vc4.kms.Overlays) ?u32 {
+    fn clientFramebuffer(r: *Renderer, t: server.Texture, x: i32, y: i32, size: [2]u32, panels: vc4.kms.Overlays) ?u32 {
         if (r.client_fbs.get(t.handle)) |fb| return fb;
         // T-tiled images are padded to whole columns of tiles.
         const pitch = texture.tiledPitch(t.format, t.width, t.height);
@@ -510,8 +510,8 @@ pub const Renderer = struct {
             sys.print(sys.log_warning ++ "dazzle-shell: no framebuffer for a {d}x{d} window: {s}\n", .{ t.width, t.height, @errorName(err) });
             break :blk null;
         };
-        if (fb) |id| if (!r.display.canShow(windowLayer(id, t, x, y), panels)) {
-            sys.print(sys.log_warning ++ "dazzle-shell: the display cannot show a {d}x{d} window directly\n", .{ t.width, t.height });
+        if (fb) |id| if (!r.display.canShow(windowLayer(id, t, x, y, size), panels)) {
+            sys.print(sys.log_warning ++ "dazzle-shell: the display cannot show a {d}x{d} window directly at {d}x{d}\n", .{ t.width, t.height, size[0], size[1] });
             vc4.drm.removeFramebuffer(r.dev.fd, id);
             fb = null;
         };

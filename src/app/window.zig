@@ -58,6 +58,10 @@ const p = wayland.protocol;
 const wire = wayland.wire;
 
 /// What a window needs from the GPU.
+/// The GPU's performance counters (see `vc4.Device.createPerfmon`) to
+/// count the windows' frames with, while set (0: none).
+pub var perfmon_id: u32 = 0;
+
 /// How long this process has waited for the GPU to finish its frames,
 /// in all (to see how much of a frame's time is the GPU's).
 pub var gpu_waited_ns: u64 = 0;
@@ -106,7 +110,11 @@ pub const Gpu = struct {
         // The kernel copies the control lists, so the frame can be reused
         // at once.
         var seqno: u64 = 0;
-        for (0..frame.regionCount()) |i| seqno = try dev.submit(frame.submitRegion(i));
+        for (0..frame.regionCount()) |i| {
+            const job = frame.submitRegion(i);
+            job.perfmonid = perfmon_id;
+            seqno = try dev.submit(job);
+        }
         return seqno;
     }
     fn devWait(ptr: *anyopaque, seqno: u64) anyerror!void {
@@ -320,6 +328,14 @@ pub const Window = struct {
     /// the shell last said (0 while square: maximized, fullscreen or
     /// tiled). What it shows should keep inside it.
     decoration: ?client.Proxy = null,
+    /// Its wp_viewport, if the shell has them: the buffer can then be
+    /// smaller than the window (`render_scale`), stretched to its size.
+    viewport: ?client.Proxy = null,
+    /// How big its buffers are, of its size (across and down): less than
+    /// 1 to draw faster, if the shell can stretch them (`viewport`).
+    render_scale: f32 = 1,
+    /// The size the viewport stretches the buffer to, as last set.
+    destination: ?[2]u32 = null,
     corner_radius: u32 = 0,
     /// The serial of the last active pointer/touch press, for asking the
     /// shell to move the window from it (0 once released).
@@ -511,6 +527,12 @@ pub const Window = struct {
             m.uint(deco.id).uint(w.toplevel.id).end();
             w.decoration = deco;
         };
+        if (try w.globals.bind(registry, p.wp_viewporter.name, 1, null)) |viewporter| {
+            const vp = try conn.newObject(null);
+            m = try viewporter.request(p.wp_viewporter.request.get_viewport);
+            m.uint(vp.id).uint(w.surface.id).end();
+            w.viewport = vp;
+        }
         m = try w.toplevel.request(p.xdg_toplevel.request.set_title);
         m.string(title).end();
         if (options.app_id) |app_id| {
@@ -989,6 +1011,13 @@ pub const Window = struct {
             m = try w.surface.request(p.wl_surface.request.damage_buffer);
             m.int(0).int(0).int(@intCast(b.width)).int(@intCast(b.height)).end();
         }
+        // A buffer smaller than the window: stretched to its size.
+        const destination: ?[2]u32 = if (b.width != w.width or b.height != w.height) .{ w.width, w.height } else null;
+        if (w.viewport) |vp| if (!std.meta.eql(destination, w.destination)) {
+            m = try vp.request(p.wp_viewport.request.set_destination);
+            if (destination) |d| m.int(@intCast(d[0])).int(@intCast(d[1])).end() else m.int(-1).int(-1).end();
+            w.destination = destination;
+        };
         const cb = try w.conn.newObject(.{ .ptr = w, .handler = frameDone });
         m = try w.surface.request(p.wl_surface.request.frame);
         m.uint(cb.id).end();
@@ -1023,6 +1052,17 @@ pub const Window = struct {
 
     /// The format new buffers are made in: the one wanted, if the shell
     /// takes it.
+    /// Its buffers' size: its own, times `render_scale` (if the shell
+    /// can stretch them).
+    pub fn bufferSize(w: *const Window) [2]u32 {
+        if (w.viewport == null or w.render_scale >= 1) return .{ w.width, w.height };
+        const s = @max(w.render_scale, 0.1);
+        return .{
+            @max(1, @as(u32, @intFromFloat(@round(@as(f32, @floatFromInt(w.width)) * s)))),
+            @max(1, @as(u32, @intFromFloat(@round(@as(f32, @floatFromInt(w.height)) * s)))),
+        };
+    }
+
     pub fn bufferFormat(w: *const Window) vc4.Format {
         return if (w.tiled_formats.contains(w.wanted_format)) w.wanted_format else .xrgb8888;
     }
@@ -1037,7 +1077,8 @@ pub const Window = struct {
             for (&w.buffers, 0..) |*slot, i| {
                 if (slot.*) |*b| {
                     if (b.busy or b.rendering) continue;
-                    if (b.width == w.width and b.height == w.height and b.format == w.bufferFormat()) return i;
+                    const size = w.bufferSize();
+                    if (b.width == size[0] and b.height == size[1] and b.format == w.bufferFormat()) return i;
                     stale = i;
                 } else empty = i;
             }
@@ -1100,14 +1141,16 @@ pub const Window = struct {
     fn roomForAnotherBuffer(w: *const Window) bool {
         const get = w.gpu.vtable.memory orelse return false;
         const mem = get(w.gpu.ptr) orelse return false;
-        const size = vc4.texture.imageSizeOf(w.bufferFormat(), w.width, w.height);
+        const dims = w.bufferSize();
+        const size = vc4.texture.imageSizeOf(w.bufferFormat(), dims[0], dims[1]);
         return mem[1] >= size + mem[0] / 4;
     }
 
     fn allocBuffer(w: *Window, slot: usize) !Buffer {
         const gpu = w.gpu;
         const format = w.bufferFormat();
-        const bo = try gpu.vtable.createBo(gpu.ptr, vc4.texture.imageSizeOf(format, w.width, w.height));
+        const dims = w.bufferSize();
+        const bo = try gpu.vtable.createBo(gpu.ptr, vc4.texture.imageSizeOf(format, dims[0], dims[1]));
         errdefer gpu.vtable.destroyBo(gpu.ptr, bo);
         const fd = try gpu.vtable.exportBo(gpu.ptr, bo.handle);
         const params = try w.conn.newObject(null);
@@ -1115,13 +1158,13 @@ pub const Window = struct {
         m.uint(params.id).end();
         const mod = p.modifier.broadcom_vc4_t_tiled;
         m = try params.request(p.zwp_linux_buffer_params_v1.request.add);
-        m.fd(fd).uint(0).uint(0).uint(vc4.texture.tiledPitch(format, w.width, w.height)).uint(@truncate(mod >> 32)).uint(@truncate(mod)).end();
+        m.fd(fd).uint(0).uint(0).uint(vc4.texture.tiledPitch(format, dims[0], dims[1])).uint(@truncate(mod >> 32)).uint(@truncate(mod)).end();
         const proxy = try w.conn.newObject(.{ .ptr = &w.buffers[slot], .handler = bufferEvent });
         m = try params.request(p.zwp_linux_buffer_params_v1.request.create_immed);
-        m.uint(proxy.id).int(@intCast(w.width)).int(@intCast(w.height)).uint(format.fourcc()).uint(0).end();
+        m.uint(proxy.id).int(@intCast(dims[0])).int(@intCast(dims[1])).uint(format.fourcc()).uint(0).end();
         m = try params.request(p.zwp_linux_buffer_params_v1.request.destroy);
         m.end();
-        return .{ .bo = bo, .proxy = proxy, .width = w.width, .height = w.height, .format = format };
+        return .{ .bo = bo, .proxy = proxy, .width = dims[0], .height = dims[1], .format = format };
     }
 
     fn freeBuffer(w: *Window, b: *Buffer, slot: *?Buffer) void {
