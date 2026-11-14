@@ -340,13 +340,12 @@ pub fn freeApps(gpa: std.mem.Allocator, apps: []App) void {
 }
 
 /// The apps again (as `findApps`), with the processes of those of `old`
-/// still there; frees `old`.
+/// still there (`old` is the caller's to free, once the dock has them).
 pub fn rescan(gpa: std.mem.Allocator, old: []App, dir_path: []const u8, builtin: []const []const u8) ![]App {
     const new = try findApps(gpa, dir_path, builtin);
     for (new) |*app| for (old) |o| {
         if (std.mem.eql(u8, app.name, o.name)) app.pid = o.pid;
     };
-    freeApps(gpa, old);
     return new;
 }
 
@@ -522,16 +521,55 @@ pub const Dock = struct {
     slide_from: f32 = 0,
     slide_start: ?u64 = null,
     slide_down: bool = false,
+    /// What is in the row, in order: the apps, and apps removed that are
+    /// still on their way out; each as big as it is on its way in or out.
+    entries: [max_entries]Entry = undefined,
+    entries_len: usize = 0,
 
     /// How long the pointer rests on an icon before its name shows.
     pub const tooltip_delay_ns = 500 * std.time.ns_per_ms;
     /// How long it takes to slide down or up.
     pub const slide_ns = 200 * std.time.ns_per_ms;
+    /// How long an app's icon takes to grow in, or shrink out, when it is
+    /// installed or removed.
+    pub const resize_ns = 250 * std.time.ns_per_ms;
+    /// The most icons in the row (more would not fit a screen).
+    pub const max_entries = 64;
+
+    /// An icon in the row: an app's (by its index in `apps`), or one
+    /// removed (`gone`: how it looked), and how big it is: from `from` to
+    /// `to` since `start` (null: there).
+    pub const Entry = struct {
+        app: ?usize,
+        gone: Look = .{},
+        from: f32 = 1,
+        to: f32 = 1,
+        start: ?u64 = null,
+        /// How big it is now (0: no room taken, 1: all of it).
+        k: f32 = 1,
+    };
+
+    /// An icon as it is drawn: its colour, and its symbol or its app's
+    /// initial.
+    pub const Look = struct {
+        color: u32 = 0,
+        icon: ?icons.Icon = null,
+        initial: [4]u8 = undefined,
+        initial_len: u8 = 0,
+
+        fn of(app: *const App) Look {
+            var l: Look = .{ .color = app.color(), .icon = app.icon };
+            const n = std.unicode.utf8ByteSequenceLength(app.label[0]) catch 1;
+            l.initial_len = @intCast(@min(n, app.label.len, 4));
+            @memcpy(l.initial[0..l.initial_len], app.label[0..l.initial_len]);
+            return l;
+        }
+    };
 
     pub fn init(gpa: std.mem.Allocator, f: ?font.Font, apps: []App, screen_width: u32, screen_height: u32) !Dock {
         const scale = @min(@as(f32, @floatFromInt(screen_width)) / 1920, @as(f32, @floatFromInt(screen_height)) / 1080);
         const height: u32 = @intFromFloat(@round((icon_size + 2 * box_pad) * scale));
-        return .{
+        var d: Dock = .{
             .font = f,
             .icon_font = font.Font.init(icons.font_data) catch null,
             .cache = font.GlyphCache.init(gpa),
@@ -544,6 +582,81 @@ pub const Dock = struct {
             .scale = scale,
             .apps = apps,
         };
+        // The apps there to start with are there already.
+        d.entries_len = @min(apps.len, max_entries);
+        for (d.entries[0..d.entries_len], 0..) |*e, i| e.* = .{ .app = i };
+        return d;
+    }
+
+    /// The apps are now `new` (`apps`, which they replace, is to be freed
+    /// after): those installed grow in from `now`, those removed shrink
+    /// out, and the others move along to make room or take it.
+    pub fn setApps(d: *Dock, new: []App, now: u64) void {
+        var out: [max_entries]Entry = undefined;
+        var n: usize = 0;
+        var next: usize = 0;
+        const add = struct {
+            fn f(o: *[max_entries]Entry, len: *usize, e: Entry) void {
+                if (len.* < max_entries) {
+                    o[len.*] = e;
+                    len.* += 1;
+                }
+            }
+        }.f;
+        for (d.entries[0..d.entries_len]) |e| {
+            const old: ?*const App = if (e.app) |i| &d.apps[i] else null;
+            const at: ?usize = if (old) |o| for (new, 0..) |*a, j| {
+                if (std.mem.eql(u8, a.name, o.name)) break j;
+            } else null else null;
+            if (at) |j| if (j >= next) {
+                // Those installed before it, growing in.
+                for (new[next..j], next..) |_, k| add(&out, &n, .{ .app = k, .from = 0, .to = 1, .start = now, .k = 0 });
+                var kept = e;
+                kept.app = j;
+                add(&out, &n, kept);
+                next = j + 1;
+                continue;
+            };
+            // Gone (or it was already): shrinking out from as big as it is.
+            if (e.app == null and e.to == 0) {
+                add(&out, &n, e);
+            } else if (old) |o| {
+                add(&out, &n, .{ .app = null, .gone = .of(o), .from = e.k, .to = 0, .start = now, .k = e.k });
+            }
+        }
+        for (new[next..], next..) |_, k| add(&out, &n, .{ .app = k, .from = 0, .to = 1, .start = now, .k = 0 });
+        d.entries = out;
+        d.entries_len = n;
+        d.apps = new;
+    }
+
+    /// Grows and shrinks the icons on their way in or out, at `now`; drops
+    /// those gone. Returns whether any are on their way.
+    pub fn animateApps(d: *Dock, now: u64) bool {
+        var moving = false;
+        var n: usize = 0;
+        for (d.entries[0..d.entries_len]) |e0| {
+            var e = e0;
+            if (e.start) |start| {
+                const t: f32 = @floatCast(@min(@as(f64, @floatFromInt(now -| start)) / resize_ns, 1));
+                e.k = e.from + (e.to - e.from) * easeInOut(t);
+                if (t >= 1) e.start = null else moving = true;
+                if (t >= 1 and e.to == 0) {
+                    moving = true;
+                    continue;
+                }
+            }
+            d.entries[n] = e;
+            n += 1;
+        }
+        d.entries_len = n;
+        return moving;
+    }
+
+    /// Whether icons are on their way in or out.
+    pub fn resizing(d: *const Dock) bool {
+        for (d.entries[0..d.entries_len]) |e| if (e.start != null) return true;
+        return false;
     }
 
     pub const Rect = struct { x: f32, y: f32, size: f32 };
@@ -572,8 +685,16 @@ pub const Dock = struct {
     /// The box's width, in pixels: the icons and the status box in a row,
     /// padded; no wider than the screen.
     pub fn boxWidth(d: *const Dock) u32 {
-        const row = @as(f32, @floatFromInt(d.apps.len)) * (icon_size + icon_gap) * d.scale + d.statusWidth();
+        const row = d.iconsWidth() + d.statusWidth();
         return @min(@as(u32, @intFromFloat(@ceil(row + 2 * box_pad * d.scale))), d.screen_width);
+    }
+
+    /// How wide the icons are, in a row: each as big as it is (on its way
+    /// in or out).
+    fn iconsWidth(d: *const Dock) f32 {
+        var w: f32 = 0;
+        for (d.entries[0..d.entries_len]) |e| w += e.k;
+        return w * (icon_size + icon_gap) * d.scale;
     }
 
     /// The gap between the box and the bottom of the screen, in pixels.
@@ -645,18 +766,35 @@ pub const Dock = struct {
     /// Where app `i`'s icon is, in the box: the icons and the status box
     /// on the right are in a row.
     pub fn iconRect(d: *const Dock, i: usize) Rect {
-        const size = icon_size * d.scale;
+        for (d.entries[0..d.entries_len], 0..) |e, j| if (e.app == i) return d.entryRect(j);
+        // Not in the row (yet): nowhere.
+        return .{ .x = -1000, .y = 0, .size = 0 };
+    }
+
+    /// Where the `j`th icon in the row is, as big as it is (the room it
+    /// takes, and the gap after it, are as much smaller): in the middle of
+    /// the space between the icons either side, and of the row's height.
+    fn entryRect(d: *const Dock, j: usize) Rect {
+        const full = icon_size * d.scale;
+        const step = (icon_size + icon_gap) * d.scale;
+        var x = d.rowStart();
+        for (d.entries[0..j]) |e| x += e.k * step;
+        const k = d.entries[j].k;
+        const size = full * k;
+        // Back by half the gap before it that it has not grown into yet.
         const gap = icon_gap * d.scale;
-        const status_width = d.statusWidth();
-        const row = @as(f32, @floatFromInt(d.apps.len)) * (size + gap) + status_width;
-        const x0 = (@as(f32, @floatFromInt(d.boxWidth())) - row) / 2;
-        return .{ .x = x0 + @as(f32, @floatFromInt(i)) * (size + gap), .y = box_pad * d.scale, .size = size };
+        return .{ .x = x - (1 - k) * gap / 2, .y = box_pad * d.scale + (full - size) / 2, .size = size };
+    }
+
+    /// Where the row starts, in the box.
+    fn rowStart(d: *const Dock) f32 {
+        const row = d.iconsWidth() + d.statusWidth();
+        return (@as(f32, @floatFromInt(d.boxWidth())) - row) / 2;
     }
 
     /// Where the status box (volume and network) is, to the right of the rightmost app.
     pub fn statusRect(d: *const Dock) StatusRect {
-        const r = d.iconRect(d.apps.len);
-        return .{ .x = r.x, .y = r.y, .width = d.statusWidth(), .height = r.size };
+        return .{ .x = d.rowStart() + d.iconsWidth(), .y = box_pad * d.scale, .width = d.statusWidth(), .height = icon_size * d.scale };
     }
 
     /// Whether (`x`, `y`) in the dock is on the status box (clicked: the
@@ -692,31 +830,37 @@ pub const Dock = struct {
         const c = d.theme.colors();
         canvas.fill(0, 0, d.width, d.height, base);
         const icon_font: ?*const font.Font = if (d.icon_font) |*f| f else null;
-        for (d.apps, 0..) |*app, i| {
-            const r = d.iconRect(i);
-            if (d.hover == i) {
-                const pad = 4 * d.scale;
-                roundedRect(canvas, r.x - pad, r.y - pad, r.size + 2 * pad, r.size + 2 * pad, 14 * d.scale, c.hover_background);
+        for (d.entries[0..d.entries_len], 0..) |e, j| {
+            if (e.k <= 0) continue;
+            const r = d.entryRect(j);
+            // As big as it is on its way in or out.
+            const k = e.k;
+            const app: ?*const App = if (e.app) |i| &d.apps[i] else null;
+            const look: Look = if (app) |a| .of(a) else e.gone;
+            if (e.app != null and d.hover == e.app.?) {
+                const pad = 4 * d.scale * k;
+                roundedRect(canvas, r.x - pad, r.y - pad, r.size + 2 * pad, r.size + 2 * pad, 14 * d.scale * k, c.hover_background);
             }
-            roundedRect(canvas, r.x, r.y, r.size, r.size, 12 * d.scale, app.color());
-            if (app.icon != null and icon_font != null) {
+            roundedRect(canvas, r.x, r.y, r.size, r.size, 12 * d.scale * k, look.color);
+            if (look.icon != null and icon_font != null) {
                 // Icons fill the em square, with the baseline at the bottom.
-                const size = @round(36 * d.scale);
+                const size = @round(36 * d.scale * k);
                 const style: font.Style = .{ .font = icon_font.?, .size = size, .color = 0xffffffff };
                 var buf: [4]u8 = undefined;
                 const x = @round(r.x + (r.size - size) / 2);
                 const y = @round(r.y + (r.size - size) / 2);
-                _ = font.draw(canvas, &d.cache, style, x, y + size, icons.text(app.icon.?, &buf)) catch {};
-            } else if (d.font) |*f| {
-                const style: font.Style = .{ .font = f, .size = 30 * d.scale, .color = 0xffffffff };
-                const initial = app.label[0..1];
+                if (size >= 1) _ = font.draw(canvas, &d.cache, style, x, y + size, icons.text(look.icon.?, &buf)) catch {};
+            } else if (d.font) |*f| if (look.initial_len > 0 and 30 * d.scale * k >= 1) {
+                const style: font.Style = .{ .font = f, .size = 30 * d.scale * k, .color = 0xffffffff };
+                const initial = look.initial[0..look.initial_len];
                 const baseline = r.y + r.size / 2 + style.ascent() * 0.36;
                 _ = font.draw(canvas, &d.cache, style, r.x + (r.size - font.measure(style, initial)) / 2, baseline, initial) catch {};
-            }
-            if (app.pid != null) {
-                const dot = 6 * d.scale;
-                roundedRect(canvas, r.x + (r.size - dot) / 2, r.y + r.size + 3 * d.scale, dot, dot, dot / 2, c.dot);
-            }
+            };
+            if (app) |a| if (a.pid != null) {
+                const dot = 6 * d.scale * k;
+                const full = icon_size * d.scale;
+                roundedRect(canvas, r.x + (r.size - dot) / 2, box_pad * d.scale + full + 3 * d.scale, dot, dot, dot / 2, c.dot);
+            };
         }
         const rs = d.statusRect();
         roundedRectOutline(canvas, rs.x, rs.y, rs.width, rs.height, 12 * d.scale, @max(1.5, 2 * d.scale), c.status_border);
@@ -1234,4 +1378,54 @@ test "resting the pointer on an icon shows the app's name above it, a while late
     // Back on an icon, a while later again.
     try testing.expect(d.pointerAt(r0.x + 4, r0.y + 4, 4000 * ms));
     try testing.expectEqual(@as(?u64, 4500 * ms), d.tooltipDue());
+}
+
+test "an app installed grows in, one removed shrinks out, and the others move along" {
+    var apps = [_]App{
+        .{ .name = "a", .label = "A", .path = "/apps/a/a", .icon = .folder },
+        .{ .name = "c", .label = "C", .path = "/apps/c/c" },
+    };
+    var d = try Dock.init(testing.allocator, null, &apps, 1920, 1080);
+    defer testing.allocator.free(d.pixels);
+    defer testing.allocator.free(d.tooltip_pixels);
+    defer d.cache.deinit();
+    const ms = std.time.ns_per_ms;
+    const two = d.boxWidth();
+    const c_before = d.iconRect(1).x;
+    try testing.expect(!d.resizing());
+
+    // "b" installed, between them: it starts with no room, and grows.
+    var more = [_]App{ apps[0], .{ .name = "b", .label = "B", .path = "/apps/b/b" }, apps[1] };
+    d.setApps(&more, 1000 * ms);
+    try testing.expect(d.resizing());
+    try testing.expect(d.animateApps(1000 * ms));
+    try testing.expectEqual(two, d.boxWidth());
+    try testing.expectEqual(@as(f32, 0), d.iconRect(1).size);
+    try testing.expect(d.animateApps(1125 * ms));
+    const half = d.iconRect(1);
+    try testing.expect(half.size > 0 and half.size < Dock.icon_size);
+    try testing.expect(d.boxWidth() > two);
+    // In the middle between "a" and "c", which move apart to make room.
+    const a_end = d.iconRect(0).x + d.iconRect(0).size;
+    try testing.expectApproxEqAbs(half.x - a_end, d.iconRect(2).x - (half.x + half.size), 0.01);
+    d.draw();
+    try testing.expect(!d.animateApps(1300 * ms));
+    try testing.expect(!d.resizing());
+    try testing.expectEqual(@as(f32, Dock.icon_size), d.iconRect(1).size);
+    try testing.expect(d.iconRect(2).x > c_before);
+    const three = d.boxWidth();
+
+    // "a" removed: it shrinks out where it was, then is gone.
+    var fewer = [_]App{ more[1], more[2] };
+    d.setApps(&fewer, 2000 * ms);
+    try testing.expectEqual(@as(usize, 3), d.entries_len);
+    try testing.expect(d.entries[0].app == null);
+    try testing.expectEqual(apps[0].color(), d.entries[0].gone.color);
+    _ = d.animateApps(2125 * ms);
+    try testing.expect(d.boxWidth() < three and d.boxWidth() > two - 1);
+    d.draw();
+    _ = d.animateApps(2300 * ms);
+    try testing.expectEqual(@as(usize, 2), d.entries_len);
+    try testing.expectEqual(two, d.boxWidth());
+    try testing.expectEqual(@as(?usize, 0), d.hit(d.iconRect(0).x + 1, d.iconRect(0).y + 1));
 }

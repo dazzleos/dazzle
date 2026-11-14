@@ -364,8 +364,10 @@ fn run(init: std.process.Init.Minimal) !void {
         if ((apps_changes.apps or apps_changes.catalogue) and updates.reload()) updates_changed = true;
         if (apps_changes.apps) {
             if (dock_mod.rescan(gpa, apps, dock_mod.apps_dir, &builtin_apps)) |new| {
+                // Those installed grow in, those removed shrink out.
+                dock.setApps(new, sys.nowNs());
+                dock_mod.freeApps(gpa, apps);
                 apps = new;
-                dock.apps = new;
                 dock.hover = null;
                 print("dazzle-shell: {d} apps\n", .{new.len});
                 if (dock_shown) {
@@ -1106,8 +1108,15 @@ fn animateNotice(notice: *notice_mod.Notice, renderer: *render.Renderer, server:
 }
 
 /// Sends the dock down while a fullscreen window is on top, and back up
-/// after, a frame each refresh while it is on its way.
+/// after, a frame each refresh while it is on its way; and grows and
+/// shrinks icons of apps installed or removed, and the box with them.
 fn slideDock(dock: *dock_mod.Dock, server: *server_mod.Server, renderer: *render.Renderer, dock_shown: bool, now: u64) void {
+    if (dock.resizing()) {
+        _ = dock.animateApps(now);
+        dock.draw();
+        showDock(renderer, dock);
+        server.damaged = true;
+    }
     if (dock_shown) dock.slideTo(server.fullscreenTop(), now);
     if (!dock.animateSlide(now)) return;
     const at = dock.place();
