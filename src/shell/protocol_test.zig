@@ -97,7 +97,11 @@ const World = struct {
     }
 
     /// What the renderer would draw: where each surface's picture goes.
+    /// What is drawn, once windows whose state changed are in their
+    /// places (`animateWindows` done).
     fn drawn(w: *World, buf: *[16]Server.Quad) []Server.Quad {
+        _ = w.server.animateWindows(0);
+        _ = w.server.animateWindows(std.math.maxInt(u64));
         return w.server.drawList(buf);
     }
 };
@@ -1914,4 +1918,67 @@ test "a window whose client asks is drawn rounded, with a shadow, unless square;
     drawn = w.drawn(&quads);
     try testing.expectEqual(@as(u16, 0), drawn[drawn.len - 1].radius);
     try testing.expect(plain_t.suspended);
+}
+
+test "a window maximized, restored or fullscreen is drawn on its way from where it was" {
+    var w: World = .{};
+    w.init();
+    defer w.deinit();
+    const a = try w.connect();
+    const compositor = try a.bind(p.wl_compositor.name, 4, null);
+    const wm_base = try a.bind(p.xdg_wm_base.name, 6, null);
+    const shm = try a.bind(p.wl_shm.name, 1, null);
+    var win: Window = .{ .surface = undefined, .xdg = undefined, .toplevel = undefined };
+    try win.open(a, compositor, wm_base, shm, null);
+    const t = w.server.topWindow().?;
+    // Opened maximized: placed, not moved there.
+    try testing.expect(t.anim == null);
+    var quads: [16]Server.Quad = undefined;
+    const wa = w.server.work_area;
+    const ms = std.time.ns_per_ms;
+
+    // Restored: from the work area to its place, over a fifth of a second.
+    var m = try win.toplevel.request(p.xdg_toplevel.request.unset_maximized);
+    m.end();
+    try win.redraw(a, shm, 400, 280);
+    const restored = w.server.windowRect(t);
+    try testing.expectEqual(wa, t.anim.?.from);
+    try testing.expect(w.server.animateWindows(1000 * ms));
+    var q = w.server.drawList(&quads)[0];
+    try testing.expectEqual(wa.x, q.x);
+    try testing.expectEqual(wa.width, q.width);
+    try testing.expectEqual(wa.height, q.height);
+    // Half way, between the two.
+    try testing.expect(w.server.animateWindows(1100 * ms));
+    q = w.server.drawList(&quads)[0];
+    try testing.expect(q.width < wa.width and q.width > restored.width);
+    try testing.expect(q.x > wa.x and q.x < restored.x);
+    // There: as it is.
+    try testing.expect(!w.server.animateWindows(1200 * ms));
+    try testing.expect(t.anim == null);
+    q = w.server.drawList(&quads)[0];
+    try testing.expectEqual(restored.x, q.x);
+    try testing.expectEqual(restored.width, q.width);
+
+    // Fullscreen: from its place to the whole screen; not shown directly
+    // on the way.
+    m = try win.toplevel.request(p.xdg_toplevel.request.set_fullscreen);
+    m.uint(0).end();
+    try w.pump();
+    try win.redraw(a, shm, 800, 600);
+    try testing.expectEqual(restored, t.anim.?.from);
+    try testing.expect(w.server.scanoutBuffer(t) == null);
+    _ = w.server.animateWindows(2000 * ms);
+    try testing.expectEqual(restored.width, w.server.drawList(&quads)[0].width);
+    _ = w.server.animateWindows(2300 * ms);
+    q = w.server.drawList(&quads)[0];
+    try testing.expectEqual(@as(u32, 800), q.width);
+    try testing.expectEqual(@as(i32, 0), q.y);
+
+    // Back again: from the screen.
+    m = try win.toplevel.request(p.xdg_toplevel.request.unset_fullscreen);
+    m.end();
+    try w.pump();
+    try win.redraw(a, shm, 400, 280);
+    try testing.expectEqual(server_mod.Rect{ .x = 0, .y = 0, .width = 800, .height = 600 }, t.anim.?.from);
 }

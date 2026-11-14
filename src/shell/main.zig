@@ -252,6 +252,7 @@ fn run(init: std.process.Init.Minimal) !void {
         // The windows on their way into or out of the overview: a frame
         // each refresh until they are there.
         _ = server.animateOverview(now);
+        _ = server.animateWindows(now);
         var wake = next_tick;
         if (dock.tooltipDue()) |due| wake = @min(wake, due);
         if (!renderer.flipPending()) {
@@ -616,7 +617,10 @@ fn run(init: std.process.Init.Minimal) !void {
         // out with its next frame: otherwise it would take the next
         // vertical blank, and the client's frame would be shown a refresh
         // late.
-        if (!renderer.flipPending()) _ = server.animateOverview(sys.nowNs());
+        if (!renderer.flipPending()) {
+            _ = server.animateOverview(sys.nowNs());
+            _ = server.animateWindows(sys.nowNs());
+        }
         const dock_due = panels_damaged and sys.nowNs() >= client_frame_ns + panel_grace_ns;
         if ((server.damaged or dock_due) and !renderer.flipPending()) {
             const count_frame = server.damaged;

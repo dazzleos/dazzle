@@ -133,7 +133,7 @@ fn roundedWindow(frame: *render.Frame, pipelines: Pipelines, vbo: vc4.Bo, quads:
         .shadow = if (w.shadow) .{ shadow_alpha, shadow_blur, shadow_offset, 0 } else .{ 0, 1, 0, 0 },
     };
     pipelines.rounded.setUniforms(std.mem.asBytes(&uniforms));
-    const filter: texture.Filter = if (qw < w.texture.width or qh < w.texture.height) .linear else .nearest;
+    const filter: texture.Filter = if (qw != w.texture.width or qh != w.texture.height) .linear else .nearest;
     const Piece = struct { x: i32, y: i32, w: i32, h: i32 };
     const piece = struct {
         fn draw(f: *render.Frame, pl: *shader.Pipeline, b: vc4.Bo, n: *usize, win: Window, sw: f32, sh: f32, flt: texture.Filter, r: Piece, clip: server.Rect) !void {
@@ -189,8 +189,9 @@ fn quadUvs(transform: u3) [4][2]f32 {
 
 /// Draws a texture with its top left at (x, y) and logical size (qw, qh).
 fn quad(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, index: usize, t: server.Texture, x: i32, y: i32, qw: u32, qh: u32, transform: u3, scissor: ?render.Viewport) !void {
-    // Drawn smaller (in the overview), it is filtered, not sampled.
-    const filter: texture.Filter = if (qw < t.width or qh < t.height) .linear else .nearest;
+    // Drawn at another size (in the overview, or on its way to its place
+    // after its state changed), it is filtered, not sampled.
+    const filter: texture.Filter = if (qw != t.width or qh != t.height) .linear else .nearest;
     try rect(frame, pipeline, vbo, index, t, x, y, qw, qh, quadUvs(transform), filter, scissor);
 }
 

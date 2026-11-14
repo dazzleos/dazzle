@@ -184,6 +184,14 @@ const Object = union(enum) {
     decoration: *Decoration,
 };
 
+/// A window on its way to its place after its state changed (maximized,
+/// say): from where it was, `k` of the way (eased), since its first frame.
+pub const StateAnim = struct {
+    from: Rect,
+    start_ns: ?u64 = null,
+    k: f32 = 0,
+};
+
 /// A toplevel's dazzle_decoration_v1: the shell rounds its corners and
 /// draws its shadow. Outlives the toplevel (without it) until destroyed.
 pub const Decoration = struct {
@@ -519,6 +527,9 @@ pub const Toplevel = struct {
     shown_tiled: ?Tile = null,
     /// Its client asked for rounded corners and a shadow.
     decoration: ?*Decoration = null,
+    /// Maximized, fullscreen, tiled or restored, just now: what it shows
+    /// is drawn on its way from where it was (`Server.animateWindows`).
+    anim: ?StateAnim = null,
     x: i32 = 0,
     y: i32 = 0,
     /// Restored before, so `x`, `y` and its size are where and how big it
@@ -1173,6 +1184,7 @@ pub const Server = struct {
     /// is: maximized or fullscreen, and the size of the area it fills.
     pub fn scanoutBuffer(s: *const Server, t: *const Toplevel) ?*Buffer {
         if (!t.shown_maximized and !t.shown_fullscreen) return null;
+        if (t.anim != null) return null;
         if (s.overviewShown() or s.snap != null) return null;
         const surf = t.xdg.surface orelse return null;
         if (surf.scale != 1 or surf.transform != 0) return null;
@@ -1267,6 +1279,33 @@ pub const Server = struct {
         s.overview_anim = null;
         if (!s.overview) s.overview_n = 0;
         return false;
+    }
+
+    /// How long a window takes to get to its place when maximized,
+    /// fullscreen, tiled or restored.
+    pub const state_anim_ns = 200 * std.time.ns_per_ms;
+
+    /// Moves the windows whose state just changed on towards their
+    /// places (from the first frame drawn of it, at `now_ns`). Returns
+    /// whether any are still on their way.
+    pub fn animateWindows(s: *Server, now_ns: u64) bool {
+        var moving = false;
+        for (s.toplevels.items) |t| {
+            const a = &(t.anim orelse continue);
+            const start = a.start_ns orelse blk: {
+                a.start_ns = now_ns;
+                break :blk now_ns;
+            };
+            const k: f32 = @floatCast(@min(@as(f64, @floatFromInt(now_ns -| start)) / state_anim_ns, 1));
+            s.damaged = true;
+            if (k >= 1) {
+                t.anim = null;
+                continue;
+            }
+            a.k = k;
+            moving = true;
+        }
+        return moving;
     }
 
     /// The overview is drawn, all or part of the way in.
@@ -3213,6 +3252,13 @@ pub const Server = struct {
             };
             // Rounded windows' shadows fall over the work area (not the
             // dock).
+            // On its way to its place, after its state changed: what it
+            // shows now, as big as the window is on the way.
+            if (t.anim) |a| {
+                const to = s.windowRect(t);
+                s.addTreeScaled(&list, surf, to, lerpRect(a.from, to, easeInOut(a.k)), rounding(t));
+                continue;
+            }
             s.addTree(&list, surf, clip, .{ .radius = rounding(t), .shadow = true, .shadow_clip = s.work_area });
             for (s.popups.items) |pp| if (pp.xdg.surface) |ps| if (s.rootToplevel(ps) == t) s.addTree(&list, ps, clip, .{});
         }
@@ -4377,6 +4423,9 @@ pub const Server = struct {
     }
 
     fn applySurfaceCommit(s: *Server, c: *Client, surf: *Surface) anyerror!void {
+        // Where a window was, before this (perhaps a new size, for a new
+        // state): the state's animation starts there.
+        const before: ?Rect = if (surf.xdg) |x| if (x.toplevel) |t| (if (t.mapped and surf.texture() != null) s.windowRect(t) else null) else null else null;
         if (surf.pending_scale) |sc| {
             surf.scale = sc;
             surf.pending_scale = null;
@@ -4489,7 +4538,7 @@ pub const Server = struct {
             }
             // Drawn since acknowledging the last configure: the next size
             // can be sent.
-            if (t.acked and !t.drawn) s.drewConfigure(c, t);
+            if (t.acked and !t.drawn) s.drewConfigure(c, t, before);
         };
         if (surf.xdg) |x| if (x.popup) |pp| {
             if (!x.configured) {
@@ -4524,15 +4573,20 @@ pub const Server = struct {
         if (surf.texture() == null) return;
         const sz = toplevelLogicalSize(t);
         const size = s.configuredSize(t);
-        if (sz[0] == size[0] and sz[1] == size[1]) s.drewConfigure(surf.client, t);
+        if (sz[0] == size[0] and sz[1] == size[1]) s.drewConfigure(surf.client, t, s.windowRect(t));
     }
 
-    fn drewConfigure(s: *Server, c: *Client, t: *Toplevel) void {
+    /// `t` has drawn as it was last told (it was at `from` on the screen
+    /// before): shown in its new state, on its way there from `from`.
+    fn drewConfigure(s: *Server, c: *Client, t: *Toplevel, from: ?Rect) void {
         t.drawn = true;
         if (t.shown_maximized != t.maximized or t.shown_fullscreen != t.fullscreen or t.shown_tiled != t.tiled) {
             t.shown_maximized = t.maximized;
             t.shown_fullscreen = t.fullscreen;
             t.shown_tiled = t.tiled;
+            if (from) |r| if (!s.overviewShown() and !std.meta.eql(r, s.windowRect(t))) {
+                t.anim = .{ .from = r };
+            };
             s.damaged = true;
             s.replacePopups(t);
         }
