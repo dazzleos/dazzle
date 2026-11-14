@@ -51,6 +51,8 @@ pub const System = struct {
     /// network.
     kernel: Str(64) = .{},
     hostname: Str(64) = .{},
+    /// The card (or flash) the system runs from.
+    card: Card = .{},
 
     pub fn read() System {
         var h: System = .{};
@@ -68,6 +70,7 @@ pub const System = struct {
         if (h.serial.len == 0) if (sys.readFile(dt ++ "/system/linux,serial", &buf)) |raw| {
             h.serial = serialFromDeviceTree(raw);
         };
+        h.card = Card.read("/sys/block/mmcblk0");
         var uts: linux.utsname = undefined;
         if (linux.errno(linux.uname(&uts)) == .SUCCESS) {
             h.kernel.print("{s} ({s})", .{ std.mem.sliceTo(&uts.release, 0), std.mem.sliceTo(&uts.machine, 0) });
@@ -76,6 +79,89 @@ pub const System = struct {
         return h;
     }
 };
+
+/// The SD card (or eMMC flash) the system runs from: how big it is, and
+/// who made it, if its maker's code is known.
+pub const Card = struct {
+    /// In bytes (0: not known).
+    bytes: u64 = 0,
+    maker: []const u8 = "",
+
+    /// From the block device's directory in sysfs (`/sys/block/mmcblk0`).
+    pub fn read(dir: []const u8) Card {
+        var c: Card = .{};
+        var path_buf: [96]u8 = undefined;
+        var buf: [64]u8 = undefined;
+        if (std.fmt.bufPrintSentinel(&path_buf, "{s}/size", .{dir}, 0)) |path| {
+            if (sys.readFile(path, &buf)) |text| {
+                const sectors = std.fmt.parseInt(u64, std.mem.trim(u8, text, " \n"), 10) catch 0;
+                c.bytes = sectors * 512;
+            }
+        } else |_| {}
+        // The makers' codes are SD cards' (eMMC's differ).
+        const is_sd = if (std.fmt.bufPrintSentinel(&path_buf, "{s}/device/type", .{dir}, 0)) |path|
+            std.mem.eql(u8, std.mem.trim(u8, sys.readFile(path, &buf) orelse "", " \n"), "SD")
+        else |_| false;
+        if (is_sd) if (std.fmt.bufPrintSentinel(&path_buf, "{s}/device/manfid", .{dir}, 0)) |path| {
+            if (sys.readFile(path, &buf)) |text| {
+                const id = std.fmt.parseInt(u32, std.mem.trim(u8, text, " \n"), 0) catch 0;
+                c.maker = sdMaker(id) orelse "";
+            }
+        } else |_| {};
+        return c;
+    }
+
+    /// "32 GB SanDisk card": its size as cards are sold (in thousands of
+    /// millions of bytes), and its maker if known.
+    pub fn describe(c: Card, buf: []u8) []const u8 {
+        if (c.bytes == 0) return "";
+        var size_buf: [16]u8 = undefined;
+        const gb = @as(f64, @floatFromInt(c.bytes)) / 1e9;
+        const size = if (gb >= 1) std.fmt.bufPrint(&size_buf, "{d:.0} GB", .{gb}) catch "" else std.fmt.bufPrint(&size_buf, "{d:.0} MB", .{gb * 1000}) catch "";
+        if (c.maker.len == 0) return std.fmt.bufPrint(buf, "{s}", .{size}) catch "";
+        return std.fmt.bufPrint(buf, "{s}, made by {s}", .{ size, c.maker }) catch "";
+    }
+};
+
+test "the card's size and maker are read from sysfs, and said as cards are sold" {
+    var dir_buf: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrintSentinel(&dir_buf, "/tmp/dazzle-card-test-{d}", .{linux.getpid()}, 0);
+    _ = linux.mkdir(dir, 0o755);
+    defer sys.files.removeTree(dir);
+    var path_buf: [96]u8 = undefined;
+    _ = linux.mkdir(try std.fmt.bufPrintSentinel(&path_buf, "{s}/device", .{dir}, 0), 0o755);
+    try sys.files.writeNew(try std.fmt.bufPrintSentinel(&path_buf, "{s}/size", .{dir}, 0), "62333952\n");
+    try sys.files.writeNew(try std.fmt.bufPrintSentinel(&path_buf, "{s}/device/type", .{dir}, 0), "SD\n");
+    try sys.files.writeNew(try std.fmt.bufPrintSentinel(&path_buf, "{s}/device/manfid", .{dir}, 0), "0x000003\n");
+    const card = Card.read(dir);
+    try std.testing.expectEqual(@as(u64, 62333952 * 512), card.bytes);
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("32 GB, made by SanDisk", card.describe(&buf));
+    // A maker not known, or none: just the size.
+    try std.testing.expectEqualStrings("8 GB", (Card{ .bytes = 7_948_206_080 }).describe(&buf));
+    try std.testing.expect(sdMaker(0xee) == null);
+    // Nothing there: nothing known.
+    try std.testing.expectEqual(@as(u64, 0), Card.read("/tmp/dazzle-no-such-card").bytes);
+}
+
+/// Who made an SD card, by its maker's code (as mmc-utils knows them).
+pub fn sdMaker(id: u32) ?[]const u8 {
+    return switch (id) {
+        0x01 => "Panasonic",
+        0x02 => "Toshiba",
+        0x03 => "SanDisk",
+        0x1b => "Samsung",
+        0x1d => "ADATA",
+        0x27 => "Phison",
+        0x28 => "Lexar",
+        0x31 => "Silicon Power",
+        0x41 => "Kingston",
+        0x74 => "Transcend",
+        0x76 => "Patriot",
+        0x82 => "Sony",
+        else => null,
+    };
+}
 
 /// A device tree's 64-bit serial number (big-endian), in hexadecimal; empty
 /// if it is 0.

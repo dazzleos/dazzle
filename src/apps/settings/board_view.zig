@@ -86,11 +86,12 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     const u = self.usage;
     var b1: [32]u8 = undefined;
     var b2: [32]u8 = undefined;
+    var card_buf: [64]u8 = undefined;
     const now: ?[]const u8 = switch (part.kind) {
         .soc => if (u.cpu_busy) |busy| (if (u.temperature) |c| cx.fmt("{d:.0}% busy, at {s}", .{ busy, locale.formatTemperature(&b1, c) }) else cx.fmt("{d:.0}% busy", .{busy})) else null,
         .soc_with_ram => if (u.cpu_busy) |busy| cx.fmt("{d:.0}% busy; {s} of {s} of memory in use", .{ busy, info.formatBytes(&b1, u.memUsed()), info.formatBytes(&b2, u.mem_total) }) else null,
         .ram => cx.fmt("{s} of {s} in use", .{ info.formatBytes(&b1, u.memUsed()), info.formatBytes(&b2, u.mem_total) }),
-        .micro_sd, .sd, .emmc => if (u.storage.user + u.storage.apps > 0) cx.fmt("{s} of your files and {s} of apps", .{ info.formatBytes(&b1, u.storage.user), info.formatBytes(&b2, u.storage.apps) }) else null,
+        .micro_sd, .sd, .emmc => if (self.system.card.bytes > 0) cx.fmt("{s}", .{self.system.card.describe(&card_buf)}) else null,
         .usb, .usb_double, .usb_otg => if (self.usb.len == 0) "Nothing is plugged in" else null,
         else => null,
     };
@@ -647,6 +648,19 @@ test "the board, drawn: picking a part says what it is" {
     draw(u, &d, &wifi, &n, .{ 1600, 900 });
     try testing.expect(view.findText(u.root.?, "Ethernet") != null);
     try testing.expect(view.findText(u.root.?, "The wired network") != null);
+
+    // Clicking the microSD card (underneath): how big it is, and who made
+    // it.
+    const sd = for (drawing.parts) |part| {
+        if (part.kind == .micro_sd) break part.rect;
+    } else unreachable;
+    const sd_pt: kete.Point = .{ x0 + (sd.x + sd.w / 2) * scale, y0 + (sd.y + sd.h / 2) * scale };
+    u.pointerMotion(sd_pt);
+    u.pointerButton(sd_pt, .left, true);
+    u.pointerButton(sd_pt, .left, false);
+    draw(u, &d, &wifi, &n, .{ 1600, 900 });
+    try testing.expect(view.findText(u.root.?, "microSD card") != null);
+    try testing.expect(view.findText(u.root.?, "32 GB, made by SanDisk") != null);
 
     // Clicking a USB connector shows plugged-in USB devices, or "Nothing is plugged in".
     const usb_pt: kete.Point = .{ x0 + 78 * scale, y0 + 9 * scale };

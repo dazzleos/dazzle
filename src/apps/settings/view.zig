@@ -310,6 +310,22 @@ pub const Builder = struct {
         }) }) }).withKey(@as(u64, @intFromEnum(p)) + 1);
     }
 
+    /// A page that does not scroll, its rows where a scrolling one has
+    /// them, filling the height: a row in an `Expanded` takes what is left
+    /// (and scrolls in itself, if it needs to).
+    pub fn fixed(b: Builder, p: Page, rows: []const kete.Widget) kete.Widget {
+        const cx = b.cx;
+        const children = cx.arena.dupe(kete.Widget, rows) catch return cx.make(kete.SizedBox.empty);
+        return cx.make(kete.Padding{ .padding = .all(24), .child = cx.make(kete.Align{
+            .alignment = .top_center,
+            .child = cx.make(kete.ConstrainedBox{ .constraints = .{ .max_w = max_page_width }, .child = cx.make(kete.Column{
+                .cross_axis_alignment = .stretch,
+                .spacing = 10,
+                .children = children,
+            }) }),
+        }) }).withKey(@as(u64, @intFromEnum(p)) + 1);
+    }
+
     pub fn label(b: Builder, text: []const u8) kete.Widget {
         const cx = b.cx;
         return cx.make(kete.SizedBox{ .width = 150, .child = cx.make(kete.Text{ .text = text, .style = .{ .size = 18, .color = cx.theme().on_surface_variant }, .wrap = false }) });
@@ -338,7 +354,7 @@ pub const sample_app_list = [_]store.App{
 pub const sample_apps: software_view.Apps = .{ .list = &sample_app_list, .installed = &.{ true, false }, .source = "https://example.com/apps", .default_source = "https://example.com/apps" };
 
 pub fn sample() struct { sys: info.System, net: info.Network, usage: info.Usage } {
-    const sys: info.System = .{ .model = .of("Raspberry Pi Zero W Rev 1.1"), .cores = 1, .serial = .of("a1b2c3d4"), .kernel = .of("6.12.0 (armv6l)"), .hostname = .of("awesome-elephant") };
+    const sys: info.System = .{ .model = .of("Raspberry Pi Zero W Rev 1.1"), .cores = 1, .serial = .of("a1b2c3d4"), .kernel = .of("6.12.0 (armv6l)"), .hostname = .of("awesome-elephant"), .card = .{ .bytes = 31_914_983_424, .maker = "SanDisk" } };
     var net: info.Network = .{ .gateway = .{ 192, 168, 1, 1 } };
     net.interfaces[0] = .{ .name = .of("eth0"), .state = .of("up"), .carrier = true, .mac = .of("00:e0:4c:68:01:02"), .ip = .{ 192, 168, 1, 42 }, .prefix = 24, .speed = 100, .rx_bytes = 12 << 20, .tx_bytes = 3 << 20 };
     net.interfaces[1] = .{ .name = .of("eth1"), .state = .of("down") };
