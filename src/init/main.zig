@@ -6,7 +6,8 @@
 //! 2. waits a moment for the SD card and mounts its space for files at
 //!    /data (if setup has prepared it), and names the computer as kept
 //!    there (or "dazzle"); starts the SoC's watchdog, which restarts the
-//!    Pi if the system hangs;
+//!    Pi if the system hangs, and keeps this start's log in
+//!    /data/system/log (see bootlog.zig);
 //! 3. starts the network manager (see
 //!    network.zig), which brings the wired and Wi-Fi network up in the
 //!    background and answers the settings app, and the log server (which
@@ -39,6 +40,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
 const logserver = @import("logserver.zig");
+const bootlog = @import("bootlog.zig");
 const network = @import("network.zig");
 const devices = @import("devices.zig");
 const media = @import("media.zig");
@@ -66,6 +68,8 @@ pub fn main() void {
     // From here on, a system that hangs (runs out of memory, say) restarts
     // by itself rather than sitting there with nothing on the screen.
     var watchdog = trial.Watchdog.start();
+    // This start's log, on the card (see bootlog.zig).
+    if (card.mounted) _ = bootlog.start();
     const name = card.hostname.slice();
     if (name.len > 0) _ = linux.syscall2(.sethostname, @intFromPtr(name.ptr), name.len);
     const network_pid = network.start();
@@ -365,6 +369,7 @@ fn reapForever(first_shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, f
 
 test {
     _ = @import("logserver.zig");
+    _ = @import("bootlog.zig");
     _ = @import("network.zig");
     _ = @import("dhcp.zig");
     _ = @import("netconf.zig");

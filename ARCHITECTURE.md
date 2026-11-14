@@ -71,7 +71,8 @@ top:
 /boot/        the card's FAT boot partition (read-only): firmware,
               config.txt, and the two OS slots (slot-a/ and slot-b/)
 /data/        the card's ext4 data partition, created on first boot:
-  system/     system settings (hostname, locale, network)
+  system/     system settings (hostname, locale, network), and the log of
+              this start and the one before (log, log.previous)
   user/       user files and folders
   apps/       installed apps (/data/apps/<name>/<name>), cached catalogue,
               icons, audio and appearance preferences (.sound, .appearance),
