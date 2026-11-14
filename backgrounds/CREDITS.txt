@@ -6,5 +6,6 @@ forest.png    Aerial view of pine trees in mist, by Dan Otis
               https://unsplash.com/photos/OYFHT4X5isg
 seashore.png  Bird's eye view of seashore, by Nattu Adnan
               https://unsplash.com/photos/Ai2TRdvI6gM
-sunrays.png   Trees with sun rays, by Dave Hoefler
-              https://unsplash.com/photos/vA80ZTVyooc
+asters.png    A dense cluster of vibrant purple asters with yellow centers,
+              by Klaudia Borowiec
+              https://unsplash.com/photos/aZORtKBz2G8

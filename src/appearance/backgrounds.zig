@@ -18,7 +18,7 @@ pub const dir = "/os/backgrounds";
 pub const all = [_]BuiltIn{
     .{ .name = "Forest", .file = "forest", .photographer = "Dan Otis" },
     .{ .name = "Seashore", .file = "seashore", .photographer = "Nattu Adnan" },
-    .{ .name = "Sun rays", .file = "sunrays", .photographer = "Dave Hoefler" },
+    .{ .name = "Asters", .file = "asters", .photographer = "Klaudia Borowiec" },
 };
 
 /// The path of `b` in the system.
