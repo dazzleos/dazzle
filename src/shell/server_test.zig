@@ -1538,3 +1538,51 @@ test "client drag-and-drop transfers payload between app windows" {
     _ = linux.close(b[1]);
     thread.join();
 }
+
+test "a client whose process ends goes, even while a child it forked keeps its socket open" {
+    // An abstract socket for the "app" to connect to.
+    const listener: linux.fd_t = @intCast(linux.socket(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0));
+    defer _ = linux.close(listener);
+    var addr: linux.sockaddr.un = .{ .path = @splat(0) };
+    const name = try std.fmt.bufPrint(addr.path[1..], "dazzle-exit-test-{d}", .{linux.getpid()});
+    const addr_len: linux.socklen_t = @intCast(@offsetOf(linux.sockaddr.un, "path") + 1 + name.len);
+    try testing.expectEqual(@as(usize, 0), linux.bind(listener, @ptrCast(&addr), addr_len));
+    try testing.expectEqual(@as(usize, 0), linux.listen(listener, 1));
+
+    // The app connects, forks a child (which keeps the socket), and ends.
+    var holder_pipe: [2]linux.fd_t = undefined;
+    try testing.expectEqual(@as(usize, 0), linux.pipe2(&holder_pipe, .{ .CLOEXEC = true }));
+    const app_pid: linux.pid_t = @intCast(linux.fork());
+    if (app_pid == 0) {
+        const fd: linux.fd_t = @intCast(linux.socket(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0));
+        if (linux.connect(fd, @ptrCast(&addr), addr_len) != 0) linux.exit(1);
+        const holder: linux.pid_t = @intCast(linux.fork());
+        if (holder == 0) {
+            // Holds the socket until the test is done (the pipe closes).
+            _ = linux.close(holder_pipe[1]);
+            var b: [1]u8 = undefined;
+            _ = linux.read(holder_pipe[0], &b, 1);
+            linux.exit(0);
+        }
+        linux.exit(0);
+    }
+    _ = linux.close(holder_pipe[0]);
+    defer _ = linux.close(holder_pipe[1]);
+
+    var renderer: FakeRenderer = .{};
+    var server: server_mod.Server = .init(testing.allocator, renderer.backend(), .{ .x = 0, .y = 40, .width = 800, .height = 560 });
+    defer server.deinit();
+    const fd: linux.fd_t = @intCast(linux.accept4(listener, null, null, linux.SOCK.CLOEXEC));
+    const c = try server.addClient(fd);
+    const pidfd = c.pidfd.?;
+    var status: i32 = 0;
+    _ = linux.waitpid(app_pid, &status, 0);
+
+    // The socket is still open (the child has it), but the app's process
+    // ended: the client goes.
+    var pfd = [_]linux.pollfd{.{ .fd = pidfd, .events = linux.POLL.IN, .revents = 0 }};
+    try testing.expectEqual(@as(usize, 1), linux.poll(&pfd, 1, 5000));
+    try testing.expect(server.clientExited(pidfd));
+    try testing.expectEqual(@as(usize, 0), server.clients.items.len);
+    try testing.expect(!server.clientExited(pidfd));
+}

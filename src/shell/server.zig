@@ -553,6 +553,9 @@ pub const Client = struct {
     objects: std.AutoHashMapUnmanaged(u32, Object) = .empty,
     dead: bool = false,
     pid: ?linux.pid_t = null,
+    /// Readable once its process has ended: its socket may outlive it (a
+    /// child it forked has it too), but its windows should not.
+    pidfd: ?linux.fd_t = null,
     /// IDs for objects the server makes (data offers).
     next_server_id: u32 = 0xff000000,
     /// Last ping serial sent on `xdg_wm_base.ping`, and whether it was ponged.
@@ -761,6 +764,13 @@ pub const Server = struct {
         const c = try s.gpa.create(Client);
         c.* = .{ .server = s, .conn = .init(fd), .pid = peerPid(fd) };
         errdefer s.gpa.destroy(c);
+        if (c.pid) |pid| if (pid != linux.getpid()) {
+            const rc = linux.pidfd_open(pid, 0);
+            if (linux.errno(rc) == .SUCCESS) c.pidfd = @intCast(rc);
+        };
+        errdefer if (c.pidfd) |pf| {
+            _ = linux.close(pf);
+        };
         try c.objects.put(s.gpa, p.wl_display.id, .display);
         try s.clients.append(s.gpa, c);
         return c;
@@ -809,6 +819,17 @@ pub const Server = struct {
             };
             i += 1;
         }
+    }
+
+    /// The client whose process `pidfd` follows ended: it goes, with its
+    /// windows, even if its socket is still open. Returns whether it was
+    /// still connected.
+    pub fn clientExited(s: *Server, pidfd: linux.fd_t) bool {
+        for (s.clients.items) |c| if (c.pidfd == pidfd) {
+            s.removeClient(c);
+            return true;
+        };
+        return false;
     }
 
     pub fn removeClient(s: *Server, c: *Client) void {
@@ -862,6 +883,7 @@ pub const Server = struct {
         }
         c.objects.deinit(s.gpa);
         c.conn.deinit();
+        if (c.pidfd) |pf| _ = linux.close(pf);
         for (s.clients.items, 0..) |x, j| if (x == c) {
             _ = s.clients.orderedRemove(j);
             break;

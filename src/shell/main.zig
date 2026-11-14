@@ -244,7 +244,7 @@ fn run(init: std.process.Init.Minimal) !void {
         // Wait for clients, input, the display (a page flip completing), or
         // the next clock tick; or not at all if a frame is due and can be
         // drawn.
-        var fds: [6 + max_clients + input.max_devices]linux.pollfd = undefined;
+        var fds: [6 + 2 * max_clients + input.max_devices]linux.pollfd = undefined;
         fds[0] = .{ .fd = listener, .events = linux.POLL.IN, .revents = 0 };
         fds[1] = .{ .fd = renderer.dev.fd, .events = linux.POLL.IN, .revents = 0 };
         const n_clients = @min(server.clients.items.len, max_clients);
@@ -268,7 +268,11 @@ fn run(init: std.process.Init.Minimal) !void {
         fds[net_index] = .{ .fd = net_sub.fd orelse -1, .events = linux.POLL.IN, .revents = 0 };
         fds[sys_index] = .{ .fd = sys_sub.fd orelse -1, .events = linux.POLL.IN, .revents = 0 };
         fds[watch_index] = .{ .fd = apps_watch.fd orelse -1, .events = linux.POLL.IN, .revents = 0 };
-        _ = linux.poll(&fds, watch_index + 1, timeout);
+        // The clients' processes, to notice one ending (crashing) while its
+        // socket is still open elsewhere.
+        const exits = fds[watch_index + 1 ..][0..n_clients];
+        for (server.clients.items[0..n_clients], exits) |c, *f| f.* = .{ .fd = c.pidfd orelse -1, .events = linux.POLL.IN, .revents = 0 };
+        _ = linux.poll(&fds, watch_index + 1 + n_clients, timeout);
         // What changed in /data/apps, or all of it if it has just appeared
         // (/data was made ready: the system manager reports it).
         var apps_changes = apps_pending;
@@ -494,6 +498,10 @@ fn run(init: std.process.Init.Minimal) !void {
             }
             i += 1;
         }
+        // Once its requests are handled, a client whose process ended goes.
+        for (exits) |f| if (f.revents != 0 and f.fd >= 0 and server.clientExited(f.fd)) {
+            print("dazzle-shell: client's process ended\n", .{});
+        };
 
         if (server.damaged) client_frame_ns = sys.nowNs();
 
