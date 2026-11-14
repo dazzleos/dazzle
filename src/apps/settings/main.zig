@@ -147,6 +147,8 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
     defer icons.deinit();
     var icons_dirty = true;
     var video_memory_failed = false;
+    // Remote control, as Settings last saw (or set) it.
+    var remote = sys.remote.load();
     var date_buf: [32]u8 = undefined;
     var build_buf: [64]u8 = undefined;
     const build = std.fmt.bufPrint(&build_buf, "{s} ({s})", .{ build_info.commit, update.formatDate(&date_buf, build_info.commit_time) }) catch build_info.commit;
@@ -359,6 +361,15 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
             if (r == null) print(sys.log_warning ++ "dazzle-settings: the system did not answer\n", .{});
             dirty = true;
         }
+        // Remote control turned on (with a new code) or off: the shell
+        // follows the setting.
+        if (actions.remote) |on| {
+            actions.remote = null;
+            remote = if (on) .fresh() else .{};
+            sys.remote.save(remote);
+            print("dazzle-settings: remote control {s}\n", .{if (on) "on" else "off"});
+            dirty = true;
+        }
         if (actions.wifi_adapter) |ad| wifi_adapter = ad;
         if (actions.connect != null or actions.hotspot != null or actions.disconnect or actions.ethernet != null or actions.wifi_addressing != null or actions.wifi_adapter != null) {
             var req_buf: [256]u8 = undefined;
@@ -460,6 +471,7 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
                 .gpio = if (pins_read) &pins else null,
                 .log = if (syslog.fd != null or syslog.failed) &syslog else null,
                 .log_server = if (updater.report) |r| r.log_server else null,
+                .remote_code = remote.code,
                 .manager = if (report) |*r| r else null,
                 .actions = &actions,
                 .apps = .{

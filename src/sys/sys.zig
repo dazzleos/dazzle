@@ -14,6 +14,7 @@
 //! * `files`: saving the user's files (numbered names, atomic writes)
 //! * `archive`: tar and xz unpacking
 //! * `v4l2`: Video4Linux2 ioctls for cameras and hardware video codecs
+//! * `remote`: the remote control setting, written by settings and read by the shell
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -28,6 +29,7 @@ pub const i2c = @import("i2c.zig");
 pub const serial = @import("serial.zig");
 pub const shell = @import("shell.zig");
 pub const files = @import("files.zig");
+pub const remote = @import("remote.zig");
 pub const archive = @import("archive.zig");
 pub const v4l2 = @import("v4l2.zig");
 pub const evdev = @import("evdev.zig");
@@ -43,6 +45,7 @@ test {
     _ = serial;
     _ = shell;
     _ = files;
+    _ = remote;
     _ = archive;
     _ = v4l2;
 }

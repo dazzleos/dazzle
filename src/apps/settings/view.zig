@@ -67,6 +67,8 @@ pub const Actions = struct {
     appearance: ?appearance_settings.Settings = null,
     /// Serve the log over HTTP, or stop.
     log_server: ?bool = null,
+    /// Let other computers control this one (with a new code), or stop.
+    remote: ?bool = null,
 
     pub const GpioChange = struct { pin: u6, mode: gpio.Mode };
 
@@ -153,6 +155,8 @@ pub const Settings = struct {
     /// Whether the log is served over HTTP; null until the system manager
     /// says.
     log_server: ?bool = null,
+    /// Remote control's code, while it is on (`sys.remote`).
+    remote_code: ?u32 = null,
     /// What the network manager last said; null if it could not be asked.
     manager: ?*const info.manager.Report = null,
     /// The apps that can be installed, and how installing goes.

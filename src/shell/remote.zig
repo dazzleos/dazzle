@@ -1,0 +1,250 @@
+//! Remote control (see `sys.remote`): an HTTP server, on `sys.remote.port`,
+//! while it is turned on. Each request is a GET carrying the code
+//! (`?code=123456`); one at a time, answered and closed:
+//!
+//!     /status                       the screen, the pointer, the windows
+//!                                   and the apps, as text
+//!     /screenshot                   the screen, as a PNG
+//!     /pointer?x=&y=                moves the pointer there
+//!     /move?dx=&dy=                 moves the pointer by that much (as a
+//!                                   mouse does: an app that has taken
+//!                                   the pointer, as Blocks does, turns)
+//!     /click?x=&y=[&button=right]   moves the pointer there and clicks
+//!     /button?button=left&pressed=1 presses (or lets go of) a button
+//!     /scroll?dy=                   scrolls (positive: down)
+//!     /key?key=28[&pressed=1]       presses a key (a Linux key code) and
+//!                                   lets it go, or only one of those
+//!     /type?text=                   types the text (US keys: letters,
+//!                                   digits, space and common punctuation)
+//!     /launch?app=dazzle-blocks     opens an app, or brings it to the top
+//!
+//! A wrong code (or none) gets 403. The shell carries out each command
+//! (`Server.accept` gives it), and answers (`Request.respond`).
+
+const std = @import("std");
+const linux = std.os.linux;
+const sys = @import("sys");
+
+/// What a request asks for.
+pub const Command = union(enum) {
+    status,
+    screenshot,
+    pointer: [2]f64,
+    move: [2]f64,
+    click: struct { x: f64, y: f64, button: u32 },
+    button: struct { button: u32, pressed: bool },
+    scroll: f64,
+    key: struct { code: u32, pressed: ?bool },
+    /// The text (in the request's buffer).
+    type: []const u8,
+    launch: []const u8,
+};
+
+/// A request read, its command to be carried out and answered.
+pub const Request = struct {
+    fd: linux.fd_t,
+    command: Command,
+    /// The request's text, which `command`'s strings are in.
+    buf: [4096]u8 = undefined,
+    text_buf: [1024]u8 = undefined,
+
+    /// Answers it (with `body` as `content_type`), and closes it.
+    pub fn respond(r: *Request, status: []const u8, content_type: []const u8, body: []const u8) void {
+        var head_buf: [160]u8 = undefined;
+        const head = std.fmt.bufPrint(&head_buf, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{ status, content_type, body.len }) catch "";
+        writeAll(r.fd, head);
+        writeAll(r.fd, body);
+        sys.close(r.fd);
+    }
+};
+
+pub const Server = struct {
+    listener: ?linux.fd_t = null,
+    code: ?u32 = null,
+
+    /// Listening while `setting` says it is on (with its code); not
+    /// otherwise. Returns whether that changed.
+    pub fn configure(s: *Server, setting: sys.remote.Setting) bool {
+        const was = s.code;
+        s.code = setting.code;
+        if (setting.code != null and s.listener == null) {
+            s.listener = listen() catch |err| blk: {
+                sys.print(sys.log_warning ++ "dazzle-shell: remote control cannot listen on port {d}: {s}\n", .{ sys.remote.port, @errorName(err) });
+                break :blk null;
+            };
+            if (s.listener != null) sys.print("dazzle-shell: remote control on, port {d}\n", .{sys.remote.port});
+        } else if (setting.code == null) if (s.listener) |fd| {
+            sys.close(fd);
+            s.listener = null;
+            sys.print("dazzle-shell: remote control off\n", .{});
+        };
+        return was != s.code;
+    }
+
+    /// The next request, if one is waiting (on `listener`) and asks for
+    /// something with the right code; others are answered here.
+    pub fn accept(s: *Server, out: *Request) bool {
+        const lfd = s.listener orelse return false;
+        const rc = linux.accept4(lfd, null, null, linux.SOCK.CLOEXEC);
+        if (linux.errno(rc) != .SUCCESS) return false;
+        const fd: linux.fd_t = @intCast(rc);
+        // A client that sends nothing does not hold the shell up for long.
+        const tv: linux.timeval = .{ .sec = 1, .usec = 0 };
+        _ = linux.setsockopt(fd, linux.SOL.SOCKET, linux.SO.RCVTIMEO, std.mem.asBytes(&tv), @sizeOf(linux.timeval));
+        _ = linux.setsockopt(fd, linux.SOL.SOCKET, linux.SO.SNDTIMEO, std.mem.asBytes(&tv), @sizeOf(linux.timeval));
+        out.* = .{ .fd = fd, .command = .status };
+        var len: usize = 0;
+        while (std.mem.indexOf(u8, out.buf[0..len], "\r\n\r\n") == null and len < out.buf.len) {
+            const n = linux.read(fd, out.buf[len..].ptr, out.buf.len - len);
+            if (linux.errno(n) != .SUCCESS or n == 0) break;
+            len += n;
+        }
+        switch (parse(out.buf[0..len], s.code orelse 0, &out.text_buf)) {
+            .command => |c| {
+                out.command = c;
+                return true;
+            },
+            .forbidden => out.respond("403 Forbidden", "text/plain", "The code is wrong\n"),
+            .not_found => out.respond("404 Not Found", "text/plain", "No such command\n"),
+            .bad => out.respond("400 Bad Request", "text/plain", "Not a request this understands\n"),
+        }
+        return false;
+    }
+};
+
+fn listen() !linux.fd_t {
+    const fd: linux.fd_t = @intCast(try sys.check(linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK, 0)));
+    errdefer sys.close(fd);
+    const one: c_int = 1;
+    _ = linux.setsockopt(fd, linux.SOL.SOCKET, linux.SO.REUSEADDR, std.mem.asBytes(&one), @sizeOf(c_int));
+    var addr: linux.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, sys.remote.port), .addr = 0 };
+    _ = try sys.check(linux.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in)));
+    _ = try sys.check(linux.listen(fd, 4));
+    return fd;
+}
+
+fn writeAll(fd: linux.fd_t, data: []const u8) void {
+    var at: usize = 0;
+    while (at < data.len) {
+        const n = linux.write(fd, data[at..].ptr, data.len - at);
+        if (linux.errno(n) != .SUCCESS or n == 0) return;
+        at += n;
+    }
+}
+
+const Parsed = union(enum) { command: Command, forbidden, not_found, bad };
+
+/// The command in an HTTP request (its text so far), if it has the code.
+fn parse(text: []const u8, code: u32, text_buf: []u8) Parsed {
+    const line_end = std.mem.indexOf(u8, text, "\r\n") orelse return .bad;
+    var parts = std.mem.tokenizeScalar(u8, text[0..line_end], ' ');
+    if (!std.mem.eql(u8, parts.next() orelse return .bad, "GET")) return .bad;
+    const target = parts.next() orelse return .bad;
+    const q = std.mem.indexOfScalar(u8, target, '?');
+    const path = target[0 .. q orelse target.len];
+    const query = if (q) |i| target[i + 1 ..] else "";
+    const given = std.fmt.parseInt(u32, param(query, "code") orelse return .forbidden, 10) catch return .forbidden;
+    if (code == 0 or given != code) return .forbidden;
+    const num = struct {
+        fn f(qs: []const u8, name: []const u8) ?f64 {
+            return std.fmt.parseFloat(f64, param(qs, name) orelse return null) catch null;
+        }
+    }.f;
+    if (std.mem.eql(u8, path, "/status")) return .{ .command = .status };
+    if (std.mem.eql(u8, path, "/screenshot")) return .{ .command = .screenshot };
+    if (std.mem.eql(u8, path, "/pointer")) return .{ .command = .{ .pointer = .{ num(query, "x") orelse return .bad, num(query, "y") orelse return .bad } } };
+    if (std.mem.eql(u8, path, "/move")) return .{ .command = .{ .move = .{ num(query, "dx") orelse return .bad, num(query, "dy") orelse return .bad } } };
+    if (std.mem.eql(u8, path, "/click")) return .{ .command = .{ .click = .{
+        .x = num(query, "x") orelse return .bad,
+        .y = num(query, "y") orelse return .bad,
+        .button = buttonCode(param(query, "button") orelse "left") orelse return .bad,
+    } } };
+    if (std.mem.eql(u8, path, "/button")) return .{ .command = .{ .button = .{
+        .button = buttonCode(param(query, "button") orelse "left") orelse return .bad,
+        .pressed = !std.mem.eql(u8, param(query, "pressed") orelse "1", "0"),
+    } } };
+    if (std.mem.eql(u8, path, "/scroll")) return .{ .command = .{ .scroll = num(query, "dy") orelse return .bad } };
+    if (std.mem.eql(u8, path, "/key")) return .{ .command = .{ .key = .{
+        .code = std.fmt.parseInt(u32, param(query, "key") orelse return .bad, 10) catch return .bad,
+        .pressed = if (param(query, "pressed")) |p| !std.mem.eql(u8, p, "0") else null,
+    } } };
+    if (std.mem.eql(u8, path, "/type")) return .{ .command = .{ .type = decode(param(query, "text") orelse return .bad, text_buf) orelse return .bad } };
+    if (std.mem.eql(u8, path, "/launch")) return .{ .command = .{ .launch = decode(param(query, "app") orelse return .bad, text_buf) orelse return .bad } };
+    return .not_found;
+}
+
+/// A query parameter's value (still %-encoded).
+fn param(query: []const u8, name: []const u8) ?[]const u8 {
+    var pairs = std.mem.tokenizeScalar(u8, query, '&');
+    while (pairs.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+        if (std.mem.eql(u8, pair[0..eq], name)) return pair[eq + 1 ..];
+    }
+    return null;
+}
+
+/// A %-encoded value ("+" a space), in `buf`.
+fn decode(v: []const u8, buf: []u8) ?[]const u8 {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < v.len) : (n += 1) {
+        if (n >= buf.len) return null;
+        if (v[i] == '%' and i + 2 < v.len) {
+            buf[n] = std.fmt.parseInt(u8, v[i + 1 .. i + 3], 16) catch return null;
+            i += 3;
+        } else {
+            buf[n] = if (v[i] == '+') ' ' else v[i];
+            i += 1;
+        }
+    }
+    return buf[0..n];
+}
+
+fn buttonCode(name: []const u8) ?u32 {
+    if (std.mem.eql(u8, name, "left")) return sys.evdev.btn_left;
+    if (std.mem.eql(u8, name, "right")) return sys.evdev.btn_left + 1;
+    if (std.mem.eql(u8, name, "middle")) return sys.evdev.btn_left + 2;
+    return null;
+}
+
+/// The Linux key code typing `c` on US keys, and whether with Shift.
+pub fn keyFor(c: u8) ?struct { code: u32, shift: bool } {
+    const lower = "1234567890-=\tqwertyuiop[]\nasdfghjkl;'`\\zxcvbnm,./ ";
+    const upper = "!@#$%^&*()_+\tQWERTYUIOP{}\nASDFGHJKL:\"~|ZXCVBNM<>? ";
+    // Their codes, in the same order.
+    const codes = [_]u8{ 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 57 };
+    comptime std.debug.assert(lower.len == codes.len and upper.len == codes.len);
+    if (std.mem.indexOfScalar(u8, lower, c)) |i| return .{ .code = codes[i], .shift = false };
+    if (std.mem.indexOfScalar(u8, upper, c)) |i| return .{ .code = codes[i], .shift = true };
+    return null;
+}
+
+/// Left Shift's key code.
+pub const key_left_shift = 42;
+
+const testing = std.testing;
+
+test "requests are read with their code, and others turned away" {
+    var buf: [64]u8 = undefined;
+    try testing.expectEqual(Parsed.forbidden, parse("GET /status HTTP/1.1\r\n\r\n", 123456, &buf));
+    try testing.expectEqual(Parsed.forbidden, parse("GET /status?code=111111 HTTP/1.1\r\n\r\n", 123456, &buf));
+    try testing.expectEqual(Parsed.forbidden, parse("GET /status?code=0 HTTP/1.1\r\n\r\n", 0, &buf));
+    try testing.expect(parse("GET /status?code=123456 HTTP/1.1\r\n\r\n", 123456, &buf).command == .status);
+    try testing.expectEqual(Parsed.not_found, parse("GET /reboot?code=123456 HTTP/1.1\r\n\r\n", 123456, &buf));
+    try testing.expectEqual(Parsed.bad, parse("POST /status?code=123456 HTTP/1.1\r\n\r\n", 123456, &buf));
+    const click = parse("GET /click?code=123456&x=10.5&y=20&button=right HTTP/1.1\r\n\r\n", 123456, &buf).command.click;
+    try testing.expectEqual(@as(f64, 10.5), click.x);
+    try testing.expectEqual(sys.evdev.btn_left + 1, click.button);
+    try testing.expectEqualStrings("Hello, there!", parse("GET /type?code=123456&text=Hello%2C+there%21 HTTP/1.1\r\n\r\n", 123456, &buf).command.type);
+    try testing.expectEqual(@as(?bool, false), parse("GET /key?code=123456&key=28&pressed=0 HTTP/1.1\r\n\r\n", 123456, &buf).command.key.pressed);
+    try testing.expectEqualStrings("dazzle-blocks", parse("GET /launch?code=123456&app=dazzle-blocks HTTP/1.1\r\n\r\n", 123456, &buf).command.launch);
+}
+
+test "text is typed with US keys" {
+    try testing.expectEqual(@as(u32, 30), keyFor('a').?.code);
+    try testing.expect(keyFor('A').?.shift);
+    try testing.expectEqual(@as(u32, 57), keyFor(' ').?.code);
+    try testing.expectEqual(@as(u32, 52), keyFor('.').?.code);
+    try testing.expectEqual(@as(u32, 9), keyFor('*').?.code);
+    try testing.expect(keyFor(0x7f) == null);
+}

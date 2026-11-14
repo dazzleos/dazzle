@@ -5,6 +5,7 @@
 //! on the network can read it).
 
 const std = @import("std");
+const sys = @import("sys");
 const kete = @import("kete");
 const kete_vc4 = @import("kete_vc4");
 const gfx = kete.gfx;
@@ -36,7 +37,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     const cx = b.cx;
     const a = cx.arena;
     const problems = cx.make(kete.SwitchRow{ .value = state.problems, .on_changed = .of(state, State.setProblems), .label = "Only warnings and errors" });
-    const serving = serveRow(self, b);
+    const serving = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 10, .children = cx.makeAll(.{ serveRow(self, b), remoteRow(self, b) }) });
     const l = self.log orelse return b.page(&.{ serving, problems, b.value("Reading the log…") });
     if (l.failed) return b.page(&.{ serving, b.value("The log cannot be read") });
     // The lines shown, newest first.
@@ -80,6 +81,30 @@ fn serveRow(self: *const Settings, b: Builder) kete.Widget {
 
 fn setLogServer(a: *Actions, on: bool) void {
     a.log_server = on;
+}
+
+/// Whether other computers on the network may control this one (for
+/// testing Dazzle from another computer), and the code they need.
+fn remoteRow(self: *const Settings, b: Builder) kete.Widget {
+    const cx = b.cx;
+    const t = cx.theme();
+    const host = self.system.hostname.slice();
+    const note = if (self.remote_code) |code|
+        cx.fmt("Code {d}. With it, a computer on the network can move the pointer, type, open apps and take screenshots, at http://{s}:{d}/. Turn this off when you are done.", .{ code, if (host.len > 0) host else "this computer", sys.remote.port })
+    else
+        "For testing Dazzle from another computer: it can then move the pointer, type, open apps and take screenshots here, with a code shown here.";
+    return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 4, .children = &.{
+        cx.make(kete.SwitchRow{
+            .value = self.remote_code != null,
+            .on_changed = if (self.actions) |a| .of(a, setRemote) else null,
+            .label = "Let other computers control this one",
+        }),
+        cx.make(kete.Text{ .text = note, .style = .{ .size = 14, .color = t.on_surface_variant } }),
+    } });
+}
+
+fn setRemote(a: *Actions, on: bool) void {
+    a.remote = on;
 }
 
 /// The log's lines, to make rows of (in the frame's arena).
@@ -156,4 +181,30 @@ test "the log: newest first, or only its warnings and errors" {
     const reading: Settings = .{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net };
     u.frame(1600, 900, 8, reading);
     try testing.expect(view.findText(u.root.?, "Reading the log…") != null);
+}
+
+test "remote control is turned on and off, and its code shown while on" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
+    defer u.destroy();
+    const d = view.sample();
+    var l: log.Log = .{};
+    var actions: Actions = .{};
+    var settings: Settings = .{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .log = &l, .log_server = false, .actions = &actions };
+    u.frame(1600, 900, 0, settings);
+    u.root.?.state(Settings.State).page = .log;
+    u.frame(1600, 900, 1, settings);
+    view.click(u, view.up(view.findText(u.root.?, "Let other computers control this one").?, kete.SwitchRow).?);
+    try testing.expectEqual(@as(?bool, true), actions.remote);
+    settings.remote_code = 482913;
+    u.frame(1600, 900, 2, settings);
+    try testing.expect(view.findTextContaining(u.root.?, "Code 482913") != null);
+    try testing.expect(view.findTextContaining(u.root.?, "http://awesome-elephant:8080/") != null);
+    actions = .{};
+    view.click(u, view.up(view.findText(u.root.?, "Let other computers control this one").?, kete.SwitchRow).?);
+    try testing.expectEqual(@as(?bool, false), actions.remote);
+    for (view.test_sizes) |size| {
+        u.frame(size[0], size[1], 3, settings);
+        try testing.expect(!view.overflows(u.root.?));
+    }
 }

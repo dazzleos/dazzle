@@ -365,16 +365,19 @@ pub const AppsWatch = struct {
         appearance: bool = false,
         /// The apps' catalogue (and so what updates there are).
         catalogue: bool = false,
+        /// Remote control turned on or off (`sys.remote`).
+        remote: bool = false,
 
-        pub const all: Changes = .{ .apps = true, .sound = true, .appearance = true, .catalogue = true };
+        pub const all: Changes = .{ .apps = true, .sound = true, .appearance = true, .catalogue = true, .remote = true };
 
         pub fn any(c: Changes) bool {
-            return c.apps or c.sound or c.appearance or c.catalogue;
+            return c.apps or c.sound or c.appearance or c.catalogue or c.remote;
         }
     };
 
     const mask = linux.IN.CREATE | linux.IN.DELETE | linux.IN.MOVED_FROM | linux.IN.MOVED_TO | linux.IN.CLOSE_WRITE | linux.IN.ONLYDIR;
     const sound_name = std.fs.path.basename(audio.settings_file);
+    const remote_name = std.fs.path.basename(sys.remote.settings_file);
     const appearance_name = std.fs.path.basename(appearance_file);
     const catalogue_name = std.fs.path.basename(store.catalogue_file);
 
@@ -429,6 +432,8 @@ pub const AppsWatch = struct {
                     if (written) c.appearance = true;
                 } else if (std.mem.eql(u8, name, catalogue_name)) {
                     if (written) c.catalogue = true;
+                } else if (std.mem.eql(u8, name, remote_name)) {
+                    if (written) c.remote = true;
                 } else if (name.len > 0 and name[0] != '.' and ev.mask & linux.IN.CLOSE_WRITE == 0) {
                     c.apps = true;
                 }

@@ -45,6 +45,7 @@ const quick_mod = @import("quick.zig");
 const notice_mod = @import("notice.zig");
 const keyboard = @import("keyboard.zig");
 const screenshot = @import("screenshot.zig");
+const remote_mod = @import("remote.zig");
 const audio = @import("audio");
 const build_info = @import("build_info");
 
@@ -122,6 +123,12 @@ fn run(init: std.process.Init.Minimal) !void {
     var notice = try notice_mod.Notice.init(gpa, ui_font, renderer.width, dock.scale);
     // Screenshots are saved on threads, which say how it went on this
     // pipe (`screenshot.Report`).
+    // Remote control, while it is turned on (in Settings), and the input
+    // it sends, handled as the devices' is.
+    var remote: remote_mod.Server = .{};
+    _ = remote.configure(sys.remote.load());
+    var remote_events: [256]input.Event = undefined;
+    var remote_len: usize = 0;
     var shot_pipe: [2]linux.fd_t = .{ -1, -1 };
     if (linux.errno(linux.pipe2(&shot_pipe, .{ .NONBLOCK = true, .CLOEXEC = true })) != .SUCCESS) shot_pipe = .{ -1, -1 };
     var net_sub: sys.network.Subscription = .{};
@@ -161,6 +168,8 @@ fn run(init: std.process.Init.Minimal) !void {
     var shortcut_key: ?u32 = null;
     // The last frame was a window's buffer, shown directly.
     var shown_directly = false;
+    // Where remote control has moved the pointer to (with what is queued).
+    var remote_at: [2]f64 = .{ 0, 0 };
     // Super is down, and nothing else has been pressed with it: let go, it
     // was tapped (which shows the overview, or ends it).
     var super_alone = false;
@@ -272,7 +281,7 @@ fn run(init: std.process.Init.Minimal) !void {
         // Wait for clients, input, the display (a page flip completing), or
         // the next clock tick; or not at all if a frame is due and can be
         // drawn.
-        var fds: [7 + 2 * max_clients + input.max_devices]linux.pollfd = undefined;
+        var fds: [8 + 2 * max_clients + input.max_devices]linux.pollfd = undefined;
         fds[0] = .{ .fd = listener, .events = linux.POLL.IN, .revents = 0 };
         fds[1] = .{ .fd = renderer.dev.fd, .events = linux.POLL.IN, .revents = 0 };
         const n_clients = @min(server.clients.items.len, max_clients);
@@ -298,16 +307,18 @@ fn run(init: std.process.Init.Minimal) !void {
         const sys_index = opener_index + 2;
         const watch_index = opener_index + 3;
         const shot_index = opener_index + 4;
+        const remote_index = opener_index + 5;
         fds[opener_index] = .{ .fd = opener orelse -1, .events = linux.POLL.IN, .revents = 0 };
         fds[net_index] = .{ .fd = net_sub.fd orelse -1, .events = linux.POLL.IN, .revents = 0 };
         fds[sys_index] = .{ .fd = sys_sub.fd orelse -1, .events = linux.POLL.IN, .revents = 0 };
         fds[watch_index] = .{ .fd = apps_watch.fd orelse -1, .events = linux.POLL.IN, .revents = 0 };
         fds[shot_index] = .{ .fd = shot_pipe[0], .events = linux.POLL.IN, .revents = 0 };
+        fds[remote_index] = .{ .fd = remote.listener orelse -1, .events = linux.POLL.IN, .revents = 0 };
         // The clients' processes, to notice one ending (crashing) while its
         // socket is still open elsewhere.
-        const exits = fds[shot_index + 1 ..][0..n_clients];
+        const exits = fds[remote_index + 1 ..][0..n_clients];
         for (server.clients.items[0..n_clients], exits) |c, *f| f.* = .{ .fd = c.pidfd orelse -1, .events = linux.POLL.IN, .revents = 0 };
-        _ = linux.poll(&fds, shot_index + 1 + n_clients, timeout);
+        _ = linux.poll(&fds, remote_index + 1 + n_clients, timeout);
         // A screenshot was saved (or could not be): the user is told.
         if (fds[shot_index].revents != 0) while (screenshot.Report.read(shot_pipe[0])) |r| {
             notice.theme = dock.theme;
@@ -397,9 +408,110 @@ fn run(init: std.process.Init.Minimal) !void {
         const time_ms: u32 = @truncate((sys.nowNs() - start) / std.time.ns_per_ms);
         // Under a fullscreen window the dock is hidden, and takes no input.
         const dock_visible = dock_shown and !server.fullscreenTop();
-        for (fds[2 + n_clients ..][0..n_inputs]) |f| if (f.revents != 0) {
+        // Remote control: each request carried out (its input queued, to
+        // be handled with the devices').
+        if (fds[remote_index].revents != 0) {
+            // Moves start from the pointer, unless some are still queued.
+            if (remote_len == 0) remote_at = .{ pointer.x, pointer.y };
+            var req: remote_mod.Request = undefined;
+            while (remote.accept(&req)) {
+                const queue = struct {
+                    fn add(q: *[256]input.Event, len: *usize, e: input.Event) void {
+                        if (len.* < q.len) {
+                            q[len.*] = e;
+                            len.* += 1;
+                        }
+                    }
+                }.add;
+                const q = &remote_events;
+                const qn = &remote_len;
+                switch (req.command) {
+                    .status => {
+                        var out: std.ArrayList(u8) = .empty;
+                        defer out.deinit(gpa);
+                        remoteStatus(gpa, &out, &server, apps, &renderer, &pointer) catch {};
+                        req.respond("200 OK", "text/plain; charset=utf-8", out.items);
+                    },
+                    .screenshot => {
+                        var windows: [render.max_windows]render.Window = undefined;
+                        if (renderer.capture(gpa, frameWindows(&server, &windows))) |pixels| {
+                            defer gpa.free(pixels);
+                            if (@import("gfx").png.encode(gpa, pixels, renderer.width, renderer.height)) |data| {
+                                defer gpa.free(data);
+                                req.respond("200 OK", "image/png", data);
+                            } else |err| req.respond("500 Internal Server Error", "text/plain", @errorName(err));
+                        } else |err| req.respond("500 Internal Server Error", "text/plain", @errorName(err));
+                    },
+                    .pointer, .click => {
+                        const to = switch (req.command) {
+                            .pointer => |p| p,
+                            .click => |c| [2]f64{ c.x, c.y },
+                            else => unreachable,
+                        };
+                        // From where the pointer will be, after what is
+                        // queued.
+                        queue(q, qn, .{ .motion = .{ @intFromFloat(@round(to[0] - remote_at[0])), @intFromFloat(@round(to[1] - remote_at[1])) } });
+                        queue(q, qn, .frame);
+                        remote_at = to;
+                        if (req.command == .click) {
+                            queue(q, qn, .{ .button = .{ .code = req.command.click.button, .pressed = true } });
+                            queue(q, qn, .frame);
+                            queue(q, qn, .{ .button = .{ .code = req.command.click.button, .pressed = false } });
+                            queue(q, qn, .frame);
+                        }
+                        req.respond("200 OK", "text/plain", "ok\n");
+                    },
+                    .move => |d| {
+                        queue(q, qn, .{ .motion = .{ @intFromFloat(@round(d[0])), @intFromFloat(@round(d[1])) } });
+                        queue(q, qn, .frame);
+                        remote_at = .{ remote_at[0] + d[0], remote_at[1] + d[1] };
+                        req.respond("200 OK", "text/plain", "ok\n");
+                    },
+                    .button => |b| {
+                        queue(q, qn, .{ .button = .{ .code = b.button, .pressed = b.pressed } });
+                        queue(q, qn, .frame);
+                        req.respond("200 OK", "text/plain", "ok\n");
+                    },
+                    .scroll => |dy| {
+                        queue(q, qn, .{ .axis = .{ .axis = 0, .value = dy } });
+                        queue(q, qn, .frame);
+                        req.respond("200 OK", "text/plain", "ok\n");
+                    },
+                    .key => |k| {
+                        if (k.pressed orelse true) queue(q, qn, .{ .key = .{ .code = k.code, .pressed = true } });
+                        if (!(k.pressed orelse false)) queue(q, qn, .{ .key = .{ .code = k.code, .pressed = false } });
+                        req.respond("200 OK", "text/plain", "ok\n");
+                    },
+                    .type => |text| {
+                        for (text) |c| if (remote_mod.keyFor(c)) |k| {
+                            if (k.shift) queue(q, qn, .{ .key = .{ .code = remote_mod.key_left_shift, .pressed = true } });
+                            queue(q, qn, .{ .key = .{ .code = k.code, .pressed = true } });
+                            queue(q, qn, .{ .key = .{ .code = k.code, .pressed = false } });
+                            if (k.shift) queue(q, qn, .{ .key = .{ .code = remote_mod.key_left_shift, .pressed = false } });
+                        };
+                        req.respond("200 OK", "text/plain", "ok\n");
+                    },
+                    .launch => |name| {
+                        const found = for (apps) |*a| {
+                            if (std.mem.eql(u8, a.name, name)) break a;
+                        } else null;
+                        if (found) |a| {
+                            activateApp(a, &server, &dock, &renderer, runtime_dir, &panels_damaged);
+                            req.respond("200 OK", "text/plain", "ok\n");
+                        } else req.respond("404 Not Found", "text/plain", "No such app\n");
+                    },
+                }
+            }
+        }
+        // The devices' events, then remote control's.
+        for (0..n_inputs + 1) |source| {
             var events: [64]input.Event = undefined;
-            for (devices.read(f.fd, &events)) |e| {
+            const batch: []const input.Event = if (source < n_inputs) blk: {
+                const f = fds[2 + n_clients + source];
+                break :blk if (f.revents != 0) devices.read(f.fd, &events) else &.{};
+            } else takeQueued(&remote_events, &remote_len, &events);
+            if (batch.len == 0) continue;
+            for (batch) |e| {
                 // Print Screen is the shell's: it saves the screen.
                 if (e == .key and e.key.code == evdev.key_sysrq) {
                     if (e.key.pressed) screenshot_wanted = true;
@@ -577,7 +689,7 @@ fn run(init: std.process.Init.Minimal) !void {
                 showDock(&renderer, &dock);
                 panels_damaged = true;
             }
-        };
+        }
         // The background image, once it is ready (or gone).
         if (background_image.poll()) |outcome| {
             switch (outcome) {
@@ -659,6 +771,15 @@ fn run(init: std.process.Init.Minimal) !void {
                 }
             }
         }
+        if (apps_changes.remote) if (remote.configure(sys.remote.load())) {
+            // The person at the screen is told, and how to reach it.
+            notice.theme = dock.theme;
+            var body_buf: [64]u8 = undefined;
+            if (remote.code) |code| {
+                notice.show(.warning, "Remote control is on", std.fmt.bufPrint(&body_buf, "Code {d}, port {d}", .{ code, sys.remote.port }) catch "", sys.nowNs());
+            } else notice.show(.check, "Remote control is off", "", sys.nowNs());
+            server.damaged = true;
+        };
         if (apps_changes.appearance) {
             const chosen = dock_mod.readAppearance();
             if (chosen.theme != dock.theme) {
@@ -1105,6 +1226,31 @@ fn showDock(renderer: *render.Renderer, dock: *const dock_mod.Dock) void {
     renderer.setPanelAt(.dock, dock.picture(), dock.width, dock.height, at.x, at.y);
 }
 
+/// Up to `out.len` of the events queued (by remote control), taken from
+/// the front of the queue.
+fn takeQueued(queue: []input.Event, len: *usize, out: []input.Event) []const input.Event {
+    const n = @min(len.*, out.len);
+    @memcpy(out[0..n], queue[0..n]);
+    std.mem.copyForwards(input.Event, queue[0 .. len.* - n], queue[n..len.*]);
+    len.* -= n;
+    return out[0..n];
+}
+
+/// What remote control's /status says: the screen, the pointer, the
+/// windows (top first) and the apps.
+fn remoteStatus(gpa: std.mem.Allocator, out: *std.ArrayList(u8), server: *const server_mod.Server, apps: []const dock_mod.App, renderer: *const render.Renderer, pointer: *const Pointer) !void {
+    try out.print(gpa, "build {s}\nscreen {d}x{d}\npointer {d:.0} {d:.0}\nwindows (top first):\n", .{ build_info.commit, renderer.width, renderer.height, pointer.x, pointer.y });
+    var i = server.toplevels.items.len;
+    while (i > 0) {
+        i -= 1;
+        const t = server.toplevels.items[i];
+        const r = server.windowRect(t);
+        try out.print(gpa, "  \"{s}\" at {d},{d} {d}x{d}{s}{s}{s}\n", .{ t.title(), r.x, r.y, r.width, r.height, if (t.maximized) " maximized" else "", if (t.fullscreen) " fullscreen" else "", if (t.suspended) " covered" else "" });
+    }
+    try out.print(gpa, "apps:\n", .{});
+    for (apps) |a| try out.print(gpa, "  {s}{s}\n", .{ a.name, if (a.pid != null) " (running)" else "" });
+}
+
 /// Fades the notification in or out, a frame each refresh while it does;
 /// and a frame more when it has gone.
 fn animateNotice(notice: *notice_mod.Notice, renderer: *render.Renderer, server: *server_mod.Server, now: u64) void {
@@ -1257,6 +1403,7 @@ test {
     _ = @import("perf.zig");
     _ = @import("quick.zig");
     _ = @import("notice.zig");
+    _ = @import("remote.zig");
     _ = @import("glass.zig");
     _ = @import("screenshot.zig");
     _ = @import("keyboard.zig");
