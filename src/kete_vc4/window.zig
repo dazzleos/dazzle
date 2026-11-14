@@ -96,9 +96,12 @@ pub const Window = struct {
     }
 
     pub fn wait(w: *Window, timeout_ns: u64) !void {
-        // Finish the frame in flight before sleeping (none yet: frames are
-        // rendered whole before they are shown).
-        try w.win.finishInFlight();
+        // Waiting for the shell to take another frame: the one in flight
+        // renders meanwhile, and is shown when the next is handed to the
+        // GPU (waiting for it here would make the GPU and the display take
+        // turns, a refresh lost every other frame). Otherwise the app has
+        // stopped drawing: it is shown before sleeping.
+        if (!w.win.frame_pending) try w.win.finishInFlight();
         try w.win.wait(timeout_ns);
     }
 
