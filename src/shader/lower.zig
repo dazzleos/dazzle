@@ -22,6 +22,9 @@ pub const Blend = enum(u8) {
     none,
     /// Mixed by the fragment's alpha (straight, not premultiplied).
     source_over,
+    /// Over what is there, the fragment's colour already multiplied by its
+    /// alpha (as a client's buffer with alpha is).
+    premultiplied_over,
 };
 
 /// An input or output by location, and its number of scalar components.
@@ -1489,10 +1492,15 @@ pub fn lower(
             switch (iface.blend) {
                 // The render target is B8G8R8A8.
                 .none => s.tlbColor(s.packUnorm8888(rgba[2], rgba[1], rgba[0], rgba[3])),
-                .source_over => {
+                .source_over, .premultiplied_over => {
                     const alpha = rgba[3];
                     const inv = s.fsub(l.k(1), alpha);
-                    const src = [4]Value{ rgba[2], rgba[1], rgba[0], l.k(1) };
+                    const pre = iface.blend == .premultiplied_over;
+                    // Straight: the colour times its alpha (and the alpha
+                    // itself), plus what is there times the rest.
+                    // Premultiplied: the colour as it is.
+                    const src = [4]Value{ rgba[2], rgba[1], rgba[0], if (pre) alpha else l.k(1) };
+                    const weight = if (pre) l.k(1) else alpha;
                     // Multisampled, each sample is blended with its own
                     // colour: the four read in turn, then written in turn
                     // (as Mesa does).
@@ -1501,7 +1509,7 @@ pub fn lower(
                     for (dsts[0..n]) |*d| d.* = s.tlbColorLoad();
                     for (dsts[0..n]) |dst| {
                         var out: [4]Value = undefined;
-                        for (&out, src, 0..) |*o, x, i| o.* = s.fadd(s.fmul(x, alpha), s.fmul(s.unpackUnorm8(dst, @intCast(i)), inv));
+                        for (&out, src, 0..) |*o, x, i| o.* = s.fadd(s.fmul(x, weight), s.fmul(s.unpackUnorm8(dst, @intCast(i)), inv));
                         const px = s.packUnorm8888(out[0], out[1], out[2], out[3]);
                         if (n == 4) s.tlbColorMs(px) else s.tlbColor(px);
                     }

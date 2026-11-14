@@ -1,6 +1,6 @@
 //! Compiles a shader program for the GPU when Dazzle is built:
 //!
-//!     shaderc <program.spv> <output> [--depth-test] [--blend=none|source-over]
+//!     shaderc <program.spv> <output> [--depth-test] [--blend=none|source-over|premultiplied-over]
 //!
 //! The input is a Zig shader source compiled to SPIR-V (by build.zig); the
 //! output is the program as `shader.Program.encode` writes it, which the
@@ -21,6 +21,8 @@ pub fn main(init: std.process.Init) !void {
             options.blend = .none;
         } else if (std.mem.eql(u8, arg, "--blend=source-over")) {
             options.blend = .source_over;
+        } else if (std.mem.eql(u8, arg, "--blend=premultiplied-over")) {
+            options.blend = .premultiplied_over;
         } else usage();
     }
     const cwd = std.Io.Dir.cwd();
@@ -37,6 +39,6 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn usage() noreturn {
-    std.debug.print("usage: shaderc <program.spv> <output> [--depth-test] [--blend=none|source-over]\n", .{});
+    std.debug.print("usage: shaderc <program.spv> <output> [--depth-test] [--blend=none|source-over|premultiplied-over]\n", .{});
     std.process.exit(2);
 }

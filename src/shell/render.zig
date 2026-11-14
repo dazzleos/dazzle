@@ -89,6 +89,8 @@ pub const Pipelines = struct {
     quads: *shader.Pipeline,
     blended: *shader.Pipeline,
     rounded: *shader.Pipeline,
+    /// Surfaces with alpha, premultiplied: blended over what is under them.
+    premultiplied: *shader.Pipeline,
 };
 
 /// Records a frame (after `frame.begin`): the windows (bottom first, at
@@ -120,7 +122,10 @@ pub fn recordFrame(frame: *render.Frame, pipelines: Pipelines, preview: server.T
             try roundedWindow(frame, pipelines, vbo, &quads, w, qw, qh);
             continue;
         }
-        try quad(frame, pipeline, vbo, quads, w.texture, w.x, w.y, qw, qh, w.transform, viewportOf(w.clip));
+        // A surface with alpha (a layer over a window, say) is blended;
+        // others hide what is under them.
+        const p = if (w.texture.format == .argb8888 and !w.texture.compressed) pipelines.premultiplied else pipeline;
+        try quad(frame, p, vbo, quads, w.texture, w.x, w.y, qw, qh, w.transform, viewportOf(w.clip));
         quads += 1;
     }
     for (panels) |panel| if (panel) |pq| {
@@ -329,6 +334,7 @@ pub const Renderer = struct {
     quads: shader.Pipeline,
     blended: shader.Pipeline,
     rounded: shader.Pipeline,
+    premultiplied: shader.Pipeline,
     preview_texture: ?server.Texture = null,
     /// Vertices for this frame's quads.
     vbo: vc4.Bo,
@@ -372,6 +378,7 @@ pub const Renderer = struct {
             .quads = try shader.Pipeline.init(gpa, dev, shader.Program.decode(@embedFile("quad.shader")) catch unreachable, layout),
             .blended = try shader.Pipeline.init(gpa, dev, shader.Program.decode(@embedFile("quad_blend.shader")) catch unreachable, layout),
             .rounded = try shader.Pipeline.init(gpa, dev, shader.Program.decode(@embedFile("window.shader")) catch unreachable, layout),
+            .premultiplied = try shader.Pipeline.init(gpa, dev, shader.Program.decode(@embedFile("quad_premultiplied.shader")) catch unreachable, layout),
             .vbo = try dev.createBo(vbo_size),
         };
     }
@@ -766,7 +773,7 @@ pub const Renderer = struct {
     }
 
     fn pipelines(r: *Renderer) Pipelines {
-        return .{ .quads = &r.quads, .blended = &r.blended, .rounded = &r.rounded };
+        return .{ .quads = &r.quads, .blended = &r.blended, .rounded = &r.rounded, .premultiplied = &r.premultiplied };
     }
 
     /// A texture of the snap preview's shade (4 by 4, all of it).
