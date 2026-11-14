@@ -48,6 +48,8 @@ pub const tiled_modifier: u64 = (0x07 << 56) | 1;
 /// pixels they redrew.
 pub const Stats = struct {
     frames: u32 = 0,
+    /// How many of them drew the layer over the window again.
+    layers: u32 = 0,
     cpu_ns: u64 = 0,
     gpu_ns: u64 = 0,
     pixels: f64 = 0,
@@ -453,6 +455,7 @@ pub const Renderer = struct {
         if (r.pipelined) _ = try r.gpu.vtable.submit.?(r.gpu.ptr, frame) else try r.gpu.vtable.run(r.gpu.ptr, frame);
         l.drawn(l.ctx);
         r.layer_drawn = hash;
+        r.stats.layers += 1;
     }
 
     /// What drawing took since the last call.
