@@ -42,6 +42,7 @@ const background_mod = @import("background.zig");
 const updates_mod = @import("updates.zig");
 const perf_mod = @import("perf.zig");
 const quick_mod = @import("quick.zig");
+const notice_mod = @import("notice.zig");
 const keyboard = @import("keyboard.zig");
 const screenshot = @import("screenshot.zig");
 const audio = @import("audio");
@@ -117,6 +118,12 @@ fn run(init: std.process.Init.Minimal) !void {
     // The touch dragging its slider.
     var quick_touch: ?i32 = null;
     var audio_devices = audio.listDevices();
+    // Notifications, at the top of the screen (a screenshot was saved).
+    var notice = try notice_mod.Notice.init(gpa, ui_font, renderer.width, dock.scale);
+    // Screenshots are saved on threads, which say how it went on this
+    // pipe (`screenshot.Report`).
+    var shot_pipe: [2]linux.fd_t = .{ -1, -1 };
+    if (linux.errno(linux.pipe2(&shot_pipe, .{ .NONBLOCK = true, .CLOEXEC = true })) != .SUCCESS) shot_pipe = .{ -1, -1 };
     var net_sub: sys.network.Subscription = .{};
     defer net_sub.deinit();
     net_sub.connect();
@@ -159,6 +166,7 @@ fn run(init: std.process.Init.Minimal) !void {
     var perf_gpu_ns: u64 = 0;
     renderer.setPanelHidden(.perf, true);
     renderer.setPanelHidden(.quick, true);
+    renderer.setPanelHidden(.notice, true);
 
     // On the first run (--setup), the setup app has the whole screen, and
     // the dock shows once it has finished.
@@ -262,7 +270,7 @@ fn run(init: std.process.Init.Minimal) !void {
         // Wait for clients, input, the display (a page flip completing), or
         // the next clock tick; or not at all if a frame is due and can be
         // drawn.
-        var fds: [6 + 2 * max_clients + input.max_devices]linux.pollfd = undefined;
+        var fds: [7 + 2 * max_clients + input.max_devices]linux.pollfd = undefined;
         fds[0] = .{ .fd = listener, .events = linux.POLL.IN, .revents = 0 };
         fds[1] = .{ .fd = renderer.dev.fd, .events = linux.POLL.IN, .revents = 0 };
         const n_clients = @min(server.clients.items.len, max_clients);
@@ -274,7 +282,9 @@ fn run(init: std.process.Init.Minimal) !void {
         _ = server.animateOverview(now);
         _ = server.animateWindows(now);
         slideDock(&dock, &server, &renderer, dock_shown, now);
+        animateNotice(&notice, &renderer, &server, now);
         var wake = next_tick;
+        if (notice.wakeAt(now)) |due| wake = @min(wake, due);
         if (dock.tooltipDue()) |due| wake = @min(wake, due);
         if (!renderer.flipPending()) {
             if (server.damaged) wake = now;
@@ -285,15 +295,26 @@ fn run(init: std.process.Init.Minimal) !void {
         const net_index = opener_index + 1;
         const sys_index = opener_index + 2;
         const watch_index = opener_index + 3;
+        const shot_index = opener_index + 4;
         fds[opener_index] = .{ .fd = opener orelse -1, .events = linux.POLL.IN, .revents = 0 };
         fds[net_index] = .{ .fd = net_sub.fd orelse -1, .events = linux.POLL.IN, .revents = 0 };
         fds[sys_index] = .{ .fd = sys_sub.fd orelse -1, .events = linux.POLL.IN, .revents = 0 };
         fds[watch_index] = .{ .fd = apps_watch.fd orelse -1, .events = linux.POLL.IN, .revents = 0 };
+        fds[shot_index] = .{ .fd = shot_pipe[0], .events = linux.POLL.IN, .revents = 0 };
         // The clients' processes, to notice one ending (crashing) while its
         // socket is still open elsewhere.
-        const exits = fds[watch_index + 1 ..][0..n_clients];
+        const exits = fds[shot_index + 1 ..][0..n_clients];
         for (server.clients.items[0..n_clients], exits) |c, *f| f.* = .{ .fd = c.pidfd orelse -1, .events = linux.POLL.IN, .revents = 0 };
-        _ = linux.poll(&fds, watch_index + 1 + n_clients, timeout);
+        _ = linux.poll(&fds, shot_index + 1 + n_clients, timeout);
+        // A screenshot was saved (or could not be): the user is told.
+        if (fds[shot_index].revents != 0) while (screenshot.Report.read(shot_pipe[0])) |r| {
+            notice.theme = dock.theme;
+            var body_buf: [300]u8 = undefined;
+            if (r.saved) {
+                notice.show(.photo_camera, "Screenshot saved", std.fmt.bufPrint(&body_buf, "Saved as \u{201c}{s}\u{201d} in your files", .{r.text()}) catch r.text(), sys.nowNs());
+            } else notice.show(.warning, "Screenshot not saved", r.text(), sys.nowNs());
+            server.damaged = true;
+        };
         // What changed in /data/apps, or all of it if it has just appeared
         // (/data was made ready: the system manager reports it).
         var apps_changes = apps_pending;
@@ -580,7 +601,7 @@ fn run(init: std.process.Init.Minimal) !void {
             screenshot_wanted = false;
             var windows: [render.max_windows]render.Window = undefined;
             if (renderer.capture(gpa, frameWindows(&server, &windows))) |pixels| {
-                screenshot.save(gpa, screenshot.folder, pixels, renderer.width, renderer.height);
+                screenshot.save(gpa, screenshot.folder, pixels, renderer.width, renderer.height, shot_pipe[1]);
             } else |err| print(sys.log_warning ++ "dazzle-shell: cannot take a screenshot: {s}\n", .{@errorName(err)});
         }
 
@@ -744,6 +765,7 @@ fn run(init: std.process.Init.Minimal) !void {
             _ = server.animateOverview(sys.nowNs());
             _ = server.animateWindows(sys.nowNs());
             slideDock(&dock, &server, &renderer, dock_shown, sys.nowNs());
+            animateNotice(&notice, &renderer, &server, sys.nowNs());
         }
         const dock_due = panels_damaged and sys.nowNs() >= client_frame_ns + panel_grace_ns;
         if ((server.damaged or dock_due) and !renderer.flipPending()) {
@@ -756,6 +778,7 @@ fn run(init: std.process.Init.Minimal) !void {
             renderer.setPanelHidden(.tooltip, !dock_shown or server.fullscreenTop() or dock.slide > 0 or dock.tooltip_shown == null);
             renderer.setPanelHidden(.perf, !perf_shown);
             renderer.setPanelHidden(.quick, !quick.shown);
+            renderer.setPanelHidden(.notice, !notice.visible(sys.nowNs()));
             // A maximized, full-size window on top goes straight onto the
             // display, with the dock on a plane below it; a fullscreen one,
             // alone. Otherwise (or if the display cannot show it) the frame
@@ -1071,6 +1094,17 @@ fn showDock(renderer: *render.Renderer, dock: *const dock_mod.Dock) void {
     renderer.setPanelAt(.dock, dock.picture(), dock.width, dock.height, at.x, at.y);
 }
 
+/// Fades the notification in or out, a frame each refresh while it does;
+/// and a frame more when it has gone.
+fn animateNotice(notice: *notice_mod.Notice, renderer: *render.Renderer, server: *server_mod.Server, now: u64) void {
+    const was_shown = notice.shown_ns != null;
+    if (notice.frame(now)) |pixels| {
+        const at = notice.place();
+        renderer.setPanelAt(.notice, pixels, notice.width, notice.height, at[0], at[1]);
+        server.damaged = true;
+    } else if (was_shown and notice.shown_ns == null) server.damaged = true;
+}
+
 /// Sends the dock down while a fullscreen window is on top, and back up
 /// after, a frame each refresh while it is on its way.
 fn slideDock(dock: *dock_mod.Dock, server: *server_mod.Server, renderer: *render.Renderer, dock_shown: bool, now: u64) void {
@@ -1204,6 +1238,7 @@ test {
     _ = @import("updates.zig");
     _ = @import("perf.zig");
     _ = @import("quick.zig");
+    _ = @import("notice.zig");
     _ = @import("glass.zig");
     _ = @import("screenshot.zig");
     _ = @import("keyboard.zig");

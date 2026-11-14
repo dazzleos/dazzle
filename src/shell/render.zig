@@ -262,7 +262,7 @@ fn rect(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, index: us
 /// Room for the panels' and windows' quads (each two triangles of four
 /// floats per vertex), every window rounded.
 const max_quads = 1 + n_panels + max_windows * max_pieces;
-const vbo_size = 51200;
+const vbo_size = 53248;
 comptime {
     std.debug.assert(max_quads * 6 * 4 * @sizeOf(f32) <= vbo_size);
 }
@@ -271,7 +271,8 @@ comptime {
 const Scanout = struct { bo: vc4.Bo, fb_id: u32 };
 
 /// The shell's own panels on the screen, drawn on the CPU: the dock, the
-/// performance overlay, the dock's tooltip and its quick settings. Each is see-through in
+/// performance overlay, the dock's tooltip and its quick settings, and
+/// notifications. Each is see-through in
 /// places (its pixels' alpha says where), and drawn blended. On an overlay
 /// plane, it is in a band if it has one (`setPanelBand`), which the plane
 /// fills, with the background drawn behind it; otherwise alone, the
@@ -282,6 +283,8 @@ pub const PanelId = enum {
     tooltip,
     /// The dock's quick settings.
     quick,
+    /// A notification, at the top of the screen.
+    notice,
 };
 const n_panels = @typeInfo(PanelId).@"enum".field_names.len;
 
@@ -783,7 +786,9 @@ pub const Renderer = struct {
     /// its own and read back: `width` by `height` pixels, 0xffRRGGBB, in
     /// `gpa`. Waits for the GPU; only while no frame is being drawn.
     pub fn capture(r: *Renderer, gpa: std.mem.Allocator, windows: []const Window) ![]u32 {
-        const quads = try r.panelQuads();
+        var quads = try r.panelQuads();
+        // A notification (perhaps of the last screenshot) is not in it.
+        quads[@intFromEnum(PanelId.notice)] = null;
         const pitch = render.Target.pitch(.xrgb8888, @intCast(r.width));
         const bo = try r.dev.createBo(pitch * r.height);
         defer r.dev.destroyBo(bo);
