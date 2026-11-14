@@ -22,30 +22,6 @@ const renderer_mod = @import("renderer.zig");
 const kwin = kete.window;
 const kgfx = kete.gfx;
 
-/// Sees Dazzle's input before kete does, and takes what it wants (true):
-/// for a game that has the mouse, say (`Display.input_filter`).
-pub const InputFilter = struct {
-    ctx: *anyopaque,
-    f: *const fn (ctx: *anyopaque, e: app.InputEvent) bool,
-
-    pub fn of(ptr: anytype, comptime f: fn (@TypeOf(ptr), app.InputEvent) bool) InputFilter {
-        const P = @TypeOf(ptr);
-        return .{ .ctx = @ptrCast(ptr), .f = struct {
-            fn call(ctx: *anyopaque, e: app.InputEvent) bool {
-                return f(@as(P, @ptrCast(@alignCast(ctx))), e);
-            }
-        }.call };
-    }
-};
-
-/// A key going down or up, for an app's own shortcuts (`Display.on_key`):
-/// its Linux key code, and whether Control is held.
-pub const KeyPress = struct {
-    code: u32,
-    pressed: bool,
-    ctrl: bool,
-};
-
 pub const Window = struct {
     win: *app.Window,
     /// Its title, as kete set it (as much as fits).
@@ -70,10 +46,6 @@ pub const Window = struct {
     /// last key pressed (a Linux key code): for an app that shows them.
     pointer: ?[2]f32 = null,
     last_key: ?u32 = null,
-    /// Told of each key before kete is (`Display.on_key`).
-    on_key: ?kete.ValueCallback(KeyPress) = null,
-    /// Takes the input it wants before kete sees it (`Display.input_filter`).
-    input_filter: ?InputFilter = null,
     /// The renderer: it draws the window's border, and when it leaves
     /// frames with the GPU, the frame it left is kept in flight
     /// (`Display.renderer`).
@@ -267,7 +239,6 @@ pub const Window = struct {
     pub fn takeInput(w: *Window) []const kwin.InputEvent {
         w.input.clearRetainingCapacity();
         for (w.win.takeInput()) |e| {
-            if (w.input_filter) |f| if (f.f(f.ctx, e)) continue;
             const k = w.convert(e) orelse continue;
             w.input.append(w.gpa, k) catch break;
         }
@@ -331,7 +302,6 @@ pub const Window = struct {
         const k = w.keyboard orelse w.win.layout;
         const shift = w.shift > 0;
         const ctrl = w.ctrl > 0;
-        if (w.on_key) |f| f.call(.{ .code = code, .pressed = pressed, .ctrl = ctrl });
         return .{ .key = .{
             .key = kwin.evdev.keyOf(code),
             .pressed = pressed,
@@ -387,11 +357,6 @@ pub const Display = struct {
     /// The keyboard layout to type with, if the app chooses it rather than
     /// the system (setup, before the system has one).
     keyboard: ?locale.Keyboard = null,
-    /// Told of each key before kete is: for an app's shortcuts that work
-    /// whatever has the keyboard (or nothing does).
-    on_key: ?kete.ValueCallback(KeyPress) = null,
-    /// Sees the input first, and takes what it wants from kete.
-    input_filter: ?InputFilter = null,
     /// The renderer: it draws the windows' borders, and if it leaves
     /// frames with the GPU (see `Renderer.pipelined`), the windows keep its
     /// frame in flight.
@@ -490,7 +455,7 @@ pub const Display = struct {
             side.* = v;
         };
         const win = try app.Window.open(d.gpa, d.gpu, d.environ, options);
-        d.window = .{ .win = win, .gpa = d.gpa, .drawn_by = d.decorations, .keyboard = d.keyboard, .on_key = d.on_key, .input_filter = d.input_filter, .renderer = d.renderer };
+        d.window = .{ .win = win, .gpa = d.gpa, .drawn_by = d.decorations, .keyboard = d.keyboard, .renderer = d.renderer };
         if (d.renderer) |r| if (r.pipelined) try win.setPipelined(true);
         d.window.?.keepTitle(o.title);
         d.syncWake();

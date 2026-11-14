@@ -30,7 +30,6 @@ pub const window = @import("window.zig");
 pub const Renderer = renderer.Renderer;
 pub const Window = window.Window;
 pub const Display = window.Display;
-pub const KeyPress = window.KeyPress;
 /// The icons the apps' catalogue names, kept in kete's icon font.
 pub const app_icons = @import("app_icons.zig").icons;
 
