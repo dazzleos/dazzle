@@ -38,6 +38,7 @@ const server_mod = @import("server.zig");
 const render = @import("render.zig");
 const input = @import("input.zig");
 const dock_mod = @import("dock.zig");
+const background_mod = @import("background.zig");
 const updates_mod = @import("updates.zig");
 const perf_mod = @import("perf.zig");
 const keyboard = @import("keyboard.zig");
@@ -127,6 +128,10 @@ fn run(init: std.process.Init.Minimal) !void {
     const appearance = dock_mod.readAppearance();
     dock.theme = appearance.theme;
     renderer.background = appearance.background;
+    // The background image, if any: made ready on a thread of its own.
+    var background_image: background_mod.Loader = .init(gpa, renderer.width, renderer.height);
+    defer background_image.deinit();
+    wantBackground(&background_image, &renderer, appearance);
     const dock_y: u32 = renderer.height - dock.height;
     const with_dock: server_mod.Rect = .{ .x = 0, .y = 0, .width = renderer.width, .height = dock_y };
     var perf = try perf_mod.Overlay.init(gpa, ui_font, renderer.width, renderer.height);
@@ -233,6 +238,7 @@ fn run(init: std.process.Init.Minimal) !void {
             const chosen = dock_mod.readAppearance();
             dock.theme = chosen.theme;
             renderer.background = chosen.background;
+            wantBackground(&background_image, &renderer, chosen);
             dock.draw();
             renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
             server.setWorkArea(with_dock);
@@ -472,6 +478,22 @@ fn run(init: std.process.Init.Minimal) !void {
                 panels_damaged = true;
             }
         };
+        // The background image, once it is ready (or gone).
+        if (background_image.poll()) |outcome| {
+            switch (outcome) {
+                .image => |ready| {
+                    var img = ready;
+                    defer img.deinit(gpa);
+                    renderer.setBackgroundImage(&img) catch |err| print(sys.log_warning ++ "dazzle-shell: cannot show the background image: {s}\n", .{@errorName(err)});
+                },
+                .none => renderer.setBackgroundImage(null) catch {},
+                .failed => |err| {
+                    print(sys.log_warning ++ "dazzle-shell: cannot read the background image: {s}\n", .{@errorName(err)});
+                    renderer.setBackgroundImage(null) catch {};
+                },
+            }
+            server.damaged = true;
+        }
         // The name of the app whose icon the pointer rests on, once it has
         // rested a while.
         if (dock.drawTooltip(sys.nowNs())) |tip| {
@@ -545,6 +567,7 @@ fn run(init: std.process.Init.Minimal) !void {
                 renderer.background = chosen.background;
                 panels_damaged = true;
             }
+            wantBackground(&background_image, &renderer, chosen);
             server.wakeAll();
         }
         if (t_now >= next_tick) {
@@ -868,6 +891,13 @@ fn openAt(app: *dock_mod.App, what: ?[]const u8, server: *server_mod.Server, run
 }
 
 /// Starts `app`, or raises its window to the front if it is already running.
+/// Asks for the background image the appearance settings name (if any),
+/// made ready as the GPU best takes it.
+fn wantBackground(loader: *background_mod.Loader, renderer: *render.Renderer, a: dock_mod.Appearance) void {
+    const path = a.image.slice();
+    loader.want(path, if (path != null) renderer.backgroundKind() else .rgb565);
+}
+
 fn activateApp(
     app: *dock_mod.App,
     server: *server_mod.Server,
@@ -995,4 +1025,5 @@ test {
     _ = @import("protocol_test.zig");
     _ = @import("placement.zig");
     _ = @import("render.zig");
+    _ = @import("background.zig");
 }

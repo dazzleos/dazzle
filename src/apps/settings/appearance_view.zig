@@ -1,5 +1,7 @@
 //! The Appearance page: system colour scheme (Dark or Light), and the
-//! desktop's background colour (the same in either), picked from swatches.
+//! desktop's background colour (the same in either), picked from swatches;
+//! and the image over it, if one was chosen (in Files), which can be
+//! removed here.
 
 const std = @import("std");
 const kete = @import("kete");
@@ -38,9 +40,18 @@ pub const State = struct {
                 const acts = st.actions orelse return;
                 var next = acts.appearance orelse st.appearance;
                 next.background = bg;
+                // The colour is what shows: no image over it.
+                next.image = .{};
                 acts.appearance = next;
             }
         }.set;
+    }
+
+    fn removeImage(st: *State) void {
+        const acts = st.actions orelse return;
+        var next = acts.appearance orelse st.appearance;
+        next.image = .{};
+        acts.appearance = next;
     }
 };
 
@@ -100,10 +111,26 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
         .children = &.{
             b.label("Background"),
             cx.make(kete.Column{ .cross_axis_alignment = .start, .spacing = 4, .children = a.dupe(kete.Widget, &swatch_rows) catch &.{} }),
+            imageRow(cx, self, state),
         },
     })) catch {};
 
     return b.page(rows.items);
+}
+
+/// The image over the colour, by name, and a button to remove it; or, with
+/// none, where one is chosen.
+fn imageRow(cx: *kete.BuildContext, self: *const Settings, state: *State) kete.Widget {
+    const t = cx.theme();
+    const style: kete.TextStyle = .{ .size = 15, .color = t.on_surface_variant };
+    const path = self.appearance.image.slice() orelse
+        return cx.make(kete.Text{ .text = "An image can be the background too: choose one in Files (Set as background)", .style = style });
+    const name = path[(std.mem.lastIndexOfScalar(u8, path, '/') orelse return cx.make(kete.SizedBox.empty)) + 1 ..];
+    return cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = cx.makeAll(.{
+        kete.Icon{ .icon = .wallpaper, .size = 20, .color = t.on_surface_variant },
+        kete.Expanded{ .child = cx.make(kete.Text{ .text = cx.fmt("Image: {s}", .{name}), .style = .{ .size = 15, .color = t.on_surface }, .wrap = false, .ellipsis = true }) },
+        kete.OutlinedButton{ .label = "Remove", .icon = .close, .on_press = if (self.actions != null) .of(state, State.removeImage) else null },
+    }) });
 }
 
 const swatches_per_row = 4;
@@ -239,4 +266,30 @@ test "Appearance page toggles between Dark and Light theme" {
     });
     try testing.expect(ringed(u.root.?, .plum));
     try testing.expect(!ringed(u.root.?, .navy));
+}
+
+test "an image over the background is named, and can be removed; picking a colour removes it too" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
+    defer u.destroy();
+    const d = view.sample();
+    var actions: Actions = .{};
+    var settings: Settings = .{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .appearance = .{} };
+    u.frame(1280, 720, 1, settings);
+    _ = view.showPage(u, .appearance);
+    u.frame(1280, 720, 2, settings);
+    // None: where to choose one.
+    try testing.expect(view.findTextContaining(u.root.?, "choose one in Files") != null);
+
+    settings.appearance = .{ .background = .teal, .image = .of("/data/user/Pictures/sea.png") };
+    u.frame(1280, 720, 3, settings);
+    try testing.expect(view.findText(u.root.?, "Image: sea.png") != null);
+    view.click(u, view.up(view.findText(u.root.?, "Remove").?, kete.OutlinedButton).?);
+    try testing.expect(actions.appearance.?.image.slice() == null);
+    try testing.expectEqual(appearance_settings.Background.teal, actions.appearance.?.background);
+
+    actions = .{};
+    view.click(u, findSwatch(u.root.?, .plum).?.child(0));
+    try testing.expect(actions.appearance.?.image.slice() == null);
+    try testing.expectEqual(appearance_settings.Background.plum, actions.appearance.?.background);
 }

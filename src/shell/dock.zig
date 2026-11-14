@@ -69,10 +69,12 @@ pub const Theme = enum {
     }
 };
 
-/// The theme and the desktop's colour, as chosen in Settings.
+/// The theme and the desktop's colour (and image, if any), as chosen in
+/// Settings (and Files).
 pub const Appearance = struct {
     theme: Theme = .dark,
     background: u32 = theme_settings.Background.navy.argb(),
+    image: theme_settings.ImagePath = .{},
 
     pub fn parse(text: []const u8) Appearance {
         const s = theme_settings.Settings.parse(text);
@@ -82,12 +84,13 @@ pub const Appearance = struct {
                 .light => .light,
             },
             .background = s.background.argb(),
+            .image = s.image,
         };
     }
 };
 
 pub fn readAppearance() Appearance {
-    var buf: [128]u8 = undefined;
+    var buf: [theme_settings.Settings.max_text]u8 = undefined;
     return .parse(sys.readFile(appearance_file, &buf) orelse "");
 }
 

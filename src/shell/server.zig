@@ -73,6 +73,8 @@ pub const Texture = struct {
     width: u32,
     height: u32,
     format: vc4.Format = .xrgb8888,
+    /// ETC1 compressed (the desktop's background), not `format`.
+    compressed: bool = false,
 };
 
 /// The formats clients' buffers can be in, and wl_shm's codes for them

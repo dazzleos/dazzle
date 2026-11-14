@@ -22,6 +22,7 @@ pub const device = @import("device.zig");
 pub const compiler = @import("compiler.zig");
 pub const render = @import("render.zig");
 pub const texture = @import("texture.zig");
+pub const etc1 = @import("etc1.zig");
 pub const format = @import("format.zig");
 pub const display = @import("display.zig");
 pub const drm = @import("drm.zig");
@@ -46,6 +47,7 @@ test {
     _ = compiler;
     _ = render;
     _ = texture;
+    _ = etc1;
     _ = format;
     _ = display;
     _ = drm;

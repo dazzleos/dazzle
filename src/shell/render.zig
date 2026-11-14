@@ -24,8 +24,11 @@ const cursor = @import("cursor.zig");
 
 const shader = @import("shader");
 
+const background_mod = @import("background.zig");
+
 const render = vc4.render;
 const texture = vc4.texture;
+const etc1 = vc4.etc1;
 
 pub const background = 0xff101830;
 
@@ -87,10 +90,15 @@ pub const Pipelines = struct {
 /// Records a frame (after `frame.begin`): the windows (bottom first, at
 /// most `max_windows`) and the panels above them as quads. `vbo` holds the
 /// quads' vertices and must stay untouched until the frame has rendered.
-pub fn recordFrame(frame: *render.Frame, pipelines: Pipelines, preview: server.Texture, vbo: vc4.Bo, panels: []const ?PanelQuad, windows: []const Window) !void {
+pub fn recordFrame(frame: *render.Frame, pipelines: Pipelines, preview: server.Texture, image: ?server.Texture, vbo: vc4.Bo, panels: []const ?PanelQuad, windows: []const Window) !void {
     std.debug.assert(windows.len <= max_windows);
     const pipeline = pipelines.quads;
     var quads: usize = 0;
+    // The background image, over the colour the frame is cleared to.
+    if (image) |bg| {
+        try quad(frame, pipeline, vbo, quads, bg, 0, 0, bg.width, bg.height, 0, null);
+        quads += 1;
+    }
     for (windows) |w| {
         if (w.preview) {
             try quad(frame, pipelines.blended, vbo, quads, preview, w.x, w.y, w.width, w.height, 0, viewportOf(w.clip));
@@ -218,7 +226,7 @@ fn rect(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, index: us
         .count = 6,
         .scissor = scissor,
         .texture = .{ .handle = t.handle, .config = .{
-            .type = t.format.textureType(),
+            .type = if (t.compressed) .etc1 else t.format.textureType(),
             .width = t.width,
             .height = t.height,
             .mag_filter = filter,
@@ -231,7 +239,7 @@ fn rect(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, index: us
 
 /// Room for the panels' and windows' quads (each two triangles of four
 /// floats per vertex), every window rounded.
-const max_quads = n_panels + max_windows * max_pieces;
+const max_quads = 1 + n_panels + max_windows * max_pieces;
 const vbo_size = 51200;
 comptime {
     std.debug.assert(max_quads * 6 * 4 * @sizeOf(f32) <= vbo_size);
@@ -306,6 +314,12 @@ pub const Renderer = struct {
     cursor_shape: ?cursor.Shape = null,
     cursor_move_failed: bool = false,
     background: u32 = background,
+    /// The background image over it, if any (`setBackgroundImage`).
+    background_image: ?server.Texture = null,
+    /// Whether the GPU decodes ETC1 as `vc4.etc1` lays it out, and in
+    /// which byte order (`etc1Order`), once checked.
+    etc1_checked: bool = false,
+    etc1_order: ?etc1.ByteOrder = null,
 
     pub fn init(gpa: std.mem.Allocator, dev: vc4.Device, output: vc4.drm.Output) !Renderer {
         // The screen stays 32-bit: it is what everything is composited
@@ -521,11 +535,95 @@ pub const Renderer = struct {
         const t0 = sys.nowNs();
         const quads = try r.panelQuads();
         static_frame.begin(r.display.backTarget(), .{ .clear = r.background });
-        try recordFrame(&static_frame, r.pipelines(), try r.previewTexture(), r.vbo, &quads, windows);
+        try recordFrame(&static_frame, r.pipelines(), try r.previewTexture(), r.background_image, r.vbo, &quads, windows);
         const t1 = sys.nowNs();
         const seqno = try r.dev.submit(static_frame.finish());
         try r.dev.waitSeqno(seqno, std.time.ns_per_s);
         return .{ .cpu_ns = t1 - t0, .gpu_ns = sys.nowNs() - t1 };
+    }
+
+    /// Shows `image` (made by `background.prepare`) over the background
+    /// colour, or none; the image's memory is the caller's still.
+    pub fn setBackgroundImage(r: *Renderer, image: ?*const background_mod.Prepared) !void {
+        if (r.background_image) |old| {
+            destroyTexture(r, old);
+            r.background_image = null;
+        }
+        const p = image orelse return;
+        switch (p.kind) {
+            .etc1 => {
+                const bo = try r.dev.createBo(@intCast(p.data.len));
+                errdefer r.dev.destroyBo(bo);
+                @memcpy(bo.map[0..p.data.len], p.data);
+                try r.owned.put(r.gpa, bo.handle, bo);
+                r.background_image = .{ .handle = bo.handle, .width = p.width, .height = p.height, .compressed = true };
+            },
+            .rgb565 => r.background_image = try uploadPixels(r, null, p.data, p.width, p.height, p.width * 2, .rgb565),
+        }
+    }
+
+    /// How a background image is best made for this GPU: ETC1, if it
+    /// decodes it as expected (checked once, by drawing a test image and
+    /// reading it back), and otherwise RGB565.
+    pub fn backgroundKind(r: *Renderer) background_mod.Kind {
+        return if (r.etc1Order()) |order| .{ .etc1 = order } else .rgb565;
+    }
+
+    fn etc1Order(r: *Renderer) ?etc1.ByteOrder {
+        if (r.etc1_checked) return r.etc1_order;
+        r.etc1_checked = true;
+        // The V3D (a Pi 4's) tiles its textures otherwise.
+        if (r.dev.is_v3d) return null;
+        for ([_]etc1.ByteOrder{ .standard, .reversed }) |order| {
+            const ok = r.etc1Decodes(order) catch |err| {
+                sys.print(sys.log_warning ++ "dazzle-shell: cannot check ETC1 textures: {s}\n", .{@errorName(err)});
+                return null;
+            };
+            if (ok) {
+                r.etc1_order = order;
+                return order;
+            }
+        }
+        sys.print(sys.log_warning ++ "dazzle-shell: the GPU does not decode ETC1 as expected: background images are RGB565\n", .{});
+        return null;
+    }
+
+    /// Whether a test image in ETC1, laid out in `order`, comes back from
+    /// the GPU as it decodes on the CPU. Big enough to be in 4 KB tiles,
+    /// as a background is.
+    fn etc1Decodes(r: *Renderer, order: etc1.ByteOrder) !bool {
+        const n = 128;
+        const pixels = try r.gpa.alloc(u32, n * n);
+        defer r.gpa.free(pixels);
+        for (0..n) |y| for (0..n) |x| {
+            pixels[y * n + x] = 0xff000000 | @as(u32, @intCast(x * 2)) << 16 | @as(u32, @intCast(y * 2)) << 8 | @as(u32, @intCast((x ^ y) * 2 & 0xff));
+        };
+        const nb = etc1.blocksOf(n, n);
+        const blocks = try r.gpa.alloc(u64, nb[0] * nb[1]);
+        defer r.gpa.free(blocks);
+        etc1.encode(pixels, n, n, blocks);
+        const size = etc1.imageSize(n, n);
+        const tex = try r.dev.createBo(size);
+        defer r.dev.destroyBo(tex);
+        @memset(tex.map[0..size], 0);
+        etc1.upload(tex.map[0..size], n, n, blocks, order);
+        const pitch = render.Target.pitch(.xrgb8888, n);
+        const target = try r.dev.createBo(pitch * n);
+        defer r.dev.destroyBo(target);
+        capture_frame.begin(.{ .handle = target.handle, .width = n, .height = n, .tiling = .linear }, .{ .clear = 0 });
+        try quad(&capture_frame, &r.quads, r.vbo, 0, .{ .handle = tex.handle, .width = n, .height = n, .compressed = true }, 0, 0, n, n, 0, null);
+        const seqno = try r.dev.submit(capture_frame.finish());
+        try r.dev.waitSeqno(seqno, std.time.ns_per_s);
+        for (0..nb[1]) |by| for (0..nb[0]) |bx| {
+            const want = etc1.decodeBlock(blocks[by * nb[0] + bx]);
+            for (0..16) |i| {
+                const x = bx * 4 + i % 4;
+                const y = by * 4 + i / 4;
+                const got = std.mem.readInt(u32, target.map[y * pitch + x * 4 ..][0..4], .little);
+                if (channelDistance(got, want[i]) > 2) return false;
+            }
+        };
+        return true;
     }
 
     fn pipelines(r: *Renderer) Pipelines {
@@ -566,7 +664,7 @@ pub const Renderer = struct {
         const bo = try r.dev.createBo(pitch * r.height);
         defer r.dev.destroyBo(bo);
         capture_frame.begin(.{ .handle = bo.handle, .width = @intCast(r.width), .height = @intCast(r.height), .tiling = .linear }, .{ .clear = r.background });
-        try recordFrame(&capture_frame, r.pipelines(), try r.previewTexture(), r.vbo, &quads, windows);
+        try recordFrame(&capture_frame, r.pipelines(), try r.previewTexture(), r.background_image, r.vbo, &quads, windows);
         const seqno = try r.dev.submit(capture_frame.finish());
         try r.dev.waitSeqno(seqno, std.time.ns_per_s);
         const pixels = try gpa.alloc(u32, @as(usize, r.width) * r.height);
@@ -595,6 +693,16 @@ pub const Renderer = struct {
         return r.display.handleEvents();
     }
 };
+
+fn channelDistance(a: u32, b: u32) u32 {
+    var most: u32 = 0;
+    inline for (.{ 0, 8, 16 }) |shift| {
+        const x: i32 = @intCast(a >> shift & 0xff);
+        const y: i32 = @intCast(b >> shift & 0xff);
+        most = @max(most, @abs(x - y));
+    }
+    return most;
+}
 
 // --- Tests ------------------------------------------------------------------
 
