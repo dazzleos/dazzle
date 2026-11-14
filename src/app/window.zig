@@ -254,14 +254,32 @@ pub const edge_right = 8;
 const max_buffers = 3;
 
 /// A frame with the GPU (see `Window.submit`): its buffer, what to wait
-/// for, and what changed in it.
+/// for, what changed in it, and what it changes in the layer over it.
 const InFlight = struct {
     buffer: usize,
     seqno: u64,
     damage: [max_damage]vc4.render.Viewport = undefined,
     /// Null: all of it.
     damage_len: ?usize,
+    layer: ?LayerChange = null,
 };
+
+/// A layer over the window, as big as it is (see `Window.beginLayer`): a
+/// subsurface of its own, with two buffers that take turns, which takes no
+/// input (it goes to the window under it).
+const Layer = struct {
+    surface: client.Proxy,
+    subsurface: client.Proxy,
+    buffers: [2]?Buffer = @splat(null),
+    /// The buffer being drawn (between `beginLayer` and `layerDrawn`).
+    back: ?usize = null,
+    /// It shows a buffer (or will, with the frame shown next).
+    shown: bool = false,
+};
+
+/// What a frame changes in the layer over the window: it shows another of
+/// its buffers, or nothing.
+const LayerChange = union(enum) { show: usize, hide };
 
 const max_damage = 16;
 
@@ -303,6 +321,8 @@ pub const Window = struct {
     tiled_formats: std.EnumSet(vc4.Format) = .{},
     /// The format the app would like its buffers in (`setFormat`).
     wanted_format: vc4.Format = .rgb565,
+    compositor: client.Proxy = undefined,
+    subcompositor: ?client.Proxy = null,
     surface: client.Proxy = undefined,
     xdg_surface: client.Proxy = undefined,
     toplevel: client.Proxy = undefined,
@@ -362,6 +382,10 @@ pub const Window = struct {
     pipelined: bool = false,
     /// The frame submitted and not yet shown.
     in_flight: ?InFlight = null,
+    /// The layer over the window, once it has been drawn (`beginLayer`),
+    /// and what the next frame shown changes in it.
+    layer: ?Layer = null,
+    layer_change: ?LayerChange = null,
 
     /// Presentation timing (`wp_presentation`): clock ID, last scanout
     /// timestamp and refresh period in nanoseconds, refresh counter, and
@@ -489,6 +513,9 @@ pub const Window = struct {
         const title = options.title;
         const registry = try w.globals.fetch(conn);
         const compositor = (try w.globals.bind(registry, p.wl_compositor.name, 4, null)) orelse return error.NoCompositor;
+        w.compositor = compositor;
+        // Optional: a layer over the window.
+        w.subcompositor = try w.globals.bind(registry, p.wl_subcompositor.name, 1, null);
         // Version 6 for the suspended state.
         w.wm_base = (try w.globals.bind(registry, p.xdg_wm_base.name, 6, .{ .ptr = w, .handler = wmBaseEvent })) orelse return error.NoXdgShell;
         w.dmabuf = (try w.globals.bind(registry, p.zwp_linux_dmabuf_v1.name, 3, .{ .ptr = w, .handler = dmabufEvent })) orelse return error.NoDmabuf;
@@ -560,6 +587,7 @@ pub const Window = struct {
     pub fn close(w: *Window) void {
         w.clipboard.deinit();
         for (&w.buffers) |*slot| if (slot.*) |*b| w.freeBuffer(b, slot);
+        if (w.layer) |*l| for (&l.buffers) |*slot| if (slot.*) |*b| w.freeBuffer(b, slot);
         w.conn.flush() catch {};
         w.conn.disconnect();
         w.gpa.destroy(w);
@@ -956,7 +984,8 @@ pub const Window = struct {
         // The frame before is done by the time this one starts (the GPU
         // takes jobs in turn): show it while this one renders.
         try w.finishInFlight();
-        var f: InFlight = .{ .buffer = i, .seqno = seqno, .damage_len = null };
+        var f: InFlight = .{ .buffer = i, .seqno = seqno, .damage_len = null, .layer = w.layer_change };
+        w.layer_change = null;
         if (damage) |rects| if (rects.len <= max_damage) {
             @memcpy(f.damage[0..rects.len], rects);
             f.damage_len = rects.len;
@@ -974,7 +1003,7 @@ pub const Window = struct {
         try w.gpu.vtable.wait.?(w.gpu.ptr, f.seqno);
         const b = &w.buffers[f.buffer].?;
         b.rendering = false;
-        try w.showBuffer(f.buffer, if (f.damage_len) |n| f.damage[0..n] else null);
+        try w.showBuffer(f.buffer, if (f.damage_len) |n| f.damage[0..n] else null, f.layer);
     }
 
     /// Hands the rendered frame to the compositor, once it has shown the
@@ -988,17 +1017,37 @@ pub const Window = struct {
     pub fn showDamaged(w: *Window, damage: ?[]const vc4.render.Viewport) !void {
         const i = w.back orelse return error.NoFrameBegun;
         try w.finishInFlight();
-        try w.showBuffer(i, damage);
+        const change = w.layer_change;
+        w.layer_change = null;
+        try w.showBuffer(i, damage, change);
         w.back = null;
     }
 
-    fn showBuffer(w: *Window, i: usize, damage: ?[]const vc4.render.Viewport) !void {
+    fn showBuffer(w: *Window, i: usize, damage: ?[]const vc4.render.Viewport, layer_change: ?LayerChange) !void {
         while (w.frame_pending) {
             try w.conn.dispatch();
             // Covered while waiting: the callback comes when it is in
             // front again.
             if (w.suspended) w.releaseSpareBuffers();
         }
+        // The layer's change first: a synchronized subsurface's, it waits
+        // for the window's commit, and is shown with it.
+        if (layer_change) |change| if (w.layer) |*l| {
+            var lm = try l.surface.request(p.wl_surface.request.attach);
+            switch (change) {
+                .show => |k| {
+                    const lb = &l.buffers[k].?;
+                    lm.uint(lb.proxy.id).int(0).int(0).end();
+                    lm = try l.surface.request(p.wl_surface.request.damage_buffer);
+                    lm.int(0).int(0).int(@intCast(lb.width)).int(@intCast(lb.height)).end();
+                    lb.rendering = false;
+                    lb.busy = true;
+                },
+                .hide => lm.uint(0).int(0).int(0).end(),
+            }
+            lm = try l.surface.request(p.wl_surface.request.commit);
+            lm.end();
+        };
         const b = &w.buffers[i].?;
         var m = try w.surface.request(p.wl_surface.request.attach);
         m.uint(b.proxy.id).int(0).int(0).end();
@@ -1134,6 +1183,112 @@ pub const Window = struct {
             if (b.busy or b.rendering or w.back == i) continue;
             w.freeBuffer(b, slot);
         };
+        if (w.layer) |*l| for (&l.buffers, 0..) |*slot, i| if (slot.*) |*b| {
+            if (b.busy or b.rendering or l.back == i) continue;
+            w.freeBuffer(b, slot);
+        };
+    }
+
+    // --- The layer over the window --------------------------------------------
+
+    /// A buffer as big as the window to draw a layer over it into (in
+    /// ARGB, premultiplied: where it is clear, the window shows through),
+    /// shown with the window's next frame once drawn (`layerDrawn`). For
+    /// what should stay sharp over a window drawn smaller (`render_scale`):
+    /// the shell can show the layer on a plane of its own, at the screen's
+    /// resolution. Until another is drawn, the layer stays as it is.
+    ///
+    /// Null if the shell cannot take one, or both of its buffers are in
+    /// use (the last one drawn is not yet on the screen): try again in a
+    /// later frame.
+    pub fn beginLayer(w: *Window) !?vc4.render.Target {
+        if (!w.tiled_formats.contains(.argb8888)) return null;
+        const l = try w.layerOrMake() orelse return null;
+        if (l.back) |i| return l.buffers[i].?.target();
+        var empty: ?usize = null;
+        for (&l.buffers, 0..) |*slot, i| {
+            if (slot.*) |*b| {
+                if (b.busy or b.rendering) continue;
+                if (b.width == w.width and b.height == w.height) {
+                    l.back = i;
+                    return b.target();
+                }
+                w.freeBuffer(b, slot);
+            }
+            empty = i;
+        }
+        const i = empty orelse return null;
+        l.buffers[i] = w.makeBuffer(&l.buffers[i], .{ w.width, w.height }, .argb8888) catch |err| {
+            if (err == error.OutOfMemory) return null;
+            return err;
+        };
+        l.back = i;
+        return l.buffers[i].?.target();
+    }
+
+    /// The layer is drawn into `beginLayer`'s buffer (or handed to the GPU
+    /// to be, before the window's frame): it is shown with the window's
+    /// next frame.
+    pub fn layerDrawn(w: *Window) void {
+        const l = &(w.layer orelse return);
+        const i = l.back orelse return;
+        l.back = null;
+        w.dropLayerChange();
+        l.buffers[i].?.rendering = true;
+        l.shown = true;
+        w.layer_change = .{ .show = i };
+    }
+
+    /// Nothing over the window from its next frame on.
+    pub fn hideLayer(w: *Window) void {
+        const l = &(w.layer orelse return);
+        if (!l.shown) return;
+        w.dropLayerChange();
+        l.shown = false;
+        w.layer_change = .hide;
+    }
+
+    /// Whether there is a layer over the window (or will be, with the next
+    /// frame).
+    pub fn layerShown(w: *const Window) bool {
+        return if (w.layer) |l| l.shown else false;
+    }
+
+    /// Forgets a change to the layer not yet shown (another replaces it).
+    fn dropLayerChange(w: *Window) void {
+        const change = w.layer_change orelse return;
+        w.layer_change = null;
+        switch (change) {
+            .show => |k| if (w.layer.?.buffers[k]) |*b| {
+                b.rendering = false;
+            },
+            .hide => {},
+        }
+    }
+
+    /// The layer, made the first time: a synchronized subsurface at the
+    /// window's top left, which no input goes to.
+    fn layerOrMake(w: *Window) !?*Layer {
+        if (w.layer) |*l| return l;
+        const sub_mgr = w.subcompositor orelse return null;
+        const surface = try w.conn.newObject(null);
+        var m = try w.compositor.request(p.wl_compositor.request.create_surface);
+        m.uint(surface.id).end();
+        const subsurface = try w.conn.newObject(null);
+        m = try sub_mgr.request(p.wl_subcompositor.request.get_subsurface);
+        m.uint(subsurface.id).uint(surface.id).uint(w.surface.id).end();
+        m = try subsurface.request(p.wl_subsurface.request.set_sync);
+        m.end();
+        const region = try w.conn.newObject(null);
+        m = try w.compositor.request(p.wl_compositor.request.create_region);
+        m.uint(region.id).end();
+        m = try surface.request(p.wl_surface.request.set_input_region);
+        m.uint(region.id).end();
+        m = try region.request(p.wl_region.request.destroy);
+        m.end();
+        w.conn.forget(region.id);
+        w.layer = .{ .surface = surface, .subsurface = subsurface };
+        return &w.layer.?;
     }
 
     /// Whether a buffer of the window's size can be made leaving a quarter
@@ -1147,9 +1302,12 @@ pub const Window = struct {
     }
 
     fn allocBuffer(w: *Window, slot: usize) !Buffer {
+        return w.makeBuffer(&w.buffers[slot], w.bufferSize(), w.bufferFormat());
+    }
+
+    /// A buffer shared with the shell, for `slot`.
+    fn makeBuffer(w: *Window, slot: *?Buffer, dims: [2]u32, format: vc4.Format) !Buffer {
         const gpu = w.gpu;
-        const format = w.bufferFormat();
-        const dims = w.bufferSize();
         const bo = try gpu.vtable.createBo(gpu.ptr, vc4.texture.imageSizeOf(format, dims[0], dims[1]));
         errdefer gpu.vtable.destroyBo(gpu.ptr, bo);
         const fd = try gpu.vtable.exportBo(gpu.ptr, bo.handle);
@@ -1159,7 +1317,7 @@ pub const Window = struct {
         const mod = p.modifier.broadcom_vc4_t_tiled;
         m = try params.request(p.zwp_linux_buffer_params_v1.request.add);
         m.fd(fd).uint(0).uint(0).uint(vc4.texture.tiledPitch(format, dims[0], dims[1])).uint(@truncate(mod >> 32)).uint(@truncate(mod)).end();
-        const proxy = try w.conn.newObject(.{ .ptr = &w.buffers[slot], .handler = bufferEvent });
+        const proxy = try w.conn.newObject(.{ .ptr = slot, .handler = bufferEvent });
         m = try params.request(p.zwp_linux_buffer_params_v1.request.create_immed);
         m.uint(proxy.id).int(@intCast(dims[0])).int(@intCast(dims[1])).uint(format.fourcc()).uint(0).end();
         m = try params.request(p.zwp_linux_buffer_params_v1.request.destroy);

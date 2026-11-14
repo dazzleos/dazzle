@@ -467,10 +467,13 @@ pub const Renderer = struct {
         for (&r.panels) |*p| p.hidden = hidden;
     }
 
+    /// The panels' overlay planes: above the one for a window's layer
+    /// (`showDirect`), the first panels' (those that can be, the dock's
+    /// and the performance overlay's), in order.
     fn panelLayers(r: *Renderer) ?vc4.kms.Overlays {
         const kms = r.display.kms orelse return null;
         var out: vc4.kms.Overlays = @splat(null);
-        for (&r.panels, 0..) |*p, i| {
+        for (&r.panels, 1..) |*p, i| {
             if (p.width == 0 or p.height == 0 or p.hidden) continue;
             if (i >= kms.overlays.len or kms.overlays[i] == null) return null;
             out[i] = r.panelLayer(p) orelse return null;
@@ -480,16 +483,24 @@ pub const Renderer = struct {
 
     /// Shows a client's buffer directly on the display's primary plane at
     /// (`x`, `y`), stretched to `size` (if smaller: the display scales it),
-    /// with the panels on overlay planes, so nothing is composited. Returns null if the display cannot (the buffer is not
-    /// T-tiled, or the planes are not available), and the frame must be
-    /// composited instead; otherwise whether it is already on the screen,
-    /// as `show` does. Only while no flip is pending.
-    pub fn showDirect(r: *Renderer, t: server.Texture, x: i32, y: i32, size: [2]u32) ?bool {
+    /// with `layer` (a buffer as big as `size`, drawn over the window) and
+    /// the panels on overlay planes above it, so nothing is composited.
+    /// Returns null if the display cannot (a buffer is not T-tiled, or the
+    /// planes are not available), and the frame must be composited
+    /// instead; otherwise whether it is already on the screen, as `show`
+    /// does. Only while no flip is pending.
+    pub fn showDirect(r: *Renderer, t: server.Texture, x: i32, y: i32, size: [2]u32, layer: ?server.Texture) ?bool {
         if (r.dev.is_v3d or r.display.kms == null) return null;
         if (vc4.render.Target.textureTiling(t.format, t.width, t.height) != .t) return null;
-        const panels = r.panelLayers() orelse return null;
-        const fb = r.clientFramebuffer(t, x, y, size, panels) orelse return null;
-        return r.display.queueLayers(windowLayer(fb, t, x, y, size), panels) catch |err| {
+        var planes = r.panelLayers() orelse return null;
+        if (layer) |l| {
+            if (vc4.render.Target.textureTiling(l.format, l.width, l.height) != .t) return null;
+            if (r.display.kms.?.overlays[0] == null) return null;
+            const fb = r.clientFramebuffer(l, x, y, size, planes) orelse return null;
+            planes[0] = windowLayer(fb, l, x, y, size);
+        }
+        const fb = r.clientFramebuffer(t, x, y, size, planes) orelse return null;
+        return r.display.queueLayers(windowLayer(fb, t, x, y, size), planes) catch |err| {
             sys.print(sys.log_warning ++ "dazzle-shell: cannot show the window directly: {s}\n", .{@errorName(err)});
             return null;
         };

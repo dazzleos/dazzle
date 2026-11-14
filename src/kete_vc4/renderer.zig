@@ -104,6 +104,25 @@ pub const Renderer = struct {
     /// each frame (see `Window.beginDmabufFrame`).
     scale: f32 = 1,
     border: Canvas,
+    /// Where to draw what is over the app's own draws (`kete.gfx.GpuDraw`):
+    /// a layer over the window, at its full size, when its buffer is drawn
+    /// smaller, so the widgets stay sharp. Set for each frame (see
+    /// `Window.beginDmabufFrame`).
+    layer: ?Layer = null,
+    /// What the layer shows, once drawn (`layerHash`): it is drawn again
+    /// only when that changes.
+    layer_drawn: ?u64 = null,
+
+    /// A window's layer (`app.Window.beginLayer`).
+    pub const Layer = struct {
+        ctx: *anyopaque,
+        /// Its next buffer to draw into; null if there is none free yet.
+        begin: *const fn (ctx: *anyopaque) anyerror!?render.Target,
+        /// Drawn into (or handed to the GPU to be).
+        drawn: *const fn (ctx: *anyopaque) void,
+        /// Nothing to show over the window.
+        hide: *const fn (ctx: *anyopaque) void,
+    };
 
     const ImageTexture = struct {
         bo: vc4.Bo,
@@ -359,12 +378,6 @@ pub const Renderer = struct {
         _ = clear_rects;
         const started = sys.nowNs();
         const frame = r.frame;
-        if (r.multisampled) frame.beginMultisampled(try targetOf(target), clear) else frame.begin(try targetOf(target), .{ .clear = clear });
-        var vps: [kgfx.frame.Damage.max_rects]render.Viewport = undefined;
-        const n = @min(damage.len, vps.len);
-        for (damage[0..n], vps[0..n]) |d, *v| v.* = viewport(d);
-        // More than it can say, or drawn smaller: all of it.
-        frame.limitTo(if (n == damage.len and r.scale == 1) vps[0..n] else null);
         // The window's border, over what it shows.
         const outlined = r.outline and target.width > 2 and target.height > 2;
         r.outline = false;
@@ -382,7 +395,19 @@ pub const Renderer = struct {
         @memcpy(all[0..canvases.len], canvases);
         all[canvases.len] = &r.border;
         try r.prepare(if (outlined) all else canvases);
-        for (segments) |s| switch (s) {
+        // What goes over the app's own draws: on the layer, if there is one.
+        var drawn = segments;
+        if (r.layer) |l| if (lastGpuDraw(segments)) |k| {
+            drawn = segments[0 .. k + 1];
+            try r.drawLayer(l, segments[k + 1 ..], target);
+        };
+        if (r.multisampled) frame.beginMultisampled(try targetOf(target), clear) else frame.begin(try targetOf(target), .{ .clear = clear });
+        var vps: [kgfx.frame.Damage.max_rects]render.Viewport = undefined;
+        const n = @min(damage.len, vps.len);
+        for (damage[0..n], vps[0..n]) |d, *v| v.* = viewport(d);
+        // More than it can say, or drawn smaller: all of it.
+        frame.limitTo(if (n == damage.len and r.scale == 1) vps[0..n] else null);
+        for (drawn) |s| switch (s) {
             .canvas => |c| try r.recordCanvas(c, frame),
             .gpu => |g| if (frame.covers(r.scaled(g.area.scissor orelse g.area.viewport))) try g.f(g.ctx, frame, g.area),
         };
@@ -397,6 +422,37 @@ pub const Renderer = struct {
         if (n == damage.len) {
             for (damage) |d| r.stats.pixels += @as(f64, @floatFromInt(d.width)) * @as(f64, @floatFromInt(d.height));
         } else r.stats.pixels += @as(f64, @floatFromInt(target.width)) * @as(f64, @floatFromInt(target.height));
+    }
+
+    /// Draws `over` (canvases) on the layer, as big as the window, if they
+    /// changed since it was last drawn: with nothing in them, there is no
+    /// layer. Without a buffer free for it, it is left as it is, for a
+    /// later frame.
+    fn drawLayer(r: *Renderer, l: Layer, over: []const kgfx.Segment, window: *const kgfx.DmabufTarget) !void {
+        const hash = layerHash(over, window);
+        if (r.layer_drawn == hash) return;
+        var empty = true;
+        for (over) |seg| if (seg == .canvas) for (seg.canvas.batches.items) |b| {
+            if (b.floats.items.len > 0) empty = false;
+        };
+        if (empty) {
+            l.hide(l.ctx);
+            r.layer_drawn = hash;
+            return;
+        }
+        const target = try l.begin(l.ctx) orelse return;
+        const frame = r.frame;
+        frame.begin(target, .{ .clear = 0 });
+        frame.limitTo(null);
+        const scale = r.scale;
+        r.scale = 1;
+        defer r.scale = scale;
+        for (over) |seg| if (seg == .canvas) try r.recordCanvas(seg.canvas, frame);
+        // Before the window's frame: the GPU takes them in turn, so the
+        // window's being done means this is too.
+        if (r.pipelined) _ = try r.gpu.vtable.submit.?(r.gpu.ptr, frame) else try r.gpu.vtable.run(r.gpu.ptr, frame);
+        l.drawn(l.ctx);
+        r.layer_drawn = hash;
     }
 
     /// What drawing took since the last call.
@@ -431,6 +487,30 @@ pub fn scaledViewport(v: kgfx.Viewport, scale: f32) render.Viewport {
     const x1 = @round(@as(f32, @floatFromInt(v.x + @as(i32, @intCast(v.width)))) * scale);
     const y1 = @round(@as(f32, @floatFromInt(v.y + @as(i32, @intCast(v.height)))) * scale);
     return .{ .x = @intFromFloat(x0), .y = @intFromFloat(y0), .width = @intFromFloat(@max(x1 - x0, 0)), .height = @intFromFloat(@max(y1 - y0, 0)) };
+}
+
+/// The last of the app's own draws among a frame's segments.
+fn lastGpuDraw(segments: []const kgfx.Segment) ?usize {
+    var i = segments.len;
+    while (i > 0) {
+        i -= 1;
+        if (segments[i] == .gpu) return i;
+    }
+    return null;
+}
+
+/// What a layer drawing `over` over a window `window`'s size shows: the
+/// same if nothing in it changed.
+fn layerHash(over: []const kgfx.Segment, window: *const kgfx.DmabufTarget) u64 {
+    var h = std.hash.Wyhash.init(0);
+    h.update(std.mem.asBytes(&[2]u32{ window.width, window.height }));
+    for (over) |seg| if (seg == .canvas) for (seg.canvas.batches.items) |*b| {
+        h.update(&.{@intFromEnum(b.kind)});
+        h.update(std.mem.sliceAsBytes(b.floats.items));
+        if (b.clip) |c| h.update(std.mem.asBytes(&[4]f32{ c.x, c.y, c.w, c.h })) else h.update("-");
+        if (b.image) |img| h.update(std.mem.asBytes(&[2]u64{ img.id, img.version }));
+    };
+    return h.final();
 }
 
 /// More than any of the canvas shaders' draws uses.
