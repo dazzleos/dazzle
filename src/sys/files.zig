@@ -50,6 +50,31 @@ pub fn writeNew(path: [:0]const u8, data: []const u8) sys.Error!void {
     while (at < data.len) at += try sys.check(linux.write(fd, data[at..].ptr, data.len - at));
 }
 
+/// A file mapped into memory to read. Its pages are read from the card as
+/// they are used, and the kernel can drop them again when memory is short,
+/// so a big download can be checked and unpacked without a copy of it all
+/// on the heap.
+pub const Mapped = struct {
+    data: []align(std.heap.page_size_min) const u8,
+
+    pub fn open(path: [:0]const u8) sys.Error!Mapped {
+        const fd = try sys.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true });
+        defer sys.close(fd);
+        var stx: linux.Statx = undefined;
+        _ = try sys.check(linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .SIZE = true }, &stx));
+        const len: usize = @intCast(stx.size);
+        if (len == 0) return .{ .data = &.{} };
+        const rc = linux.mmap(null, len, .{ .READ = true }, .{ .TYPE = .PRIVATE }, fd, 0);
+        _ = try sys.check(rc);
+        const p: [*]align(std.heap.page_size_min) const u8 = @ptrFromInt(rc);
+        return .{ .data = p[0..len] };
+    }
+
+    pub fn close(m: Mapped) void {
+        if (m.data.len > 0) _ = linux.munmap(m.data.ptr, m.data.len);
+    }
+};
+
 /// Removes a directory and what is in it, if it is there.
 pub fn removeTree(path: [:0]const u8) void {
     // Removing entries while reading a directory can skip some (on FAT,

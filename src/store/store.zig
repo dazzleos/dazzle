@@ -526,7 +526,9 @@ pub const Client = struct {
         c.threaded.deinit();
     }
 
-    pub fn download(c: *Client, url: []const u8) ![]u8 {
+    /// The HTTP client, ready for `url` (with the certificates loaded, for
+    /// HTTPS).
+    fn prepare(c: *Client, url: []const u8) !*std.http.Client {
         last_url = url;
         last_status = 0;
         const io = c.threaded.io();
@@ -543,6 +545,13 @@ pub const Client = struct {
             client.now = now;
             c.certs_loaded = true;
         }
+        return client;
+    }
+
+    /// Downloads `url` into memory: for what is small (a catalogue, a
+    /// manifest, an icon).
+    pub fn download(c: *Client, url: []const u8) ![]u8 {
+        const client = try c.prepare(url);
         var out: std.Io.Writer.Allocating = .init(c.gpa);
         errdefer out.deinit();
         const result = try client.fetch(.{
@@ -556,6 +565,73 @@ pub const Client = struct {
         }
         if (out.written().len > max_download) return error.TooBig;
         return out.toOwnedSlice();
+    }
+
+    /// Downloads `url` into the new file `path` (replacing one left there),
+    /// a piece at a time, so that an archive of tens of megabytes never
+    /// has to fit in memory: it fails once more than `size` bytes come, or
+    /// if fewer than `size` do. On failure the file is removed.
+    pub fn downloadToFile(c: *Client, url: []const u8, path: [:0]const u8, size: u64) !void {
+        const client = try c.prepare(url);
+        _ = linux.unlink(path);
+        const fd = try sys.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true });
+        var ok = false;
+        defer {
+            sys.close(fd);
+            if (!ok) _ = linux.unlink(path);
+        }
+        _ = linux.fchmod(fd, 0o644);
+        var buf: [64 * 1024]u8 = undefined;
+        var fw: FileWriter = .{ .fd = fd, .limit = size, .interface = .{ .vtable = &.{ .drain = FileWriter.drain }, .buffer = &buf } };
+        const result = client.fetch(.{
+            .location = .{ .url = url },
+            .response_writer = &fw.interface,
+            .keep_alive = true,
+        }) catch |err| return fw.failure orelse err;
+        if (result.status != .ok) {
+            last_status = @intFromEnum(result.status);
+            return error.HttpError;
+        }
+        fw.interface.flush() catch return fw.failure orelse error.WriteFailed;
+        if (fw.written != size) return error.WrongSize;
+        _ = try sys.check(linux.fsync(fd));
+        ok = true;
+    }
+};
+
+/// Writes a download to a file, stopping at `limit` bytes.
+const FileWriter = struct {
+    fd: linux.fd_t,
+    limit: u64,
+    written: u64 = 0,
+    /// Why writing stopped, if it did.
+    failure: ?anyerror = null,
+    interface: std.Io.Writer,
+
+    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const self: *FileWriter = @alignCast(@fieldParentPtr("interface", w));
+        try self.writeAll(w.buffered());
+        w.end = 0;
+        var n: usize = 0;
+        for (data[0 .. data.len - 1]) |d| {
+            try self.writeAll(d);
+            n += d.len;
+        }
+        for (0..splat) |_| try self.writeAll(data[data.len - 1]);
+        return n + data[data.len - 1].len * splat;
+    }
+
+    fn writeAll(self: *FileWriter, bytes: []const u8) std.Io.Writer.Error!void {
+        if (self.written + bytes.len > self.limit) {
+            self.failure = error.WrongSize;
+            return error.WriteFailed;
+        }
+        var at: usize = 0;
+        while (at < bytes.len) at += sys.check(linux.write(self.fd, bytes[at..].ptr, bytes.len - at)) catch |err| {
+            self.failure = err;
+            return error.WriteFailed;
+        };
+        self.written += bytes.len;
     }
 };
 
@@ -754,10 +830,9 @@ fn childCatalogue(gpa: std.mem.Allocator, base_url: []const u8, check_os: bool) 
 }
 
 fn childInstall(gpa: std.mem.Allocator, base_url: []const u8, app: App) !void {
-    const url = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ base_url, app.file });
-    const archive = try download(gpa, url);
-    try verify(archive, app);
-    try unpack(gpa, archive, apps_dir, app.name);
+    var client: Client = .init(gpa);
+    defer client.deinit();
+    try downloadAndInstall(&client, gpa, base_url, app);
 }
 
 fn childUpdateAll(gpa: std.mem.Allocator, base_url: []const u8, list: []const App) !void {
@@ -765,13 +840,26 @@ fn childUpdateAll(gpa: std.mem.Allocator, base_url: []const u8, list: []const Ap
     defer client.deinit();
     for (list) |app| {
         if (!isInstalled(apps_dir, app.name) or !hasNewerVersion(apps_dir, app)) continue;
-        const url = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ base_url, app.file });
-        defer gpa.free(url);
-        const archive = try client.download(url);
-        defer gpa.free(archive);
-        try verify(archive, app);
-        try unpack(gpa, archive, apps_dir, app.name);
+        try downloadAndInstall(&client, gpa, base_url, app);
     }
+}
+
+/// Downloads `app`'s archive to /data/apps/.download-<name> (not into
+/// memory: Develop's is tens of megabytes, too much beside everything else
+/// on a 512 MB Pi), checks it and installs it.
+fn downloadAndInstall(client: *Client, gpa: std.mem.Allocator, base_url: []const u8, app: App) !void {
+    if (!validName(app.name)) return error.BadName;
+    if (app.size > max_download) return error.TooBig;
+    const url = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ base_url, app.file });
+    defer gpa.free(url);
+    var path_buf: [256]u8 = undefined;
+    const path = try std.mem.printSentinel(&path_buf, "{s}/.download-{s}", .{ apps_dir, app.name }, 0);
+    try client.downloadToFile(url, path, app.size);
+    defer _ = linux.unlink(path);
+    const archive = try sys.files.Mapped.open(path);
+    defer archive.close();
+    try verify(archive.data, app);
+    try unpack(gpa, archive.data, apps_dir, app.name);
 }
 
 /// Why a job failed, for people.

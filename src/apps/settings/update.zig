@@ -195,14 +195,19 @@ fn childCheck(gpa: std.mem.Allocator, base_url: []const u8) !void {
 
 fn childDownload(gpa: std.mem.Allocator, base_url: []const u8, m: Manifest) !void {
     const url = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ base_url, m.file });
-    const archive = try store.download(gpa, url);
-    if (archive.len != m.size) return error.WrongSize;
-    if (!sys.archive.sha256Is(archive, m.sha256)) return error.WrongChecksum;
-    const keys = store.loadKeys();
-    try store.verifySignature(archive, m.signature, keys.slice());
+    // Straight to the card, not into memory (see store.downloadAndInstall).
     const tmp = proto.update_archive ++ ".new";
-    _ = linux.unlink(tmp);
-    try sys.files.writeNew(tmp, archive);
+    var client: store.Client = .init(gpa);
+    defer client.deinit();
+    try client.downloadToFile(url, tmp, m.size);
+    errdefer _ = linux.unlink(tmp);
+    {
+        const archive = try sys.files.Mapped.open(tmp);
+        defer archive.close();
+        if (!sys.archive.sha256Is(archive.data, m.sha256)) return error.WrongChecksum;
+        const keys = store.loadKeys();
+        try store.verifySignature(archive.data, m.signature, keys.slice());
+    }
     _ = try sys.check(linux.rename(tmp, proto.update_archive));
     var request: [208]u8 = undefined;
     // The manager answers between slices of other work (making the other
