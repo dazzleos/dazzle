@@ -188,11 +188,10 @@ pub const Window = struct {
     /// the `id`), format and tiling.
     pub fn beginDmabufFrame(w: *Window) ?kgfx.DmabufTarget {
         const t = w.win.beginFrame() catch return null;
-        // Not filling the work area or the screen, it has a border,
-        // rounded as the shell rounds the window.
+        // Not filling the work area or the screen, it has a border; but
+        // not if the shell rounds it, as it then draws a shadow around it.
         if (w.renderer) |r| {
-            r.outline = !w.win.maximized and !w.win.fullscreen;
-            r.outline_radius = @floatFromInt(w.win.corner_radius);
+            r.outline = !w.win.maximized and !w.win.fullscreen and w.win.corner_radius == 0;
         }
         return .{
             .id = t.handle,
