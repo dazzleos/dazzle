@@ -19,6 +19,8 @@ const Server = server_mod.Server;
 /// Textures without a GPU.
 const FakeRenderer = struct {
     next: u32 = 1,
+    /// Textures made and not yet destroyed.
+    live: u32 = 0,
 
     fn backend(r: *FakeRenderer) server_mod.Backend {
         return .{ .ptr = r, .vtable = &.{ .importDmabuf = importDmabuf, .uploadPixels = uploadPixels, .destroyTexture = destroyTexture } };
@@ -28,6 +30,7 @@ const FakeRenderer = struct {
         const r: *FakeRenderer = @ptrCast(@alignCast(ptr));
         _ = linux.close(fd);
         r.next += 1;
+        r.live += 1;
         return .{ .handle = r.next, .width = w, .height = h, .format = format };
     }
 
@@ -35,10 +38,14 @@ const FakeRenderer = struct {
         const r: *FakeRenderer = @ptrCast(@alignCast(ptr));
         if (existing) |e| if (e.width == w and e.height == h and e.format == format) return e;
         r.next += 1;
+        r.live += 1;
         return .{ .handle = r.next, .width = w, .height = h, .format = format };
     }
 
-    fn destroyTexture(_: *anyopaque, _: server_mod.Texture) void {}
+    fn destroyTexture(ptr: *anyopaque, _: server_mod.Texture) void {
+        const r: *FakeRenderer = @ptrCast(@alignCast(ptr));
+        r.live -= 1;
+    }
 };
 
 /// The server with a work area of 800x560 at 0,40 (under a 40-pixel
@@ -1975,22 +1982,45 @@ test "a window maximized, restored or fullscreen is drawn on its way from where 
     try win.redraw(a, shm, 400, 280);
     const restored = w.server.windowRect(t);
     try testing.expectEqual(wa, t.anim.?.from);
+    // The maximized frame is kept, to fade out over the new one.
+    try testing.expectEqual(@as(u32, 2), w.renderer.live);
     try testing.expect(w.server.animateWindows(1000 * ms));
-    var q = w.server.drawList(&quads)[0];
+    var drawn = w.server.drawList(&quads);
+    try testing.expectEqual(@as(usize, 2), drawn.len);
+    var q = drawn[0];
     try testing.expectEqual(wa.x, q.x);
     try testing.expectEqual(wa.width, q.width);
     try testing.expectEqual(wa.height, q.height);
-    // Half way, between the two.
+    try testing.expectEqual(@as(f32, 1), q.opacity);
+    var old = drawn[1];
+    try testing.expect(old.texture.handle != q.texture.handle);
+    try testing.expectEqual(wa.width, old.texture.width);
+    try testing.expectEqual(@as(f32, 1), old.opacity);
+    try testing.expectEqual(q.x, old.x);
+    try testing.expectEqual(q.width, old.width);
+    try testing.expectEqual(q.height, old.height);
+    // Half way, between the two: both stretched to the same place, the
+    // old one partly faded.
     try testing.expect(w.server.animateWindows(1100 * ms));
-    q = w.server.drawList(&quads)[0];
+    drawn = w.server.drawList(&quads);
+    q = drawn[0];
+    old = drawn[1];
     try testing.expect(q.width < wa.width and q.width > restored.width);
     try testing.expect(q.x > wa.x and q.x < restored.x);
-    // There: as it is.
+    try testing.expectEqual(q.x, old.x);
+    try testing.expectEqual(q.y, old.y);
+    try testing.expectEqual(q.width, old.width);
+    try testing.expectEqual(q.height, old.height);
+    try testing.expect(old.opacity > 0 and old.opacity < 1);
+    // There: as it is, and the old frame gone.
     try testing.expect(!w.server.animateWindows(1200 * ms));
     try testing.expect(t.anim == null);
-    q = w.server.drawList(&quads)[0];
+    drawn = w.server.drawList(&quads);
+    try testing.expectEqual(@as(usize, 1), drawn.len);
+    q = drawn[0];
     try testing.expectEqual(restored.x, q.x);
     try testing.expectEqual(restored.width, q.width);
+    try testing.expectEqual(@as(u32, 1), w.renderer.live);
 
     // Fullscreen: from its place to the whole screen; not shown directly
     // on the way.
@@ -2013,4 +2043,13 @@ test "a window maximized, restored or fullscreen is drawn on its way from where 
     try w.pump();
     try win.redraw(a, shm, 400, 280);
     try testing.expectEqual(server_mod.Rect{ .x = 0, .y = 0, .width = 800, .height = 600 }, t.anim.?.from);
+    // Closed on the way: its old frame goes with it.
+    try testing.expectEqual(@as(u32, 2), w.renderer.live);
+    m = try win.surface.request(p.wl_surface.request.attach);
+    m.uint(0).int(0).int(0).end();
+    m = try win.surface.request(p.wl_surface.request.commit);
+    m.end();
+    try w.pump();
+    try testing.expect(t.anim == null);
+    try testing.expectEqual(@as(u32, 0), w.renderer.live);
 }

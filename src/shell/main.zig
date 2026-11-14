@@ -980,6 +980,7 @@ fn frameWindows(server: *server_mod.Server, out: *[render.max_windows]render.Win
         .radius = q.radius,
         .shadow = q.shadow,
         .shadow_clip = q.shadow_clip,
+        .opacity = q.opacity,
     };
     return out[0..list.len];
 }

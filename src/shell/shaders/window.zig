@@ -5,15 +5,16 @@
 //! beyond it, in the shadow around it), so the fragment's place in the
 //! window follows from them and the window's size. Its coverage by the
 //! window's rounded outline cuts the corners; outside it, the shadow: the
-//! same outline a little lower, fading over `blur` pixels.
+//! same outline a little lower, fading over `blur` pixels. A window fading
+//! out is drawn whole with it, see-through.
 
 const gpu = @import("gpu");
 const Vec2 = gpu.Vec2;
 const Vec4 = gpu.Vec4;
 
 const Uniforms = extern struct {
-    /// The window's half width and height on the screen, and its corners'
-    /// radius.
+    /// The window's half width and height on the screen, its corners'
+    /// radius, and its opacity (less than 1 when fading out).
     shape: Vec4,
     /// The shadow's opacity (0 for none), how far it fades, and how far
     /// down it is.
@@ -60,5 +61,5 @@ export fn fragment() callconv(.{ .spirv_fragment = .{} }) void {
     const alpha = cover + shade * (1 - cover);
     const c = gpu.texture(uv);
     const k = cover / @max(alpha, 0.0001);
-    gpu.color.* = .{ c[0] * k, c[1] * k, c[2] * k, alpha };
+    gpu.color.* = .{ c[0] * k, c[1] * k, c[2] * k, alpha * u.shape[3] };
 }

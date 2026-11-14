@@ -54,6 +54,9 @@ pub const Window = struct {
     radius: u16 = 0,
     shadow: bool = false,
     shadow_clip: server.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+    /// Less than 1: see-through (a window's old frame, fading out),
+    /// without a shadow.
+    opacity: f32 = 1,
 };
 
 /// A rounded window's shadow: how dark under the window, how far it fades
@@ -107,6 +110,11 @@ pub fn recordFrame(frame: *render.Frame, pipelines: Pipelines, preview: server.T
         }
         const qw = if (w.width != 0) w.width else w.texture.width;
         const qh = if (w.height != 0) w.height else w.texture.height;
+        if (w.opacity < 1) {
+            try fadingWindow(frame, pipelines.rounded, vbo, quads, w, qw, qh);
+            quads += 1;
+            continue;
+        }
         if (w.radius > 0 and w.transform == 0 and 2 * @as(u32, w.radius) <= @min(qw, qh)) {
             try roundedWindow(frame, pipelines, vbo, &quads, w, qw, qh);
             continue;
@@ -137,7 +145,7 @@ fn roundedWindow(frame: *render.Frame, pipelines: Pipelines, vbo: vc4.Bo, quads:
     const ww: i32 = @intCast(qw);
     const wh: i32 = @intCast(qh);
     const uniforms: RoundedUniforms = .{
-        .shape = .{ fw / 2, fh / 2, @floatFromInt(radius), 0 },
+        .shape = .{ fw / 2, fh / 2, @floatFromInt(radius), 1 },
         .shadow = if (w.shadow) .{ shadow_alpha, shadow_blur, shadow_offset, 0 } else .{ 0, 1, 0, 0 },
     };
     pipelines.rounded.setUniforms(std.mem.asBytes(&uniforms));
@@ -182,6 +190,19 @@ fn roundedWindow(frame: *render.Frame, pipelines: Pipelines, vbo: vc4.Bo, quads:
         .{ .x = x, .y = y + wh - radius, .w = radius, .h = radius },
         .{ .x = x + ww - radius, .y = y + wh - radius, .w = radius, .h = radius },
     }) |r| try piece(frame, pipelines.rounded, vbo, quads, w, fw, fh, filter, r, w.clip);
+}
+
+/// A see-through window, `qw` by `qh` on the screen, in one piece: its
+/// corners cut if it is rounded.
+fn fadingWindow(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, index: usize, w: Window, qw: u32, qh: u32) !void {
+    const radius: u32 = if (w.transform == 0 and 2 * @as(u32, w.radius) <= @min(qw, qh)) w.radius else 0;
+    const uniforms: RoundedUniforms = .{
+        .shape = .{ @as(f32, @floatFromInt(qw)) / 2, @as(f32, @floatFromInt(qh)) / 2, @floatFromInt(radius), std.math.clamp(w.opacity, 0, 1) },
+        .shadow = .{ 0, 1, 0, 0 },
+    };
+    pipeline.setUniforms(std.mem.asBytes(&uniforms));
+    const filter: texture.Filter = if (qw != w.texture.width or qh != w.texture.height) .linear else .nearest;
+    try rect(frame, pipeline, vbo, index, w.texture, w.x, w.y, qw, qh, quadUvs(w.transform), filter, viewportOf(w.clip));
 }
 
 fn quadUvs(transform: u3) [4][2]f32 {
@@ -832,7 +853,7 @@ test "a rounded window's corners are cut, and its shadow fades out around it (sh
     const tex_pixels: [16]u32 = @splat(window_color);
     texture.uploadRectOf(.xrgb8888, &tex_memory, 4, 4, .{ .x = 0, .y = 0, .width = 4, .height = 4 }, std.mem.sliceAsBytes(&tex_pixels), 16);
     const cfg: texture.Config = .{ .type = vc4.Format.xrgb8888.textureType(), .width = 4, .height = 4, .mag_filter = .nearest, .min_filter = .nearest, .wrap_s = .clamp, .wrap_t = .clamp };
-    const values: RoundedUniforms = .{ .shape = .{ ww / 2, wh / 2, 12, 0 }, .shadow = .{ shadow_alpha, shadow_blur, shadow_offset, 0 } };
+    const values: RoundedUniforms = .{ .shape = .{ ww / 2, wh / 2, 12, 1 }, .shadow = .{ shadow_alpha, shadow_blur, shadow_offset, 0 } };
     const words = std.mem.bytesAsSlice(u32, std.mem.asBytes(&values));
     var uniforms: [32]u32 = undefined;
     for (program.fs.uniforms(), uniforms[0..program.fs.uniforms().len]) |u, *out| out.* = switch (u) {
@@ -884,5 +905,42 @@ test "a rounded window's corners are cut, and its shadow fades out around it (sh
                 try testing.expect(red >= range[0] and red <= range[1]);
             },
         }
+    }
+}
+
+test "a window fading out is drawn see-through, as much as its opacity (shaders/window.zig, in the QPU simulator)" {
+    // A black window 100 by 60, half see-through, over white: grey all
+    // over it, its corners square.
+    const program = shader.Program.decode(@embedFile("window.shader")) catch unreachable;
+    var decoded_buf: [vc4.compiler.max_code]sim.DecodedInst = undefined;
+    const decoded = sim.decodeProgram(program.fs.code(), &decoded_buf);
+    var tex_memory: [texture.imageSizeOf(.xrgb8888, 4, 4)]u8 = undefined;
+    const tex_pixels: [16]u32 = @splat(0xff000000);
+    texture.uploadRectOf(.xrgb8888, &tex_memory, 4, 4, .{ .x = 0, .y = 0, .width = 4, .height = 4 }, std.mem.sliceAsBytes(&tex_pixels), 16);
+    const cfg: texture.Config = .{ .type = vc4.Format.xrgb8888.textureType(), .width = 4, .height = 4, .mag_filter = .nearest, .min_filter = .nearest, .wrap_s = .clamp, .wrap_t = .clamp };
+    const values: RoundedUniforms = .{ .shape = .{ 50, 30, 0, 0.5 }, .shadow = .{ 0, 1, 0, 0 } };
+    const words = std.mem.bytesAsSlice(u32, std.mem.asBytes(&values));
+    var uniforms: [32]u32 = undefined;
+    for (program.fs.uniforms(), uniforms[0..program.fs.uniforms().len]) |u, *out| out.* = switch (u) {
+        .user => |i| words[i],
+        .tex_p0 => texture.p0(cfg),
+        .tex_p1 => texture.p1(cfg),
+        .constant => |v| v,
+    };
+    const points = [_][2]f32{ .{ 50.5, 30.5 }, .{ 0.5, 0.5 }, .{ 99.5, 59.5 }, .{ 0.5, 59.5 } };
+    var u_lanes: sim.Vec = undefined;
+    var v_lanes: sim.Vec = undefined;
+    for (0..sim.lanes) |lane| {
+        const pt = points[@min(lane, points.len - 1)];
+        u_lanes[lane] = @bitCast(pt[0] / 100);
+        v_lanes[lane] = @bitCast(pt[1] / 60);
+    }
+    const r = try sim.runFragmentDecoded(decoded, .{ .uniforms = &uniforms, .varyings = &.{ u_lanes, v_lanes }, .tlb_color_in = @splat(0xffffffff), .texture_memory = &tex_memory });
+    for (points, 0..) |pt, lane| {
+        const px = r.tlb_color.?[lane];
+        errdefer std.debug.print("at ({d}, {d}): 0x{x:0>8}\n", .{ pt[0], pt[1], px });
+        const red: u8 = @truncate(px >> 16);
+        try testing.expect(red >= 0x7c and red <= 0x84);
+        try testing.expectEqual(red, @as(u8, @truncate(px)));
     }
 }

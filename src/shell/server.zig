@@ -188,11 +188,28 @@ const Object = union(enum) {
 };
 
 /// A window on its way to its place after its state changed (maximized,
-/// say): from where it was, `k` of the way (eased), since its first frame.
+/// say): from where it was, `k` of the way (eased), since its first frame;
+/// what it showed before fading out over what it shows now.
 pub const StateAnim = struct {
     from: Rect,
     start_ns: ?u64 = null,
     k: f32 = 0,
+    old: ?OldFrame = null,
+};
+
+/// What a window's surface showed before its state changed, kept while
+/// it fades out: a dmabuf held from its client (`buffer`), or a copy the
+/// shell owns. Where it was relative to the window (at `from`), its
+/// logical size and transform, and its corners' radius.
+pub const OldFrame = struct {
+    texture: Texture,
+    buffer: ?*Buffer = null,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    transform: u3 = 0,
+    radius: u32 = 0,
 };
 
 /// A toplevel's dazzle_decoration_v1: the shell rounds its corners and
@@ -572,6 +589,12 @@ pub const Toplevel = struct {
     fn toldRadius(t: *const Toplevel) u32 {
         if (t.decoration == null or t.maximized or t.fullscreen or t.tiled != null) return 0;
         return corner_radius;
+    }
+
+    /// Told to be maximized, fullscreen, tiled or restored, and not yet
+    /// shown so.
+    fn stateChanging(t: *const Toplevel) bool {
+        return t.shown_maximized != t.maximized or t.shown_fullscreen != t.fullscreen or t.shown_tiled != t.tiled;
     }
 
     /// Mapped, with something to show.
@@ -1105,6 +1128,7 @@ pub const Server = struct {
             break;
         };
         t.mapped = false;
+        s.endAnim(t);
         s.damaged = true;
     }
 
@@ -1308,13 +1332,24 @@ pub const Server = struct {
             const k: f32 = @floatCast(@min(@as(f64, @floatFromInt(now_ns -| start)) / state_anim_ns, 1));
             s.damaged = true;
             if (k >= 1) {
-                t.anim = null;
+                s.endAnim(t);
                 continue;
             }
             a.k = k;
             moving = true;
         }
         return moving;
+    }
+
+    /// `t` is no longer on its way to its place: its old frame goes.
+    fn endAnim(s: *Server, t: *Toplevel) void {
+        const a = t.anim orelse return;
+        if (a.old) |o| s.releaseOldFrame(o);
+        t.anim = null;
+    }
+
+    fn releaseOldFrame(s: *Server, o: OldFrame) void {
+        if (o.buffer) |b| s.dropBuffer(b) else s.backend.vtable.destroyTexture(s.backend.ptr, o.texture);
     }
 
     /// The overview is drawn, all or part of the way in.
@@ -3205,6 +3240,9 @@ pub const Server = struct {
         radius: u16 = 0,
         shadow: bool = false,
         shadow_clip: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+        /// Less than 1: drawn see-through, over what is under it (a
+        /// window's old frame, fading out).
+        opacity: f32 = 1,
     };
 
     /// How a window's main surface is drawn: rounded, with a shadow.
@@ -3240,7 +3278,9 @@ pub const Server = struct {
                 } else continue;
                 const surf = t.xdg.surface orelse continue;
                 const from = s.windowRect(t);
-                s.addTreeScaled(&list, surf, from, lerpRect(from, slot.rect, e), rounding(t));
+                const to = lerpRect(from, slot.rect, e);
+                const radius = @as(u64, rounding(t)) * to.width / @max(from.width, 1);
+                s.addTreeScaled(&list, surf, from, to, @intCast(radius));
             }
             return list.items;
         }
@@ -3264,10 +3304,31 @@ pub const Server = struct {
                 });
             };
             // On its way to its place, after its state changed: what it
-            // shows now, as big as the window is on the way.
+            // shows now, stretched to where the window is on the way, and
+            // what it showed before over it, fading out. Their corners go
+            // from the old frame's roundness to the new one's.
             if (t.anim) |a| {
                 const to = s.windowRect(t);
-                s.addTreeScaled(&list, surf, to, lerpRect(a.from, to, easeInOut(a.k)), rounding(t));
+                const e = easeInOut(a.k);
+                const at = lerpRect(a.from, to, e);
+                const radius = if (a.old) |o| lerpU32(o.radius, rounding(t), e) else rounding(t);
+                s.addTreeScaled(&list, surf, to, at, radius);
+                if (a.old) |o| {
+                    const fx = @as(f64, @floatFromInt(at.width)) / @as(f64, @floatFromInt(@max(a.from.width, 1)));
+                    const fy = @as(f64, @floatFromInt(at.height)) / @as(f64, @floatFromInt(@max(a.from.height, 1)));
+                    if (list.items.len == list.capacity) _ = list.orderedRemove(0);
+                    list.appendAssumeCapacity(.{
+                        .texture = o.texture,
+                        .x = at.x + @as(i32, @intFromFloat(@round(@as(f64, @floatFromInt(o.x)) * fx))),
+                        .y = at.y + @as(i32, @intFromFloat(@round(@as(f64, @floatFromInt(o.y)) * fy))),
+                        .width = @max(@as(u32, @intFromFloat(@round(@as(f64, @floatFromInt(o.width)) * fx))), 1),
+                        .height = @max(@as(u32, @intFromFloat(@round(@as(f64, @floatFromInt(o.height)) * fy))), 1),
+                        .transform = o.transform,
+                        .clip = at,
+                        .radius = @intCast(radius),
+                        .opacity = 1 - e,
+                    });
+                }
                 continue;
             }
             // A tiled window drawn wider than its half is cut to it.
@@ -3312,6 +3373,11 @@ pub const Server = struct {
         return 1 - u * u * u / 2;
     }
 
+    fn lerpU32(a: u32, b: u32, k: f32) u32 {
+        const fa: f32 = @floatFromInt(a);
+        return @intFromFloat(@round(fa + (@as(f32, @floatFromInt(b)) - fa) * k));
+    }
+
     /// `a`, `k` of the way to `b`.
     fn lerpRect(a: Rect, b: Rect, k: f32) Rect {
         const f = struct {
@@ -3326,24 +3392,25 @@ pub const Server = struct {
     }
 
     /// A window's surface and its subsurfaces, drawn with the window (at
-    /// `from` on the screen) at `to` instead, as much smaller as that is,
-    /// and clipped to it; the window's surface with its corners rounded by
-    /// `radius` (as much smaller), without a shadow.
+    /// `from` on the screen) stretched to fill `to` instead, and clipped
+    /// to it; the window's surface with its corners rounded by `radius`
+    /// (on the screen), without a shadow.
     fn addTreeScaled(s: *const Server, list: *std.ArrayList(Quad), surf: *const Surface, from: Rect, to: Rect, radius: u32) void {
         const o = s.surfaceOrigin(surf) orelse return;
-        const f = @as(f64, @floatFromInt(to.width)) / @as(f64, @floatFromInt(@max(from.width, 1)));
+        const fx = @as(f64, @floatFromInt(to.width)) / @as(f64, @floatFromInt(@max(from.width, 1)));
+        const fy = @as(f64, @floatFromInt(to.height)) / @as(f64, @floatFromInt(@max(from.height, 1)));
         if (surf.texture()) |tex| {
             const sz = surf.size().?;
             if (list.items.len == list.capacity) _ = list.orderedRemove(0);
             list.appendAssumeCapacity(.{
                 .texture = tex,
-                .x = to.x + @as(i32, @intFromFloat(@round(@as(f64, @floatFromInt(o[0] - from.x)) * f))),
-                .y = to.y + @as(i32, @intFromFloat(@round(@as(f64, @floatFromInt(o[1] - from.y)) * f))),
-                .width = @max(@as(u32, @intFromFloat(@round(@as(f64, @floatFromInt(sz[0])) * f))), 1),
-                .height = @max(@as(u32, @intFromFloat(@round(@as(f64, @floatFromInt(sz[1])) * f))), 1),
+                .x = to.x + @as(i32, @intFromFloat(@round(@as(f64, @floatFromInt(o[0] - from.x)) * fx))),
+                .y = to.y + @as(i32, @intFromFloat(@round(@as(f64, @floatFromInt(o[1] - from.y)) * fy))),
+                .width = @max(@as(u32, @intFromFloat(@round(@as(f64, @floatFromInt(sz[0])) * fx))), 1),
+                .height = @max(@as(u32, @intFromFloat(@round(@as(f64, @floatFromInt(sz[1])) * fy))), 1),
                 .transform = surf.transform,
                 .clip = to,
-                .radius = @intFromFloat(@round(@as(f64, @floatFromInt(radius)) * f)),
+                .radius = @intCast(radius),
             });
         }
         for (surf.subsurfaces.items) |sub| if (sub.surface) |child| s.addTreeScaled(list, child, from, to, 0);
@@ -4439,6 +4506,10 @@ pub const Server = struct {
         // Where a window was, before this (perhaps a new size, for a new
         // state): the state's animation starts there.
         const before: ?Rect = if (surf.xdg) |x| if (x.toplevel) |t| (if (t.mapped and surf.texture() != null) s.windowRect(t) else null) else null else null;
+        // What it shows now, if this may be the frame of its new state:
+        // kept, to fade out (see `drewConfigure`).
+        var old_frame: ?OldFrame = if (before) |r| s.keepOldFrame(surf, r) else null;
+        defer if (old_frame) |o| s.releaseOldFrame(o);
         if (surf.pending_scale) |sc| {
             surf.scale = sc;
             surf.pending_scale = null;
@@ -4551,7 +4622,7 @@ pub const Server = struct {
             }
             // Drawn since acknowledging the last configure: the next size
             // can be sent.
-            if (t.acked and !t.drawn) s.drewConfigure(c, t, before);
+            if (t.acked and !t.drawn) s.drewConfigure(c, t, before, &old_frame);
         };
         if (surf.xdg) |x| if (x.popup) |pp| {
             if (!x.configured) {
@@ -4586,19 +4657,51 @@ pub const Server = struct {
         if (surf.texture() == null) return;
         const sz = toplevelLogicalSize(t);
         const size = s.configuredSize(t);
-        if (sz[0] == size[0] and sz[1] == size[1]) s.drewConfigure(surf.client, t, s.windowRect(t));
+        if (sz[0] == size[0] and sz[1] == size[1]) s.drewConfigure(surf.client, t, s.windowRect(t), null);
+    }
+
+    /// The frame `surf` shows, kept from being released or replaced, if
+    /// it is a window's (at `at` on the screen) about to be shown in a new
+    /// state: its next commit attaches a frame of it.
+    fn keepOldFrame(s: *Server, surf: *Surface, at: Rect) ?OldFrame {
+        const t = (surf.xdg orelse return null).toplevel orelse return null;
+        if (!surf.pending_attach or surf.pending_buffer == null) return null;
+        if (!t.acked or t.drawn or !t.stateChanging() or s.overviewShown()) return null;
+        const tex = surf.texture() orelse return null;
+        const o = s.surfaceOrigin(surf) orelse return null;
+        const sz = surf.size() orelse return null;
+        const frame: OldFrame = .{
+            .texture = tex,
+            .buffer = surf.buffer,
+            .x = o[0] - at.x,
+            .y = o[1] - at.y,
+            .width = sz[0],
+            .height = sz[1],
+            .transform = surf.transform,
+            .radius = rounding(t),
+        };
+        // The surface's copy is the shell's to keep; a new one is made
+        // for the new frame.
+        if (surf.buffer) |b| s.holdBuffer(b) else surf.copy = null;
+        return frame;
     }
 
     /// `t` has drawn as it was last told (it was at `from` on the screen
-    /// before): shown in its new state, on its way there from `from`.
-    fn drewConfigure(s: *Server, c: *Client, t: *Toplevel, from: ?Rect) void {
+    /// before, showing `old`, if kept): shown in its new state, on its way
+    /// there from `from`, with `old` fading out (taken from `old`).
+    fn drewConfigure(s: *Server, c: *Client, t: *Toplevel, from: ?Rect, old: ?*?OldFrame) void {
         t.drawn = true;
-        if (t.shown_maximized != t.maximized or t.shown_fullscreen != t.fullscreen or t.shown_tiled != t.tiled) {
+        if (t.stateChanging()) {
             t.shown_maximized = t.maximized;
             t.shown_fullscreen = t.fullscreen;
             t.shown_tiled = t.tiled;
             if (from) |r| if (!s.overviewShown() and !std.meta.eql(r, s.windowRect(t))) {
+                s.endAnim(t);
                 t.anim = .{ .from = r };
+                if (old) |o| {
+                    t.anim.?.old = o.*;
+                    o.* = null;
+                }
             };
             s.damaged = true;
             s.replacePopups(t);
