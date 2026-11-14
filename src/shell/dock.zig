@@ -371,7 +371,15 @@ pub const AppsWatch = struct {
         pub const all: Changes = .{ .apps = true, .sound = true, .appearance = true, .catalogue = true, .remote = true };
 
         pub fn any(c: Changes) bool {
-            return c.apps or c.sound or c.appearance or c.catalogue or c.remote;
+            inline for (comptime std.meta.fieldNames(Changes)) |name| if (@field(c, name)) return true;
+            return false;
+        }
+
+        /// What changed in either.
+        pub fn with(a: Changes, b: Changes) Changes {
+            var out: Changes = .{};
+            inline for (comptime std.meta.fieldNames(Changes)) |name| @field(out, name) = @field(a, name) or @field(b, name);
+            return out;
         }
     };
 
@@ -1036,6 +1044,8 @@ test "the apps and the settings in the apps directory are noticed changing" {
     try testing.expect(!w.take().any());
 
     _ = linux.mkdir(sub, 0o755);
+    // Everything that changes is kept when changes are put together.
+    try testing.expectEqual(AppsWatch.Changes.all, (AppsWatch.Changes{ .apps = true, .sound = true }).with(.{ .appearance = true, .catalogue = true, .remote = true }));
     try testing.expectEqual(AppsWatch.Changes{ .apps = true }, w.take());
     _ = linux.rmdir(sub);
     try testing.expectEqual(AppsWatch.Changes{ .apps = true }, w.take());

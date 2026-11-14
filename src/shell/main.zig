@@ -368,10 +368,7 @@ fn run(init: std.process.Init.Minimal) !void {
         }
         if (fds[watch_index].revents != 0) {
             const c = apps_watch.take();
-            apps_changes.apps = apps_changes.apps or c.apps;
-            apps_changes.sound = apps_changes.sound or c.sound;
-            apps_changes.appearance = apps_changes.appearance or c.appearance;
-            apps_changes.catalogue = apps_changes.catalogue or c.catalogue;
+            apps_changes = apps_changes.with(c);
         }
         // Settings fetched the catalogue, or installed or removed apps.
         if ((apps_changes.apps or apps_changes.catalogue) and updates.reload()) updates_changed = true;
