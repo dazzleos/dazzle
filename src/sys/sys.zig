@@ -30,6 +30,7 @@ pub const shell = @import("shell.zig");
 pub const files = @import("files.zig");
 pub const archive = @import("archive.zig");
 pub const v4l2 = @import("v4l2.zig");
+pub const evdev = @import("evdev.zig");
 
 test {
     _ = network;

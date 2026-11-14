@@ -29,6 +29,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
+const evdev = sys.evdev;
 const locale = @import("locale");
 const vc4 = @import("vc4");
 const font = @import("font");
@@ -52,9 +53,6 @@ fn logFn(comptime level: std.log.Level, comptime scope: @TypeOf(.enum_literal), 
     _ = level;
     print("dazzle-shell: " ++ (if (scope == .default) "" else @tagName(scope) ++ ": ") ++ fmt ++ "\n", args);
 }
-
-/// The mouse's left button.
-const btn_left = 0x110;
 
 pub fn main(init: std.process.Init.Minimal) u8 {
     sys.logToKmsgIfStderr();
@@ -353,7 +351,7 @@ fn run(init: std.process.Init.Minimal) !void {
             var events: [64]input.Event = undefined;
             for (devices.read(f.fd, &events)) |e| {
                 // Print Screen is the shell's: it saves the screen.
-                if (e == .key and e.key.code == screenshot.key_print) {
+                if (e == .key and e.key.code == evdev.key_sysrq) {
                     if (e.key.pressed) screenshot_wanted = true;
                     continue;
                 }
@@ -362,7 +360,7 @@ fn run(init: std.process.Init.Minimal) !void {
                 // position.
                 var super_tapped = false;
                 if (e == .key) {
-                    if (e.key.code == key_left_meta or e.key.code == key_right_meta) {
+                    if (e.key.code == evdev.key_leftmeta or e.key.code == evdev.key_rightmeta) {
                         if (e.key.pressed) {
                             super_alone = true;
                         } else if (super_alone) {
@@ -378,7 +376,7 @@ fn run(init: std.process.Init.Minimal) !void {
                         continue;
                     }
                     if (e.key.pressed and (server.modifiers.depressed() & keyboard.mod4) != 0) {
-                        if (e.key.code == perf_mod.key_i) {
+                        if (e.key.code == evdev.key_i) {
                             shortcut_key = e.key.code;
                             perf_shown = !perf_shown;
                             renderer.setPanelHidden(.perf, !perf_shown);
@@ -428,7 +426,7 @@ fn run(init: std.process.Init.Minimal) !void {
                 if (e == .button) pointer.flushMotion(&server, time_ms);
                 // Buttons pressed over the dock (when not dragging) are the shell's.
                 if (dock_tap != null or (dock_visible and e == .button and e.button.pressed and server.grab == null and server.drag == null and server.buttons_down == 0 and pointer.y >= @as(f64, @floatFromInt(dock_y)))) {
-                    if (dock_tap == null and e.button.code != btn_left) continue;
+                    if (dock_tap == null and e.button.code != evdev.btn_left) continue;
                     const at = dock_tap orelse [2]f64{ pointer.x, pointer.y };
                     server.setOverview(false);
                     // The update icon: Settings' Software page, to update.
@@ -449,7 +447,7 @@ fn run(init: std.process.Init.Minimal) !void {
                 // In the overview, the buttons are the shell's: the left
                 // one picks a window, or (elsewhere) ends it.
                 if (server.overview and e == .button) {
-                    if (e.button.pressed and e.button.code == btn_left) {
+                    if (e.button.pressed and e.button.code == evdev.btn_left) {
                         if (server.overviewAt(pointer.x, pointer.y)) |win| server.overviewPick(win) else server.setOverview(false);
                     }
                     continue;
@@ -699,10 +697,6 @@ const Scanout = struct {
 const max_clients = 32;
 
 /// The pointer: input events move it and go to the server.
-/// KEY_LEFTMETA (linux/input-event-codes.h).
-const key_left_meta = 125;
-/// KEY_RIGHTMETA.
-const key_right_meta = 126;
 
 const Pointer = struct {
     x: f64,
@@ -738,7 +732,7 @@ const Pointer = struct {
             .key => |k| {
                 // The Super key takes the pointer back from a game that
                 // has it locked.
-                if (k.code == key_left_meta and k.pressed) server.breakLock();
+                if (k.code == evdev.key_leftmeta and k.pressed) server.breakLock();
                 server.keyboardKey(time_ms, k.code, k.pressed);
             },
             // Touches are handled before.

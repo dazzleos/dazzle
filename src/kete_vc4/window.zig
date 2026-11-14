@@ -11,6 +11,7 @@
 //! popups (menus are drawn in the window).
 
 const std = @import("std");
+const evdev = @import("sys").evdev;
 const linux = std.os.linux;
 const kete = @import("kete");
 const vc4 = @import("vc4");
@@ -20,21 +21,6 @@ const renderer_mod = @import("renderer.zig");
 
 const kwin = kete.window;
 const kgfx = kete.gfx;
-
-/// The keys whose state the window keeps, to know what a key types.
-const key_left_shift = 42;
-const key_right_shift = 54;
-const key_left_ctrl = 29;
-const key_right_ctrl = 97;
-const key_right_alt = 100;
-const key_caps_lock = 58;
-
-/// Linux's mouse buttons.
-const btn_left = 0x110;
-const btn_right = 0x111;
-const btn_middle = 0x112;
-const btn_side = 0x113;
-const btn_extra = 0x114;
 
 /// Sees Dazzle's input before kete does, and takes what it wants (true):
 /// for a game that has the mouse, say (`Display.input_filter`).
@@ -334,10 +320,10 @@ pub const Window = struct {
     /// modifiers held.
     fn key(w: *Window, code: u32, pressed: bool) kwin.InputEvent {
         switch (code) {
-            key_left_shift, key_right_shift => w.shift = if (pressed) w.shift +| 1 else w.shift -| 1,
-            key_left_ctrl, key_right_ctrl => w.ctrl = if (pressed) w.ctrl +| 1 else w.ctrl -| 1,
-            key_right_alt => w.altgr = pressed,
-            key_caps_lock => if (pressed) {
+            evdev.key_leftshift, evdev.key_rightshift => w.shift = if (pressed) w.shift +| 1 else w.shift -| 1,
+            evdev.key_leftctrl, evdev.key_rightctrl => w.ctrl = if (pressed) w.ctrl +| 1 else w.ctrl -| 1,
+            evdev.key_rightalt => w.altgr = pressed,
+            evdev.key_capslock => if (pressed) {
                 w.caps = !w.caps;
             },
             else => {},
@@ -365,11 +351,11 @@ pub const Window = struct {
 
 fn button(code: u32) kwin.PointerButton {
     return switch (code) {
-        btn_left => .left,
-        btn_right => .right,
-        btn_middle => .middle,
-        btn_side => .back,
-        btn_extra => .forward,
+        evdev.btn_left => .left,
+        evdev.btn_right => .right,
+        evdev.btn_middle => .middle,
+        evdev.btn_side => .back,
+        evdev.btn_extra => .forward,
         else => .other,
     };
 }

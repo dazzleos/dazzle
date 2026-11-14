@@ -17,6 +17,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
+const evdev = sys.evdev;
 const font = @import("font");
 const icons = @import("icons");
 const audio = @import("audio");
@@ -267,23 +268,18 @@ pub const App = struct {
     }
 };
 
-/// Linux key codes (linux/input-event-codes.h) for Super shortcuts:
-/// Super+1..9,0 open the app at that position in the dock; Super+S opens
-/// Settings.
-pub const key_1 = 2;
-pub const key_0 = 11;
-pub const key_s = 31;
-
-/// Which app in `apps` a Super+<key> shortcut opens, if any.
+/// Which app in `apps` a Super+<key> shortcut opens, if any (`key_code`
+/// is a Linux key code): Super+1..9,0 open the app at that position in the
+/// dock; Super+S opens Settings.
 pub fn shortcutApp(apps: []const App, key_code: u32) ?usize {
-    if (key_code == key_s) {
+    if (key_code == evdev.key_s) {
         for (apps, 0..) |app, i| {
             if (std.mem.eql(u8, app.name, "dazzle-settings")) return i;
         }
         return null;
     }
-    if (key_code >= key_1 and key_code <= key_0) {
-        const i: usize = key_code - key_1;
+    if (key_code >= evdev.key_1 and key_code <= evdev.key_0) {
+        const i: usize = key_code - evdev.key_1;
         if (i < apps.len) return i;
     }
     return null;
@@ -928,10 +924,10 @@ test "Super+S opens Settings and Super+1, Super+2 etc open the app at that dock 
         .{ .name = "dazzle-maps", .label = "Maps", .path = "/data/apps/dazzle-maps/dazzle-maps" },
         .{ .name = "dazzle-settings", .label = "Settings", .path = "/os/shell/dazzle-settings" },
     };
-    try testing.expectEqual(@as(?usize, 2), shortcutApp(&apps, key_s));
-    try testing.expectEqual(@as(?usize, 0), shortcutApp(&apps, key_1));
-    try testing.expectEqual(@as(?usize, 1), shortcutApp(&apps, key_1 + 1));
-    try testing.expectEqual(@as(?usize, 2), shortcutApp(&apps, key_1 + 2));
-    try testing.expectEqual(@as(?usize, null), shortcutApp(&apps, key_1 + 3));
+    try testing.expectEqual(@as(?usize, 2), shortcutApp(&apps, evdev.key_s));
+    try testing.expectEqual(@as(?usize, 0), shortcutApp(&apps, evdev.key_1));
+    try testing.expectEqual(@as(?usize, 1), shortcutApp(&apps, evdev.key_1 + 1));
+    try testing.expectEqual(@as(?usize, 2), shortcutApp(&apps, evdev.key_1 + 2));
+    try testing.expectEqual(@as(?usize, null), shortcutApp(&apps, evdev.key_1 + 3));
     try testing.expectEqual(@as(?usize, null), shortcutApp(&apps, 30));
 }

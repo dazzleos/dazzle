@@ -54,6 +54,7 @@
 //! the window under it, except while it moves a window.
 
 const std = @import("std");
+const evdev = @import("sys").evdev;
 const linux = std.os.linux;
 const wayland = @import("wayland");
 const vc4 = @import("vc4");
@@ -107,9 +108,6 @@ pub const Backend = struct {
 };
 
 pub const Rect = struct { x: i32, y: i32, width: u32, height: u32 };
-
-/// KEY_ESC (linux/input-event-codes.h).
-pub const key_esc = 1;
 
 const globals = [_]struct { name: []const u8, version: u32 }{
     .{ .name = p.wl_compositor.name, .version = p.wl_compositor.version },
@@ -3974,7 +3972,7 @@ pub const Server = struct {
     }
 
     fn buttonBit(button: u32) u32 {
-        const idx = button -% p.input.btn_left;
+        const idx = button -% evdev.btn_left;
         return @as(u32, 1) << @intCast(@min(idx, 31));
     }
 
@@ -4051,7 +4049,7 @@ pub const Server = struct {
     pub fn keyboardKey(s: *Server, time_ms: u32, key: u32, pressed: bool) void {
         const changed = s.modifiers.update(key, pressed);
         // Escape ends the overview (no window has the keyboard in it).
-        if (s.overview and pressed and key == key_esc) return s.setOverview(false);
+        if (s.overview and pressed and key == evdev.key_esc) return s.setOverview(false);
         const surf = s.keyboard_focus orelse return;
         const state: u32 = if (pressed) p.wl_keyboard.key_state.pressed else p.wl_keyboard.key_state.released;
         broadcast(surf.client, .keyboard, p.wl_keyboard.event.key, 1, .{ s.nextSerial(), time_ms, key, state });

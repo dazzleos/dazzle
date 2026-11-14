@@ -847,10 +847,3 @@ pub const dazzle_decoration_v1 = struct {
         pub const corner_radius = 0;
     };
 };
-
-/// Linux input event codes (linux/input-event-codes.h) used by Dazzle.
-pub const input = struct {
-    pub const btn_left = 0x110;
-    pub const btn_right = 0x111;
-    pub const btn_middle = 0x112;
-};

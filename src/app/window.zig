@@ -48,6 +48,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const locale = @import("locale");
 const sys = @import("sys");
+const evdev = sys.evdev;
 const vc4 = @import("vc4");
 const wayland = @import("wayland");
 
@@ -1351,7 +1352,7 @@ pub const Window = struct {
                 }
                 // Pressing an edge resizes the window; the app does not
                 // see it (nor its release: the shell has the pointer).
-                if (pressed and code == p.input.btn_left) {
+                if (pressed and code == evdev.btn_left) {
                     const edges = w.edgesAt(w.pointer_pos);
                     if (edges != 0) if (w.seat) |seat| {
                         var m = w.toplevel.request(p.xdg_toplevel.request.resize) catch return;
@@ -1360,7 +1361,7 @@ pub const Window = struct {
                         return;
                     };
                 }
-                const bit = @as(u32, 1) << @intCast(@min(code -% p.input.btn_left, 31));
+                const bit = @as(u32, 1) << @intCast(@min(code -% evdev.btn_left, 31));
                 w.buttons_down = if (pressed) w.buttons_down | bit else w.buttons_down & ~bit;
                 if (!pressed and w.buttons_down == 0) w.updateCursor();
                 w.pushInput(.{ .button = .{ .pos = w.pointer_pos, .code = code, .pressed = pressed } });

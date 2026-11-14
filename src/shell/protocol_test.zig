@@ -4,6 +4,7 @@
 //! clients handle the events, in turn, so every step is deterministic.
 
 const std = @import("std");
+const evdev = @import("sys").evdev;
 const vc4 = @import("vc4");
 const linux = std.os.linux;
 const wayland = @import("wayland");
@@ -430,7 +431,7 @@ test "the overview shows every window smaller, side by side, without telling the
 
     // Escape ends it too.
     w.server.setOverview(true);
-    w.server.keyboardKey(0, server_mod.key_esc, true);
+    w.server.keyboardKey(0, evdev.key_esc, true);
     try testing.expect(!w.server.overview);
 }
 
@@ -570,13 +571,13 @@ test "popups go where their positioner says, take the keyboard, and close on a c
     // A click on its own window leaves it; a click outside every window
     // (above the work area) closes it, and the keyboard goes back.
     w.server.pointerMotion(1, 400, 300);
-    w.server.pointerButton(1, p.input.btn_left, true);
-    w.server.pointerButton(2, p.input.btn_left, false);
+    w.server.pointerButton(1, evdev.btn_left, true);
+    w.server.pointerButton(2, evdev.btn_left, false);
     try w.pump();
     try testing.expectEqual(@as(u32, 0), popup_heard.counts[p.xdg_popup.event.popup_done]);
     w.server.pointerMotion(3, 400, 10);
-    w.server.pointerButton(3, p.input.btn_left, true);
-    w.server.pointerButton(4, p.input.btn_left, false);
+    w.server.pointerButton(3, evdev.btn_left, true);
+    w.server.pointerButton(4, evdev.btn_left, false);
     try w.pump();
     try testing.expectEqual(@as(u32, 1), popup_heard.counts[p.xdg_popup.event.popup_done]);
     try testing.expectEqual(@as(usize, 1), w.drawn(&buf).len);
@@ -902,7 +903,7 @@ test "a window dragged to the left or right edge fills that half, to the top fil
         fn to(ww: *World, win_: *Window, seat_: client.Proxy, x: f64, y: f64, to_x: f64, to_y: f64) !void {
             ww.server.pointerMotion(1, x, y);
             ww.server.pointerFrame();
-            ww.server.pointerButton(2, p.input.btn_left, true);
+            ww.server.pointerButton(2, evdev.btn_left, true);
             ww.server.pointerFrame();
             try ww.pump();
             var mm = try win_.toplevel.request(p.xdg_toplevel.request.move);
@@ -913,7 +914,7 @@ test "a window dragged to the left or right edge fills that half, to the top fil
         }
 
         fn release(ww: *World) !void {
-            ww.server.pointerButton(4, p.input.btn_left, false);
+            ww.server.pointerButton(4, evdev.btn_left, false);
             ww.server.pointerFrame();
             try ww.pump();
         }
@@ -936,7 +937,7 @@ test "a window dragged to the left or right edge fills that half, to the top fil
     try testing.expectEqual(server_mod.Rect{ .x = wa.x, .y = wa.y, .width = wa.width / 2, .height = wa.height }, w.server.windowRect(t));
     // It is not resized from its edges.
     w.server.pointerMotion(1, 200, 300);
-    w.server.pointerButton(2, p.input.btn_left, true);
+    w.server.pointerButton(2, evdev.btn_left, true);
     try w.pump();
     m = try win.toplevel.request(p.xdg_toplevel.request.resize);
     m.uint(seat.id).uint(w.server.press_serial).uint(8).end();
@@ -1000,7 +1001,7 @@ test "pressing in a window keeps the pointer when dragging and releasing outside
     // below the work area (into the dock area at y=580), and release there.
     w.server.pointerMotion(1, 250, 200);
     w.server.pointerFrame();
-    w.server.pointerButton(2, p.input.btn_left, true);
+    w.server.pointerButton(2, evdev.btn_left, true);
     w.server.pointerFrame();
     try w.pump();
     try testing.expectEqual(w.server.pointer_focus.?.id, win.surface.id);
@@ -1016,7 +1017,7 @@ test "pressing in a window keeps the pointer when dragging and releasing outside
     try testing.expectEqual(leaves_before, pointer_heard.counts[p.wl_pointer.event.leave]);
 
     // Releasing outside delivers the button release and then leaves the window.
-    w.server.pointerButton(4, p.input.btn_left, false);
+    w.server.pointerButton(4, evdev.btn_left, false);
     w.server.pointerFrame();
     try w.pump();
     try testing.expect(w.server.pointer_focus == null);
@@ -1025,7 +1026,7 @@ test "pressing in a window keeps the pointer when dragging and releasing outside
     try testing.expectEqual(leaves_before + 1, pointer_heard.counts[p.wl_pointer.event.leave]);
 
     // An unmatched button release (e.g. a click that started on the dock) is ignored.
-    w.server.pointerButton(5, p.input.btn_left, false);
+    w.server.pointerButton(5, evdev.btn_left, false);
     try testing.expectEqual(@as(u32, 0), w.server.buttons_down);
 
     // Pressing on the title bar and moving off the window before xdg_toplevel.move
@@ -1033,7 +1034,7 @@ test "pressing in a window keeps the pointer when dragging and releasing outside
     // ends the grab.
     w.server.pointerMotion(6, 250, 190);
     w.server.pointerFrame();
-    w.server.pointerButton(7, p.input.btn_left, true);
+    w.server.pointerButton(7, evdev.btn_left, true);
     w.server.pointerFrame();
     try w.pump();
     const press_serial = w.server.press_serial;
@@ -1047,7 +1048,7 @@ test "pressing in a window keeps the pointer when dragging and releasing outside
     const t = w.server.topWindow().?;
     // dx was 250 - 200 = 50, so at pointer_x = 300 the window moved to x = 250.
     try testing.expectEqual(@as(i32, 250), t.x);
-    w.server.pointerButton(9, p.input.btn_left, false);
+    w.server.pointerButton(9, evdev.btn_left, false);
     w.server.pointerFrame();
     try w.pump();
     try testing.expect(w.server.grab == null);
@@ -1115,21 +1116,21 @@ test "dragging from one client and dropping on another negotiates actions, draws
     try w.pump();
     w.server.pointerMotion(1, 250, 200);
     w.server.pointerFrame();
-    w.server.pointerButton(2, p.input.btn_left, true);
+    w.server.pointerButton(2, evdev.btn_left, true);
     w.server.pointerFrame();
     try w.pump();
     m = try b.win.toplevel.request(p.xdg_toplevel.request.move);
     m.uint(b.seat.id).uint(w.server.press_serial).end();
     try w.pump();
     w.server.pointerMotion(3, 400, 240);
-    w.server.pointerButton(4, p.input.btn_left, false);
+    w.server.pointerButton(4, evdev.btn_left, false);
     w.server.pointerFrame();
     try w.pump();
 
     // Press in A at 250,250 and start a drag with an icon surface.
     w.server.pointerMotion(8, 250, 250);
     w.server.pointerFrame();
-    w.server.pointerButton(9, p.input.btn_left, true);
+    w.server.pointerButton(9, evdev.btn_left, true);
     w.server.pointerFrame();
     try w.pump();
     const drag_serial = w.server.press_serial;
@@ -1219,7 +1220,7 @@ test "dragging from one client and dropping on another negotiates actions, draws
     try testing.expectEqual(A.copy, b.heard.action);
     try testing.expectEqual(A.copy, src_heard.action);
 
-    w.server.pointerButton(14, p.input.btn_left, false);
+    w.server.pointerButton(14, evdev.btn_left, false);
     w.server.pointerFrame();
     try w.pump();
     try testing.expectEqual(@as(u32, 1), b.heard.drops);

@@ -12,6 +12,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
+const evdev = sys.evdev;
 
 const print = sys.print;
 
@@ -43,46 +44,26 @@ const RawEvent = extern struct {
     value: i32,
 };
 
-const ev_syn = 0x00;
-const ev_key = 0x01;
-const ev_rel = 0x02;
-const ev_abs = 0x03;
-const abs_x = 0x00;
-const abs_y = 0x01;
-const abs_mt_slot = 0x2f;
-const abs_mt_position_x = 0x35;
-const abs_mt_position_y = 0x36;
-const abs_mt_tracking_id = 0x39;
-const btn_touch = 0x14a;
-const syn_report = 0;
-const rel_x = 0x00;
-const rel_y = 0x01;
-const rel_hwheel = 0x06;
-const rel_wheel = 0x08;
-const btn_mouse = 0x110;
-const btn_task = 0x117;
-/// Keyboard keys are below the first button code.
-const btn_misc = 0x100;
 /// How far one notch of a scroll wheel scrolls.
 const wheel_step = 15;
 
 pub fn decode(ev_type: u16, code: u16, value: i32) ?Event {
     switch (ev_type) {
-        ev_syn => if (code == syn_report) return .frame,
-        ev_rel => switch (code) {
-            rel_x => return .{ .motion = .{ value, 0 } },
-            rel_y => return .{ .motion = .{ 0, value } },
+        evdev.ev_syn => if (code == evdev.syn_report) return .frame,
+        evdev.ev_rel => switch (code) {
+            evdev.rel_x => return .{ .motion = .{ value, 0 } },
+            evdev.rel_y => return .{ .motion = .{ 0, value } },
             // Wheel notches are positive up and left.
-            rel_wheel => return .{ .axis = .{ .axis = 0, .value = @floatFromInt(-value * wheel_step) } },
-            rel_hwheel => return .{ .axis = .{ .axis = 1, .value = @floatFromInt(value * wheel_step) } },
+            evdev.rel_wheel => return .{ .axis = .{ .axis = 0, .value = @floatFromInt(-value * wheel_step) } },
+            evdev.rel_hwheel => return .{ .axis = .{ .axis = 1, .value = @floatFromInt(value * wheel_step) } },
             else => {},
         },
-        ev_key => {
+        evdev.ev_key => {
             // 2 is the keyboard's own auto-repeat; clients repeat keys.
             if (value != 0 and value != 1) return null;
             const pressed = value == 1;
-            if (code >= btn_mouse and code <= btn_task) return .{ .button = .{ .code = code, .pressed = pressed } };
-            if (code < btn_misc and code != 0) return .{ .key = .{ .code = code, .pressed = pressed } };
+            if (code >= evdev.btn_mouse and code <= evdev.btn_task) return .{ .button = .{ .code = code, .pressed = pressed } };
+            if (code < evdev.btn_misc and code != 0) return .{ .key = .{ .code = code, .pressed = pressed } };
         },
         else => {},
     }
@@ -118,33 +99,33 @@ pub const Touch = struct {
     pub fn feed(t: *Touch, ev_type: u16, code: u16, value: i32, out: []Event, n_in: usize) usize {
         var n = n_in;
         switch (ev_type) {
-            ev_abs => if (t.multitouch) switch (code) {
-                abs_mt_slot => t.slot = @intCast(std.math.clamp(value, 0, max_touches - 1)),
-                abs_mt_tracking_id => t.slots[t.slot].id = value,
-                abs_mt_position_x => {
+            evdev.ev_abs => if (t.multitouch) switch (code) {
+                evdev.abs_mt_slot => t.slot = @intCast(std.math.clamp(value, 0, max_touches - 1)),
+                evdev.abs_mt_tracking_id => t.slots[t.slot].id = value,
+                evdev.abs_mt_position_x => {
                     t.slots[t.slot].x = value;
                     t.slots[t.slot].moved = true;
                 },
-                abs_mt_position_y => {
+                evdev.abs_mt_position_y => {
                     t.slots[t.slot].y = value;
                     t.slots[t.slot].moved = true;
                 },
                 else => {},
             } else switch (code) {
-                abs_x => {
+                evdev.abs_x => {
                     t.slots[0].x = value;
                     t.slots[0].moved = true;
                 },
-                abs_y => {
+                evdev.abs_y => {
                     t.slots[0].y = value;
                     t.slots[0].moved = true;
                 },
                 else => {},
             },
-            ev_key => if (!t.multitouch and code == btn_touch) {
+            evdev.ev_key => if (!t.multitouch and code == evdev.btn_touch) {
                 t.slots[0].id = if (value != 0) 0 else -1;
             },
-            ev_syn => if (code == syn_report) {
+            evdev.ev_syn => if (code == evdev.syn_report) {
                 const before = n;
                 for (&t.slots) |*sl| {
                     if (n + 2 > out.len) break;
@@ -195,17 +176,17 @@ const AbsInfo = extern struct { value: i32, minimum: i32, maximum: i32, fuzz: i3
 /// positions (multitouch's, or a single touch's).
 fn probeTouch(fd: linux.fd_t) ?Touch {
     var abs_bits: [8]u8 = @splat(0);
-    const eviocgbit_abs = linux.IOCTL.IOR('E', 0x20 + ev_abs, [8]u8);
+    const eviocgbit_abs = linux.IOCTL.IOR('E', 0x20 + evdev.ev_abs, [8]u8);
     if (linux.errno(linux.ioctl(fd, eviocgbit_abs, @intFromPtr(&abs_bits))) != .SUCCESS) return null;
     const has = struct {
         fn f(bits: []const u8, bit: u16) bool {
             return bits[bit / 8] & (@as(u8, 1) << @intCast(bit % 8)) != 0;
         }
     }.f;
-    const multitouch = has(&abs_bits, abs_mt_position_x) and has(&abs_bits, abs_mt_position_y);
-    if (!multitouch and !(has(&abs_bits, abs_x) and has(&abs_bits, abs_y))) return null;
+    const multitouch = has(&abs_bits, evdev.abs_mt_position_x) and has(&abs_bits, evdev.abs_mt_position_y);
+    if (!multitouch and !(has(&abs_bits, evdev.abs_x) and has(&abs_bits, evdev.abs_y))) return null;
     var t: Touch = .{ .range = undefined, .multitouch = multitouch };
-    const axes = if (multitouch) [2]u16{ abs_mt_position_x, abs_mt_position_y } else [2]u16{ abs_x, abs_y };
+    const axes = if (multitouch) [2]u16{ evdev.abs_mt_position_x, evdev.abs_mt_position_y } else [2]u16{ evdev.abs_x, evdev.abs_y };
     for (axes, 0..) |a, i| {
         var info: AbsInfo = undefined;
         if (linux.errno(linux.ioctl(fd, linux.IOCTL.IOR('E', @intCast(0x40 + a), AbsInfo), @intFromPtr(&info))) != .SUCCESS) return null;
@@ -327,13 +308,13 @@ test "event node names" {
 }
 
 test "decode" {
-    try std.testing.expectEqual(Event{ .motion = .{ -3, 0 } }, decode(ev_rel, rel_x, -3).?);
-    try std.testing.expectEqual(Event{ .motion = .{ 0, 5 } }, decode(ev_rel, rel_y, 5).?);
-    try std.testing.expectEqual(Event{ .axis = .{ .axis = 0, .value = -15 } }, decode(ev_rel, rel_wheel, 1).?);
-    try std.testing.expectEqual(Event{ .button = .{ .code = 0x110, .pressed = true } }, decode(ev_key, 0x110, 1).?);
-    try std.testing.expectEqual(Event{ .key = .{ .code = 30, .pressed = false } }, decode(ev_key, 30, 0).?);
-    try std.testing.expectEqual(@as(?Event, null), decode(ev_key, 30, 2));
-    try std.testing.expectEqual(Event.frame, decode(ev_syn, syn_report, 0).?);
+    try std.testing.expectEqual(Event{ .motion = .{ -3, 0 } }, decode(evdev.ev_rel, evdev.rel_x, -3).?);
+    try std.testing.expectEqual(Event{ .motion = .{ 0, 5 } }, decode(evdev.ev_rel, evdev.rel_y, 5).?);
+    try std.testing.expectEqual(Event{ .axis = .{ .axis = 0, .value = -15 } }, decode(evdev.ev_rel, evdev.rel_wheel, 1).?);
+    try std.testing.expectEqual(Event{ .button = .{ .code = 0x110, .pressed = true } }, decode(evdev.ev_key, 0x110, 1).?);
+    try std.testing.expectEqual(Event{ .key = .{ .code = 30, .pressed = false } }, decode(evdev.ev_key, 30, 0).?);
+    try std.testing.expectEqual(@as(?Event, null), decode(evdev.ev_key, 30, 2));
+    try std.testing.expectEqual(Event.frame, decode(evdev.ev_syn, evdev.syn_report, 0).?);
     try std.testing.expectEqual(@as(?Event, null), decode(0x04, 0, 0)); // EV_MSC
 }
 
@@ -342,33 +323,33 @@ test "multitouch: touches go down, move and come up, from 0 to 1" {
     var out: [8]Event = undefined;
     var n: usize = 0;
     // A touch in slot 0 at 250,250.
-    for ([_][3]i32{ .{ ev_abs, abs_mt_slot, 0 }, .{ ev_abs, abs_mt_tracking_id, 7 }, .{ ev_abs, abs_mt_position_x, 250 }, .{ ev_abs, abs_mt_position_y, 250 }, .{ ev_syn, syn_report, 0 } }) |e| n = t.feed(@intCast(e[0]), @intCast(e[1]), e[2], &out, n);
+    for ([_][3]i32{ .{ evdev.ev_abs, evdev.abs_mt_slot, 0 }, .{ evdev.ev_abs, evdev.abs_mt_tracking_id, 7 }, .{ evdev.ev_abs, evdev.abs_mt_position_x, 250 }, .{ evdev.ev_abs, evdev.abs_mt_position_y, 250 }, .{ evdev.ev_syn, evdev.syn_report, 0 } }) |e| n = t.feed(@intCast(e[0]), @intCast(e[1]), e[2], &out, n);
     try std.testing.expectEqual(@as(usize, 2), n);
     try std.testing.expectEqual(Event{ .touch = .{ .kind = .down, .id = 7, .x = 0.25, .y = 0.5 } }, out[0]);
     try std.testing.expectEqual(Event.frame, out[1]);
     // A second finger, and the first moving.
     n = 0;
-    for ([_][3]i32{ .{ ev_abs, abs_mt_slot, 1 }, .{ ev_abs, abs_mt_tracking_id, 8 }, .{ ev_abs, abs_mt_position_x, 1000 }, .{ ev_abs, abs_mt_position_y, 0 }, .{ ev_abs, abs_mt_slot, 0 }, .{ ev_abs, abs_mt_position_x, 500 }, .{ ev_syn, syn_report, 0 } }) |e| n = t.feed(@intCast(e[0]), @intCast(e[1]), e[2], &out, n);
+    for ([_][3]i32{ .{ evdev.ev_abs, evdev.abs_mt_slot, 1 }, .{ evdev.ev_abs, evdev.abs_mt_tracking_id, 8 }, .{ evdev.ev_abs, evdev.abs_mt_position_x, 1000 }, .{ evdev.ev_abs, evdev.abs_mt_position_y, 0 }, .{ evdev.ev_abs, evdev.abs_mt_slot, 0 }, .{ evdev.ev_abs, evdev.abs_mt_position_x, 500 }, .{ evdev.ev_syn, evdev.syn_report, 0 } }) |e| n = t.feed(@intCast(e[0]), @intCast(e[1]), e[2], &out, n);
     try std.testing.expectEqual(@as(usize, 3), n);
     try std.testing.expectEqual(Event{ .touch = .{ .kind = .motion, .id = 7, .x = 0.5, .y = 0.5 } }, out[0]);
     try std.testing.expectEqual(Event{ .touch = .{ .kind = .down, .id = 8, .x = 1, .y = 0 } }, out[1]);
     // Both up.
     n = 0;
-    for ([_][3]i32{ .{ ev_abs, abs_mt_tracking_id, -1 }, .{ ev_abs, abs_mt_slot, 1 }, .{ ev_abs, abs_mt_tracking_id, -1 }, .{ ev_syn, syn_report, 0 } }) |e| n = t.feed(@intCast(e[0]), @intCast(e[1]), e[2], &out, n);
+    for ([_][3]i32{ .{ evdev.ev_abs, evdev.abs_mt_tracking_id, -1 }, .{ evdev.ev_abs, evdev.abs_mt_slot, 1 }, .{ evdev.ev_abs, evdev.abs_mt_tracking_id, -1 }, .{ evdev.ev_syn, evdev.syn_report, 0 } }) |e| n = t.feed(@intCast(e[0]), @intCast(e[1]), e[2], &out, n);
     try std.testing.expectEqual(@as(usize, 3), n);
     try std.testing.expectEqual(Event{ .touch = .{ .kind = .up, .id = 7 } }, out[0]);
     try std.testing.expectEqual(Event{ .touch = .{ .kind = .up, .id = 8 } }, out[1]);
     // Nothing changed: nothing, not even a frame.
-    try std.testing.expectEqual(@as(usize, 0), t.feed(ev_syn, syn_report, 0, &out, 0));
+    try std.testing.expectEqual(@as(usize, 0), t.feed(evdev.ev_syn, evdev.syn_report, 0, &out, 0));
 }
 
 test "single touch: BTN_TOUCH with ABS_X and ABS_Y" {
     var t: Touch = .{ .range = .{ .{ 100, 300 }, .{ 100, 300 } }, .multitouch = false };
     var out: [8]Event = undefined;
     var n: usize = 0;
-    for ([_][3]i32{ .{ ev_key, btn_touch, 1 }, .{ ev_abs, abs_x, 200 }, .{ ev_abs, abs_y, 100 }, .{ ev_syn, syn_report, 0 } }) |e| n = t.feed(@intCast(e[0]), @intCast(e[1]), e[2], &out, n);
+    for ([_][3]i32{ .{ evdev.ev_key, evdev.btn_touch, 1 }, .{ evdev.ev_abs, evdev.abs_x, 200 }, .{ evdev.ev_abs, evdev.abs_y, 100 }, .{ evdev.ev_syn, evdev.syn_report, 0 } }) |e| n = t.feed(@intCast(e[0]), @intCast(e[1]), e[2], &out, n);
     try std.testing.expectEqual(Event{ .touch = .{ .kind = .down, .id = 0, .x = 0.5, .y = 0 } }, out[0]);
     n = 0;
-    for ([_][3]i32{ .{ ev_key, btn_touch, 0 }, .{ ev_syn, syn_report, 0 } }) |e| n = t.feed(@intCast(e[0]), @intCast(e[1]), e[2], &out, n);
+    for ([_][3]i32{ .{ evdev.ev_key, evdev.btn_touch, 0 }, .{ evdev.ev_syn, evdev.syn_report, 0 } }) |e| n = t.feed(@intCast(e[0]), @intCast(e[1]), e[2], &out, n);
     try std.testing.expectEqual(Event{ .touch = .{ .kind = .up, .id = 0 } }, out[0]);
 }

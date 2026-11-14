@@ -7,9 +7,6 @@ const linux = std.os.linux;
 const sys = @import("sys");
 const font = @import("font");
 
-/// KEY_I (linux/input-event-codes.h).
-pub const key_i = 23;
-
 const background = 0xff1c2a4a;
 const border_color = 0xff2c3e66;
 const track_color = 0xff101830;

@@ -11,9 +11,6 @@ const linux = std.os.linux;
 const sys = @import("sys");
 const png = @import("gfx").png;
 
-/// Print Screen (KEY_SYSRQ, a Linux key code).
-pub const key_print = 99;
-
 /// Where screenshots go: with the user's other files.
 pub const folder = sys.system.user_dir;
 

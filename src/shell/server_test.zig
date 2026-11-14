@@ -3,6 +3,7 @@
 //! GPU.
 
 const std = @import("std");
+const evdev = @import("sys").evdev;
 const linux = std.os.linux;
 const wayland = @import("wayland");
 const server_mod = @import("server.zig");
@@ -108,7 +109,7 @@ const ServerThread = struct {
                 srv.pointerMotion(2, 30, 50);
                 srv.pointerFrame();
                 srv.pointerMotion(3, 31.5, 52);
-                srv.pointerButton(3, p.input.btn_left, true);
+                srv.pointerButton(3, evdev.btn_left, true);
                 srv.pointerFrame();
                 srv.pointerAxis(4, p.wl_pointer.axis.vertical_scroll, 15);
                 srv.pointerFrame();
@@ -700,7 +701,7 @@ const InputState = struct {
             p.wl_pointer.event.button => {
                 _ = r.uint() catch 0;
                 _ = r.uint() catch 0;
-                if ((r.uint() catch 0) == p.input.btn_left and (r.uint() catch 0) == p.wl_pointer.button_state.pressed) s.buttons += 1;
+                if ((r.uint() catch 0) == evdev.btn_left and (r.uint() catch 0) == p.wl_pointer.button_state.pressed) s.buttons += 1;
             },
             p.wl_pointer.event.axis => {
                 _ = r.uint() catch 0;
@@ -933,7 +934,7 @@ const MultiServerThread = struct {
     };
 
     fn feed(srv: *server_mod.Server, input: Input) void {
-        const left = p.input.btn_left;
+        const left = evdev.btn_left;
         switch (input) {
             .none => {},
             .press_second => {
