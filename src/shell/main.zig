@@ -127,13 +127,16 @@ fn run(init: std.process.Init.Minimal) !void {
     dock.updates = updates.available;
     const appearance = dock_mod.readAppearance();
     dock.theme = appearance.theme;
-    renderer.background = appearance.background;
+    renderer.setBackgroundColor(appearance.background);
     // The background image, if any: made ready on a thread of its own.
-    var background_image: background_mod.Loader = .init(gpa, renderer.width, renderer.height);
+    var background_image: background_mod.Loader = .init(gpa, renderer.width, renderer.height, dock.bandHeight());
     defer background_image.deinit();
     wantBackground(&background_image, &renderer, appearance);
-    const dock_y: u32 = renderer.height - dock.height;
-    const with_dock: server_mod.Rect = .{ .x = 0, .y = 0, .width = renderer.width, .height = dock_y };
+    // The dock floats in a band along the bottom, which windows stay above;
+    // on an overlay plane, the band is drawn whole, background and all.
+    const band_y: u32 = renderer.height - dock.bandHeight();
+    const with_dock: server_mod.Rect = .{ .x = 0, .y = 0, .width = renderer.width, .height = band_y };
+    renderer.setPanelBand(.dock, @intCast(band_y));
     var perf = try perf_mod.Overlay.init(gpa, ui_font, renderer.width, renderer.height);
     var perf_monitor: perf_mod.Monitor = .{};
     var perf_shown = false;
@@ -157,7 +160,7 @@ fn run(init: std.process.Init.Minimal) !void {
     var dock_shown = !in_setup;
     if (dock_shown) {
         dock.draw();
-        renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+        showDock(&renderer, &dock);
     }
     var server = server_mod.Server.init(gpa, renderer.backend(), if (dock_shown) with_dock else .{
         .x = 0,
@@ -224,7 +227,7 @@ fn run(init: std.process.Init.Minimal) !void {
     while (true) {
         if (child_exited.swap(false, .monotonic) and reapChildren(apps, &setup_pid) and dock_shown) {
             dock.draw();
-            renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+            showDock(&renderer, &dock);
             panels_damaged = true;
         }
         // Setup has finished (or stopped): the dock comes.
@@ -237,10 +240,10 @@ fn run(init: std.process.Init.Minimal) !void {
             dock.volume = dock_mod.readVolumeStatus();
             const chosen = dock_mod.readAppearance();
             dock.theme = chosen.theme;
-            renderer.background = chosen.background;
+            renderer.setBackgroundColor(chosen.background);
             wantBackground(&background_image, &renderer, chosen);
             dock.draw();
-            renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+            showDock(&renderer, &dock);
             server.setWorkArea(with_dock);
             panels_damaged = true;
         }
@@ -259,6 +262,7 @@ fn run(init: std.process.Init.Minimal) !void {
         // each refresh until they are there.
         _ = server.animateOverview(now);
         _ = server.animateWindows(now);
+        slideDock(&dock, &server, &renderer, dock_shown, now);
         var wake = next_tick;
         if (dock.tooltipDue()) |due| wake = @min(wake, due);
         if (!renderer.flipPending()) {
@@ -286,7 +290,7 @@ fn run(init: std.process.Init.Minimal) !void {
         if (fds[opener_index].revents != 0) if (opener) |l| {
             if (openApp(l, apps, &server, runtime_dir) and dock_shown) {
                 dock.draw();
-                renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+                showDock(&renderer, &dock);
                 panels_damaged = true;
             }
         };
@@ -297,7 +301,7 @@ fn run(init: std.process.Init.Minimal) !void {
                     dock.network = net;
                     if (dock_shown) {
                         dock.draw();
-                        renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+                        showDock(&renderer, &dock);
                         panels_damaged = true;
                     }
                 }
@@ -332,7 +336,7 @@ fn run(init: std.process.Init.Minimal) !void {
                 print("dazzle-shell: {d} apps\n", .{new.len});
                 if (dock_shown) {
                     dock.draw();
-                    renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+                    showDock(&renderer, &dock);
                     panels_damaged = true;
                 }
             } else |err| print(sys.log_warning ++ "dazzle-shell: cannot list the apps: {s}\n", .{@errorName(err)});
@@ -403,7 +407,7 @@ fn run(init: std.process.Init.Minimal) !void {
                         if (dock_shown) if (dock_mod.shortcutApp(apps, e.key.code)) |i| {
                             shortcut_key = e.key.code;
                             server.setOverview(false);
-                            activateApp(&apps[i], &server, &dock, &renderer, dock_y, runtime_dir, &panels_damaged);
+                            activateApp(&apps[i], &server, &dock, &renderer, runtime_dir, &panels_damaged);
                             continue;
                         };
                     }
@@ -415,7 +419,7 @@ fn run(init: std.process.Init.Minimal) !void {
                     const t = e.touch;
                     const x = t.x * @as(f64, @floatFromInt(renderer.width - 1));
                     const y = t.y * @as(f64, @floatFromInt(renderer.height - 1));
-                    const on_dock = dock_visible and y >= @as(f64, @floatFromInt(dock_y));
+                    const on_dock = dock_visible and dock.local(x, y) != null;
                     switch (t.kind) {
                         .down => if (on_dock) {
                             dock_touches.set(t.id);
@@ -433,26 +437,27 @@ fn run(init: std.process.Init.Minimal) !void {
                 }
                 if (e == .button) pointer.flushMotion(&server, time_ms);
                 // Buttons pressed over the dock (when not dragging) are the shell's.
-                if (dock_tap != null or (dock_visible and e == .button and e.button.pressed and server.grab == null and server.drag == null and server.buttons_down == 0 and pointer.y >= @as(f64, @floatFromInt(dock_y)))) {
+                if (dock_tap != null or (dock_visible and e == .button and e.button.pressed and server.grab == null and server.drag == null and server.buttons_down == 0 and dock.local(pointer.x, pointer.y) != null)) {
                     if (dock_tap == null and e.button.code != evdev.btn_left) continue;
-                    const at = dock_tap orelse [2]f64{ pointer.x, pointer.y };
+                    const on = dock_tap orelse [2]f64{ pointer.x, pointer.y };
+                    const at = dock.local(on[0], on[1]) orelse continue;
                     // Pressed, an icon's tooltip goes.
                     if (dock.tooltip_shown != null) panels_damaged = true;
                     dock.dismissTooltip();
                     server.setOverview(false);
                     // The update icon: Settings' Software page, to update.
-                    if (dock.hitUpdates(at[0], at[1] - @as(f64, @floatFromInt(dock_y)))) {
+                    if (dock.hitUpdates(at[0], at[1])) {
                         for (apps) |*a| if (std.mem.eql(u8, a.name, "dazzle-settings")) {
                             if (openAt(a, "apps", &server, runtime_dir)) {
                                 dock.draw();
-                                renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+                                showDock(&renderer, &dock);
                                 panels_damaged = true;
                             }
                         };
                         continue;
                     }
-                    const i = dock.hit(at[0], at[1] - @as(f64, @floatFromInt(dock_y))) orelse continue;
-                    activateApp(&apps[i], &server, &dock, &renderer, dock_y, runtime_dir, &panels_damaged);
+                    const i = dock.hit(at[0], at[1]) orelse continue;
+                    activateApp(&apps[i], &server, &dock, &renderer, runtime_dir, &panels_damaged);
                     continue;
                 }
                 // In the overview, the buttons are the shell's: the left
@@ -471,10 +476,11 @@ fn run(init: std.process.Init.Minimal) !void {
                 pointer.moved = false;
                 renderer.moveCursor(@intFromFloat(pointer.x), @intFromFloat(pointer.y));
             }
-            const in_dock = dock_visible and server.grab == null and server.drag == null and server.buttons_down == 0 and pointer.y >= @as(f64, @floatFromInt(dock_y));
-            if (dock.pointerAt(if (in_dock) pointer.x else null, pointer.y - @as(f64, @floatFromInt(dock_y)), sys.nowNs())) {
+            const in_dock = dock_visible and server.grab == null and server.drag == null and server.buttons_down == 0;
+            const on = if (in_dock) dock.local(pointer.x, pointer.y) else null;
+            if (dock.pointerAt(if (on) |l| l[0] else null, if (on) |l| l[1] else 0, sys.nowNs())) {
                 dock.draw();
-                renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+                showDock(&renderer, &dock);
                 panels_damaged = true;
             }
         };
@@ -548,7 +554,7 @@ fn run(init: std.process.Init.Minimal) !void {
                 dock.volume = vol;
                 if (dock_shown) {
                     dock.draw();
-                    renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+                    showDock(&renderer, &dock);
                     panels_damaged = true;
                 }
             }
@@ -559,12 +565,12 @@ fn run(init: std.process.Init.Minimal) !void {
                 dock.theme = chosen.theme;
                 if (dock_shown) {
                     dock.draw();
-                    renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+                    showDock(&renderer, &dock);
                 }
                 panels_damaged = true;
             }
             if (chosen.background != renderer.background) {
-                renderer.background = chosen.background;
+                renderer.setBackgroundColor(chosen.background);
                 panels_damaged = true;
             }
             wantBackground(&background_image, &renderer, chosen);
@@ -583,7 +589,7 @@ fn run(init: std.process.Init.Minimal) !void {
                 dock.activity = activity;
                 if (dock_shown) {
                     dock.draw();
-                    renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+                    showDock(&renderer, &dock);
                     panels_damaged = true;
                 }
             }
@@ -595,7 +601,7 @@ fn run(init: std.process.Init.Minimal) !void {
                         dock.network = net;
                         if (dock_shown) {
                             dock.draw();
-                            renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+                            showDock(&renderer, &dock);
                             panels_damaged = true;
                         }
                     }
@@ -629,7 +635,7 @@ fn run(init: std.process.Init.Minimal) !void {
             print("dazzle-shell: {s}\n", .{if (updates.available) "updates available" else "up to date"});
             if (dock_shown) {
                 dock.draw();
-                renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+                showDock(&renderer, &dock);
                 panels_damaged = true;
             }
         }
@@ -643,22 +649,25 @@ fn run(init: std.process.Init.Minimal) !void {
         if (!renderer.flipPending()) {
             _ = server.animateOverview(sys.nowNs());
             _ = server.animateWindows(sys.nowNs());
+            slideDock(&dock, &server, &renderer, dock_shown, sys.nowNs());
         }
         const dock_due = panels_damaged and sys.nowNs() >= client_frame_ns + panel_grace_ns;
         if ((server.damaged or dock_due) and !renderer.flipPending()) {
             const count_frame = server.damaged;
             panels_damaged = false;
             server.frameDrawn();
-            // A fullscreen window on top hides the dock.
-            renderer.setPanelHidden(.dock, !dock_shown or server.fullscreenTop());
-            renderer.setPanelHidden(.tooltip, !dock_shown or server.fullscreenTop() or dock.tooltip_shown == null);
+            // A fullscreen window on top sends the dock down, off the
+            // screen; its tooltip goes at once.
+            renderer.setPanelHidden(.dock, !dock_shown or dock.offScreen());
+            renderer.setPanelHidden(.tooltip, !dock_shown or server.fullscreenTop() or dock.slide > 0 or dock.tooltip_shown == null);
             renderer.setPanelHidden(.perf, !perf_shown);
             // A maximized, full-size window on top goes straight onto the
             // display, with the dock on a plane below it; a fullscreen one,
             // alone. Otherwise (or if the display cannot show it) the frame
             // is composited.
             var on_screen: ?bool = null;
-            if (top) |t| if (server.scanoutBuffer(t)) |b| {
+            // Not while the dock slides: it would leave its band.
+            if (top) |t| if (!dock.sliding()) if (server.scanoutBuffer(t)) |b| {
                 const at = server.windowRect(t);
                 if (renderer.showDirect(b.dmabuf.?, at.x, at.y)) |at_once| {
                     server.holdBuffer(b);
@@ -898,12 +907,27 @@ fn wantBackground(loader: *background_mod.Loader, renderer: *render.Renderer, a:
     loader.want(path, if (path != null) renderer.backgroundKind() else .rgb565);
 }
 
+/// Gives the renderer the dock's latest picture, where it is.
+fn showDock(renderer: *render.Renderer, dock: *const dock_mod.Dock) void {
+    const at = dock.place();
+    renderer.setPanelAt(.dock, dock.picture(), dock.width, dock.height, at.x, at.y);
+}
+
+/// Sends the dock down while a fullscreen window is on top, and back up
+/// after, a frame each refresh while it is on its way.
+fn slideDock(dock: *dock_mod.Dock, server: *server_mod.Server, renderer: *render.Renderer, dock_shown: bool, now: u64) void {
+    if (dock_shown) dock.slideTo(server.fullscreenTop(), now);
+    if (!dock.animateSlide(now)) return;
+    const at = dock.place();
+    renderer.movePanel(.dock, at.x, at.y);
+    server.damaged = true;
+}
+
 fn activateApp(
     app: *dock_mod.App,
     server: *server_mod.Server,
     dock: *dock_mod.Dock,
     renderer: *render.Renderer,
-    dock_y: u32,
     runtime_dir: ?[:0]const u8,
     panels_damaged: *bool,
 ) void {
@@ -912,7 +936,7 @@ fn activateApp(
     } else {
         app.pid = spawn(app.path, null, runtime_dir);
         dock.draw();
-        renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
+        showDock(renderer, dock);
         panels_damaged.* = true;
     }
 }

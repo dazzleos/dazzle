@@ -1,5 +1,7 @@
-//! The dock along the bottom of the screen: an icon for each app in /data/apps,
-//! and for the shell's own (Settings). Clicking one starts the app or, if it
+//! The dock at the bottom of the screen: a rounded box floating in the
+//! middle, just big enough for an icon for each app in /data/apps and for
+//! the shell's own (Settings), and the status box. It slides down out of
+//! the way of a fullscreen window, and back up after (`slideTo`). Clicking one starts the app or, if it
 //! is running, brings its window to the front (apps run once each).
 //!
 //! An app is a directory /data/apps/<name> holding its program, also called
@@ -479,9 +481,12 @@ pub const Dock = struct {
     font: ?font.Font,
     icon_font: ?font.Font,
     cache: font.GlyphCache,
+    /// The box's picture, `width` by `height` (rows `width` apart), see-
+    /// through outside its rounded corners. Room for the screen's width.
     pixels: []u32,
     width: u32,
     height: u32,
+    screen_width: u32,
     scale: f32,
     apps: []App,
     /// The app under the pointer.
@@ -505,9 +510,18 @@ pub const Dock = struct {
     /// at its bottom).
     tooltip_pixels: []u32,
     screen_height: u32,
+    /// How far down it is, out of the way of a fullscreen window (0: in
+    /// its place, 1: off the bottom of the screen), and on its way: from
+    /// where, since when, and whether down.
+    slide: f32 = 0,
+    slide_from: f32 = 0,
+    slide_start: ?u64 = null,
+    slide_down: bool = false,
 
     /// How long the pointer rests on an icon before its name shows.
     pub const tooltip_delay_ns = 500 * std.time.ns_per_ms;
+    /// How long it takes to slide down or up.
+    pub const slide_ns = 200 * std.time.ns_per_ms;
 
     pub fn init(gpa: std.mem.Allocator, f: ?font.Font, apps: []App, screen_width: u32, screen_height: u32) !Dock {
         const scale = @min(@as(f32, @floatFromInt(screen_width)) / 1920, @as(f32, @floatFromInt(screen_height)) / 1080);
@@ -519,6 +533,7 @@ pub const Dock = struct {
             .pixels = try gpa.alloc(u32, @as(usize, screen_width) * height),
             .tooltip_pixels = try gpa.alloc(u32, @as(usize, tooltipMaxWidth(scale)) * tooltipHeight(scale)),
             .screen_height = screen_height,
+            .screen_width = screen_width,
             .width = screen_width,
             .height = height,
             .scale = scale,
@@ -540,14 +555,95 @@ pub const Dock = struct {
     }
     pub const StatusRect = struct { x: f32, y: f32, width: f32, height: f32 };
 
-    /// Where app `i`'s icon is, in the dock: the icons and the status box
-    /// on the right are in a row in the middle.
+    const icon_size = 56;
+    const icon_gap = 20;
+    /// Between the box's sides and what is in it.
+    const side_pad = 10;
+    /// Between the box and the bottom of the screen (and the work area).
+    const margin = 8;
+    const box_radius = 18;
+
+    /// The box's width, in pixels: the icons and the status box in a row,
+    /// padded; no wider than the screen.
+    pub fn boxWidth(d: *const Dock) u32 {
+        const row = @as(f32, @floatFromInt(d.apps.len)) * (icon_size + icon_gap) * d.scale + d.statusWidth();
+        return @min(@as(u32, @intFromFloat(@ceil(row + 2 * side_pad * d.scale))), d.screen_width);
+    }
+
+    /// The gap between the box and the bottom of the screen, in pixels.
+    fn marginPx(d: *const Dock) u32 {
+        return @intFromFloat(@round(margin * d.scale));
+    }
+
+    /// The height of the band along the bottom of the screen the dock is
+    /// in, with a gap above and below it: windows (but fullscreen ones)
+    /// stay above it.
+    pub fn bandHeight(d: *const Dock) u32 {
+        return d.height + 2 * d.marginPx();
+    }
+
+    /// Where the box is on the screen, slid down as far as it is.
+    pub const Place = struct { x: i32, y: i32 };
+    pub fn place(d: *const Dock) Place {
+        const top: f32 = @floatFromInt(d.screen_height - d.marginPx() - d.height);
+        const down: f32 = @floatFromInt(d.height + d.marginPx());
+        return .{
+            .x = @intCast((d.screen_width - d.boxWidth()) / 2),
+            .y = @intFromFloat(@round(top + easeInOut(d.slide) * down)),
+        };
+    }
+
+    /// (`x`, `y`) on the screen, in the box (null: not on it). Where it
+    /// is in its place: it takes no input while it slides.
+    pub fn local(d: *const Dock, x: f64, y: f64) ?[2]f64 {
+        const lx = x - @as(f64, @floatFromInt((d.screen_width - d.boxWidth()) / 2));
+        const ly = y - @as(f64, @floatFromInt(d.screen_height - d.marginPx() - d.height));
+        if (lx < 0 or ly < 0 or lx >= @as(f64, @floatFromInt(d.boxWidth())) or ly >= @as(f64, @floatFromInt(d.height))) return null;
+        return .{ lx, ly };
+    }
+
+    /// Sends it down off the screen (for a fullscreen window), or back up,
+    /// from where it is, at `now`.
+    pub fn slideTo(d: *Dock, down: bool, now: u64) void {
+        if (down == d.slide_down) return;
+        d.slide_down = down;
+        d.slide_from = d.slide;
+        d.slide_start = now;
+    }
+
+    /// Moves it along its way, at `now`; returns whether it moved.
+    pub fn animateSlide(d: *Dock, now: u64) bool {
+        const start = d.slide_start orelse return false;
+        const k: f32 = @floatCast(@min(@as(f64, @floatFromInt(now -| start)) / slide_ns, 1));
+        const to: f32 = if (d.slide_down) 1 else 0;
+        d.slide = d.slide_from + (to - d.slide_from) * k;
+        if (k >= 1) d.slide_start = null;
+        return true;
+    }
+
+    /// On its way down or up.
+    pub fn sliding(d: *const Dock) bool {
+        return d.slide_start != null;
+    }
+
+    /// All the way down, off the screen.
+    pub fn offScreen(d: *const Dock) bool {
+        return d.slide >= 1;
+    }
+
+    /// Its picture, as `draw` last drew it.
+    pub fn picture(d: *const Dock) []const u32 {
+        return d.pixels[0 .. @as(usize, d.width) * d.height];
+    }
+
+    /// Where app `i`'s icon is, in the box: the icons and the status box
+    /// on the right are in a row.
     pub fn iconRect(d: *const Dock, i: usize) Rect {
-        const size = 56 * d.scale;
-        const gap = 20 * d.scale;
+        const size = icon_size * d.scale;
+        const gap = icon_gap * d.scale;
         const status_width = d.statusWidth();
         const row = @as(f32, @floatFromInt(d.apps.len)) * (size + gap) + status_width;
-        const x0 = (@as(f32, @floatFromInt(d.width)) - row) / 2;
+        const x0 = (@as(f32, @floatFromInt(d.boxWidth())) - row) / 2;
         return .{ .x = x0 + @as(f32, @floatFromInt(i)) * (size + gap), .y = 6 * d.scale, .size = size };
     }
 
@@ -577,7 +673,8 @@ pub const Dock = struct {
 
     pub fn draw(d: *Dock) void {
         const c = d.theme.colors();
-        const canvas: font.Canvas = .{ .pixels = d.pixels, .width = d.width, .height = d.height, .stride = d.width };
+        d.width = d.boxWidth();
+        const canvas: font.Canvas = .{ .pixels = d.pixels[0 .. @as(usize, d.width) * d.height], .width = d.width, .height = d.height, .stride = d.width };
         canvas.fill(0, 0, d.width, d.height, c.background);
         const icon_font: ?*const font.Font = if (d.icon_font) |*f| f else null;
         for (d.apps, 0..) |*app, i| {
@@ -632,6 +729,8 @@ pub const Dock = struct {
                 _ = font.draw(canvas, &d.cache, .{ .font = f, .size = arrow, .color = down_color }, arrows_x, @round(mid + arrow), icons.text(.arrow_downward, &buf)) catch {};
             }
         }
+        // Rounded: what is outside its corners is see-through.
+        cutCorners(canvas, @round(box_radius * d.scale));
     }
 
     /// Moves the hover highlight for the pointer at (`x`, `y`) in the dock
@@ -696,12 +795,19 @@ pub const Dock = struct {
         cutCorners(canvas, @round(6 * d.scale));
         // Above the icon, clear of the dock, and on the screen.
         const r = d.iconRect(i);
+        const at = d.place();
         const fw: f32 = @floatFromInt(w);
-        const x = std.math.clamp(@round(r.x + r.size / 2 - fw / 2), 0, @as(f32, @floatFromInt(d.width)) - fw);
-        const dock_top: i32 = @intCast(d.screen_height - d.height);
-        return .{ .pixels = pixels, .width = w, .height = h, .x = @intFromFloat(x), .y = dock_top - @as(i32, @intCast(h)) - @as(i32, @intFromFloat(@round(8 * d.scale))) };
+        const x = std.math.clamp(@round(@as(f32, @floatFromInt(at.x)) + r.x + r.size / 2 - fw / 2), 0, @as(f32, @floatFromInt(d.screen_width)) - fw);
+        return .{ .pixels = pixels, .width = w, .height = h, .x = @intFromFloat(x), .y = at.y - @as(i32, @intCast(h)) - @as(i32, @intFromFloat(@round(8 * d.scale))) };
     }
 };
+
+fn easeInOut(t: f32) f32 {
+    const x = std.math.clamp(t, 0, 1);
+    if (x < 0.5) return 4 * x * x * x;
+    const u = -2 * x + 2;
+    return 1 - u * u * u / 2;
+}
 
 /// Makes the canvas's corners, outside a rounded rectangle of `radius`,
 /// see-through (in the pixels' alpha), anti-aliased.
@@ -810,7 +916,7 @@ test "app labels drop the dazzle- prefix" {
     try testing.expectEqualStrings("Notes", m);
 }
 
-test "icons and the status box are in a row in the middle, and clicks find the apps" {
+test "icons and the status box are in a row in a box, and clicks find the apps" {
     var apps = [_]App{
         .{ .name = "a", .label = "A", .path = "/apps/a/a", .icon = .folder },
         .{ .name = "b", .label = "B", .path = "/apps/b/b" },
@@ -823,7 +929,7 @@ test "icons and the status box are in a row in the middle, and clicks find the a
     const r0 = d.iconRect(0);
     const r1 = d.iconRect(1);
     const rs = d.statusRect();
-    try testing.expectApproxEqAbs(@as(f32, 1920) - (rs.x + rs.width), r0.x, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, @floatFromInt(d.boxWidth())) - (rs.x + rs.width), r0.x, 0.01);
     try testing.expect(rs.x > r1.x + r1.size);
     try testing.expectEqual(@as(?usize, 0), d.hit(r0.x + 1, r0.y + 1));
     try testing.expectEqual(@as(?usize, 1), d.hit(r1.x + r1.size - 1, r1.y + r1.size - 1));
@@ -848,7 +954,7 @@ test "icons and the status box are in a row in the middle, and clicks find the a
             return dock.pixels[@as(usize, @intFromFloat(y)) * dock.width + @as(usize, @intFromFloat(x))];
         }
     }.f;
-    try testing.expectEqual(@as(u32, background), at(&d, 5, 5));
+    try testing.expectEqual(@as(u32, background), at(&d, @floatFromInt(d.width / 2), 2));
     try testing.expectEqual(apps[0].color(), at(&d, r0.x + r0.size / 2, r0.y + 4));
     try testing.expectEqual(@as(u32, dot_color), at(&d, r0.x + r0.size / 2, r0.y + r0.size + 6));
     try testing.expectEqual(@as(u32, background), at(&d, r1.x + r1.size / 2, r1.y + r1.size + 6));
@@ -865,10 +971,54 @@ test "icons and the status box are in a row in the middle, and clicks find the a
     d.theme = .light;
     d.draw();
     const light = Theme.light.colors();
-    try testing.expectEqual(light.background, at(&d, 5, 5));
+    try testing.expectEqual(light.background, at(&d, @floatFromInt(d.width / 2), 2));
     try testing.expectEqual(light.dot, at(&d, r0.x + r0.size / 2, r0.y + r0.size + 6));
     try testing.expectEqual(light.hover_background, at(&d, r1.x - 2, r1.y + r1.size / 2));
     try testing.expectEqual(light.status_border, at(&d, rs.x + rs.width / 2, rs.y + 1));
+}
+
+test "the dock floats in a rounded box in the middle of the bottom, and slides down and back" {
+    var apps = [_]App{
+        .{ .name = "a", .label = "A", .path = "/apps/a/a", .icon = .folder },
+        .{ .name = "b", .label = "B", .path = "/apps/b/b" },
+    };
+    var d = try Dock.init(testing.allocator, null, &apps, 1920, 1080);
+    defer testing.allocator.free(d.pixels);
+    defer testing.allocator.free(d.tooltip_pixels);
+    defer d.cache.deinit();
+    d.draw();
+    // Just big enough: the icons and status box, padded.
+    try testing.expect(d.width < 500);
+    try testing.expectEqual(d.width, d.boxWidth());
+    try testing.expectEqual(@as(u32, 76 + 2 * 8), d.bandHeight());
+    const at = d.place();
+    try testing.expectEqual(@as(i32, @intCast((1920 - d.width) / 2)), at.x);
+    try testing.expectEqual(@as(i32, 1080 - 8 - 76), at.y);
+    // See-through outside its corners, solid in the middle.
+    try testing.expectEqual(@as(u32, 0), d.picture()[0] >> 24);
+    try testing.expectEqual(@as(u32, 0), d.picture()[d.width - 1] >> 24);
+    try testing.expectEqual(@as(u32, 0xff), d.picture()[d.width / 2] >> 24);
+    // The screen's points map into it, or are beside it.
+    const r0 = d.iconRect(0);
+    const l = d.local(@as(f64, @floatFromInt(at.x)) + r0.x + 1, @as(f64, @floatFromInt(at.y)) + r0.y + 1).?;
+    try testing.expectEqual(@as(?usize, 0), d.hit(l[0], l[1]));
+    try testing.expect(d.local(10, 1075) == null);
+    try testing.expect(d.local(960, 990) == null);
+
+    // Sent down: on its way for a while, then off the screen; and back.
+    try testing.expect(!d.animateSlide(0));
+    d.slideTo(true, 1000);
+    try testing.expect(d.animateSlide(1000 + Dock.slide_ns / 2));
+    try testing.expect(d.sliding());
+    const mid = d.place().y;
+    try testing.expect(mid > at.y and mid < 1080);
+    try testing.expect(d.animateSlide(1000 + Dock.slide_ns));
+    try testing.expect(!d.sliding() and d.offScreen());
+    try testing.expect(d.place().y >= 1080);
+    d.slideTo(false, 5000);
+    _ = d.animateSlide(5000 + Dock.slide_ns);
+    try testing.expect(!d.offScreen());
+    try testing.expectEqual(at.y, d.place().y);
 }
 
 test "with updates, the status box is wider and starts with the update icon" {
@@ -885,11 +1035,12 @@ test "with updates, the status box is wider and starts with the update icon" {
             return dock.pixels[y * dock.width + @as(usize, @intFromFloat(x))];
         }
     }.f;
+    const box_without = d.boxWidth();
     d.updates = true;
     const with = d.statusRect();
     try testing.expectApproxEqAbs(without.width + 46, with.width, 0.01);
-    // Still in the middle: the row grew to the left too.
-    try testing.expect(with.x < without.x);
+    // The box grew to fit it (and stays in the middle).
+    try testing.expectEqual(box_without + 46, d.boxWidth());
     // Pressing the icon is pressing it (Settings opens), and the rest of
     // the box is not; without updates there is nothing to press.
     try testing.expect(d.hitUpdates(with.x + 20, with.y + with.height / 2));
@@ -1060,9 +1211,10 @@ test "resting the pointer on an icon shows the app's name above it, a while late
     try testing.expectEqual(@as(?usize, 0), d.tooltip_shown);
     try testing.expect(d.tooltipDue() == null);
     // Above the dock, centred over the icon.
-    try testing.expect(tip.y + @as(i32, @intCast(tip.height)) < 1080 - @as(i32, @intCast(d.height)));
+    const at = d.place();
+    try testing.expect(tip.y + @as(i32, @intCast(tip.height)) < at.y);
     const middle = @as(f32, @floatFromInt(tip.x)) + @as(f32, @floatFromInt(tip.width)) / 2;
-    try testing.expectApproxEqAbs(r0.x + r0.size / 2, middle, 1);
+    try testing.expectApproxEqAbs(@as(f32, @floatFromInt(at.x)) + r0.x + r0.size / 2, middle, 1);
     // Its corners are see-through, and its middle not; the name is drawn.
     const c = Theme.dark.colors();
     try testing.expectEqual(@as(u32, 0), tip.pixels[0] >> 24);

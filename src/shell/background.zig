@@ -33,9 +33,13 @@ pub const Prepared = struct {
     width: u32,
     height: u32,
     kind: Kind,
+    /// Its last rows (behind the dock), as the GPU shows them: 0xffRRGGBB,
+    /// `width` apart, for the dock's overlay to draw them the same.
+    bottom: []u32 = &.{},
 
     pub fn deinit(p: *Prepared, gpa: std.mem.Allocator) void {
         gpa.free(p.data);
+        gpa.free(p.bottom);
     }
 };
 
@@ -43,8 +47,8 @@ pub const Prepared = struct {
 pub const max_file_size = 64 * 1024 * 1024;
 
 /// Reads the PNG at `path` and makes it ready for a screen `width` by
-/// `height`, as `kind`.
-pub fn prepare(gpa: std.mem.Allocator, path: []const u8, width: u32, height: u32, kind: Kind) !Prepared {
+/// `height`, as `kind`, with its last `bottom_rows` rows as shown.
+pub fn prepare(gpa: std.mem.Allocator, path: []const u8, width: u32, height: u32, kind: Kind, bottom_rows: u32) !Prepared {
     var path_buf: [appearance.ImagePath.max_len + 1]u8 = undefined;
     const pathz = try std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0);
     const data = try sys.readFileAlloc(gpa, pathz, max_file_size);
@@ -54,11 +58,16 @@ pub fn prepare(gpa: std.mem.Allocator, path: []const u8, width: u32, height: u32
     const pixels = try gpa.alloc(u32, @as(usize, width) * height);
     defer gpa.free(pixels);
     cover(image.pixels, image.width, image.height, pixels, width, height);
-    return fromPixels(gpa, pixels, width, height, kind);
+    return fromPixels(gpa, pixels, width, height, kind, bottom_rows);
 }
 
-/// `pixels` (`width` by `height`) ready for the GPU, as `kind`.
-pub fn fromPixels(gpa: std.mem.Allocator, pixels: []const u32, width: u32, height: u32, kind: Kind) !Prepared {
+/// `pixels` (`width` by `height`) ready for the GPU, as `kind`, with its
+/// last `bottom_rows` rows as shown.
+pub fn fromPixels(gpa: std.mem.Allocator, pixels: []const u32, width: u32, height: u32, kind: Kind, bottom_rows: u32) !Prepared {
+    const rows = @min(bottom_rows, height);
+    const first = height - rows;
+    const bottom = try gpa.alloc(u32, @as(usize, width) * rows);
+    errdefer gpa.free(bottom);
     switch (kind) {
         .etc1 => |order| {
             const n = etc1.blocksOf(width, height);
@@ -68,17 +77,32 @@ pub fn fromPixels(gpa: std.mem.Allocator, pixels: []const u32, width: u32, heigh
             const out = try gpa.alloc(u8, etc1.imageSize(width, height));
             @memset(out, 0);
             etc1.upload(out, width, height, blocks, order);
-            return .{ .data = out, .width = width, .height = height, .kind = kind };
+            for (0..rows) |row| for (0..width) |x| {
+                const y = first + row;
+                const decoded = etc1.decodeBlock(blocks[(y / 4) * n[0] + x / 4]);
+                bottom[row * width + x] = decoded[(y % 4) * 4 + x % 4];
+            };
+            return .{ .data = out, .width = width, .height = height, .kind = kind, .bottom = bottom };
         },
         .rgb565 => {
             const out = try gpa.alloc(u8, @as(usize, width) * height * 2);
             for (0..height) |y| for (0..width) |x| {
                 const px = pixels[y * width + x];
-                std.mem.writeInt(u16, out[(y * width + x) * 2 ..][0..2], dither565(px, @intCast(x), @intCast(y)), .little);
+                const v = dither565(px, @intCast(x), @intCast(y));
+                std.mem.writeInt(u16, out[(y * width + x) * 2 ..][0..2], v, .little);
+                if (y >= first) bottom[(y - first) * width + x] = expand565(v);
             };
-            return .{ .data = out, .width = width, .height = height, .kind = kind };
+            return .{ .data = out, .width = width, .height = height, .kind = kind, .bottom = bottom };
         },
     }
+}
+
+/// An RGB565 pixel (red in the low bits) as the GPU shows it.
+fn expand565(v: u16) u32 {
+    const r: u32 = v & 31;
+    const g: u32 = v >> 5 & 63;
+    const b: u32 = v >> 11;
+    return 0xff000000 | ((r << 3) | (r >> 2)) << 16 | ((g << 2) | (g >> 4)) << 8 | ((b << 3) | (b >> 2));
 }
 
 /// Scales `src` (`sw` by `sh`) to cover `dst` (`dw` by `dh`), cropping
@@ -138,6 +162,8 @@ pub const Loader = struct {
     gpa: std.mem.Allocator,
     width: u32,
     height: u32,
+    /// Its last rows kept as shown (`Prepared.bottom`).
+    bottom_rows: u32,
     /// How the image wanted is made ready.
     kind: Kind = .rgb565,
     /// The image wanted, and the one last given by `poll`.
@@ -153,7 +179,7 @@ pub const Loader = struct {
         result: anyerror!Prepared = error.NotDone,
 
         fn run(j: *Job, l: *const Loader) void {
-            j.result = prepare(l.gpa, j.path.slice().?, l.width, l.height, j.kind);
+            j.result = prepare(l.gpa, j.path.slice().?, l.width, l.height, j.kind, l.bottom_rows);
             j.done.store(true, .release);
         }
     };
@@ -167,8 +193,8 @@ pub const Loader = struct {
         failed: anyerror,
     };
 
-    pub fn init(gpa: std.mem.Allocator, width: u32, height: u32) Loader {
-        return .{ .gpa = gpa, .width = width, .height = height };
+    pub fn init(gpa: std.mem.Allocator, width: u32, height: u32, bottom_rows: u32) Loader {
+        return .{ .gpa = gpa, .width = width, .height = height, .bottom_rows = bottom_rows };
     }
 
     /// Waits for the job under way, and lets it go.
@@ -241,7 +267,7 @@ test "an image is scaled to cover the screen, cropped in the middle" {
 
 test "RGB565 is dithered: a level between two steps comes out as both" {
     const pixels: [16]u32 = @splat(0xff848484);
-    var p = try fromPixels(testing.allocator, &pixels, 4, 4, .rgb565);
+    var p = try fromPixels(testing.allocator, &pixels, 4, 4, .rgb565, 0);
     defer p.deinit(testing.allocator);
     var low: usize = 0;
     var high: usize = 0;
@@ -250,6 +276,25 @@ test "RGB565 is dithered: a level between two steps comes out as both" {
         if (red == 0x84 >> 3) low += 1 else if (red == (0x84 >> 3) + 1) high += 1;
     }
     try testing.expect(low > 0 and high > 0 and low + high == 16);
+}
+
+test "the bottom rows are kept as the GPU shows them, for the dock's overlay" {
+    var pixels: [8 * 8]u32 = undefined;
+    for (&pixels, 0..) |*px, i| px.* = 0xff000000 | @as(u32, @intCast(i * 4)) << 16 | @as(u32, @intCast(i * 3)) << 8 | 0x40;
+    // ETC1: the blocks decoded.
+    var e = try fromPixels(testing.allocator, &pixels, 8, 8, .{ .etc1 = .standard }, 3);
+    defer e.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 8 * 3), e.bottom.len);
+    var blocks: [4]u64 = undefined;
+    etc1.encode(&pixels, 8, 8, &blocks);
+    try testing.expectEqual(etc1.decodeBlock(blocks[3])[1 * 4 + 2], e.bottom[0 * 8 + 6]);
+    try testing.expectEqual(etc1.decodeBlock(blocks[2])[3 * 4 + 1], e.bottom[2 * 8 + 1]);
+    // RGB565: the dithered pixels, widened again.
+    var r = try fromPixels(testing.allocator, &pixels, 8, 8, .rgb565, 2);
+    defer r.deinit(testing.allocator);
+    const v = std.mem.readInt(u16, r.data[(7 * 8 + 5) * 2 ..][0..2], .little);
+    try testing.expectEqual(expand565(v), r.bottom[1 * 8 + 5]);
+    try testing.expectEqual(@as(u32, 0xffffffff), expand565(0xffff));
 }
 
 test "the loader makes the image wanted on a thread, and says when none is" {
@@ -263,7 +308,7 @@ test "the loader makes the image wanted on a thread, and says when none is" {
     try sys.files.writeNew(path, data);
     defer _ = linux.unlink(path);
 
-    var l: Loader = .init(testing.allocator, 16, 16);
+    var l: Loader = .init(testing.allocator, 16, 16, 3);
     defer l.deinit();
     try testing.expect(l.poll() == null);
     l.want(path, .{ .etc1 = .standard });

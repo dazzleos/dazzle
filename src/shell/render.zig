@@ -256,10 +256,10 @@ pub const PanelId = enum {
     tooltip,
 
     /// See-through in places (its pixels' alpha says where): drawn
-    /// blended, so only when the frame is composited, not on an overlay
-    /// plane.
+    /// blended. On an overlay plane only if it has a band (`setPanelBand`),
+    /// which the plane fills, with the background drawn behind it.
     fn blended(id: PanelId) bool {
-        return id == .tooltip;
+        return id == .tooltip or id == .dock;
     }
 };
 const n_panels = @typeInfo(PanelId).@"enum".field_names.len;
@@ -284,6 +284,12 @@ const Panel = struct {
     shown: u1 = 0,
     /// Not shown (under a fullscreen window, or toggled off).
     hidden: bool = false,
+    /// On an overlay plane, it is shown in the band across the screen from
+    /// here down, over what of the background is there (`setPanelBand`).
+    band_y: ?i32 = null,
+    /// The overlay buffers' size, and the background they were drawn over.
+    plane_size: [2]u32 = .{ 0, 0 },
+    band_stamp: u32 = 0,
 };
 
 const n_cursors = @typeInfo(cursor.Shape).@"enum".field_names.len;
@@ -316,6 +322,10 @@ pub const Renderer = struct {
     background: u32 = background,
     /// The background image over it, if any (`setBackgroundImage`).
     background_image: ?server.Texture = null,
+    /// The image's last rows as shown (`Prepared.bottom`), for bands.
+    background_bottom: []u32 = &.{},
+    /// Changes with the background, for bands to be drawn again.
+    band_stamp: u32 = 1,
     /// Whether the GPU decodes ETC1 as `vc4.etc1` lays it out, and in
     /// which byte order (`etc1Order`), once checked.
     etc1_checked: bool = false,
@@ -361,6 +371,11 @@ pub const Renderer = struct {
         const r: *Renderer = @ptrCast(@alignCast(ptr));
         var t = existing orelse server.Texture{ .handle = 0, .width = 0, .height = 0 };
         if (existing == null or t.width != width or t.height != height or t.format != format) {
+            // Another size: the old one goes.
+            if (existing) |old| {
+                destroyTexture(r, old);
+                t = .{ .handle = 0, .width = 0, .height = 0 };
+            }
             const bo = try r.dev.createBo(texture.imageSizeOf(format, width, height));
             errdefer r.dev.destroyBo(bo);
             try r.owned.put(r.gpa, bo.handle, bo);
@@ -401,6 +416,30 @@ pub const Renderer = struct {
         p.texture_stale = true;
     }
 
+    /// Moves a panel, its picture as it is.
+    pub fn movePanel(r: *Renderer, id: PanelId, x: i32, y: i32) void {
+        const p = &r.panels[@intFromEnum(id)];
+        if (p.x == x and p.y == y) return;
+        p.x = x;
+        p.y = y;
+        p.dirty = true;
+    }
+
+    /// On an overlay plane, shows a panel in a band across the screen from
+    /// `y` to the bottom, over the background there, rather than alone:
+    /// one that is see-through can then be (the dock, around a window
+    /// shown directly that leaves the band uncovered).
+    pub fn setPanelBand(r: *Renderer, id: PanelId, y: ?i32) void {
+        r.panels[@intFromEnum(id)].band_y = y;
+    }
+
+    /// Changes the background's colour.
+    pub fn setBackgroundColor(r: *Renderer, color: u32) void {
+        if (color == r.background) return;
+        r.background = color;
+        r.band_stamp +%= 1;
+    }
+
     /// Hides a panel, or shows it again.
     pub fn setPanelHidden(r: *Renderer, id: PanelId, hidden: bool) void {
         r.panels[@intFromEnum(id)].hidden = hidden;
@@ -416,8 +455,8 @@ pub const Renderer = struct {
         var out: vc4.kms.Overlays = @splat(null);
         for (&r.panels, 0..) |*p, i| {
             if (p.width == 0 or p.height == 0 or p.hidden) continue;
-            // One that is see-through is composited.
-            if (@as(PanelId, @enumFromInt(i)).blended()) return null;
+            // One that is see-through is composited, but in a band.
+            if (@as(PanelId, @enumFromInt(i)).blended() and p.band_y == null) return null;
             if (i >= kms.overlays.len or kms.overlays[i] == null) return null;
             out[i] = r.panelLayer(p) orelse return null;
         }
@@ -471,27 +510,87 @@ pub const Renderer = struct {
     /// A panel as an overlay layer, writing its latest pixels into the
     /// overlay buffer that is not on the screen.
     fn panelLayer(r: *Renderer, p: *Panel) ?vc4.kms.Layer {
-        if (p.dirty) {
+        const size = r.planeSize(p) orelse return null;
+        // Made at another size (the panel changed): it is composited.
+        if (p.planes[0] != null and !std.meta.eql(size, p.plane_size)) return null;
+        if (p.dirty or (p.band_y != null and p.band_stamp != r.band_stamp)) {
             const next = p.shown +% 1;
-            const plane = r.panelPlane(p, next) orelse return null;
-            @memcpy(std.mem.bytesAsSlice(u32, plane.bo.map[0 .. p.width * p.height * 4]), p.pixels[0 .. p.width * p.height]);
+            const plane = r.panelPlane(p, next, size) orelse return null;
+            r.drawPlane(p, plane);
             p.shown = next;
             p.dirty = false;
         }
-        const plane = r.panelPlane(p, p.shown) orelse return null;
-        return .{ .fb_id = plane.fb_id, .src_width = p.width, .src_height = p.height, .x = p.x, .y = p.y, .width = p.width, .height = p.height };
+        const plane = r.panelPlane(p, p.shown, size) orelse return null;
+        const x = if (p.band_y != null) 0 else p.x;
+        const y = p.band_y orelse p.y;
+        return .{ .fb_id = plane.fb_id, .src_width = size[0], .src_height = size[1], .x = x, .y = y, .width = size[0], .height = size[1] };
     }
 
-    fn panelPlane(r: *Renderer, p: *Panel, i: u1) ?Scanout {
+    /// An overlay buffer's size: the panel's, or its band's.
+    fn planeSize(r: *const Renderer, p: *const Panel) ?[2]u32 {
+        const y = p.band_y orelse return .{ p.width, p.height };
+        if (y < 0 or y >= r.height) return null;
+        return .{ r.width, r.height - @as(u32, @intCast(y)) };
+    }
+
+    /// Writes the panel's picture into an overlay buffer: in a band, over
+    /// the background there.
+    fn drawPlane(r: *Renderer, p: *Panel, plane: Scanout) void {
+        const size = p.plane_size;
+        const dst = std.mem.bytesAsSlice(u32, plane.bo.map[0 .. size[0] * size[1] * 4]);
+        const band_y = p.band_y orelse {
+            @memcpy(dst, p.pixels[0 .. p.width * p.height]);
+            return;
+        };
+        p.band_stamp = r.band_stamp;
+        const bottom_rows = r.background_bottom.len / r.width;
+        for (0..size[1]) |row| {
+            const line = dst[row * size[0] ..][0..size[0]];
+            const screen_y = @as(usize, @intCast(band_y)) + row;
+            // The background image's row there, or its colour.
+            if (screen_y + bottom_rows >= r.height) {
+                const from = screen_y + bottom_rows - r.height;
+                @memcpy(line, r.background_bottom[from * r.width ..][0..r.width]);
+            } else @memset(line, r.background);
+            // The panel over it, blended.
+            const py = @as(i64, @intCast(screen_y)) - p.y;
+            if (py < 0 or py >= p.height) continue;
+            for (0..p.width) |px| {
+                const sx = @as(i64, p.x) + @as(i64, @intCast(px));
+                if (sx < 0 or sx >= size[0]) continue;
+                const src = p.pixels[@as(usize, @intCast(py)) * p.width + px];
+                const d = &line[@intCast(sx)];
+                d.* = over(d.*, src);
+            }
+        }
+    }
+
+    /// `src` (0xAARRGGBB, not premultiplied) over the opaque `dst`, as the
+    /// GPU blends it.
+    fn over(dst: u32, src: u32) u32 {
+        const a = src >> 24;
+        if (a == 255) return src;
+        if (a == 0) return dst;
+        var out: u32 = 0xff000000;
+        inline for (.{ 0, 8, 16 }) |shift| {
+            const sc = src >> shift & 0xff;
+            const dc = dst >> shift & 0xff;
+            out |= ((sc * a + dc * (255 - a) + 127) / 255) << shift;
+        }
+        return out;
+    }
+
+    fn panelPlane(r: *Renderer, p: *Panel, i: u1, size: [2]u32) ?Scanout {
         if (p.planes[i]) |plane| return plane;
-        const bo = r.dev.createBo(p.width * p.height * 4) catch return null;
-        const fb = vc4.drm.addFramebuffer(r.dev.fd, bo.kmsHandle(), p.width, p.height, p.width * 4, vc4.drm.format_xrgb8888) catch {
+        const bo = r.dev.createBo(size[0] * size[1] * 4) catch return null;
+        const fb = vc4.drm.addFramebuffer(r.dev.fd, bo.kmsHandle(), size[0], size[1], size[0] * 4, vc4.drm.format_xrgb8888) catch {
             r.dev.destroyBo(bo);
             return null;
         };
-        // The first one shown starts with the current picture.
-        @memcpy(std.mem.bytesAsSlice(u32, bo.map[0 .. p.width * p.height * 4]), p.pixels[0 .. p.width * p.height]);
         p.planes[i] = .{ .bo = bo, .fb_id = fb };
+        p.plane_size = size;
+        // The first one shown starts with the current picture.
+        r.drawPlane(p, p.planes[i].?);
         return p.planes[i];
     }
 
@@ -549,7 +648,11 @@ pub const Renderer = struct {
             destroyTexture(r, old);
             r.background_image = null;
         }
+        r.gpa.free(r.background_bottom);
+        r.background_bottom = &.{};
+        r.band_stamp +%= 1;
         const p = image orelse return;
+        r.background_bottom = try r.gpa.dupe(u32, p.bottom);
         switch (p.kind) {
             .etc1 => {
                 const bo = try r.dev.createBo(@intCast(p.data.len));
@@ -708,6 +811,12 @@ fn channelDistance(a: u32, b: u32) u32 {
 
 const testing = std.testing;
 const sim = vc4.qpu_sim;
+
+test "a band's panel is blended over the background as the GPU blends it" {
+    try testing.expectEqual(@as(u32, 0xff112233), Renderer.over(0xff445566, 0xff112233));
+    try testing.expectEqual(@as(u32, 0xff445566), Renderer.over(0xff445566, 0x00112233));
+    try testing.expectEqual(@as(u32, 0xff808080), Renderer.over(0xff000000, 0x80ffffff));
+}
 
 test "a rounded window's corners are cut, and its shadow fades out around it (shaders/window.zig, in the QPU simulator)" {
     // A window 100 by 60 at (0, 0) on the screen, in a blue-grey, over
