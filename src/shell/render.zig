@@ -72,8 +72,9 @@ pub const preview_color = 0x55d0bcff;
 /// the vertex buffer holds this many quads besides the panels').
 pub const max_windows = 48;
 
-/// A panel's picture, drawn at (`x`, `y`) on the screen.
-pub const PanelQuad = struct { texture: server.Texture, x: i32 = 0, y: i32 };
+/// A panel's picture, drawn at (`x`, `y`) on the screen (blended, if it
+/// is see-through in places).
+pub const PanelQuad = struct { texture: server.Texture, x: i32 = 0, y: i32, blended: bool = false };
 
 /// The programs a frame is drawn with: textures as they are, blended (the
 /// snap preview), and rounded windows' corners and shadows.
@@ -106,7 +107,7 @@ pub fn recordFrame(frame: *render.Frame, pipelines: Pipelines, preview: server.T
         quads += 1;
     }
     for (panels) |panel| if (panel) |pq| {
-        try quad(frame, pipeline, vbo, quads, pq.texture, pq.x, pq.y, pq.texture.width, pq.texture.height, 0, null);
+        try quad(frame, if (pq.blended) pipelines.blended else pipeline, vbo, quads, pq.texture, pq.x, pq.y, pq.texture.width, pq.texture.height, 0, null);
         quads += 1;
     };
 }
@@ -238,8 +239,20 @@ comptime {
 /// A buffer the display can show.
 const Scanout = struct { bo: vc4.Bo, fb_id: u32 };
 
-/// The shell's own panels on the screen, drawn on the CPU.
-pub const PanelId = enum { dock, perf };
+/// The shell's own panels on the screen, drawn on the CPU: the dock, the
+/// performance overlay, and the dock's tooltip.
+pub const PanelId = enum {
+    dock,
+    perf,
+    tooltip,
+
+    /// See-through in places (its pixels' alpha says where): drawn
+    /// blended, so only when the frame is composited, not on an overlay
+    /// plane.
+    fn blended(id: PanelId) bool {
+        return id == .tooltip;
+    }
+};
 const n_panels = @typeInfo(PanelId).@"enum".field_names.len;
 
 /// A panel's picture, copied where it is needed when a frame is drawn: into
@@ -388,7 +401,9 @@ pub const Renderer = struct {
         var out: vc4.kms.Overlays = @splat(null);
         for (&r.panels, 0..) |*p, i| {
             if (p.width == 0 or p.height == 0 or p.hidden) continue;
-            if (kms.overlays[i] == null) return null;
+            // One that is see-through is composited.
+            if (@as(PanelId, @enumFromInt(i)).blended()) return null;
+            if (i >= kms.overlays.len or kms.overlays[i] == null) return null;
             out[i] = r.panelLayer(p) orelse return null;
         }
         return out;
@@ -528,13 +543,14 @@ pub const Renderer = struct {
     /// The panels as textures, with their latest pictures.
     fn panelQuads(r: *Renderer) ![n_panels]?PanelQuad {
         var quads: [n_panels]?PanelQuad = @splat(null);
-        for (&r.panels, &quads) |*p, *q| {
+        for (&r.panels, &quads, 0..) |*p, *q, i| {
             if (p.width == 0 or p.height == 0 or p.hidden) continue;
+            const blended = @as(PanelId, @enumFromInt(i)).blended();
             if (p.texture_stale) {
-                p.texture = try uploadPixels(r, p.texture, std.mem.sliceAsBytes(p.pixels), p.width, p.height, p.width * 4, .xrgb8888);
+                p.texture = try uploadPixels(r, p.texture, std.mem.sliceAsBytes(p.pixels), p.width, p.height, p.width * 4, if (blended) .argb8888 else .xrgb8888);
                 p.texture_stale = false;
             }
-            q.* = .{ .texture = p.texture.?, .x = p.x, .y = p.y };
+            q.* = .{ .texture = p.texture.?, .x = p.x, .y = p.y, .blended = blended };
         }
         return quads;
     }

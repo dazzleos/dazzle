@@ -253,6 +253,7 @@ fn run(init: std.process.Init.Minimal) !void {
         // each refresh until they are there.
         _ = server.animateOverview(now);
         var wake = next_tick;
+        if (dock.tooltipDue()) |due| wake = @min(wake, due);
         if (!renderer.flipPending()) {
             if (server.damaged) wake = now;
             if (panels_damaged) wake = @min(wake, client_frame_ns + panel_grace_ns);
@@ -428,6 +429,9 @@ fn run(init: std.process.Init.Minimal) !void {
                 if (dock_tap != null or (dock_visible and e == .button and e.button.pressed and server.grab == null and server.drag == null and server.buttons_down == 0 and pointer.y >= @as(f64, @floatFromInt(dock_y)))) {
                     if (dock_tap == null and e.button.code != evdev.btn_left) continue;
                     const at = dock_tap orelse [2]f64{ pointer.x, pointer.y };
+                    // Pressed, an icon's tooltip goes.
+                    if (dock.tooltip_shown != null) panels_damaged = true;
+                    dock.dismissTooltip();
                     server.setOverview(false);
                     // The update icon: Settings' Software page, to update.
                     if (dock.hitUpdates(at[0], at[1] - @as(f64, @floatFromInt(dock_y)))) {
@@ -461,12 +465,18 @@ fn run(init: std.process.Init.Minimal) !void {
                 renderer.moveCursor(@intFromFloat(pointer.x), @intFromFloat(pointer.y));
             }
             const in_dock = dock_visible and server.grab == null and server.drag == null and server.buttons_down == 0 and pointer.y >= @as(f64, @floatFromInt(dock_y));
-            if (dock.pointerAt(if (in_dock) pointer.x else null, pointer.y - @as(f64, @floatFromInt(dock_y)))) {
+            if (dock.pointerAt(if (in_dock) pointer.x else null, pointer.y - @as(f64, @floatFromInt(dock_y)), sys.nowNs())) {
                 dock.draw();
                 renderer.setPanel(.dock, dock.pixels, dock.width, dock.height, @intCast(dock_y));
                 panels_damaged = true;
             }
         };
+        // The name of the app whose icon the pointer rests on, once it has
+        // rested a while.
+        if (dock.drawTooltip(sys.nowNs())) |tip| {
+            renderer.setPanelAt(.tooltip, tip.pixels, tip.width, tip.height, tip.x, tip.y);
+            panels_damaged = true;
+        }
 
         if (screenshot_wanted) {
             screenshot_wanted = false;
@@ -614,6 +624,7 @@ fn run(init: std.process.Init.Minimal) !void {
             server.frameDrawn();
             // A fullscreen window on top hides the dock.
             renderer.setPanelHidden(.dock, !dock_shown or server.fullscreenTop());
+            renderer.setPanelHidden(.tooltip, !dock_shown or server.fullscreenTop() or dock.tooltip_shown == null);
             renderer.setPanelHidden(.perf, !perf_shown);
             // A maximized, full-size window on top goes straight onto the
             // display, with the dock on a plane below it; a fullscreen one,

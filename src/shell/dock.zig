@@ -38,6 +38,9 @@ pub const Theme = enum {
         dot: u32,
         status_active: u32,
         status_inactive: u32,
+        /// An app's name over its icon, when the pointer rests on it.
+        tooltip_background: u32,
+        tooltip_text: u32,
     };
 
     pub fn colors(t: Theme) Colors {
@@ -49,6 +52,8 @@ pub const Theme = enum {
                 .dot = 0xffe8eefc,
                 .status_active = 0xffffffff,
                 .status_inactive = 0x40ffffff,
+                .tooltip_background = 0xffe8eefc,
+                .tooltip_text = 0xff1c2a4a,
             },
             .light => .{
                 .background = 0xffe8eef8,
@@ -57,6 +62,8 @@ pub const Theme = enum {
                 .dot = 0xff1c2a4a,
                 .status_active = 0xff1c2a4a,
                 .status_inactive = 0x401c2a4a,
+                .tooltip_background = 0xff1c2a4a,
+                .tooltip_text = 0xffe8eef8,
             },
         };
     }
@@ -487,6 +494,17 @@ pub const Dock = struct {
     volume: VolumeStatus = .{},
     /// Light or dark colour scheme (from `/data/apps/.appearance`).
     theme: Theme = .dark,
+    /// The app's name, over the icon the pointer rests on: when it is due
+    /// (the pointer has rested a while), and the app whose it shows.
+    tooltip_at: ?u64 = null,
+    tooltip_shown: ?usize = null,
+    /// Its picture (`drawTooltip`), and the screen's height (the dock is
+    /// at its bottom).
+    tooltip_pixels: []u32,
+    screen_height: u32,
+
+    /// How long the pointer rests on an icon before its name shows.
+    pub const tooltip_delay_ns = 500 * std.time.ns_per_ms;
 
     pub fn init(gpa: std.mem.Allocator, f: ?font.Font, apps: []App, screen_width: u32, screen_height: u32) !Dock {
         const scale = @min(@as(f32, @floatFromInt(screen_width)) / 1920, @as(f32, @floatFromInt(screen_height)) / 1080);
@@ -496,6 +514,8 @@ pub const Dock = struct {
             .icon_font = font.Font.init(icons.font_data) catch null,
             .cache = font.GlyphCache.init(gpa),
             .pixels = try gpa.alloc(u32, @as(usize, screen_width) * height),
+            .tooltip_pixels = try gpa.alloc(u32, @as(usize, tooltipMaxWidth(scale)) * tooltipHeight(scale)),
+            .screen_height = screen_height,
             .width = screen_width,
             .height = height,
             .scale = scale,
@@ -612,14 +632,95 @@ pub const Dock = struct {
     }
 
     /// Moves the hover highlight for the pointer at (`x`, `y`) in the dock
-    /// (null: elsewhere). Returns whether it changed.
-    pub fn pointerAt(d: *Dock, x: ?f64, y: f64) bool {
+    /// (null: elsewhere), at `now`. Returns whether it changed (and with
+    /// it, the tooltip: gone, and due again a while later; at once if one
+    /// was showing, moving along the icons).
+    pub fn pointerAt(d: *Dock, x: ?f64, y: f64, now: u64) bool {
         const under = if (x) |px| d.hit(px, y) else null;
         if (under == d.hover) return false;
+        const was_shown = d.tooltip_shown != null;
         d.hover = under;
+        d.tooltip_shown = null;
+        d.tooltip_at = if (under == null) null else if (was_shown) now else now + tooltip_delay_ns;
         return true;
     }
+
+    /// An icon was pressed: its tooltip goes (until the pointer moves to
+    /// another).
+    pub fn dismissTooltip(d: *Dock) void {
+        d.tooltip_at = null;
+        d.tooltip_shown = null;
+    }
+
+    /// When the tooltip should show, if it is not showing yet.
+    pub fn tooltipDue(d: *const Dock) ?u64 {
+        return if (d.tooltip_shown == null) d.tooltip_at else null;
+    }
+
+    /// The tooltip's picture: the app's name, centred above its icon.
+    pub const Tooltip = struct { pixels: []const u32, width: u32, height: u32, x: i32, y: i32 };
+
+    fn tooltipHeight(scale: f32) u32 {
+        return @intFromFloat(@round(34 * scale));
+    }
+
+    fn tooltipMaxWidth(scale: f32) u32 {
+        return @intFromFloat(@round(480 * scale));
+    }
+
+    /// Draws the tooltip of the icon the pointer rests on, if it is due by
+    /// `now` (it is then showing).
+    pub fn drawTooltip(d: *Dock, now: u64) ?Tooltip {
+        const due = d.tooltip_at orelse return null;
+        const i = d.hover orelse return null;
+        if (now < due or d.tooltip_shown != null) return null;
+        const f = if (d.font) |*f| f else return null;
+        d.tooltip_at = null;
+        d.tooltip_shown = i;
+        const c = d.theme.colors();
+        const text = d.apps[i].label;
+        const style: font.Style = .{ .font = f, .size = @round(18 * d.scale), .color = c.tooltip_text };
+        const pad = @round(12 * d.scale);
+        const h = tooltipHeight(d.scale);
+        const w: u32 = @min(@as(u32, @intFromFloat(@ceil(font.measure(style, text) + 2 * pad))), tooltipMaxWidth(d.scale));
+        const pixels = d.tooltip_pixels[0 .. @as(usize, w) * h];
+        const canvas: font.Canvas = .{ .pixels = pixels, .width = w, .height = h, .stride = w };
+        canvas.fill(0, 0, w, h, c.tooltip_background);
+        const fh: f32 = @floatFromInt(h);
+        const baseline = @round(fh / 2 + style.ascent() * 0.36);
+        _ = font.draw(canvas, &d.cache, style, pad, baseline, text) catch {};
+        // Rounded: what is outside its corners is see-through.
+        cutCorners(canvas, @round(6 * d.scale));
+        // Above the icon, clear of the dock, and on the screen.
+        const r = d.iconRect(i);
+        const fw: f32 = @floatFromInt(w);
+        const x = std.math.clamp(@round(r.x + r.size / 2 - fw / 2), 0, @as(f32, @floatFromInt(d.width)) - fw);
+        const dock_top: i32 = @intCast(d.screen_height - d.height);
+        return .{ .pixels = pixels, .width = w, .height = h, .x = @intFromFloat(x), .y = dock_top - @as(i32, @intCast(h)) - @as(i32, @intFromFloat(@round(8 * d.scale))) };
+    }
 };
+
+/// Makes the canvas's corners, outside a rounded rectangle of `radius`,
+/// see-through (in the pixels' alpha), anti-aliased.
+fn cutCorners(c: font.Canvas, radius: f32) void {
+    const w: f32 = @floatFromInt(c.width);
+    const h: f32 = @floatFromInt(c.height);
+    const r = @min(radius, @min(w, h) / 2);
+    const n: u32 = @intFromFloat(@ceil(r));
+    for (0..c.height) |py| {
+        // Only the rows and columns of the corners.
+        if (py >= n and py + n < c.height) continue;
+        for (0..c.width) |px| {
+            if (px >= n and px + n < c.width) continue;
+            const qx = @abs(@as(f32, @floatFromInt(px)) + 0.5 - w / 2) - (w / 2 - r);
+            const qy = @abs(@as(f32, @floatFromInt(py)) + 0.5 - h / 2) - (h / 2 - r);
+            const outside = std.math.hypot(@max(qx, 0), @max(qy, 0)) + @min(@max(qx, qy), 0) - r;
+            const coverage = std.math.clamp(0.5 - outside, 0, 1);
+            const p = &c.pixels[py * c.stride + px];
+            p.* = (p.* & 0x00ffffff) | (@as(u32, @intFromFloat(@round(coverage * 255))) << 24);
+        }
+    }
+}
 
 /// Fills a rectangle with rounded corners, anti-aliased.
 fn roundedRect(c: font.Canvas, x: f32, y: f32, w: f32, h: f32, radius: f32, color: u32) void {
@@ -713,6 +814,7 @@ test "icons and the status box are in a row in the middle, and clicks find the a
     };
     var d = try Dock.init(testing.allocator, null, &apps, 1920, 1080);
     defer testing.allocator.free(d.pixels);
+    defer testing.allocator.free(d.tooltip_pixels);
     defer d.cache.deinit();
     try testing.expectEqual(@as(u32, 76), d.height);
     const r0 = d.iconRect(0);
@@ -732,8 +834,8 @@ test "icons and the status box are in a row in the middle, and clicks find the a
     try testing.expectEqual(icons.Icon.volume_off, (VolumeStatus{ .volume = 0, .muted = false }).icon());
 
     // Hovering changes the picture; a running app gets a dot.
-    try testing.expect(d.pointerAt(r1.x + 1, r1.y + 1));
-    try testing.expect(!d.pointerAt(r1.x + 2, r1.y + 2));
+    try testing.expect(d.pointerAt(r1.x + 1, r1.y + 1, 0));
+    try testing.expect(!d.pointerAt(r1.x + 2, r1.y + 2, 0));
     apps[0].pid = 42;
     d.network = .ethernet;
     d.volume = .{ .volume = 75, .muted = false };
@@ -770,6 +872,7 @@ test "with updates, the status box is wider and starts with the update icon" {
     var apps = [_]App{.{ .name = "a", .label = "A", .path = "/apps/a/a", .icon = .folder }};
     var d = try Dock.init(testing.allocator, null, &apps, 1920, 1080);
     defer testing.allocator.free(d.pixels);
+    defer testing.allocator.free(d.tooltip_pixels);
     defer d.cache.deinit();
     const without = d.statusRect();
     d.draw();
@@ -930,4 +1033,54 @@ test "Super+S opens Settings and Super+1, Super+2 etc open the app at that dock 
     try testing.expectEqual(@as(?usize, 2), shortcutApp(&apps, evdev.key_1 + 2));
     try testing.expectEqual(@as(?usize, null), shortcutApp(&apps, evdev.key_1 + 3));
     try testing.expectEqual(@as(?usize, null), shortcutApp(&apps, 30));
+}
+
+test "resting the pointer on an icon shows the app's name above it, a while later" {
+    var apps = [_]App{
+        .{ .name = "dazzle-files", .label = "Files", .path = "/apps/files/files", .icon = .folder },
+        .{ .name = "dazzle-settings", .label = "Settings", .path = "/apps/settings/settings", .icon = .settings },
+    };
+    const fira = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    var d = try Dock.init(testing.allocator, fira, &apps, 1920, 1080);
+    defer testing.allocator.free(d.pixels);
+    defer testing.allocator.free(d.tooltip_pixels);
+    defer d.cache.deinit();
+    const r0 = d.iconRect(0);
+    const r1 = d.iconRect(1);
+    const ms = std.time.ns_per_ms;
+
+    // Not at once: half a second later.
+    try testing.expect(d.pointerAt(r0.x + 4, r0.y + 4, 1000 * ms));
+    try testing.expectEqual(@as(?u64, 1500 * ms), d.tooltipDue());
+    try testing.expect(d.drawTooltip(1200 * ms) == null);
+    const tip = d.drawTooltip(1500 * ms).?;
+    try testing.expectEqual(@as(?usize, 0), d.tooltip_shown);
+    try testing.expect(d.tooltipDue() == null);
+    // Above the dock, centred over the icon.
+    try testing.expect(tip.y + @as(i32, @intCast(tip.height)) < 1080 - @as(i32, @intCast(d.height)));
+    const middle = @as(f32, @floatFromInt(tip.x)) + @as(f32, @floatFromInt(tip.width)) / 2;
+    try testing.expectApproxEqAbs(r0.x + r0.size / 2, middle, 1);
+    // Its corners are see-through, and its middle not; the name is drawn.
+    const c = Theme.dark.colors();
+    try testing.expectEqual(@as(u32, 0), tip.pixels[0] >> 24);
+    try testing.expectEqual(c.tooltip_background, tip.pixels[(tip.height / 2) * tip.width + 2]);
+    var text_pixels: usize = 0;
+    for (tip.pixels) |px| if (px != c.tooltip_background and px >> 24 == 0xff) {
+        text_pixels += 1;
+    };
+    try testing.expect(text_pixels > 20);
+
+    // Moving to the next icon, it shows that app's at once.
+    try testing.expect(d.pointerAt(r1.x + 4, r1.y + 4, 2000 * ms));
+    try testing.expect(d.tooltip_shown == null);
+    try testing.expect(d.drawTooltip(2000 * ms) != null);
+    try testing.expectEqual(@as(?usize, 1), d.tooltip_shown);
+    // Pressed, it goes; and off the icons, it is not due.
+    d.dismissTooltip();
+    try testing.expect(d.tooltip_shown == null and d.tooltipDue() == null);
+    try testing.expect(d.pointerAt(null, 0, 3000 * ms));
+    try testing.expect(d.tooltipDue() == null);
+    // Back on an icon, a while later again.
+    try testing.expect(d.pointerAt(r0.x + 4, r0.y + 4, 4000 * ms));
+    try testing.expectEqual(@as(?u64, 4500 * ms), d.tooltipDue());
 }

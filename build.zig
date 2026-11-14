@@ -1344,6 +1344,9 @@ pub fn build(b: *std.Build) void {
         m.addAnonymousImport("TwemojiMozilla.ttf", .{ .root_source_file = b.path("fonts/TwemojiMozilla.ttf") });
     }
     const test_step = b.step("test", "Run unit tests on the host");
+    // The shell's tests draw text (the dock's tooltips) in the system font.
+    const host_shell = addProgramModule(b, "src/shell/main.zig", b.graph.host, test_optimize, host, shaders, false);
+    host_shell.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     // The demo's layout is tested with its real font.
     const host_demo = addProgramModule(b, "src/apps/demo/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_demo.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
@@ -1412,7 +1415,7 @@ pub fn build(b: *std.Build) void {
         host_maps,
         host_terminal,
         host_develop,
-        addProgramModule(b, "src/shell/main.zig", b.graph.host, test_optimize, host, shaders, false),
+        host_shell,
     }) |m| {
         const t = b.addTest(.{ .root_module = m });
         test_step.dependOn(&b.addRunArtifact(t).step);
