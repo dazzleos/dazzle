@@ -545,7 +545,7 @@ const LayerPlan = struct {
                 }
                 beside[n] = b.bounds;
                 n += 1;
-            } else for (beside[0..n]) |r| if (b.overlaps(r)) {
+            } else for (beside[0..n]) |r| if (overlapsMuch(b, r)) {
                 p.beside = false;
                 return p;
             };
@@ -553,11 +553,23 @@ const LayerPlan = struct {
         return p;
     }
 
+    /// Whether `b` overlaps `r` by more than the pixel or two of an
+    /// antialiased edge (which would not be seen drawn the other way).
+    fn overlapsMuch(b: *const kgfx.canvas.Batch, r: kgfx.Rect) bool {
+        const areas: []const kgfx.Rect = if (b.areas.items.len > 0) b.areas.items else &.{b.bounds};
+        for (areas) |a| {
+            const w = @min(a.x + a.w, r.x + r.w) - @max(a.x, r.x);
+            const h = @min(a.y + a.h, r.y + r.h) - @max(a.y, r.y);
+            if (w > 2 and h > 2) return true;
+        }
+        return false;
+    }
+
     /// Whether batch `b` of segment `segment` goes on the layer.
     fn onLayer(p: *const LayerPlan, segment: usize, b: *const kgfx.canvas.Batch) bool {
         if (segment > p.last_gpu) return true;
         if (!p.beside) return false;
-        for (p.areas[0..p.n_areas]) |a| if (b.overlaps(a)) return false;
+        for (p.areas[0..p.n_areas]) |a| if (overlapsMuch(b, a)) return false;
         return true;
     }
 };
