@@ -594,7 +594,10 @@ fn hostTool(b: *std.Build, name: []const u8) *std.Build.Step.Compile {
         .root_module = b.createModule(.{
             .root_source_file = b.path(b.fmt("tools/{s}.zig", .{name})),
             .target = b.graph.host,
-            .optimize = .debug,
+            // Optimized (with its checks kept): some run at every build,
+            // hashing and signing megabytes of archives, which takes
+            // seconds unoptimized.
+            .optimize = .ReleaseSafe,
         }),
     });
 }
@@ -674,6 +677,26 @@ const overlays_readme =
     \\The Raspberry Pi firmware loads overlays from the folder os_prefix
     \\names (config.txt) only when this README is here: keep it.
     \\
+;
+
+/// Makes a kernel configuration (see `addKernel`): `$1` the source tree,
+/// `$2` the output directory, `$3` merge_config.sh, `$4` "stamp" to skip
+/// it when made before from the same things or "always", `$5` and `$6`
+/// the fragments, and the rest make's ARCH= and CROSS_COMPILE=.
+const config_script =
+    \\set -e
+    \\src=$1 o=$2 merge=$3 mode=$4 dazzle=$5 arch=$6
+    \\shift 6
+    \\mkdir -p "$o"
+    \\cross=$(printf '%s\n' "$@" | sed -n 's/^CROSS_COMPILE=//p')
+    \\want="$(git -C "$src" rev-parse HEAD) $(cat "$dazzle" "$arch" | sha256sum) $("${cross}gcc" -dumpfullversion) $*"
+    \\if [ "$mode" = stamp ] && [ -f "$o/.config" ] && [ "$(cat "$o/.dazzle-config" 2>/dev/null)" = "$want" ]; then exit 0; fi
+    \\rm -f "$o/.dazzle-config"
+    \\make -s -C "$src" O="$o" "$@" tinyconfig
+    \\# It lists every option it changes: shown only if it fails.
+    \\if ! "$merge" -m -O "$o" "$o/.config" "$dazzle" "$arch" > "$o/merge.log" 2>&1; then cat "$o/merge.log" >&2; exit 1; fi
+    \\make -s -C "$src" O="$o" "$@" olddefconfig
+    \\printf '%s\n' "$want" > "$o/.dazzle-config"
 ;
 
 const Kernel = struct {
@@ -773,15 +796,18 @@ fn addKernel(b: *std.Build) Kernel {
         const o = b.pathJoin(&.{ out, arch });
         dir.* = o;
         const fragment = b.path(b.fmt("kernel/{s}.config", .{arch}));
-        Chain.add(&last, b.addSystemCommand(&.{ "mkdir", "-p", o }));
-        Chain.add(&last, make(b, linux_dir, o, toolchain, &.{"tinyconfig"}));
-        const merge = b.addSystemCommand(&.{ b.pathJoin(&.{ linux_dir, "scripts/kconfig/merge_config.sh" }), "-m", "-O", o, b.pathJoin(&.{ o, ".config" }) });
-        merge.addFileArg(b.path("kernel/dazzle.config"));
-        merge.addFileArg(fragment);
-        // It lists every option it changes; show that only if it fails.
-        merge.expectExitCode(0);
-        Chain.add(&last, merge);
-        Chain.add(&last, make(b, linux_dir, o, toolchain, &.{"olddefconfig"}));
+        // The configuration: the smallest, with Dazzle's options and the
+        // architecture's merged in. Made again only when what it is made
+        // from changed (the kernel's source, the two fragments, the
+        // compiler): otherwise a build would spend most of its time on it,
+        // and the kernel's make would then look over everything again. A
+        // tree of one's own (-Dlinux) may have changed without a commit:
+        // its configuration is always made again.
+        const config = b.addSystemCommand(&.{ "sh", "-c", config_script, "config", linux_dir, o, b.pathJoin(&.{ linux_dir, "scripts/kconfig/merge_config.sh" }), if (own_tree == null) "stamp" else "always" });
+        config.addFileArg(b.path("kernel/dazzle.config"));
+        config.addFileArg(fragment);
+        config.addArgs(toolchain);
+        Chain.add(&last, config);
         for ([_]std.Build.LazyPath{ b.path("kernel/dazzle.config"), fragment }) |wanted| {
             const check_config = b.addRunArtifact(hostTool(b, "check"));
             check_config.addArg("config");
@@ -979,21 +1005,28 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.B
     // of the times they were made (so a build with a newer kernel is a
     // newer system, offered as an update even without a change to Dazzle).
     // A kernel tree without git history counts as Dazzle's commit alone.
+    // Written only when it changes: a file just written is not trusted by
+    // the build's cache, and everything made from it (the system's
+    // archive, compressed for seconds, and the card's image) would be made
+    // again at every build.
+    const version_path = fromRoot(b, "build/version");
     const version_cmd = b.addSystemCommand(&.{
         "sh",
         "-c",
-        \\k=$(git -C "$1" log -1 --format="%ct %h" 2>/dev/null) || { echo "$2 $3"; exit; }
+        \\v=$(k=$(git -C "$1" log -1 --format="%ct %h" 2>/dev/null) || { echo "$2 $3"; exit; }
         \\t=${k% *}; [ "$t" -gt "$2" ] || t=$2
-        \\echo "$t $3-${k#* }"
+        \\echo "$t $3-${k#* }")
+        \\[ "$(cat "$4" 2>/dev/null)" = "$v" ] || echo "$v" > "$4"
         ,
         "version",
         kernel.src,
         b.fmt("{d}", .{gitCommitTime(b)}),
         gitCommit(b),
+        version_path,
     });
     version_cmd.step.dependOn(kernel.step);
     version_cmd.has_side_effects = true;
-    const version = version_cmd.captureStdOut(.{ .basename = "version" });
+    const version: std.Build.LazyPath = .{ .cwd_relative = version_path };
     var files: std.ArrayList(CardFile) = .empty;
     files.appendSlice(b.allocator, &.{
         // The firmware starts kernel.img on the ARMv6 boards, kernel7.img on
@@ -1026,7 +1059,7 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.B
         pack.addArg("pack");
         const tar = pack.addOutputFileArg("dazzle-os.tar");
         for (files.items) |f| pack.addPrefixedFileArg(b.fmt("{s}=", .{f[0]}), f[1]);
-        pack.step.dependOn(kernel.step);
+        pack.step.dependOn(&version_cmd.step);
         const compress = b.addSystemCommand(&.{ "xz", "-9", "-c" });
         compress.step.dependOn(&xz.step);
         compress.addFileArg(tar);
@@ -1036,6 +1069,7 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.B
         manifest.addArg(b.fmt("--key={s}", .{signingKey(b).seed_hex}));
         const json = manifest.addOutputFileArg("os.json");
         manifest.addFileArg(version);
+        manifest.step.dependOn(&version_cmd.step);
         manifest.addFileArg(archive);
         os_step.dependOn(&b.addInstallFile(archive, "os/dazzle-os.tar.xz").step);
         os_step.dependOn(&b.addInstallFile(json, "os/os.json").step);
@@ -1044,7 +1078,7 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.B
 
     const mkimage = b.addRunArtifact(hostTool(b, "mkimage"));
     mkimage.step.dependOn(verify_step);
-    mkimage.step.dependOn(kernel.step);
+    mkimage.step.dependOn(&version_cmd.step);
     const img = mkimage.addOutputFileArg("dazzle.img");
     mkimage.addArg(if (b.option(u32, "image-size", "SD image size in MiB (default: just big enough)")) |mib| b.fmt("{d}", .{mib}) else "auto");
     mkimage.addArg(b.fmt("--grow-to={d}", .{boot_partition_mib}));
