@@ -1313,9 +1313,12 @@ pub fn build(b: *std.Build) void {
         .root_module = setup_module,
     });
     const install_setup = b.addInstallArtifact(setup_exe, .{});
+    // The shell's own UI is kete's too, drawn on the CPU into its panels.
+    const shell_module = addProgramModule(b, "src/shell/main.zig", target, optimize, pi, shaders, true);
+    _ = addKete(b, shell_module, pi, target, optimize, "src/shell");
     const shell_exe = b.addExecutable(.{
         .name = "dazzle-shell",
-        .root_module = addProgramModule(b, "src/shell/main.zig", target, optimize, pi, shaders, true),
+        .root_module = shell_module,
     });
     const install_shell = b.addInstallArtifact(shell_exe, .{});
     const maps_mod = addProgramModule(b, "src/apps/maps/main.zig", target, optimize, pi, shaders, true);
@@ -1468,6 +1471,7 @@ pub fn build(b: *std.Build) void {
     // The shell's tests draw text (the dock's tooltips) in the system font.
     const host_shell = addProgramModule(b, "src/shell/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_shell.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
+    _ = addKete(b, host_shell, host, b.graph.host, test_optimize, "src/shell");
     // The demo's layout is tested with its real font.
     const host_demo = addProgramModule(b, "src/apps/demo/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_demo.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });

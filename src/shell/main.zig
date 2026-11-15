@@ -44,6 +44,7 @@ const perf_mod = @import("perf.zig");
 const quick_mod = @import("quick.zig");
 const notice_mod = @import("notice.zig");
 const lock_mod = @import("lock.zig");
+const kete_panel = @import("kete_panel.zig");
 const keyboard = @import("keyboard.zig");
 const screenshot = @import("screenshot.zig");
 const remote_mod = @import("remote.zig");
@@ -59,16 +60,16 @@ fn logFn(comptime level: std.log.Level, comptime scope: @TypeOf(.enum_literal), 
     print("dazzle-shell: " ++ (if (scope == .default) "" else @tagName(scope) ++ ": ") ++ fmt ++ "\n", args);
 }
 
-pub fn main(init: std.process.Init.Minimal) u8 {
+pub fn main(init: std.process.Init) u8 {
     sys.logToKmsgIfStderr();
-    run(init) catch |err| {
+    run(init.minimal, init.io) catch |err| {
         print(sys.log_error ++ "dazzle-shell: error: {s}\n", .{@errorName(err)});
         return 1;
     };
     return 0;
 }
 
-fn run(init: std.process.Init.Minimal) !void {
+fn run(init: std.process.Init.Minimal, io: std.Io) !void {
     const launched = sys.nowNs();
     // How long each part of starting takes, said with the first frame.
     var took: StartTimes = .{ .at = launched };
@@ -89,12 +90,15 @@ fn run(init: std.process.Init.Minimal) !void {
     });
 
     var ui_font: ?font.Font = null;
+    // Its file, for the shell's kete UI too.
+    var ui_font_data: ?[]const u8 = null;
     var emoji_font: ?font.Font = null;
     var font_buf: [512]u8 = undefined;
     const font_path = sys.fontFile(&font_buf, font.default_font_file);
     if (sys.readFileAlloc(gpa, font_path, 32 * 1024 * 1024)) |data| {
         if (font.Font.init(data)) |f| {
             ui_font = f;
+            ui_font_data = data;
         } else |err| print("dazzle-shell: font: {s}\n", .{@errorName(err)});
     } else |err| print(sys.log_warning ++ "dazzle-shell: cannot read {s}: {s}\n", .{ font_path, @errorName(err) });
     var emoji_buf: [512]u8 = undefined;
@@ -133,7 +137,7 @@ fn run(init: std.process.Init.Minimal) !void {
     // Parental controls (the system manager keeps them): while it says the
     // computer is locked, the lock screen in place of the windows and the
     // dock; before then, warnings as time runs out.
-    var lock = try lock_mod.Lock.init(gpa, ui_font, dock.scale);
+    var lock: lock_mod.Screen = .{ .panel = try kete_panel.Panel.create(gpa, io, ui_font_data) };
     var parental: sys.system.Parental = .{};
     var locked = false;
     var warnings: lock_mod.Warnings = .{};
@@ -390,7 +394,7 @@ fn run(init: std.process.Init.Minimal) !void {
                     server.setKeyboard(r.locale.keyboard);
                 }
                 if (updates.setReport(r)) updates_changed = true;
-                if (applyParental(r.parental, &parental, &locked, &lock, &quick, &renderer, dock.theme)) {
+                if (applyParental(r.parental, &parental, &locked, &lock, &quick, &renderer)) {
                     server.damaged = true;
                     panels_damaged = true;
                 }
@@ -462,7 +466,7 @@ fn run(init: std.process.Init.Minimal) !void {
                     },
                     .screenshot => {
                         var windows: [render.max_windows]render.Window = undefined;
-                        if (renderer.capture(gpa, frameWindows(&server, &windows))) |pixels| {
+                        if (renderer.capture(gpa, if (locked) &.{} else frameWindows(&server, &windows))) |pixels| {
                             defer gpa.free(pixels);
                             if (@import("gfx").png.encode(gpa, pixels, renderer.width, renderer.height)) |data| {
                                 defer gpa.free(data);
@@ -581,8 +585,8 @@ fn run(init: std.process.Init.Minimal) !void {
                 // Locked: the keys type the password; nothing else does
                 // anything.
                 if (locked) {
-                    lock.keyboard = server.keyboard_layout;
-                    if (e == .key) if (lockKey(&lock, e.key.code, e.key.pressed, &parental, &locked, &quick, &renderer, dock.theme)) {
+                    lock.panel.setKeyboard(server.keyboard_layout);
+                    if (e == .key) if (lockKey(&lock, e.key.code, e.key.pressed, &parental, &locked, &quick, &renderer)) {
                         server.damaged = true;
                         panels_damaged = true;
                     };
@@ -793,7 +797,7 @@ fn run(init: std.process.Init.Minimal) !void {
         if (screenshot_wanted) {
             screenshot_wanted = false;
             var windows: [render.max_windows]render.Window = undefined;
-            if (renderer.capture(gpa, frameWindows(&server, &windows))) |pixels| {
+            if (renderer.capture(gpa, if (locked) &.{} else frameWindows(&server, &windows))) |pixels| {
                 screenshot.save(gpa, screenshot.folder, pixels, renderer.width, renderer.height, shot_pipe[1]);
             } else |err| print(sys.log_warning ++ "dazzle-shell: cannot take a screenshot: {s}\n", .{@errorName(err)});
         }
@@ -912,7 +916,7 @@ fn run(init: std.process.Init.Minimal) !void {
                         server.setKeyboard(r.locale.keyboard);
                     }
                     if (updates.setReport(r)) updates_changed = true;
-                    if (applyParental(r.parental, &parental, &locked, &lock, &quick, &renderer, dock.theme)) {
+                    if (applyParental(r.parental, &parental, &locked, &lock, &quick, &renderer)) {
                         server.damaged = true;
                         panels_damaged = true;
                     }
@@ -1455,53 +1459,51 @@ fn remoteStatus(gpa: std.mem.Allocator, out: *std.ArrayList(u8), server: *const 
 /// and a frame more when it has gone.
 /// A report's parental controls: locks, or unlocks, the screen as they
 /// say. Returns whether the screen changed.
-fn applyParental(p: sys.system.Parental, have: *sys.system.Parental, locked: *bool, lock: *lock_mod.Lock, quick: *quick_mod.Quick, renderer: *render.Renderer, theme: dock_mod.Theme) bool {
+fn applyParental(p: sys.system.Parental, have: *sys.system.Parental, locked: *bool, lock: *lock_mod.Screen, quick: *quick_mod.Quick, renderer: *render.Renderer) bool {
     const changed = !std.meta.eql(p, have.*);
     have.* = p;
     const now_locked = p.on and p.lock != .none;
     if (now_locked != locked.*) {
         locked.* = now_locked;
-        lock.clear();
-        lock.wrong = false;
-        lock.shift = .{ false, false };
-        lock.altgr = false;
+        lock.entry.clear();
+        lock.entry.wrong = false;
+        lock.panel.followTheme();
         print("dazzle-shell: {s}\n", .{if (now_locked) "locked by parental controls" else "unlocked"});
         if (now_locked) quick.close();
     }
     if (!changed and !locked.*) return false;
-    if (locked.*) drawLock(lock, p, renderer, theme);
+    if (locked.*) drawLock(lock, p, renderer);
     return true;
 }
 
-fn drawLock(lock: *lock_mod.Lock, p: sys.system.Parental, renderer: *render.Renderer, theme: dock_mod.Theme) void {
-    lock.theme = theme;
-    lock.draw(p, sys.realtimeSec());
-    const at = lock.place(renderer.width, renderer.height);
-    renderer.setPanelAt(.lock, lock.picture(), lock.width, lock.height, at[0], at[1]);
+fn drawLock(lock: *lock_mod.Screen, p: sys.system.Parental, renderer: *render.Renderer) void {
+    const pixels = lock.draw(p);
+    if (pixels.len == 0) return;
+    const at = lock_mod.Screen.place(renderer.width, renderer.height);
+    renderer.setPanelAt(.lock, pixels, lock_mod.width, lock_mod.height, at[0], at[1]);
 }
 
 /// A key on the lock screen; Enter tries the password (the system manager
 /// turns parental controls off if it is the one). Returns whether the
 /// screen changed.
-fn lockKey(lock: *lock_mod.Lock, code: u32, pressed: bool, parental: *sys.system.Parental, locked: *bool, quick: *quick_mod.Quick, renderer: *render.Renderer, theme: dock_mod.Theme) bool {
-    switch (lock.key(code, pressed)) {
-        .none => return false,
-        .changed => {},
-        .submit => {
-            var hex_buf: [2 * sys.parental.max_password]u8 = undefined;
-            var req_buf: [32 + 2 * sys.parental.max_password]u8 = undefined;
-            const pw = sys.parental.Password.of(lock.password()) orelse return false;
-            const req = std.fmt.bufPrint(&req_buf, "parental_off {s}\n", .{pw.hex(&hex_buf)}) catch return false;
-            lock.clear();
-            const answer = sys.system.ask(req, 5000);
-            if (answer) |r| if (r.password == true) {
-                _ = applyParental(r.parental, parental, locked, lock, quick, renderer, theme);
-                return true;
-            };
-            lock.wrong = true;
-        },
+fn lockKey(lock: *lock_mod.Screen, code: u32, pressed: bool, parental: *sys.system.Parental, locked: *bool, quick: *quick_mod.Quick, renderer: *render.Renderer) bool {
+    lock.panel.key(code, pressed);
+    // The field takes it at the next frame.
+    _ = lock.draw(parental.*);
+    if (lock.entry.submitted) {
+        var hex_buf: [2 * sys.parental.max_password]u8 = undefined;
+        var req_buf: [32 + 2 * sys.parental.max_password]u8 = undefined;
+        const pw = sys.parental.Password.of(lock.entry.password()) orelse return false;
+        const req = std.fmt.bufPrint(&req_buf, "parental_off {s}\n", .{pw.hex(&hex_buf)}) catch return false;
+        lock.entry.clear();
+        const answer = sys.system.ask(req, 5000);
+        if (answer) |r| if (r.password == true) {
+            _ = applyParental(r.parental, parental, locked, lock, quick, renderer);
+            return true;
+        };
+        lock.entry.wrong = true;
     }
-    drawLock(lock, parental.*, renderer, theme);
+    drawLock(lock, parental.*, renderer);
     return true;
 }
 
@@ -1686,6 +1688,7 @@ test {
     _ = @import("quick.zig");
     _ = @import("notice.zig");
     _ = @import("lock.zig");
+    _ = @import("kete_panel.zig");
     _ = @import("remote.zig");
     _ = @import("glass.zig");
     _ = @import("screenshot.zig");

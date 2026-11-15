@@ -10,200 +10,118 @@
 
 const std = @import("std");
 const sys = @import("sys");
-const font = @import("font");
-const icons = @import("icons");
+const kete = @import("kete");
 const locale = @import("locale");
-const glass = @import("glass.zig");
-const dock = @import("dock.zig");
-const remote = @import("remote.zig");
+const kete_panel = @import("kete_panel.zig");
 
 const Parental = sys.system.Parental;
 
-/// Its size (at 1080p; scaled).
-const box_width = 560;
-const box_height = 340;
-const pad = 32;
-
-pub const Lock = struct {
-    font: ?font.Font,
-    icon_font: ?font.Font,
-    cache: font.GlyphCache,
-    /// Drawn over black (then its picture), and over white.
-    pixels: []u32,
-    width: u32,
-    height: u32,
-    scale: f32,
-    theme: dock.Theme = .dark,
-    /// The password typed so far (UTF-8).
+/// The password typed into the lock screen, and how trying it went.
+pub const Entry = struct {
     typed: [sys.parental.max_password]u8 = undefined,
     len: u8 = 0,
-    /// The keyboard's layout (as the apps have it), and the modifiers held.
-    keyboard: locale.Keyboard = .us,
-    shift: [2]bool = .{ false, false },
-    altgr: bool = false,
-    caps: bool = false,
     /// The password tried was not the one.
     wrong: bool = false,
+    /// Enter was pressed, for the shell to try it.
+    submitted: bool = false,
+    /// A new field each time (empty, after a try).
+    field: u32 = 0,
 
-    pub fn init(gpa: std.mem.Allocator, f: ?font.Font, scale: f32) !Lock {
-        const w: u32 = @intFromFloat(@round(box_width * scale));
-        const h: u32 = @intFromFloat(@round(box_height * scale));
-        return .{
-            .font = f,
-            .icon_font = font.Font.init(icons.font_data) catch null,
-            .cache = font.GlyphCache.init(gpa),
-            .pixels = try gpa.alloc(u32, 2 * @as(usize, w) * h),
-            .width = w,
-            .height = h,
-            .scale = scale,
-        };
+    pub fn password(e: *const Entry) []const u8 {
+        return e.typed[0..e.len];
     }
 
-    pub fn deinit(l: *Lock, gpa: std.mem.Allocator) void {
-        gpa.free(l.pixels);
-        l.cache.deinit();
+    /// Forgets what was typed (a new, empty field).
+    pub fn clear(e: *Entry) void {
+        @memset(&e.typed, 0);
+        e.len = 0;
+        e.submitted = false;
+        e.field +%= 1;
     }
 
-    pub fn password(l: *const Lock) []const u8 {
-        return l.typed[0..l.len];
+    fn changed(e: *Entry, text: []const u8) void {
+        e.len = @intCast(@min(text.len, e.typed.len));
+        @memcpy(e.typed[0..e.len], text[0..e.len]);
+        e.wrong = false;
     }
 
-    /// Forgets what was typed.
-    pub fn clear(l: *Lock) void {
-        @memset(&l.typed, 0);
-        l.len = 0;
+    fn submit(e: *Entry) void {
+        if (e.len > 0) e.submitted = true;
     }
+};
 
-    pub const KeyResult = enum { none, changed, submit };
+/// The lock screen's size (it is drawn as a panel, in the middle of the
+/// screen).
+pub const width = 560;
+pub const height = 340;
 
-    /// A key pressed or let go (a Linux key code): typed into the box, as
-    /// the keyboard's layout has it; Enter, with something typed, to try it.
-    pub fn key(l: *Lock, code: u32, pressed: bool) KeyResult {
-        switch (code) {
-            remote.key_left_shift => l.shift[0] = pressed,
-            54 => l.shift[1] = pressed,
-            // The right Alt, which is AltGr where the layout has a third
-            // level.
-            100 => l.altgr = pressed,
-            58 => if (pressed) {
-                l.caps = !l.caps;
-            },
-            else => {},
-        }
-        if (!pressed) return .none;
-        switch (code) {
-            // Enter (and the keypad's).
-            28, 96 => return if (l.len > 0) .submit else .none,
-            // Backspace: the last character (all its bytes).
-            14 => {
-                if (l.len == 0) return .none;
-                l.len -= 1;
-                while (l.len > 0 and l.typed[l.len] & 0xc0 == 0x80) l.len -= 1;
-                l.wrong = false;
-                return .changed;
-            },
-            // Escape: start again.
-            1 => {
-                l.clear();
-                l.wrong = false;
-                return .changed;
-            },
-            else => {},
-        }
-        const c = l.charOf(code) orelse return .none;
-        var utf8: [4]u8 = undefined;
-        const n = std.unicode.utf8Encode(c, &utf8) catch return .none;
-        if (@as(usize, l.len) + n > l.typed.len) return .none;
-        @memcpy(l.typed[l.len..][0..n], utf8[0..n]);
-        l.len += @intCast(n);
-        l.wrong = false;
-        return .changed;
+/// The lock screen, as kete widgets: why it is locked, when it may be
+/// used again, and the password's field.
+pub const View = struct {
+    parental: Parental,
+    /// The system's clock.
+    system_now: i64,
+    entry: *Entry,
+
+    pub fn build(self: *const View, cx: *kete.BuildContext) kete.Widget {
+        const t = cx.theme();
+        const p = self.parental;
+        var when_buf: [64]u8 = undefined;
+        const until = if (p.until) |at|
+            cx.fmt("This computer can be used again {s}", .{whenText(&when_buf, at, p.now(self.system_now), sys.parental.utc_offset)})
+        else
+            "This computer cannot be used again this week";
+        var rows: std.ArrayList(kete.Widget) = .empty;
+        const a = cx.arena;
+        rows.appendSlice(a, &.{
+            cx.make(kete.Icon{ .icon = .lock, .size = 44, .color = t.primary }),
+            cx.make(kete.Text{ .text = switch (p.lock) {
+                .downtime => "It is downtime",
+                else => "Time is up for today",
+            }, .style = .{ .size = 26, .color = t.on_surface }, .wrap = false }),
+            cx.make(kete.Text{ .text = until, .style = .{ .size = 17, .color = t.on_surface_variant }, .wrap = false }),
+            cx.make(kete.SizedBox{ .height = 8 }),
+            cx.make(kete.Text{ .text = "A parent can unlock it with the password", .style = .{ .size = 15, .color = t.on_surface_variant }, .wrap = false }),
+            cx.make(kete.TextField{
+                .placeholder = "Password",
+                .obscure = true,
+                .max_len = sys.parental.max_password,
+                .width = 400,
+                .autofocus = true,
+                .on_changed = .of(self.entry, Entry.changed),
+                .on_submit = .of(self.entry, Entry.submit),
+            }).withKey(@as(u64, self.entry.field) | 0x10c0_0000),
+        }) catch {};
+        if (self.entry.wrong) rows.append(a, cx.make(kete.Text{ .text = "That is not the password", .style = .{ .size = 15, .color = t.@"error" }, .wrap = false })) catch {};
+        return cx.make(kete.RoundedBox{
+            .color = t.surface_container,
+            .border_width = 1,
+            .border_color = t.outline_variant,
+            .radius = .all(24),
+            .child = cx.make(kete.Padding{ .padding = .all(28), .child = cx.make(kete.Column{
+                .fill = false,
+                .spacing = 10,
+                .cross_axis_alignment = .center,
+                .children = rows.items,
+            }) }),
+        });
     }
+};
 
-    /// The character key `code` types now, by the layout.
-    fn charOf(l: *const Lock, code: u32) ?u21 {
-        const shifted = l.shift[0] or l.shift[1];
-        for (l.keyboard.keys()) |k| if (k.code == code) {
-            if (l.altgr) return k.altgr;
-            const letter = k.plain >= 'a' and k.plain <= 'z';
-            const c = if (shifted != (l.caps and letter)) k.shifted else k.plain;
-            return if (c >= ' ') c else null;
-        };
-        return null;
-    }
+/// The lock screen as the shell has it: its panel (kete's), and the
+/// password typed.
+pub const Screen = struct {
+    panel: *kete_panel.Panel,
+    entry: Entry = .{},
 
-    /// Draws it as `p` says, at `system_now` (the system's clock).
-    pub fn draw(l: *Lock, p: Parental, system_now: i64) void {
-        const count = @as(usize, l.width) * l.height;
-        const over_black: font.Canvas = .{ .pixels = l.pixels[0..count], .width = l.width, .height = l.height, .stride = l.width };
-        const over_white: font.Canvas = .{ .pixels = l.pixels[count .. 2 * count], .width = l.width, .height = l.height, .stride = l.width };
-        l.drawContents(over_black, glass.black, p, system_now);
-        l.drawContents(over_white, glass.white, p, system_now);
-        glass.compose(over_black.pixels, over_white.pixels, l.theme.colors().background);
-        glass.cutCorners(over_black, @round(dock.Dock.box_radius * 1.5 * l.scale));
-    }
-
-    pub fn picture(l: *const Lock) []const u32 {
-        return l.pixels[0 .. @as(usize, l.width) * l.height];
+    /// Its picture, as `p` says, `width` by `height`.
+    pub fn draw(s: *Screen, p: Parental) []const u32 {
+        return s.panel.draw(width, height, sys.nowNs(), View{ .parental = p, .system_now = sys.realtimeSec(), .entry = &s.entry });
     }
 
     /// In the middle of a screen `w` by `h`.
-    pub fn place(l: *const Lock, w: u32, h: u32) [2]i32 {
-        return .{ @divTrunc(@as(i32, @intCast(w)) - @as(i32, @intCast(l.width)), 2), @divTrunc(@as(i32, @intCast(h)) - @as(i32, @intCast(l.height)), 2) };
-    }
-
-    fn drawContents(l: *Lock, canvas: font.Canvas, base: u32, p: Parental, system_now: i64) void {
-        const s = l.scale;
-        const c = l.theme.colors();
-        const w: f32 = @floatFromInt(l.width);
-        canvas.fill(0, 0, l.width, l.height, base);
-        if (l.icon_font) |*f| {
-            const size = @round(44 * s);
-            var buf: [4]u8 = undefined;
-            const text = icons.text(.lock, &buf);
-            _ = font.draw(canvas, &l.cache, .{ .font = f, .size = size, .color = c.dot }, @round((w - size) / 2), @round(28 * s) + size, text) catch {};
-        }
-        const f = if (l.font) |*f| f else return;
-        const centred = struct {
-            fn at(cv: font.Canvas, cache: *font.GlyphCache, style: font.Style, width: f32, y: f32, text: []const u8) void {
-                _ = font.draw(cv, cache, style, @round((width - font.measure(style, text)) / 2), y, text) catch {};
-            }
-        }.at;
-        const title: font.Style = .{ .font = f, .size = @round(26 * s), .color = c.dot };
-        const line: font.Style = .{ .font = f, .size = @round(17 * s), .color = dimmed(c.dot) };
-        const small: font.Style = .{ .font = f, .size = @round(15 * s), .color = dimmed(c.dot) };
-        centred(canvas, &l.cache, title, w, @round(122 * s), switch (p.lock) {
-            .downtime => "It is downtime",
-            else => "Time is up for today",
-        });
-        var when_buf: [64]u8 = undefined;
-        var buf: [96]u8 = undefined;
-        const until = if (p.until) |t|
-            std.fmt.bufPrint(&buf, "This computer can be used again {s}", .{whenText(&when_buf, t, p.now(system_now), sys.parental.utc_offset)}) catch ""
-        else
-            "This computer cannot be used again this week";
-        centred(canvas, &l.cache, line, w, @round(154 * s), until);
-        centred(canvas, &l.cache, small, w, @round(204 * s), "A parent can unlock it with the password");
-        // The box, the password in it as dots.
-        const bx = @round(pad * s);
-        const by = @round(220 * s);
-        const bw = w - 2 * bx;
-        const bh = @round(46 * s);
-        glass.fillRounded(canvas, bx, by, bw, bh, @round(10 * s), if (l.wrong) 0xffe57373 else dimmed(c.dot));
-        glass.fillRounded(canvas, bx + @round(2 * s), by + @round(2 * s), bw - @round(4 * s), bh - @round(4 * s), @round(8 * s), base);
-        if (l.len == 0) {
-            centred(canvas, &l.cache, small, w, by + bh / 2 + small.ascent() / 2, "Password");
-        } else {
-            const dot = @round(10 * s);
-            const step = @round(18 * s);
-            const n = @min(@as(f32, @floatFromInt(l.len)), @floor((bw - 2 * dot) / step));
-            var x = @round((w - (n - 1) * step - dot) / 2);
-            for (0..@intFromFloat(n)) |_| {
-                glass.fillRounded(canvas, x, by + (bh - dot) / 2, dot, dot, dot / 2, c.dot);
-                x += step;
-            }
-        }
-        if (l.wrong) centred(canvas, &l.cache, .{ .font = f, .size = small.size, .color = 0xffe57373 }, w, @round(306 * s), "That is not the password");
+    pub fn place(w: u32, h: u32) [2]i32 {
+        return .{ @divTrunc(@as(i32, @intCast(w)) - width, 2), @divTrunc(@as(i32, @intCast(h)) - height, 2) };
     }
 };
 
@@ -267,55 +185,31 @@ pub const Warnings = struct {
     }
 };
 
-/// The colour, a little dimmer.
-fn dimmed(c: u32) u32 {
-    return (c & 0x00ffffff) | 0xb8000000;
-}
-
 const testing = std.testing;
 
-test "the password is typed as the keys say, and Enter tries it" {
-    var l = try Lock.init(testing.allocator, null, 1);
-    defer l.deinit(testing.allocator);
-    const type_ = struct {
-        fn in(lk: *Lock, text: []const u8) void {
-            for (text) |ch| {
-                const k = remote.keyFor(ch).?;
-                if (k.shift) _ = lk.key(remote.key_left_shift, true);
-                _ = lk.key(k.code, true);
-                _ = lk.key(k.code, false);
-                if (k.shift) _ = lk.key(remote.key_left_shift, false);
-            }
-        }
-    }.in;
-    try testing.expectEqual(Lock.KeyResult.none, l.key(28, true));
-    type_(&l, "Pa55 word!");
-    try testing.expectEqualStrings("Pa55 word!", l.password());
-    try testing.expectEqual(Lock.KeyResult.changed, l.key(14, true));
-    try testing.expectEqualStrings("Pa55 word", l.password());
-    try testing.expectEqual(Lock.KeyResult.submit, l.key(28, true));
-    // A UK keyboard: Shift and 3 is a pound sign (two bytes, gone with one
-    // Backspace); Caps Lock capitals.
-    l.clear();
-    l.keyboard = .gb;
-    _ = l.key(remote.key_left_shift, true);
-    _ = l.key(4, true);
-    _ = l.key(remote.key_left_shift, false);
-    try testing.expectEqualStrings("£", l.password());
-    _ = l.key(58, true);
-    _ = l.key(30, true);
-    try testing.expectEqualStrings("£A", l.password());
-    _ = l.key(14, true);
-    _ = l.key(14, true);
-    try testing.expectEqual(@as(u8, 0), l.len);
-    l.wrong = true;
-    _ = l.key(1, true);
-    try testing.expectEqual(@as(u8, 0), l.len);
-    try testing.expect(!l.wrong);
-    // Drawn without a font: the box, at least.
-    l.draw(.{ .on = true, .lock = .time, .until = 1794830400 }, 1794800000);
-    try testing.expect(l.picture()[(l.height / 2) * l.width + l.width / 2] >> 24 != 0);
-    try testing.expectEqual([2]i32{ (1920 - 560) / 2, (1080 - 340) / 2 }, l.place(1920, 1080));
+test "the lock screen: typed by the keyboard's layout, Enter tries it" {
+    const p = try kete_panel.Panel.create(testing.allocator, testing.io, @embedFile("FiraSans-Regular.ttf"));
+    defer p.destroy();
+    p.setKeyboard(.gb);
+    var entry: Entry = .{};
+    const view: View = .{ .parental = .{ .on = true, .lock = .time, .until = 1794830400 }, .system_now = 1794800000, .entry = &entry };
+    _ = p.draw(width, height, 0, view);
+    _ = p.draw(width, height, 1, view);
+    // Shift and 3: on a UK keyboard, a pound sign.
+    for ([_][2]u32{ .{ 42, 1 }, .{ 4, 1 }, .{ 4, 0 }, .{ 42, 0 }, .{ 30, 1 }, .{ 30, 0 } }) |k| p.key(k[0], k[1] == 1);
+    _ = p.draw(width, height, 2, view);
+    try testing.expectEqualStrings("£a", entry.password());
+    try testing.expect(!entry.submitted);
+    p.key(28, true);
+    p.key(28, false);
+    try testing.expect(entry.submitted);
+    // A try: the field empties.
+    entry.clear();
+    entry.wrong = true;
+    const px = p.draw(width, height, 3, view);
+    try testing.expectEqual(@as(usize, width * height), px.len);
+    try testing.expect(px[(height / 2) * width + width / 2] >> 24 == 0xff);
+    try testing.expectEqual(@as(u8, 0), entry.len);
 }
 
 test "warnings at ten, five and one minute left; again after a bonus" {
