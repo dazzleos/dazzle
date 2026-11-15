@@ -22,6 +22,7 @@ const std = @import("std");
 const wayland = @import("wayland");
 
 pub const window = @import("window.zig");
+pub const gpu_counters = @import("gpu_counters.zig");
 pub const clipboard = @import("clipboard.zig");
 pub const Clipboard = clipboard.Clipboard;
 pub const Window = window.Window;
@@ -108,4 +109,5 @@ test "child environment carries the compositor's socket" {
 test {
     _ = window;
     _ = clipboard;
+    _ = gpu_counters;
 }
