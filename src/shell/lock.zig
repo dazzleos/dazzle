@@ -34,10 +34,14 @@ pub const Lock = struct {
     height: u32,
     scale: f32,
     theme: dock.Theme = .dark,
-    /// The password typed so far.
+    /// The password typed so far (UTF-8).
     typed: [sys.parental.max_password]u8 = undefined,
     len: u8 = 0,
+    /// The keyboard's layout (as the apps have it), and the modifiers held.
+    keyboard: locale.Keyboard = .us,
     shift: [2]bool = .{ false, false },
+    altgr: bool = false,
+    caps: bool = false,
     /// The password tried was not the one.
     wrong: bool = false,
 
@@ -72,22 +76,29 @@ pub const Lock = struct {
 
     pub const KeyResult = enum { none, changed, submit };
 
-    /// A key pressed or let go (a Linux key code): typed into the box;
-    /// Enter, with something typed, to try it.
+    /// A key pressed or let go (a Linux key code): typed into the box, as
+    /// the keyboard's layout has it; Enter, with something typed, to try it.
     pub fn key(l: *Lock, code: u32, pressed: bool) KeyResult {
         switch (code) {
             remote.key_left_shift => l.shift[0] = pressed,
             54 => l.shift[1] = pressed,
+            // The right Alt, which is AltGr where the layout has a third
+            // level.
+            100 => l.altgr = pressed,
+            58 => if (pressed) {
+                l.caps = !l.caps;
+            },
             else => {},
         }
         if (!pressed) return .none;
         switch (code) {
             // Enter (and the keypad's).
             28, 96 => return if (l.len > 0) .submit else .none,
-            // Backspace.
+            // Backspace: the last character (all its bytes).
             14 => {
                 if (l.len == 0) return .none;
                 l.len -= 1;
+                while (l.len > 0 and l.typed[l.len] & 0xc0 == 0x80) l.len -= 1;
                 l.wrong = false;
                 return .changed;
             },
@@ -99,12 +110,26 @@ pub const Lock = struct {
             },
             else => {},
         }
-        const c = remote.charFor(code, l.shift[0] or l.shift[1]) orelse return .none;
-        if (c == '\n' or c == '\t' or l.len == l.typed.len) return .none;
-        l.typed[l.len] = c;
-        l.len += 1;
+        const c = l.charOf(code) orelse return .none;
+        var utf8: [4]u8 = undefined;
+        const n = std.unicode.utf8Encode(c, &utf8) catch return .none;
+        if (@as(usize, l.len) + n > l.typed.len) return .none;
+        @memcpy(l.typed[l.len..][0..n], utf8[0..n]);
+        l.len += @intCast(n);
         l.wrong = false;
         return .changed;
+    }
+
+    /// The character key `code` types now, by the layout.
+    fn charOf(l: *const Lock, code: u32) ?u21 {
+        const shifted = l.shift[0] or l.shift[1];
+        for (l.keyboard.keys()) |k| if (k.code == code) {
+            if (l.altgr) return k.altgr;
+            const letter = k.plain >= 'a' and k.plain <= 'z';
+            const c = if (shifted != (l.caps and letter)) k.shifted else k.plain;
+            return if (c >= ' ') c else null;
+        };
+        return null;
     }
 
     /// Draws it as `p` says, at `system_now` (the system's clock).
@@ -154,7 +179,7 @@ pub const Lock = struct {
         var when_buf: [64]u8 = undefined;
         var buf: [96]u8 = undefined;
         const until = if (p.until) |t|
-            std.fmt.bufPrint(&buf, "This computer can be used again {s}", .{whenText(&when_buf, t, p.now(system_now), p.limits.utc_offset)}) catch ""
+            std.fmt.bufPrint(&buf, "This computer can be used again {s}", .{whenText(&when_buf, t, p.now(system_now), sys.parental.utc_offset)}) catch ""
         else
             "This computer cannot be used again this week";
         centred(canvas, &l.cache, line, w, @round(154 * s), until);
@@ -229,7 +254,7 @@ pub const Warnings = struct {
         if (left <= 0) return null;
         const minutes: i64 = @max(1, @divFloor(left + 30, 60));
         // Downtime starting, or the day's time running out.
-        const local = sys.parental.Local.of(t, p.limits.utc_offset);
+        const local = sys.parental.Local.of(t, sys.parental.utc_offset);
         const downtime = if (p.limits.downtime) |d| local.minute() == d.start else false;
         const half = buf.len / 2;
         var when_buf: [64]u8 = undefined;
@@ -237,7 +262,7 @@ pub const Warnings = struct {
             std.fmt.bufPrint(buf[0..half], "Downtime in {d} minute{s}", .{ minutes, if (minutes == 1) "" else "s" })
         else
             std.fmt.bufPrint(buf[0..half], "{d} minute{s} left today", .{ minutes, if (minutes == 1) "" else "s" })) catch return null;
-        const body = std.fmt.bufPrint(buf[half..], "The computer locks {s}", .{whenText(&when_buf, t, now, p.limits.utc_offset)}) catch return null;
+        const body = std.fmt.bufPrint(buf[half..], "The computer locks {s}", .{whenText(&when_buf, t, now, sys.parental.utc_offset)}) catch return null;
         return .{ .title = title, .body = body };
     }
 };
@@ -269,6 +294,20 @@ test "the password is typed as the keys say, and Enter tries it" {
     try testing.expectEqual(Lock.KeyResult.changed, l.key(14, true));
     try testing.expectEqualStrings("Pa55 word", l.password());
     try testing.expectEqual(Lock.KeyResult.submit, l.key(28, true));
+    // A UK keyboard: Shift and 3 is a pound sign (two bytes, gone with one
+    // Backspace); Caps Lock capitals.
+    l.clear();
+    l.keyboard = .gb;
+    _ = l.key(remote.key_left_shift, true);
+    _ = l.key(4, true);
+    _ = l.key(remote.key_left_shift, false);
+    try testing.expectEqualStrings("£", l.password());
+    _ = l.key(58, true);
+    _ = l.key(30, true);
+    try testing.expectEqualStrings("£A", l.password());
+    _ = l.key(14, true);
+    _ = l.key(14, true);
+    try testing.expectEqual(@as(u8, 0), l.len);
     l.wrong = true;
     _ = l.key(1, true);
     try testing.expectEqual(@as(u8, 0), l.len);

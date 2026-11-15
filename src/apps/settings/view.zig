@@ -232,9 +232,10 @@ pub const Settings = struct {
                 .child = right,
             }) }),
         } });
-        return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .children = &.{
+        // A parent's password asked for, over the window.
+        return parental_view.withDialog(self, b, &state.parental, cx.make(kete.Column{ .cross_axis_alignment = .stretch, .children = &.{
             cx.make(kete.Expanded{ .child = content }),
-        } });
+        } }));
     }
 };
 

@@ -327,7 +327,7 @@ const Manager = struct {
     }
 
     fn parentalLocal(m: *const Manager) parental.Local {
-        return .of(m.parentalNow(), m.parental.limits.utc_offset);
+        return .of(m.parentalNow(), parental.utc_offset);
     }
 
     /// Moves parental controls' clock on, counts the time used (while not

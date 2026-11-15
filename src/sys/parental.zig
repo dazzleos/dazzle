@@ -17,8 +17,8 @@
 //! when it is given. It is set each time parental controls are turned
 //! on, so it is not long forgotten.
 //!
-//! Times of day are local: the clock is UTC, and `Limits.utc_offset` says
-//! how far ahead the place is. The clock is only set once the computer is
+//! Times of day are by `utc_offset`: UTC, until the system has a time
+//! zone. The clock is only set once the computer is
 //! on the network; until then the manager goes on from the last time it
 //! saw (see `Usage.wall`), so turning the network off does not stop the
 //! day, or the night, coming.
@@ -57,8 +57,6 @@ pub const Limits = struct {
     downtime: ?Downtime = .{ .start = 20 * 60, .end = 7 * 60 },
     /// Apps may not be installed or removed.
     block_software: bool = true,
-    /// How far the local time is ahead of UTC, in minutes.
-    utc_offset: i16 = 0,
 
     /// The most minutes a day can have.
     pub const most_minutes = 24 * 60;
@@ -67,7 +65,7 @@ pub const Limits = struct {
         if (l.weekday) |m| if (m > most_minutes) return false;
         if (l.weekend) |m| if (m > most_minutes) return false;
         if (l.downtime) |d| if (d.start >= most_minutes or d.end >= most_minutes) return false;
-        return l.utc_offset >= -14 * 60 and l.utc_offset <= 14 * 60;
+        return true;
     }
 
     /// The minutes allowed on `weekday` (0: Sunday).
@@ -75,8 +73,8 @@ pub const Limits = struct {
         return if (weekday == 0 or weekday == 6) l.weekend else l.weekday;
     }
 
-    /// "<weekday> <weekend> <downtime start> <downtime end> <software>
-    /// <utc offset>", "-" for none, as requests and reports say them.
+    /// "<weekday> <weekend> <downtime start> <downtime end> <software>",
+    /// "-" for none, as requests and reports say them.
     pub fn write(l: Limits, w: *std.Io.Writer) !void {
         try writeOpt(w, l.weekday);
         try w.writeByte(' ');
@@ -85,7 +83,7 @@ pub const Limits = struct {
         try writeOpt(w, if (l.downtime) |d| d.start else null);
         try w.writeByte(' ');
         try writeOpt(w, if (l.downtime) |d| d.end else null);
-        try w.print(" {s} {d}", .{ if (l.block_software) "block" else "allow", l.utc_offset });
+        try w.print(" {s}", .{if (l.block_software) "block" else "allow"});
     }
 
     pub fn parse(f: *std.mem.TokenIterator(u8, .any)) ?Limits {
@@ -99,11 +97,14 @@ pub const Limits = struct {
             .weekend = weekend.value,
             .downtime = if (start.value != null and end.value != null) .{ .start = start.value.?, .end = end.value.? } else null,
             .block_software = if (std.mem.eql(u8, software, "block")) true else if (std.mem.eql(u8, software, "allow")) false else return null,
-            .utc_offset = std.fmt.parseInt(i16, f.next() orelse return null, 10) catch return null,
         };
         return if (l.valid()) l else null;
     }
 };
+
+/// How far local time is ahead of UTC, in minutes: none, until the system
+/// has a time zone.
+pub const utc_offset: i16 = 0;
 
 fn writeOpt(w: *std.Io.Writer, v: ?u16) !void {
     if (v) |n| try w.print("{d}", .{n}) else try w.writeByte('-');
@@ -248,8 +249,8 @@ pub const Local = struct {
     /// 0: Sunday.
     weekday: u3,
 
-    pub fn of(now: i64, utc_offset: i16) Local {
-        const t = now + @as(i64, utc_offset) * 60;
+    pub fn of(now: i64, offset: i16) Local {
+        const t = now + @as(i64, offset) * 60;
         const day: i32 = @intCast(@divFloor(t, std.time.s_per_day));
         return .{
             .day = day,
@@ -286,7 +287,7 @@ pub const Status = struct {
 };
 
 fn statusOf(l: Limits, u: Usage, now: i64) Status {
-    const local = Local.of(now, l.utc_offset);
+    const local = Local.of(now, utc_offset);
     const used = u.usedOn(local.day);
     const allowed: ?u32 = if (l.minutesOn(local.weekday)) |m| @as(u32, m) + u.bonusOn(local.day) else null;
     var s: Status = .{ .used = used, .allowed = allowed };
@@ -325,7 +326,7 @@ fn startOfNextDay(now: i64, local: Local) i64 {
 fn availableFrom(l: Limits, from: i64) ?i64 {
     var t = from;
     for (0..8) |_| {
-        const local = Local.of(t, l.utc_offset);
+        const local = Local.of(t, utc_offset);
         if (l.downtime) |d| if (d.contains(local.minute())) {
             t += secondsUntil(local, d.end);
             continue;
@@ -470,11 +471,11 @@ test "the password: only its hash is kept, and only it unlocks" {
 test "limits, as requests and reports say them" {
     var buf: [128]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    const l: Limits = .{ .weekday = 90, .weekend = null, .downtime = .{ .start = 1260, .end = 420 }, .block_software = false, .utc_offset = -300 };
+    const l: Limits = .{ .weekday = 90, .weekend = null, .downtime = .{ .start = 1260, .end = 420 }, .block_software = false };
     try l.write(&w);
-    try testing.expectEqualStrings("90 - 1260 420 allow -300", w.buffered());
+    try testing.expectEqualStrings("90 - 1260 420 allow", w.buffered());
     var f = std.mem.tokenizeAny(u8, w.buffered(), " ");
     try testing.expectEqual(l, Limits.parse(&f).?);
-    var bad = std.mem.tokenizeAny(u8, "90 - 1500 420 allow 0", " ");
+    var bad = std.mem.tokenizeAny(u8, "90 - 1500 420 allow", " ");
     try testing.expect(Limits.parse(&bad) == null);
 }

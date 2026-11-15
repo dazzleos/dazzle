@@ -46,7 +46,7 @@
 //!     update none
 //!     locale en-GB gb
 //!     video_memory 128 256
-//!     parental on 120 180 1200 420 block 600
+//!     parental on 120 180 1200 420 block
 //!     parental_status none 1794830400 - 42 120 0 0
 //!     end
 //!
@@ -701,7 +701,7 @@ test "requests and reports go through the socket" {
     var r: Report = .{ .storage = .preparing, .progress = 42, .hostname = Hostname.parse("awesome-elephant").? };
     var buf: [512]u8 = undefined;
     const text = r.write(&buf);
-    try testing.expectEqualStrings("storage preparing 42\nhostname awesome-elephant\nversion a -\nversion b -\nupdate none\nlocale en-US us\nvideo_memory - -\nlog_server off\nparental off 120 180 1200 420 block 0\nparental_status none - - 0 - 0 0\nend\n", text);
+    try testing.expectEqualStrings("storage preparing 42\nhostname awesome-elephant\nversion a -\nversion b -\nupdate none\nlocale en-US us\nvideo_memory - -\nlog_server off\nparental off 120 180 1200 420 block\nparental_status none - - 0 - 0 0\nend\n", text);
     const back = Report.parse(text).?;
     try testing.expectEqual(StorageState.preparing, back.storage);
     try testing.expectEqual(@as(u8, 42), back.progress);
@@ -753,13 +753,13 @@ test "requests and reports go through the socket" {
     try testing.expect(!Request.allowedFor(.{ .log_server = true }, .setup));
     try testing.expect(!Request.allowedFor(.{ .log_server = true }, .shell));
     // Parental controls: on, locked till the morning; a password's answer.
-    var locked: Report = .{ .parental = .{ .on = true, .limits = .{ .weekday = 90, .utc_offset = 600 }, .lock = .time, .until = 1794830400, .used = 90, .allowed = 90, .bonus = 0, .clock_offset = -5 }, .password = false };
+    var locked: Report = .{ .parental = .{ .on = true, .limits = .{ .weekday = 90 }, .lock = .time, .until = 1794830400, .used = 90, .allowed = 90, .bonus = 0, .clock_offset = -5 }, .password = false };
     const lb = Report.parse(locked.write(&buf)).?;
     try testing.expectEqual(locked.parental, lb.parental);
     try testing.expectEqual(@as(?bool, false), lb.password);
     locked.password = null;
     try testing.expect(Report.parse(locked.write(&buf)).?.password == null);
-    const on = Request.parse("parental_on 7365736166 60 120 - - allow -300\n").?;
+    const on = Request.parse("parental_on 7365736166 60 120 - - allow\n").?;
     try testing.expectEqualStrings("sesaf", on.parental_on.password.slice());
     try testing.expectEqual(@as(?u16, 60), on.parental_on.limits.weekday);
     try testing.expect(on.parental_on.limits.downtime == null);

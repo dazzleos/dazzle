@@ -581,6 +581,7 @@ fn run(init: std.process.Init.Minimal) !void {
                 // Locked: the keys type the password; nothing else does
                 // anything.
                 if (locked) {
+                    lock.keyboard = server.keyboard_layout;
                     if (e == .key) if (lockKey(&lock, e.key.code, e.key.pressed, &parental, &locked, &quick, &renderer, dock.theme)) {
                         server.damaged = true;
                         panels_damaged = true;
@@ -1463,6 +1464,7 @@ fn applyParental(p: sys.system.Parental, have: *sys.system.Parental, locked: *bo
         lock.clear();
         lock.wrong = false;
         lock.shift = .{ false, false };
+        lock.altgr = false;
         print("dazzle-shell: {s}\n", .{if (now_locked) "locked by parental controls" else "unlocked"});
         if (now_locked) quick.close();
     }

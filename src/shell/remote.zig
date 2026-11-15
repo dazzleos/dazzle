@@ -257,13 +257,6 @@ pub fn keyFor(c: u8) ?struct { code: u32, shift: bool } {
     return null;
 }
 
-/// The character a key (a Linux key code) types, as `keyFor` has them (a
-/// US keyboard), with Shift held or not.
-pub fn charFor(code: u32, shift: bool) ?u8 {
-    for (0..128) |c| if (keyFor(@intCast(c))) |k| if (k.code == code and k.shift == shift) return @intCast(c);
-    return null;
-}
-
 /// Left Shift's key code.
 pub const key_left_shift = 42;
 

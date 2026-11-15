@@ -1,6 +1,6 @@
 //! The Parental controls page (see `sys.parental`; the system manager
 //! keeps them). While they are off: how long the computer may be used on
-//! weekdays and at weekends, downtime, the time zone, and whether apps may
+//! weekdays and at weekends, downtime, and whether apps may
 //! be installed or removed; turning them on asks for a password, twice.
 //! While they are on: not those, but how today goes, for whoever is using
 //! it to see (the time used, what is left, when it locks), and for a
@@ -19,7 +19,7 @@ const Builder = view.Builder;
 const Limits = sys.parental.Limits;
 const Password = info.Str(sys.parental.max_password);
 
-pub const label = "Parental controls";
+pub const label = "Parental";
 pub const icon: kete.IconName = .family_restroom;
 
 /// What a parent asks for, with the password.
@@ -121,25 +121,20 @@ pub fn build(self: *const Settings, b: Builder, st: *State) kete.Widget {
             const left: u32 = @intCast(@max(0, @divFloor(at - now + 59, 60)));
             rows.append(a, b.item("Left", cx.fmt("{s}", .{duration(&lbuf, left)}))) catch {};
             var wbuf: [64]u8 = undefined;
-            rows.append(a, b.item("Locks", cx.fmt("{s}", .{when(&wbuf, at, now, p.limits.utc_offset)}))) catch {};
+            rows.append(a, b.item("Locks", cx.fmt("{s}", .{when(&wbuf, at, now, sys.parental.utc_offset)}))) catch {};
         }
         rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 12 }, .child = cx.make(kete.Text{ .text = "Limits", .style = heading }) })) catch {};
         appendLimits(b, &rows, p.limits);
         rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 12 }, .child = cx.make(kete.Text{ .text = "For a parent", .style = heading }) })) catch {};
-        switch (st.form) {
-            .turn_off => rows.append(a, passwordForm(self, b, st, "Turn off parental controls", "Turn off", .of(st, submitTurnOff))) catch {},
-            .bonus => rows.append(a, bonusForm(self, b, st)) catch {},
-            else => rows.append(a, cx.make(kete.Row{ .spacing = 12, .children = a.dupe(kete.Widget, &.{
-                cx.make(kete.OutlinedButton{ .label = "More time today", .on_press = if (self.actions != null) .of(st, State.openBonus) else null }),
-                cx.make(kete.OutlinedButton{ .label = "Turn off", .on_press = if (self.actions != null) .of(st, State.openTurnOff) else null }),
-            }) catch &.{} })) catch {},
-        }
+        rows.append(a, cx.make(kete.Row{ .spacing = 12, .children = a.dupe(kete.Widget, &.{
+            cx.make(kete.OutlinedButton{ .label = "More time today", .on_press = if (self.actions != null) .of(st, State.openBonus) else null }),
+            cx.make(kete.OutlinedButton{ .label = "Turn off", .on_press = if (self.actions != null) .of(st, State.openTurnOff) else null }),
+        }) catch &.{} })) catch {};
         return b.page(rows.items);
     }
     // Off: the limits to choose, and turning them on.
     rows.append(a, cx.make(kete.SwitchRow{ .value = st.form == .turn_on, .on_changed = if (self.actions != null) .of(st, State.setOn) else null, .label = "Parental controls" })) catch {};
     rows.append(a, note(cx, "Limit how long this computer is used each day, and when. When the time is up it locks until it may be used again, or until a parent unlocks it with the password.")) catch {};
-    if (st.form == .turn_on) rows.append(a, passwordForm(self, b, st, "Choose a password for a parent to unlock with (it is asked for each time parental controls are turned on)", "Turn on", .of(st, submitTurnOn))) catch {};
     rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 12 }, .child = cx.make(kete.Text{ .text = "Each day", .style = heading }) })) catch {};
     rows.append(a, choiceRow(b, "Weekdays", durationOptions(cx), indexOfDuration(st.draft.weekday), .of(st, setWeekday))) catch {};
     rows.append(a, choiceRow(b, "Weekends", durationOptions(cx), indexOfDuration(st.draft.weekend), .of(st, setWeekend))) catch {};
@@ -148,7 +143,6 @@ pub fn build(self: *const Settings, b: Builder, st: *State) kete.Widget {
         rows.append(a, choiceRow(b, "From", timeOptions(cx), d.start / 30, .of(st, setDowntimeStart))) catch {};
         rows.append(a, choiceRow(b, "To", timeOptions(cx), d.end / 30, .of(st, setDowntimeEnd))) catch {};
     }
-    rows.append(a, choiceRow(b, "Time zone", zoneOptions(cx), zoneIndex(st.draft.utc_offset), .of(st, setZone))) catch {};
     rows.append(a, cx.make(kete.SwitchRow{ .value = st.draft.block_software, .on_changed = .of(st, setBlockSoftware), .label = "Stop apps being installed or removed" })) catch {};
     return b.page(rows.items);
 }
@@ -168,48 +162,54 @@ fn appendLimits(b: Builder, rows: *std.ArrayList(kete.Widget), l: Limits) void {
     rows.append(a, b.item("Apps", if (l.block_software) "Cannot be installed or removed" else "Can be installed and removed")) catch {};
 }
 
-/// The password, or two (turning on), and a button to go ahead.
-fn passwordForm(self: *const Settings, b: Builder, st: *State, title: []const u8, go: []const u8, on_go: kete.Callback) kete.Widget {
+/// The page's window with the password asked for over it, as a parent
+/// turns parental controls on or off, or gives more time (a modal dialog).
+pub fn withDialog(self: *const Settings, b: Builder, st: *State, child: kete.Widget) kete.Widget {
     const cx = b.cx;
     const t = cx.theme();
     const a = cx.arena;
+    if (st.form == .none or self.actions == null) return child;
     var items: std.ArrayList(kete.Widget) = .empty;
-    items.append(a, cx.make(kete.Text{ .text = title, .style = .{ .size = 16, .color = t.on_surface } })) catch {};
-    const key = @as(u64, st.form_id) << 8 | 0x7a000000;
-    items.append(a, cx.make(kete.TextField{ .placeholder = "Password", .obscure = true, .max_len = sys.parental.max_password, .width = 320, .initial = st.password.slice(), .on_changed = .of(st, State.setPassword), .on_submit = on_go, .autofocus = true }).withKey(key)) catch {};
-    if (st.form == .turn_on) items.append(a, cx.make(kete.TextField{ .placeholder = "Password again", .obscure = true, .max_len = sys.parental.max_password, .width = 320, .initial = st.again.slice(), .on_changed = .of(st, State.setAgain), .on_submit = on_go }).withKey(key | 1)) catch {};
-    if (st.mismatch) items.append(a, cx.make(kete.Text{ .text = if (st.form == .turn_on) "Give the same password twice" else "Give the password", .style = .{ .size = 15, .color = t.@"error" } })) catch {};
-    items.append(a, cx.make(kete.Row{ .spacing = 12, .children = a.dupe(kete.Widget, &.{
-        cx.make(kete.FilledButton{ .label = go, .on_press = if (self.actions != null) on_go else null }),
-        cx.make(kete.TextButton{ .label = "Cancel", .on_press = .of(st, State.cancel) }),
-    }) catch &.{} })) catch {};
-    return card(cx, items.items);
-}
-
-fn bonusForm(self: *const Settings, b: Builder, st: *State) kete.Widget {
-    const cx = b.cx;
-    const a = cx.arena;
-    const opts = a.alloc(kete.MenuItem, bonuses.len) catch return cx.make(kete.SizedBox.empty);
-    for (opts, bonuses) |*o, m| {
-        var buf: [32]u8 = undefined;
-        o.* = .{ .label = cx.fmt("{s}", .{duration(&buf, m)}) };
+    const go: kete.Callback = switch (st.form) {
+        .turn_on => .of(st, submitTurnOn),
+        .turn_off => .of(st, submitTurnOff),
+        else => .of(st, submitBonus),
+    };
+    if (st.form == .bonus) {
+        const opts = a.alloc(kete.MenuItem, bonuses.len) catch return child;
+        for (opts, bonuses) |*o, m| {
+            var buf: [32]u8 = undefined;
+            o.* = .{ .label = cx.fmt("{s}", .{duration(&buf, m)}) };
+        }
+        items.append(a, cx.make(kete.DropdownMenu{ .options = opts, .selected = std.mem.indexOfScalar(u16, &bonuses, st.bonus), .on_selected = .of(st, setBonus), .width = 320 })) catch {};
     }
-    const index = std.mem.indexOfScalar(u16, &bonuses, st.bonus);
-    const form = passwordForm(self, b, st, "More time today, with the password", "Give it", .of(st, submitBonus));
-    return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 10, .children = a.dupe(kete.Widget, &.{
-        choiceRow(b, "How long", opts, index, .of(st, setBonus)),
-        form,
-    }) catch &.{} });
-}
-
-fn card(cx: *kete.BuildContext, children: []const kete.Widget) kete.Widget {
-    const t = cx.theme();
-    return cx.make(kete.RoundedBox{
-        .color = t.surface_container,
-        .border_width = 1,
-        .border_color = t.outline_variant,
-        .radius = .all(8),
-        .child = cx.make(kete.Padding{ .padding = .all(16), .child = cx.make(kete.Column{ .cross_axis_alignment = .start, .fill = false, .spacing = 10, .children = children }) }),
+    const key = @as(u64, st.form_id) << 8 | 0x7a000000;
+    items.append(a, cx.make(kete.TextField{ .placeholder = "Password", .obscure = true, .max_len = sys.parental.max_password, .width = 320, .initial = st.password.slice(), .on_changed = .of(st, State.setPassword), .on_submit = go, .autofocus = true }).withKey(key)) catch {};
+    if (st.form == .turn_on) items.append(a, cx.make(kete.TextField{ .placeholder = "Password again", .obscure = true, .max_len = sys.parental.max_password, .width = 320, .initial = st.again.slice(), .on_changed = .of(st, State.setAgain), .on_submit = go }).withKey(key | 1)) catch {};
+    if (st.mismatch) items.append(a, cx.make(kete.Text{ .text = if (st.form == .turn_on) "Give the same password twice" else "Give the password", .style = .{ .size = 15, .color = t.@"error" } })) catch {};
+    return cx.make(kete.Dialog{
+        .icon = .lock,
+        .title = switch (st.form) {
+            .turn_on => "Turn on parental controls",
+            .turn_off => "Turn off parental controls",
+            else => "More time today",
+        },
+        .description = switch (st.form) {
+            .turn_on => "Choose a password for a parent to unlock with. It is asked for each time parental controls are turned on.",
+            .turn_off => "Give the parent's password.",
+            else => "How much more time, and the parent's password.",
+        },
+        .content = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 10, .children = items.items }),
+        .confirm_label = switch (st.form) {
+            .turn_on => "Turn on",
+            .turn_off => "Turn off",
+            else => "Give it",
+        },
+        .on_confirm = go,
+        .dismiss_label = "Cancel",
+        .on_dismiss = .of(st, State.cancel),
+        .width = 400,
+        .child = child,
     });
 }
 
@@ -271,10 +271,6 @@ fn setDowntimeEnd(st: *State, i: usize) void {
     if (st.draft.downtime) |*d| d.end = @intCast(@min(i, 47) * 30);
 }
 
-fn setZone(st: *State, i: usize) void {
-    st.draft.utc_offset = zoneOffset(i);
-}
-
 fn setBlockSoftware(st: *State, on: bool) void {
     st.draft.block_software = on;
 }
@@ -303,28 +299,6 @@ fn timeOptions(cx: *kete.BuildContext) []const kete.MenuItem {
     for (opts, 0..) |*o, i| {
         var buf: [16]u8 = undefined;
         o.* = .{ .label = cx.fmt("{s}", .{clockOf(&buf, @intCast(i * 30))}) };
-    }
-    return opts;
-}
-
-/// UTC−12:00 to UTC+14:00, each half hour.
-const zone_count = (14 + 12) * 2 + 1;
-
-fn zoneOffset(i: usize) i16 {
-    return @as(i16, @intCast(@min(i, zone_count - 1))) * 30 - 12 * 60;
-}
-
-fn zoneIndex(offset: i16) ?usize {
-    const i = @divFloor(@as(i32, offset) + 12 * 60, 30);
-    return if (i >= 0 and i < zone_count and @mod(offset, 30) == 0) @intCast(i) else null;
-}
-
-fn zoneOptions(cx: *kete.BuildContext) []const kete.MenuItem {
-    const opts = cx.arena.alloc(kete.MenuItem, zone_count) catch return &.{};
-    for (opts, 0..) |*o, i| {
-        const off = zoneOffset(i);
-        const m: u16 = @intCast(@abs(off));
-        o.* = .{ .label = if (off == 0) "UTC" else cx.fmt("UTC{s}{d}:{d:0>2}", .{ if (off < 0) "\u{2212}" else "+", m / 60, m % 60 }) };
     }
     return opts;
 }
@@ -386,6 +360,9 @@ test "off: the limits are chosen, and turning on asks for the password twice" {
     // Turned on: the form, which wants the same password twice.
     const st = &view.settingsState(u).?.parental;
     st.setOn(true);
+    u.frame(1600, 900, 2, settings);
+    try testing.expect(view.findText(u.root.?, "Turn on parental controls") != null);
+    try testing.expect(view.findType(u.root.?, kete.Dialog) != null);
     st.setPassword("sesame");
     st.setAgain("sesamE");
     submitTurnOn(st);
@@ -435,14 +412,11 @@ test "on: today's use, not the settings; a parent turns them off or gives more t
     try testing.expectEqualStrings("sesame", actions.parental_off.?.slice());
 }
 
-test "words for durations, limits and time zones" {
+test "words for durations and limits" {
     var buf: [64]u8 = undefined;
     try testing.expectEqualStrings("No limit", limitText(&buf, null));
     try testing.expectEqualStrings("None", limitText(&buf, 0));
     try testing.expectEqualStrings("1 hour", duration(&buf, 60));
     try testing.expectEqualStrings("2 hours 30 minutes", duration(&buf, 150));
     try testing.expectEqualStrings("1 minute", duration(&buf, 1));
-    try testing.expectEqual(@as(?usize, 24), zoneIndex(0));
-    try testing.expectEqual(@as(i16, 600), zoneOffset(zoneIndex(600).?));
-    try testing.expectEqual(@as(i16, -720), zoneOffset(0));
 }
