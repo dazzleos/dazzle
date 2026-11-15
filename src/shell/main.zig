@@ -103,6 +103,7 @@ fn run(init: std.process.Init.Minimal) !void {
         f.fallback = ef;
     };
 
+    took.step(.fonts);
     // The shell's own apps are beside it; the others are in /data/apps.
     var settings_buf: [512]u8 = undefined;
     const settings_path = try sys.appFile(&settings_buf, "dazzle-settings");
@@ -114,7 +115,7 @@ fn run(init: std.process.Init.Minimal) !void {
     var apps_watch: dock_mod.AppsWatch = .init(dock_mod.apps_dir);
     defer apps_watch.deinit();
     for (apps) |app| print("dazzle-shell: app {s} ({s})\n", .{ app.label, app.path });
-    took.step(.fonts_and_apps);
+    took.step(.apps);
     var dock = try dock_mod.Dock.init(gpa, ui_font, apps, renderer.width, renderer.height);
     // The quick settings, over the status box when it is clicked: the
     // volume, the network, updates and powering off.
@@ -991,7 +992,7 @@ const StartTimes = struct {
     at: u64,
     ms: std.EnumArray(Step, u64) = .initFill(0),
 
-    const Step = enum { display, fonts_and_apps, dock, updates, background, rest, first_frame };
+    const Step = enum { display, fonts, apps, dock, updates, background, rest, first_frame };
 
     fn step(t: *StartTimes, s: Step) void {
         const now = sys.nowNs();
