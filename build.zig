@@ -365,6 +365,8 @@ const shader_programs = [_]struct { source: []const u8, name: ?[]const u8 = null
     // Rounded windows' corners and shadows.
     .{ .source = "src/shell/shaders/window.zig", .owner = .shell, .args = &.{"--blend=source-over"} },
     .{ .source = "src/apps/maps/shaders/globe.zig", .owner = .maps, .args = &.{"--depth-test"} },
+    // Its coastlines, borders and parallels, blended over it.
+    .{ .source = "src/apps/maps/shaders/globe_lines.zig", .owner = .maps, .args = &.{"--blend=source-over"} },
 };
 
 /// Shaders the shader tests compile from SPIR-V themselves, embedded as
