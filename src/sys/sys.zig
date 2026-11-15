@@ -301,6 +301,7 @@ pub const Capability = enum(u5) {
     chown = 0,
     dac_override = 1,
     dac_read_search = 2,
+    kill = 5,
     net_bind_service = 10,
     net_admin = 12,
     net_raw = 13,

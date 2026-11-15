@@ -53,6 +53,7 @@ pub const GemClose = extern struct {
 pub const IOCTL_VERSION = IOWR(0x00, Version);
 pub const IOCTL_GEM_CLOSE = linux.IOCTL.IOW(ioctl_base, 0x09, GemClose);
 pub const IOCTL_SET_MASTER = IO(0x1e);
+pub const IOCTL_DROP_MASTER = IO(0x1f);
 
 /// Returns the kernel driver name (e.g. "vc4") in `buf`.
 pub fn driverName(fd: linux.fd_t, buf: []u8) ![]const u8 {
@@ -171,6 +172,7 @@ pub const format_xrgb8888 = fourcc("XR24");
 pub const format_argb8888 = fourcc("AR24");
 
 pub const IOCTL_MODE_GETRESOURCES = IOWR(0xa0, ModeCardRes);
+pub const IOCTL_MODE_GETCRTC = IOWR(0xa1, ModeCrtc);
 pub const IOCTL_MODE_SETCRTC = IOWR(0xa2, ModeCrtc);
 pub const IOCTL_MODE_GETENCODER = IOWR(0xa6, ModeGetEncoder);
 pub const IOCTL_MODE_GETCONNECTOR = IOWR(0xa7, ModeGetConnector);
@@ -426,6 +428,37 @@ pub fn setCrtc(fd: linux.fd_t, output: Output, fb_id: u32) !void {
     };
     try ioctl(fd, IOCTL_MODE_SETCRTC, &crtc);
 }
+
+/// The framebuffer a CRTC shows (0 if none).
+pub fn crtcFramebuffer(fd: linux.fd_t, crtc_id: u32) !u32 {
+    var crtc: ModeCrtc = .{ .crtc_id = crtc_id };
+    try ioctl(fd, IOCTL_MODE_GETCRTC, &crtc);
+    return crtc.fb_id;
+}
+
+/// Gives up being the display's master (another process may become it).
+pub fn dropMaster(fd: linux.fd_t) !void {
+    _ = try sys.check(linux.ioctl(fd, IOCTL_DROP_MASTER, 0));
+}
+
+/// A buffer the CPU draws into (32 bits a pixel), mapped.
+pub const DumbBuffer = struct {
+    handle: u32,
+    pitch: u32,
+    map: []align(std.heap.page_size_min) u8,
+
+    pub fn create(fd: linux.fd_t, width: u32, height: u32) !DumbBuffer {
+        var dumb: ModeCreateDumb = .{ .width = width, .height = height, .bpp = 32 };
+        try ioctl(fd, IOCTL_MODE_CREATE_DUMB, &dumb);
+        errdefer gemClose(fd, dumb.handle);
+        var map: ModeMapDumb = .{ .handle = dumb.handle };
+        try ioctl(fd, IOCTL_MODE_MAP_DUMB, &map);
+        const rc = linux.mmap(null, @intCast(dumb.size), .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, fd, @intCast(map.offset));
+        if (linux.errno(rc) != .SUCCESS) return error.MapFailed;
+        const ptr: [*]align(std.heap.page_size_min) u8 = @ptrFromInt(rc);
+        return .{ .handle = dumb.handle, .pitch = dumb.pitch, .map = ptr[0..@intCast(dumb.size)] };
+    }
+};
 
 comptime {
     // Sizes from the uapi headers, identical on 32- and 64-bit targets.

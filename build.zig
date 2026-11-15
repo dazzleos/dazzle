@@ -554,6 +554,29 @@ fn addProgramModule(b: *std.Build, path: []const u8, target: std.Build.ResolvedT
     return module;
 }
 
+/// Gives init what its boot screen draws with (see src/init/splash.zig):
+/// kete's font renderer and PNG decoder (without the rest of kete), and
+/// the logo.
+fn addBootScreen(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.Optimize) *std.Build.Module {
+    const dep = b.dependency("kete", .{});
+    const options = dep.builder.addOptions();
+    options.addOption(bool, "backends", false);
+    options.addOption(bool, "embed_fonts", false);
+    module.addImport("kete_font", b.createModule(.{
+        .root_source_file = dep.path("src/font/font.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "kete_options", .module = options.createModule() }},
+    }));
+    module.addImport("kete_png", b.createModule(.{
+        .root_source_file = dep.path("src/gfx/png.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+    module.addAnonymousImport("logo.png", .{ .root_source_file = b.path("src/init/logo.png") });
+    return module;
+}
+
 /// Gives `module` kete (built without its own backends, or its fonts: it
 /// reads the system's, in /os/fonts), and `kete_vc4`,
 /// which draws it with Dazzle's window and GPU. Its icon font has only the
@@ -1221,7 +1244,7 @@ pub fn build(b: *std.Build) void {
     // as the unprivileged Dazzle user.
     const init_exe = b.addExecutable(.{
         .name = "dazzle-init",
-        .root_module = addProgramModule(b, "src/init/main.zig", target, optimize, pi, shaders, true),
+        .root_module = addBootScreen(b, addProgramModule(b, "src/init/main.zig", target, optimize, pi, shaders, true), target, optimize),
     });
     const install_init = b.addInstallArtifact(init_exe, .{});
     const demo_module = addProgramModule(b, "src/apps/demo/main.zig", target, optimize, pi, shaders, true);
@@ -1490,7 +1513,7 @@ pub fn build(b: *std.Build) void {
         host.locale,
         host.video,
         host.audio,
-        addProgramModule(b, "src/init/main.zig", b.graph.host, test_optimize, host, shaders, false),
+        addBootScreen(b, addProgramModule(b, "src/init/main.zig", b.graph.host, test_optimize, host, shaders, false), b.graph.host, test_optimize),
         host_demo,
         host_kete_vc4,
         host_settings,

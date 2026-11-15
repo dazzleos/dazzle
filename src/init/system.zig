@@ -40,6 +40,7 @@ const mkfs = @import("mkfs.zig");
 const slots = @import("slots.zig");
 const update = @import("update.zig");
 const trial = @import("trial.zig");
+const shutdown = @import("shutdown.zig");
 const locale = @import("locale");
 
 const proto = sys.system;
@@ -76,7 +77,8 @@ pub fn start(card: bool, mounted: bool, slot: ?u8, setup_done: bool, log_server:
             return null;
         },
     }
-    sys.dropPrivilegesKeeping(&.{ .sys_admin, .dac_override, .chown, .sys_boot }) catch |err| {
+    // Kill: to ask init to restart or turn off (see shutdown.zig).
+    sys.dropPrivilegesKeeping(&.{ .sys_admin, .dac_override, .chown, .sys_boot, .kill }) catch |err| {
         print(sys.log_warning ++ "dazzle: system: cannot drop privileges ({s})\n", .{@errorName(err)});
         linux.exit(1);
     };
@@ -511,18 +513,22 @@ fn random(buf: []u8) void {
     }
 }
 
-/// Restarts the computer: what is written goes to the card first.
+/// Restarts the computer: init stops everything and puts the card's
+/// filesystems away first (or, if it cannot be asked, what is written
+/// goes to the card).
 fn restart() noreturn {
     print("dazzle: system: restarting\n", .{});
+    shutdown.request(.restart);
     linux.sync();
     _ = linux.reboot(.MAGIC1, .MAGIC2, .RESTART, null);
     print(sys.log_warning ++ "dazzle: system: cannot restart\n", .{});
     linux.exit(1);
 }
 
-/// Turns the computer off: what is written goes to the card first.
+/// Turns the computer off, as `restart` does.
 fn powerOff() noreturn {
     print("dazzle: system: turning off\n", .{});
+    shutdown.request(.power_off);
     linux.sync();
     _ = linux.reboot(.MAGIC1, .MAGIC2, .POWER_OFF, null);
     print(sys.log_warning ++ "dazzle: system: cannot turn off\n", .{});

@@ -47,6 +47,8 @@ const media = @import("media.zig");
 const storage = @import("storage.zig");
 const system = @import("system.zig");
 const trial = @import("trial.zig");
+const splash = @import("splash.zig");
+const shutdown = @import("shutdown.zig");
 const build_info = @import("build_info");
 
 const print = sys.print;
@@ -62,9 +64,13 @@ pub fn main() void {
     prepareRoot();
     sys.logToKmsg();
     print("dazzle: starting as init (build {s})\n", .{build_info.commit});
+    // The boot screen, until the shell shows its first frame.
+    const screen = splash.start("Starting");
+    // Asked to restart or turn off (by the system manager): see shutdown.zig.
+    shutdown.listen();
     // The card's files (and the computer's name, kept there once setup has
     // finished; until then, setup names it).
-    const card = storage.boot();
+    const card = storage.boot(screen);
     // From here on, a system that hangs (runs out of memory, say) restarts
     // by itself rather than sitting there with nothing on the screen.
     var watchdog = trial.Watchdog.start();
@@ -82,6 +88,7 @@ pub fn main() void {
     // computer for it. It also makes the second OS slot, if that is still
     // to be made, and later installs updates.
     const system_pid = system.start(card.card, card.mounted, card.slot, card.setup_done, log_server_pid);
+    if (screen) |s| s.handOver();
     const shell_pid = startShell(!card.setup_done);
     // Trying an update: it has worked when the shell has run for a while
     // (the timer, a child process that ends then).
@@ -297,6 +304,7 @@ fn reapForever(first_shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, f
     while (true) {
         var status: u32 = 0;
         const rc = linux.wait4(-1, @ptrCast(&status), 0, null);
+        if (shutdown.requested()) |kind| shutdown.now(kind);
         switch (linux.errno(rc)) {
             .SUCCESS => {},
             // No children left: wait for signals forever.
@@ -359,7 +367,7 @@ fn reapForever(first_shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, f
         // next start already is).
         if (t.timer != null) {
             print(sys.log_error ++ "dazzle: the update did not work\n", .{});
-            trial.restart();
+            shutdown.now(.restart);
         }
         print("dazzle: restarting the shell in 1 s\n", .{});
         sys.sleepMs(1000);
@@ -385,4 +393,6 @@ test {
     _ = @import("slots.zig");
     _ = @import("trial.zig");
     _ = @import("update.zig");
+    _ = @import("splash.zig");
+    _ = @import("shutdown.zig");
 }

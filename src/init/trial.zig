@@ -128,14 +128,6 @@ pub fn commit(running: u8) void {
     print("dazzle: the update in OS slot {c} works: it starts from now on\n", .{std.ascii.toUpper(running)});
 }
 
-/// Restarts the computer (into the system before, during a trial).
-pub fn restart() noreturn {
-    print("dazzle: restarting\n", .{});
-    linux.sync();
-    _ = linux.reboot(.MAGIC1, .MAGIC2, .RESTART, null);
-    while (true) _ = linux.pause();
-}
-
 /// The SoC's watchdog, kept fed by a child process for as long as the
 /// system runs: if the system hangs, it stops being fed and the Pi
 /// restarts.

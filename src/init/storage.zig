@@ -25,6 +25,7 @@ const sys = @import("sys");
 
 const proto = sys.system;
 const trial = @import("trial.zig");
+const splash_mod = @import("splash.zig");
 const print = sys.print;
 
 /// The card (on the SDHOST controller), and the partition for files.
@@ -61,8 +62,9 @@ pub const Boot = struct {
 };
 
 /// Waits for the card (it is found a moment after boot) and mounts its
-/// filesystem, if it has one; then reads the settings kept there.
-pub fn boot() Boot {
+/// filesystem, if it has one; then reads the settings kept there. What
+/// takes a while is said on the boot screen (`splash`).
+pub fn boot(splash: ?splash_mod.Splash) Boot {
     var b: Boot = .{};
     var cmdline: [1024]u8 = undefined;
     if (sys.readFile("/proc/cmdline", &cmdline)) |text| b.slot = parseSlot(text);
@@ -81,6 +83,12 @@ pub fn boot() Boot {
     // First, before anything can fail: an update being tried.
     b.trial = trial.atBoot(b.slot);
     if (!exists(data_partition) or !hasFilesystem(data_partition)) return b;
+    // Not stopped cleanly (the power went, say): mounting it goes over
+    // what was being written first, which can take a while.
+    if (needsRecovery(data_partition)) {
+        print("dazzle: {s} was not stopped cleanly: checking it\n", .{data_partition});
+        if (splash) |sp| sp.say("Checking the files");
+    }
     b.mounted = mountData();
     if (!b.mounted) return b;
     makeUserDirs();
@@ -255,6 +263,24 @@ pub fn exists(path: [*:0]const u8) bool {
     return linux.errno(linux.access(path, linux.F_OK)) == .SUCCESS;
 }
 
+/// Whether the ext4 filesystem at `path` has a journal to go over when it
+/// is mounted (it was not unmounted cleanly).
+pub fn needsRecovery(path: [*:0]const u8) bool {
+    const fd = sys.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }) catch return false;
+    defer sys.close(fd);
+    var sb: [0x64]u8 = undefined;
+    const n = sys.check(linux.pread(fd, &sb, sb.len, 1024)) catch return false;
+    return n == sb.len and superblockNeedsRecovery(&sb);
+}
+
+/// Whether an ext4 superblock (its first bytes) says its journal needs
+/// going over: its magic number, and the incompatible feature "recover".
+fn superblockNeedsRecovery(sb: *const [0x64]u8) bool {
+    const incompat_recover = 0x4;
+    return std.mem.readInt(u16, sb[0x38..0x3a], .little) == 0xef53 and
+        std.mem.readInt(u32, sb[0x60..0x64], .little) & incompat_recover != 0;
+}
+
 /// Whether the partition at `path` holds an ext2/3/4 filesystem.
 pub fn hasFilesystem(path: [*:0]const u8) bool {
     const fd = sys.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }) catch return false;
@@ -421,6 +447,18 @@ fn growableBootSector(sectors: u32) [sector]u8 {
     bs[510] = 0x55;
     bs[511] = 0xaa;
     return bs;
+}
+
+test "a filesystem not stopped cleanly needs its journal gone over" {
+    var sb: [0x64]u8 = @splat(0);
+    std.mem.writeInt(u16, sb[0x38..0x3a], 0xef53, .little);
+    std.mem.writeInt(u32, sb[0x60..0x64], 0x2c2, .little);
+    try std.testing.expect(!superblockNeedsRecovery(&sb));
+    std.mem.writeInt(u32, sb[0x60..0x64], 0x2c6, .little);
+    try std.testing.expect(superblockNeedsRecovery(&sb));
+    // Not ext4 at all.
+    std.mem.writeInt(u16, sb[0x38..0x3a], 0, .little);
+    try std.testing.expect(!superblockNeedsRecovery(&sb));
 }
 
 test "the boot partition grows as far as its FATs reach, once, before /data" {
