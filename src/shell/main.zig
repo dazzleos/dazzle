@@ -1060,18 +1060,25 @@ const BootFade = struct {
     const fade_ns = 500 * std.time.ns_per_ms;
 
     fn start(renderer: *render.Renderer) BootFade {
-        const k = &(renderer.display.kms orelse return .{ .gone = true });
-        if (!k.canFadeCover()) return .{ .gone = true };
-        const shown = vc4.drm.adoptShown(renderer.display.fd, renderer.display.output.crtc_id) orelse return .{ .gone = true };
+        const k = &(renderer.display.kms orelse return none("no atomic mode setting"));
+        if (k.cover_plane == null) return none("no plane for it");
+        if (!k.canFadeCover()) return none("the display's planes have no alpha");
+        const shown = vc4.drm.adoptShown(renderer.display.fd, renderer.display.output.crtc_id) orelse return none("nothing to take");
         const w: u32 = renderer.width;
         const h: u32 = renderer.height;
         var f: BootFade = .{ .fb_id = shown.fb_id, .handle = shown.handle };
         f.layer = .{ .fb_id = shown.fb_id, .src_width = @min(shown.width, w), .src_height = @min(shown.height, h), .x = 0, .y = 0, .width = @min(shown.width, w), .height = @min(shown.height, h) };
         if (!k.setCover(f.layer)) {
             f.release(renderer);
-            return .{ .gone = true };
+            return none("no plane for it");
         }
+        print("dazzle-shell: fading in from the boot screen\n", .{});
         return f;
+    }
+
+    fn none(why: []const u8) BootFade {
+        print("dazzle-shell: not fading in from the boot screen: {s}\n", .{why});
+        return .{ .gone = true };
     }
 
     /// Before each frame: whether the cover changed (a frame is needed).
