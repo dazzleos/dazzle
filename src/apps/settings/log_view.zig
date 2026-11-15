@@ -90,9 +90,9 @@ fn remoteRow(self: *const Settings, b: Builder) kete.Widget {
     const t = cx.theme();
     const host = self.system.hostname.slice();
     const note = if (self.remote_code) |code|
-        cx.fmt("Code {d}. With it, a computer on the network can move the pointer, type, open apps and take screenshots, at http://{s}:{d}/. Turn this off when you are done.", .{ code, if (host.len > 0) host else "this computer", sys.remote.port })
+        cx.fmt("Code {d}. With it, a computer on the network can move the pointer, type, open and close apps and windows, take screenshots, install updates and restart, at http://{s}:{d}/. Turn this off when you are done.", .{ code, if (host.len > 0) host else "this computer", sys.remote.port })
     else
-        "For testing Dazzle from another computer: it can then move the pointer, type, open apps and take screenshots here, with a code shown here.";
+        "For testing Dazzle from another computer: it can then move the pointer, type, open and close apps and windows, take screenshots, install updates and restart, with a code shown here.";
     return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 4, .children = &.{
         cx.make(kete.SwitchRow{
             .value = self.remote_code != null,
