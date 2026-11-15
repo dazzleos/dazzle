@@ -306,9 +306,16 @@ pub const Renderer = struct {
     /// being rendered (see `render.Frame.limitTo`). When the frame fills
     /// up, it is rendered and drawing goes on.
     fn recordCanvas(r: *Renderer, c: *const Canvas, frame: *render.Frame) !void {
+        return r.recordPart(c, frame, null);
+    }
+
+    /// Records those of a canvas's batches that `part` says (all if null):
+    /// those on the layer, or those not.
+    fn recordPart(r: *Renderer, c: *const Canvas, frame: *render.Frame, part: ?Part) !void {
         for (c.batches.items) |*b| {
             const data = std.mem.sliceAsBytes(b.floats.items);
             if (data.len == 0) continue;
+            if (part) |pt| if (pt.plan.onLayer(pt.segment, b) != pt.layer) continue;
             const area = if (b.clip) |clip| b.bounds.intersect(clip) orelse continue else b.bounds;
             if (!frame.covers(scissor(area, r.scale))) continue;
             const vbo = r.vbo orelse return error.NotPrepared;
@@ -397,11 +404,14 @@ pub const Renderer = struct {
         @memcpy(all[0..canvases.len], canvases);
         all[canvases.len] = &r.border;
         try r.prepare(if (outlined) all else canvases);
-        // What goes over the app's own draws: on the layer, if there is one.
+        // What goes over the app's own draws (and beside them): on the
+        // layer, if there is one.
         var drawn = segments;
-        if (r.layer) |l| if (lastGpuDraw(segments)) |k| {
-            drawn = segments[0 .. k + 1];
-            try r.drawLayer(l, segments[k + 1 ..], target);
+        var plan: ?LayerPlan = null;
+        if (r.layer) |l| if (LayerPlan.of(segments)) |pl| {
+            plan = pl;
+            drawn = segments[0 .. pl.last_gpu + 1];
+            try r.drawLayer(l, &plan.?, segments, target);
         };
         if (r.multisampled) frame.beginMultisampled(try targetOf(target), clear) else frame.begin(try targetOf(target), .{ .clear = clear });
         var vps: [kgfx.frame.Damage.max_rects]render.Viewport = undefined;
@@ -409,8 +419,8 @@ pub const Renderer = struct {
         for (damage[0..n], vps[0..n]) |d, *v| v.* = viewport(d);
         // More than it can say, or drawn smaller: all of it.
         frame.limitTo(if (n == damage.len and r.scale == 1) vps[0..n] else null);
-        for (drawn) |s| switch (s) {
-            .canvas => |c| try r.recordCanvas(c, frame),
+        for (drawn, 0..) |s, i| switch (s) {
+            .canvas => |c| try r.recordPart(c, frame, if (plan) |*pl| .{ .plan = pl, .segment = i, .layer = false } else null),
             .gpu => |g| if (frame.covers(r.scaled(g.area.scissor orelse g.area.viewport))) try g.f(g.ctx, frame, g.area),
         };
         if (outlined) try r.recordCanvas(&r.border, frame);
@@ -426,16 +436,16 @@ pub const Renderer = struct {
         } else r.stats.pixels += @as(f64, @floatFromInt(target.width)) * @as(f64, @floatFromInt(target.height));
     }
 
-    /// Draws `over` (canvases) on the layer, as big as the window, if they
+    /// Draws what `plan` puts on the layer, as big as the window, if it
     /// changed since it was last drawn: with nothing in them, there is no
     /// layer. Without a buffer free for it, it is left as it is, for a
     /// later frame.
-    fn drawLayer(r: *Renderer, l: Layer, over: []const kgfx.Segment, window: *const kgfx.DmabufTarget) !void {
-        const hash = layerHash(over, window);
+    fn drawLayer(r: *Renderer, l: Layer, plan: *const LayerPlan, segments: []const kgfx.Segment, window: *const kgfx.DmabufTarget) !void {
+        const hash = layerHash(plan, segments, window);
         if (r.layer_drawn == hash) return;
         var empty = true;
-        for (over) |seg| if (seg == .canvas) for (seg.canvas.batches.items) |b| {
-            if (b.floats.items.len > 0) empty = false;
+        for (segments, 0..) |seg, i| if (seg == .canvas) for (seg.canvas.batches.items) |*b| {
+            if (b.floats.items.len > 0 and plan.onLayer(i, b)) empty = false;
         };
         if (empty) {
             l.hide(l.ctx);
@@ -449,7 +459,7 @@ pub const Renderer = struct {
         const scale = r.scale;
         r.scale = 1;
         defer r.scale = scale;
-        for (over) |seg| if (seg == .canvas) try r.recordCanvas(seg.canvas, frame);
+        for (segments, 0..) |seg, i| if (seg == .canvas) try r.recordPart(seg.canvas, frame, .{ .plan = plan, .segment = i, .layer = true });
         // Before the window's frame: the GPU takes them in turn, so the
         // window's being done means this is too.
         if (r.pipelined) _ = try r.gpu.vtable.submit.?(r.gpu.ptr, frame) else try r.gpu.vtable.run(r.gpu.ptr, frame);
@@ -492,22 +502,77 @@ pub fn scaledViewport(v: kgfx.Viewport, scale: f32) render.Viewport {
     return .{ .x = @intFromFloat(x0), .y = @intFromFloat(y0), .width = @intFromFloat(@max(x1 - x0, 0)), .height = @intFromFloat(@max(y1 - y0, 0)) };
 }
 
-/// The last of the app's own draws among a frame's segments.
-fn lastGpuDraw(segments: []const kgfx.Segment) ?usize {
-    var i = segments.len;
-    while (i > 0) {
-        i -= 1;
-        if (segments[i] == .gpu) return i;
-    }
-    return null;
-}
+/// Which of a frame's batches go on the layer over the window: those
+/// after the app's last draw of its own (over it), and those before that
+/// none of its draws is under (beside them: a title bar), unless putting
+/// them over everything else would change what is over what.
+const LayerPlan = struct {
+    last_gpu: usize,
+    /// Where the app's own draws are.
+    areas: [max_areas]kgfx.Rect = undefined,
+    n_areas: usize = 0,
+    /// Batches before the app's draws can be on the layer.
+    beside: bool = true,
 
-/// What a layer drawing `over` over a window `window`'s size shows: the
-/// same if nothing in it changed.
-fn layerHash(over: []const kgfx.Segment, window: *const kgfx.DmabufTarget) u64 {
+    const max_areas = 8;
+    const max_beside = 128;
+
+    /// Null if the frame has no draws of the app's own.
+    fn of(segments: []const kgfx.Segment) ?LayerPlan {
+        var p: LayerPlan = .{ .last_gpu = undefined };
+        var last: ?usize = null;
+        for (segments, 0..) |seg, i| if (seg == .gpu) {
+            last = i;
+            const v = seg.gpu.area.scissor orelse seg.gpu.area.viewport;
+            if (p.n_areas == max_areas) {
+                p.beside = false;
+                continue;
+            }
+            p.areas[p.n_areas] = .{ .x = @floatFromInt(v.x), .y = @floatFromInt(v.y), .w = @floatFromInt(v.width), .h = @floatFromInt(v.height) };
+            p.n_areas += 1;
+        };
+        p.last_gpu = last orelse return null;
+        // A batch left under the layer that is drawn after (so over) one
+        // beside the app's draws: none can go on the layer.
+        var beside: [max_beside]kgfx.Rect = undefined;
+        var n: usize = 0;
+        for (segments[0..p.last_gpu], 0..) |seg, i| if (seg == .canvas) for (seg.canvas.batches.items) |*b| {
+            if (b.floats.items.len == 0) continue;
+            if (p.onLayer(i, b)) {
+                if (n == max_beside) {
+                    p.beside = false;
+                    return p;
+                }
+                beside[n] = b.bounds;
+                n += 1;
+            } else for (beside[0..n]) |r| if (b.overlaps(r)) {
+                p.beside = false;
+                return p;
+            };
+        };
+        return p;
+    }
+
+    /// Whether batch `b` of segment `segment` goes on the layer.
+    fn onLayer(p: *const LayerPlan, segment: usize, b: *const kgfx.canvas.Batch) bool {
+        if (segment > p.last_gpu) return true;
+        if (!p.beside) return false;
+        for (p.areas[0..p.n_areas]) |a| if (b.overlaps(a)) return false;
+        return true;
+    }
+};
+
+/// Some of a canvas's batches: those `plan` puts on the layer, or those
+/// it does not.
+const Part = struct { plan: *const LayerPlan, segment: usize, layer: bool };
+
+/// What a layer drawing what `plan` puts on it over a window `window`'s
+/// size shows: the same if nothing in it changed.
+fn layerHash(plan: *const LayerPlan, segments: []const kgfx.Segment, window: *const kgfx.DmabufTarget) u64 {
     var h = std.hash.Wyhash.init(0);
     h.update(std.mem.asBytes(&[2]u32{ window.width, window.height }));
-    for (over) |seg| if (seg == .canvas) for (seg.canvas.batches.items) |*b| {
+    for (segments, 0..) |seg, i| if (seg == .canvas) for (seg.canvas.batches.items) |*b| {
+        if (!plan.onLayer(i, b)) continue;
         h.update(&.{@intFromEnum(b.kind)});
         h.update(std.mem.sliceAsBytes(b.floats.items));
         if (b.clip) |c| h.update(std.mem.asBytes(&[4]f32{ c.x, c.y, c.w, c.h })) else h.update("-");
@@ -525,4 +590,46 @@ fn scissor(clip: kgfx.Rect, scale: f32) render.Viewport {
     const x1 = @max(@ceil((clip.x + clip.w) * scale), x0);
     const y1 = @max(@ceil((clip.y + clip.h) * scale), y0);
     return .{ .x = @intFromFloat(@min(x0, 1e6)), .y = @intFromFloat(@min(y0, 1e6)), .width = @intFromFloat(@min(x1 - x0, 1e6)), .height = @intFromFloat(@min(y1 - y0, 1e6)) };
+}
+
+test "the layer takes what is over the app's own draws, and what is beside them" {
+    const gpa = std.testing.allocator;
+    const nothing = struct {
+        fn f(_: *const anyopaque, _: *anyopaque, _: kgfx.GpuArea) anyerror!void {}
+    }.f;
+    const world: kgfx.Segment = .{ .gpu = .{ .ctx = undefined, .f = nothing, .area = .{ .viewport = .{ .x = 0, .y = 40, .width = 800, .height = 560 } } } };
+    // Under the world: the window's background (under it), then a button
+    // in its title bar (beside it); over it, a menu.
+    var under: Canvas = .init(gpa);
+    defer under.deinit();
+    under.begin(800, 600);
+    under.fillRect(.{ .x = 0, .y = 0, .w = 800, .h = 600 }, .rgb(0x101010));
+    under.fillPolygon(&.{ .{ 770, 10 }, .{ 790, 10 }, .{ 780, 30 } }, .rgb(0x303030));
+    var over: Canvas = .init(gpa);
+    defer over.deinit();
+    over.begin(800, 600);
+    over.fillRect(.{ .x = 200, .y = 200, .w = 400, .h = 200 }, .rgb(0x505050));
+    const segments = [_]kgfx.Segment{ .{ .canvas = &under }, world, .{ .canvas = &over } };
+    const plan = LayerPlan.of(&segments).?;
+    try std.testing.expectEqual(@as(usize, 1), plan.last_gpu);
+    try std.testing.expect(plan.beside);
+    var on: [3]u32 = @splat(0);
+    for (segments, 0..) |seg, i| if (seg == .canvas) for (seg.canvas.batches.items) |*b| {
+        if (b.floats.items.len > 0 and plan.onLayer(i, b)) on[i] += 1;
+    };
+    // The button and the menu; not the background under the world.
+    try std.testing.expect(on[0] > 0);
+    try std.testing.expect(!plan.onLayer(0, &under.batches.items[0]));
+    try std.testing.expect(on[2] > 0);
+    var over_batches: u32 = 0;
+    for (over.batches.items) |b| over_batches += @intFromBool(b.floats.items.len > 0);
+    try std.testing.expectEqual(over_batches, on[2]);
+    // Something drawn after the button, over it and under the world,
+    // would end up under the button: nothing beside the world goes on the
+    // layer then.
+    under.fillRect(.{ .x = 760, .y = 0, .w = 40, .h = 100 }, .rgb(0x707070));
+    const mixed = LayerPlan.of(&segments).?;
+    try std.testing.expect(!mixed.beside);
+    // Without draws of the app's own, there is no layer.
+    try std.testing.expect(LayerPlan.of(&.{.{ .canvas = &under }}) == null);
 }

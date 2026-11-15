@@ -255,3 +255,7 @@ fn channelDistance(a: u32, b: u32) u32 {
     }
     return most;
 }
+
+test {
+    _ = renderer;
+}
