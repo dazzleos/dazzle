@@ -1349,7 +1349,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_mkinitramfs = b.addRunArtifact(mkinitramfs);
-    const initramfs = run_mkinitramfs.addOutputFileArg("initramfs.cpio");
+    const initramfs_cpio = run_mkinitramfs.addOutputFileArg("initramfs.cpio");
     run_mkinitramfs.addArtifactArg(init_exe);
     run_mkinitramfs.addArtifactArg(shell_exe);
     run_mkinitramfs.addFileArg(b.path("fonts/FiraSans-Regular.ttf"));
@@ -1381,6 +1381,14 @@ pub fn build(b: *std.Build) void {
     // Settings to download apps and updates.
     run_mkinitramfs.step.dependOn(fetchCaCertificates(b));
     run_mkinitramfs.addArg(b.fmt("--file=os/certs/ca-certificates.pem={s}", .{b.pathJoin(&.{ fromRoot(b, "build/firmware/certs"), ca_certificates[0].name })}));
+    // Compressed (zstd): the firmware reads it from the card before the
+    // kernel starts, slowly (16 MB took seconds), and the kernel unpacks it
+    // in a fraction of a second. It keeps its name: the kernel knows it is
+    // compressed by its first bytes.
+    const zstd = b.addSystemCommand(&.{ "zstd", "-19", "-q", "-c" });
+    zstd.step.dependOn(&requireTools(b, &.{"zstd:zstd"}).step);
+    zstd.addFileArg(initramfs_cpio);
+    const initramfs = zstd.captureStdOut(.{ .basename = "initramfs.cpio" });
     // The apps, each in /data/apps/<name> and listed in the shell's dock,
     // are not part of the system or the image: each is an archive to
     // download and install, in setup or from Settings (zig-out/apps/, with
