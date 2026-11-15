@@ -1672,11 +1672,17 @@ pub const Server = struct {
     /// A restored window's first buffer: the size its client chose (it was
     /// told 0 by 0: see `configure`), as far as the work area and its size
     /// limits allow, in the middle of the work area. If it had to be made
-    /// smaller, it is told so.
+    /// smaller, it is told so. One that fills the work area is maximized
+    /// (as one that leaves fullscreen without ever having been placed, a
+    /// game started fullscreen, say): it can then be shown directly.
     fn placeFirst(s: *Server, c: *Client, t: *Toplevel) void {
         if (t.placed or t.maximized) return;
         const sz = toplevelLogicalSize(t);
         const wa = s.work_area;
+        if (sz[0] >= wa.width and sz[1] >= wa.height and !t.fullscreen) {
+            s.setMaximized(c, t, true);
+            return;
+        }
         t.width = s.clampWidth(t, sz[0], wa.width);
         t.height = s.clampHeight(t, sz[1], wa.height);
         t.x = wa.x + @divTrunc(@as(i32, @intCast(wa.width)) - @as(i32, @intCast(t.width)), 2);
