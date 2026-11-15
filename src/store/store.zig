@@ -799,14 +799,21 @@ pub const Job = struct {
         });
     }
 
-    const time_limit = 10 * 60 * std.time.ns_per_s;
+    /// How long a job may take: little for the small files of a list of
+    /// apps or a system update's description, longer for downloads.
+    fn timeLimit(kind: Kind) u64 {
+        return switch (kind) {
+            .catalogue, .os_check => 30 * std.time.ns_per_s,
+            .install, .update_all, .os_download => 10 * 60 * std.time.ns_per_s,
+        };
+    }
 
     /// If the job has finished: null if it worked, else why not (in `buf`).
     pub fn finished(j: *Job, buf: []u8) ??[]const u8 {
         var status: u32 = 0;
         const rc = linux.wait4(j.pid, @ptrCast(&status), linux.W.NOHANG, null);
         if (linux.errno(rc) == .SUCCESS and rc == 0) {
-            if (sys.nowNs() -| j.started < time_limit) return null;
+            if (sys.nowNs() -| j.started < timeLimit(j.kind)) return null;
             _ = linux.kill(j.pid, .KILL);
             _ = linux.wait4(j.pid, @ptrCast(&status), 0, null);
             sys.close(j.result);

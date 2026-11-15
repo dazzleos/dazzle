@@ -73,13 +73,26 @@ pub fn main(init: std.process.Init) !void {
     try out.print("  https://{s}:{d}\n\n", .{ host, listener.port });
     try out.flush();
 
+    // Each connection on a thread of its own: a client keeping one open
+    // (between requests, or stuck) must not keep the others waiting. One
+    // idle for a while is closed.
     while (true) {
         const rc = linux.accept4(listener.fd, null, null, linux.SOCK.CLOEXEC);
         if (linux.errno(rc) != .SUCCESS) continue;
         const conn_fd: linux.fd_t = @intCast(rc);
-        handleConnection(gpa, init.io, conn_fd, root_dir, host);
+        const timeout: linux.timeval = .{ .sec = idle_timeout_s, .usec = 0 };
+        _ = linux.setsockopt(conn_fd, linux.SOL.SOCKET, linux.SO.RCVTIMEO, std.mem.asBytes(&timeout), @sizeOf(linux.timeval));
+        _ = linux.setsockopt(conn_fd, linux.SOL.SOCKET, linux.SO.SNDTIMEO, std.mem.asBytes(&timeout), @sizeOf(linux.timeval));
+        const thread = std.Thread.spawn(.{}, handleConnection, .{ gpa, init.io, conn_fd, root_dir, host }) catch {
+            handleConnection(gpa, init.io, conn_fd, root_dir, host);
+            continue;
+        };
+        thread.detach();
     }
 }
+
+/// How long a connection may wait for its client before it is closed.
+const idle_timeout_s = 30;
 
 pub const Listener = struct {
     fd: linux.fd_t,
