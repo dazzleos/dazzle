@@ -68,6 +68,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
 }
 
 fn run(init: std.process.Init.Minimal) !void {
+    const launched = sys.nowNs();
     const gpa = std.heap.page_allocator;
     // Run elsewhere (on Raspberry Pi OS), the socket goes where other
     // compositors' do.
@@ -951,6 +952,9 @@ fn run(init: std.process.Init.Minimal) !void {
             // The cursor plane needs the mode the first frame set.
             if (!cursor_shown) {
                 cursor_shown = true;
+                // How long starting took (the boot screen was shown until
+                // now), for the log.
+                print("dazzle-shell: first frame, {d} ms after the shell started\n", .{(sys.nowNs() - launched) / std.time.ns_per_ms});
                 if (renderer.showCursor(.arrow)) {
                     renderer.moveCursor(@intFromFloat(pointer.x), @intFromFloat(pointer.y));
                     print("dazzle-shell: cursor shown\n", .{});
