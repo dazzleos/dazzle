@@ -27,6 +27,14 @@
 //! It also keeps whether the log is served over HTTP (asked for by
 //! Settings), telling the log server when it changes (see logserver.zig).
 //!
+//! Parental controls (`sys.parental`): it keeps them, in
+//! /data/system/parental, counts the time the computer is used each day
+//! (while it is on and not locked), and says in its report when it is
+//! locked; Settings turns them on and off, and gives bonus time, with the
+//! password, and the shell's lock screen turns them off with it. Its clock
+//! for them never goes back, and goes on from the last time it saw until
+//! the network sets the system's.
+//!
 //! Updating (update.zig): Settings downloads an update and asks for it to
 //! be installed; a child process unpacks it into the OS slot not running
 //! and has the firmware start that slot next time. Settings then offers to
@@ -44,6 +52,7 @@ const shutdown = @import("shutdown.zig");
 const locale = @import("locale");
 
 const proto = sys.system;
+const parental = sys.parental;
 const print = sys.print;
 
 const max_clients = 8;
@@ -62,6 +71,12 @@ const Work = struct {
         return w.done.load(.acquire);
     }
 };
+
+/// `new`, unless it is within two seconds of `old`.
+fn steady(old: ?i64, new: ?i64) ?i64 {
+    if (old) |o| if (new) |n| if (@abs(o - n) <= 2) return o;
+    return new;
+}
 
 /// Forks the manager. `card` says whether there is an SD card, `mounted`
 /// whether /data is already there (prepared on an earlier run that did not
@@ -114,6 +129,16 @@ const Manager = struct {
     power_off: bool = false,
     /// The log server's process (a pidfd), told when its setting changes.
     log_server: ?linux.fd_t = null,
+    /// Parental controls, once read from /data/system.
+    parental: parental.State = .{},
+    parental_loaded: bool = false,
+    /// The clock parental controls go by (nanoseconds since 1970), and the
+    /// monotonic clock when it last moved on.
+    parental_wall_ns: i128 = 0,
+    parental_mono: u64 = 0,
+    parental_saved_at: u64 = 0,
+    /// After a wrong password, none is tried until then (monotonic).
+    wrong_until: u64 = 0,
 
     /// What the slots hold, and which starts next.
     fn readSlots(m: *Manager) void {
@@ -152,9 +177,10 @@ const Manager = struct {
         if (!m.finished and m.report.storage == .unprepared) m.prepare();
         const Conn = struct { fd: linux.fd_t, who: proto.Client, subscribed: bool = false, needs_initial: bool = false };
         var clients: [max_clients]?Conn = @splat(null);
-        var last_sent: [512]u8 = undefined;
+        var last_sent: [1024]u8 = undefined;
         var last_sent_len: usize = 0;
         while (true) {
+            m.tickParental();
             // While formatting or copying, see how it goes now and then.
             if (m.formatting != null) m.checkFormatting();
             if (m.copying != null) m.checkCopying();
@@ -168,7 +194,7 @@ const Manager = struct {
             };
 
             {
-                var out: [512]u8 = undefined;
+                var out: [1024]u8 = undefined;
                 const text = m.report.write(&out);
                 const changed = !std.mem.eql(u8, text, last_sent[0..last_sent_len]);
                 if (changed) {
@@ -221,9 +247,11 @@ const Manager = struct {
                             continue;
                         }
                         m.handle(req);
-                        var out: [512]u8 = undefined;
+                        var out: [1024]u8 = undefined;
                         const text = m.report.write(&out);
                         _ = linux.write(conn.fd, text.ptr, text.len);
+                        // Said only to the one who gave it.
+                        m.report.password = null;
                     } else _ = linux.write(conn.fd, "denied\n", 7);
                 };
                 // One request per connection (unless subscribed).
@@ -253,7 +281,123 @@ const Manager = struct {
             },
             .video_memory => |mib| m.setVideoMemory(mib),
             .log_server => |on| m.setLogServer(on),
+            .parental_on => |r| if (m.parental_loaded) {
+                m.parental.enable(r.password.slice(), r.limits, parental.freshSalt());
+                m.parental.usage.roll(m.parentalLocal().day);
+                m.report.password = true;
+                print("dazzle: system: parental controls on\n", .{});
+                m.saveParental();
+            },
+            .parental_off => |pw| {
+                const ok = !m.parental.on or m.passwordRight(pw.slice());
+                m.report.password = ok;
+                if (ok and m.parental.on) {
+                    m.parental.on = false;
+                    print("dazzle: system: parental controls off\n", .{});
+                    m.saveParental();
+                }
+            },
+            .parental_bonus => |b| {
+                const ok = m.parental.on and m.passwordRight(b.password.slice());
+                m.report.password = ok;
+                if (ok) {
+                    m.parental.usage.roll(m.parentalLocal().day);
+                    m.parental.usage.bonus +|= b.minutes;
+                    print("dazzle: system: {d} minutes more today\n", .{b.minutes});
+                    m.saveParental();
+                }
+            },
         }
+        m.tickParental();
+    }
+
+    /// Whether `password` unlocks; a wrong one, and none is tried for a
+    /// while (so guessing is slow).
+    fn passwordRight(m: *Manager, password: []const u8) bool {
+        const now = sys.nowNs();
+        if (now < m.wrong_until) return false;
+        if (m.parental.check(password)) return true;
+        m.wrong_until = sys.nowNs() + 2 * std.time.ns_per_s;
+        print(sys.log_warning ++ "dazzle: system: wrong parental controls password\n", .{});
+        return false;
+    }
+
+    fn parentalNow(m: *const Manager) i64 {
+        return @intCast(@divFloor(m.parental_wall_ns, std.time.ns_per_s));
+    }
+
+    fn parentalLocal(m: *const Manager) parental.Local {
+        return .of(m.parentalNow(), m.parental.limits.utc_offset);
+    }
+
+    /// Moves parental controls' clock on, counts the time used (while not
+    /// locked), and says how they stand in the report.
+    fn tickParental(m: *Manager) void {
+        const mono = sys.nowNs();
+        const dt = if (m.parental_mono == 0) 0 else mono - m.parental_mono;
+        m.parental_mono = mono;
+        if (!m.parental_loaded) {
+            // Once there is a /data (set up), what was kept.
+            if (!storage.exists(proto.config_dir)) return;
+            var buf: [1024]u8 = undefined;
+            if (sys.readFile(parental.file, &buf)) |text| m.parental = .parse(text);
+            m.parental_loaded = true;
+            m.parental_wall_ns = @as(i128, m.parental.usage.wall) * std.time.ns_per_s;
+            if (m.parental.on) print("dazzle: system: parental controls on\n", .{});
+        }
+        const real = sys.realtimeNs();
+        m.parental_wall_ns = @max(real, m.parental_wall_ns + dt);
+        const now = m.parentalNow();
+        const p = &m.parental;
+        p.usage.wall = now;
+        const local = m.parentalLocal();
+        if (p.on) p.usage.roll(local.day);
+        var st = p.status(now);
+        if (p.on and st.lock == .none) {
+            p.usage.used_ms +|= @intCast(@min(dt / std.time.ns_per_ms, 60_000));
+            st = p.status(now);
+        }
+        const r = &m.report.parental;
+        const was_locked = r.lock;
+        r.on = p.on;
+        r.limits = p.limits;
+        r.lock = st.lock;
+        // Times a second or two off (the count goes on in milliseconds):
+        // the same, so the report is not sent again each second.
+        r.lock_at = steady(r.lock_at, st.lock_at);
+        r.until = steady(r.until, st.until);
+        r.used = st.used / 60;
+        r.allowed = st.allowed;
+        r.bonus = p.usage.bonusOn(local.day);
+        const offset = now - @as(i64, @intCast(@divFloor(real, std.time.ns_per_s)));
+        if (@abs(offset - r.clock_offset) > 2) r.clock_offset = offset;
+        if (r.lock != was_locked) print("dazzle: system: parental controls: {s}\n", .{switch (r.lock) {
+            .none => "unlocked",
+            .time => "locked: the day's time is up",
+            .downtime => "locked: downtime",
+        }});
+        if (p.on and mono -| m.parental_saved_at > 30 * std.time.ns_per_s) m.saveParental();
+    }
+
+    /// Keeps parental controls in /data/system (only the manager can write
+    /// there), readable by it alone.
+    fn saveParental(m: *Manager) void {
+        m.parental_saved_at = sys.nowNs();
+        if (!m.parental_loaded) return;
+        var buf: [1024]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        m.parental.write(&w) catch return;
+        const tmp = parental.file ++ ".new";
+        const fd = sys.check(linux.open(tmp, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, 0o600)) catch |err| {
+            print(sys.log_warning ++ "dazzle: system: cannot keep parental controls ({s})\n", .{@errorName(err)});
+            return;
+        };
+        const data = w.buffered();
+        const n = linux.write(@intCast(fd), data.ptr, data.len);
+        _ = linux.fsync(@intCast(fd));
+        sys.close(@intCast(fd));
+        if (linux.errno(n) != .SUCCESS or n != data.len) return;
+        _ = linux.rename(tmp, parental.file);
     }
 
     /// Serves the log over HTTP, or stops: keeps the setting and tells the

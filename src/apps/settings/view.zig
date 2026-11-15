@@ -1,7 +1,7 @@
 //! The settings app's window, as widgets: pages, chosen with the tabs on
 //! the left, about the Wi-Fi networks around, Ethernet, sound, appearance,
-//! the board, software, resources in use, language and keyboard, and the
-//! system's log. What is asked of the network manager, and of the store,
+//! the board, software, resources in use, language and keyboard, parental
+//! controls, and the system's log. What is asked of the network manager, and of the store,
 //! goes to the main loop through `Actions`.
 
 const std = @import("std");
@@ -25,6 +25,7 @@ pub const software_view = @import("software_view.zig");
 pub const resources_view = @import("resources_view.zig");
 pub const language_view = @import("language_view.zig");
 pub const log_view = @import("log_view.zig");
+pub const parental_view = @import("parental_view.zig");
 
 /// What the window asks of the network manager; the main loop sends it,
 /// then clears it.
@@ -69,6 +70,11 @@ pub const Actions = struct {
     log_server: ?bool = null,
     /// Let other computers control this one (with a new code), or stop.
     remote: ?bool = null,
+    /// Parental controls: turned on (with a new password), off, or more
+    /// time today (with the password).
+    parental_on: ?parental_view.ParentalOn = null,
+    parental_off: ?info.Str(@import("sys").parental.max_password) = null,
+    parental_bonus: ?parental_view.Bonus = null,
 
     pub const GpioChange = struct { pin: u6, mode: gpio.Mode };
 
@@ -157,6 +163,10 @@ pub const Settings = struct {
     log_server: ?bool = null,
     /// Remote control's code, while it is on (`sys.remote`).
     remote_code: ?u32 = null,
+    /// Parental controls, as the system manager last said (null until it
+    /// has), and whether the password last given was wrong.
+    parental: ?@import("sys").system.Parental = null,
+    parental_wrong: bool = false,
     /// What the network manager last said; null if it could not be asked.
     manager: ?*const info.manager.Report = null,
     /// The apps that can be installed, and how installing goes.
@@ -179,6 +189,7 @@ pub const Settings = struct {
         software: software_view.State = .{},
         resources: resources_view.State = .{},
         log: log_view.State = .{},
+        parental: parental_view.State = .{},
 
         fn selectPage(st: *State, idx: usize) void {
             if (idx < @typeInfo(Page).@"enum".field_values.len) st.page = @enumFromInt(idx);
@@ -211,6 +222,7 @@ pub const Settings = struct {
             .apps => software_view.build(self, b, &state.software),
             .resources => resources_view.build(self, b, &state.resources),
             .language => b.scroll(.language, language_view.build(self, b)),
+            .parental => b.scroll(.parental, parental_view.build(self, b, &state.parental)),
             .log => b.scroll(.log, log_view.build(self, b, &state.log)),
         };
         const content = cx.make(kete.Row{ .cross_axis_alignment = .stretch, .children = &.{
@@ -238,6 +250,7 @@ pub const Page = enum {
     apps,
     resources,
     language,
+    parental,
     log,
 
     pub fn label(p: Page) []const u8 {
@@ -250,6 +263,7 @@ pub const Page = enum {
             .apps => software_view.label,
             .resources => resources_view.label,
             .language => language_view.label,
+            .parental => parental_view.label,
             .log => log_view.label,
         };
     }
@@ -264,6 +278,7 @@ pub const Page = enum {
             .apps => software_view.icon,
             .resources => resources_view.icon,
             .language => language_view.icon,
+            .parental => parental_view.icon,
             .log => log_view.icon,
         };
     }
@@ -284,6 +299,12 @@ fn findSettings(n: *kete.WidgetNode) ?*kete.WidgetNode {
 pub fn shownPage(u: *kete.ui.WindowUi) Page {
     const root = settingsNode(u) orelse return .wifi;
     return root.state(Settings.State).page;
+}
+
+/// The window's page state, once it is built.
+pub fn settingsState(u: *kete.ui.WindowUi) ?*Settings.State {
+    const root = settingsNode(u) orelse return null;
+    return root.state(Settings.State);
 }
 
 /// Whether a Wi-Fi network is selected in `u` (so its join form is open).

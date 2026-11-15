@@ -43,6 +43,7 @@ const updates_mod = @import("updates.zig");
 const perf_mod = @import("perf.zig");
 const quick_mod = @import("quick.zig");
 const notice_mod = @import("notice.zig");
+const lock_mod = @import("lock.zig");
 const keyboard = @import("keyboard.zig");
 const screenshot = @import("screenshot.zig");
 const remote_mod = @import("remote.zig");
@@ -129,6 +130,13 @@ fn run(init: std.process.Init.Minimal) !void {
     var audio_devices = audio.listDevices();
     // Notifications, at the top of the screen (a screenshot was saved).
     var notice = try notice_mod.Notice.init(gpa, ui_font, renderer.width, dock.scale);
+    // Parental controls (the system manager keeps them): while it says the
+    // computer is locked, the lock screen in place of the windows and the
+    // dock; before then, warnings as time runs out.
+    var lock = try lock_mod.Lock.init(gpa, ui_font, dock.scale);
+    var parental: sys.system.Parental = .{};
+    var locked = false;
+    var warnings: lock_mod.Warnings = .{};
     // Screenshots are saved on threads, which say how it went on this
     // pipe (`screenshot.Report`).
     // Remote control, while it is turned on (in Settings), and the input
@@ -382,6 +390,10 @@ fn run(init: std.process.Init.Minimal) !void {
                     server.setKeyboard(r.locale.keyboard);
                 }
                 if (updates.setReport(r)) updates_changed = true;
+                if (applyParental(r.parental, &parental, &locked, &lock, &quick, &renderer, dock.theme)) {
+                    server.damaged = true;
+                    panels_damaged = true;
+                }
             };
             if (apps_watch.retry()) apps_changes = .all;
         }
@@ -566,6 +578,15 @@ fn run(init: std.process.Init.Minimal) !void {
             } else takeQueued(&remote_events, &remote_len, &events);
             if (batch.len == 0) continue;
             for (batch) |e| {
+                // Locked: the keys type the password; nothing else does
+                // anything.
+                if (locked) {
+                    if (e == .key) if (lockKey(&lock, e.key.code, e.key.pressed, &parental, &locked, &quick, &renderer, dock.theme)) {
+                        server.damaged = true;
+                        panels_damaged = true;
+                    };
+                    continue;
+                }
                 // Print Screen is the shell's: it saves the screen.
                 if (e == .key and e.key.code == evdev.key_sysrq) {
                     if (e.key.pressed) screenshot_wanted = true;
@@ -890,11 +911,22 @@ fn run(init: std.process.Init.Minimal) !void {
                         server.setKeyboard(r.locale.keyboard);
                     }
                     if (updates.setReport(r)) updates_changed = true;
+                    if (applyParental(r.parental, &parental, &locked, &lock, &quick, &renderer, dock.theme)) {
+                        server.damaged = true;
+                        panels_damaged = true;
+                    }
                 };
                 if (apps_watch.retry()) apps_pending = .all;
             }
             // The daily check for updates, when it is due.
             if (updates.tick(t_now)) updates_changed = true;
+            // Time running out: said, at ten minutes, five and one.
+            var warn_buf: [192]u8 = undefined;
+            if (warnings.due(parental, sys.realtimeSec(), &warn_buf)) |w| {
+                notice.theme = dock.theme;
+                notice.show(.schedule, w.title, w.body, sys.nowNs());
+                server.damaged = true;
+            }
             if (perf_shown) {
                 var pids: [max_clients]linux.pid_t = undefined;
                 perf.draw(perf_monitor.sample(t_now, perf_frames, perf_gpu_ns, clientPids(&server, &pids)), dock.theme);
@@ -956,8 +988,9 @@ fn run(init: std.process.Init.Minimal) !void {
             server.frameDrawn();
             // A fullscreen window on top sends the dock down, off the
             // screen; its tooltip goes at once.
-            renderer.setPanelHidden(.dock, !dock_shown or dock.offScreen());
-            renderer.setPanelHidden(.tooltip, !dock_shown or server.fullscreenTop() or dock.slide > 0 or dock.tooltip_shown == null);
+            renderer.setPanelHidden(.dock, !dock_shown or dock.offScreen() or locked);
+            renderer.setPanelHidden(.lock, !locked);
+            renderer.setPanelHidden(.tooltip, locked or !dock_shown or server.fullscreenTop() or dock.slide > 0 or dock.tooltip_shown == null);
             renderer.setPanelHidden(.perf, !perf_shown);
             renderer.setPanelHidden(.quick, !quick.shown);
             renderer.setPanelHidden(.notice, !notice.visible(sys.nowNs()));
@@ -967,7 +1000,7 @@ fn run(init: std.process.Init.Minimal) !void {
             // is composited.
             var on_screen: ?bool = null;
             // Not while the dock slides: it would leave its band.
-            if (top) |t| if (!dock.sliding()) if (server.scanoutBuffer(t)) |b| {
+            if (!locked) if (top) |t| if (!dock.sliding()) if (server.scanoutBuffer(t)) |b| {
                 const at = server.windowRect(t);
                 if (renderer.showDirect(b.dmabuf.?, at.x, at.y, .{ at.width, at.height })) |at_once| {
                     server.holdBuffer(b);
@@ -985,7 +1018,7 @@ fn run(init: std.process.Init.Minimal) !void {
             }
             if (on_screen == null) {
                 var windows: [render.max_windows]render.Window = undefined;
-                if (renderer.composite(frameWindows(&server, &windows))) |timing| {
+                if (renderer.composite(if (locked) &.{} else frameWindows(&server, &windows))) |timing| {
                     if (count_frame) perf_frames += 1;
                     perf_gpu_ns += timing.gpu_ns;
                     on_screen = renderer.show() catch |err| blk: {
@@ -1419,6 +1452,57 @@ fn remoteStatus(gpa: std.mem.Allocator, out: *std.ArrayList(u8), server: *const 
 
 /// Fades the notification in or out, a frame each refresh while it does;
 /// and a frame more when it has gone.
+/// A report's parental controls: locks, or unlocks, the screen as they
+/// say. Returns whether the screen changed.
+fn applyParental(p: sys.system.Parental, have: *sys.system.Parental, locked: *bool, lock: *lock_mod.Lock, quick: *quick_mod.Quick, renderer: *render.Renderer, theme: dock_mod.Theme) bool {
+    const changed = !std.meta.eql(p, have.*);
+    have.* = p;
+    const now_locked = p.on and p.lock != .none;
+    if (now_locked != locked.*) {
+        locked.* = now_locked;
+        lock.clear();
+        lock.wrong = false;
+        lock.shift = .{ false, false };
+        print("dazzle-shell: {s}\n", .{if (now_locked) "locked by parental controls" else "unlocked"});
+        if (now_locked) quick.close();
+    }
+    if (!changed and !locked.*) return false;
+    if (locked.*) drawLock(lock, p, renderer, theme);
+    return true;
+}
+
+fn drawLock(lock: *lock_mod.Lock, p: sys.system.Parental, renderer: *render.Renderer, theme: dock_mod.Theme) void {
+    lock.theme = theme;
+    lock.draw(p, sys.realtimeSec());
+    const at = lock.place(renderer.width, renderer.height);
+    renderer.setPanelAt(.lock, lock.picture(), lock.width, lock.height, at[0], at[1]);
+}
+
+/// A key on the lock screen; Enter tries the password (the system manager
+/// turns parental controls off if it is the one). Returns whether the
+/// screen changed.
+fn lockKey(lock: *lock_mod.Lock, code: u32, pressed: bool, parental: *sys.system.Parental, locked: *bool, quick: *quick_mod.Quick, renderer: *render.Renderer, theme: dock_mod.Theme) bool {
+    switch (lock.key(code, pressed)) {
+        .none => return false,
+        .changed => {},
+        .submit => {
+            var hex_buf: [2 * sys.parental.max_password]u8 = undefined;
+            var req_buf: [32 + 2 * sys.parental.max_password]u8 = undefined;
+            const pw = sys.parental.Password.of(lock.password()) orelse return false;
+            const req = std.fmt.bufPrint(&req_buf, "parental_off {s}\n", .{pw.hex(&hex_buf)}) catch return false;
+            lock.clear();
+            const answer = sys.system.ask(req, 5000);
+            if (answer) |r| if (r.password == true) {
+                _ = applyParental(r.parental, parental, locked, lock, quick, renderer, theme);
+                return true;
+            };
+            lock.wrong = true;
+        },
+    }
+    drawLock(lock, parental.*, renderer, theme);
+    return true;
+}
+
 fn animateNotice(notice: *notice_mod.Notice, renderer: *render.Renderer, server: *server_mod.Server, now: u64) void {
     const was_shown = notice.shown_ns != null;
     if (notice.frame(now)) |pixels| {
@@ -1599,6 +1683,7 @@ test {
     _ = @import("perf.zig");
     _ = @import("quick.zig");
     _ = @import("notice.zig");
+    _ = @import("lock.zig");
     _ = @import("remote.zig");
     _ = @import("glass.zig");
     _ = @import("screenshot.zig");

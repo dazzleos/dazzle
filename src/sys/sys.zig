@@ -30,6 +30,7 @@ pub const serial = @import("serial.zig");
 pub const shell = @import("shell.zig");
 pub const files = @import("files.zig");
 pub const remote = @import("remote.zig");
+pub const parental = @import("parental.zig");
 pub const archive = @import("archive.zig");
 pub const v4l2 = @import("v4l2.zig");
 pub const evdev = @import("evdev.zig");
@@ -46,6 +47,7 @@ test {
     _ = shell;
     _ = files;
     _ = remote;
+    _ = parental;
     _ = archive;
     _ = v4l2;
 }

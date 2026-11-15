@@ -138,6 +138,10 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     }
     const snackbar_msg = if (state.dismissed) "" else err_msg;
     dazzleRows(self, b, state, &rows);
+    // Parental controls may stop apps being installed or removed (updates
+    // still come).
+    const fixed = if (self.parental) |p| p.on and p.limits.block_software else false;
+    if (fixed) rows.append(a, cx.make(kete.Text{ .text = "Parental controls stop apps being installed or removed", .style = .{ .size = 15, .color = t.on_surface_variant } })) catch {};
     var updates: usize = @intFromBool(self.update.status == .available);
     for (apps.list, 0..) |app, i| {
         const installed = i < apps.installed.len and apps.installed[i];
@@ -151,12 +155,12 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
         else if (updatable)
             cx.make(kete.Row{ .fill = false, .cross_axis_alignment = .center, .spacing = 8, .children = cx.makeAll(.{
                 kete.OutlinedButton{ .label = "Update", .icon = .download, .on_press = if (enabled) .of(x.?, AppAct.install) else null },
-                kete.OutlinedButton{ .icon = .delete, .destructive = true, .on_press = if (enabled) .of(x.?, AppAct.remove) else null },
+                kete.OutlinedButton{ .icon = .delete, .destructive = true, .on_press = if (enabled and !fixed) .of(x.?, AppAct.remove) else null },
             }) })
         else if (installed)
-            cx.make(kete.OutlinedButton{ .icon = .delete, .destructive = true, .on_press = if (enabled) .of(x.?, AppAct.remove) else null })
+            cx.make(kete.OutlinedButton{ .icon = .delete, .destructive = true, .on_press = if (enabled and !fixed) .of(x.?, AppAct.remove) else null })
         else
-            cx.make(kete.OutlinedButton{ .label = "Install", .icon = .download, .on_press = if (enabled) .of(x.?, AppAct.install) else null });
+            cx.make(kete.OutlinedButton{ .label = "Install", .icon = .download, .on_press = if (enabled and !fixed) .of(x.?, AppAct.install) else null });
         var size_buf: [32]u8 = undefined;
         const detail = if (i >= apps.offered)
             "Installed, and no longer offered"

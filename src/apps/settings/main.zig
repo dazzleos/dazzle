@@ -149,6 +149,8 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
     var video_memory_failed = false;
     // Remote control, as Settings last saw (or set) it.
     var remote = sys.remote.load();
+    // The password last given for parental controls was wrong.
+    var parental_wrong = false;
     var date_buf: [32]u8 = undefined;
     var build_buf: [64]u8 = undefined;
     const build = std.fmt.bufPrint(&build_buf, "{s} ({s})", .{ build_info.commit, update.formatDate(&date_buf, build_info.commit_time) }) catch build_info.commit;
@@ -283,6 +285,14 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
             actions.unsubscribe_key = null;
             dirty = true;
         }
+        // Not while parental controls stop it (updating an app is still
+        // installing it).
+        if (updater.report) |r| if (r.parental.on and r.parental.limits.block_software) {
+            if (actions.install) |*n| if (!store.isInstalled(store.apps_dir, n.slice())) {
+                actions.install = null;
+            };
+            actions.remove = null;
+        };
         if (actions.install != null or actions.remove != null or actions.refresh_apps or actions.check_update) {
             if (actions.install) |*n| apps.install(n.slice());
             if (actions.remove) |*n| {
@@ -358,6 +368,35 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
             if (r) |have| if (!have.denied) {
                 updater.report = have;
             };
+            if (r == null) print(sys.log_warning ++ "dazzle-settings: the system did not answer\n", .{});
+            dirty = true;
+        }
+        // Parental controls turned on or off, or more time given: the
+        // system manager keeps them, if the password is right.
+        if (actions.parental_on != null or actions.parental_off != null or actions.parental_bonus != null) {
+            var hex_buf: [2 * sys.parental.max_password]u8 = undefined;
+            var req_buf: [64 + 2 * sys.parental.max_password]u8 = undefined;
+            var w: std.Io.Writer = .fixed(&req_buf);
+            if (actions.parental_on) |on| {
+                const pw = sys.parental.Password.of(on.password.slice()).?;
+                w.print("parental_on {s} ", .{pw.hex(&hex_buf)}) catch {};
+                on.limits.write(&w) catch {};
+                w.writeByte('\n') catch {};
+            } else if (actions.parental_off) |off| {
+                const pw = sys.parental.Password.of(off.slice()).?;
+                w.print("parental_off {s}\n", .{pw.hex(&hex_buf)}) catch {};
+            } else if (actions.parental_bonus) |bonus| {
+                const pw = sys.parental.Password.of(bonus.password.slice()).?;
+                w.print("parental_bonus {s} {d}\n", .{ pw.hex(&hex_buf), bonus.minutes }) catch {};
+            }
+            actions.parental_on = null;
+            actions.parental_off = null;
+            actions.parental_bonus = null;
+            const r = sys.system.ask(w.buffered(), 5000);
+            if (r) |have| if (!have.denied) {
+                updater.report = have;
+            };
+            parental_wrong = if (r) |have| have.password == false else false;
             if (r == null) print(sys.log_warning ++ "dazzle-settings: the system did not answer\n", .{});
             dirty = true;
         }
@@ -472,6 +511,8 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
                 .log = if (syslog.fd != null or syslog.failed) &syslog else null,
                 .log_server = if (updater.report) |r| r.log_server else null,
                 .remote_code = remote.code,
+                .parental = if (updater.report) |r| r.parental else null,
+                .parental_wrong = parental_wrong,
                 .manager = if (report) |*r| r else null,
                 .actions = &actions,
                 .apps = .{
@@ -527,6 +568,7 @@ test {
     _ = @import("resources_view.zig");
     _ = @import("language_view.zig");
     _ = @import("log_view.zig");
+    _ = @import("parental_view.zig");
     _ = @import("update.zig");
     _ = @import("board.zig");
     _ = usb;

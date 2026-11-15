@@ -26,6 +26,14 @@
 //!                              (once there is a /data)
 //!     video_memory <MiB>       how much memory the GPU may have, from the
 //!                              next start (settings): see `video_memory`
+//!     parental_on <password> <limits>
+//!                              turn parental controls on (settings), the
+//!                              password (in hex) to unlock from now on;
+//!                              the limits as `parental.Limits` says them
+//!     parental_off <password>  turn them off, unlocking (settings, and the
+//!                              shell's lock screen)
+//!     parental_bonus <password> <minutes>
+//!                              more time today (settings)
 //!
 //! and the report:
 //!
@@ -38,6 +46,8 @@
 //!     update none
 //!     locale en-GB gb
 //!     video_memory 128 256
+//!     parental on 120 180 1200 420 block 600
+//!     parental_status none 1794830400 - 42 120 0 0
 //!     end
 //!
 //! "storage" is how the card's free space is: "none" (there is no card),
@@ -49,13 +59,21 @@
 //! next start runs it) or "failed" with why ("did_not_start" when it was
 //! installed but did not work, and the system before is running again).
 //! "video_memory" is the memory the GPU may have now and from the next
-//! start, in MiB ("-": not known). A client the manager does not
-//! serve, or a request it does not serve that client, gets "denied\n".
+//! start, in MiB ("-": not known). "parental" is whether parental
+//! controls are on, and their limits; "parental_status" whether the
+//! computer is locked ("none", "time" or "downtime"), when it will lock
+//! and when it may be used again (seconds since 1970, by the manager's
+//! clock), the minutes used and allowed today, the bonus minutes, and
+//! the manager's clock less the system's (see `sys.parental`). The answer
+//! to a request with a password has "password ok" or "password wrong". A
+//! client the manager does not serve, or a request it does not serve that
+//! client, gets "denied\n".
 
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys.zig");
 const locale = @import("locale");
+const parental = @import("parental.zig");
 
 /// The manager's socket.
 pub const socket_path = "/os/sockets/system";
@@ -173,6 +191,9 @@ pub const Request = union(enum) {
     video_memory: u16,
     /// Serve the log over HTTP, or not.
     log_server: bool,
+    parental_on: struct { password: parental.Password, limits: parental.Limits },
+    parental_off: parental.Password,
+    parental_bonus: struct { password: parental.Password, minutes: u16 },
 
     pub fn parse(line: []const u8) ?Request {
         var f = std.mem.tokenizeAny(u8, line, " \n");
@@ -194,6 +215,17 @@ pub const Request = union(enum) {
             return .{ .video_memory = mib };
         }
         if (std.mem.eql(u8, kind, "log_server")) return .{ .log_server = parseOnOff(f.next() orelse return null) orelse return null };
+        if (std.mem.eql(u8, kind, "parental_on")) {
+            const password = parental.Password.fromHex(f.next() orelse return null) orelse return null;
+            return .{ .parental_on = .{ .password = password, .limits = parental.Limits.parse(&f) orelse return null } };
+        }
+        if (std.mem.eql(u8, kind, "parental_off")) return .{ .parental_off = parental.Password.fromHex(f.next() orelse return null) orelse return null };
+        if (std.mem.eql(u8, kind, "parental_bonus")) {
+            const password = parental.Password.fromHex(f.next() orelse return null) orelse return null;
+            const minutes = std.fmt.parseInt(u16, f.next() orelse return null, 10) catch return null;
+            if (minutes == 0 or minutes > parental.Limits.most_minutes) return null;
+            return .{ .parental_bonus = .{ .password = password, .minutes = minutes } };
+        }
         if (std.mem.eql(u8, kind, "update")) {
             const hex = f.next() orelse return null;
             const sig = f.next() orelse return null;
@@ -215,7 +247,9 @@ pub const Request = union(enum) {
             .prepare, .hostname, .finish => client == .setup,
             // The shell too: remote control installs updates and restarts.
             .update, .restart => client == .settings or client == .shell,
-            .video_memory, .log_server => client == .settings,
+            .video_memory, .log_server, .parental_on, .parental_bonus => client == .settings,
+            // The shell's lock screen unlocks.
+            .parental_off => client == .settings or client == .shell,
             .locale => client == .setup or client == .settings,
             .power_off => client == .shell or client == .settings,
         };
@@ -311,6 +345,30 @@ pub const Hostname = struct {
     }
 };
 
+/// Parental controls, as the report says them (see `sys.parental`).
+pub const Parental = struct {
+    on: bool = false,
+    limits: parental.Limits = .{},
+    lock: parental.Lock = .none,
+    /// When it will lock, while not locked; when it may be used again,
+    /// while it is (seconds since 1970, by the manager's clock).
+    lock_at: ?i64 = null,
+    until: ?i64 = null,
+    /// Minutes used today, and allowed (null: no limit), with the bonus
+    /// minutes given.
+    used: u32 = 0,
+    allowed: ?u32 = null,
+    bonus: u16 = 0,
+    /// The manager's clock less the system's: not 0 while the clock is not
+    /// set (it goes on from the last time the manager saw).
+    clock_offset: i64 = 0,
+
+    /// The manager's clock, by the system's.
+    pub fn now(p: Parental, system_now: i64) i64 {
+        return system_now + p.clock_offset;
+    }
+};
+
 pub const Report = struct {
     storage: StorageState = .none,
     /// How far preparing has got, in percent.
@@ -331,6 +389,10 @@ pub const Report = struct {
     video_memory_next: ?u16 = null,
     /// The log is served over HTTP (see `logServerOn`).
     log_server: bool = false,
+    parental: Parental = .{},
+    /// The password given with the request answered was right (or not);
+    /// null if none was given.
+    password: ?bool = null,
     /// The manager refused the client.
     denied: bool = false,
 
@@ -365,6 +427,17 @@ pub const Report = struct {
         w.writeAll("\nvideo_memory") catch {};
         for ([_]?u16{ r.video_memory_now, r.video_memory_next }) |v| if (v) |mib| w.print(" {d}", .{mib}) catch {} else w.writeAll(" -") catch {};
         w.print("\nlog_server {s}", .{if (r.log_server) "on" else "off"}) catch {};
+        const p = r.parental;
+        w.print("\nparental {s} ", .{if (p.on) "on" else "off"}) catch {};
+        p.limits.write(&w) catch {};
+        w.print("\nparental_status {s} ", .{@tagName(p.lock)}) catch {};
+        writeOptional(&w, p.lock_at);
+        w.writeByte(' ') catch {};
+        writeOptional(&w, p.until);
+        w.print(" {d} ", .{p.used}) catch {};
+        writeOptional(&w, p.allowed);
+        w.print(" {d} {d}", .{ p.bonus, p.clock_offset }) catch {};
+        if (r.password) |ok| w.print("\npassword {s}", .{if (ok) "ok" else "wrong"}) catch {};
         w.writeAll("\nend\n") catch {};
         return w.buffered();
     }
@@ -404,6 +477,21 @@ pub const Report = struct {
                 r.video_memory_next = std.fmt.parseInt(u16, f.next() orelse continue, 10) catch null;
             } else if (std.mem.eql(u8, kind, "log_server")) {
                 r.log_server = parseOnOff(f.next() orelse continue) orelse false;
+            } else if (std.mem.eql(u8, kind, "parental")) {
+                r.parental.on = parseOnOff(f.next() orelse continue) orelse false;
+                var lf = std.mem.tokenizeAny(u8, f.rest(), " ");
+                if (parental.Limits.parse(&lf)) |l| r.parental.limits = l;
+            } else if (std.mem.eql(u8, kind, "parental_status")) {
+                const p = &r.parental;
+                p.lock = std.meta.stringToEnum(parental.Lock, f.next() orelse continue) orelse .none;
+                p.lock_at = parseOptional(i64, f.next() orelse continue);
+                p.until = parseOptional(i64, f.next() orelse continue);
+                p.used = std.fmt.parseInt(u32, f.next() orelse continue, 10) catch 0;
+                p.allowed = parseOptional(u32, f.next() orelse continue);
+                p.bonus = std.fmt.parseInt(u16, f.next() orelse continue, 10) catch 0;
+                p.clock_offset = std.fmt.parseInt(i64, f.next() orelse continue, 10) catch 0;
+            } else if (std.mem.eql(u8, kind, "password")) {
+                r.password = std.mem.eql(u8, f.next() orelse continue, "ok");
             } else if (std.mem.eql(u8, kind, "update")) {
                 r.update = std.meta.stringToEnum(UpdateState, f.next() orelse continue) orelse .none;
                 if (r.update == .failed) r.update_failure = std.meta.stringToEnum(UpdateFailure, f.next() orelse "io") orelse .io;
@@ -412,6 +500,14 @@ pub const Report = struct {
         return null;
     }
 };
+
+fn writeOptional(w: *std.Io.Writer, v: anytype) void {
+    if (v) |n| w.print("{d}", .{n}) catch {} else w.writeByte('-') catch {};
+}
+
+fn parseOptional(comptime T: type, s: []const u8) ?T {
+    return std.fmt.parseInt(T, s, 10) catch null;
+}
 
 fn parseSlot(s: []const u8) ?u8 {
     return if (s.len == 1 and (s[0] == 'a' or s[0] == 'b')) s[0] else null;
@@ -427,7 +523,7 @@ pub fn ask(request: []const u8, timeout_ms: u64) ?Report {
     @memcpy(addr.path[0..path.len], path);
     _ = sys.check(linux.connect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.un))) catch return null;
     _ = sys.check(linux.write(fd, request.ptr, request.len)) catch return null;
-    var buf: [1024]u8 = undefined;
+    var buf: [2048]u8 = undefined;
     var len: usize = 0;
     const deadline = sys.nowNs() + timeout_ms * std.time.ns_per_ms;
     while (len < buf.len) {
@@ -603,9 +699,9 @@ test "requests and reports go through the socket" {
     try testing.expectEqual(locale.Language.en_au, Report.parse(chosen.write(&chosen_buf)).?.locale.language);
 
     var r: Report = .{ .storage = .preparing, .progress = 42, .hostname = Hostname.parse("awesome-elephant").? };
-    var buf: [256]u8 = undefined;
+    var buf: [512]u8 = undefined;
     const text = r.write(&buf);
-    try testing.expectEqualStrings("storage preparing 42\nhostname awesome-elephant\nversion a -\nversion b -\nupdate none\nlocale en-US us\nvideo_memory - -\nlog_server off\nend\n", text);
+    try testing.expectEqualStrings("storage preparing 42\nhostname awesome-elephant\nversion a -\nversion b -\nupdate none\nlocale en-US us\nvideo_memory - -\nlog_server off\nparental off 120 180 1200 420 block 0\nparental_status none - - 0 - 0 0\nend\n", text);
     const back = Report.parse(text).?;
     try testing.expectEqual(StorageState.preparing, back.storage);
     try testing.expectEqual(@as(u8, 42), back.progress);
@@ -647,7 +743,7 @@ test "requests and reports go through the socket" {
     try testing.expect(!videoMemoryAllowed(100, 940));
     // Serving the log: only Settings turns it on or off.
     const serving: Report = .{ .log_server = true };
-    var serving_buf: [256]u8 = undefined;
+    var serving_buf: [512]u8 = undefined;
     try testing.expect(Report.parse(serving.write(&serving_buf)).?.log_server);
     try testing.expect(Request.parse("log_server on\n").?.log_server);
     try testing.expect(!Request.parse("log_server off\n").?.log_server);
@@ -656,6 +752,23 @@ test "requests and reports go through the socket" {
     try testing.expect(Request.allowedFor(.{ .log_server = true }, .settings));
     try testing.expect(!Request.allowedFor(.{ .log_server = true }, .setup));
     try testing.expect(!Request.allowedFor(.{ .log_server = true }, .shell));
+    // Parental controls: on, locked till the morning; a password's answer.
+    var locked: Report = .{ .parental = .{ .on = true, .limits = .{ .weekday = 90, .utc_offset = 600 }, .lock = .time, .until = 1794830400, .used = 90, .allowed = 90, .bonus = 0, .clock_offset = -5 }, .password = false };
+    const lb = Report.parse(locked.write(&buf)).?;
+    try testing.expectEqual(locked.parental, lb.parental);
+    try testing.expectEqual(@as(?bool, false), lb.password);
+    locked.password = null;
+    try testing.expect(Report.parse(locked.write(&buf)).?.password == null);
+    const on = Request.parse("parental_on 7365736166 60 120 - - allow -300\n").?;
+    try testing.expectEqualStrings("sesaf", on.parental_on.password.slice());
+    try testing.expectEqual(@as(?u16, 60), on.parental_on.limits.weekday);
+    try testing.expect(on.parental_on.limits.downtime == null);
+    try testing.expect(Request.parse("parental_on 7365 60 120\n") == null);
+    try testing.expectEqualStrings("ab", Request.parse("parental_off 6162\n").?.parental_off.slice());
+    try testing.expectEqual(@as(u16, 30), Request.parse("parental_bonus 6162 30\n").?.parental_bonus.minutes);
+    try testing.expect(Request.parse("parental_bonus 6162 0\n") == null);
+    try testing.expect(Request.allowedFor(on, .settings) and !Request.allowedFor(on, .shell) and !Request.allowedFor(on, .setup));
+    try testing.expect(Request.allowedFor(.{ .parental_off = .{} }, .shell));
     try testing.expect(Version.parse("soon abc") == null);
     try testing.expect(Version.parse("12 a/b") == null);
 

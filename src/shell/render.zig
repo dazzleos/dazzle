@@ -290,6 +290,8 @@ pub const PanelId = enum {
     quick,
     /// A notification, at the top of the screen.
     notice,
+    /// Parental controls' lock screen, over everything.
+    lock,
 };
 const n_panels = @typeInfo(PanelId).@"enum".field_names.len;
 
