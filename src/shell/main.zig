@@ -397,6 +397,9 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                 if (applyParental(r.parental, &parental, &locked, &lock, &quick, &renderer)) {
                     server.damaged = true;
                     panels_damaged = true;
+                    // A game's hold on the pointer ends: it is the lock
+                    // screen's.
+                    if (locked) server.breakLock();
                 }
             };
             if (apps_watch.retry()) apps_changes = .all;
@@ -582,14 +585,30 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
             } else takeQueued(&remote_events, &remote_len, &events);
             if (batch.len == 0) continue;
             for (batch) |e| {
-                // Locked: the keys type the password; nothing else does
-                // anything.
+                // Locked: the keys type the password, and the pointer moves
+                // over the lock screen and clicks in it; nothing goes to
+                // the windows.
                 if (locked) {
                     lock.panel.setKeyboard(server.keyboard_layout);
-                    if (e == .key) if (lockKey(&lock, e.key.code, e.key.pressed, &parental, &locked, &quick, &renderer)) {
+                    const changed = switch (e) {
+                        .key => |k| lockKey(&lock, k.code, k.pressed, &parental, &locked, &quick, &renderer),
+                        .motion => |d| blk: {
+                            pointer.x = std.math.clamp(pointer.x + @as(f64, @floatFromInt(d[0])), 0, pointer.max_x);
+                            pointer.y = std.math.clamp(pointer.y + @as(f64, @floatFromInt(d[1])), 0, pointer.max_y);
+                            pointer.moved = true;
+                            lock.panel.pointerMotion(lockLocal(pointer.x, pointer.y, &renderer));
+                            break :blk lockRedraw(&lock, parental, &renderer);
+                        },
+                        .button => |b| if (b.code == evdev.btn_left) blk: {
+                            lock.panel.pointerButton(lockLocal(pointer.x, pointer.y, &renderer), b.pressed);
+                            break :blk lockAfterInput(&lock, &parental, &locked, &quick, &renderer);
+                        } else false,
+                        else => false,
+                    };
+                    if (changed) {
                         server.damaged = true;
                         panels_damaged = true;
-                    };
+                    }
                     continue;
                 }
                 // Print Screen is the shell's: it saves the screen.
@@ -919,6 +938,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                     if (applyParental(r.parental, &parental, &locked, &lock, &quick, &renderer)) {
                         server.damaged = true;
                         panels_damaged = true;
+                        if (locked) server.breakLock();
                     }
                 };
                 if (apps_watch.retry()) apps_pending = .all;
@@ -1486,8 +1506,28 @@ fn drawLock(lock: *lock_mod.Screen, p: sys.system.Parental, renderer: *render.Re
 /// A key on the lock screen; Enter tries the password (the system manager
 /// turns parental controls off if it is the one). Returns whether the
 /// screen changed.
+/// Where (`x`, `y`) on the screen is on the lock screen.
+fn lockLocal(x: f64, y: f64, renderer: *const render.Renderer) [2]f32 {
+    const at = lock_mod.Screen.place(renderer.width, renderer.height);
+    return .{ @floatCast(x - @as(f64, @floatFromInt(at[0]))), @floatCast(y - @as(f64, @floatFromInt(at[1]))) };
+}
+
+/// Draws the lock screen again if what it shows changed (the pointer over
+/// a button, say).
+fn lockRedraw(lock: *lock_mod.Screen, p: sys.system.Parental, renderer: *render.Renderer) bool {
+    if (!lock.panel.needsFrame()) return false;
+    drawLock(lock, p, renderer);
+    return true;
+}
+
 fn lockKey(lock: *lock_mod.Screen, code: u32, pressed: bool, parental: *sys.system.Parental, locked: *bool, quick: *quick_mod.Quick, renderer: *render.Renderer) bool {
     lock.panel.key(code, pressed);
+    return lockAfterInput(lock, parental, locked, quick, renderer);
+}
+
+/// After a key or a click on the lock screen: the password tried, if it
+/// was given.
+fn lockAfterInput(lock: *lock_mod.Screen, parental: *sys.system.Parental, locked: *bool, quick: *quick_mod.Quick, renderer: *render.Renderer) bool {
     // The field takes it at the next frame.
     _ = lock.draw(parental.*);
     if (lock.entry.submitted) {

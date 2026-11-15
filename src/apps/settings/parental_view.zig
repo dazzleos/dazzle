@@ -83,8 +83,8 @@ pub const State = struct {
     }
 };
 
-/// Durations to choose from, in minutes (null: no limit).
-const durations = [_]?u16{ null, 0, 30, 60, 90, 120, 150, 180, 240, 300, 360, 480 };
+/// Durations to choose from, in minutes (0: not at all; null: unlimited).
+const durations = [_]?u16{ 0, 30, 60, 90, 120, 150, 180, 240, 300, 360, 480, null };
 const bonuses = [_]u16{ 15, 30, 60, 120 };
 
 pub fn build(self: *const Settings, b: Builder, st: *State) kete.Widget {
@@ -98,68 +98,53 @@ pub fn build(self: *const Settings, b: Builder, st: *State) kete.Widget {
         st.have_draft = true;
     }
     var rows: std.ArrayList(kete.Widget) = .empty;
-    const note = struct {
-        fn f(c: *kete.BuildContext, text: []const u8) kete.Widget {
-            return c.make(kete.Text{ .text = text, .style = .{ .size = 15, .color = c.theme().on_surface_variant } });
-        }
-    }.f;
-    const heading: kete.TextStyle = .{ .size = 18, .color = t.on_surface_variant };
     if (self.parental_wrong) rows.append(a, cx.make(kete.Text{ .text = "That is not the password", .style = .{ .size = 16, .color = t.@"error" } })) catch {};
     if (p.on) {
-        // How today goes.
+        // How today goes, for whoever uses it to see: how much of the
+        // day's time is used, what is left (more with the password), and
+        // when downtime comes; and turning parental controls off.
         const now = p.now(sys.realtimeSec());
-        rows.append(a, cx.make(kete.Text{ .text = "Today", .style = heading })) catch {};
-        var buf: [64]u8 = undefined;
-        rows.append(a, b.item("Used", cx.fmt("{s}", .{duration(&buf, p.used)}))) catch {};
+        rows.append(a, cx.make(kete.Text{ .text = "Parental controls", .style = .{ .size = 24, .color = t.on_surface }, .wrap = false })) catch {};
         if (p.allowed) |allowed| {
-            var abuf: [64]u8 = undefined;
-            rows.append(a, b.item("Allowed", if (p.bonus > 0) cx.fmt("{s} ({d} minutes extra)", .{ duration(&abuf, allowed), p.bonus }) else cx.fmt("{s}", .{duration(&abuf, allowed)}))) catch {};
-            rows.append(a, cx.make(kete.ProgressBar{ .value = if (allowed == 0) 1 else @min(1, @as(f32, @floatFromInt(p.used)) / @as(f32, @floatFromInt(allowed))), .height = 10 })) catch {};
-        } else rows.append(a, b.item("Allowed", "No limit today")) catch {};
-        if (p.lock_at) |at| {
-            var lbuf: [64]u8 = undefined;
-            const left: u32 = @intCast(@max(0, @divFloor(at - now + 59, 60)));
-            rows.append(a, b.item("Left", cx.fmt("{s}", .{duration(&lbuf, left)}))) catch {};
-            var wbuf: [64]u8 = undefined;
-            rows.append(a, b.item("Locks", cx.fmt("{s}", .{when(&wbuf, at, now, sys.parental.utc_offset)}))) catch {};
+            const fraction: f32 = if (allowed == 0) 1 else @min(1, @as(f32, @floatFromInt(p.used)) / @as(f32, @floatFromInt(allowed)));
+            rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = a.dupe(kete.Widget, &.{
+                cx.make(kete.Expanded{ .child = cx.make(kete.ProgressBar{ .value = fraction, .height = 10 }) }),
+                cx.make(kete.Text{ .text = cx.fmt("{d:.0}%", .{fraction * 100}), .style = .{ .size = 18, .color = t.on_surface }, .wrap = false }),
+            }) catch &.{} })) catch {};
         }
-        rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 12 }, .child = cx.make(kete.Text{ .text = "Limits", .style = heading }) })) catch {};
-        appendLimits(b, &rows, p.limits);
-        rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 12 }, .child = cx.make(kete.Text{ .text = "For a parent", .style = heading }) })) catch {};
-        rows.append(a, cx.make(kete.Row{ .spacing = 12, .children = a.dupe(kete.Widget, &.{
-            cx.make(kete.OutlinedButton{ .label = "More time today", .on_press = if (self.actions != null) .of(st, State.openBonus) else null }),
-            cx.make(kete.OutlinedButton{ .label = "Turn off", .on_press = if (self.actions != null) .of(st, State.openTurnOff) else null }),
+        var buf: [64]u8 = undefined;
+        const remaining = if (p.allowed) |allowed| cx.fmt("{s} remaining today", .{durationAnd(&buf, allowed -| p.used)}) else "No limit today";
+        rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = a.dupe(kete.Widget, &.{
+            cx.make(kete.Expanded{ .child = b.value(remaining) }),
+            cx.make(kete.OutlinedButton{ .label = "Add time", .icon = .add, .on_press = if (self.actions != null) .of(st, State.openBonus) else null }),
         }) catch &.{} })) catch {};
+        if (p.limits.downtime) |d| if (p.lock != .downtime) {
+            const local = sys.parental.Local.of(now, sys.parental.utc_offset);
+            const secs = @mod(@as(i64, d.start) * 60 - local.second, std.time.s_per_day);
+            var dbuf: [64]u8 = undefined;
+            rows.append(a, b.value(cx.fmt("Downtime in {s}", .{durationAnd(&dbuf, @intCast(@divFloor(secs + 59, 60)))}))) catch {};
+        };
+        rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 12 }, .child = cx.make(kete.Row{ .children = a.dupe(kete.Widget, &.{
+            cx.make(kete.OutlinedButton{ .label = "Turn off parental controls", .on_press = if (self.actions != null) .of(st, State.openTurnOff) else null }),
+        }) catch &.{} }) })) catch {};
         return b.page(rows.items);
     }
     // Off: the limits to choose, and turning them on.
-    rows.append(a, cx.make(kete.SwitchRow{ .value = st.form == .turn_on, .on_changed = if (self.actions != null) .of(st, State.setOn) else null, .label = "Parental controls" })) catch {};
-    rows.append(a, note(cx, "Limit how long this computer is used each day, and when. When the time is up it locks until it may be used again, or until a parent unlocks it with the password.")) catch {};
-    rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 12 }, .child = cx.make(kete.Text{ .text = "Each day", .style = heading }) })) catch {};
-    rows.append(a, choiceRow(b, "Weekdays", durationOptions(cx), indexOfDuration(st.draft.weekday), .of(st, setWeekday))) catch {};
-    rows.append(a, choiceRow(b, "Weekends", durationOptions(cx), indexOfDuration(st.draft.weekend), .of(st, setWeekend))) catch {};
-    rows.append(a, cx.make(kete.SwitchRow{ .value = st.draft.downtime != null, .on_changed = .of(st, setDowntime), .label = "Downtime: not to be used at night" })) catch {};
+    // Titles, each with its switch at the right.
+    rows.append(a, titleRow(cx, "Parental controls", 24, st.form == .turn_on, if (self.actions != null) .of(st, State.setOn) else null)) catch {};
+    const limited = st.draft.weekday != null or st.draft.weekend != null;
+    rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 12 }, .child = titleRow(cx, "Daily limits", 20, limited, .of(st, setLimited)) })) catch {};
+    if (limited) {
+        rows.append(a, choiceRow(b, "Weekdays", durationOptions(cx), indexOfDuration(st.draft.weekday), .of(st, setWeekday))) catch {};
+        rows.append(a, choiceRow(b, "Weekends", durationOptions(cx), indexOfDuration(st.draft.weekend), .of(st, setWeekend))) catch {};
+    }
+    rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 20 }, .child = titleRow(cx, "Downtime", 20, st.draft.downtime != null, .of(st, setDowntime)) })) catch {};
     if (st.draft.downtime) |d| {
         rows.append(a, choiceRow(b, "From", timeOptions(cx), d.start / 30, .of(st, setDowntimeStart))) catch {};
         rows.append(a, choiceRow(b, "To", timeOptions(cx), d.end / 30, .of(st, setDowntimeEnd))) catch {};
     }
-    rows.append(a, cx.make(kete.SwitchRow{ .value = st.draft.block_software, .on_changed = .of(st, setBlockSoftware), .label = "Stop apps being installed or removed" })) catch {};
+    rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 20 }, .child = titleRow(cx, "Stop apps being installed or removed", 18, st.draft.block_software, .of(st, setBlockSoftware)) })) catch {};
     return b.page(rows.items);
-}
-
-/// The limits, in words.
-fn appendLimits(b: Builder, rows: *std.ArrayList(kete.Widget), l: Limits) void {
-    const cx = b.cx;
-    const a = cx.arena;
-    var buf: [64]u8 = undefined;
-    rows.append(a, b.item("Weekdays", cx.fmt("{s}", .{limitText(&buf, l.weekday)}))) catch {};
-    rows.append(a, b.item("Weekends", cx.fmt("{s}", .{limitText(&buf, l.weekend)}))) catch {};
-    if (l.downtime) |d| {
-        var from: [16]u8 = undefined;
-        var to: [16]u8 = undefined;
-        rows.append(a, b.item("Downtime", cx.fmt("{s} to {s}", .{ clockOf(&from, d.start), clockOf(&to, d.end) }))) catch {};
-    } else rows.append(a, b.item("Downtime", "None")) catch {};
-    rows.append(a, b.item("Apps", if (l.block_software) "Cannot be installed or removed" else "Can be installed and removed")) catch {};
 }
 
 /// The page's window with the password asked for over it, as a parent
@@ -213,6 +198,15 @@ pub fn withDialog(self: *const Settings, b: Builder, st: *State, child: kete.Wid
     });
 }
 
+/// A title, its switch at the right.
+fn titleRow(cx: *kete.BuildContext, text: []const u8, size: f32, value: bool, on_changed: ?kete.ValueCallback(bool)) kete.Widget {
+    return cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = cx.arena.dupe(kete.Widget, &.{
+        cx.make(kete.Text{ .text = text, .style = .{ .size = size, .color = cx.theme().on_surface }, .wrap = false }),
+        cx.make(kete.Expanded{ .child = cx.make(kete.SizedBox.empty) }),
+        cx.make(kete.Switch{ .value = value, .on_changed = on_changed }),
+    }) catch &.{} });
+}
+
 fn choiceRow(b: Builder, name: []const u8, options: []const kete.MenuItem, selected: ?usize, on: kete.ValueCallback(usize)) kete.Widget {
     const cx = b.cx;
     return cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = cx.arena.dupe(kete.Widget, &.{
@@ -249,6 +243,12 @@ fn submitBonus(st: *State) void {
     }
     actions.parental_bonus = .{ .password = st.password, .minutes = st.bonus };
     st.open(.none);
+}
+
+/// Daily limits, or none (the time unlimited).
+fn setLimited(st: *State, on: bool) void {
+    st.draft.weekday = if (on) 120 else null;
+    st.draft.weekend = if (on) 180 else null;
 }
 
 fn setWeekday(st: *State, i: usize) void {
@@ -303,11 +303,19 @@ fn timeOptions(cx: *kete.BuildContext) []const kete.MenuItem {
     return opts;
 }
 
-/// "No limit", "None", "45 minutes", "1 hour", "2 hours 30 minutes".
+/// "Unlimited", "Not allowed", "45 minutes", "1 hour", "2 hours 30 minutes".
 fn limitText(buf: []u8, m: ?u16) []const u8 {
-    const minutes = m orelse return "No limit";
-    if (minutes == 0) return "None";
+    const minutes = m orelse return "Unlimited";
+    if (minutes == 0) return "Not allowed";
     return duration(buf, minutes);
+}
+
+/// "1 hour and 18 minutes", "45 minutes", "2 hours".
+fn durationAnd(buf: []u8, minutes: u32) []const u8 {
+    const h = minutes / 60;
+    const m = minutes % 60;
+    if (h == 0 or m == 0) return duration(buf, minutes);
+    return std.fmt.bufPrint(buf, "{d} hour{s} and {d} minute{s}", .{ h, if (h == 1) "" else "s", m, if (m == 1) "" else "s" }) catch "";
 }
 
 fn duration(buf: []u8, minutes: u32) []const u8 {
@@ -368,7 +376,7 @@ test "off: the limits are chosen, and turning on asks for the password twice" {
     submitTurnOn(st);
     try testing.expect(st.mismatch and actions.parental_on == null);
     st.setAgain("sesame");
-    setWeekday(st, 3);
+    setWeekday(st, 2);
     submitTurnOn(st);
     try testing.expectEqualStrings("sesame", actions.parental_on.?.password.slice());
     try testing.expectEqual(@as(?u16, 60), actions.parental_on.?.limits.weekday);
@@ -393,9 +401,12 @@ test "on: today's use, not the settings; a parent turns them off or gives more t
     u.frame(1600, 900, 0, settings);
     _ = view.showPage(u, .parental);
     u.frame(1600, 900, 1, settings);
-    try testing.expect(view.findText(u.root.?, "42 minutes") != null);
-    try testing.expect(view.findText(u.root.?, "2 hours 30 minutes (30 minutes extra)") != null);
-    try testing.expect(view.findText(u.root.?, "1 hour 48 minutes") != null);
+    // 42 of 150 minutes: 28%, an hour and 48 minutes left.
+    try testing.expect(view.findText(u.root.?, "28%") != null);
+    try testing.expect(view.findText(u.root.?, "1 hour and 48 minutes remaining today") != null);
+    try testing.expect(view.findText(u.root.?, "Add time") != null);
+    try testing.expect(view.findText(u.root.?, "Turn off parental controls") != null);
+    try testing.expect(view.findText(u.root.?, "Weekdays") == null);
     try testing.expect(view.findType(u.root.?, kete.DropdownMenu) == null);
     try testing.expect(view.findText(u.root.?, "Stop apps being installed or removed") == null);
     const st = &view.settingsState(u).?.parental;
@@ -414,9 +425,11 @@ test "on: today's use, not the settings; a parent turns them off or gives more t
 
 test "words for durations and limits" {
     var buf: [64]u8 = undefined;
-    try testing.expectEqualStrings("No limit", limitText(&buf, null));
-    try testing.expectEqualStrings("None", limitText(&buf, 0));
+    try testing.expectEqualStrings("Unlimited", limitText(&buf, null));
+    try testing.expectEqualStrings("Not allowed", limitText(&buf, 0));
     try testing.expectEqualStrings("1 hour", duration(&buf, 60));
     try testing.expectEqualStrings("2 hours 30 minutes", duration(&buf, 150));
     try testing.expectEqualStrings("1 minute", duration(&buf, 1));
+    try testing.expectEqualStrings("1 hour and 1 minute", durationAnd(&buf, 61));
+    try testing.expectEqualStrings("2 hours", durationAnd(&buf, 120));
 }
