@@ -1083,6 +1083,13 @@ pub const Window = struct {
                 } else empty = i;
             }
             if (stale) |i| {
+                // Replaced by one of the right size if there is room for
+                // it; if not, drawn into as it is (the compositor stretches
+                // it to the window). Freed for one that cannot be made,
+                // there would be none to draw into, and the one shown is
+                // kept by the compositor till another comes: waiting for it
+                // would never end.
+                if (!w.roomToReplace(&w.buffers[i].?)) return i;
                 w.freeBuffer(&w.buffers[i].?, &w.buffers[i]);
                 empty = i;
             }
@@ -1100,20 +1107,19 @@ pub const Window = struct {
                 } else |err| {
                     if (err != error.OutOfMemory) return err;
                     // No GPU memory for another buffer: make do with those
-                    // there are, or wait for some to be freed.
-                    const busy = for (w.buffers) |slot| {
-                        if (slot) |b| if (b.busy) break true;
-                    } else false;
+                    // there are, or wait a while for some to be freed (or
+                    // for the compositor to give one back), and then give
+                    // up on this frame: the compositor may be keeping the
+                    // only other one till another comes, which waiting
+                    // would never bring.
                     if (w.in_flight != null) {
                         try w.finishInFlight();
                         continue;
                     }
-                    if (!busy) {
-                        out_of_memory_waits += 1;
-                        if (out_of_memory_waits > 40) return err;
-                        try w.conn.dispatchTimeout(50);
-                        continue;
-                    }
+                    out_of_memory_waits += 1;
+                    if (out_of_memory_waits > 40) return err;
+                    try w.conn.dispatchTimeout(50);
+                    continue;
                 }
             }
             // All buffers are with the compositor (or the GPU): wait for a
@@ -1144,6 +1150,17 @@ pub const Window = struct {
         const dims = w.bufferSize();
         const size = vc4.texture.imageSizeOf(w.bufferFormat(), dims[0], dims[1]);
         return mem[1] >= size + mem[0] / 4;
+    }
+
+    /// Whether a buffer of the window's size can be made in place of `b`
+    /// (once it is freed), leaving an eighth of the GPU's memory free (for
+    /// the shell, and as the pool is never all in one piece). Unknown: yes.
+    fn roomToReplace(w: *const Window, b: *const Buffer) bool {
+        const get = w.gpu.vtable.memory orelse return true;
+        const mem = get(w.gpu.ptr) orelse return true;
+        const dims = w.bufferSize();
+        const size = vc4.texture.imageSizeOf(w.bufferFormat(), dims[0], dims[1]);
+        return mem[1] + b.bo.map.len >= size + mem[0] / 8;
     }
 
     fn allocBuffer(w: *Window, slot: usize) !Buffer {
