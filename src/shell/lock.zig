@@ -203,7 +203,7 @@ pub const Lock = struct {
                 x += step;
             }
         }
-        centred(canvas, &l.cache, if (l.wrong) .{ .font = f, .size = small.size, .color = 0xffe57373 } else small, w, @round(306 * s), if (l.wrong) "That is not the password" else "Type it, then press Enter");
+        if (l.wrong) centred(canvas, &l.cache, .{ .font = f, .size = small.size, .color = 0xffe57373 }, w, @round(306 * s), "That is not the password");
     }
 };
 
