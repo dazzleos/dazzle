@@ -31,6 +31,11 @@ pub const Options = struct {
     /// what was drawn before. Every draw in the frame that tests depth must
     /// then test it the same way (less), as all programs here do.
     early_z: bool = false,
+    /// With depth testing: whether what is drawn is kept in the depth
+    /// buffer. See-through things drawn after the rest (plants, whose
+    /// tiles are partly clear) can leave it out, so their clear parts hide
+    /// nothing drawn after them.
+    depth_write: bool = true,
 };
 
 const Stage = struct {
@@ -188,8 +193,9 @@ pub const Pipeline = struct {
                 // screen, where y points down, that is clockwise.
                 .clockwise_primitives = true,
                 .depth_func = if (prog.options.depth_test) .less else .always,
-                .z_updates = prog.options.depth_test,
+                .z_updates = prog.options.depth_test and p.options.depth_write,
                 .early_z = prog.options.depth_test and p.options.early_z,
+                .early_z_updates = p.options.depth_write,
             },
             .viewport = viewport,
             .scissor = d.scissor,
