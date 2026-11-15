@@ -546,8 +546,42 @@ test "an app window as big as the work area (or bigger) is maximized" {
     while (!win.maximized) try d.dispatch();
     _ = try win.applyConfigure();
     try testing.expectEqual([2]u32{ 800, 560 }, [2]u32{ win.width, win.height });
-
     win.close();
+    thread.join();
+    try testing.expectEqual(@as(u32, 0), fake.live_bos);
+}
+
+test "a window started fullscreen is maximized when it leaves fullscreen" {
+    var pair: [2]linux.fd_t = undefined;
+    try testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &pair));
+    var renderer: FakeRenderer = .{};
+    const st = try testing.allocator.create(ServerThread);
+    defer testing.allocator.destroy(st);
+    st.* = .{ .server = .init(testing.allocator, renderer.backend(), .{ .x = 0, .y = 40, .width = 800, .height = 560 }), .fd = pair[0] };
+    st.server.output = .{ .width = 800, .height = 600 };
+    defer st.server.deinit();
+    const thread = try std.Thread.spawn(.{}, ServerThread.run, .{st});
+
+    var fake: FakeGpu = .{};
+    const d = try client.Display.fromFd(testing.allocator, pair[1]);
+    // A game: fullscreen, then out of it. Maximized, not just as big as
+    // the work area (which the shell composites).
+    const game = try app.Window.openOn(testing.allocator, fake.gpu(), d, .{ .title = "Game", .size = .{ 300, 200 } });
+    game.setFullscreen(true);
+    while (!game.fullscreen) try d.dispatch();
+    _ = try game.applyConfigure();
+    test_frame.begin(try game.beginFrame(), .{ .clear = 0xff000000 });
+    try game.present(&test_frame);
+    game.setFullscreen(false);
+    while (game.fullscreen) try d.dispatch();
+    _ = try game.applyConfigure();
+    test_frame.begin(try game.beginFrame(), .{ .clear = 0xff000000 });
+    try game.present(&test_frame);
+    while (!game.maximized) try d.dispatch();
+    _ = try game.applyConfigure();
+    try testing.expectEqual([2]u32{ 800, 560 }, [2]u32{ game.width, game.height });
+
+    game.close();
     thread.join();
     try testing.expectEqual(@as(u32, 0), fake.live_bos);
 }

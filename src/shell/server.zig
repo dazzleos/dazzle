@@ -1674,12 +1674,13 @@ pub const Server = struct {
     /// limits allow, in the middle of the work area. If it had to be made
     /// smaller, it is told so. One that fills the work area is maximized
     /// (as one that leaves fullscreen without ever having been placed, a
-    /// game started fullscreen, say): it can then be shown directly.
+    /// game started fullscreen, say): it can then be shown directly. A
+    /// fullscreen window is placed once it leaves fullscreen.
     fn placeFirst(s: *Server, c: *Client, t: *Toplevel) void {
-        if (t.placed or t.maximized) return;
+        if (t.placed or t.maximized or t.fullscreen) return;
         const sz = toplevelLogicalSize(t);
         const wa = s.work_area;
-        if (sz[0] >= wa.width and sz[1] >= wa.height and !t.fullscreen) {
+        if (sz[0] >= wa.width and sz[1] >= wa.height) {
             s.setMaximized(c, t, true);
             return;
         }
@@ -4762,6 +4763,10 @@ pub const Server = struct {
                 try s.toplevels.append(s.gpa, t);
             } else if (surf.texture() == null and t.mapped) {
                 s.unmap(t);
+            } else if (surf.texture() != null and !t.placed and !t.maximized and !t.fullscreen) {
+                // Shown fullscreen first, and out of it now: placed as a
+                // window's first buffer is.
+                s.placeFirst(c, t);
             }
             // Drawn since acknowledging the last configure: the next size
             // can be sent.
