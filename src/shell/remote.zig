@@ -17,6 +17,20 @@
 //!     /type?text=                   types the text (US keys: letters,
 //!                                   digits, space and common punctuation)
 //!     /launch?app=dazzle-blocks     opens an app, or brings it to the top
+//!     /quit?app=dazzle-blocks[&force=1]
+//!                                   asks the app's windows to close (or
+//!                                   ends it at once)
+//!     /window?do=maximize[&app=dazzle-blocks]
+//!                                   maximizes, restores, makes fullscreen
+//!                                   (fullscreen), leaves fullscreen
+//!                                   (windowed), closes or raises the top
+//!                                   window (of the app, or by its title)
+//!     /updates                      how updates stand, as text
+//!     /check                        checks for updates now
+//!     /update                       checks, then installs everything
+//!                                   newer (the system starts when the
+//!                                   computer restarts)
+//!     /restart                      restarts the computer
 //!
 //! A wrong code (or none) gets 403. The shell carries out each command
 //! (`Server.accept` gives it), and answers (`Request.respond`).
@@ -38,7 +52,19 @@ pub const Command = union(enum) {
     /// The text (in the request's buffer).
     type: []const u8,
     launch: []const u8,
+    /// The app (in the request's buffer); ended at once, or asked to close.
+    quit: struct { app: []const u8, force: bool },
+    /// What to do to the top window, of `app` (its app ID or title) or of
+    /// all.
+    window: struct { action: WindowAction, app: ?[]const u8 },
+    updates,
+    check,
+    update,
+    restart,
 };
+
+/// What `/window` does (as `Server.WindowAction`).
+pub const WindowAction = enum { maximize, restore, fullscreen, windowed, close, raise };
 
 /// A request read, its command to be carried out and answered.
 pub const Request = struct {
@@ -170,6 +196,18 @@ fn parse(text: []const u8, code: u32, text_buf: []u8) Parsed {
     } } };
     if (std.mem.eql(u8, path, "/type")) return .{ .command = .{ .type = decode(param(query, "text") orelse return .bad, text_buf) orelse return .bad } };
     if (std.mem.eql(u8, path, "/launch")) return .{ .command = .{ .launch = decode(param(query, "app") orelse return .bad, text_buf) orelse return .bad } };
+    if (std.mem.eql(u8, path, "/quit")) return .{ .command = .{ .quit = .{
+        .app = decode(param(query, "app") orelse return .bad, text_buf) orelse return .bad,
+        .force = std.mem.eql(u8, param(query, "force") orelse "0", "1"),
+    } } };
+    if (std.mem.eql(u8, path, "/window")) return .{ .command = .{ .window = .{
+        .action = std.meta.stringToEnum(WindowAction, param(query, "do") orelse return .bad) orelse return .bad,
+        .app = if (param(query, "app")) |a| decode(a, text_buf) orelse return .bad else null,
+    } } };
+    if (std.mem.eql(u8, path, "/updates")) return .{ .command = .updates };
+    if (std.mem.eql(u8, path, "/check")) return .{ .command = .check };
+    if (std.mem.eql(u8, path, "/update")) return .{ .command = .update };
+    if (std.mem.eql(u8, path, "/restart")) return .{ .command = .restart };
     return .not_found;
 }
 
@@ -238,6 +276,23 @@ test "requests are read with their code, and others turned away" {
     try testing.expectEqualStrings("Hello, there!", parse("GET /type?code=123456&text=Hello%2C+there%21 HTTP/1.1\r\n\r\n", 123456, &buf).command.type);
     try testing.expectEqual(@as(?bool, false), parse("GET /key?code=123456&key=28&pressed=0 HTTP/1.1\r\n\r\n", 123456, &buf).command.key.pressed);
     try testing.expectEqualStrings("dazzle-blocks", parse("GET /launch?code=123456&app=dazzle-blocks HTTP/1.1\r\n\r\n", 123456, &buf).command.launch);
+}
+
+test "apps, windows and updates are controlled directly" {
+    var buf: [64]u8 = undefined;
+    const quit = parse("GET /quit?code=123456&app=dazzle-blocks&force=1 HTTP/1.1\r\n\r\n", 123456, &buf).command.quit;
+    try testing.expectEqualStrings("dazzle-blocks", quit.app);
+    try testing.expect(quit.force);
+    try testing.expect(!parse("GET /quit?code=123456&app=dazzle-blocks HTTP/1.1\r\n\r\n", 123456, &buf).command.quit.force);
+    const w = parse("GET /window?code=123456&do=fullscreen&app=Blocks HTTP/1.1\r\n\r\n", 123456, &buf).command.window;
+    try testing.expectEqual(WindowAction.fullscreen, w.action);
+    try testing.expectEqualStrings("Blocks", w.app.?);
+    try testing.expect(parse("GET /window?code=123456&do=maximize HTTP/1.1\r\n\r\n", 123456, &buf).command.window.app == null);
+    try testing.expect(parse("GET /window?code=123456&do=explode HTTP/1.1\r\n\r\n", 123456, &buf) == .bad);
+    try testing.expect(parse("GET /update?code=123456 HTTP/1.1\r\n\r\n", 123456, &buf).command == .update);
+    try testing.expect(parse("GET /restart?code=123456 HTTP/1.1\r\n\r\n", 123456, &buf).command == .restart);
+    // Not without the code.
+    try testing.expect(parse("GET /restart HTTP/1.1\r\n\r\n", 123456, &buf) == .forbidden);
 }
 
 test "text is typed with US keys" {

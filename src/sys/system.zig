@@ -213,7 +213,9 @@ pub const Request = union(enum) {
         return switch (r) {
             .status, .subscribe => true,
             .prepare, .hostname, .finish => client == .setup,
-            .update, .restart, .video_memory, .log_server => client == .settings,
+            // The shell too: remote control installs updates and restarts.
+            .update, .restart => client == .settings or client == .shell,
+            .video_memory, .log_server => client == .settings,
             .locale => client == .setup or client == .settings,
             .power_off => client == .shell or client == .settings,
         };

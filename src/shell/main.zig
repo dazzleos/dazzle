@@ -507,6 +507,44 @@ fn run(init: std.process.Init.Minimal) !void {
                             req.respond("200 OK", "text/plain", "ok\n");
                         } else req.respond("404 Not Found", "text/plain", "No such app\n");
                     },
+                    .quit => |want| {
+                        const found = for (apps) |*a| {
+                            if (std.mem.eql(u8, a.name, want.app)) break a;
+                        } else null;
+                        const pid = if (found) |a| a.pid else null;
+                        if (pid == null) {
+                            req.respond("404 Not Found", "text/plain", "Not running\n");
+                        } else if (want.force) {
+                            _ = linux.kill(pid.?, .KILL);
+                            req.respond("200 OK", "text/plain", "ok\n");
+                        } else {
+                            // Each of its windows asked to close, as its
+                            // close button does.
+                            for (server.toplevels.items) |t| if (t.xdg.surface) |surf| if (surf.client.pid == pid.?) server.closeToplevel(t);
+                            req.respond("200 OK", "text/plain", "ok\n");
+                        }
+                    },
+                    .window => |w| if (server.findWindow(w.app)) |t| {
+                        server.act(t, std.meta.stringToEnum(server_mod.Server.WindowAction, @tagName(w.action)).?);
+                        req.respond("200 OK", "text/plain", "ok\n");
+                    } else req.respond("404 Not Found", "text/plain", "No such window\n"),
+                    .updates => {
+                        var out_buf: [512]u8 = undefined;
+                        var w: std.Io.Writer = .fixed(&out_buf);
+                        updates.describe(&w) catch {};
+                        req.respond("200 OK", "text/plain; charset=utf-8", w.buffered());
+                    },
+                    .check => {
+                        updates.checkNow();
+                        req.respond("200 OK", "text/plain", "checking\n");
+                    },
+                    .update => {
+                        updates.installAll();
+                        req.respond("200 OK", "text/plain", "checking, then installing what is newer\n");
+                    },
+                    .restart => if (sys.system.ask("restart\n", 3000)) |r| {
+                        req.respond(if (r.denied) "403 Forbidden" else "200 OK", "text/plain", if (r.denied) "Not allowed\n" else "restarting\n");
+                    } else req.respond("503 Service Unavailable", "text/plain", "The system did not answer\n"),
                 }
             }
         }

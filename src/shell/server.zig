@@ -1492,6 +1492,41 @@ pub const Server = struct {
         return false;
     }
 
+    /// What remote control can do to a window (as its title bar's buttons
+    /// and its app can).
+    pub const WindowAction = enum { maximize, restore, fullscreen, windowed, close, raise };
+
+    /// The top window whose app (its app ID, or the name of its program)
+    /// or title is `app`; the top window if `app` is null.
+    pub fn findWindow(s: *const Server, app: ?[]const u8) ?*Toplevel {
+        var i = s.toplevels.items.len;
+        while (i > 0) {
+            i -= 1;
+            const t = s.toplevels.items[i];
+            if (!t.mapped or t.xdg.surface == null) continue;
+            const want = app orelse return t;
+            if (std.mem.eql(u8, t.appId(), want) or std.mem.eql(u8, t.title(), want)) return t;
+        }
+        return null;
+    }
+
+    /// Does `action` to window `t`, as if its title bar's button (or its
+    /// app) asked: a window leaving fullscreen goes back to how it was.
+    pub fn act(s: *Server, t: *Toplevel, action: WindowAction) void {
+        const c = (t.xdg.surface orelse return).client;
+        switch (action) {
+            .maximize => s.setMaximized(c, t, true),
+            .restore => {
+                s.setFullscreen(c, t, false);
+                s.setMaximized(c, t, false);
+            },
+            .fullscreen => s.setFullscreen(c, t, true),
+            .windowed => s.setFullscreen(c, t, false),
+            .close => s.closeToplevel(t),
+            .raise => s.raiseToplevel(t),
+        }
+    }
+
     fn raiseToplevel(s: *Server, t: *Toplevel) void {
         const i = std.mem.indexOfScalar(*Toplevel, s.toplevels.items, t) orelse return;
         if (i + 1 < s.toplevels.items.len) {

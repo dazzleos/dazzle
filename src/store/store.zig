@@ -642,6 +642,35 @@ pub fn download(gpa: std.mem.Allocator, url: []const u8) ![]u8 {
     return client.download(url);
 }
 
+/// Downloads the system update `m` offers (from `base_url`) to the card,
+/// checks its size, SHA-256 and signature, and asks the system manager to
+/// install it (which checks them again): it unpacks it into the slot not
+/// running and has the firmware start that slot next time. For a job's
+/// child process (`Job`): Settings', or the shell's (remote control).
+pub fn downloadAndInstallOs(gpa: std.mem.Allocator, base_url: []const u8, m: OsManifest) !void {
+    const proto = sys.system;
+    const url = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ base_url, m.file });
+    // Straight to the card, not into memory.
+    const tmp = proto.update_archive ++ ".new";
+    var client: Client = .init(gpa);
+    defer client.deinit();
+    try client.downloadToFile(url, tmp, m.size);
+    errdefer _ = linux.unlink(tmp);
+    {
+        const archive = try sys.files.Mapped.open(tmp);
+        defer archive.close();
+        if (!sys.archive.sha256Is(archive.data, m.sha256)) return error.WrongChecksum;
+        const keys = loadKeys();
+        try verifySignature(archive.data, m.signature, keys.slice());
+    }
+    _ = try sys.check(linux.rename(tmp, proto.update_archive));
+    var request: [208]u8 = undefined;
+    // The manager answers between slices of other work (making the other
+    // slot, say), which can take it a while on a slow card.
+    const report = proto.ask(try std.fmt.bufPrint(&request, "update {s} {s}\n", .{ m.sha256, m.signature }), 30_000) orelse return error.InstallFailed;
+    if (report.denied or report.update == .failed) return error.InstallFailed;
+}
+
 /// Downloads `os.json` and `icon.png` from `base_url` into `dir` using `client`.
 pub fn fetchOs(client: *Client, gpa: std.mem.Allocator, base_url: []const u8, dir: []const u8) !void {
     const url = try std.fmt.allocPrint(gpa, "{s}/os.json", .{base_url});

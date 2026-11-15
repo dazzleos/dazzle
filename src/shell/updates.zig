@@ -5,6 +5,11 @@
 //! after it starts and then once a day, in a child process (`store.Job`).
 //! What Settings fetches, installs or removes meanwhile is seen as the
 //! files change (see `AppsWatch`) and as the system manager reports.
+//!
+//! Remote control can also have it check now, install everything newer
+//! (the apps, and the system: downloaded, then installed by the system
+//! manager into the other slot), and say how that goes (`checkNow`,
+//! `installAll`, `describe`).
 
 const std = @import("std");
 const sys = @import("sys");
@@ -33,6 +38,13 @@ pub const Updates = struct {
     available: bool = false,
     system: bool = false,
     apps_newer: bool = false,
+    /// Downloading the system update (and having it installed).
+    os_job: ?store.Job = null,
+    /// Install what is newer once the check under way is done.
+    install_after_check: bool = false,
+    /// What went wrong last (remote control says it).
+    problem_buf: [160]u8 = undefined,
+    problem_len: usize = 0,
 
     /// Starts watching for updates (in place: `apps` keeps a pointer into
     /// `url_buf`). The first check is in a minute.
@@ -55,11 +67,85 @@ pub const Updates = struct {
             u.next_check = now + check_every_ns;
             u.apps.refresh(true);
         }
-        if (u.apps.poll()) {
-            if (u.apps.message().len > 0) sys.print(sys.log_warning ++ "dazzle-shell: {s}\n", .{u.apps.message()});
-            return u.recompute();
+        var changed = false;
+        if (u.os_job) |*j| {
+            var buf: [160]u8 = undefined;
+            if (j.finished(&buf)) |outcome| {
+                u.os_job = null;
+                if (outcome) |why| u.setProblem("cannot update the system: {s}", .{why});
+                changed = true;
+            }
         }
-        return false;
+        if (u.apps.poll()) {
+            if (u.apps.message().len > 0) {
+                sys.print(sys.log_warning ++ "dazzle-shell: {s}\n", .{u.apps.message()});
+                u.setProblem("{s}", .{u.apps.message()});
+            }
+            changed = u.recompute() or changed;
+            // The check asked for has finished: install what it found.
+            if (u.install_after_check and u.apps.job == null) {
+                u.install_after_check = false;
+                u.installNow();
+            }
+        }
+        return changed;
+    }
+
+    /// Checks for updates now (the apps' catalogue and the system's
+    /// os.json).
+    pub fn checkNow(u: *Updates) void {
+        u.problem_len = 0;
+        if (u.apps.job == null) u.apps.refresh(true);
+    }
+
+    /// Checks for updates now, then installs everything newer: the apps,
+    /// and the system (which starts when the computer restarts).
+    pub fn installAll(u: *Updates) void {
+        u.checkNow();
+        u.install_after_check = true;
+    }
+
+    fn installNow(u: *Updates) void {
+        _ = u.recompute();
+        if (u.apps_newer) u.apps.updateAll();
+        if (u.system and u.os_job == null) {
+            var parsed = store.loadOsManifest(u.gpa) orelse return;
+            defer parsed.deinit();
+            u.os_job = store.Job.spawn(.os_download, parsed.value.version, store.downloadAndInstallOs, .{ u.gpa, u.apps.base_url, parsed.value }) catch |err| blk: {
+                u.setProblem("cannot update the system: {s}", .{@errorName(err)});
+                break :blk null;
+            };
+        }
+    }
+
+    fn setProblem(u: *Updates, comptime fmt: []const u8, args: anytype) void {
+        u.problem_len = if (std.fmt.bufPrint(&u.problem_buf, fmt, args)) |t| t.len else |_| 0;
+    }
+
+    /// How updates stand, for remote control: what is being done, what is
+    /// newer, and what the system manager says of the system's.
+    pub fn describe(u: *const Updates, w: *std.Io.Writer) !void {
+        const doing = if (u.install_after_check or (u.apps.job != null and u.apps.job.?.kind == .catalogue))
+            "checking"
+        else if (u.apps.job != null)
+            "updating apps"
+        else if (u.os_job != null)
+            "downloading the system"
+        else
+            "idle";
+        try w.print("doing {s}\n", .{doing});
+        try w.print("apps {s}\n", .{if (u.apps_newer) "newer available" else "up to date"});
+        const r = if (u.report) |*rep| rep else null;
+        const system = if (r != null and r.?.update == .installing)
+            "installing"
+        else if (r != null and r.?.slot != null and r.?.next != null and r.?.slot.? != r.?.next.?)
+            "installed, starts when restarted"
+        else if (u.system)
+            "newer available"
+        else
+            "up to date";
+        try w.print("system {s}\n", .{system});
+        if (u.problem_len > 0) try w.print("problem {s}\n", .{u.problem_buf[0..u.problem_len]});
     }
 
     /// What the system manager says now. Returns whether what there are
