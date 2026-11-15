@@ -69,6 +69,8 @@ pub fn main(init: std.process.Init.Minimal) u8 {
 
 fn run(init: std.process.Init.Minimal) !void {
     const launched = sys.nowNs();
+    // How long each part of starting takes, said with the first frame.
+    var took: StartTimes = .{ .at = launched };
     const gpa = std.heap.page_allocator;
     // Run elsewhere (on Raspberry Pi OS), the socket goes where other
     // compositors' do.
@@ -77,6 +79,7 @@ fn run(init: std.process.Init.Minimal) !void {
     const dev = try vc4.device.open();
     const output = try vc4.drm.waitForOutput(dev.fd);
     var renderer = try render.Renderer.init(gpa, dev, output);
+    took.step(.display);
     print("dazzle-shell: build {s}, display {d}x{d}, {s}\n", .{
         build_info.commit,                                                                                                                                                                                                             renderer.width, renderer.height,
         if (renderer.display.kms) |k| (if (k.overlays[vc4.kms.max_overlays - 1] != null) "atomic mode setting with overlay planes" else "atomic mode setting, too few overlay planes") else "legacy mode setting (no direct scanout)",
@@ -111,6 +114,7 @@ fn run(init: std.process.Init.Minimal) !void {
     var apps_watch: dock_mod.AppsWatch = .init(dock_mod.apps_dir);
     defer apps_watch.deinit();
     for (apps) |app| print("dazzle-shell: app {s} ({s})\n", .{ app.label, app.path });
+    took.step(.fonts_and_apps);
     var dock = try dock_mod.Dock.init(gpa, ui_font, apps, renderer.width, renderer.height);
     // The quick settings, over the status box when it is clicked: the
     // volume, the network, updates and powering off.
@@ -150,7 +154,9 @@ fn run(init: std.process.Init.Minimal) !void {
     // Updates of the system and the apps: checked for a minute from now,
     // then daily.
     var updates: updates_mod.Updates = undefined;
+    took.step(.dock);
     updates.init(gpa, sys.nowNs());
+    took.step(.updates);
     dock.updates = updates.available;
     const appearance = dock_mod.readAppearance();
     dock.theme = appearance.theme;
@@ -158,6 +164,7 @@ fn run(init: std.process.Init.Minimal) !void {
     var background_image: background_mod.Loader = .init(gpa, renderer.width, renderer.height, dock.bandHeight());
     defer background_image.deinit();
     wantBackground(&background_image, &renderer, appearance);
+    took.step(.background);
     // The dock floats in a band along the bottom, which windows stay above;
     // on an overlay plane, the band is drawn whole, background and all.
     const band_y: u32 = renderer.height - dock.bandHeight();
@@ -212,6 +219,7 @@ fn run(init: std.process.Init.Minimal) !void {
     const path = if (runtime_dir) |dir| try std.mem.printSentinel(&path_buf, "{s}/wayland-0", .{dir}, 0) else wayland.client.default_socket;
     const listener = try listen(path);
     print("dazzle-shell: listening on {s}\n", .{path});
+    took.step(.rest);
 
     var setup_pid: ?linux.pid_t = if (in_setup) blk: {
         var setup_buf: [512]u8 = undefined;
@@ -954,7 +962,8 @@ fn run(init: std.process.Init.Minimal) !void {
                 cursor_shown = true;
                 // How long starting took (the boot screen was shown until
                 // now), for the log.
-                print("dazzle-shell: first frame, {d} ms after the shell started\n", .{(sys.nowNs() - launched) / std.time.ns_per_ms});
+                took.step(.first_frame);
+                took.report(launched);
                 if (renderer.showCursor(.arrow)) {
                     renderer.moveCursor(@intFromFloat(pointer.x), @intFromFloat(pointer.y));
                     print("dazzle-shell: cursor shown\n", .{});
@@ -976,6 +985,27 @@ fn run(init: std.process.Init.Minimal) !void {
         server.flushClients();
     }
 }
+
+/// How long the parts of starting took (milliseconds), for the log.
+const StartTimes = struct {
+    at: u64,
+    ms: std.EnumArray(Step, u64) = .initFill(0),
+
+    const Step = enum { display, fonts_and_apps, dock, updates, background, rest, first_frame };
+
+    fn step(t: *StartTimes, s: Step) void {
+        const now = sys.nowNs();
+        t.ms.set(s, (now - t.at) / std.time.ns_per_ms);
+        t.at = now;
+    }
+
+    fn report(t: *const StartTimes, launched: u64) void {
+        var buf: [256]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        for (std.enums.values(Step), 0..) |s, i| w.print("{s}{s} {d}", .{ if (i == 0) "" else ", ", @tagName(s), t.ms.get(s) }) catch {};
+        print("dazzle-shell: first frame, {d} ms after the shell started ({s} ms)\n", .{ (t.at - launched) / std.time.ns_per_ms, w.buffered() });
+    }
+};
 
 /// How long a change to the dock alone waits for a client's
 /// frame to go out with (a few refreshes).
