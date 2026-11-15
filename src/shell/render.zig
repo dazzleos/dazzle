@@ -626,6 +626,24 @@ pub const Renderer = struct {
         return p.planes[i];
     }
 
+    /// The shell's last frame, before it stops (the computer restarting or
+    /// turning off): everything but the pointer and a notification, in one
+    /// buffer shown alone, so the shutdown screen can show that buffer and
+    /// fade from it (see init's splash.zig). Returns once it is on the
+    /// screen.
+    pub fn showLast(r: *Renderer, windows: []const Window) !void {
+        while (r.display.flip_pending) _ = try r.display.handleEvents();
+        var quads = try r.panelQuads();
+        quads[@intFromEnum(PanelId.notice)] = null;
+        static_frame.begin(r.display.backTarget(), .{ .clear = r.background });
+        try recordFrame(&static_frame, r.pipelines(), try r.previewTexture(), r.background_image, r.vbo, &quads, windows);
+        const seqno = try r.dev.submit(static_frame.finish());
+        try r.dev.waitSeqno(seqno, std.time.ns_per_s);
+        vc4.drm.setCursor(r.dev.fd, r.display.output.crtc_id, 0, 0, 0) catch {};
+        if (r.display.kms) |*k| _ = k.setCover(null);
+        if (!try r.display.queue()) while (try r.display.handleEvents() == null) {};
+    }
+
     /// Shows the pointer as `shape` on the display's cursor plane, once the
     /// first frame has set the mode. Move it afterwards (`moveCursor`):
     /// shapes' hotspots differ.

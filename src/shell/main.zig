@@ -80,6 +80,8 @@ fn run(init: std.process.Init.Minimal) !void {
     const output = try vc4.drm.waitForOutput(dev.fd);
     var renderer = try render.Renderer.init(gpa, dev, output);
     took.step(.display);
+    // What the boot screen shows, over the first frames, fading out.
+    var boot_fade: BootFade = .start(&renderer);
     print("dazzle-shell: build {s}, display {d}x{d}, {s}\n", .{
         build_info.commit,                                                                                                                                                                                                             renderer.width, renderer.height,
         if (renderer.display.kms) |k| (if (k.overlays[vc4.kms.max_overlays - 1] != null) "atomic mode setting with overlay planes" else "atomic mode setting, too few overlay planes") else "legacy mode setting (no direct scanout)",
@@ -329,6 +331,13 @@ fn run(init: std.process.Init.Minimal) !void {
         const exits = fds[remote_index + 1 ..][0..n_clients];
         for (server.clients.items[0..n_clients], exits) |c, *f| f.* = .{ .fd = c.pidfd orelse -1, .events = linux.POLL.IN, .revents = 0 };
         _ = linux.poll(&fds, remote_index + 1 + n_clients, timeout);
+        // Asked to stop (the computer restarting or turning off): the last
+        // frame is left for the shutdown screen to fade from.
+        if (stop_asked.load(.monotonic)) {
+            var windows: [render.max_windows]render.Window = undefined;
+            stopShowingLast(&renderer, frameWindows(&server, &windows));
+            return;
+        }
         // A screenshot was saved (or could not be): the user is told.
         if (fds[shot_index].revents != 0) while (screenshot.Report.read(shot_pipe[0])) |r| {
             notice.theme = dock.theme;
@@ -737,6 +746,7 @@ fn run(init: std.process.Init.Minimal) !void {
         }
         // The background image, once it is ready (or gone).
         if (background_image.poll()) |outcome| {
+            boot_fade.ready = true;
             switch (outcome) {
                 .image => |ready| {
                     var img = ready;
@@ -938,6 +948,8 @@ fn run(init: std.process.Init.Minimal) !void {
             animateNotice(&notice, &renderer, &server, sys.nowNs());
         }
         const dock_due = panels_damaged and sys.nowNs() >= client_frame_ns + panel_grace_ns;
+        // The boot screen fading out: a frame each refresh until it has.
+        if (!renderer.flipPending() and boot_fade.step(&renderer, sys.nowNs())) server.damaged = true;
         if ((server.damaged or dock_due) and !renderer.flipPending()) {
             const count_frame = server.damaged;
             panels_damaged = false;
@@ -1024,6 +1036,83 @@ fn run(init: std.process.Init.Minimal) !void {
         server.flushClients();
     }
 }
+
+/// The boot screen's last frame (see init's splash.zig), shown over
+/// everything on the display's top plane from the shell's first frame, so
+/// nothing changes then; once the desktop is ready (its background loaded,
+/// or after a moment), it fades out, by the plane's alpha. Not if the
+/// display cannot (no plane for it, or no alpha): the desktop is shown at
+/// once.
+const BootFade = struct {
+    fb_id: u32 = 0,
+    handle: u32 = 0,
+    layer: vc4.kms.Layer = undefined,
+    /// When the first frame was shown, and when fading began.
+    first_ns: ?u64 = null,
+    fading_ns: ?u64 = null,
+    /// The desktop is ready to be seen.
+    ready: bool = false,
+    /// Taken away: the framebuffer goes once the frame without it is on
+    /// the screen.
+    gone: bool = false,
+
+    const hold_ns = 1500 * std.time.ns_per_ms;
+    const fade_ns = 500 * std.time.ns_per_ms;
+
+    fn start(renderer: *render.Renderer) BootFade {
+        const k = &(renderer.display.kms orelse return .{ .gone = true });
+        if (!k.canFadeCover()) return .{ .gone = true };
+        const shown = vc4.drm.adoptShown(renderer.display.fd, renderer.display.output.crtc_id) orelse return .{ .gone = true };
+        const w: u32 = renderer.width;
+        const h: u32 = renderer.height;
+        var f: BootFade = .{ .fb_id = shown.fb_id, .handle = shown.handle };
+        f.layer = .{ .fb_id = shown.fb_id, .src_width = @min(shown.width, w), .src_height = @min(shown.height, h), .x = 0, .y = 0, .width = @min(shown.width, w), .height = @min(shown.height, h) };
+        if (!k.setCover(f.layer)) {
+            f.release(renderer);
+            return .{ .gone = true };
+        }
+        return f;
+    }
+
+    /// Before each frame: whether the cover changed (a frame is needed).
+    fn step(f: *BootFade, renderer: *render.Renderer, now: u64) bool {
+        if (f.fb_id == 0) return false;
+        const k = &(renderer.display.kms orelse return false);
+        if (f.gone) {
+            // The frame without it is on the screen: it can go.
+            f.release(renderer);
+            return false;
+        }
+        const first = f.first_ns orelse {
+            f.first_ns = now;
+            return false;
+        };
+        const fading = f.fading_ns orelse blk: {
+            if (!f.ready and now - first < hold_ns) return false;
+            f.fading_ns = now;
+            break :blk now;
+        };
+        const t = @min(@as(f32, @floatFromInt(now - fading)) / @as(f32, @floatFromInt(fade_ns)), 1);
+        if (t >= 1) {
+            _ = k.setCover(null);
+            f.gone = true;
+            return true;
+        }
+        var layer = f.layer;
+        // Eased: quick at first, gentle at the end.
+        const ease = 1 - (1 - t) * (1 - t);
+        layer.alpha = @intFromFloat(@round((1 - ease) * 0xffff));
+        _ = k.setCover(layer);
+        return true;
+    }
+
+    fn release(f: *BootFade, renderer: *render.Renderer) void {
+        if (f.fb_id != 0) vc4.drm.removeFramebuffer(renderer.display.fd, f.fb_id);
+        if (f.handle != 0) vc4.drm.gemClose(renderer.display.fd, f.handle);
+        f.fb_id = 0;
+        f.handle = 0;
+    }
+};
 
 /// How long the parts of starting took (milliseconds), for the log.
 const StartTimes = struct {
@@ -1415,6 +1504,34 @@ fn frameWindows(server: *server_mod.Server, out: *[render.max_windows]render.Win
 /// screenshot), so it is reaped.
 var child_exited: std.atomic.Value(bool) = .init(true);
 
+/// SIGTERM came: the system is stopping (see init's shutdown.zig).
+var stop_asked = std.atomic.Value(bool).init(false);
+
+fn onStop(_: linux.SIG) callconv(.c) void {
+    stop_asked.store(true, .monotonic);
+}
+
+/// Shows the last frame (`Renderer.showLast`), lets the display go, and
+/// waits (a while at most) for the shutdown screen to take it: the frame's
+/// buffer stays on the screen until it has.
+fn stopShowingLast(renderer: *render.Renderer, windows: []const render.Window) void {
+    print("dazzle-shell: stopping\n", .{});
+    renderer.showLast(windows) catch |err| {
+        print(sys.log_warning ++ "dazzle-shell: cannot show the last frame: {s}\n", .{@errorName(err)});
+        return;
+    };
+    const fd = renderer.display.fd;
+    const crtc = renderer.display.output.crtc_id;
+    const shown = vc4.drm.crtcFramebuffer(fd, crtc) catch return;
+    vc4.drm.dropMaster(fd) catch return;
+    const started = sys.nowNs();
+    while (sys.nowNs() - started < 3 * std.time.ns_per_s) {
+        const now_shown = vc4.drm.crtcFramebuffer(fd, crtc) catch return;
+        if (now_shown != shown) return;
+        sys.sleepMs(20);
+    }
+}
+
 fn onChildExit(_: linux.SIG) callconv(.c) void {
     child_exited.store(true, .monotonic);
 }
@@ -1428,6 +1545,8 @@ fn watchChildren() void {
         .flags = 0,
     };
     _ = linux.sigaction(.CHLD, &act, null);
+    const stop: linux.Sigaction = .{ .handler = .{ .handler = onStop }, .mask = linux.sigemptyset(), .flags = 0 };
+    _ = linux.sigaction(.TERM, &stop, null);
 }
 
 /// Reaps exited clients. Returns whether one was an app (which the dock

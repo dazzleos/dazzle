@@ -304,7 +304,7 @@ fn reapForever(first_shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, f
     while (true) {
         var status: u32 = 0;
         const rc = linux.wait4(-1, @ptrCast(&status), 0, null);
-        if (shutdown.requested()) |kind| shutdown.now(kind);
+        if (shutdown.requested()) |kind| shutdown.now(kind, shell_pid);
         switch (linux.errno(rc)) {
             .SUCCESS => {},
             // No children left: wait for signals forever.
@@ -367,7 +367,7 @@ fn reapForever(first_shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, f
         // next start already is).
         if (t.timer != null) {
             print(sys.log_error ++ "dazzle: the update did not work\n", .{});
-            shutdown.now(.restart);
+            shutdown.now(.restart, null);
         }
         print("dazzle: restarting the shell in 1 s\n", .{});
         sys.sleepMs(1000);

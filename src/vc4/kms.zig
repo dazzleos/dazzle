@@ -145,6 +145,8 @@ const PlaneProps = struct {
     crtc_y: u32,
     crtc_w: u32,
     crtc_h: u32,
+    /// Its "alpha" (how opaque it is all over), if the driver has it.
+    alpha: ?u32 = null,
 
     fn read(fd: linux.fd_t, plane_id: u32) !struct { PlaneProps, ?u64 } {
         const p = try Props.read(fd, plane_id, object_plane);
@@ -159,6 +161,7 @@ const PlaneProps = struct {
             .crtc_y = try p.id("CRTC_Y"),
             .crtc_w = try p.id("CRTC_W"),
             .crtc_h = try p.id("CRTC_H"),
+            .alpha = p.id("alpha") catch null,
         }, p.value("type") };
     }
 };
@@ -181,15 +184,18 @@ pub const Layer = struct {
     y: i32,
     width: u32,
     height: u32,
+    /// How opaque it is all over (0xffff: wholly), where the plane can be
+    /// made see-through.
+    alpha: u16 = 0xffff,
 };
 
 /// An atomic request under construction: properties grouped by object.
 pub const Request = struct {
-    objs: [3 + max_overlays]u32 = undefined,
-    counts: [3 + max_overlays]u32 = undefined,
+    objs: [4 + max_overlays]u32 = undefined,
+    counts: [4 + max_overlays]u32 = undefined,
     n_objs: usize = 0,
-    props: [48]u32 = undefined,
-    values: [48]u64 = undefined,
+    props: [64]u32 = undefined,
+    values: [64]u64 = undefined,
     n_props: usize = 0,
 
     fn object(r: *Request, id: u32) void {
@@ -226,6 +232,7 @@ pub const Request = struct {
         r.set(pp.crtc_y, @as(u32, @bitCast(l.y)));
         r.set(pp.crtc_w, l.width);
         r.set(pp.crtc_h, l.height);
+        if (pp.alpha) |a| r.set(a, l.alpha);
     }
 };
 
@@ -239,6 +246,13 @@ pub const Kms = struct {
     primary: Plane,
     /// Planes above the primary one, as many as the CRTC has to spare.
     overlays: [max_overlays]?Plane,
+    /// The plane above all the others, for `cover`, if there is one more.
+    cover_plane: ?Plane = null,
+    /// Shown over everything else by every commit while it is set: the
+    /// picture the screen showed before (the boot screen's, say), fading
+    /// out as its `alpha` comes down (`setCover`).
+    cover: ?Layer = null,
+    shown_cover: ?Layer = null,
     mode_set: bool = false,
     /// What the last commit put on each plane: later commits only change
     /// what differs, so the kernel re-checks as little as it can.
@@ -265,6 +279,7 @@ pub const Kms = struct {
 
         var primary: ?Plane = null;
         var overlays: [max_overlays]?Plane = @splat(null);
+        var cover_plane: ?Plane = null;
         var n_overlays: usize = 0;
         for (ids[0..res.count_planes]) |plane_id| {
             var plane: GetPlane = .{ .plane_id = plane_id };
@@ -276,6 +291,8 @@ pub const Kms = struct {
             } else if (plane_type == plane_type_overlay and n_overlays < max_overlays) {
                 overlays[n_overlays] = .{ .id = plane_id, .props = props };
                 n_overlays += 1;
+            } else if (plane_type == plane_type_overlay and cover_plane == null) {
+                cover_plane = .{ .id = plane_id, .props = props };
             }
         }
 
@@ -290,7 +307,23 @@ pub const Kms = struct {
             .mode_blob = blob.blob_id,
             .primary = primary orelse return error.NoPrimaryPlane,
             .overlays = overlays,
+            .cover_plane = cover_plane,
         };
+    }
+
+    /// Shows `layer` over everything from the next commit on (null: no
+    /// longer). False if there is no plane for it.
+    pub fn setCover(k: *Kms, layer: ?Layer) bool {
+        if (k.cover_plane == null) return layer == null;
+        k.cover = layer;
+        return true;
+    }
+
+    /// Whether a cover can be made see-through (faded): the driver has
+    /// planes' "alpha".
+    pub fn canFadeCover(k: *const Kms) bool {
+        const p = k.cover_plane orelse return false;
+        return p.props.alpha != null;
     }
 
     /// The request for showing `primary` and `overlays` above it, setting the mode if it has not been set yet. Unless `full`, it
@@ -313,6 +346,8 @@ pub const Kms = struct {
             c.* = plane != null and (all or !std.meta.eql(shown_layer, layer));
             any_overlay_changed = any_overlay_changed or c.*;
         }
+        const cover_changed = k.cover_plane != null and (all or !std.meta.eql(k.shown_cover, k.cover));
+        any_overlay_changed = any_overlay_changed or cover_changed;
         const shown = k.shown_primary;
         if (all or shown == null or !std.meta.eql(shown.?, primary)) {
             var moved = shown orelse primary;
@@ -327,6 +362,7 @@ pub const Kms = struct {
             r.set(k.primary.props.fb_id, primary.fb_id);
         }
         for (k.overlays, overlays, overlay_changed) |plane, layer, changed| if (changed) r.plane(plane.?, k.output.crtc_id, layer);
+        if (cover_changed) r.plane(k.cover_plane.?, k.output.crtc_id, k.cover);
         return r;
     }
 
@@ -360,6 +396,7 @@ pub const Kms = struct {
         k.shown_primary = primary;
         // Without a plane, nothing is shown there.
         for (&k.shown_overlays, k.overlays, overlays) |*shown_layer, plane, layer| shown_layer.* = if (plane != null) layer else null;
+        k.shown_cover = k.cover;
         return at_once;
     }
 
@@ -431,4 +468,49 @@ test "atomic requests group properties by object" {
     // A full request sets everything.
     r = k.request(window, .{ window, bar }, true);
     try std.testing.expectEqual(@as(usize, 30), r.n_props);
+}
+
+test "a cover is shown over everything by every commit, as see-through as it says, until it is taken away" {
+    var props: PlaneProps = .{ .fb_id = 1, .crtc_id = 2, .src_x = 3, .src_y = 4, .src_w = 5, .src_h = 6, .crtc_x = 7, .crtc_y = 8, .crtc_w = 9, .crtc_h = 10 };
+    var mode: drm.ModeInfo = std.mem.zeroes(drm.ModeInfo);
+    mode.hdisplay = 1920;
+    var cover_props = props;
+    cover_props.alpha = 11;
+    var k: Kms = .{
+        .fd = -1,
+        .output = .{ .connector_id = 30, .crtc_id = 40, .crtc_index = 0, .mode = mode },
+        .connector_crtc_id = 100,
+        .crtc_mode_id = 101,
+        .crtc_active = 102,
+        .mode_blob = 55,
+        .primary = .{ .id = 50, .props = props },
+        .overlays = .{ .{ .id = 60, .props = props }, .{ .id = 61, .props = props } },
+        .cover_plane = .{ .id = 70, .props = cover_props },
+        .mode_set = true,
+    };
+    const screen: Layer = .{ .fb_id = 77, .src_width = 1920, .src_height = 1080, .x = 0, .y = 0, .width = 1920, .height = 1080 };
+    k.shown_primary = screen;
+    try std.testing.expect(k.canFadeCover());
+    var boot = screen;
+    boot.fb_id = 90;
+    boot.alpha = 0x8000;
+    try std.testing.expect(k.setCover(boot));
+    var r = k.request(screen, .{ null, null }, false);
+    // Only the cover's plane changes: all of it, alpha too.
+    try std.testing.expectEqualSlices(u32, &.{70}, r.objs[0..r.n_objs]);
+    try std.testing.expectEqual(@as(u32, 11), r.props[r.n_props - 1]);
+    try std.testing.expectEqual(@as(u64, 0x8000), r.values[r.n_props - 1]);
+    k.shown_cover = k.cover;
+    // Unchanged: not sent again.
+    r = k.request(screen, .{ null, null }, false);
+    try std.testing.expectEqualSlices(u32, &.{50}, r.objs[0..r.n_objs]);
+    // Taken away: the plane is switched off.
+    try std.testing.expect(k.setCover(null));
+    r = k.request(screen, .{ null, null }, false);
+    try std.testing.expectEqualSlices(u32, &.{70}, r.objs[0..r.n_objs]);
+    try std.testing.expectEqualSlices(u64, &.{ 0, 0 }, r.values[0..r.n_props]);
+    // Without a plane for it, there is no cover.
+    k.cover_plane = null;
+    try std.testing.expect(!k.setCover(boot));
+    props.alpha = null;
 }

@@ -181,6 +181,7 @@ pub const IOCTL_MODE_PAGE_FLIP = IOWR(0xb0, ModeCrtcPageFlip);
 pub const IOCTL_MODE_CREATE_DUMB = IOWR(0xb2, ModeCreateDumb);
 pub const IOCTL_MODE_MAP_DUMB = IOWR(0xb3, ModeMapDumb);
 pub const IOCTL_MODE_ADDFB2 = IOWR(0xb8, ModeFbCmd2);
+pub const IOCTL_MODE_GETFB2 = IOWR(0xce, ModeFbCmd2);
 
 pub const ModeCreateDumb = extern struct {
     height: u32,
@@ -427,6 +428,43 @@ pub fn setCrtc(fd: linux.fd_t, output: Output, fb_id: u32) !void {
         .mode = output.mode,
     };
     try ioctl(fd, IOCTL_MODE_SETCRTC, &crtc);
+}
+
+/// A framebuffer (another process's, say), with a handle to its buffer
+/// in this DRM file: which the kernel gives only the display's master, or
+/// a process with CAP_SYS_ADMIN. Close the handle (`gemClose`) when done.
+pub fn framebufferInfo(fd: linux.fd_t, fb_id: u32) !ModeFbCmd2 {
+    var fb: ModeFbCmd2 = .{ .fb_id = fb_id };
+    try ioctl(fd, IOCTL_MODE_GETFB2, &fb);
+    if (fb.handles[0] == 0) return error.AccessDenied;
+    return fb;
+}
+
+/// What the screen shows now (CRTC `crtc_id`'s framebuffer), as a
+/// framebuffer of this DRM file's own, made from the same buffer: so it
+/// can be shown (on another plane, faded) after the process it was drawn
+/// by has gone. Null if there is nothing on the screen, or it cannot be
+/// had (see `framebufferInfo`).
+pub fn adoptShown(fd: linux.fd_t, crtc_id: u32) ?struct { fb_id: u32, handle: u32, width: u32, height: u32 } {
+    const shown = crtcFramebuffer(fd, crtc_id) catch return null;
+    if (shown == 0) return null;
+    const info = framebufferInfo(fd, shown) catch return null;
+    const handle = info.handles[0];
+    var fb: ModeFbCmd2 = .{
+        .width = info.width,
+        .height = info.height,
+        .pixel_format = info.pixel_format,
+        .flags = info.flags,
+        .handles = .{ handle, 0, 0, 0 },
+        .pitches = .{ info.pitches[0], 0, 0, 0 },
+        .offsets = .{ info.offsets[0], 0, 0, 0 },
+        .modifier = .{ info.modifier[0], 0, 0, 0 },
+    };
+    ioctl(fd, IOCTL_MODE_ADDFB2, &fb) catch {
+        gemClose(fd, handle);
+        return null;
+    };
+    return .{ .fb_id = fb.fb_id, .handle = handle, .width = info.width, .height = info.height };
 }
 
 /// The framebuffer a CRTC shows (0 if none).

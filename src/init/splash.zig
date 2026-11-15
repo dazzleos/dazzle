@@ -10,7 +10,15 @@
 //! to say (`Splash.say`); when the shell starts (`Splash.handOver`), it
 //! lets the shell have the display, and goes once the shell has put a
 //! frame of its own on the screen, so the screen is never blank between
-//! them.
+//! them. The shell fades in from it (its first frames show this frame's
+//! buffer over the desktop, on the display's top plane, see the shell's
+//! `BootFade`).
+//!
+//! Shutting down (`startShutdown`), it fades the other way: the shell,
+//! asked to stop, shows its last frame alone and lets the display go;
+//! the shutdown screen takes the display, shows that frame over itself on
+//! the top plane, and fades it out (by the plane's alpha), then says it
+//! is done.
 //!
 //! The text is drawn with kete's font renderer, in Fira Sans from
 //! /os/fonts; the logo is decoded with kete's PNG decoder. Nothing else
@@ -105,10 +113,103 @@ pub fn start(text: []const u8) ?Splash {
     return .{ .pid = @intCast(rc), .pipe = fds[1], .ack = ack[0] };
 }
 
+/// Starts the shutdown screen saying `text`: it waits for the shell to
+/// let the display go (or for a moment, if there is no shell), fades from
+/// the shell's last frame to itself, and says when it has (`waitShown`).
+/// It is not stopped with the other processes (it ignores SIGTERM).
+pub fn startShutdown(text: []const u8) ?Splash {
+    var ack: [2]linux.fd_t = undefined;
+    _ = sys.check(linux.pipe2(&ack, .{ .CLOEXEC = true })) catch return null;
+    const rc = linux.fork();
+    if (linux.errno(rc) != .SUCCESS) {
+        for (ack) |fd| sys.close(fd);
+        return null;
+    }
+    if (rc == 0) {
+        sys.close(ack[0]);
+        const ignore: linux.Sigaction = .{ .handler = .{ .handler = linux.SIG.IGN }, .mask = linux.sigemptyset(), .flags = 0 };
+        _ = linux.sigaction(.TERM, &ignore, null);
+        runShutdown(ack[1], text);
+        // On the screen until the computer restarts.
+        while (true) _ = linux.pause();
+    }
+    sys.close(ack[1]);
+    return .{ .pid = @intCast(rc), .pipe = -1, .ack = ack[0] };
+}
+
+/// Waits (`timeout_ms` at most) for the shutdown screen to be shown
+/// (faded in).
+pub fn waitShown(s: Splash, timeout_ms: i32) void {
+    var pfd = [1]linux.pollfd{.{ .fd = s.ack, .events = linux.POLL.IN, .revents = 0 }};
+    _ = linux.poll(&pfd, 1, timeout_ms);
+}
+
+/// How long the shutdown screen fades in over the shell's last frame.
+const fade_ns = 400 * std.time.ns_per_ms;
+
+fn runShutdown(done: linux.fd_t, text: []const u8) void {
+    defer {
+        _ = linux.write(done, "x", 1);
+        sys.close(done);
+    }
+    var screen = Screen.open(false) catch |err| {
+        print(sys.log_warning ++ "dazzle: shutdown screen: {s}\n", .{@errorName(err)});
+        return;
+    };
+    screen.say(text);
+    // The display, once the shell has let it go (it shows its last frame
+    // first), or after a moment (it has stopped, or there is none).
+    const started = sys.nowNs();
+    while (linux.errno(linux.ioctl(screen.fd, drm.IOCTL_SET_MASTER, 0)) != .SUCCESS) {
+        if (sys.nowNs() - started > 4 * std.time.ns_per_s) break;
+        sys.sleepMs(20);
+    }
+    const last = drm.adoptShown(screen.fd, screen.output.crtc_id);
+    var kms = vc4.kms.Kms.init(screen.fd, screen.output) catch {
+        drm.setCrtc(screen.fd, screen.output, screen.fb) catch {};
+        return;
+    };
+    const w = screen.width;
+    const h = screen.height;
+    const own: vc4.kms.Layer = .{ .fb_id = screen.fb, .src_width = w, .src_height = h, .x = 0, .y = 0, .width = w, .height = h };
+    const from = last orelse {
+        showOnly(&kms, &screen, own);
+        return;
+    };
+    var cover: vc4.kms.Layer = .{ .fb_id = from.fb_id, .src_width = @min(from.width, w), .src_height = @min(from.height, h), .x = 0, .y = 0, .width = @min(from.width, w), .height = @min(from.height, h) };
+    if (!kms.canFadeCover() or !kms.setCover(cover)) {
+        showOnly(&kms, &screen, own);
+        return;
+    }
+    // As it was (the shell's last frame), then less and less of it.
+    _ = kms.commit(own, @splat(null)) catch {
+        drm.setCrtc(screen.fd, screen.output, screen.fb) catch {};
+        return;
+    };
+    const fading = sys.nowNs();
+    while (true) {
+        const t = @min(@as(f32, @floatFromInt(sys.nowNs() - fading)) / @as(f32, @floatFromInt(fade_ns)), 1);
+        const ease = 1 - (1 - t) * (1 - t);
+        cover.alpha = @intFromFloat(@round((1 - ease) * 0xffff));
+        _ = kms.setCover(if (t < 1) cover else null);
+        _ = kms.commit(own, @splat(null)) catch break;
+        drm.waitFlip(screen.fd) catch break;
+        if (t >= 1) break;
+    }
+}
+
+/// Shows the screen alone (atomically, or by the old call if that fails).
+fn showOnly(kms: *vc4.kms.Kms, screen: *const Screen, own: vc4.kms.Layer) void {
+    _ = kms.setCover(null);
+    _ = kms.commit(own, @splat(null)) catch {
+        drm.setCrtc(screen.fd, screen.output, screen.fb) catch {};
+    };
+}
+
 /// The boot screen's process: shows it, says what init says, and goes
 /// once the shell has the screen.
 fn run(pipe: linux.fd_t, ack: linux.fd_t, first: []const u8) void {
-    var screen = Screen.open() catch |err| {
+    var screen = Screen.open(true) catch |err| {
         print(sys.log_warning ++ "dazzle: boot screen: {s}\n", .{@errorName(err)});
         // Nothing to let go: init is not held up.
         sys.close(ack);
@@ -154,7 +255,9 @@ const Screen = struct {
 
     const gpa = std.heap.page_allocator;
 
-    fn open() !Screen {
+    /// Draws the screen; `show`s it (being the display's master), or
+    /// leaves that to the caller.
+    fn open(show: bool) !Screen {
         const fd = try openDisplay();
         errdefer sys.close(fd);
         const output = try findOutput(fd);
@@ -189,7 +292,7 @@ const Screen = struct {
         };
         if (s.font) |*f| s.style = .{ .font = f, .size = size };
         // Shown once drawn.
-        try drm.setCrtc(fd, output, fb);
+        if (show) try drm.setCrtc(fd, output, fb);
         return s;
     }
 

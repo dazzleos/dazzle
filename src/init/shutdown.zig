@@ -53,51 +53,95 @@ pub fn request(kind: Kind) void {
 }
 
 /// In init: stops everything, puts the card's filesystems away, and
-/// restarts or turns off.
-pub fn now(kind: Kind) noreturn {
+/// restarts or turns off. The shutdown screen fades in from the shell's
+/// last frame (see splash.zig): the shell (`shell`) is stopped first, and
+/// alone, so it can leave it.
+pub fn now(kind: Kind, shell: ?linux.pid_t) noreturn {
     print("dazzle: {s}: stopping everything\n", .{if (kind == .restart) "restarting" else "turning off"});
-    stopAll();
-    // The display is free again: say what is happening.
-    const screen = splash.start(if (kind == .restart) "Restarting" else "Turning off");
-    putAway();
-    print("dazzle: {s}\n", .{if (kind == .restart) "restarting" else "turning off"});
-    if (screen) |s| {
-        // Seen for a moment at least (it is drawn by its own process).
-        sys.sleepMs(300);
-        _ = s;
+    const screen = splash.startShutdown(if (kind == .restart) "Restarting" else "Turning off");
+    const keep: linux.pid_t = if (screen) |s| s.pid else 0;
+    if (shell) |pid| {
+        _ = linux.kill(pid, .TERM);
+        waitFor(pid, 4000);
     }
+    signalOthers(.TERM, keep);
+    if (!reapOthers(keep, 3000)) {
+        signalOthers(.KILL, keep);
+        _ = reapOthers(keep, 2000);
+    }
+    putAway();
+    // Seen faded in before the screen goes.
+    if (screen) |s| splash.waitShown(s, 1500);
+    print("dazzle: {s}\n", .{if (kind == .restart) "restarting" else "turning off"});
     linux.sync();
     _ = linux.reboot(.MAGIC1, .MAGIC2, if (kind == .restart) .RESTART else .POWER_OFF, null);
     print(sys.log_warning ++ "dazzle: cannot {s}\n", .{if (kind == .restart) "restart" else "turn off"});
     while (true) _ = linux.pause();
 }
 
-/// Asks every other process to stop, gives them a moment, then makes the
-/// rest; and reaps them all.
-fn stopAll() void {
-    _ = linux.kill(-1, .TERM);
-    if (!reapAll(3000)) {
-        _ = linux.kill(-1, .KILL);
-        _ = reapAll(2000);
+/// Waits (`timeout_ms` at most) for child `pid` to stop, and reaps it.
+fn waitFor(pid: linux.pid_t, timeout_ms: u32) void {
+    var waited: u32 = 0;
+    while (waited < timeout_ms) : (waited += 20) {
+        var status: u32 = 0;
+        const rc = linux.wait4(pid, @ptrCast(&status), linux.W.NOHANG, null);
+        if (linux.errno(rc) != .SUCCESS or rc != 0) return;
+        sys.sleepMs(20);
     }
 }
 
-/// Reaps children until there are none left (true), or `timeout_ms` has
-/// passed.
-fn reapAll(timeout_ms: u32) bool {
+/// Sends `sig` to every process but init, `keep` and the kernel's own.
+fn signalOthers(sig: linux.SIG, keep: linux.pid_t) void {
+    var pids: [512]linux.pid_t = undefined;
+    for (others(&pids, keep)) |pid| _ = linux.kill(pid, sig);
+}
+
+/// Reaps children until no process is left but init, `keep` and the
+/// kernel's own (true), or `timeout_ms` has passed.
+fn reapOthers(keep: linux.pid_t, timeout_ms: u32) bool {
     var waited: u32 = 0;
     while (true) {
-        var status: u32 = 0;
-        const rc = linux.wait4(-1, @ptrCast(&status), linux.W.NOHANG, null);
-        switch (linux.errno(rc)) {
-            .CHILD => return true,
-            .SUCCESS => if (rc != 0) continue,
-            else => {},
+        while (true) {
+            var status: u32 = 0;
+            const rc = linux.wait4(-1, @ptrCast(&status), linux.W.NOHANG, null);
+            if (linux.errno(rc) != .SUCCESS or rc == 0) break;
         }
+        var pids: [512]linux.pid_t = undefined;
+        if (others(&pids, keep).len == 0) return true;
         if (waited >= timeout_ms) return false;
         sys.sleepMs(20);
         waited += 20;
     }
+}
+
+/// The processes running but init, `keep` and the kernel's own threads
+/// (which have no command line; nor do processes that have ended and
+/// wait to be reaped).
+fn others(out: []linux.pid_t, keep: linux.pid_t) []linux.pid_t {
+    const dir = sys.open("/proc", .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }) catch return out[0..0];
+    defer sys.close(dir);
+    var n: usize = 0;
+    var buf: [4096]u8 align(8) = undefined;
+    while (true) {
+        const len = sys.check(linux.getdents64(dir, &buf, buf.len)) catch break;
+        if (len == 0) break;
+        var at: usize = 0;
+        while (at < len) {
+            const reclen = std.mem.readInt(u16, buf[at + 16 ..][0..2], .little);
+            const name = std.mem.sliceTo(buf[at + 19 .. at + reclen], 0);
+            at += reclen;
+            const pid = std.fmt.parseInt(linux.pid_t, name, 10) catch continue;
+            if (pid == 1 or pid == keep or n == out.len) continue;
+            var path_buf: [32]u8 = undefined;
+            const path = std.fmt.bufPrintSentinel(&path_buf, "/proc/{d}/cmdline", .{pid}, 0) catch continue;
+            var cmd: [1]u8 = undefined;
+            const got = sys.readFile(path, &cmd) orelse continue;
+            if (got.len == 0) continue;
+            out[n] = pid;
+            n += 1;
+        }
+    }
+    return out[0..n];
 }
 
 /// Unmounts the card's filesystems and any drives (the last mounted
