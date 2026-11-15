@@ -72,7 +72,6 @@ const ServerThread = struct {
     check_fullscreen: std.atomic.Value(bool) = .init(false),
     fullscreen_top: std.atomic.Value(bool) = .init(false),
     scanout_width: std.atomic.Value(u32) = .init(0),
-    scanout_layer_width: std.atomic.Value(u32) = .init(0),
     checked: std.atomic.Value(bool) = .init(false),
     /// With `check_fullscreen`: where the top window is (x, y, width,
     /// height).
@@ -123,8 +122,6 @@ const ServerThread = struct {
                 st.fullscreen_top.store(srv.fullscreenTop(), .monotonic);
                 const b = if (srv.topWindow()) |t| srv.scanoutBuffer(t) else null;
                 st.scanout_width.store(if (b) |x| x.width else 0, .monotonic);
-                const layer = if (b != null) srv.scanoutLayer(srv.topWindow().?) else null;
-                st.scanout_layer_width.store(if (layer) |x| x.width else 0, .monotonic);
                 if (srv.topWindow()) |t| {
                     const r = srv.windowRect(t);
                     for (&st.top_rect, [4]i32{ r.x, r.y, @intCast(r.width), @intCast(r.height) }) |*o, v| o.store(v, .monotonic);
@@ -562,36 +559,6 @@ test "a fullscreen window covers the dock and can be shown directly; a game lock
     try testing.expect(st.fullscreen_top.load(.monotonic));
     // Its buffer is the screen's size: the display can show it as it is.
     try testing.expectEqual(@as(u32, 400), st.scanout_width.load(.monotonic));
-    try testing.expectEqual(@as(u32, 0), st.scanout_layer_width.load(.monotonic));
-
-    // Drawn at half the size, with a layer over it at the full size: the
-    // display can show both, the one stretched, the other over it.
-    win.render_scale = 0.5;
-    const layer = (try win.beginLayer()).?;
-    try testing.expectEqual(@as(u16, 400), layer.width);
-    test_frame.begin(layer, .{ .clear = 0 });
-    try win.render(&test_frame);
-    win.layerDrawn();
-    try testing.expect(win.layerShown());
-    test_frame.begin(try win.beginFrame(), .{ .clear = 0xff000000 });
-    try win.present(&test_frame);
-    while (win.frame_pending) try d.dispatch();
-    st.checked.store(false, .release);
-    st.check_fullscreen.store(true, .monotonic);
-    while (!st.checked.load(.acquire)) try d.dispatchTimeout(10);
-    try testing.expectEqual(@as(u32, 200), st.scanout_width.load(.monotonic));
-    try testing.expectEqual(@as(u32, 400), st.scanout_layer_width.load(.monotonic));
-    // Nothing over it again.
-    win.hideLayer();
-    test_frame.begin(try win.beginFrame(), .{ .clear = 0xff000000 });
-    try win.present(&test_frame);
-    while (win.frame_pending) try d.dispatch();
-    st.checked.store(false, .release);
-    st.check_fullscreen.store(true, .monotonic);
-    while (!st.checked.load(.acquire)) try d.dispatchTimeout(10);
-    try testing.expectEqual(@as(u32, 200), st.scanout_width.load(.monotonic));
-    try testing.expectEqual(@as(u32, 0), st.scanout_layer_width.load(.monotonic));
-    win.render_scale = 1;
 
     // The pointer locked over it: it stays put, hidden, and the window
     // hears only how it moves.

@@ -909,12 +909,9 @@ fn run(init: std.process.Init.Minimal) !void {
             // Not while the dock slides: it would leave its band.
             if (top) |t| if (!dock.sliding()) if (server.scanoutBuffer(t)) |b| {
                 const at = server.windowRect(t);
-                const layer = server.scanoutLayer(t);
-                if (renderer.showDirect(b.dmabuf.?, at.x, at.y, .{ at.width, at.height }, if (layer) |l| l.dmabuf.? else null)) |at_once| {
+                if (renderer.showDirect(b.dmabuf.?, at.x, at.y, .{ at.width, at.height })) |at_once| {
                     server.holdBuffer(b);
                     scanout.queued = b;
-                    if (layer) |l| server.holdBuffer(l);
-                    scanout.queued_layer = layer;
                     if (count_frame) perf_frames += 1;
                     on_screen = at_once;
                 }
@@ -986,19 +983,13 @@ const Scanout = struct {
     shown: ?*server_mod.Buffer = null,
     /// In the frame queued for the next vertical blank.
     queued: ?*server_mod.Buffer = null,
-    /// The layers over them (`Server.scanoutLayer`), if they have one.
-    shown_layer: ?*server_mod.Buffer = null,
-    queued_layer: ?*server_mod.Buffer = null,
 
-    /// The queued frame reached the screen: the buffers it replaced go
-    /// back to their client.
+    /// The queued frame reached the screen: the buffer it replaced goes
+    /// back to its client.
     fn presented(s: *Scanout, server: *server_mod.Server) void {
         if (s.shown) |b| server.dropBuffer(b);
-        if (s.shown_layer) |b| server.dropBuffer(b);
         s.shown = s.queued;
-        s.shown_layer = s.queued_layer;
         s.queued = null;
-        s.queued_layer = null;
     }
 };
 

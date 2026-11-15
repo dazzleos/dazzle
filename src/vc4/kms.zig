@@ -165,9 +165,8 @@ const PlaneProps = struct {
 
 pub const Plane = struct { id: u32, props: PlaneProps };
 
-/// Overlay planes `Kms` uses, at most: one for a layer over a window shown
-/// directly, and two for the shell's panels.
-pub const max_overlays = 3;
+/// Overlay planes `Kms` uses, at most.
+pub const max_overlays = 2;
 
 /// What is shown on each overlay plane (null: nothing).
 pub const Overlays = [max_overlays]?Layer;
@@ -391,45 +390,45 @@ test "atomic requests group properties by object" {
         .crtc_active = 102,
         .mode_blob = 55,
         .primary = .{ .id = 50, .props = props },
-        .overlays = .{ .{ .id = 60, .props = props }, .{ .id = 61, .props = props }, .{ .id = 62, .props = props } },
+        .overlays = .{ .{ .id = 60, .props = props }, .{ .id = 61, .props = props } },
     };
     const window: Layer = .{ .fb_id = 77, .src_width = 1920, .src_height = 1036, .x = 0, .y = 44, .width = 1920, .height = 1036 };
-    var r = k.request(window, .{ null, null, null }, false);
+    var r = k.request(window, .{ null, null }, false);
     // The mode set: connector, CRTC, then all the planes.
-    try std.testing.expectEqualSlices(u32, &.{ 30, 40, 50, 60, 61, 62 }, r.objs[0..r.n_objs]);
-    try std.testing.expectEqualSlices(u32, &.{ 1, 2, 10, 2, 2, 2 }, r.counts[0..r.n_objs]);
+    try std.testing.expectEqualSlices(u32, &.{ 30, 40, 50, 60, 61 }, r.objs[0..r.n_objs]);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2, 10, 2, 2 }, r.counts[0..r.n_objs]);
     try std.testing.expectEqual(@as(u64, 1036 << 16), r.values[3 + 5]);
     try std.testing.expectEqual(@as(u64, 44), r.values[3 + 7]);
     // The overlays are switched off.
     try std.testing.expectEqualSlices(u64, &.{ 0, 0, 0, 0 }, r.values[r.n_props - 4 .. r.n_props]);
 
     k.mode_set = true;
-    r = k.request(window, .{ window, null, null }, false);
+    r = k.request(window, .{ window, null }, false);
     try std.testing.expectEqualSlices(u32, &.{ 50, 60 }, r.objs[0..r.n_objs]);
     try std.testing.expectEqual(@as(usize, 20), r.n_props);
 
     // After that is shown, a new buffer in the same place changes only the
     // primary plane's framebuffer.
     k.shown_primary = window;
-    k.shown_overlays = .{ window, null, null };
+    k.shown_overlays = .{ window, null };
     var next = window;
     next.fb_id = 78;
-    r = k.request(next, .{ window, null, null }, false);
+    r = k.request(next, .{ window, null }, false);
     try std.testing.expectEqualSlices(u32, &.{50}, r.objs[0..r.n_objs]);
     try std.testing.expectEqualSlices(u32, &.{1}, r.props[0..r.n_props]);
     try std.testing.expectEqual(@as(u64, 78), r.values[0]);
     // A new bar changes only the overlay plane.
     var bar = window;
     bar.fb_id = 90;
-    r = k.request(window, .{ bar, null, null }, false);
+    r = k.request(window, .{ bar, null }, false);
     try std.testing.expectEqualSlices(u32, &.{60}, r.objs[0..r.n_objs]);
     // A dock appearing changes only the second.
-    r = k.request(window, .{ window, bar, null }, false);
+    r = k.request(window, .{ window, bar }, false);
     try std.testing.expectEqualSlices(u32, &.{61}, r.objs[0..r.n_objs]);
     // Nothing new still names the primary plane, for the flip event.
-    r = k.request(window, .{ window, null, null }, false);
+    r = k.request(window, .{ window, null }, false);
     try std.testing.expectEqualSlices(u32, &.{50}, r.objs[0..r.n_objs]);
     // A full request sets everything.
-    r = k.request(window, .{ window, bar, null }, true);
-    try std.testing.expectEqual(@as(usize, 32), r.n_props);
+    r = k.request(window, .{ window, bar }, true);
+    try std.testing.expectEqual(@as(usize, 30), r.n_props);
 }

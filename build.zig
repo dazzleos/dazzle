@@ -359,7 +359,7 @@ const shader_programs = [_]struct { source: []const u8, name: ?[]const u8 = null
     .{ .source = "src/shell/shaders/quad.zig", .owner = .shell, .args = &.{} },
     // The same, blended: the shaded preview of where a window will go.
     .{ .source = "src/shell/shaders/quad.zig", .name = "quad_blend", .owner = .shell, .args = &.{"--blend=source-over"} },
-    // Surfaces with alpha (premultiplied, as Wayland's are): a layer over
+    // Surfaces with alpha (premultiplied, as Wayland's are): a subsurface over
     // a window, say.
     .{ .source = "src/shell/shaders/quad.zig", .name = "quad_premultiplied", .owner = .shell, .args = &.{"--blend=premultiplied-over"} },
     // Rounded windows' corners and shadows.

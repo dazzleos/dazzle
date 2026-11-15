@@ -1265,10 +1265,8 @@ pub const Server = struct {
         const surf = t.xdg.surface orelse return null;
         if (surf.scale != 1 or surf.transform != 0) return null;
         if (t.xdg.geometry) |g| if (g.x != 0 or g.y != 0) return null;
-        // Subsurfaces, popups, a drag icon and a custom cursor are drawn on
-        // it; but a layer over all of it goes on a plane of its own.
-        const sz = surf.size() orelse return null;
-        if (layerOf(surf, sz) == .unsuitable) return null;
+        // Subsurfaces, popups, a drag icon and a custom cursor are drawn on it.
+        if (surf.subsurfaces.items.len > 0) return null;
         if (s.drag) |d| if (d.icon) |icon| if (icon.texture() != null) return null;
         if (s.cursor_surface) |cs| if (cs.texture() != null and s.pointer_focus != null) return null;
         for (s.popups.items) |pp| if (pp.xdg.surface) |ps| if (s.rootToplevel(ps) == t) return null;
@@ -1279,40 +1277,9 @@ pub const Server = struct {
         const area = s.areaOf(t);
         // As big as the area (its buffer may be smaller: the display
         // stretches it).
+        const sz = surf.size() orelse return null;
         if (b.dmabuf == null or sz[0] != area.width or sz[1] != area.height) return null;
         return b;
-    }
-
-    /// The layer over a window that `scanoutBuffer` gives, shown on a
-    /// plane above it: its one subsurface with a buffer, if it has one.
-    pub fn scanoutLayer(_: *const Server, t: *const Toplevel) ?*Buffer {
-        const surf = t.xdg.surface orelse return null;
-        const sz = surf.size() orelse return null;
-        return switch (layerOf(surf, sz)) {
-            .one => |b| b,
-            else => null,
-        };
-    }
-
-    /// What a window of size `sz` has over it: nothing, or one layer (a
-    /// subsurface at its top left, as big, with a dma-buf of the size it
-    /// shows and nothing over it) the display can show on a plane of its
-    /// own; or more than that, which must be composited.
-    fn layerOf(surf: *const Surface, sz: [2]u32) union(enum) { none, one: *Buffer, unsuitable } {
-        var found: ?*Buffer = null;
-        for (surf.subsurfaces.items) |sub| {
-            const child = sub.surface orelse continue;
-            const b = child.buffer orelse {
-                if (child.copy != null) return .unsuitable;
-                continue;
-            };
-            if (found != null or b.dmabuf == null) return .unsuitable;
-            if (sub.x != 0 or sub.y != 0 or child.scale != 1 or child.transform != 0 or child.destination != null) return .unsuitable;
-            if (b.dmabuf.?.width != sz[0] or b.dmabuf.?.height != sz[1]) return .unsuitable;
-            for (child.subsurfaces.items) |grand| if (grand.surface) |g| if (g.texture() != null) return .unsuitable;
-            found = b;
-        }
-        return if (found) |b| .{ .one = b } else .none;
     }
 
     fn sendRelease(b: *Buffer) void {

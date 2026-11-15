@@ -50,11 +50,6 @@ pub const Window = struct {
     /// frames with the GPU, the frame it left is kept in flight
     /// (`Display.renderer`).
     renderer: ?*renderer_mod.Renderer = null,
-    /// While its buffer is drawn smaller than the window (`app.Window.render_scale`),
-    /// what is over the app's own draws (its widgets over a game's world,
-    /// say) is drawn on a layer over it at the window's full size, so it
-    /// stays sharp (see `app.Window.beginLayer`).
-    layered: bool = false,
 
     pub fn platform(_: *const Window) kwin.WindowPlatform {
         return .custom;
@@ -202,13 +197,6 @@ pub const Window = struct {
             r.outline = !w.win.maximized and !w.win.fullscreen and w.win.corner_radius == 0;
             // A buffer smaller than the window: drawn as much smaller.
             r.scale = @as(f32, @floatFromInt(t.width)) / @as(f32, @floatFromInt(@max(w.win.width, 1)));
-            if (w.layered and r.scale != 1) {
-                r.layer = .{ .ctx = w, .begin = beginLayer, .drawn = layerDrawn, .hide = hideLayer };
-            } else {
-                r.layer = null;
-                r.layer_drawn = null;
-                w.win.hideLayer();
-            }
         }
         return .{
             .id = t.handle,
@@ -223,21 +211,6 @@ pub const Window = struct {
             .content = .{ t.width, t.height },
             .cpu = .{ .ctx = w, .begin = noCpu, .end = noCpuEnd },
         };
-    }
-
-    fn beginLayer(ctx: *anyopaque) anyerror!?vc4.render.Target {
-        const w: *Window = @ptrCast(@alignCast(ctx));
-        return w.win.beginLayer();
-    }
-
-    fn layerDrawn(ctx: *anyopaque) void {
-        const w: *Window = @ptrCast(@alignCast(ctx));
-        w.win.layerDrawn();
-    }
-
-    fn hideLayer(ctx: *anyopaque) void {
-        const w: *Window = @ptrCast(@alignCast(ctx));
-        w.win.hideLayer();
     }
 
     fn noCpu(_: *anyopaque) anyerror!kgfx.software.Image {
