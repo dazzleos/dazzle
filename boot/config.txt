@@ -52,6 +52,11 @@ enable_uart=1
 # affect the warranty.)
 force_turbo=1
 
+# Start the kernel at once: the firmware otherwise waits a second first
+# (for an SD card slow to start, which Dazzle's are not). Updates add this
+# to cards made before (see src/init/slots.zig).
+boot_delay=0
+
 # The kernel's vc4 driver owns the display. Keep the firmware from drawing
 # its rainbow splash or warning overlays on top of it.
 disable_splash=1

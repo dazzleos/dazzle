@@ -206,7 +206,7 @@ pub fn startNext(slot: u8) !void {
     const gpa = std.heap.page_allocator;
     const text = try sys.readFileAlloc(gpa, config_file, 1024 * 1024);
     defer gpa.free(text);
-    const out = try gpa.alloc(u8, text.len + 32);
+    const out = try gpa.alloc(u8, text.len + 128);
     defer gpa.free(out);
     const changed = setOsPrefix(text, slot, out);
     const tmp = config_file ++ ".new";
@@ -238,16 +238,29 @@ pub fn osPrefix(config: []const u8) ?u8 {
     return found;
 }
 
-/// config.txt with its os_prefix lines for `slot` (or one added).
+/// Settings an update brings to config.txt on cards made before it (each
+/// added if the card does not set it at all).
+const added_settings = [_][]const u8{
+    // The firmware's wait before starting the kernel (a second by default).
+    "boot_delay=0",
+};
+
+/// config.txt with its os_prefix lines for `slot` (or one added), and the
+/// settings it does not have yet (`added_settings`).
 pub fn setOsPrefix(config: []const u8, slot: u8, out: []u8) []const u8 {
     var w: std.Io.Writer = .fixed(out);
     var found = false;
+    var has: [added_settings.len]bool = @splat(false);
     var lines = std.mem.splitScalar(u8, config, '\n');
     var first = true;
     while (lines.next()) |raw| {
         if (!first) w.writeByte('\n') catch {};
         first = false;
         const line = std.mem.trim(u8, raw, " \t\r");
+        for (added_settings, &has) |setting, *h| {
+            const key = setting[0 .. std.mem.indexOfScalar(u8, setting, '=').? + 1];
+            if (std.mem.startsWith(u8, line, key)) h.* = true;
+        }
         if (std.mem.startsWith(u8, line, "os_prefix=")) {
             w.print("os_prefix=slot-{c}/", .{slot}) catch {};
             found = true;
@@ -257,6 +270,10 @@ pub fn setOsPrefix(config: []const u8, slot: u8, out: []u8) []const u8 {
         if (w.end > 0 and out[w.end - 1] != '\n') w.writeByte('\n') catch {};
         w.print("os_prefix=slot-{c}/\n", .{slot}) catch {};
     }
+    for (added_settings, has) |setting, h| if (!h) {
+        if (w.end > 0 and out[w.end - 1] != '\n') w.writeByte('\n') catch {};
+        w.print("{s}\n", .{setting}) catch {};
+    };
     return w.buffered();
 }
 
@@ -385,11 +402,17 @@ test "config.txt's os_prefix picks the slot" {
     const config = "# Dazzle\narm_64bit=0\nos_prefix=slot-a/\ncamera_auto_detect=1\n";
     try std.testing.expectEqual(@as(?u8, 'a'), osPrefix(config));
     var out: [256]u8 = undefined;
-    const changed = setOsPrefix(config, 'b', &out);
-    try std.testing.expectEqualStrings("# Dazzle\narm_64bit=0\nos_prefix=slot-b/\ncamera_auto_detect=1\n", changed);
+    var first: [256]u8 = undefined;
+    const changed = setOsPrefix(config, 'b', &first);
+    // A card made before: the settings it lacks are added.
+    try std.testing.expectEqualStrings("# Dazzle\narm_64bit=0\nos_prefix=slot-b/\ncamera_auto_detect=1\nboot_delay=0\n", changed);
     try std.testing.expectEqual(@as(?u8, 'b'), osPrefix(changed));
     try std.testing.expectEqual(@as(?u8, null), osPrefix("arm_64bit=0\n"));
-    try std.testing.expectEqualStrings("arm_64bit=0\nos_prefix=slot-a/\n", setOsPrefix("arm_64bit=0", 'a', &out));
+    try std.testing.expectEqualStrings("arm_64bit=0\nos_prefix=slot-a/\nboot_delay=0\n", setOsPrefix("arm_64bit=0", 'a', &out));
+    // Set already (to whatever): left as it is, and not added twice.
+    try std.testing.expectEqualStrings("boot_delay=2\nos_prefix=slot-b/\n", setOsPrefix("boot_delay=2\nos_prefix=slot-a/\n", 'b', &out));
+    var again: [256]u8 = undefined;
+    try std.testing.expectEqualStrings(changed, setOsPrefix(changed, 'b', &again));
 }
 
 test "a slot's command line says which slot it is" {
