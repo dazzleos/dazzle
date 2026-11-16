@@ -98,6 +98,9 @@ pub const Host = struct {
             .on_last_window_closed = options.on_last_window_closed,
         });
         h.app.shared.attachRenderer(h.renderer.renderer(), false);
+        // Emoji, Chinese and Japanese are composed by the shell's input
+        // method (see src/shell/ime.zig), for every app.
+        h.app.shared.own_input_method = false;
         followThemeOf(h);
         h.theme_watch = .init();
         if (h.theme_watch.fd) |fd| _ = h.display.wakeOn(fd, true);
@@ -113,15 +116,6 @@ pub const Host = struct {
     /// kete's step (see `kete.App.step`), and the system's theme taken if
     /// it changed. False when the app should end.
     pub fn step(h: *Host, idle_timeout_ns: u64) !bool {
-        // Chinese and Japanese typed through kete's input methods (pinyin,
-        // romaji), with those keyboards.
-        if (h.display.openWindowOrNull()) |w| {
-            h.app.shared.input_language = switch (w.keyboard orelse w.win.layout) {
-                .pinyin => .pinyin,
-                .romaji => .romaji,
-                else => .none,
-            };
-        }
         // Arabic: laid out right to left.
         h.app.setRightToLeft(locale.current.rightToLeft());
         const going = try h.app.step(idle_timeout_ns);

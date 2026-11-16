@@ -293,6 +293,8 @@ pub const PanelId = enum {
     quick,
     /// A notification, at the top of the screen.
     notice,
+    /// The input method's candidates, by the cursor of the text typed.
+    candidates,
     /// Parental controls' lock screen, over everything.
     lock,
 };
@@ -498,6 +500,7 @@ pub const Renderer = struct {
         .tooltip = null,
         .quick = null,
         .notice = 2,
+        .candidates = null,
         .lock = null,
     });
 

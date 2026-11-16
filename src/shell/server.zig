@@ -236,6 +236,13 @@ pub const Decoration = struct {
     toplevel: ?*Toplevel,
 };
 
+/// Something that takes keys before clients: `key` returns whether it took
+/// the key (a Linux key code), after the modifiers have noted it.
+pub const InputMethodHook = struct {
+    ctx: *anyopaque,
+    key: *const fn (ctx: *anyopaque, s: *Server, key: u32, pressed: bool) bool,
+};
+
 pub const TextInput = struct {
     client: *Client,
     id: u32,
@@ -797,6 +804,9 @@ pub const Server = struct {
     popups: std.ArrayList(*Popup) = .empty,
     /// The keyboard's modifiers.
     modifiers: keyboard.Modifiers = .{},
+    /// The system's input method (see ime.zig): offered each key before
+    /// the client with the keyboard, which does not get what it takes.
+    input_method: ?InputMethodHook = null,
     /// Pointer locks asked for, and the one in effect.
     locks: std.ArrayList(*PointerLock) = .empty,
     active_lock: ?*PointerLock = null,
@@ -4310,8 +4320,9 @@ pub const Server = struct {
         // Escape ends the overview (no window has the keyboard in it).
         if (s.overview and pressed and key == evdev.key_esc) return s.setOverview(false);
         const surf = s.keyboard_focus orelse return;
+        const taken = if (s.input_method) |im| im.key(im.ctx, s, key, pressed) else false;
         const state: u32 = if (pressed) p.wl_keyboard.key_state.pressed else p.wl_keyboard.key_state.released;
-        broadcast(surf.client, .keyboard, p.wl_keyboard.event.key, 1, .{ s.nextSerial(), time_ms, key, state });
+        if (!taken) broadcast(surf.client, .keyboard, p.wl_keyboard.event.key, 1, .{ s.nextSerial(), time_ms, key, state });
         // The modifiers after the key, as the keymap has them.
         if (changed) broadcast(surf.client, .keyboard, p.wl_keyboard.event.modifiers, 1, .{ s.nextSerial(), s.modifiers.depressed(), @as(u32, 0), s.modifiers.locked, @as(u32, 0) });
     }

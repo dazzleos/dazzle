@@ -185,6 +185,22 @@ pub const Window = struct {
         w.win.unlockPointer();
     }
 
+    /// The text field with the focus (or none), for the shell's input
+    /// method (`zwp_text_input_v3`), which composes text for it.
+    pub fn setTextInput(w: *Window, state: ?kwin.TextInputState) void {
+        const s = state orelse return w.win.setTextInput(null);
+        const ti = app.TextInputProtocol;
+        w.win.setTextInput(.{
+            .surrounding_text = s.surrounding_text,
+            .cursor = s.cursor,
+            .anchor = s.anchor,
+            .change_cause = if (s.change_cause == .input_method) ti.change_cause.input_method else ti.change_cause.other,
+            .content_hint = if (s.password) ti.content_hint.sensitive_data | ti.content_hint.hidden_text else if (s.multiline) ti.content_hint.multiline else ti.content_hint.none,
+            .content_purpose = if (s.password) ti.content_purpose.password else ti.content_purpose.normal,
+            .cursor_rect = s.cursor_rect,
+        });
+    }
+
     pub fn layout(w: *const Window) kwin.KeyboardLayout {
         const k = w.keyboard orelse w.win.layout;
         return .init(k.name(), @tagName(k));

@@ -9,6 +9,7 @@ const vc4 = @import("vc4");
 const linux = std.os.linux;
 const wayland = @import("wayland");
 const server_mod = @import("server.zig");
+const ime_mod = @import("ime.zig");
 
 const p = wayland.protocol;
 const client = wayland.client;
@@ -1880,6 +1881,52 @@ test "zwp_text_input_v3 sends enter/leave with focus, commits client state, and 
     try testing.expectEqual(@as(u32, 1), ti_ev.del_before);
     try testing.expectEqualStrings("你好", ti_ev.commit[0..ti_ev.commit_len]);
     try testing.expectEqual(@as(u32, 1), ti_ev.done_serial);
+
+    // The system's input method, with a Japanese keyboard: "ka" is
+    // composed (the app hears no keys), and Enter puts in か.
+    var keyboard_heard: Heard = .{ .keyboard = true };
+    const keyboard = try a.d.newObject(keyboard_heard.listener());
+    m = try seat.request(p.wl_seat.request.get_keyboard);
+    m.uint(keyboard.id).end();
+    try w.pump();
+    var ime: ime_mod.Ime = .{};
+    w.server.input_method = .{ .ctx = &ime, .key = struct {
+        fn key(ctx: *anyopaque, s: *Server, code: u32, pressed: bool) bool {
+            const i: *ime_mod.Ime = @ptrCast(@alignCast(ctx));
+            return i.key(s, code, pressed);
+        }
+    }.key };
+    w.server.keyboard_layout = .romaji;
+    const keys_before = keyboard_heard.counts[p.wl_keyboard.event.key];
+    for ([_]u32{ 37, 30 }) |code| {
+        w.server.keyboardKey(10, code, true);
+        w.server.keyboardKey(11, code, false);
+    }
+    try w.pump();
+    try testing.expectEqualStrings("か", ti_ev.preedit[0..ti_ev.preedit_len]);
+    try testing.expectEqual(keys_before, keyboard_heard.counts[p.wl_keyboard.event.key]);
+    try testing.expect(ime.showing());
+    w.server.keyboardKey(12, 28, true);
+    w.server.keyboardKey(13, 28, false);
+    try w.pump();
+    try testing.expectEqualStrings("か", ti_ev.commit[0..ti_ev.commit_len]);
+    try testing.expectEqual(keys_before, keyboard_heard.counts[p.wl_keyboard.event.key]);
+    try testing.expect(!ime.showing());
+    // A key it does not take (a digit, not composing) goes to the app.
+    w.server.keyboardKey(14, 2, true);
+    try w.pump();
+    try testing.expectEqual(keys_before + 1, keyboard_heard.counts[p.wl_keyboard.event.key]);
+    w.server.keyboardKey(15, 2, false);
+    // Not in a password field.
+    m = try ti.request(p.zwp_text_input_v3.request.set_content_type);
+    m.uint(p.zwp_text_input_v3.content_hint.sensitive_data).uint(p.zwp_text_input_v3.content_purpose.password).end();
+    m = try ti.request(p.zwp_text_input_v3.request.commit);
+    m.end();
+    try w.pump();
+    w.server.keyboardKey(16, 37, true);
+    try w.pump();
+    try testing.expectEqual(keys_before + 3, keyboard_heard.counts[p.wl_keyboard.event.key]);
+    w.server.keyboardKey(17, 37, false);
 }
 
 test "a window whose client asks is drawn rounded, with a shadow, unless square; other windows are drawn as they are" {

@@ -45,6 +45,7 @@ const quick_mod = @import("quick.zig");
 const notice_mod = @import("notice.zig");
 const lock_mod = @import("lock.zig");
 const kete_panel = @import("kete_panel.zig");
+const ime_mod = @import("ime.zig");
 const keyboard = @import("keyboard.zig");
 const screenshot = @import("screenshot.zig");
 const remote_mod = @import("remote.zig");
@@ -138,6 +139,11 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
     // computer is locked, the lock screen in place of the windows and the
     // dock; before then, warnings as time runs out.
     var lock: lock_mod.Screen = .{ .panel = try kit.panel() };
+    // The input method (emoji, pinyin, romaji), for the app with the
+    // keyboard: it gets each key first, and its candidates show by the
+    // text's cursor.
+    var ime: ime_mod.Ime = .{ .panel = try kit.panel() };
+    var candidates_hidden = true;
     var parental: sys.system.Parental = .{};
     var locked = false;
     var warnings: lock_mod.Warnings = .{};
@@ -226,6 +232,13 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         .width = renderer.width,
         .height = renderer.height,
     });
+    // The input method gets keys first.
+    server.input_method = .{ .ctx = &ime, .key = struct {
+        fn key(ctx: *anyopaque, s: *server_mod.Server, code: u32, pressed: bool) bool {
+            const i: *ime_mod.Ime = @ptrCast(@alignCast(ctx));
+            return i.key(s, code, pressed);
+        }
+    }.key };
     // The keyboard, the language (the clock's ways) and the time zone,
     // until the system's report says.
     _ = applyLocale(locale.load(), &server, &lock, &dock, &quick);
@@ -510,6 +523,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                             .{ .tooltip, dock.tip_panel },
                             .{ .quick, quick.panel },
                             .{ .notice, notice.panel },
+                            .{ .candidates, ime.panel.? },
                             .{ .perf, perf.panel },
                             .{ .lock, lock.panel },
                         }) catch {};
@@ -866,6 +880,18 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
             renderer.setPanelAt(.tooltip, tip.picture, tip.x, tip.y);
             panels_damaged = true;
         }
+        // The input method's candidates, as they change.
+        {
+            var gone = false;
+            if (ime.draw(&server, sys.nowNs(), dock.scale, &gone)) |c| {
+                renderer.setPanelAt(.candidates, c.picture, c.x, c.y);
+                candidates_hidden = false;
+                panels_damaged = true;
+            } else if (gone and !candidates_hidden) {
+                candidates_hidden = true;
+                panels_damaged = true;
+            }
+        }
 
         if (screenshot_wanted) {
             screenshot_wanted = false;
@@ -1083,6 +1109,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
             renderer.setPanelHidden(.perf, !perf_shown);
             renderer.setPanelHidden(.quick, !quick.shown);
             renderer.setPanelHidden(.notice, !notice.visible(sys.nowNs()));
+            renderer.setPanelHidden(.candidates, locked or candidates_hidden);
             // A maximized, full-size window on top goes straight onto the
             // display, with the dock on a plane below it; a fullscreen one,
             // alone. Otherwise (or if the display cannot show it) the frame
