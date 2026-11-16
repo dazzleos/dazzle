@@ -1584,8 +1584,10 @@ fn applyLocale(l: locale.Settings, server: *server_mod.Server, lock: *lock_mod.S
     // The language says how the time is written (18:05, 6:05 PM).
     const language_changed = l.language != locale.current;
     locale.current = l.language;
-    // Arabic: the panels laid out right to left (they share the kit's).
-    dock.panel.ui.shared.right_to_left = l.language.rightToLeft();
+    // The panels stay left to right in Arabic (their text still runs
+    // right to left): the dock finds what is clicked, and where its
+    // tooltips go, by its own geometry, which kete's mirroring would not
+    // follow.
     if (language_changed) dock.time = null;
     if (l.timezone == lock.zone) return language_changed;
     print("dazzle-shell: time zone {s}\n", .{l.timezone.name()});
