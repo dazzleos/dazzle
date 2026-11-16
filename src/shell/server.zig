@@ -250,9 +250,6 @@ pub const TextInput = struct {
     serial: u32 = 0,
     enabled: bool = false,
     surrounding_text: []u8 = &.{},
-    /// The client has said what text is around the cursor since it was
-    /// enabled (some never do: terminals), so `surrounding_text` is it.
-    has_surrounding: bool = false,
     cursor: i32 = 0,
     anchor: i32 = 0,
     change_cause: u32 = p.zwp_text_input_v3.change_cause.input_method,
@@ -2870,7 +2867,6 @@ pub const Server = struct {
                     if (!ti.enabled) {
                         s.gpa.free(ti.surrounding_text);
                         ti.surrounding_text = &.{};
-                        ti.has_surrounding = false;
                         ti.cursor = 0;
                         ti.anchor = 0;
                         ti.change_cause = p.zwp_text_input_v3.change_cause.input_method;
@@ -2881,7 +2877,6 @@ pub const Server = struct {
                         if (ti.pending.surrounding_text) |txt| {
                             s.gpa.free(ti.surrounding_text);
                             ti.surrounding_text = txt;
-                            ti.has_surrounding = true;
                             ti.pending.surrounding_text = null;
                             ti.cursor = ti.pending.cursor;
                             ti.anchor = ti.pending.anchor;

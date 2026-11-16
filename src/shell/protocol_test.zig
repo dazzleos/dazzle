@@ -1917,22 +1917,6 @@ test "zwp_text_input_v3 sends enter/leave with focus, commits client state, and 
     try w.pump();
     try testing.expectEqual(keys_before + 1, keyboard_heard.counts[p.wl_keyboard.event.key]);
     w.server.keyboardKey(15, 2, false);
-    // Typed faster than the app says what its text is: a space, then ":"
-    // starts an emoji's name all the same.
-    w.server.keyboard_layout = .us;
-    for ([_]u32{ 57, 39, 20, 30, 32 }) |code| {
-        // ":" is Shift+;.
-        if (code == 39) w.server.keyboardKey(18, 42, true);
-        w.server.keyboardKey(18, code, true);
-        w.server.keyboardKey(18, code, false);
-        if (code == 39) w.server.keyboardKey(18, 42, false);
-    }
-    try w.pump();
-    try testing.expectEqualStrings(":tad", ti_ev.preedit[0..ti_ev.preedit_len]);
-    w.server.keyboardKey(19, 1, true);
-    w.server.keyboardKey(19, 1, false);
-    try w.pump();
-    const keys_typed = keyboard_heard.counts[p.wl_keyboard.event.key];
     // Not in a password field.
     m = try ti.request(p.zwp_text_input_v3.request.set_content_type);
     m.uint(p.zwp_text_input_v3.content_hint.sensitive_data).uint(p.zwp_text_input_v3.content_purpose.password).end();
@@ -1941,56 +1925,8 @@ test "zwp_text_input_v3 sends enter/leave with focus, commits client state, and 
     try w.pump();
     w.server.keyboardKey(16, 37, true);
     try w.pump();
-    try testing.expectEqual(keys_typed + 1, keyboard_heard.counts[p.wl_keyboard.event.key]);
+    try testing.expectEqual(keys_before + 3, keyboard_heard.counts[p.wl_keyboard.event.key]);
     w.server.keyboardKey(17, 37, false);
-}
-
-test "the system's input method starts no emoji in a field that does not say what text it has" {
-    var w: World = .{};
-    w.init();
-    defer w.deinit();
-    const a = try w.connect();
-    const compositor = try a.bind(p.wl_compositor.name, 4, null);
-    const wm_base = try a.bind(p.xdg_wm_base.name, 6, null);
-    const shm = try a.bind(p.wl_shm.name, 1, null);
-    const seat = try a.bind(p.wl_seat.name, 5, null);
-    const tim = try a.bind(p.zwp_text_input_manager_v3.name, 1, null);
-    const Ignore = struct {
-        fn event(_: ?*anyopaque, _: *client.Display, _: u32, _: u16, _: *wire.Reader) void {}
-    };
-    const ti = try a.d.newObject(.{ .ptr = null, .handler = Ignore.event });
-    var m = try tim.request(p.zwp_text_input_manager_v3.request.get_text_input);
-    m.uint(ti.id).uint(seat.id).end();
-    var keyboard_heard: Heard = .{ .keyboard = true };
-    const keyboard = try a.d.newObject(keyboard_heard.listener());
-    m = try seat.request(p.wl_seat.request.get_keyboard);
-    m.uint(keyboard.id).end();
-    var win: Window = .{ .surface = undefined, .xdg = undefined, .toplevel = undefined };
-    try win.open(a, compositor, wm_base, shm, null);
-    // Enabled, as a terminal does, without its text.
-    m = try ti.request(p.zwp_text_input_v3.request.enable);
-    m.end();
-    m = try ti.request(p.zwp_text_input_v3.request.commit);
-    m.end();
-    try w.pump();
-    var ime: ime_mod.Ime = .{};
-    w.server.input_method = .{ .ctx = &ime, .key = struct {
-        fn key(ctx: *anyopaque, srv: *Server, code: u32, pressed: bool) bool {
-            const i: *ime_mod.Ime = @ptrCast(@alignCast(ctx));
-            return i.key(srv, code, pressed);
-        }
-    }.key };
-    // ":" (Shift+;), "w": all the app's.
-    const before = keyboard_heard.counts[p.wl_keyboard.event.key];
-    w.server.keyboardKey(1, 42, true);
-    w.server.keyboardKey(1, 39, true);
-    w.server.keyboardKey(1, 39, false);
-    w.server.keyboardKey(1, 42, false);
-    w.server.keyboardKey(1, 17, true);
-    w.server.keyboardKey(1, 17, false);
-    try w.pump();
-    try testing.expect(ime.im.composing == null);
-    try testing.expectEqual(before + 6, keyboard_heard.counts[p.wl_keyboard.event.key]);
 }
 
 test "a window whose client asks is drawn rounded, with a shadow, unless square; other windows are drawn as they are" {

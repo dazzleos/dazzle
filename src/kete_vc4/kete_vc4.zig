@@ -98,9 +98,6 @@ pub const Host = struct {
             .on_last_window_closed = options.on_last_window_closed,
         });
         h.app.shared.attachRenderer(h.renderer.renderer(), false);
-        // Emoji, Chinese and Japanese are composed by the shell's input
-        // method (see src/shell/ime.zig), for every app.
-        h.app.shared.own_input_method = false;
         followThemeOf(h);
         h.theme_watch = .init();
         if (h.theme_watch.fd) |fd| _ = h.display.wakeOn(fd, true);

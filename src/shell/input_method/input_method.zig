@@ -1,12 +1,9 @@
 //! The system's input methods, which the shell runs for every app (see
 //! ime.zig): typed keys become text composed (shown in the app's text field
 //! as the input method's preedit, underlined) and candidates for it (in a
-//! panel by the cursor), until one is chosen and put in the text.
+//! panel by the cursor), until one is chosen and put in the text. (Emoji
+//! by name are each app's: kete's text fields have them.)
 //!
-//! * Emoji, everywhere: `:` (at the start, or after a space) then a name,
-//!   as chat apps have it: ":smi" offers 😄 🙂 😊 and others. Up and Down
-//!   choose, Enter, Tab or a closing `:` put the emoji in; Escape, a space
-//!   or anything else puts in what was typed.
 //! * Pinyin, for Chinese (`Language.pinyin`): lower-case letters are
 //!   composed, and the candidates are the characters of the first
 //!   syllable ("nihao": 你, 泥, 拟, …), most used first. Space puts in the
@@ -32,16 +29,13 @@
 const std = @import("std");
 const kete = @import("kete");
 const widget = kete.ui.widget;
-// Emoji's names are kete's (which finds emoji by name in its own text
-// fields, where the system has no input method).
-const emoji = kete.ui.emoji;
 const pinyin_table = @import("pinyin_table.zig");
 const kana_table = @import("kana_table.zig");
 const japanese_words = @import("japanese_words.zig");
 
 const Key = widget.Event.Key;
 
-/// An input method for a language, as well as emoji.
+/// The language an input method is for.
 pub const Language = enum {
     /// Letters type as they are.
     none,
@@ -52,7 +46,7 @@ pub const Language = enum {
 };
 
 /// What is composed.
-pub const Kind = enum { emoji, pinyin, kana };
+pub const Kind = enum { pinyin, kana };
 
 /// A candidate: what is put in, and what the popup shows of it.
 pub const Candidate = struct {
@@ -69,8 +63,6 @@ pub const page_size = 9;
 const pool_size = 7 * page_size;
 
 pub const InputMethod = struct {
-    /// Emoji offered after `:` (unless the app turns them off).
-    emoji: bool = true,
     language: Language = .none,
     /// For `pinyin` and `romaji`: letters type Chinese or Japanese (Shift,
     /// tapped alone, switches).
@@ -124,9 +116,8 @@ pub const InputMethod = struct {
         return im.composing != null and im.count > 0;
     }
 
-    /// Offers `k` to the input method, in a field whose text before the
-    /// cursor is `before` (for knowing a `:` starts an emoji's name).
-    pub fn key(im: *InputMethod, k: Key, before: []const u8) Outcome {
+    /// Offers `k` to the input method.
+    pub fn key(im: *InputMethod, k: Key) Outcome {
         // Shift, tapped alone: Chinese (or Japanese), or English.
         if (k.key == .left_shift or k.key == .right_shift) {
             if (k.pressed) {
@@ -142,16 +133,10 @@ pub const InputMethod = struct {
         if (k.pressed) im.shift_alone = false;
         if (!k.pressed or k.ctrl) return .{};
         if (im.composing) |kind| return switch (kind) {
-            .emoji => im.emojiKey(k),
             .pinyin => im.pinyinKey(k),
             .kana => im.kanaKey(k),
         };
         const c = k.char orelse return .{};
-        // An emoji's name starts.
-        if (im.emoji and c == ':' and startsWord(before)) {
-            im.start(.emoji, ":");
-            return .{ .taken = true, .preedit = true };
-        }
         if (im.language == .romaji and im.native) {
             if (c >= 'a' and c <= 'z') {
                 im.start(.kana, &.{@intCast(c)});
@@ -169,36 +154,6 @@ pub const InputMethod = struct {
             if (chinesePunctuation(c)) |p| return .{ .taken = true, .commit = p };
         }
         return .{};
-    }
-
-    fn emojiKey(im: *InputMethod, k: Key) Outcome {
-        switch (k.key) {
-            .escape => return im.commitRaw(true),
-            .enter, .keypad_enter, .tab => return if (im.count > 0) im.commitChosen() else im.commitRaw(true),
-            .backspace => {
-                im.len -= 1;
-                if (im.len == 0) {
-                    im.reset();
-                    return .{ .taken = true, .preedit = true };
-                }
-                im.findEmoji();
-                return .{ .taken = true, .preedit = true };
-            },
-            .up, .down => {
-                im.move(k.key == .down);
-                return .{ .taken = true };
-            },
-            else => {},
-        }
-        const c = k.char orelse return im.commitRaw(false);
-        // ":smile:": the emoji.
-        if (c == ':' and im.count > 0) return im.commitChosen();
-        const name_char = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_' or c == '+' or c == '-';
-        if (!name_char or im.len == im.buf.len) return im.commitRaw(false);
-        im.buf[im.len] = @intCast(c);
-        im.len += 1;
-        im.findEmoji();
-        return .{ .taken = true, .preedit = true };
     }
 
     fn pinyinKey(im: *InputMethod, k: Key) Outcome {
@@ -370,9 +325,8 @@ pub const InputMethod = struct {
         return .{ .taken = taken, .commit = text, .preedit = true };
     }
 
-    /// The chosen candidate goes in: an emoji, ending composing; a
-    /// character, for its syllable (or kanji, for the start of the kana),
-    /// composing going on with the rest.
+    /// The chosen candidate goes in: a character, for its syllable (or
+    /// kanji, for the start of the kana), composing going on with the rest.
     fn commitChosen(im: *InputMethod) Outcome {
         if (im.count == 0) return im.commitRaw(true);
         const cand = im.candidates[im.selected];
@@ -381,7 +335,6 @@ pub const InputMethod = struct {
         const used = switch (im.composing.?) {
             .pinyin => im.syllable_len,
             .kana => if (cand.consumes > 0) cand.consumes else im.len,
-            .emoji => im.len,
         };
         if (used < im.len) {
             const rest = im.len - used;
@@ -406,7 +359,6 @@ pub const InputMethod = struct {
         const total = switch (im.composing.?) {
             .pinyin => charCount(im.chars),
             .kana => im.pool_len,
-            .emoji => im.count,
         };
         if (down) {
             if (im.selected + 1 < im.count) {
@@ -488,15 +440,6 @@ pub const InputMethod = struct {
         im.selected = @min(im.selected, im.count -| 1);
     }
 
-    fn findEmoji(im: *InputMethod) void {
-        var found: [page_size]emoji.Emoji = undefined;
-        // Two letters at least, after the colon.
-        const n = if (im.len >= 3) emoji.search(im.composed()[1..], &found) else 0;
-        for (found[0..n], im.candidates[0..n]) |e, *cand| cand.* = .{ .text = e.text, .label = e.name };
-        im.count = n;
-        im.selected = 0;
-    }
-
     /// The candidates for the first syllable of what is composed: the
     /// longest that is one ("xian" rather than "xi"), or, if none is (the
     /// start of one: "zh"), the first characters of those it starts.
@@ -564,16 +507,6 @@ fn syllableIndex(s: []const u8) ?usize {
 
 fn charCount(s: []const u8) usize {
     return std.unicode.utf8CountCodepoints(s) catch 0;
-}
-
-/// Whether `before` (the text before the cursor) ends where a word starts:
-/// it is empty, or ends in a space.
-fn startsWord(before: []const u8) bool {
-    if (before.len == 0) return true;
-    return switch (before[before.len - 1]) {
-        ' ', '\t', '\n', '(', '[', '"' => true,
-        else => false,
-    };
 }
 
 /// The first of a sorted table's rows whose key is not less than `key`.
@@ -769,36 +702,11 @@ fn chinesePunctuation(c: u21) ?[]const u8 {
 const testing = std.testing;
 
 fn press(im: *InputMethod, key: widget.KeyboardKey, c: ?u21) InputMethod.Outcome {
-    return im.key(.{ .key = key, .pressed = true, .char = c }, "");
+    return im.key(.{ .key = key, .pressed = true, .char = c });
 }
 
 fn typeText(im: *InputMethod, text: []const u8) void {
-    for (text) |c| _ = im.key(.{ .key = .a, .pressed = true, .char = c }, "");
-}
-
-test "an emoji by its name: ':' then the name, and Enter" {
-    var im: InputMethod = .{};
-    typeText(&im, ":tad");
-    try testing.expectEqualStrings(":tad", im.composed());
-    try testing.expect(im.showing());
-    try testing.expectEqualStrings("🎉", im.candidates[0].text);
-    const out = press(&im, .enter, null);
-    try testing.expect(out.taken);
-    try testing.expectEqualStrings("🎉", out.commit.?);
-    try testing.expect(im.composing == null);
-}
-
-test "not an emoji: a space puts in what was typed, and ':' within a word starts nothing" {
-    var im: InputMethod = .{};
-    typeText(&im, ":x");
-    const out = press(&im, .space, ' ');
-    try testing.expect(!out.taken);
-    try testing.expectEqualStrings(":x", out.commit.?);
-    // "10:30": the colon is typed as it is.
-    try testing.expect(!im.key(.{ .key = .a, .pressed = true, .char = ':' }, "10").taken);
-    // Escape: what was typed, as it is.
-    typeText(&im, ":smi");
-    try testing.expectEqualStrings(":smi", press(&im, .escape, null).commit.?);
+    for (text) |c| _ = im.key(.{ .key = .a, .pressed = true, .char = c });
 }
 
 test "pinyin: the first syllable's characters, chosen with Space or a digit" {
@@ -828,13 +736,13 @@ test "pinyin: Enter types the letters, Escape drops them, Shift switches to Engl
     _ = press(&im, .escape, null);
     try testing.expect(im.composing == null);
     // Shift alone: English letters.
-    _ = im.key(.{ .key = .left_shift, .pressed = true }, "");
-    _ = im.key(.{ .key = .left_shift, .pressed = false }, "");
+    _ = im.key(.{ .key = .left_shift, .pressed = true });
+    _ = im.key(.{ .key = .left_shift, .pressed = false });
     try testing.expect(!press(&im, .a, 'a').taken);
     // Shift with a letter (a capital) does not switch.
-    _ = im.key(.{ .key = .left_shift, .pressed = true }, "");
+    _ = im.key(.{ .key = .left_shift, .pressed = true });
     _ = press(&im, .a, 'A');
-    _ = im.key(.{ .key = .left_shift, .pressed = false }, "");
+    _ = im.key(.{ .key = .left_shift, .pressed = false });
     try testing.expect(!im.native);
 }
 

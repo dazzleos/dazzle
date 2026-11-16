@@ -1,14 +1,12 @@
-//! The system's input method (emoji by name, Chinese by pinyin, Japanese by
-//! romaji; see input_method/input_method.zig), run by the shell for
-//! the app that has the keyboard, in the text field it has enabled
-//! (`zwp_text_input_v3`). Each key goes to it before the app: what it takes
-//! the app does not get; what it composes goes to the app as the input
-//! method's preedit, and what it puts in as its commit. Its candidates
-//! show in a panel by the text's cursor. The keyboard layout says which
-//! language it composes (pinyin, romaji); emoji are for every layout. Never
-//! in a password field; emoji not in a field that does not say what text
-//! it has. kete's apps leave emoji to it too (see kete's
-//! `own_input_method`).
+//! The system's input method (Chinese by pinyin, Japanese by romaji; see
+//! input_method/input_method.zig), run by the shell for the app that has
+//! the keyboard, in the text field it has enabled (`zwp_text_input_v3`).
+//! Each key goes to it before the app: what it takes the app does not get;
+//! what it composes goes to the app as the input method's preedit, and what
+//! it puts in as its commit. Its candidates show in a panel by the text's
+//! cursor. The keyboard layout says which language it composes; with
+//! others, it takes nothing. Never in a password field. (Emoji by name are
+//! the apps' own: kete's text fields have them.)
 
 const std = @import("std");
 const kete = @import("kete");
@@ -32,13 +30,6 @@ pub const Ime = struct {
     changed: bool = false,
     /// The keys it took as they went down: it takes them coming up too.
     taken: std.StaticBitSet(256) = .empty,
-    /// The last of what was typed (and put in) since the app last said
-    /// what text its field has, which it has not said yet: the text before
-    /// the cursor ends with it (typing fast, before the app catches up).
-    /// Only whether a word starts there matters (for `:`), so only ASCII.
-    typed: ?u8 = null,
-    /// The app's text field's state when `typed` began (its commits).
-    typed_serial: u32 = 0,
 
     /// Offers a key (a Linux key code) to the input method, before the
     /// app with the keyboard gets it, after `s.modifiers` has noted it.
@@ -61,15 +52,13 @@ pub const Ime = struct {
             ime.target = ti;
         }
         if (secret(ti)) return false;
-        // Emoji's names start with ":" where a word does, which only a
-        // field that says what text it has can tell (in a terminal, ":wq"
-        // would start one).
-        ime.im.emoji = ti.has_surrounding;
         ime.im.language = switch (s.keyboard_layout) {
             .pinyin => .pinyin,
             .romaji => .romaji,
             else => .none,
         };
+        // Other keyboards: nothing to compose.
+        if (ime.im.language == .none and ime.im.composing == null) return false;
         const m = &s.modifiers;
         const shift = m.held[0] > 0;
         const ctrl = m.held[1] > 0;
@@ -82,18 +71,8 @@ pub const Ime = struct {
             .ctrl = ctrl,
             .shift = shift,
         };
-        const cursor: usize = @intCast(@max(ti.cursor, 0));
-        if (ti.serial != ime.typed_serial) ime.typed = null;
-        const last: [1]u8 = .{ime.typed orelse 0};
-        const before = if (ime.typed != null) &last else ti.surrounding_text[0..@min(cursor, ti.surrounding_text.len)];
-        const out = ime.im.key(k, before);
+        const out = ime.im.key(k);
         ime.send(s, out);
-        // What the app will have, until it says.
-        const typed: ?u21 = if (out.commit) |c| (if (c.len > 0) c[c.len - 1] else null) else if (!out.taken and pressed) k.char else null;
-        if (typed) |c| {
-            ime.typed = if (c < 0x80) @intCast(c) else 'x';
-            ime.typed_serial = ti.serial;
-        }
         return out.taken;
     }
 
@@ -171,8 +150,8 @@ fn secret(ti: *const TextInput) bool {
     return ti.content_hint & p.zwp_text_input_v3.content_hint.sensitive_data != 0;
 }
 
-/// The candidates, one to a row, as kete shows its own: a character (or
-/// kana) and its number, which types it; or an emoji and its name.
+/// The candidates, one to a row: a character (or kana) and its number,
+/// which types it.
 const View = struct {
     im: *const input_method.InputMethod,
     scale: f32,
@@ -182,16 +161,12 @@ const View = struct {
         const t = cx.theme();
         const s = v.scale;
         const im = v.im;
-        const numbered = im.composing != .emoji;
         const rows = a.alloc(kete.Widget, im.count) catch return cx.make(kete.Column{});
         for (im.candidates[0..im.count], rows, 0..) |cand, *row, i| {
             const text = cx.make(kete.Text{ .text = cand.text, .style = .{ .size = @round(22 * s), .color = t.on_surface }, .wrap = false, .ellipsis = true });
-            const children: []const kete.Widget = if (numbered) &.{
+            const children: []const kete.Widget = &.{
                 cx.make(kete.Text{ .text = cx.fmt("{d}", .{i + 1}), .style = .{ .size = @round(14 * s), .color = t.on_surface_variant }, .wrap = false }),
                 cx.make(kete.Expanded{ .child = text }),
-            } else &.{
-                text,
-                cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = cand.label, .style = .{ .size = @round(15 * s), .color = t.on_surface }, .wrap = false, .ellipsis = true }) }),
             };
             row.* = cx.make(kete.RoundedBox{
                 .color = if (i == im.selected) t.secondary_container else kete.gfx.Color.argb(0),
@@ -203,11 +178,8 @@ const View = struct {
                 }) }),
             });
         }
-        const width: f32 = switch (im.composing orelse .emoji) {
-            .pinyin => 140,
-            .kana => 260,
-            .emoji => 340,
-        };
+        // Kana can be a phrase.
+        const width: f32 = if (im.composing == .kana) 260 else 140;
         return cx.make(kete.SizedBox{ .width = @round(width * s), .child = cx.make(kete.RoundedBox{
             .color = t.surface_container_highest,
             .border_width = 1,
