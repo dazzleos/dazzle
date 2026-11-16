@@ -428,10 +428,10 @@ test "atomic requests group properties by object" {
         .crtc_active = 102,
         .mode_blob = 55,
         .primary = .{ .id = 50, .props = props },
-        .overlays = .{ .{ .id = 60, .props = props }, .{ .id = 61, .props = props } },
+        .overlays = .{ .{ .id = 60, .props = props }, .{ .id = 61, .props = props }, null },
     };
     const window: Layer = .{ .fb_id = 77, .src_width = 1920, .src_height = 1036, .x = 0, .y = 44, .width = 1920, .height = 1036 };
-    var r = k.request(window, .{ null, null }, false);
+    var r = k.request(window, @splat(null), false);
     // The mode set: connector, CRTC, then all the planes.
     try std.testing.expectEqualSlices(u32, &.{ 30, 40, 50, 60, 61 }, r.objs[0..r.n_objs]);
     try std.testing.expectEqualSlices(u32, &.{ 1, 2, 10, 2, 2 }, r.counts[0..r.n_objs]);
@@ -441,33 +441,33 @@ test "atomic requests group properties by object" {
     try std.testing.expectEqualSlices(u64, &.{ 0, 0, 0, 0 }, r.values[r.n_props - 4 .. r.n_props]);
 
     k.mode_set = true;
-    r = k.request(window, .{ window, null }, false);
+    r = k.request(window, .{ window, null, null }, false);
     try std.testing.expectEqualSlices(u32, &.{ 50, 60 }, r.objs[0..r.n_objs]);
     try std.testing.expectEqual(@as(usize, 20), r.n_props);
 
     // After that is shown, a new buffer in the same place changes only the
     // primary plane's framebuffer.
     k.shown_primary = window;
-    k.shown_overlays = .{ window, null };
+    k.shown_overlays = .{ window, null, null };
     var next = window;
     next.fb_id = 78;
-    r = k.request(next, .{ window, null }, false);
+    r = k.request(next, .{ window, null, null }, false);
     try std.testing.expectEqualSlices(u32, &.{50}, r.objs[0..r.n_objs]);
     try std.testing.expectEqualSlices(u32, &.{1}, r.props[0..r.n_props]);
     try std.testing.expectEqual(@as(u64, 78), r.values[0]);
     // A new bar changes only the overlay plane.
     var bar = window;
     bar.fb_id = 90;
-    r = k.request(window, .{ bar, null }, false);
+    r = k.request(window, .{ bar, null, null }, false);
     try std.testing.expectEqualSlices(u32, &.{60}, r.objs[0..r.n_objs]);
     // A dock appearing changes only the second.
-    r = k.request(window, .{ window, bar }, false);
+    r = k.request(window, .{ window, bar, null }, false);
     try std.testing.expectEqualSlices(u32, &.{61}, r.objs[0..r.n_objs]);
     // Nothing new still names the primary plane, for the flip event.
-    r = k.request(window, .{ window, null }, false);
+    r = k.request(window, .{ window, null, null }, false);
     try std.testing.expectEqualSlices(u32, &.{50}, r.objs[0..r.n_objs]);
     // A full request sets everything.
-    r = k.request(window, .{ window, bar }, true);
+    r = k.request(window, .{ window, bar, null }, true);
     try std.testing.expectEqual(@as(usize, 30), r.n_props);
 }
 
@@ -485,7 +485,7 @@ test "a cover is shown over everything by every commit, as see-through as it say
         .crtc_active = 102,
         .mode_blob = 55,
         .primary = .{ .id = 50, .props = props },
-        .overlays = .{ .{ .id = 60, .props = props }, .{ .id = 61, .props = props } },
+        .overlays = .{ .{ .id = 60, .props = props }, .{ .id = 61, .props = props }, null },
         .cover_plane = .{ .id = 70, .props = cover_props },
         .mode_set = true,
     };
@@ -496,18 +496,18 @@ test "a cover is shown over everything by every commit, as see-through as it say
     boot.fb_id = 90;
     boot.alpha = 0x8000;
     try std.testing.expect(k.setCover(boot));
-    var r = k.request(screen, .{ null, null }, false);
+    var r = k.request(screen, @splat(null), false);
     // Only the cover's plane changes: all of it, alpha too.
     try std.testing.expectEqualSlices(u32, &.{70}, r.objs[0..r.n_objs]);
     try std.testing.expectEqual(@as(u32, 11), r.props[r.n_props - 1]);
     try std.testing.expectEqual(@as(u64, 0x8000), r.values[r.n_props - 1]);
     k.shown_cover = k.cover;
     // Unchanged: not sent again.
-    r = k.request(screen, .{ null, null }, false);
+    r = k.request(screen, @splat(null), false);
     try std.testing.expectEqualSlices(u32, &.{50}, r.objs[0..r.n_objs]);
     // Taken away: the plane is switched off.
     try std.testing.expect(k.setCover(null));
-    r = k.request(screen, .{ null, null }, false);
+    r = k.request(screen, @splat(null), false);
     try std.testing.expectEqualSlices(u32, &.{70}, r.objs[0..r.n_objs]);
     try std.testing.expectEqualSlices(u64, &.{ 0, 0 }, r.values[0..r.n_props]);
     // Without a plane for it, there is no cover.
