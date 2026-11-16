@@ -62,6 +62,14 @@ pub const Updates = struct {
     /// Starts the check when it is due, and follows it (the shell's reaper
     /// may reap its child first: the job still reads its result). Returns
     /// whether what there are updates of changed.
+    /// When `tick` next has something to do (monotonic nanoseconds): at
+    /// once, every second or so, while a check or an update runs (they are
+    /// looked at as they go); otherwise at the next daily check.
+    pub fn dueAt(u: *const Updates, now: u64) u64 {
+        if (u.os_job != null or u.apps.job != null) return now + std.time.ns_per_s;
+        return u.next_check;
+    }
+
     pub fn tick(u: *Updates, now: u64) bool {
         if (now >= u.next_check and u.apps.job == null) {
             u.next_check = now + check_every_ns;

@@ -254,6 +254,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
 
     // The pointer starts in the middle of the screen.
     var devices: input.Devices = .{};
+    devices.watchNodes();
     var pointer: Pointer = .{
         .x = @floatFromInt(renderer.width / 2),
         .y = @floatFromInt(renderer.height / 2),
@@ -268,7 +269,9 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
     // A client buffer the display shows directly is held until a later
     // frame replaces it on the screen.
     var scanout: Scanout = .{};
+    // The tick (see below): when it is next due, and when it last ran.
     var next_tick: u64 = start;
+    var last_tick: u64 = start;
     // The dock changed, and is waiting to be shown.
     var panels_damaged = true;
     // Print Screen was pressed: the screen is saved once input is handled.
@@ -308,7 +311,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         // Wait for clients, input, the display (a page flip completing), or
         // the next clock tick; or not at all if a frame is due and can be
         // drawn.
-        var fds: [8 + 2 * max_clients + input.max_devices]linux.pollfd = undefined;
+        var fds: [9 + 2 * max_clients + input.max_devices]linux.pollfd = undefined;
         fds[0] = .{ .fd = listener, .events = linux.POLL.IN, .revents = 0 };
         fds[1] = .{ .fd = renderer.dev.fd, .events = linux.POLL.IN, .revents = 0 };
         const n_clients = @min(server.clients.items.len, max_clients);
@@ -321,6 +324,31 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         _ = server.animateWindows(now);
         slideDock(&dock, &server, &renderer, dock_shown, now);
         animateNotice(&notice, &renderer, &server, now);
+        // The tick: what has to be looked at rather than waited for, only
+        // when there is something to look at, and when.
+        {
+            var due: u64 = now + std.time.ns_per_hour;
+            // Every second: the network's traffic (while the dock's arrows
+            // show it), the managers and the apps' folder until they are
+            // reached, the performance overlay, and the input devices if
+            // they cannot be watched.
+            const polled = (dock_shown and dock.slide < 1 and dock.show_network and dock.network.connected()) or
+                net_sub.fd == null or sys_sub.fd == null or !apps_watch.watching or
+                perf_shown or devices.watch == null;
+            if (polled) due = @min(due, last_tick + std.time.ns_per_s);
+            // The clock, when the minute changes (and a little after).
+            const wall_ns = sys.realtimeNs();
+            if ((dock_shown and dock.show_clock) or quick.shown) {
+                const into: u64 = @intCast(@mod(wall_ns, 60 * std.time.ns_per_s));
+                due = @min(due, now + (60 * std.time.ns_per_s - into) + std.time.ns_per_ms);
+            }
+            // Updates: the daily check, or one running.
+            due = @min(due, updates.dueAt(now));
+            // Parental controls' next warning.
+            const wall: i64 = @intCast(@divFloor(wall_ns, std.time.ns_per_s));
+            if (warnings.nextAt(parental, wall)) |at| due = @min(due, now + @as(u64, @intCast(@max(at - wall, 0))) * std.time.ns_per_s);
+            next_tick = due;
+        }
         var wake = next_tick;
         if (notice.wakeAt(now)) |due| wake = @min(wake, due);
         if (dock.tooltipDue()) |due| wake = @min(wake, due);
@@ -335,17 +363,23 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         const watch_index = opener_index + 3;
         const shot_index = opener_index + 4;
         const remote_index = opener_index + 5;
+        const input_watch_index = opener_index + 6;
         fds[opener_index] = .{ .fd = opener orelse -1, .events = linux.POLL.IN, .revents = 0 };
         fds[net_index] = .{ .fd = net_sub.fd orelse -1, .events = linux.POLL.IN, .revents = 0 };
         fds[sys_index] = .{ .fd = sys_sub.fd orelse -1, .events = linux.POLL.IN, .revents = 0 };
         fds[watch_index] = .{ .fd = apps_watch.fd orelse -1, .events = linux.POLL.IN, .revents = 0 };
         fds[shot_index] = .{ .fd = shot_pipe[0], .events = linux.POLL.IN, .revents = 0 };
         fds[remote_index] = .{ .fd = remote.listener orelse -1, .events = linux.POLL.IN, .revents = 0 };
+        fds[input_watch_index] = .{ .fd = devices.watch orelse -1, .events = linux.POLL.IN, .revents = 0 };
         // The clients' processes, to notice one ending (crashing) while its
         // socket is still open elsewhere.
-        const exits = fds[remote_index + 1 ..][0..n_clients];
+        const exits = fds[input_watch_index + 1 ..][0..n_clients];
         for (server.clients.items[0..n_clients], exits) |c, *f| f.* = .{ .fd = c.pidfd orelse -1, .events = linux.POLL.IN, .revents = 0 };
-        _ = linux.poll(&fds, remote_index + 1 + n_clients, timeout);
+        _ = linux.poll(&fds, input_watch_index + 1 + n_clients, timeout);
+        frame_times.wakes += 1;
+        if (sys.nowNs() >= next_tick) frame_times.ticks += 1;
+        // A keyboard or mouse plugged in (or handed to the user).
+        if (fds[input_watch_index].revents != 0) devices.nodesChanged();
         // Asked to stop (the computer restarting or turning off): the last
         // frame is left for the shutdown screen to fade from.
         if (stop_asked.load(.monotonic)) {
@@ -465,7 +499,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                         var out: std.ArrayList(u8) = .empty;
                         defer out.deinit(gpa);
                         remoteStatus(gpa, &out, &server, apps, &renderer, &pointer) catch {};
-                        out.print(gpa, "frames:\n  composited {f}\n  shown directly {f}\n", .{ frame_times.composited, frame_times.direct }) catch {};
+                        out.print(gpa, "wakes {d} (the tick {d})\nframes:\n  composited {f}\n  shown directly {f}\n", .{ frame_times.wakes, frame_times.ticks, frame_times.composited, frame_times.direct }) catch {};
                         panelStatus(gpa, &out, &renderer, &.{
                             .{ .dock, dock.panel },
                             .{ .tooltip, dock.tip_panel },
@@ -912,9 +946,10 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
             server.wakeAll();
         }
         if (t_now >= next_tick) {
-            next_tick = start + ((t_now - start) / std.time.ns_per_s + 1) * std.time.ns_per_s;
-            // Keyboards and mice plugged in since.
-            devices.scan();
+            last_tick = t_now;
+            // Keyboards and mice plugged in since, if they cannot be
+            // watched for.
+            if (devices.watch == null) devices.scan();
             // Whether data moved over the network this second (the kernel
             // tells nothing of it as it happens: its counters are read).
             const now_traffic = dock_mod.readTraffic();
@@ -1510,6 +1545,10 @@ fn remoteStatus(gpa: std.mem.Allocator, out: *std.ArrayList(u8), server: *const 
 const FrameTimes = struct {
     composited: kete_panel.Times = .{},
     direct: kete_panel.Times = .{},
+    /// How often the shell has woken (from waiting for something to
+    /// happen), and of those, for its tick.
+    wakes: u64 = 0,
+    ticks: u64 = 0,
 };
 
 /// What drawing each panel has cost (see `kete_panel.Times`): its

@@ -211,6 +211,34 @@ pub const Devices = struct {
     active: [max_devices]bool = @splat(false),
     /// The touchscreens' touches.
     touch: [max_devices]?Touch = @splat(null),
+    /// Watching /dev/input (inotify) for nodes made (a device plugged in)
+    /// or handed to the user (init does that after): `scan` when it says
+    /// so, rather than looking every so often.
+    watch: ?linux.fd_t = null,
+
+    /// Starts watching /dev/input, then opens what is there.
+    pub fn watchNodes(d: *Devices) void {
+        const rc = linux.inotify_init1(linux.IN.NONBLOCK | linux.IN.CLOEXEC);
+        if (linux.errno(rc) == .SUCCESS) {
+            const fd: linux.fd_t = @intCast(rc);
+            if (linux.errno(linux.inotify_add_watch(fd, "/dev/input", linux.IN.CREATE | linux.IN.ATTRIB)) == .SUCCESS) {
+                d.watch = fd;
+            } else sys.close(fd);
+        }
+        d.scan();
+    }
+
+    /// The watch said something changed: what it said is read, and the
+    /// nodes are looked at again.
+    pub fn nodesChanged(d: *Devices) void {
+        const fd = d.watch orelse return;
+        var buf: [1024]u8 align(@alignOf(linux.inotify_event)) = undefined;
+        while (true) {
+            const rc = linux.read(fd, &buf, buf.len);
+            if (linux.errno(rc) != .SUCCESS or rc == 0) break;
+        }
+        d.scan();
+    }
 
     /// Opens event nodes that are not open yet.
     pub fn scan(d: *Devices) void {

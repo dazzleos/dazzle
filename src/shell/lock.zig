@@ -159,6 +159,15 @@ pub const Warning = struct {
 pub const Warnings = struct {
     given: u8 = 0,
 
+    /// When the next warning is due (seconds since 1970, by the system's
+    /// clock), if one is to come.
+    pub fn nextAt(ws: *const Warnings, p: Parental, system_now: i64) ?i64 {
+        const t = if (p.on and p.lock == .none) p.lock_at orelse return null else return null;
+        if (ws.given >= warn_at.len) return null;
+        // `lock_at` is by the manager's clock: back to the system's.
+        return (t - warn_at[ws.given]) - (p.now(system_now) - system_now);
+    }
+
     /// A warning due at `system_now`, if one is (in `buf`), in `zone`.
     pub fn due(ws: *Warnings, p: Parental, system_now: i64, zone: sys.parental.TimeZone, buf: []u8) ?Warning {
         const lock_at = if (p.on and p.lock == .none) p.lock_at else null;
@@ -241,6 +250,17 @@ test "warnings at ten, five and one minute left; again after a bonus" {
     // Locked: none.
     d.lock = .downtime;
     try testing.expect(wd.due(d, now + 21 * 3600, .utc, &buf) == null);
+}
+
+test "the next warning's time" {
+    var ws: Warnings = .{};
+    var buf: [192]u8 = undefined;
+    const now: i64 = 1_794_787_200;
+    const p: Parental = .{ .on = true, .limits = .{ .downtime = null }, .lock_at = now + 30 * 60 };
+    try testing.expectEqual(@as(?i64, now + 20 * 60), ws.nextAt(p, now));
+    _ = ws.due(p, now + 20 * 60, .utc, &buf);
+    try testing.expectEqual(@as(?i64, now + 25 * 60), ws.nextAt(p, now + 20 * 60));
+    try testing.expect(ws.nextAt(.{}, now) == null);
 }
 
 test "when it may be used again, in words" {
