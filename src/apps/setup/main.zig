@@ -463,7 +463,7 @@ const Worker = struct {
 
             if (loc) |l| {
                 var req_buf: [64]u8 = undefined;
-                sys_rep = ask(std.fmt.bufPrint(&req_buf, "locale {s} {s}\n", .{ l.language.code(), l.keyboard.code() }) catch "");
+                sys_rep = ask(std.fmt.bufPrint(&req_buf, "locale {s} {s} {s}\n", .{ l.language.code(), l.keyboard.code(), l.timezone.name() }) catch "");
                 if (sys_rep) |r| w.publishSystem(r);
             }
             if (host) |h| {

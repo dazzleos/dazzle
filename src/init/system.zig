@@ -327,7 +327,7 @@ const Manager = struct {
     }
 
     fn parentalLocal(m: *const Manager) parental.Local {
-        return .of(m.parentalNow(), parental.utc_offset);
+        return .in(m.parentalNow(), m.report.locale.timezone);
     }
 
     /// Moves parental controls' clock on, counts the time used (while not
@@ -352,10 +352,10 @@ const Manager = struct {
         p.usage.wall = now;
         const local = m.parentalLocal();
         if (p.on) p.usage.roll(local.day);
-        var st = p.status(now);
+        var st = p.status(now, m.report.locale.timezone);
         if (p.on and st.lock == .none) {
             p.usage.used_ms +|= @intCast(@min(dt / std.time.ns_per_ms, 60_000));
-            st = p.status(now);
+            st = p.status(now, m.report.locale.timezone);
         }
         const r = &m.report.parental;
         const was_locked = r.lock;
@@ -443,7 +443,7 @@ const Manager = struct {
         if (!storage.exists(proto.config_dir)) return;
         var buf: [64]u8 = undefined;
         writeFile(locale.settings_file, m.report.locale.write(&buf));
-        print("dazzle: system: language {s}, keyboard {s}\n", .{ m.report.locale.language.code(), m.report.locale.keyboard.code() });
+        print("dazzle: system: language {s}, keyboard {s}, time zone {s}\n", .{ m.report.locale.language.code(), m.report.locale.keyboard.code(), m.report.locale.timezone.name() });
     }
 
     /// Starts installing the update Settings downloaded.

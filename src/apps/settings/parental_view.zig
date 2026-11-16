@@ -119,7 +119,7 @@ pub fn build(self: *const Settings, b: Builder, st: *State) kete.Widget {
             cx.make(kete.OutlinedButton{ .label = "Add time", .icon = .add, .on_press = if (self.actions != null) .of(st, State.openBonus) else null }),
         }) catch &.{} })) catch {};
         if (p.limits.downtime) |d| if (p.lock != .downtime) {
-            const local = sys.parental.Local.of(now, sys.parental.utc_offset);
+            const local = sys.parental.Local.in(now, self.locale.timezone);
             const secs = @mod(@as(i64, d.start) * 60 - local.second, std.time.s_per_day);
             var dbuf: [64]u8 = undefined;
             rows.append(a, b.value(cx.fmt("Downtime in {s}", .{durationAnd(&dbuf, @intCast(@divFloor(secs + 59, 60)))}))) catch {};
@@ -334,9 +334,9 @@ fn clockOf(buf: []u8, minute_of_day: u16) []const u8 {
 }
 
 /// "at 7:30 pm", "tomorrow at 7:00 am", "on Saturday at 7:00 am".
-fn when(buf: []u8, t: i64, now: i64, utc_offset: i16) []const u8 {
-    const at = sys.parental.Local.of(t, utc_offset);
-    const today = sys.parental.Local.of(now, utc_offset);
+fn when(buf: []u8, t: i64, now: i64, zone: sys.parental.TimeZone) []const u8 {
+    const at = sys.parental.Local.in(t, zone);
+    const today = sys.parental.Local.in(now, zone);
     var clock_buf: [16]u8 = undefined;
     const clock = clockOf(&clock_buf, at.minute());
     const names = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };

@@ -337,7 +337,7 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
         if (actions.locale) |l| {
             actions.locale = null;
             var req_buf: [64]u8 = undefined;
-            const req = std.fmt.bufPrint(&req_buf, "locale {s} {s}\n", .{ l.language.code(), l.keyboard.code() }) catch "";
+            const req = std.fmt.bufPrint(&req_buf, "locale {s} {s} {s}\n", .{ l.language.code(), l.keyboard.code(), l.timezone.name() }) catch "";
             if (sys.system.ask(req, 3000)) |r| {
                 if (!r.denied) {
                     chosen = l;

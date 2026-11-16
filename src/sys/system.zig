@@ -20,10 +20,11 @@
 //!     restart                  restart the computer (settings)
 //!     power_off                turn the computer off (the shell's quick
 //!                              settings, and settings)
-//!     locale <language> <keyboard>
-//!                              the language and keyboard (setup and
-//!                              settings): kept in /data/system/locale
-//!                              (once there is a /data)
+//!     locale <language> <keyboard> [<time zone>]
+//!                              the language, keyboard and time zone
+//!                              (setup and settings; UTC if none is
+//!                              given): kept in /data/system/locale (once
+//!                              there is a /data)
 //!     video_memory <MiB>       how much memory the GPU may have, from the
 //!                              next start (settings): see `video_memory`
 //!     parental_on <password> <limits>
@@ -44,7 +45,7 @@
 //!     version a 1791331200 de14aa2
 //!     version b -
 //!     update none
-//!     locale en-GB gb
+//!     locale en-GB gb Europe/London
 //!     video_memory 128 256
 //!     parental on 120 180 1200 420 block
 //!     parental_status none 1794830400 - 42 120 0 0
@@ -208,6 +209,7 @@ pub const Request = union(enum) {
         if (std.mem.eql(u8, kind, "locale")) return .{ .locale = .{
             .language = locale.Language.fromCode(f.next() orelse return null) orelse return null,
             .keyboard = locale.Keyboard.fromCode(f.next() orelse return null) orelse return null,
+            .timezone = if (f.next()) |z| locale.TimeZone.fromName(z) orelse return null else .utc,
         } };
         if (std.mem.eql(u8, kind, "video_memory")) {
             const mib = std.fmt.parseInt(u16, f.next() orelse return null, 10) catch return null;
@@ -423,7 +425,7 @@ pub const Report = struct {
         }
         w.print("update {s}", .{@tagName(r.update)}) catch {};
         if (r.update == .failed) w.print(" {s}", .{@tagName(r.update_failure)}) catch {};
-        w.print("\nlocale {s} {s}", .{ r.locale.language.code(), r.locale.keyboard.code() }) catch {};
+        w.print("\nlocale {s} {s} {s}", .{ r.locale.language.code(), r.locale.keyboard.code(), r.locale.timezone.name() }) catch {};
         w.writeAll("\nvideo_memory") catch {};
         for ([_]?u16{ r.video_memory_now, r.video_memory_next }) |v| if (v) |mib| w.print(" {d}", .{mib}) catch {} else w.writeAll(" -") catch {};
         w.print("\nlog_server {s}", .{if (r.log_server) "on" else "off"}) catch {};
@@ -472,6 +474,7 @@ pub const Report = struct {
             } else if (std.mem.eql(u8, kind, "locale")) {
                 if (locale.Language.fromCode(f.next() orelse continue)) |l| r.locale.language = l;
                 if (locale.Keyboard.fromCode(f.next() orelse continue)) |k| r.locale.keyboard = k;
+                if (locale.TimeZone.fromName(f.next() orelse continue)) |z| r.locale.timezone = z;
             } else if (std.mem.eql(u8, kind, "video_memory")) {
                 r.video_memory_now = std.fmt.parseInt(u16, f.next() orelse continue, 10) catch null;
                 r.video_memory_next = std.fmt.parseInt(u16, f.next() orelse continue, 10) catch null;
@@ -692,16 +695,19 @@ test "requests and reports go through the socket" {
     try testing.expectEqual(locale.Language.en_nz, lr.language);
     try testing.expectEqual(locale.Keyboard.gb, lr.keyboard);
     try testing.expect(Request.parse("locale fr-FR us\n") == null);
+    try testing.expectEqualStrings("Europe/London", Request.parse("locale en-GB gb Europe/London\n").?.locale.timezone.name());
+    try testing.expectEqual(locale.TimeZone.utc, lr.timezone);
+    try testing.expect(Request.parse("locale en-GB gb Middle/Earth\n") == null);
     try testing.expect(Request.allowedFor(.{ .locale = .{} }, .setup));
     try testing.expect(Request.allowedFor(.{ .locale = .{} }, .settings));
-    const chosen: Report = .{ .locale = .{ .language = .en_au, .keyboard = .gb } };
+    const chosen: Report = .{ .locale = .{ .language = .en_au, .keyboard = .gb, .timezone = locale.TimeZone.fromName("Australia/Perth").? } };
     var chosen_buf: [256]u8 = undefined;
-    try testing.expectEqual(locale.Language.en_au, Report.parse(chosen.write(&chosen_buf)).?.locale.language);
+    try testing.expectEqual(chosen.locale, Report.parse(chosen.write(&chosen_buf)).?.locale);
 
     var r: Report = .{ .storage = .preparing, .progress = 42, .hostname = Hostname.parse("awesome-elephant").? };
     var buf: [512]u8 = undefined;
     const text = r.write(&buf);
-    try testing.expectEqualStrings("storage preparing 42\nhostname awesome-elephant\nversion a -\nversion b -\nupdate none\nlocale en-US us\nvideo_memory - -\nlog_server off\nparental off 120 180 1200 420 block\nparental_status none - - 0 - 0 0\nend\n", text);
+    try testing.expectEqualStrings("storage preparing 42\nhostname awesome-elephant\nversion a -\nversion b -\nupdate none\nlocale en-US us UTC\nvideo_memory - -\nlog_server off\nparental off 120 180 1200 420 block\nparental_status none - - 0 - 0 0\nend\n", text);
     const back = Report.parse(text).?;
     try testing.expectEqual(StorageState.preparing, back.storage);
     try testing.expectEqual(@as(u8, 42), back.progress);

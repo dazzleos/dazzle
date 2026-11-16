@@ -59,8 +59,9 @@ pub const height = 340;
 /// used again, and the password's field.
 pub const View = struct {
     parental: Parental,
-    /// The system's clock.
+    /// The system's clock, and the time zone.
     system_now: i64,
+    zone: sys.parental.TimeZone = .utc,
     entry: *Entry,
 
     pub fn build(self: *const View, cx: *kete.BuildContext) kete.Widget {
@@ -68,7 +69,7 @@ pub const View = struct {
         const p = self.parental;
         var when_buf: [64]u8 = undefined;
         const until = if (p.until) |at|
-            cx.fmt("This computer can be used again {s}", .{whenText(&when_buf, at, p.now(self.system_now), sys.parental.utc_offset)})
+            cx.fmt("This computer can be used again {s}", .{whenText(&when_buf, at, p.now(self.system_now), self.zone)})
         else
             "This computer cannot be used again this week";
         var rows: std.ArrayList(kete.Widget) = .empty;
@@ -113,10 +114,12 @@ pub const View = struct {
 pub const Screen = struct {
     panel: *kete_panel.Panel,
     entry: Entry = .{},
+    /// The computer's time zone (the system's report says).
+    zone: sys.parental.TimeZone = .utc,
 
     /// Its picture, as `p` says, `width` by `height`.
     pub fn draw(s: *Screen, p: Parental) kete_panel.Picture {
-        return s.panel.draw(width, height, sys.nowNs(), View{ .parental = p, .system_now = sys.realtimeSec(), .entry = &s.entry });
+        return s.panel.draw(width, height, sys.nowNs(), View{ .parental = p, .system_now = sys.realtimeSec(), .zone = s.zone, .entry = &s.entry });
     }
 
     /// In the middle of a screen `w` by `h`.
@@ -126,10 +129,11 @@ pub const Screen = struct {
 };
 
 /// When `t` is, from `now` (both seconds since 1970, by the manager's
-/// clock): "at 3:30 pm", "tomorrow at 7:00 am", "on Saturday at 7:00 am".
-pub fn whenText(buf: []u8, t: i64, now: i64, utc_offset: i16) []const u8 {
-    const at = sys.parental.Local.of(t, utc_offset);
-    const today = sys.parental.Local.of(now, utc_offset);
+/// clock), in `zone`: "at 3:30 pm", "tomorrow at 7:00 am", "on Saturday at
+/// 7:00 am".
+pub fn whenText(buf: []u8, t: i64, now: i64, zone: sys.parental.TimeZone) []const u8 {
+    const at = sys.parental.Local.in(t, zone);
+    const today = sys.parental.Local.in(now, zone);
     var clock_buf: [16]u8 = undefined;
     const clock = locale.formatClock(&clock_buf, at.second / 3600, at.second / 60 % 60);
     const days = at.day - today.day;
@@ -155,8 +159,8 @@ pub const Warning = struct {
 pub const Warnings = struct {
     given: u8 = 0,
 
-    /// A warning due at `system_now`, if one is (in `buf`).
-    pub fn due(ws: *Warnings, p: Parental, system_now: i64, buf: []u8) ?Warning {
+    /// A warning due at `system_now`, if one is (in `buf`), in `zone`.
+    pub fn due(ws: *Warnings, p: Parental, system_now: i64, zone: sys.parental.TimeZone, buf: []u8) ?Warning {
         const lock_at = if (p.on and p.lock == .none) p.lock_at else null;
         const t = lock_at orelse {
             ws.given = 0;
@@ -172,7 +176,7 @@ pub const Warnings = struct {
         if (left <= 0) return null;
         const minutes: i64 = @max(1, @divFloor(left + 30, 60));
         // Downtime starting, or the day's time running out.
-        const local = sys.parental.Local.of(t, sys.parental.utc_offset);
+        const local = sys.parental.Local.in(t, zone);
         const downtime = if (p.limits.downtime) |d| local.minute() == d.start else false;
         const half = buf.len / 2;
         var when_buf: [64]u8 = undefined;
@@ -180,7 +184,7 @@ pub const Warnings = struct {
             std.fmt.bufPrint(buf[0..half], "Downtime in {d} minute{s}", .{ minutes, if (minutes == 1) "" else "s" })
         else
             std.fmt.bufPrint(buf[0..half], "{d} minute{s} left today", .{ minutes, if (minutes == 1) "" else "s" })) catch return null;
-        const body = std.fmt.bufPrint(buf[half..], "The computer locks {s}", .{whenText(&when_buf, t, now, sys.parental.utc_offset)}) catch return null;
+        const body = std.fmt.bufPrint(buf[half..], "The computer locks {s}", .{whenText(&when_buf, t, now, zone)}) catch return null;
         return .{ .title = title, .body = body };
     }
 };
@@ -219,30 +223,30 @@ test "warnings at ten, five and one minute left; again after a bonus" {
     var buf: [192]u8 = undefined;
     const now: i64 = 1_794_787_200; // Monday, 16 November 2026, midnight UTC
     var p: Parental = .{ .on = true, .limits = .{ .downtime = null }, .lock_at = now + 30 * 60 };
-    try testing.expect(ws.due(p, now, &buf) == null);
-    const w10 = ws.due(p, now + 20 * 60, &buf).?;
+    try testing.expect(ws.due(p, now, .utc, &buf) == null);
+    const w10 = ws.due(p, now + 20 * 60, .utc, &buf).?;
     try testing.expectEqualStrings("10 minutes left today", w10.title);
-    try testing.expect(ws.due(p, now + 21 * 60, &buf) == null);
-    try testing.expectEqualStrings("5 minutes left today", ws.due(p, now + 25 * 60, &buf).?.title);
-    try testing.expectEqualStrings("1 minute left today", ws.due(p, now + 29 * 60, &buf).?.title);
-    try testing.expect(ws.due(p, now + 29 * 60 + 30, &buf) == null);
+    try testing.expect(ws.due(p, now + 21 * 60, .utc, &buf) == null);
+    try testing.expectEqualStrings("5 minutes left today", ws.due(p, now + 25 * 60, .utc, &buf).?.title);
+    try testing.expectEqualStrings("1 minute left today", ws.due(p, now + 29 * 60, .utc, &buf).?.title);
+    try testing.expect(ws.due(p, now + 29 * 60 + 30, .utc, &buf) == null);
     // Twenty minutes more: warned again as it runs out.
     p.lock_at = now + 50 * 60;
-    try testing.expect(ws.due(p, now + 30 * 60, &buf) == null);
-    try testing.expectEqualStrings("10 minutes left today", ws.due(p, now + 40 * 60, &buf).?.title);
+    try testing.expect(ws.due(p, now + 30 * 60, .utc, &buf) == null);
+    try testing.expectEqualStrings("10 minutes left today", ws.due(p, now + 40 * 60, .utc, &buf).?.title);
     // Downtime starting.
     var d: Parental = .{ .on = true, .limits = .{ .downtime = .{ .start = 20 * 60, .end = 7 * 60 } }, .lock_at = now + 20 * 3600 };
     var wd: Warnings = .{};
-    try testing.expectEqualStrings("Downtime in 5 minutes", (wd.due(d, now + 20 * 3600 - 5 * 60, &buf) orelse return error.NoWarning).title);
+    try testing.expectEqualStrings("Downtime in 5 minutes", (wd.due(d, now + 20 * 3600 - 5 * 60, .utc, &buf) orelse return error.NoWarning).title);
     // Locked: none.
     d.lock = .downtime;
-    try testing.expect(wd.due(d, now + 21 * 3600, &buf) == null);
+    try testing.expect(wd.due(d, now + 21 * 3600, .utc, &buf) == null);
 }
 
 test "when it may be used again, in words" {
     var buf: [64]u8 = undefined;
     const now: i64 = 1_794_787_200 + 15 * 3600; // Monday 3 pm UTC
-    try testing.expect(std.mem.startsWith(u8, whenText(&buf, now + 3600, now, 0), "at "));
-    try testing.expect(std.mem.startsWith(u8, whenText(&buf, now + 16 * 3600, now, 0), "tomorrow at "));
-    try testing.expect(std.mem.startsWith(u8, whenText(&buf, now + 4 * 86400, now, 0), "on Friday at "));
+    try testing.expect(std.mem.startsWith(u8, whenText(&buf, now + 3600, now, .utc), "at "));
+    try testing.expect(std.mem.startsWith(u8, whenText(&buf, now + 16 * 3600, now, .utc), "tomorrow at "));
+    try testing.expect(std.mem.startsWith(u8, whenText(&buf, now + 4 * 86400, now, .utc), "on Friday at "));
 }

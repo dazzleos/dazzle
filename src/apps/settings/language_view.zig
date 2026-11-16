@@ -45,11 +45,11 @@ const LocalePick = struct {
     current: locale.Settings,
 
     fn language(p: *LocalePick, l: locale.Language) void {
-        if (p.actions) |a| a.locale = .{ .language = l, .keyboard = p.current.keyboard };
+        if (p.actions) |a| a.locale = .{ .language = l, .keyboard = p.current.keyboard, .timezone = p.current.timezone };
     }
 
     fn keyboard(p: *LocalePick, k: locale.Keyboard) void {
-        if (p.actions) |a| a.locale = .{ .language = p.current.language, .keyboard = k };
+        if (p.actions) |a| a.locale = .{ .language = p.current.language, .keyboard = k, .timezone = p.current.timezone };
     }
 };
 

@@ -145,7 +145,7 @@ pub const PageWidth = struct {
 
 pub const Settings = struct {
     commit: []const u8,
-    /// The language and keyboard in use.
+    /// The language, keyboard and time zone in use.
     locale: locale.Settings = .{},
     /// Where the window's requests go (none in tests that do not look).
     actions: ?*Actions = null,

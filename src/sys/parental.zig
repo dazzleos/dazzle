@@ -17,8 +17,8 @@
 //! when it is given. It is set each time parental controls are turned
 //! on, so it is not long forgotten.
 //!
-//! Times of day are by `utc_offset`: UTC, until the system has a time
-//! zone. The clock is only set once the computer is
+//! Times of day are by the computer's time zone (as it is at each time:
+//! daylight saving time comes and goes). The clock is only set once the computer is
 //! on the network; until then the manager goes on from the last time it
 //! saw (see `Usage.wall`), so turning the network off does not stop the
 //! day, or the night, coming.
@@ -102,9 +102,7 @@ pub const Limits = struct {
     }
 };
 
-/// How far local time is ahead of UTC, in minutes: none, until the system
-/// has a time zone.
-pub const utc_offset: i16 = 0;
+pub const TimeZone = @import("locale").TimeZone;
 
 fn writeOpt(w: *std.Io.Writer, v: ?u16) !void {
     if (v) |n| try w.print("{d}", .{n}) else try w.writeByte('-');
@@ -206,10 +204,10 @@ pub const State = struct {
         return s;
     }
 
-    /// How it stands at `now` (seconds since 1970).
-    pub fn status(s: *const State, now: i64) Status {
+    /// How it stands at `now` (seconds since 1970), in `zone`.
+    pub fn status(s: *const State, now: i64, zone: TimeZone) Status {
         if (!s.on) return .{};
-        return statusOf(s.limits, s.usage, now);
+        return statusOf(s.limits, s.usage, now, zone);
     }
 };
 
@@ -260,6 +258,11 @@ pub const Local = struct {
         };
     }
 
+    /// `now` in `zone`, by its offset then.
+    pub fn in(now: i64, zone: TimeZone) Local {
+        return .of(now, @intCast(@divFloor(zone.offsetAt(now), 60)));
+    }
+
     pub fn minute(l: Local) u16 {
         return @intCast(l.second / 60);
     }
@@ -286,19 +289,19 @@ pub const Status = struct {
     allowed: ?u32 = null,
 };
 
-fn statusOf(l: Limits, u: Usage, now: i64) Status {
-    const local = Local.of(now, utc_offset);
+fn statusOf(l: Limits, u: Usage, now: i64, zone: TimeZone) Status {
+    const local = Local.in(now, zone);
     const used = u.usedOn(local.day);
     const allowed: ?u32 = if (l.minutesOn(local.weekday)) |m| @as(u32, m) + u.bonusOn(local.day) else null;
     var s: Status = .{ .used = used, .allowed = allowed };
     if (l.downtime) |d| if (d.contains(local.minute())) {
         s.lock = .downtime;
-        s.until = availableFrom(l, now + secondsUntil(local, d.end));
+        s.until = availableFrom(l, now + secondsUntil(local, d.end), zone);
         return s;
     };
     if (allowed) |a| if (used >= a * 60) {
         s.lock = .time;
-        s.until = availableFrom(l, startOfNextDay(now, local));
+        s.until = availableFrom(l, startOfNextDay(now, local), zone);
         return s;
     };
     // While used: the time left, or downtime, whichever comes first.
@@ -323,10 +326,10 @@ fn startOfNextDay(now: i64, local: Local) i64 {
 /// The first time from `t` (a start of a day, or the end of downtime) at
 /// which it may be used: not in downtime, on a day with some time; null
 /// if not within a week.
-fn availableFrom(l: Limits, from: i64) ?i64 {
+fn availableFrom(l: Limits, from: i64, zone: TimeZone) ?i64 {
     var t = from;
     for (0..8) |_| {
-        const local = Local.of(t, utc_offset);
+        const local = Local.in(t, zone);
         if (l.downtime) |d| if (d.contains(local.minute())) {
             t += secondsUntil(local, d.end);
             continue;
@@ -393,6 +396,22 @@ test "downtime, across midnight or not" {
     try testing.expect(lunch.contains(12 * 60 + 30) and !lunch.contains(13 * 60));
 }
 
+test "downtime by the time zone's clock, daylight saving time and all" {
+    var s: State = .{};
+    s.enable("sesame", .{ .weekday = null, .weekend = null, .downtime = .{ .start = 20 * 60, .end = 7 * 60 } }, @splat(7));
+    const nz = TimeZone.fromName("Pacific/Auckland").?;
+    // Monday 16 November 2026, 7:30 am UTC: 8:30 pm in Auckland (NZDT).
+    const evening: i64 = 1_794_787_200 + 7 * 3600 + 1800;
+    try testing.expectEqual(Lock.downtime, s.status(evening, nz).lock);
+    try testing.expectEqual(Lock.none, s.status(evening, .utc).lock);
+    // Over at 7 am there: 6 pm UTC.
+    try testing.expectEqual(@as(?i64, 1_794_787_200 + 18 * 3600), s.status(evening, nz).until);
+    // In July (NZST, an hour less ahead), 8:30 pm is 8:30 am UTC.
+    const winter: i64 = 1_782_864_000 + 8 * 3600 + 1800;
+    try testing.expectEqual(Lock.downtime, s.status(winter, nz).lock);
+    try testing.expectEqual(Lock.none, s.status(winter - 3600, nz).lock);
+}
+
 test "the day's time runs out, and comes again the next morning, after downtime" {
     var s: State = .{};
     s.enable("sesame", .{ .weekday = 60, .weekend = 120, .downtime = .{ .start = 20 * 60, .end = 7 * 60 } }, @splat(7));
@@ -400,50 +419,50 @@ test "the day's time runs out, and comes again the next morning, after downtime"
     const local = Local.of(now, 0);
     s.usage.roll(local.day);
     // Fresh: locks in an hour.
-    var st = s.status(now);
+    var st = s.status(now, .utc);
     try testing.expectEqual(Lock.none, st.lock);
     try testing.expectEqual(@as(?i64, now + 3600), st.lock_at);
     // Fifty minutes used: ten left.
     s.usage.used_ms = 50 * 60 * 1000;
-    try testing.expectEqual(@as(?i64, now + 600), s.status(now).lock_at);
+    try testing.expectEqual(@as(?i64, now + 600), s.status(now, .utc).lock_at);
     // Used up: locked until 7:00 tomorrow (midnight is downtime).
     s.usage.used_ms = 60 * 60 * 1000;
-    st = s.status(now);
+    st = s.status(now, .utc);
     try testing.expectEqual(Lock.time, st.lock);
     try testing.expectEqual(@as(?i64, monday(24 + 7, 0)), st.until);
     // Bonus time: twenty minutes more.
     s.usage.bonus = 20;
-    st = s.status(now);
+    st = s.status(now, .utc);
     try testing.expectEqual(Lock.none, st.lock);
     try testing.expectEqual(@as(?i64, now + 1200), st.lock_at);
     // Evening, with time left: locks when downtime starts.
     s.usage.used_ms = 0;
-    try testing.expectEqual(@as(?i64, monday(20, 0)), s.status(monday(19, 30)).lock_at);
+    try testing.expectEqual(@as(?i64, monday(20, 0)), s.status(monday(19, 30), .utc).lock_at);
     // Downtime: locked till 7:00.
-    st = s.status(monday(23, 0));
+    st = s.status(monday(23, 0), .utc);
     try testing.expectEqual(Lock.downtime, st.lock);
     try testing.expectEqual(@as(?i64, monday(24 + 7, 0)), st.until);
     // A new day: the count starts again.
     s.usage.used_ms = 60 * 60 * 1000;
     const tomorrow = monday(24 + 9, 0);
-    try testing.expectEqual(Lock.none, s.status(tomorrow).lock);
+    try testing.expectEqual(Lock.none, s.status(tomorrow, .utc).lock);
     s.usage.roll(Local.of(tomorrow, 0).day);
     try testing.expectEqual(@as(u32, 0), s.usage.used_ms);
     // Off: never locked.
     s.on = false;
-    try testing.expectEqual(Lock.none, s.status(monday(23, 0)).lock);
+    try testing.expectEqual(Lock.none, s.status(monday(23, 0), .utc).lock);
 }
 
 test "no time on weekdays: available again on Saturday" {
     var s: State = .{};
     s.enable("x", .{ .weekday = 0, .weekend = 60, .downtime = null }, @splat(1));
-    const st = s.status(monday(12, 0));
+    const st = s.status(monday(12, 0), .utc);
     try testing.expectEqual(Lock.time, st.lock);
     // Saturday, midnight.
     try testing.expectEqual(@as(?i64, monday(5 * 24, 0)), st.until);
     // No limits at all: never locks.
     s.limits = .{ .weekday = null, .weekend = null, .downtime = null };
-    try testing.expect(s.status(monday(12, 0)).lock_at == null);
+    try testing.expect(s.status(monday(12, 0), .utc).lock_at == null);
 }
 
 test "the password: only its hash is kept, and only it unlocks" {
