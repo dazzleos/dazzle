@@ -23,6 +23,7 @@ const evdev = sys.evdev;
 const kete = @import("kete");
 const glass = @import("glass.zig");
 const kete_panel = @import("kete_panel.zig");
+const clock = @import("clock.zig");
 const ui_icons = @import("ui_icons.zig");
 const icons = @import("icons");
 const audio = @import("audio");
@@ -79,6 +80,9 @@ pub const Theme = enum {
 pub const Appearance = struct {
     theme: Theme = .dark,
     image: theme_settings.ImagePath = theme_settings.Settings.default_image,
+    /// The dock shows the time, and the network's status.
+    clock: bool = true,
+    network: bool = true,
 
     pub fn parse(text: []const u8) Appearance {
         const s = theme_settings.Settings.parse(text);
@@ -88,6 +92,8 @@ pub const Appearance = struct {
                 .light => .light,
             },
             .image = s.image,
+            .clock = s.clock,
+            .network = s.network,
         };
     }
 };
@@ -520,6 +526,15 @@ pub const Dock = struct {
     volume: VolumeStatus = .{},
     /// Light or dark colour scheme (from `/data/apps/.appearance`).
     theme: Theme = .dark,
+    /// The status box shows the time (before the volume), and the
+    /// network's status (after it), unless turned off in Settings'
+    /// appearance.
+    show_clock: bool = true,
+    show_network: bool = true,
+    /// The time zone, and the time the clock shows (as `draw` last drew
+    /// it).
+    zone: clock.TimeZone = .utc,
+    time: ?clock.Time = null,
     /// The app's name, over the icon the pointer rests on: when it is due
     /// (the pointer has rested a while), and the app whose it shows.
     tooltip_at: ?u64 = null,
@@ -676,16 +691,47 @@ pub const Dock = struct {
     }
 
     pub const Rect = struct { x: f32, y: f32, size: f32 };
-    /// The status box's width (at 1080p): the volume, the network and its
-    /// activity arrows.
-    const status_box_width = 124;
-    /// How much wider the status box is with the update icon in it.
+    /// The status box's width (at 1080p): the volume, in its padding.
+    const status_box_width = 56;
+    /// How much wider the status box is with the network (its icon and
+    /// activity arrows), and the update icon, in it.
+    const network_width = 68;
     const update_icon_width = 46;
+    /// The clock's text's size, and the gap after it.
+    const clock_text = 22;
+    const clock_gap = 10;
 
     /// The status box's width, in pixels.
     fn statusWidth(d: *const Dock) f32 {
-        const w: f32 = if (d.updates) status_box_width + update_icon_width else status_box_width;
-        return w * d.scale;
+        var w: f32 = status_box_width;
+        if (d.updates) w += update_icon_width;
+        if (d.show_network) w += network_width;
+        return w * d.scale + d.clockWidth();
+    }
+
+    /// The room the clock takes in the status box (its widest, so the box
+    /// stays as it is as the time changes), in pixels: none if it is not
+    /// shown.
+    fn clockWidth(d: *const Dock) f32 {
+        if (!d.show_clock) return 0;
+        const f = d.panel.ui.font orelse return 0;
+        var buf: [16]u8 = undefined;
+        const text = clock.widestText(&buf);
+        return @ceil(kete.font.measure(.{ .font = f, .size = @round(clock_text * d.scale) }, text)) + clock_gap * d.scale;
+    }
+
+    /// Shows the time in `zone` from now on.
+    pub fn setTimeZone(d: *Dock, zone: clock.TimeZone) void {
+        d.zone = zone;
+        d.time = null;
+    }
+
+    /// Whether the clock, shown, is behind the time at `now` (seconds
+    /// since 1970): the dock is then to be drawn again.
+    pub fn clockBehind(d: *const Dock, now: i64) bool {
+        if (!d.show_clock) return false;
+        const t = d.time orelse return true;
+        return t.minute != @divFloor(now, 60);
     }
     pub const StatusRect = struct { x: f32, y: f32, width: f32, height: f32 };
 
@@ -831,6 +877,7 @@ pub const Dock = struct {
 
     /// Draws it as it is now (with kete: see `View`).
     pub fn draw(d: *Dock) void {
+        d.time = .at(sys.realtimeSec(), d.zone);
         d.width = d.boxWidth();
         d.drawn = d.panel.draw(d.width, d.height, 0, View{ .d = d });
     }
@@ -868,8 +915,10 @@ pub const Dock = struct {
                 .scale = d.scale,
                 .updates = d.updates,
                 .volume = d.volume,
-                .network = d.network,
+                .network = if (d.show_network) d.network else null,
                 .activity = d.activity,
+                .clock = if (d.show_clock) if (d.time) |t| t.timeText(a.alloc(u8, 16) catch &.{}) else null else null,
+                .clock_width = d.clockWidth(),
             }))) catch {};
             return cx.make(kete.Overlay{ .children = layers.items });
         }
@@ -953,14 +1002,18 @@ pub const Dock = struct {
         }
     };
 
-    /// The status box: an outline, updates, the volume and the network.
+    /// The status box: an outline, updates, the time, the volume and the
+    /// network (the time and the network if shown).
     const Status = struct {
         theme: Theme,
         scale: f32,
         updates: bool,
         volume: VolumeStatus,
-        network: NetworkStatus,
+        network: ?NetworkStatus,
         activity: Activity,
+        clock: ?[]const u8 = null,
+        /// The room kept for it, the gap after it included.
+        clock_width: f32 = 0,
 
         pub fn layout(_: *const Status, _: *kete.WidgetNode, c: kete.Constraints) kete.Size {
             return c.constrain(.{ .w = c.max_w, .h = c.max_h });
@@ -979,15 +1032,23 @@ pub const Dock = struct {
             const pad = @round(10 * s);
             const y = @round((h - size) / 2);
             const update_x = pad;
-            const vol_x = if (st.updates) @round(update_x + update_icon_width * s) else update_x;
+            const clock_x = if (st.updates) @round(update_x + update_icon_width * s) else update_x;
+            const vol_x = @round(clock_x + st.clock_width);
             const arrow = @round(18 * s);
             const arrows_x = @round(w - pad - arrow);
             const net_x = @round(arrows_x - 4 * s - size);
             if (st.updates) p.icon(.system_update_alt, update_x, y, size, argb(c.dot));
+            // The time, its right edge before the volume.
+            if (st.clock) |text| if (p.ui.font) |f| {
+                const style: kete.font.Style = .{ .font = f, .size = @round(clock_text * s) };
+                const tw = kete.font.measure(style, text);
+                _ = p.text(style.size, @round(vol_x - clock_gap * s - tw), @round(h / 2 + style.ascent() * 0.36), text, argb(c.status_active));
+            };
             p.icon(ui_icons.of(st.volume.icon()), vol_x, y, size, argb(if (st.volume.active()) c.status_active else c.status_inactive));
-            p.icon(ui_icons.of(st.network.icon()), net_x, y, size, argb(if (st.network.connected()) c.status_active else c.status_inactive));
+            const network = st.network orelse return;
+            p.icon(ui_icons.of(network.icon()), net_x, y, size, argb(if (network.connected()) c.status_active else c.status_inactive));
             // Sending above receiving, each lit while data moves that way.
-            if (st.network.connected()) {
+            if (network.connected()) {
                 const mid = @round(h / 2);
                 p.icon(.arrow_upward, arrows_x, mid - arrow, arrow, argb(if (st.activity.sending) c.status_active else c.status_inactive));
                 p.icon(.arrow_downward, arrows_x, mid, arrow, argb(if (st.activity.receiving) c.status_active else c.status_inactive));

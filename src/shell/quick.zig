@@ -11,6 +11,7 @@ const icons = @import("icons");
 const glass = @import("glass.zig");
 const dock = @import("dock.zig");
 const kete_panel = @import("kete_panel.zig");
+const clock = @import("clock.zig");
 const ui_icons = @import("ui_icons.zig");
 
 /// How the computer is connected, as the popup says it: each kind of
@@ -131,11 +132,15 @@ const updates_gap = 8;
 const updates_row = 36;
 const power_row = 40;
 const text_size = 16;
+/// The time and the date, at the top.
+const time_row = 34;
+const time_size = 28;
+const date_row = 22;
 /// The slider's track, and the knob on it.
 const track_height = 6;
 const knob_radius = 9;
 /// The highest it gets: two network rows and the updates.
-const max_height = pad + volume_row + section_gap + 2 * network_row + updates_gap + updates_row + section_gap + power_row + pad;
+const max_height = pad + time_row + date_row + section_gap + volume_row + section_gap + 2 * network_row + updates_gap + updates_row + section_gap + power_row + pad;
 /// Between it and the dock.
 const gap_above_dock = 8;
 
@@ -156,6 +161,9 @@ pub const Quick = struct {
     theme: dock.Theme = .dark,
     volume: dock.VolumeStatus = .{},
     network: NetworkSummary = .{},
+    /// The time zone, and the time shown (as `draw` last drew it).
+    zone: clock.TimeZone = .utc,
+    time: ?clock.Time = null,
     updates: Updates = .none,
     /// Showing, and where (its top left on the screen).
     shown: bool = false,
@@ -186,10 +194,11 @@ pub const Quick = struct {
 
     /// Where its parts are, in it.
     const Layout = struct {
+        time_y: f32,
         volume_y: f32,
         network_y: f32,
         network_rows: u32,
-        divider_ys: [2]f32,
+        divider_ys: [3]f32,
         updates: ?Rect,
         power: Rect,
         height: f32,
@@ -206,6 +215,10 @@ pub const Quick = struct {
         const s = q.scale;
         const w: f32 = @floatFromInt(q.width);
         var y = pad * s;
+        const time_y = y;
+        y += (time_row + date_row) * s;
+        const time_divider = y + section_gap * s / 2;
+        y += section_gap * s;
         const volume_y = y;
         y += volume_row * s;
         const first_divider = y + section_gap * s / 2;
@@ -224,10 +237,11 @@ pub const Quick = struct {
         const power: Rect = .{ .x = pad * s, .y = y, .w = w - 2 * pad * s, .h = power_row * s };
         y += power_row * s + pad * s;
         return .{
+            .time_y = time_y,
             .volume_y = volume_y,
             .network_y = network_y,
             .network_rows = rows,
-            .divider_ys = .{ first_divider, second_divider },
+            .divider_ys = .{ time_divider, first_divider, second_divider },
             .updates = updates,
             .power = power,
             .height = @ceil(y),
@@ -236,7 +250,7 @@ pub const Quick = struct {
 
     fn muteRect(q: *const Quick) Rect {
         const s = q.scale;
-        return .{ .x = pad * s / 2, .y = pad * s, .w = (volume_icon + pad) * s, .h = volume_row * s };
+        return .{ .x = pad * s / 2, .y = q.layout().volume_y, .w = (volume_icon + pad) * s, .h = volume_row * s };
     }
 
     /// Where the slider takes the pointer: its track, as tall as its row.
@@ -244,7 +258,7 @@ pub const Quick = struct {
         const s = q.scale;
         const x0 = (pad + volume_icon + 12) * s;
         const x1 = @as(f32, @floatFromInt(q.width)) - (pad + percent_width) * s;
-        return .{ .x = x0, .y = pad * s, .w = x1 - x0, .h = volume_row * s };
+        return .{ .x = x0, .y = q.layout().volume_y, .w = x1 - x0, .h = volume_row * s };
     }
 
     /// The volume the slider has at `x` (in it).
@@ -358,6 +372,7 @@ pub const Quick = struct {
 
     /// Draws it as it is now (with kete: see `View`).
     pub fn draw(q: *Quick) void {
+        q.time = .at(sys.realtimeSec(), q.zone);
         q.height = @intFromFloat(q.layout().height);
         q.drawn = q.panel.draw(q.width, q.height, 0, View{ .q = q });
     }
@@ -376,6 +391,20 @@ pub const Quick = struct {
             const argb = kete.gfx.Color.argb;
             var layers: std.ArrayList(kete.Widget) = .empty;
             layers.append(a, cx.make(Fill{ .color = (c.background & 0x00ffffff) | @as(u32, glass.alpha) << 24, .radius = @round(dock.Dock.box_radius * s) })) catch {};
+            // The time, and the date under it.
+            if (q.time) |t| {
+                layers.append(a, placed(cx, pad * s, l.time_y, w - 2 * pad * s, time_row * s, cx.make(kete.Align{ .alignment = .center_left, .child = cx.make(kete.Text{
+                    .text = t.timeText(a.alloc(u8, 16) catch &.{}),
+                    .style = .{ .size = @round(time_size * s), .color = argb(c.status_active) },
+                    .wrap = false,
+                }) }))) catch {};
+                layers.append(a, placed(cx, pad * s, l.time_y + time_row * s, w - 2 * pad * s, date_row * s, cx.make(kete.Align{ .alignment = .center_left, .child = cx.make(kete.Text{
+                    .text = t.dateText(a.alloc(u8, 48) catch &.{}),
+                    .style = .{ .size = @round(text_size * s), .color = argb(c.dot) },
+                    .wrap = false,
+                    .ellipsis = true,
+                }) }))) catch {};
+            }
             // The volume: its icon (clicked: muted), the slider and how loud.
             layers.append(a, placed(cx, 0, l.volume_y, w, volume_row * s, cx.make(Volume{
                 .theme = q.theme,
@@ -571,8 +600,10 @@ test "the popup sits above the status box, and its parts take clicks" {
     try testing.expectEqual(@as(u8, 50), q.volumeAt(slider.x + slider.w / 2));
     try testing.expectEqual(@as(u8, 0), q.volumeAt(slider.x - 50));
     try testing.expectEqual(@as(u8, 100), q.volumeAt(slider.x + slider.w + 50));
-    try testing.expectEqual(Part.mute, q.hit(20, 30).?);
     const l = q.layout();
+    try testing.expectEqual(Part.mute, q.hit(20, l.volume_y + 14).?);
+    // The time and date at the top take no clicks.
+    try testing.expect(q.hit(40, l.time_y + 10) == null);
     try testing.expectEqual(Part.updates, q.hit(l.updates.?.x + 10, l.updates.?.y + 10).?);
     try testing.expectEqual(Part.power, q.hit(l.power.x + l.power.w / 2, l.power.y + l.power.h / 2).?);
     try testing.expect(q.hit(5, 2) == null);
@@ -596,7 +627,7 @@ test "pressing the popup's parts mutes, drags the slider, and asks twice before 
     q.draw();
     const l = q.layout();
     // The icon mutes, and unmutes.
-    try testing.expectEqual(dock.VolumeStatus{ .volume = 40, .muted = true }, q.press(20, 30).volume);
+    try testing.expectEqual(dock.VolumeStatus{ .volume = 40, .muted = true }, q.press(20, l.volume_y + 14).volume);
     // The slider: pressed, the volume there; dragged, along with it (off
     // its end too), and let go.
     const slider = q.sliderRect();

@@ -1,7 +1,8 @@
 //! The system's appearance, as chosen in Settings: the dark or light
-//! theme, and the desktop's background: one of the photos built into the
-//! system (`backgrounds`; the forest to start with), or an image chosen in
-//! Files. Kept in `settings_file`, which Settings and
+//! theme, the desktop's background (one of the photos built into the
+//! system, `backgrounds`, the forest to start with, or an image chosen in
+//! Files), and what the dock shows beside the volume: the clock, and the
+//! network's status. Kept in `settings_file`, which Settings and
 //! Files write and the shell and the apps read (and watch).
 
 const std = @import("std");
@@ -65,6 +66,9 @@ pub const Settings = struct {
     /// The last picture chosen in Files: Settings offers it beside the
     /// built-in ones (while its file is there), whichever is shown.
     custom: ImagePath = .{},
+    /// The dock shows the time, and the network's status.
+    clock: bool = true,
+    network: bool = true,
 
     pub const default_image: ImagePath = .of(backgrounds.path(backgrounds.all[0]));
 
@@ -77,6 +81,9 @@ pub const Settings = struct {
             const val = tok.next() orelse continue;
             if (std.mem.eql(u8, key, "theme")) {
                 if (Mode.fromCode(val)) |m| s.theme = m;
+            } else if (std.mem.eql(u8, key, "clock") or std.mem.eql(u8, key, "network")) {
+                const on = !std.mem.eql(u8, val, "off");
+                if (key[0] == 'c') s.clock = on else s.network = on;
             } else if (std.mem.eql(u8, key, "image") or std.mem.eql(u8, key, "custom")) {
                 // The rest of the line: a path may have spaces.
                 const start = @intFromPtr(val.ptr) - @intFromPtr(line.ptr);
@@ -100,7 +107,7 @@ pub const Settings = struct {
     }
 
     pub fn formatBuf(s: Settings, buf: []u8) []const u8 {
-        const head = std.fmt.bufPrint(buf, "theme {s}\n", .{s.theme.code()}) catch return "";
+        const head = std.fmt.bufPrint(buf, "theme {s}\nclock {s}\nnetwork {s}\n", .{ s.theme.code(), if (s.clock) "on" else "off", if (s.network) "on" else "off" }) catch return "";
         var len = head.len;
         if (s.image.slice()) |path| len += (std.fmt.bufPrint(buf[len..], "image {s}\n", .{path}) catch return "").len;
         if (s.custom.slice()) |path| len += (std.fmt.bufPrint(buf[len..], "custom {s}\n", .{path}) catch return "").len;
@@ -140,6 +147,13 @@ test "appearance settings parse, format, save and load" {
     try testing.expectEqual(Mode.dark, Settings.parse("").theme);
     try testing.expectEqual(Mode.light, Settings.parse("theme light\n").theme);
     try testing.expectEqual(Mode.dark, Settings.parse("theme dark\n").theme);
+    // The dock's clock and network status: shown unless turned off.
+    try testing.expect(Settings.parse("theme dark\n").clock and Settings.parse("").network);
+    const off = Settings.parse("clock off\nnetwork off\n");
+    try testing.expect(!off.clock and !off.network);
+    var off_buf: [Settings.max_text]u8 = undefined;
+    try testing.expectEqual(off.clock, Settings.parse(off.formatBuf(&off_buf)).clock);
+    try testing.expectEqual(off.network, Settings.parse(off.formatBuf(&off_buf)).network);
     try testing.expectEqual(Mode.dark, Settings.parse("theme invalid\n").theme);
 
     var path_buf: [64]u8 = undefined;
@@ -168,7 +182,7 @@ test "the last picture chosen in Files is kept while a built-in one shows" {
     s.image = .of(backgrounds.path(backgrounds.all[0]));
     var buf: [Settings.max_text]u8 = undefined;
     const text = s.formatBuf(&buf);
-    try testing.expectEqualStrings("theme dark\nimage /os/backgrounds/forest.etc1\ncustom /data/user/sea.png\n", text);
+    try testing.expectEqualStrings("theme dark\nclock on\nnetwork on\nimage /os/backgrounds/forest.etc1\ncustom /data/user/sea.png\n", text);
     try testing.expectEqual(s, Settings.parse(text));
     // Written before it was kept apart: the picture shown is it.
     try testing.expectEqualStrings("/data/user/old.png", Settings.parse("theme dark\nimage /data/user/old.png\n").custom.slice().?);
@@ -180,7 +194,7 @@ test "the background image is kept, with spaces in its path" {
     s.chooseCustom("/data/user/My Pictures/sea.png");
     var buf: [Settings.max_text]u8 = undefined;
     const text = s.formatBuf(&buf);
-    try std.testing.expectEqualStrings("theme dark\nimage /data/user/My Pictures/sea.png\ncustom /data/user/My Pictures/sea.png\n", text);
+    try std.testing.expectEqualStrings("theme dark\nclock on\nnetwork on\nimage /data/user/My Pictures/sea.png\ncustom /data/user/My Pictures/sea.png\n", text);
     const back = Settings.parse(text);
     try std.testing.expectEqual(s, back);
     try std.testing.expectEqualStrings("/data/user/My Pictures/sea.png", back.image.slice().?);

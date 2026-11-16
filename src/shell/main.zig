@@ -170,6 +170,8 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
     dock.updates = updates.available;
     const appearance = dock_mod.readAppearance();
     dock.theme = appearance.theme;
+    dock.show_clock = appearance.clock;
+    dock.show_network = appearance.network;
     // The background image, if any: made ready on a thread of its own.
     var background_image: background_mod.Loader = .init(gpa, renderer.width, renderer.height, dock.bandHeight());
     defer background_image.deinit();
@@ -219,7 +221,9 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         .width = renderer.width,
         .height = renderer.height,
     });
-    server.setKeyboard(locale.load().keyboard);
+    // The keyboard, the language (the clock's ways) and the time zone,
+    // until the system's report says.
+    _ = applyLocale(locale.load(), &server, &lock, &dock, &quick);
     // The screen, for clients that ask (wl_output).
     server.output = .{
         .width = renderer.width,
@@ -292,6 +296,8 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
             dock.volume = dock_mod.readVolumeStatus();
             const chosen = dock_mod.readAppearance();
             dock.theme = chosen.theme;
+            dock.show_clock = chosen.clock;
+            dock.show_network = chosen.network;
             wantBackground(&background_image, &renderer, chosen);
             dock.draw();
             showDock(&renderer, &dock);
@@ -386,10 +392,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         var updates_changed = false;
         if (fds[sys_index].revents != 0) {
             if (sys_sub.poll()) |r| if (!r.denied) {
-                if (r.locale.keyboard != server.keyboard_layout) {
-                    print("dazzle-shell: keyboard {s}\n", .{r.locale.keyboard.code()});
-                    server.setKeyboard(r.locale.keyboard);
-                }
+                if (applyLocale(r.locale, &server, &lock, &dock, &quick)) panels_damaged = true;
                 if (updates.setReport(r)) updates_changed = true;
                 if (applyParental(r.parental, &parental, &locked, &lock, &quick, &renderer)) {
                     server.damaged = true;
@@ -894,8 +897,10 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         };
         if (apps_changes.appearance) {
             const chosen = dock_mod.readAppearance();
-            if (chosen.theme != dock.theme) {
+            if (chosen.theme != dock.theme or chosen.clock != dock.show_clock or chosen.network != dock.show_network) {
                 dock.theme = chosen.theme;
+                dock.show_clock = chosen.clock;
+                dock.show_network = chosen.network;
                 quick_dirty = true;
                 if (dock_shown) {
                     dock.draw();
@@ -942,10 +947,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
             if (sys_sub.fd == null) {
                 sys_sub.connect();
                 if (sys_sub.poll()) |r| if (!r.denied) {
-                    if (r.locale.keyboard != server.keyboard_layout) {
-                        print("dazzle-shell: keyboard {s}\n", .{r.locale.keyboard.code()});
-                        server.setKeyboard(r.locale.keyboard);
-                    }
+                    if (applyLocale(r.locale, &server, &lock, &dock, &quick)) panels_damaged = true;
                     if (updates.setReport(r)) updates_changed = true;
                     if (applyParental(r.parental, &parental, &locked, &lock, &quick, &renderer)) {
                         server.damaged = true;
@@ -955,11 +957,21 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                 };
                 if (apps_watch.retry()) apps_pending = .all;
             }
+            // The clock, a minute on: the dock's, and the quick settings'.
+            const wall = sys.realtimeSec();
+            if (dock_shown and dock.clockBehind(wall)) {
+                dock.draw();
+                showDock(&renderer, &dock);
+                panels_damaged = true;
+            }
+            if (quick.shown) if (quick.time) |t| if (t.minute != @divFloor(wall, 60)) {
+                quick_dirty = true;
+            };
             // The daily check for updates, when it is due.
             if (updates.tick(t_now)) updates_changed = true;
             // Time running out: said, at ten minutes, five and one.
             var warn_buf: [192]u8 = undefined;
-            if (warnings.due(parental, sys.realtimeSec(), &warn_buf)) |w| {
+            if (warnings.due(parental, sys.realtimeSec(), lock.zone, &warn_buf)) |w| {
                 notice.theme = dock.theme;
                 notice.show(.schedule, w.title, w.body, sys.nowNs());
                 server.damaged = true;
@@ -1516,6 +1528,27 @@ fn panelStatus(gpa: std.mem.Allocator, out: *std.ArrayList(u8), renderer: *const
 /// and a frame more when it has gone.
 /// A report's parental controls: locks, or unlocks, the screen as they
 /// say. Returns whether the screen changed.
+/// The system's keyboard and time zone, as its report says: the
+/// keyboard for the windows; the zone for the clock (the dock's, and the
+/// quick settings') and the lock screen. Returns whether the clock
+/// changed.
+fn applyLocale(l: locale.Settings, server: *server_mod.Server, lock: *lock_mod.Screen, dock: *dock_mod.Dock, quick: *quick_mod.Quick) bool {
+    if (l.keyboard != server.keyboard_layout) {
+        print("dazzle-shell: keyboard {s}\n", .{l.keyboard.code()});
+        server.setKeyboard(l.keyboard);
+    }
+    // The language says how the time is written (18:05, 6:05 PM).
+    const language_changed = l.language != locale.current;
+    locale.current = l.language;
+    if (language_changed) dock.time = null;
+    if (l.timezone == lock.zone) return language_changed;
+    print("dazzle-shell: time zone {s}\n", .{l.timezone.name()});
+    lock.zone = l.timezone;
+    dock.setTimeZone(l.timezone);
+    quick.zone = l.timezone;
+    return true;
+}
+
 fn applyParental(p: sys.system.Parental, have: *sys.system.Parental, locked: *bool, lock: *lock_mod.Screen, quick: *quick_mod.Quick, renderer: *render.Renderer) bool {
     const changed = !std.meta.eql(p, have.*);
     have.* = p;
@@ -1774,4 +1807,5 @@ test {
     _ = @import("placement.zig");
     _ = @import("render.zig");
     _ = @import("background.zig");
+    _ = @import("clock.zig");
 }
