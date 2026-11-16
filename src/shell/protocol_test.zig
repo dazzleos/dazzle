@@ -1917,6 +1917,22 @@ test "zwp_text_input_v3 sends enter/leave with focus, commits client state, and 
     try w.pump();
     try testing.expectEqual(keys_before + 1, keyboard_heard.counts[p.wl_keyboard.event.key]);
     w.server.keyboardKey(15, 2, false);
+    // Typed faster than the app says what its text is: a space, then ":"
+    // starts an emoji's name all the same.
+    w.server.keyboard_layout = .us;
+    for ([_]u32{ 57, 39, 20, 30, 32 }) |code| {
+        // ":" is Shift+;.
+        if (code == 39) w.server.keyboardKey(18, 42, true);
+        w.server.keyboardKey(18, code, true);
+        w.server.keyboardKey(18, code, false);
+        if (code == 39) w.server.keyboardKey(18, 42, false);
+    }
+    try w.pump();
+    try testing.expectEqualStrings(":tad", ti_ev.preedit[0..ti_ev.preedit_len]);
+    w.server.keyboardKey(19, 1, true);
+    w.server.keyboardKey(19, 1, false);
+    try w.pump();
+    const keys_typed = keyboard_heard.counts[p.wl_keyboard.event.key];
     // Not in a password field.
     m = try ti.request(p.zwp_text_input_v3.request.set_content_type);
     m.uint(p.zwp_text_input_v3.content_hint.sensitive_data).uint(p.zwp_text_input_v3.content_purpose.password).end();
@@ -1925,7 +1941,7 @@ test "zwp_text_input_v3 sends enter/leave with focus, commits client state, and 
     try w.pump();
     w.server.keyboardKey(16, 37, true);
     try w.pump();
-    try testing.expectEqual(keys_before + 3, keyboard_heard.counts[p.wl_keyboard.event.key]);
+    try testing.expectEqual(keys_typed + 1, keyboard_heard.counts[p.wl_keyboard.event.key]);
     w.server.keyboardKey(17, 37, false);
 }
 

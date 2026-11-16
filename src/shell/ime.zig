@@ -31,6 +31,13 @@ pub const Ime = struct {
     changed: bool = false,
     /// The keys it took as they went down: it takes them coming up too.
     taken: std.StaticBitSet(256) = .empty,
+    /// The last of what was typed (and put in) since the app last said
+    /// what text its field has, which it has not said yet: the text before
+    /// the cursor ends with it (typing fast, before the app catches up).
+    /// Only whether a word starts there matters (for `:`), so only ASCII.
+    typed: ?u8 = null,
+    /// The app's text field's state when `typed` began (its commits).
+    typed_serial: u32 = 0,
 
     /// Offers a key (a Linux key code) to the input method, before the
     /// app with the keyboard gets it, after `s.modifiers` has noted it.
@@ -71,9 +78,17 @@ pub const Ime = struct {
             .shift = shift,
         };
         const cursor: usize = @intCast(@max(ti.cursor, 0));
-        const before = ti.surrounding_text[0..@min(cursor, ti.surrounding_text.len)];
+        if (ti.serial != ime.typed_serial) ime.typed = null;
+        const last: [1]u8 = .{ime.typed orelse 0};
+        const before = if (ime.typed != null) &last else ti.surrounding_text[0..@min(cursor, ti.surrounding_text.len)];
         const out = ime.im.key(k, before);
         ime.send(s, out);
+        // What the app will have, until it says.
+        const typed: ?u21 = if (out.commit) |c| (if (c.len > 0) c[c.len - 1] else null) else if (!out.taken and pressed) k.char else null;
+        if (typed) |c| {
+            ime.typed = if (c < 0x80) @intCast(c) else 'x';
+            ime.typed_serial = ti.serial;
+        }
         return out.taken;
     }
 
