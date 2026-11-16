@@ -1945,6 +1945,54 @@ test "zwp_text_input_v3 sends enter/leave with focus, commits client state, and 
     w.server.keyboardKey(17, 37, false);
 }
 
+test "the system's input method starts no emoji in a field that does not say what text it has" {
+    var w: World = .{};
+    w.init();
+    defer w.deinit();
+    const a = try w.connect();
+    const compositor = try a.bind(p.wl_compositor.name, 4, null);
+    const wm_base = try a.bind(p.xdg_wm_base.name, 6, null);
+    const shm = try a.bind(p.wl_shm.name, 1, null);
+    const seat = try a.bind(p.wl_seat.name, 5, null);
+    const tim = try a.bind(p.zwp_text_input_manager_v3.name, 1, null);
+    const Ignore = struct {
+        fn event(_: ?*anyopaque, _: *client.Display, _: u32, _: u16, _: *wire.Reader) void {}
+    };
+    const ti = try a.d.newObject(.{ .ptr = null, .handler = Ignore.event });
+    var m = try tim.request(p.zwp_text_input_manager_v3.request.get_text_input);
+    m.uint(ti.id).uint(seat.id).end();
+    var keyboard_heard: Heard = .{ .keyboard = true };
+    const keyboard = try a.d.newObject(keyboard_heard.listener());
+    m = try seat.request(p.wl_seat.request.get_keyboard);
+    m.uint(keyboard.id).end();
+    var win: Window = .{ .surface = undefined, .xdg = undefined, .toplevel = undefined };
+    try win.open(a, compositor, wm_base, shm, null);
+    // Enabled, as a terminal does, without its text.
+    m = try ti.request(p.zwp_text_input_v3.request.enable);
+    m.end();
+    m = try ti.request(p.zwp_text_input_v3.request.commit);
+    m.end();
+    try w.pump();
+    var ime: ime_mod.Ime = .{};
+    w.server.input_method = .{ .ctx = &ime, .key = struct {
+        fn key(ctx: *anyopaque, srv: *Server, code: u32, pressed: bool) bool {
+            const i: *ime_mod.Ime = @ptrCast(@alignCast(ctx));
+            return i.key(srv, code, pressed);
+        }
+    }.key };
+    // ":" (Shift+;), "w": all the app's.
+    const before = keyboard_heard.counts[p.wl_keyboard.event.key];
+    w.server.keyboardKey(1, 42, true);
+    w.server.keyboardKey(1, 39, true);
+    w.server.keyboardKey(1, 39, false);
+    w.server.keyboardKey(1, 42, false);
+    w.server.keyboardKey(1, 17, true);
+    w.server.keyboardKey(1, 17, false);
+    try w.pump();
+    try testing.expect(ime.im.composing == null);
+    try testing.expectEqual(before + 6, keyboard_heard.counts[p.wl_keyboard.event.key]);
+}
+
 test "a window whose client asks is drawn rounded, with a shadow, unless square; other windows are drawn as they are" {
     var w: World = .{};
     w.init();

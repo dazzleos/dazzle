@@ -6,7 +6,8 @@
 //! method's preedit, and what it puts in as its commit. Its candidates
 //! show in a panel by the text's cursor. The keyboard layout says which
 //! language it composes (pinyin, romaji); emoji are for every layout. Never
-//! in a password field. kete's apps leave emoji to it too (see kete's
+//! in a password field; emoji not in a field that does not say what text
+//! it has. kete's apps leave emoji to it too (see kete's
 //! `own_input_method`).
 
 const std = @import("std");
@@ -60,6 +61,10 @@ pub const Ime = struct {
             ime.target = ti;
         }
         if (secret(ti)) return false;
+        // Emoji's names start with ":" where a word does, which only a
+        // field that says what text it has can tell (in a terminal, ":wq"
+        // would start one).
+        ime.im.emoji = ti.has_surrounding;
         ime.im.language = switch (s.keyboard_layout) {
             .pinyin => .pinyin,
             .romaji => .romaji,
