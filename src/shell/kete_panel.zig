@@ -149,8 +149,9 @@ pub const Panel = struct {
     frame_times: Times = .{},
     render_times: Times = .{},
     /// Drawn on the GPU: of `render_times`, the GPU's part (from handing
-    /// it the frame to its finishing).
+    /// it the frame to its finishing), and of that, the waiting.
     gpu_times: Times = .{},
+    wait_times: Times = .{},
 
     pub fn destroy(p: *Panel) void {
         p.ui.destroy();
@@ -230,12 +231,14 @@ pub const Panel = struct {
             .cpu = undefined,
         };
         const all = [_]kete.gfx.Viewport{.{ .x = 0, .y = 0, .width = width, .height = height }};
+        const waited = app.window.gpu_waited_ns;
         g.renderer.renderDmabuf(f.canvases, f.segments, &target, 0, &.{}, &all) catch |err| {
             sys.print(sys.log_warning ++ "dazzle-shell: a panel is not drawn on the GPU: {s}\n", .{@errorName(err)});
             return .{};
         };
         p.render_times.add(sys.nowNs() - framed, count);
         p.gpu_times.add(g.renderer.takeStats().gpu_ns, count);
+        p.wait_times.add(app.window.gpu_waited_ns -% waited, count);
         return picture;
     }
 
