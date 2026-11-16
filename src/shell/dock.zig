@@ -1147,7 +1147,7 @@ fn easeInOut(t: f32) f32 {
 const testing = std.testing;
 
 fn testKit() !*kete_panel.Kit {
-    return kete_panel.Kit.create(testing.allocator, testing.io, @embedFile("FiraSans-Regular.ttf"), null);
+    return kete_panel.Kit.create(testing.allocator, testing.io, @embedFile("FiraSans-Regular.ttf"), null, &.{});
 }
 
 test "the apps and the settings in the apps directory are noticed changing" {

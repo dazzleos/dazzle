@@ -1361,6 +1361,8 @@ pub fn build(b: *std.Build) void {
     run_mkinitramfs.addFileArg(b.path("fonts/OFL.txt"));
     run_mkinitramfs.addPrefixedFileArg("--file=os/fonts/TwemojiMozilla.ttf=", b.path("fonts/TwemojiMozilla.ttf"));
     run_mkinitramfs.addPrefixedFileArg("--file=os/fonts/TwemojiMozilla-LICENSE.txt=", b.path("fonts/TwemojiMozilla-LICENSE.txt"));
+    run_mkinitramfs.addPrefixedFileArg("--file=os/fonts/DroidSansFallbackFull.ttf=", b.path("fonts/DroidSansFallbackFull.ttf"));
+    run_mkinitramfs.addPrefixedFileArg("--file=os/fonts/DroidSansFallback-LICENSE.txt=", b.path("fonts/DroidSansFallback-LICENSE.txt"));
     // The third-party software built into the system's programs, and its
     // licences (each app has its own: see below).
     addNotices(b, run_mkinitramfs, "os/NOTICES", "Dazzle's system programs", &.{"MaterialIcons"});

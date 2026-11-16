@@ -577,7 +577,7 @@ test "updates are described by what they are of" {
 }
 
 test "the popup sits above the status box, and its parts take clicks" {
-    const kit = try kete_panel.Kit.create(testing.allocator, testing.io, @embedFile("FiraSans-Regular.ttf"), null);
+    const kit = try kete_panel.Kit.create(testing.allocator, testing.io, @embedFile("FiraSans-Regular.ttf"), null, &.{});
     defer kit.destroy();
     var q = try Quick.init(kit, 1);
     defer q.deinit();
@@ -619,7 +619,7 @@ test "the popup sits above the status box, and its parts take clicks" {
 }
 
 test "pressing the popup's parts mutes, drags the slider, and asks twice before powering off" {
-    const kit = try kete_panel.Kit.create(testing.allocator, testing.io, @embedFile("FiraSans-Regular.ttf"), null);
+    const kit = try kete_panel.Kit.create(testing.allocator, testing.io, @embedFile("FiraSans-Regular.ttf"), null, &.{});
     defer kit.destroy();
     var q = try Quick.init(kit, 1);
     defer q.deinit();

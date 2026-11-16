@@ -190,9 +190,9 @@ pub const Warnings = struct {
         const half = buf.len / 2;
         var when_buf: [64]u8 = undefined;
         const title = if (downtime)
-            locale.bufPrint(buf[0..half], "Downtime in {d} minute{s}", .{ minutes, if (minutes == 1) "" else "s" })
+            locale.bufPrint(buf[0..half], "Downtime in {d} minute{s}", .{ minutes, locale.plural(minutes) })
         else
-            locale.bufPrint(buf[0..half], "{d} minute{s} left today", .{ minutes, if (minutes == 1) "" else "s" });
+            locale.bufPrint(buf[0..half], "{d} minute{s} left today", .{ minutes, locale.plural(minutes) });
         const body = locale.bufPrint(buf[half..], "The computer locks {s}", .{whenText(&when_buf, t, now, zone)});
         return .{ .title = title, .body = body };
     }
@@ -201,7 +201,7 @@ pub const Warnings = struct {
 const testing = std.testing;
 
 test "the lock screen: typed by the keyboard's layout, Enter tries it" {
-    const kit = try kete_panel.Kit.create(testing.allocator, testing.io, @embedFile("FiraSans-Regular.ttf"), null);
+    const kit = try kete_panel.Kit.create(testing.allocator, testing.io, @embedFile("FiraSans-Regular.ttf"), null, &.{});
     defer kit.destroy();
     const p = try kit.panel();
     defer p.destroy();

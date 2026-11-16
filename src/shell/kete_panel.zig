@@ -81,12 +81,13 @@ pub const Kit = struct {
     gpu: ?*Gpu = null,
 
     /// Drawing text in the font in `font_data` (which must last as long as
-    /// it does), or kete's own if there is none, and emoji in the font at
-    /// `emoji_path`, if there is one.
-    pub fn create(gpa: std.mem.Allocator, io: std.Io, font_data: ?[]const u8, emoji_path: ?[]const u8) !*Kit {
+    /// it does), or kete's own if there is none, emoji in the font at
+    /// `emoji_path`, if there is one, and other scripts (Chinese) in those
+    /// at `fallback_paths` (those there are).
+    pub fn create(gpa: std.mem.Allocator, io: std.Io, font_data: ?[]const u8, emoji_path: ?[]const u8, fallback_paths: []const []const u8) !*Kit {
         const k = try gpa.create(Kit);
         errdefer gpa.destroy(k);
-        const shared = try kete.ui.SharedResources.createWithFonts(gpa, io, .empty, .{ .data = font_data, .emoji_path = emoji_path });
+        const shared = try kete.ui.SharedResources.createWithFonts(gpa, io, .empty, .{ .data = font_data, .emoji_path = emoji_path, .fallback_paths = fallback_paths });
         k.* = .{ .gpa = gpa, .shared = shared, .software = .init() };
         shared.attachRenderer(k.software.renderer(), false);
         return k;
@@ -328,7 +329,7 @@ const Rows = struct {
 };
 
 test "drawn again only where it changed, the same as drawn whole" {
-    const kit = try Kit.create(testing.allocator, testing.io, @embedFile("FiraSans-Regular.ttf"), null);
+    const kit = try Kit.create(testing.allocator, testing.io, @embedFile("FiraSans-Regular.ttf"), null, &.{});
     defer kit.destroy();
     const p = try kit.panel();
     defer p.destroy();
@@ -343,7 +344,7 @@ test "drawn again only where it changed, the same as drawn whole" {
 }
 
 test "kete widget trees drawn into panels' pictures, see-through where nothing is" {
-    const kit = try Kit.create(testing.allocator, testing.io, @embedFile("FiraSans-Regular.ttf"), null);
+    const kit = try Kit.create(testing.allocator, testing.io, @embedFile("FiraSans-Regular.ttf"), null, &.{});
     defer kit.destroy();
     const p = try kit.panel();
     defer p.destroy();

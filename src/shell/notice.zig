@@ -180,7 +180,7 @@ const View = struct {
 const testing = std.testing;
 
 test "a notice fades in, stays, fades out, and is gone; a new one takes its place" {
-    const kit = try kete_panel.Kit.create(testing.allocator, testing.io, @embedFile("FiraSans-Regular.ttf"), null);
+    const kit = try kete_panel.Kit.create(testing.allocator, testing.io, @embedFile("FiraSans-Regular.ttf"), null, &.{});
     defer kit.destroy();
     const panel = try kit.panel();
     defer panel.destroy();

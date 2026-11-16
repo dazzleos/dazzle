@@ -38,6 +38,10 @@ pub const default_font_file = "FiraSans-Regular.ttf";
 /// The system colour emoji font in /os/fonts.
 pub const emoji_font_file = "TwemojiMozilla.ttf";
 
+/// The font in /os/fonts for Chinese characters (and other scripts Fira
+/// Sans lacks), which text falls back to after the emoji font.
+pub const cjk_font_file = "DroidSansFallbackFull.ttf";
+
 test {
     _ = opentype;
     _ = raster;

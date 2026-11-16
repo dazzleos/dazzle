@@ -488,7 +488,7 @@ pub const Display = struct {
     }
 
     /// The window, if it is open.
-    fn openWindowOrNull(d: *Display) ?*Window {
+    pub fn openWindowOrNull(d: *Display) ?*Window {
         const w = &(d.window orelse return null);
         return if (w.open) w else null;
     }

@@ -444,7 +444,7 @@ test "formatting FPS, CPU, GPU, memory and GPU memory lines" {
 }
 
 test "overlay draws a see-through box like the dock's, with meter bars, in the bottom right" {
-    const kit = try kete_panel.Kit.create(testing.allocator, testing.io, @embedFile("FiraSans-Regular.ttf"), null);
+    const kit = try kete_panel.Kit.create(testing.allocator, testing.io, @embedFile("FiraSans-Regular.ttf"), null, &.{});
     defer kit.destroy();
     var o = try Overlay.init(kit, 1920, 1080);
     defer o.deinit();
@@ -483,7 +483,7 @@ test "overlay draws a see-through box like the dock's, with meter bars, in the b
 }
 
 test "drawn again as the numbers change, the same as drawn afresh" {
-    const kit = try kete_panel.Kit.create(testing.allocator, testing.io, @embedFile("FiraSans-Regular.ttf"), null);
+    const kit = try kete_panel.Kit.create(testing.allocator, testing.io, @embedFile("FiraSans-Regular.ttf"), null, &.{});
     defer kit.destroy();
     var o = try Overlay.init(kit, 1920, 1080);
     defer o.deinit();

@@ -86,10 +86,13 @@ pub const Host = struct {
         h.display.renderer = &h.renderer;
         var font_buf: [256]u8 = undefined;
         var emoji_buf: [256]u8 = undefined;
+        var cjk_buf: [256]u8 = undefined;
         h.app = try kete.App.init(gpa, io, environ, .{
             .app_id = options.app_id,
             .font_path = sys.fontFile(&font_buf, dazzle_font.default_font_file),
             .emoji_font_path = sys.fontFile(&emoji_buf, dazzle_font.emoji_font_file),
+            // Chinese, and other scripts Fira Sans lacks.
+            .fallback_font_paths = &.{sys.fontFile(&cjk_buf, dazzle_font.cjk_font_file)},
             .display = h.display.display(),
             .on_last_window_closed = options.on_last_window_closed,
         });
@@ -109,6 +112,12 @@ pub const Host = struct {
     /// kete's step (see `kete.App.step`), and the system's theme taken if
     /// it changed. False when the app should end.
     pub fn step(h: *Host, idle_timeout_ns: u64) !bool {
+        // Chinese typed through kete's pinyin input method, with that
+        // keyboard.
+        if (h.display.openWindowOrNull()) |w| {
+            const k = w.keyboard orelse w.win.layout;
+            h.app.shared.input_language = if (k == .pinyin) .pinyin else .none;
+        }
         const going = try h.app.step(idle_timeout_ns);
         if (h.theme_watch.changed()) followThemeOf(h);
         return going;

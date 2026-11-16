@@ -116,7 +116,9 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
     took.step(.apps);
     // The shell's UI is kete's: its panels share the font (and its
     // glyphs) and the renderers; the big ones are drawn on the GPU.
-    const kit = try kete_panel.Kit.create(gpa, io, ui_font_data, emoji);
+    // Chinese, and other scripts Fira Sans lacks.
+    var cjk_buf: [256]u8 = undefined;
+    const kit = try kete_panel.Kit.create(gpa, io, ui_font_data, emoji, &.{sys.fontFile(&cjk_buf, font.cjk_font_file)});
     kit.useGpu(renderer.dev) catch |err| print(sys.log_warning ++ "dazzle-shell: the panels are drawn on the CPU: {s}\n", .{@errorName(err)});
     var dock = try dock_mod.Dock.init(kit, apps, renderer.width, renderer.height);
     // The quick settings, over the status box when it is clicked: the
