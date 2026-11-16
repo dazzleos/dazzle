@@ -152,6 +152,8 @@ pub const Panel = struct {
     /// it the frame to its finishing), and of that, the waiting.
     gpu_times: Times = .{},
     wait_times: Times = .{},
+    /// And the kernel taking the job.
+    submit_times: Times = .{},
 
     pub fn destroy(p: *Panel) void {
         p.ui.destroy();
@@ -232,6 +234,7 @@ pub const Panel = struct {
         };
         const all = [_]kete.gfx.Viewport{.{ .x = 0, .y = 0, .width = width, .height = height }};
         const waited = app.window.gpu_waited_ns;
+        const submitted = app.window.gpu_submit_ns;
         g.renderer.renderDmabuf(f.canvases, f.segments, &target, 0, &.{}, &all) catch |err| {
             sys.print(sys.log_warning ++ "dazzle-shell: a panel is not drawn on the GPU: {s}\n", .{@errorName(err)});
             return .{};
@@ -239,6 +242,7 @@ pub const Panel = struct {
         p.render_times.add(sys.nowNs() - framed, count);
         p.gpu_times.add(g.renderer.takeStats().gpu_ns, count);
         p.wait_times.add(app.window.gpu_waited_ns -% waited, count);
+        p.submit_times.add(app.window.gpu_submit_ns -% submitted, count);
         return picture;
     }
 

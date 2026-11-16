@@ -65,6 +65,9 @@ pub var perfmon_id: u32 = 0;
 /// How long this process has waited for the GPU to finish its frames,
 /// in all (to see how much of a frame's time is the GPU's).
 pub var gpu_waited_ns: u64 = 0;
+/// And how long it has taken handing them over (the kernel checking and
+/// queueing their jobs).
+pub var gpu_submit_ns: u64 = 0;
 
 pub const Gpu = struct {
     ptr: *anyopaque,
@@ -110,6 +113,8 @@ pub const Gpu = struct {
         // The kernel copies the control lists, so the frame can be reused
         // at once.
         var seqno: u64 = 0;
+        const started = sys.nowNs();
+        defer gpu_submit_ns +%= sys.nowNs() - started;
         for (0..frame.regionCount()) |i| {
             const job = frame.submitRegion(i);
             job.perfmonid = perfmon_id;
