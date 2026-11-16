@@ -30,6 +30,11 @@ pub const Language = enum {
     es_pe,
     es_us,
     zh_cn,
+    fr_fr,
+    fr_ca,
+    de_de,
+    pt_br,
+    pt_pt,
 
     /// Its code, as BCP 47 writes it: "en-GB".
     pub fn code(l: Language) []const u8 {
@@ -47,15 +52,29 @@ pub const Language = enum {
             .es_pe => "es-PE",
             .es_us => "es-US",
             .zh_cn => "zh-CN",
+            .fr_fr => "fr-FR",
+            .fr_ca => "fr-CA",
+            .de_de => "de-DE",
+            .pt_br => "pt-BR",
+            .pt_pt => "pt-PT",
+        };
+    }
+
+    /// The language it is a kind of (for its words and ways).
+    pub fn family(l: Language) Family {
+        return switch (l) {
+            .en_us, .en_gb, .en_au, .en_nz, .en_ca => .english,
+            .es_es, .es_mx, .es_ar, .es_co, .es_cl, .es_pe, .es_us => .spanish,
+            .zh_cn => .chinese,
+            .fr_fr, .fr_ca => .french,
+            .de_de => .german,
+            .pt_br, .pt_pt => .portuguese,
         };
     }
 
     /// Spanish (of any country).
     pub fn spanish(l: Language) bool {
-        return switch (l) {
-            .es_es, .es_mx, .es_ar, .es_co, .es_cl, .es_pe, .es_us => true,
-            else => false,
-        };
+        return l.family() == .spanish;
     }
 
     pub fn fromCode(text_: []const u8) ?Language {
@@ -79,6 +98,11 @@ pub const Language = enum {
             .es_pe => "Español (Perú)",
             .es_us => "Español (Estados Unidos)",
             .zh_cn => "中文（简体）",
+            .fr_fr => "Français (France)",
+            .fr_ca => "Français (Canada)",
+            .de_de => "Deutsch (Deutschland)",
+            .pt_br => "Português (Brasil)",
+            .pt_pt => "Português (Portugal)",
         };
     }
 
@@ -93,6 +117,11 @@ pub const Language = enum {
             .es_pe => "Spanish (Peru)",
             .es_us => "Spanish (United States)",
             .zh_cn => "Chinese (Simplified)",
+            .fr_fr => "French (France)",
+            .fr_ca => "French (Canada)",
+            .de_de => "German (Germany)",
+            .pt_br => "Portuguese (Brazil)",
+            .pt_pt => "Portuguese (Portugal)",
             else => l.name(),
         };
     }
@@ -114,6 +143,11 @@ pub const Language = enum {
             .es_pe => "America/Lima",
             .es_us => "America/New_York",
             .zh_cn => "Asia/Shanghai",
+            .fr_fr => "Europe/Paris",
+            .fr_ca => "America/Toronto",
+            .de_de => "Europe/Berlin",
+            .pt_br => "America/Sao_Paulo",
+            .pt_pt => "Europe/Lisbon",
         }) orelse .utc;
     }
 
@@ -124,6 +158,11 @@ pub const Language = enum {
             .es_es => .es,
             .es_mx, .es_ar, .es_co, .es_cl, .es_pe => .latam,
             .zh_cn => .pinyin,
+            .fr_fr => .fr,
+            .de_de => .de,
+            .pt_br => .br,
+            .pt_pt => .pt,
+            // Canada's French keyboard is QWERTY: the US one, to start.
             else => .us,
         };
     }
@@ -141,7 +180,7 @@ pub const Language = enum {
 
     pub fn clock(l: Language) Clock {
         return switch (l) {
-            .en_gb, .es_es, .es_ar, .es_cl, .zh_cn => .@"24_hour",
+            .en_gb, .es_es, .es_ar, .es_cl, .zh_cn, .fr_fr, .fr_ca, .de_de, .pt_br, .pt_pt => .@"24_hour",
             .en_us, .en_ca => .@"12_hour_upper",
             .en_au, .en_nz => .@"12_hour_lower",
             .es_mx, .es_co, .es_pe, .es_us => .@"12_hour_spanish",
@@ -168,6 +207,10 @@ pub const Keyboard = enum {
     latam,
     /// A US keyboard, typing Chinese through kete's pinyin input method.
     pinyin,
+    fr,
+    de,
+    br,
+    pt,
 
     pub fn name(k: Keyboard) []const u8 {
         return switch (k) {
@@ -176,6 +219,10 @@ pub const Keyboard = enum {
             .es => "Español (España)",
             .latam => "Español (Latinoamérica)",
             .pinyin => "中文（拼音）",
+            .fr => "Français (AZERTY)",
+            .de => "Deutsch (QWERTZ)",
+            .br => "Português (Brasil, ABNT2)",
+            .pt => "Português (Portugal)",
         };
     }
 
@@ -196,6 +243,10 @@ pub const Keyboard = enum {
             .es => &es_keys,
             .latam => &latam_keys,
             .pinyin => &us_keys,
+            .fr => &fr_keys,
+            .de => &de_keys,
+            .br => &br_keys,
+            .pt => &pt_keys,
         };
     }
 
@@ -204,7 +255,7 @@ pub const Keyboard = enum {
     pub fn char(k: Keyboard, key_code: u32, shift: bool, caps: bool, altgr: bool) ?u21 {
         for (k.keys()) |key| if (key.code == key_code) {
             if (altgr) return key.altgr;
-            const letter = isLetter(key.plain);
+            const letter = key.capsLetter();
             const up = if (letter) shift != caps else shift;
             return if (up) key.shifted else key.plain;
         };
@@ -236,6 +287,16 @@ pub const Key = struct {
     plain: u21,
     shifted: u21,
     altgr: ?u21 = null,
+
+    /// Whether Caps Lock types it as with Shift: a letter, its capital with
+    /// Shift (not ç on a French keyboard, which types 9).
+    pub fn capsLetter(k: Key) bool {
+        if (k.plain >= 'a' and k.plain <= 'z') return k.shifted == k.plain - 32;
+        return switch (k.plain) {
+            'ñ', 'ç', 'ü', 'ö', 'ä' => k.shifted == k.plain - 32,
+            else => false,
+        };
+    }
 };
 
 /// The keys of a US keyboard's rows, by Linux key code.
@@ -350,6 +411,157 @@ const latam_keys = blk: {
         };
     for (&keys) |*k| if (k.code == 16) {
         k.altgr = '@';
+    };
+    break :blk keys;
+};
+
+/// French (France), AZERTY: é è ç à on the number keys (the digits with
+/// Shift), ^ and ¨ as dead keys, ù, and on AltGr ~ # { [ | ` \ ^ @ ] }
+/// and €.
+const fr_keys = blk: {
+    var keys = row(2, "&é\"'(-è_çà)=", "1234567890°+") ++
+        row(16, "azertyuiop", "AZERTYUIOP") ++
+        [_]Key{
+            .{ .code = 26, .plain = dead_circumflex, .shifted = dead_diaeresis },
+            .{ .code = 27, .plain = '$', .shifted = '£', .altgr = '¤' },
+        } ++
+        row(30, "qsdfghjklm", "QSDFGHJKLM") ++
+        [_]Key{
+            .{ .code = 40, .plain = 'ù', .shifted = '%' },
+            .{ .code = 41, .plain = '²', .shifted = '³' },
+            .{ .code = 43, .plain = '*', .shifted = 'µ' },
+        } ++
+        row(44, "wxcvbn,;:!", "WXCVBN?./§") ++
+        [_]Key{
+            .{ .code = 57, .plain = ' ', .shifted = ' ' },
+            .{ .code = 86, .plain = '<', .shifted = '>' },
+        };
+    for (&keys) |*k| k.altgr = switch (k.code) {
+        3 => '~',
+        4 => '#',
+        5 => '{',
+        6 => '[',
+        7 => '|',
+        8 => '`',
+        9 => '\\',
+        10 => '^',
+        11 => '@',
+        12 => ']',
+        13 => '}',
+        18 => '€',
+        else => k.altgr,
+    };
+    break :blk keys;
+};
+
+/// German (Germany), QWERTZ: ß, ü, ö and ä, ^ ´ and ` as dead keys, and
+/// on AltGr @ (Q), € (E), ² ³ { [ ] } \ ~ | and µ.
+const de_keys = blk: {
+    var keys = row(2, "1234567890ß", "!\"§$%&/()=?") ++
+        [_]Key{.{ .code = 13, .plain = dead_acute, .shifted = dead_grave }} ++
+        row(16, "qwertzuiop", "QWERTZUIOP") ++
+        [_]Key{
+            .{ .code = 26, .plain = 'ü', .shifted = 'Ü' },
+            .{ .code = 27, .plain = '+', .shifted = '*', .altgr = '~' },
+        } ++
+        row(30, "asdfghjkl", "ASDFGHJKL") ++
+        [_]Key{
+            .{ .code = 39, .plain = 'ö', .shifted = 'Ö' },
+            .{ .code = 40, .plain = 'ä', .shifted = 'Ä' },
+            .{ .code = 41, .plain = dead_circumflex, .shifted = '°' },
+            .{ .code = 43, .plain = '#', .shifted = '\'' },
+        } ++
+        row(44, "yxcvbnm,.-", "YXCVBNM;:_") ++
+        [_]Key{
+            .{ .code = 57, .plain = ' ', .shifted = ' ' },
+            .{ .code = 86, .plain = '<', .shifted = '>', .altgr = '|' },
+        };
+    for (&keys) |*k| k.altgr = switch (k.code) {
+        3 => '²',
+        4 => '³',
+        8 => '{',
+        9 => '[',
+        10 => ']',
+        11 => '}',
+        12 => '\\',
+        16 => '@',
+        18 => '€',
+        50 => 'µ',
+        else => k.altgr,
+    };
+    break :blk keys;
+};
+
+/// Portuguese (Brazil), ABNT2: ç, ´ ` ~ ^ and ¨ as dead keys, and on
+/// AltGr / ? ° (Q W E), ¹ ² ³ £ ¢ ¬ §, ª and º.
+const br_keys = blk: {
+    var keys = row(2, "12345", "!@#$%") ++
+        [_]Key{.{ .code = 7, .plain = '6', .shifted = dead_diaeresis }} ++
+        row(8, "7890-=", "&*()_+") ++
+        row(16, "qwertyuiop", "QWERTYUIOP") ++
+        [_]Key{
+            .{ .code = 26, .plain = dead_acute, .shifted = dead_grave },
+            .{ .code = 27, .plain = '[', .shifted = '{', .altgr = 'ª' },
+        } ++
+        row(30, "asdfghjkl", "ASDFGHJKL") ++
+        [_]Key{
+            .{ .code = 39, .plain = 'ç', .shifted = 'Ç' },
+            .{ .code = 40, .plain = dead_tilde, .shifted = dead_circumflex },
+            .{ .code = 41, .plain = '\'', .shifted = '"' },
+            .{ .code = 43, .plain = ']', .shifted = '}', .altgr = 'º' },
+        } ++
+        row(44, "zxcvbnm,.;", "ZXCVBNM<>:") ++
+        [_]Key{
+            .{ .code = 57, .plain = ' ', .shifted = ' ' },
+            .{ .code = 86, .plain = '\\', .shifted = '|' },
+        };
+    for (&keys) |*k| k.altgr = switch (k.code) {
+        2 => '¹',
+        3 => '²',
+        4 => '³',
+        5 => '£',
+        6 => '¢',
+        7 => '¬',
+        13 => '§',
+        16 => '/',
+        17 => '?',
+        18 => '°',
+        else => k.altgr,
+    };
+    break :blk keys;
+};
+
+/// Portuguese (Portugal): ç, º and ª, ´ ` ~ and ^ as dead keys, « and »,
+/// and on AltGr @ £ § { [ ] } and €.
+const pt_keys = blk: {
+    var keys = row(2, "1234567890'«", "!\"#$%&/()=?»") ++
+        row(16, "qwertyuiop", "QWERTYUIOP") ++
+        [_]Key{
+            .{ .code = 26, .plain = '+', .shifted = '*' },
+            .{ .code = 27, .plain = dead_acute, .shifted = dead_grave },
+        } ++
+        row(30, "asdfghjkl", "ASDFGHJKL") ++
+        [_]Key{
+            .{ .code = 39, .plain = 'ç', .shifted = 'Ç' },
+            .{ .code = 40, .plain = 'º', .shifted = 'ª' },
+            .{ .code = 41, .plain = '\\', .shifted = '|' },
+            .{ .code = 43, .plain = dead_tilde, .shifted = dead_circumflex },
+        } ++
+        row(44, "zxcvbnm,.-", "ZXCVBNM;:_") ++
+        [_]Key{
+            .{ .code = 57, .plain = ' ', .shifted = ' ' },
+            .{ .code = 86, .plain = '<', .shifted = '>' },
+        };
+    for (&keys) |*k| k.altgr = switch (k.code) {
+        3 => '@',
+        4 => '£',
+        5 => '§',
+        8 => '{',
+        9 => '[',
+        10 => ']',
+        11 => '}',
+        18 => '€',
+        else => k.altgr,
     };
     break :blk keys;
 };
@@ -488,14 +700,24 @@ pub fn bufPrint(buf: []u8, comptime fmt: []const u8, args: anytype) []const u8 {
 pub fn textIn(comptime l: Language, comptime s: []const u8) []const u8 {
     @setEvalBranchQuota(1_000_000);
     if (l == .en_us) return lookup(&us_spelling, s) orelse s;
-    if (l == .zh_cn) {
-        if (!hasWords(s)) return s;
-        return lookup(&chinese.simplified, s) orelse @compileError("no Chinese for \"" ++ s ++ "\" (see chinese.zig)");
-    }
-    if (!l.spanish()) return s;
-    if (!hasWords(s)) return s;
-    if (l == .es_es) if (lookup(&spanish.spain, s)) |t| return t;
-    return lookup(&spanish.latin_america, s) orelse @compileError("no Spanish for \"" ++ s ++ "\" (see spanish.zig)");
+    if (l.family() == .english or !hasWords(s)) return s;
+    // The country's own words, if it has any for it, then the language's.
+    const own: ?[]const u8 = switch (l) {
+        .es_es => lookup(&spanish.spain, s),
+        .fr_ca => lookup(&french.canada, s),
+        .pt_pt => lookup(&portuguese.portugal, s),
+        else => null,
+    };
+    if (own) |t| return t;
+    const t = switch (l.family()) {
+        .english => unreachable,
+        .spanish => lookup(&spanish.latin_america, s),
+        .chinese => lookup(&chinese.simplified, s),
+        .french => lookup(&french.france, s),
+        .german => lookup(&german.germany, s),
+        .portuguese => lookup(&portuguese.brazil, s),
+    };
+    return t orelse @compileError("no " ++ @tagName(l.family()) ++ " for \"" ++ s ++ "\" (see " ++ @tagName(l.family()) ++ ".zig)");
 }
 
 /// Whether `s` has words to translate: letters outside its format's
@@ -515,8 +737,14 @@ fn lookup(table: []const [2][]const u8, comptime s: []const u8) ?[]const u8 {
 
 /// The Spanish translations.
 pub const spanish = @import("spanish.zig");
-/// The Chinese translations.
+/// The other languages' translations.
 pub const chinese = @import("chinese.zig");
+pub const french = @import("french.zig");
+pub const german = @import("german.zig");
+pub const portuguese = @import("portuguese.zig");
+
+/// The kinds of language, by their words and ways.
+pub const Family = enum { english, spanish, chinese, french, german, portuguese };
 
 /// American spelling, where it differs (Canada spells as Britain does).
 const us_spelling = [_][2][]const u8{
@@ -524,35 +752,91 @@ const us_spelling = [_][2][]const u8{
     .{ "16-bit colour", "16-bit color" },
 };
 
-const months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
-const months_long = [_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
-const weekdays = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
-// Spanish writes them in lower case.
-const months_es = [_][]const u8{ "ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sept", "oct", "nov", "dic" };
-const months_long_es = [_][]const u8{ "enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre" };
-const weekdays_es = [_][]const u8{ "domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado" };
-const weekdays_zh = [_][]const u8{ "星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六" };
+/// A language's words for the calendar, and how its dates are written.
+const Calendar = struct {
+    months: [12][]const u8,
+    months_long: [12][]const u8,
+    weekdays: [7][]const u8,
+    today: []const u8,
+    yesterday: []const u8,
+};
+
+const calendars = std.enums.directEnumArray(Family, Calendar, 0, .{
+    .english = .{
+        .months = .{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" },
+        .months_long = .{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" },
+        .weekdays = .{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" },
+        .today = "Today",
+        .yesterday = "Yesterday",
+    },
+    // Spanish, French and Portuguese write them in lower case.
+    .spanish = .{
+        .months = .{ "ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sept", "oct", "nov", "dic" },
+        .months_long = .{ "enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre" },
+        .weekdays = .{ "domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado" },
+        .today = "Hoy",
+        .yesterday = "Ayer",
+    },
+    .chinese = .{
+        .months = .{ "1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月" },
+        .months_long = .{ "1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月" },
+        .weekdays = .{ "星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六" },
+        .today = "今天",
+        .yesterday = "昨天",
+    },
+    .french = .{
+        .months = .{ "janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc." },
+        .months_long = .{ "janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre" },
+        .weekdays = .{ "dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi" },
+        .today = "Aujourd’hui",
+        .yesterday = "Hier",
+    },
+    .german = .{
+        .months = .{ "Jan.", "Feb.", "März", "Apr.", "Mai", "Juni", "Juli", "Aug.", "Sept.", "Okt.", "Nov.", "Dez." },
+        .months_long = .{ "Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember" },
+        .weekdays = .{ "Sonntag", "Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag" },
+        .today = "Heute",
+        .yesterday = "Gestern",
+    },
+    .portuguese = .{
+        .months = .{ "jan.", "fev.", "mar.", "abr.", "mai.", "jun.", "jul.", "ago.", "set.", "out.", "nov.", "dez." },
+        .months_long = .{ "janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro" },
+        .weekdays = .{ "domingo", "segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado" },
+        .today = "Hoje",
+        .yesterday = "Ontem",
+    },
+});
+
+fn calendar() *const Calendar {
+    return &calendars[@intFromEnum(current.family())];
+}
 
 /// A day of the week's name (0: Sunday), in the current language.
 pub fn weekdayName(d: u3) []const u8 {
-    if (current == .zh_cn) return weekdays_zh[@min(d, 6)];
-    return (if (current.spanish()) weekdays_es else weekdays)[@min(d, 6)];
+    return calendar().weekdays[@min(d, 6)];
 }
 
 /// The ending a count's word takes: "s" for more than one (or none) in
-/// English and Spanish ("5 minutes", "5 minutos"); none in Chinese.
+/// English, Spanish, French and Portuguese ("5 minutes", "5 minutos");
+/// none in Chinese or German (whose translations say the word whole).
 pub fn plural(n: anytype) []const u8 {
-    if (current == .zh_cn) return "";
-    return if (n == 1) "" else "s";
+    return switch (current.family()) {
+        .chinese, .german => "",
+        else => if (n == 1) "" else "s",
+    };
 }
 
 /// A date in full, with its day of the week: "Monday, 16 November 2026",
-/// "lunes, 16 de noviembre de 2026" or "2026年11月16日 星期一".
+/// "lunes, 16 de noviembre de 2026", "lundi 16 novembre 2026" or
+/// "2026年11月16日 星期一".
 pub fn formatFullDate(buf: []u8, weekday: u3, day: u32, month: u32, year: u32) []const u8 {
-    var date_buf: [40]u8 = undefined;
+    var date_buf: [48]u8 = undefined;
     const date = formatLongDate(&date_buf, day, month, year);
-    if (current == .zh_cn) return std.fmt.bufPrint(buf, "{s} {s}", .{ date, weekdayName(weekday) }) catch "";
-    return std.fmt.bufPrint(buf, "{s}, {s}", .{ weekdayName(weekday), date }) catch "";
+    return switch (current.family()) {
+        .chinese => std.fmt.bufPrint(buf, "{s} {s}", .{ date, weekdayName(weekday) }),
+        .french => std.fmt.bufPrint(buf, "{s} {s}", .{ weekdayName(weekday), date }),
+        else => std.fmt.bufPrint(buf, "{s}, {s}", .{ weekdayName(weekday), date }),
+    } catch "";
 }
 
 /// A time of day: "18:05", "6:05 PM", "6:05 pm" or "6:05 p. m.".
@@ -566,36 +850,36 @@ pub fn formatClock(buf: []u8, hour: u32, minute: u32) []const u8 {
     } catch "";
 }
 
-/// A date: "7 Oct", "Oct 7" or "7 oct", with the year ("7 Oct 2025",
-/// "Oct 7, 2025", "7 oct 2025") if `year` is given.
+/// A date: "7 Oct", "Oct 7", "7 oct", "7. Okt." or "10月7日", with the
+/// year ("7 Oct 2025", "Oct 7, 2025", "2025年10月7日") if `year` is given.
 pub fn formatDate(buf: []u8, day: u32, month: u32, year: ?u32) []const u8 {
-    if (current == .zh_cn) {
-        if (year) |y| return std.fmt.bufPrint(buf, "{d}年{d}月{d}日", .{ y, month, day }) catch "";
-        return std.fmt.bufPrint(buf, "{d}月{d}日", .{ month, day }) catch "";
-    }
-    const m = (if (current.spanish()) months_es else months)[@min(month, 12) -| 1];
-    if (current.monthFirst()) {
-        if (year) |y| return std.fmt.bufPrint(buf, "{s} {d}, {d}", .{ m, day, y }) catch "";
-        return std.fmt.bufPrint(buf, "{s} {d}", .{ m, day }) catch "";
-    }
-    if (year) |y| return std.fmt.bufPrint(buf, "{d} {s} {d}", .{ day, m, y }) catch "";
-    return std.fmt.bufPrint(buf, "{d} {s}", .{ day, m }) catch "";
+    const m = calendar().months[@min(month, 12) -| 1];
+    return (switch (current.family()) {
+        .chinese => if (year) |y| std.fmt.bufPrint(buf, "{d}年{d}月{d}日", .{ y, month, day }) else std.fmt.bufPrint(buf, "{d}月{d}日", .{ month, day }),
+        .german => if (year) |y| std.fmt.bufPrint(buf, "{d}. {s} {d}", .{ day, m, y }) else std.fmt.bufPrint(buf, "{d}. {s}", .{ day, m }),
+        .portuguese => if (year) |y| std.fmt.bufPrint(buf, "{d} de {s} de {d}", .{ day, m, y }) else std.fmt.bufPrint(buf, "{d} de {s}", .{ day, m }),
+        else => if (current.monthFirst())
+            (if (year) |y| std.fmt.bufPrint(buf, "{s} {d}, {d}", .{ m, day, y }) else std.fmt.bufPrint(buf, "{s} {d}", .{ m, day }))
+        else if (year) |y| std.fmt.bufPrint(buf, "{d} {s} {d}", .{ day, m, y }) else std.fmt.bufPrint(buf, "{d} {s}", .{ day, m }),
+    }) catch "";
 }
 
-/// A date in full: "7 October 2026", "October 7, 2026" or "7 de octubre de
-/// 2026".
+/// A date in full: "7 October 2026", "October 7, 2026", "7 de octubre de
+/// 2026", "7 octobre 2026", "7. Oktober 2026" or "2026年10月7日".
 pub fn formatLongDate(buf: []u8, day: u32, month: u32, year: u32) []const u8 {
-    const i = @min(month, 12) -| 1;
-    if (current == .zh_cn) return std.fmt.bufPrint(buf, "{d}年{d}月{d}日", .{ year, month, day }) catch "";
-    if (current.spanish()) return std.fmt.bufPrint(buf, "{d} de {s} de {d}", .{ day, months_long_es[i], year }) catch "";
-    if (current.monthFirst()) return std.fmt.bufPrint(buf, "{s} {d}, {d}", .{ months_long[i], day, year }) catch "";
-    return std.fmt.bufPrint(buf, "{d} {s} {d}", .{ day, months_long[i], year }) catch "";
+    const m = calendar().months_long[@min(month, 12) -| 1];
+    return (switch (current.family()) {
+        .chinese => std.fmt.bufPrint(buf, "{d}年{d}月{d}日", .{ year, month, day }),
+        .spanish, .portuguese => std.fmt.bufPrint(buf, "{d} de {s} de {d}", .{ day, m, year }),
+        .german => std.fmt.bufPrint(buf, "{d}. {s} {d}", .{ day, m, year }),
+        else => if (current.monthFirst()) std.fmt.bufPrint(buf, "{s} {d}, {d}", .{ m, day, year }) else std.fmt.bufPrint(buf, "{d} {s} {d}", .{ day, m, year }),
+    }) catch "";
 }
 
 /// When something happened, against `now` (both in seconds since 1970, in
 /// UTC, the only time the system has): "Today, 10:32", "Yesterday, 6:05
 /// PM", "7 Oct" this year, else "7 Oct 2025" (in the current language's
-/// ways: "Hoy, 10:32").
+/// ways: "Hoy, 10:32", "今天 10:32").
 pub fn formatWhen(buf: []u8, secs: i64, now: i64) []const u8 {
     if (secs <= 0) return "";
     const day_secs = std.time.s_per_day;
@@ -605,8 +889,8 @@ pub fn formatWhen(buf: []u8, secs: i64, now: i64) []const u8 {
     if (day == today or day == today - 1) {
         var clock_buf: [16]u8 = undefined;
         const clock = formatClock(&clock_buf, in_day / 3600, in_day / 60 % 60);
-        if (current == .zh_cn) return std.fmt.bufPrint(buf, "{s} {s}", .{ if (day == today) "今天" else "昨天", clock }) catch "";
-        const word = if (current.spanish()) (if (day == today) "Hoy" else "Ayer") else if (day == today) "Today" else "Yesterday";
+        const word = if (day == today) calendar().today else calendar().yesterday;
+        if (current.family() == .chinese) return std.fmt.bufPrint(buf, "{s} {s}", .{ word, clock }) catch "";
         return std.fmt.bufPrint(buf, "{s}, {s}", .{ word, clock }) catch "";
     }
     const date = (std.time.epoch.EpochDay{ .day = @intCast(day) }).calculateYearDay();
@@ -663,6 +947,20 @@ test "keyboards" {
     // Latin American: AltGr+Q.
     try testing.expectEqual(@as(?u21, '@'), Keyboard.latam.char(16, false, false, true));
     try testing.expectEqual(@as(?u21, dead_acute), Keyboard.latam.char(26, false, false, false));
+    // French (AZERTY): é on 2 (1 with Shift), Caps Lock not turning ç
+    // into 9, € on AltGr+E; German: ü, ß, € and @; Brazil: ç, dead ~.
+    try testing.expectEqual(@as(?u21, 'é'), Keyboard.fr.char(3, false, false, false));
+    try testing.expectEqual(@as(?u21, '2'), Keyboard.fr.char(3, true, false, false));
+    try testing.expectEqual(@as(?u21, 'ç'), Keyboard.fr.char(10, false, true, false));
+    try testing.expectEqual(@as(?u21, 'A'), Keyboard.fr.char(16, false, true, false));
+    try testing.expectEqual(@as(?u21, '€'), Keyboard.fr.char(18, false, false, true));
+    try testing.expectEqual(@as(?u21, 'Ü'), Keyboard.de.char(26, false, true, false));
+    try testing.expectEqual(@as(?u21, 'ß'), Keyboard.de.char(12, false, false, false));
+    try testing.expectEqual(@as(?u21, 'z'), Keyboard.de.char(21, false, false, false));
+    try testing.expectEqual(@as(?u21, '@'), Keyboard.de.char(16, false, false, true));
+    try testing.expectEqual(@as(?u21, 'Ç'), Keyboard.br.char(39, true, false, false));
+    try testing.expectEqual(@as(?u21, dead_tilde), Keyboard.br.char(40, false, false, false));
+    try testing.expectEqual(@as(?u21, '«'), Keyboard.pt.char(13, false, false, false));
     // Numeric keypad.
     for ([_]u32{ 82, 79, 80, 81, 75, 76, 77, 71, 72, 73, 83, 78, 74, 55, 98, 117 }, "0123456789.+-*/=") |code, expected| {
         try testing.expectEqual(@as(?u21, expected), Keyboard.us.char(code, false, false, false));
@@ -742,11 +1040,28 @@ test "dates, times and temperatures, in each language" {
     try testing.expectEqualStrings("2026年10月7日 星期三", formatFullDate(&full, 3, 7, 10, 2026));
     try testing.expectEqualStrings("设置", text("Settings"));
     try testing.expectEqualStrings("今天还剩 5 分钟", bufPrint(&full, "{d} minute{s} left today", .{ 5, plural(5) }));
+    // French, German and Portuguese.
+    current = .fr_fr;
+    try testing.expectEqualStrings("Hier, 18:05", formatWhen(&buf, 1791331200 - 6 * 3600 + 5 * 60, now));
+    try testing.expectEqualStrings("mercredi 7 octobre 2026", formatFullDate(&full, 3, 7, 10, 2026));
+    try testing.expectEqualStrings("Encore 5 minutes aujourd’hui", bufPrint(&full, "{d} minute{s} left today", .{ 5, plural(5) }));
+    current = .de_de;
+    try testing.expectEqualStrings("Mittwoch, 7. Oktober 2026", formatFullDate(&full, 3, 7, 10, 2026));
+    try testing.expectEqualStrings("31. Dez. 2025", formatWhen(&buf, 1767225600 - 60, now));
+    try testing.expectEqualStrings("Heute noch 5 Min.", bufPrint(&full, "{d} minute{s} left today", .{ 5, plural(5) }));
+    current = .pt_br;
+    try testing.expectEqualStrings("quarta-feira, 7 de outubro de 2026", formatFullDate(&full, 3, 7, 10, 2026));
+    try testing.expectEqualStrings("Configurações", text("Settings"));
+    current = .pt_pt;
+    try testing.expectEqualStrings("Definições", text("Settings"));
+    // Portugal's own words, and Brazil's where it has none.
+    try testing.expectEqualStrings("Aparência", text("Appearance"));
 }
 
 test "languages" {
     try testing.expectEqual(Language.en_gb, Language.fromCode("en-GB").?);
-    try testing.expect(Language.fromCode("fr-FR") == null);
+    try testing.expect(Language.fromCode("xx-XX") == null);
+    try testing.expectEqual(Language.fr_ca, Language.fromCode("fr-CA").?);
     try testing.expectEqual(Keyboard.gb, Language.en_gb.keyboard());
     try testing.expectEqual(Keyboard.us, Language.en_au.keyboard());
     try testing.expectEqual(Language.es_mx, Language.fromCode("es-MX").?);

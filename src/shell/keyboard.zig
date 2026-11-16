@@ -22,11 +22,11 @@ pub fn keymap(k: locale.Keyboard) []const u8 {
 }
 
 fn generate(comptime k: locale.Keyboard) []const u8 {
-    @setEvalBranchQuota(200_000);
+    @setEvalBranchQuota(2_000_000);
     var symbols: []const u8 = "";
     var altgr = false;
     for (k.keys()) |key| {
-        const letter = locale.isLetter(key.plain);
+        const letter = key.capsLetter();
         if (key.altgr != null) altgr = true;
         symbols = symbols ++ if (key.altgr) |third|
             std.fmt.comptimePrint("    key <{s}> {{ type = \"{s}\", [ {s}, {s}, {s}, {s} ] }};\n", .{ keyName(key.code), if (letter) "FOUR_LEVEL_ALPHABETIC" else "FOUR_LEVEL", keysym(key.plain), keysym(key.shifted), keysym(third), keysym(third) })
@@ -60,6 +60,7 @@ fn keyName(comptime code: u8) []const u8 {
 
 /// A character's keysym name.
 fn keysym(comptime c: u21) []const u8 {
+    @setEvalBranchQuota(100_000);
     if ((c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9')) return &[_]u8{@intCast(c)};
     return switch (c) {
         ' ' => "space",

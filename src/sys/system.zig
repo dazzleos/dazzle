@@ -694,7 +694,7 @@ test "requests and reports go through the socket" {
     const lr = Request.parse("locale en-NZ gb\n").?.locale;
     try testing.expectEqual(locale.Language.en_nz, lr.language);
     try testing.expectEqual(locale.Keyboard.gb, lr.keyboard);
-    try testing.expect(Request.parse("locale fr-FR us\n") == null);
+    try testing.expect(Request.parse("locale xx-XX us\n") == null);
     try testing.expectEqualStrings("Europe/London", Request.parse("locale en-GB gb Europe/London\n").?.locale.timezone.name());
     try testing.expectEqual(locale.TimeZone.utc, lr.timezone);
     try testing.expect(Request.parse("locale en-GB gb Middle/Earth\n") == null);

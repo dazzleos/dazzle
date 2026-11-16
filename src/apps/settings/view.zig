@@ -625,7 +625,7 @@ test "no page needs the window wider than the least it can be" {
     var n: u64 = 0;
     // In English, and in Spanish (longer).
     defer locale.current = .en_gb;
-    for ([_]locale.Language{ .en_gb, .es_es, .es_mx, .zh_cn }) |lang| for (std.enums.values(Page)) |pg| {
+    for ([_]locale.Language{ .en_gb, .es_es, .es_mx, .zh_cn, .fr_fr, .de_de, .pt_br, .pt_pt }) |lang| for (std.enums.values(Page)) |pg| {
         locale.current = lang;
         n += 1;
         u.frame(1000, 680, n, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps });
