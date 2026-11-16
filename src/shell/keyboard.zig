@@ -26,10 +26,10 @@ fn generate(comptime k: locale.Keyboard) []const u8 {
     var symbols: []const u8 = "";
     var altgr = false;
     for (k.keys()) |key| {
-        const letter = key.plain >= 'a' and key.plain <= 'z';
+        const letter = locale.isLetter(key.plain);
         if (key.altgr != null) altgr = true;
         symbols = symbols ++ if (key.altgr) |third|
-            std.fmt.comptimePrint("    key <{s}> {{ type = \"FOUR_LEVEL\", [ {s}, {s}, {s}, {s} ] }};\n", .{ keyName(key.code), keysym(key.plain), keysym(key.shifted), keysym(third), keysym(third) })
+            std.fmt.comptimePrint("    key <{s}> {{ type = \"{s}\", [ {s}, {s}, {s}, {s} ] }};\n", .{ keyName(key.code), if (letter) "FOUR_LEVEL_ALPHABETIC" else "FOUR_LEVEL", keysym(key.plain), keysym(key.shifted), keysym(third), keysym(third) })
         else if (letter)
             std.fmt.comptimePrint("    key <{s}> {{ type = \"ALPHABETIC\", [ {s}, {s} ] }};\n", .{ keyName(key.code), keysym(key.plain), keysym(key.shifted) })
         else
@@ -99,6 +99,18 @@ fn keysym(comptime c: u21) []const u8 {
         '¬' => "notsign",
         '¦' => "brokenbar",
         '€' => "EuroSign",
+        // Dead keys: an accent for the letter typed next.
+        locale.dead_grave => "dead_grave",
+        locale.dead_acute => "dead_acute",
+        locale.dead_circumflex => "dead_circumflex",
+        locale.dead_tilde => "dead_tilde",
+        locale.dead_diaeresis => "dead_diaeresis",
+        'ñ' => "ntilde",
+        'Ñ' => "Ntilde",
+        'ç' => "ccedilla",
+        'Ç' => "Ccedilla",
+        '¡' => "exclamdown",
+        '¿' => "questiondown",
         else => std.fmt.comptimePrint("U{X:0>4}", .{c}),
     };
 }
@@ -224,6 +236,12 @@ test "each layout's keymap: its keys, and its name" {
     try testing.expect(std.mem.indexOf(u8, gb, "key <AE04> { type = \"FOUR_LEVEL\", [ 4, dollar, EuroSign, EuroSign ] };") != null);
     try testing.expect(std.mem.indexOf(u8, gb, "key <BKSL> { [ numbersign, asciitilde ] };") != null);
     try testing.expect(std.mem.indexOf(u8, gb, "modifier_map Mod5 { <RALT> };") != null);
+    // Spanish: ñ a letter (Caps Lock makes it Ñ), dead accents, € on E.
+    const es = keymap(.es);
+    try testing.expect(std.mem.indexOf(u8, es, "key <AC10> { type = \"ALPHABETIC\", [ ntilde, Ntilde ] };") != null);
+    try testing.expect(std.mem.indexOf(u8, es, "key <AC11> { type = \"FOUR_LEVEL\", [ dead_acute, dead_diaeresis, braceleft, braceleft ] };") != null);
+    try testing.expect(std.mem.indexOf(u8, es, "key <AD03> { type = \"FOUR_LEVEL_ALPHABETIC\", [ e, E, EuroSign, EuroSign ] };") != null);
+    try testing.expect(std.mem.indexOf(u8, keymap(.latam), "key <AD11> { [ dead_acute, dead_diaeresis ] };") != null);
 }
 
 test "the keymap is in a sealed file" {

@@ -22,6 +22,13 @@ pub const Language = enum {
     en_au,
     en_nz,
     en_ca,
+    es_es,
+    es_mx,
+    es_ar,
+    es_co,
+    es_cl,
+    es_pe,
+    es_us,
 
     /// Its code, as BCP 47 writes it: "en-GB".
     pub fn code(l: Language) []const u8 {
@@ -31,6 +38,21 @@ pub const Language = enum {
             .en_au => "en-AU",
             .en_nz => "en-NZ",
             .en_ca => "en-CA",
+            .es_es => "es-ES",
+            .es_mx => "es-MX",
+            .es_ar => "es-AR",
+            .es_co => "es-CO",
+            .es_cl => "es-CL",
+            .es_pe => "es-PE",
+            .es_us => "es-US",
+        };
+    }
+
+    /// Spanish (of any country).
+    pub fn spanish(l: Language) bool {
+        return switch (l) {
+            .es_es, .es_mx, .es_ar, .es_co, .es_cl, .es_pe, .es_us => true,
+            else => false,
         };
     }
 
@@ -47,6 +69,27 @@ pub const Language = enum {
             .en_au => "English (Australia)",
             .en_nz => "English (New Zealand)",
             .en_ca => "English (Canada)",
+            .es_es => "Español (España)",
+            .es_mx => "Español (México)",
+            .es_ar => "Español (Argentina)",
+            .es_co => "Español (Colombia)",
+            .es_cl => "Español (Chile)",
+            .es_pe => "Español (Perú)",
+            .es_us => "Español (Estados Unidos)",
+        };
+    }
+
+    /// Its name in English, for finding it by ("Spanish (Mexico)").
+    pub fn englishName(l: Language) []const u8 {
+        return switch (l) {
+            .es_es => "Spanish (Spain)",
+            .es_mx => "Spanish (Mexico)",
+            .es_ar => "Spanish (Argentina)",
+            .es_co => "Spanish (Colombia)",
+            .es_cl => "Spanish (Chile)",
+            .es_pe => "Spanish (Peru)",
+            .es_us => "Spanish (United States)",
+            else => l.name(),
         };
     }
 
@@ -59,6 +102,13 @@ pub const Language = enum {
             .en_au => "Australia/Sydney",
             .en_nz => "Pacific/Auckland",
             .en_ca => "America/Toronto",
+            .es_es => "Europe/Madrid",
+            .es_mx => "America/Mexico_City",
+            .es_ar => "America/Argentina/Buenos_Aires",
+            .es_co => "America/Bogota",
+            .es_cl => "America/Santiago",
+            .es_pe => "America/Lima",
+            .es_us => "America/New_York",
         }) orelse .utc;
     }
 
@@ -66,6 +116,8 @@ pub const Language = enum {
     pub fn keyboard(l: Language) Keyboard {
         return switch (l) {
             .en_gb => .gb,
+            .es_es => .es,
+            .es_mx, .es_ar, .es_co, .es_cl, .es_pe => .latam,
             else => .us,
         };
     }
@@ -77,13 +129,16 @@ pub const Language = enum {
         @"12_hour_upper",
         /// 6:05 pm
         @"12_hour_lower",
+        /// 6:05 p. m.
+        @"12_hour_spanish",
     };
 
     pub fn clock(l: Language) Clock {
         return switch (l) {
-            .en_gb => .@"24_hour",
+            .en_gb, .es_es, .es_ar, .es_cl => .@"24_hour",
             .en_us, .en_ca => .@"12_hour_upper",
             .en_au, .en_nz => .@"12_hour_lower",
+            .es_mx, .es_co, .es_pe, .es_us => .@"12_hour_spanish",
         };
     }
 
@@ -94,7 +149,7 @@ pub const Language = enum {
 
     /// Temperatures in Fahrenheit.
     pub fn fahrenheit(l: Language) bool {
-        return l == .en_us;
+        return l == .en_us or l == .es_us;
     }
 };
 
@@ -103,11 +158,15 @@ pub const Language = enum {
 pub const Keyboard = enum {
     us,
     gb,
+    es,
+    latam,
 
     pub fn name(k: Keyboard) []const u8 {
         return switch (k) {
             .us => "English (US)",
             .gb => "English (UK)",
+            .es => "Español (España)",
+            .latam => "Español (Latinoamérica)",
         };
     }
 
@@ -125,6 +184,8 @@ pub const Keyboard = enum {
         return switch (k) {
             .us => &us_keys,
             .gb => &gb_keys,
+            .es => &es_keys,
+            .latam => &latam_keys,
         };
     }
 
@@ -133,7 +194,7 @@ pub const Keyboard = enum {
     pub fn char(k: Keyboard, key_code: u32, shift: bool, caps: bool, altgr: bool) ?u21 {
         for (k.keys()) |key| if (key.code == key_code) {
             if (altgr) return key.altgr;
-            const letter = key.plain >= 'a' and key.plain <= 'z';
+            const letter = isLetter(key.plain);
             const up = if (letter) shift != caps else shift;
             return if (up) key.shifted else key.plain;
         };
@@ -168,9 +229,20 @@ pub const Key = struct {
 };
 
 /// The keys of a US keyboard's rows, by Linux key code.
-fn row(comptime first: u8, comptime plain: []const u8, comptime shifted: []const u8) [plain.len]Key {
-    var out: [plain.len]Key = undefined;
-    for (&out, plain, shifted, 0..) |*k, p, s, i| k.* = .{ .code = first + i, .plain = p, .shifted = s };
+fn row(comptime first: u8, comptime plain: []const u8, comptime shifted: []const u8) [codepoints(plain).len]Key {
+    const p = codepoints(plain);
+    const s = codepoints(shifted);
+    var out: [p.len]Key = undefined;
+    for (&out, p, s, 0..) |*k, pc, sc, i| k.* = .{ .code = first + i, .plain = pc, .shifted = sc };
+    return out;
+}
+
+/// `chars`'s characters (it is UTF-8).
+fn codepoints(comptime chars: []const u8) [std.unicode.utf8CountCodepoints(chars) catch unreachable]u21 {
+    var out: [std.unicode.utf8CountCodepoints(chars) catch unreachable]u21 = undefined;
+    var it = (std.unicode.Utf8View.init(chars) catch unreachable).iterator();
+    var i: usize = 0;
+    while (it.nextCodepoint()) |c| : (i += 1) out[i] = c;
     return out;
 }
 
@@ -210,6 +282,122 @@ const gb_keys = blk: {
     };
     break :blk keys;
 };
+
+/// Spanish (Spain): ñ and ç, ¡ and ¿, and accents as dead keys (` and ^
+/// on the key after P, ´ and ¨ on the key after Ñ: then the letter); on
+/// AltGr, | @ # ~ € ¬ over the numbers, and € on E.
+const es_keys = blk: {
+    var keys = row(2, "1234567890'¡", "!\"·$%&/()=?¿") ++
+        row(16, "qwertyuiop", "QWERTYUIOP") ++
+        [_]Key{
+            .{ .code = 26, .plain = dead_grave, .shifted = dead_circumflex, .altgr = '[' },
+            .{ .code = 27, .plain = '+', .shifted = '*', .altgr = ']' },
+        } ++
+        row(30, "asdfghjkl", "ASDFGHJKL") ++
+        [_]Key{
+            .{ .code = 39, .plain = 'ñ', .shifted = 'Ñ' },
+            .{ .code = 40, .plain = dead_acute, .shifted = dead_diaeresis, .altgr = '{' },
+            .{ .code = 41, .plain = 'º', .shifted = 'ª', .altgr = '\\' },
+            .{ .code = 43, .plain = 'ç', .shifted = 'Ç', .altgr = '}' },
+        } ++
+        row(44, "zxcvbnm,.-", "ZXCVBNM;:_") ++
+        [_]Key{
+            .{ .code = 57, .plain = ' ', .shifted = ' ' },
+            .{ .code = 86, .plain = '<', .shifted = '>' },
+        };
+    for (&keys) |*k| k.altgr = switch (k.code) {
+        2 => '|',
+        3 => '@',
+        4 => '#',
+        5 => '~',
+        6, 18 => '€',
+        7 => '¬',
+        else => k.altgr,
+    };
+    break :blk keys;
+};
+
+/// Latin American Spanish: ñ, ¿ and ¡, ´ and ¨ as dead keys (the key
+/// after P), and @ on AltGr+Q.
+const latam_keys = blk: {
+    var keys = row(2, "1234567890'¿", "!\"#$%&/()=?¡") ++
+        row(16, "qwertyuiop", "QWERTYUIOP") ++
+        [_]Key{
+            .{ .code = 26, .plain = dead_acute, .shifted = dead_diaeresis },
+            .{ .code = 27, .plain = '+', .shifted = '*', .altgr = '~' },
+        } ++
+        row(30, "asdfghjkl", "ASDFGHJKL") ++
+        [_]Key{
+            .{ .code = 39, .plain = 'ñ', .shifted = 'Ñ' },
+            .{ .code = 40, .plain = '{', .shifted = '[', .altgr = '^' },
+            .{ .code = 41, .plain = '|', .shifted = '°', .altgr = '¬' },
+            .{ .code = 43, .plain = '}', .shifted = ']', .altgr = '`' },
+        } ++
+        row(44, "zxcvbnm,.-", "ZXCVBNM;:_") ++
+        [_]Key{
+            .{ .code = 57, .plain = ' ', .shifted = ' ' },
+            .{ .code = 86, .plain = '<', .shifted = '>' },
+        };
+    for (&keys) |*k| if (k.code == 16) {
+        k.altgr = '@';
+    };
+    break :blk keys;
+};
+
+// --- Accents typed with dead keys ------------------------------------------------
+
+/// Dead keys, as the combining accents they put on the next letter.
+pub const dead_grave: u21 = 0x300;
+pub const dead_acute: u21 = 0x301;
+pub const dead_circumflex: u21 = 0x302;
+pub const dead_tilde: u21 = 0x303;
+pub const dead_diaeresis: u21 = 0x308;
+
+/// Whether a key types a dead key (an accent for the next letter).
+pub fn isDead(c: u21) bool {
+    return switch (c) {
+        dead_grave, dead_acute, dead_circumflex, dead_tilde, dead_diaeresis => true,
+        else => false,
+    };
+}
+
+/// `dead` then `c`: the letter with the accent, if there is one (é), or
+/// the accent alone if `c` is a space or the dead key again; null if they
+/// do not go together (the accent and the key are then typed as they are).
+pub fn compose(dead: u21, c: u21) ?u21 {
+    if (c == ' ' or c == dead) return spacing(dead);
+    const bases = "aeiouAEIOUnNcC";
+    const table = switch (dead) {
+        dead_acute => "áéíóúÁÉÍÓÚ",
+        dead_grave => "àèìòùÀÈÌÒÙ",
+        dead_circumflex => "âêîôûÂÊÎÔÛ",
+        dead_diaeresis => "äëïöüÄËÏÖÜ",
+        dead_tilde => "ãẽĩõũÃẼĨÕŨñÑ",
+        else => return null,
+    };
+    const at = std.mem.indexOfScalar(u8, bases, std.math.cast(u8, c) orelse return null) orelse return null;
+    var it = (std.unicode.Utf8View.init(table) catch return null).iterator();
+    var i: usize = 0;
+    while (it.nextCodepoint()) |cp| : (i += 1) if (i == at) return cp;
+    return null;
+}
+
+/// A dead key's accent on its own (typed with a space).
+pub fn spacing(dead: u21) u21 {
+    return switch (dead) {
+        dead_grave => '`',
+        dead_acute => '´',
+        dead_circumflex => '^',
+        dead_tilde => '~',
+        dead_diaeresis => '¨',
+        else => dead,
+    };
+}
+
+/// A letter (as Caps Lock shifts): a to z, ñ and ç.
+pub fn isLetter(c: u21) bool {
+    return (c >= 'a' and c <= 'z') or c == 'ñ' or c == 'ç';
+}
 
 // --- The choice, kept ------------------------------------------------------------
 
@@ -290,21 +478,33 @@ const us_spelling = [_][2][]const u8{
 };
 
 const months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+const months_long = [_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
+const weekdays = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+// Spanish writes them in lower case.
+const months_es = [_][]const u8{ "ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sept", "oct", "nov", "dic" };
+const months_long_es = [_][]const u8{ "enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre" };
+const weekdays_es = [_][]const u8{ "domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado" };
 
-/// A time of day: "18:05", "6:05 PM" or "6:05 pm".
+/// A day of the week's name (0: Sunday), in the current language.
+pub fn weekdayName(d: u3) []const u8 {
+    return (if (current.spanish()) weekdays_es else weekdays)[@min(d, 6)];
+}
+
+/// A time of day: "18:05", "6:05 PM", "6:05 pm" or "6:05 p. m.".
 pub fn formatClock(buf: []u8, hour: u32, minute: u32) []const u8 {
     const h12 = if (hour % 12 == 0) 12 else hour % 12;
     return switch (current.clock()) {
         .@"24_hour" => std.fmt.bufPrint(buf, "{d:0>2}:{d:0>2}", .{ hour, minute }),
         .@"12_hour_upper" => std.fmt.bufPrint(buf, "{d}:{d:0>2} {s}", .{ h12, minute, if (hour < 12) "AM" else "PM" }),
         .@"12_hour_lower" => std.fmt.bufPrint(buf, "{d}:{d:0>2} {s}", .{ h12, minute, if (hour < 12) "am" else "pm" }),
+        .@"12_hour_spanish" => std.fmt.bufPrint(buf, "{d}:{d:0>2} {s}", .{ h12, minute, if (hour < 12) "a. m." else "p. m." }),
     } catch "";
 }
 
-/// A date: "7 Oct" or "Oct 7", with the year ("7 Oct 2025", "Oct 7,
-/// 2025") if `year` is given.
+/// A date: "7 Oct", "Oct 7" or "7 oct", with the year ("7 Oct 2025",
+/// "Oct 7, 2025", "7 oct 2025") if `year` is given.
 pub fn formatDate(buf: []u8, day: u32, month: u32, year: ?u32) []const u8 {
-    const m = months[@min(month, 12) -| 1];
+    const m = (if (current.spanish()) months_es else months)[@min(month, 12) -| 1];
     if (current.monthFirst()) {
         if (year) |y| return std.fmt.bufPrint(buf, "{s} {d}, {d}", .{ m, day, y }) catch "";
         return std.fmt.bufPrint(buf, "{s} {d}", .{ m, day }) catch "";
@@ -313,18 +513,19 @@ pub fn formatDate(buf: []u8, day: u32, month: u32, year: ?u32) []const u8 {
     return std.fmt.bufPrint(buf, "{d} {s}", .{ day, m }) catch "";
 }
 
-/// A date in full: "7 October 2026", or "October 7, 2026".
+/// A date in full: "7 October 2026", "October 7, 2026" or "7 de octubre de
+/// 2026".
 pub fn formatLongDate(buf: []u8, day: u32, month: u32, year: u32) []const u8 {
-    const names = [_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
-    const m = names[@min(month, 12) -| 1];
-    if (current.monthFirst()) return std.fmt.bufPrint(buf, "{s} {d}, {d}", .{ m, day, year }) catch "";
-    return std.fmt.bufPrint(buf, "{d} {s} {d}", .{ day, m, year }) catch "";
+    const i = @min(month, 12) -| 1;
+    if (current.spanish()) return std.fmt.bufPrint(buf, "{d} de {s} de {d}", .{ day, months_long_es[i], year }) catch "";
+    if (current.monthFirst()) return std.fmt.bufPrint(buf, "{s} {d}, {d}", .{ months_long[i], day, year }) catch "";
+    return std.fmt.bufPrint(buf, "{d} {s} {d}", .{ day, months_long[i], year }) catch "";
 }
 
 /// When something happened, against `now` (both in seconds since 1970, in
 /// UTC, the only time the system has): "Today, 10:32", "Yesterday, 6:05
 /// PM", "7 Oct" this year, else "7 Oct 2025" (in the current language's
-/// ways).
+/// ways: "Hoy, 10:32").
 pub fn formatWhen(buf: []u8, secs: i64, now: i64) []const u8 {
     if (secs <= 0) return "";
     const day_secs = std.time.s_per_day;
@@ -333,7 +534,8 @@ pub fn formatWhen(buf: []u8, secs: i64, now: i64) []const u8 {
     const in_day: u32 = @intCast(@mod(secs, day_secs));
     if (day == today or day == today - 1) {
         var clock_buf: [16]u8 = undefined;
-        return std.fmt.bufPrint(buf, "{s}, {s}", .{ if (day == today) "Today" else "Yesterday", formatClock(&clock_buf, in_day / 3600, in_day / 60 % 60) }) catch "";
+        const word = if (current.spanish()) (if (day == today) "Hoy" else "Ayer") else if (day == today) "Today" else "Yesterday";
+        return std.fmt.bufPrint(buf, "{s}, {s}", .{ word, formatClock(&clock_buf, in_day / 3600, in_day / 60 % 60) }) catch "";
     }
     const date = (std.time.epoch.EpochDay{ .day = @intCast(day) }).calculateYearDay();
     const md = date.calculateMonthDay();
@@ -378,11 +580,34 @@ test "keyboards" {
     try testing.expectEqual(@as(?u21, '~'), Keyboard.gb.char(43, true, false, false));
     try testing.expectEqual(@as(?u21, '\\'), Keyboard.gb.char(86, false, false, false));
     try testing.expectEqual(@as(?u21, 'q'), Keyboard.gb.char(16, false, false, false));
+    // Spanish (Spain): ñ (Caps Lock too), AltGr+E and AltGr+2, and the
+    // accents as dead keys.
+    try testing.expectEqual(@as(?u21, 'ñ'), Keyboard.es.char(39, false, false, false));
+    try testing.expectEqual(@as(?u21, 'Ñ'), Keyboard.es.char(39, false, true, false));
+    try testing.expectEqual(@as(?u21, '€'), Keyboard.es.char(18, false, false, true));
+    try testing.expectEqual(@as(?u21, '@'), Keyboard.es.char(3, false, false, true));
+    try testing.expectEqual(@as(?u21, '¿'), Keyboard.es.char(13, true, false, false));
+    try testing.expectEqual(@as(?u21, dead_acute), Keyboard.es.char(40, false, false, false));
+    // Latin American: AltGr+Q.
+    try testing.expectEqual(@as(?u21, '@'), Keyboard.latam.char(16, false, false, true));
+    try testing.expectEqual(@as(?u21, dead_acute), Keyboard.latam.char(26, false, false, false));
     // Numeric keypad.
     for ([_]u32{ 82, 79, 80, 81, 75, 76, 77, 71, 72, 73, 83, 78, 74, 55, 98, 117 }, "0123456789.+-*/=") |code, expected| {
         try testing.expectEqual(@as(?u21, expected), Keyboard.us.char(code, false, false, false));
         try testing.expectEqual(@as(?u21, expected), Keyboard.gb.char(code, false, false, false));
     }
+}
+
+test "dead keys: the accent on the next letter" {
+    try testing.expectEqual(@as(?u21, 'é'), compose(dead_acute, 'e'));
+    try testing.expectEqual(@as(?u21, 'Ú'), compose(dead_acute, 'U'));
+    try testing.expectEqual(@as(?u21, 'ü'), compose(dead_diaeresis, 'u'));
+    try testing.expectEqual(@as(?u21, 'à'), compose(dead_grave, 'a'));
+    try testing.expectEqual(@as(?u21, 'ñ'), compose(dead_tilde, 'n'));
+    try testing.expectEqual(@as(?u21, '´'), compose(dead_acute, ' '));
+    try testing.expectEqual(@as(?u21, '^'), compose(dead_circumflex, dead_circumflex));
+    try testing.expect(compose(dead_acute, 'x') == null);
+    try testing.expect(isDead(dead_tilde) and !isDead('a'));
 }
 
 test "settings, kept as text" {
@@ -424,6 +649,18 @@ test "dates, times and temperatures, in each language" {
     try testing.expectEqualStrings("Oct 7", formatDate(&buf, 7, 10, null));
     try testing.expectEqualStrings("colour", text("colour"));
     try testing.expectEqualStrings("", formatWhen(&buf, 0, now));
+    // Spanish: 24 hours in Spain, a. m. and p. m. in Mexico.
+    current = .es_es;
+    try testing.expectEqualStrings("Hoy, 10:32", formatWhen(&buf, now, now));
+    try testing.expectEqualStrings("Ayer, 18:05", formatWhen(&buf, 1791331200 - 6 * 3600 + 5 * 60, now));
+    try testing.expectEqualStrings("31 dic 2025", formatWhen(&buf, 1767225600 - 60, now));
+    try testing.expectEqualStrings("7 de octubre de 2026", formatLongDate(&buf, 7, 10, 2026));
+    try testing.expectEqualStrings("miércoles", weekdayName(3));
+    current = .es_mx;
+    try testing.expectEqualStrings("Ayer, 6:05 p. m.", formatWhen(&buf, 1791331200 - 6 * 3600 + 5 * 60, now));
+    try testing.expectEqualStrings("48.3 °C", formatTemperature(&buf, 48.3));
+    current = .es_us;
+    try testing.expectEqualStrings("118.9 °F", formatTemperature(&buf, 48.3));
 }
 
 test "languages" {
@@ -431,4 +668,9 @@ test "languages" {
     try testing.expect(Language.fromCode("fr-FR") == null);
     try testing.expectEqual(Keyboard.gb, Language.en_gb.keyboard());
     try testing.expectEqual(Keyboard.us, Language.en_au.keyboard());
+    try testing.expectEqual(Language.es_mx, Language.fromCode("es-MX").?);
+    try testing.expectEqual(Keyboard.es, Language.es_es.keyboard());
+    try testing.expectEqual(Keyboard.latam, Language.es_ar.keyboard());
+    try testing.expectEqualStrings("America/Bogota", Language.es_co.timeZone().name());
+    try testing.expect(Language.es_pe.spanish() and !Language.en_gb.spanish());
 }

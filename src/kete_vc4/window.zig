@@ -35,6 +35,9 @@ pub const Window = struct {
     ctrl: u2 = 0,
     altgr: bool = false,
     caps: bool = false,
+    /// A dead key pressed (its accent, see `locale.compose`), for the next
+    /// key to take.
+    dead: ?u21 = null,
     /// Not yet closed (`close`): `win` is gone once it is.
     open: bool = true,
     /// Who draws its title bar: kete, or no one (`Display.decorations`).
@@ -308,10 +311,26 @@ pub const Window = struct {
         const k = w.keyboard orelse w.win.layout;
         const shift = w.shift > 0;
         const ctrl = w.ctrl > 0;
+        var char = if (ctrl) null else k.char(code, shift, w.caps, w.altgr);
+        if (pressed) if (char) |c| {
+            if (w.dead) |dead| {
+                // The accent on this key's letter (or alone, with a space
+                // or itself); otherwise the key types as it would.
+                w.dead = null;
+                char = locale.compose(dead, c) orelse if (locale.isDead(c)) locale.spacing(c) else c;
+            } else if (locale.isDead(c)) {
+                // An accent: it waits for the next key.
+                w.dead = c;
+                char = null;
+            }
+        };
+        if (!pressed) if (char) |c| if (locale.isDead(c)) {
+            char = null;
+        };
         return .{ .key = .{
             .key = kwin.evdev.keyOf(code),
             .pressed = pressed,
-            .char = if (ctrl) null else k.char(code, shift, w.caps, w.altgr),
+            .char = char,
             .shift = shift,
             .ctrl = ctrl,
         } };

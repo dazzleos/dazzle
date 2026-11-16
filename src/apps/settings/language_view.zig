@@ -23,12 +23,11 @@ pub fn build(self: *const Settings, b: Builder) kete.Widget {
     var rows: std.ArrayList(kete.Widget) = .empty;
     const heading: kete.TextStyle = .{ .size = 18, .color = t.on_surface_variant };
     rows.append(a, cx.make(kete.Text{ .text = "Language", .style = heading })) catch {};
-    for (std.enums.values(locale.Language)) |l| rows.append(a, cx.make(kete.RadioRow(locale.Language){
-        .value = l,
-        .group_value = self.locale.language,
+    rows.append(a, cx.make(kete.SizedBox{ .width = 380, .child = cx.make(kete_vc4.LanguagePicker{
+        .language = self.locale.language,
         .on_changed = if (self.actions != null) .of(picker, LocalePick.language) else null,
-        .label = l.name(),
-    })) catch {};
+        .height = 240,
+    }) })) catch {};
     rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 12 }, .child = cx.make(kete.Text{ .text = "Keyboard", .style = heading }) })) catch {};
     for (std.enums.values(locale.Keyboard)) |k| rows.append(a, cx.make(kete.RadioRow(locale.Keyboard){
         .value = k,

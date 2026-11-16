@@ -24,12 +24,12 @@ pub const Time = struct {
         return locale.formatClock(buf, t.local.hour, t.local.minute);
     }
 
-    /// "Monday, 16 November 2026", or "Monday, November 16, 2026".
+    /// "Monday, 16 November 2026", "Monday, November 16, 2026" or "lunes,
+    /// 16 de noviembre de 2026".
     pub fn dateText(t: Time, buf: []u8) []const u8 {
-        const names = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
-        var date_buf: [32]u8 = undefined;
+        var date_buf: [40]u8 = undefined;
         const date = locale.formatLongDate(&date_buf, t.local.day, t.local.month, t.local.year);
-        return std.fmt.bufPrint(buf, "{s}, {s}", .{ names[t.local.weekday], date }) catch "";
+        return std.fmt.bufPrint(buf, "{s}, {s}", .{ locale.weekdayName(t.local.weekday), date }) catch "";
     }
 };
 
@@ -55,6 +55,11 @@ test "the time and date, in the zone and the language's ways" {
     try testing.expectEqualStrings("2:05 PM", t.timeText(&buf));
     try testing.expectEqualStrings("Monday, November 16, 2026", t.dateText(&buf));
     try testing.expectEqualStrings("12:00 AM", widestText(&buf));
+    locale.current = .es_mx;
+    try testing.expectEqualStrings("2:05 p. m.", t.timeText(&buf));
+    try testing.expectEqualStrings("lunes, 16 de noviembre de 2026", t.dateText(&buf));
+    locale.current = .es_es;
+    try testing.expectEqualStrings("14:05", t.timeText(&buf));
     // The minute it is, whatever the zone.
     try testing.expectEqual(t.minute, Time.at(1_794_787_200 + 3600 + 300, .utc).minute);
 }

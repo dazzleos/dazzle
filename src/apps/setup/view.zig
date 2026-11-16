@@ -139,6 +139,10 @@ pub const Setup = struct {
             st.chose();
         }
 
+        fn pickKeyboard(st: *State, i: usize) void {
+            if (i < std.enums.values(locale.Keyboard).len) st.setKeyboard(@enumFromInt(i));
+        }
+
         fn setKeyboard(st: *State, k: locale.Keyboard) void {
             st.keyboard = k;
             st.keyboard_picked = true;
@@ -245,31 +249,19 @@ pub const Setup = struct {
     fn languagePage(cx: *kete.BuildContext, state: *State) kete.Widget {
         const t = cx.theme();
         const a = cx.arena;
-        var languages: std.ArrayList(kete.Widget) = .empty;
-        for (std.enums.values(locale.Language)) |l| languages.append(a, cx.make(kete.RadioRow(locale.Language){
-            .value = l,
-            .group_value = state.language,
-            .on_changed = .of(state, State.setLanguage),
-            .label = l.name(),
-        })) catch {};
-        var keyboards: std.ArrayList(kete.Widget) = .empty;
-        for (std.enums.values(locale.Keyboard)) |k| keyboards.append(a, cx.make(kete.RadioRow(locale.Keyboard){
-            .value = k,
-            .group_value = state.keyboard,
-            .on_changed = .of(state, State.setKeyboard),
-            .label = k.name(),
-        })) catch {};
+        var keyboards: std.ArrayList(kete.MenuItem) = .empty;
+        for (std.enums.values(locale.Keyboard)) |k| keyboards.append(a, .{ .label = k.name() }) catch {};
         const heading: kete.TextStyle = .{ .size = 20, .color = t.on_surface_variant };
         return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 12, .children = &.{
             cx.make(kete.Text{ .text = "Language and keyboard", .style = .{ .size = 28 } }),
             cx.make(kete.Row{ .spacing = 24, .cross_axis_alignment = .start, .children = &.{
                 cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .start, .fill = false, .spacing = 4, .children = &.{
                     cx.make(kete.Text{ .text = "Language", .style = heading }),
-                    cx.make(kete.Column{ .cross_axis_alignment = .start, .fill = false, .children = languages.items }),
+                    cx.make(kete_vc4.LanguagePicker{ .language = state.language, .on_changed = .of(state, State.setLanguage), .height = 160 }),
                 } }) }),
                 cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 4, .children = &.{
                     cx.make(kete.Text{ .text = "Keyboard", .style = heading }),
-                    cx.make(kete.Column{ .cross_axis_alignment = .start, .fill = false, .children = keyboards.items }),
+                    cx.make(kete.DropdownMenu{ .options = keyboards.items, .selected = @intFromEnum(state.keyboard), .on_selected = .of(state, State.pickKeyboard), .width = 260 }),
                     cx.make(kete.Padding{ .padding = .{ .top = 8 }, .child = cx.make(kete.TextField{ .placeholder = "Type here to try it", .width = std.math.inf(f32) }) }),
                 } }) }),
             } }),
@@ -937,7 +929,8 @@ test "the language and keyboard: the keyboard goes with the language, until one 
     try testing.expectEqual(locale.Keyboard.gb, st.keyboard);
     try testing.expectEqual(locale.Keyboard.gb, actions.locale.?.keyboard);
     // A US keyboard picked stays, whatever the language.
-    click(u, findText(u.root.?, "English (US)").?);
+    try testing.expect(findType(u.root.?, kete.DropdownMenu) != null);
+    st.pickKeyboard(@intFromEnum(locale.Keyboard.us));
     u.frame(1280, 720, 2, setup);
     click(u, findText(u.root.?, "English (Australia)").?);
     u.frame(1280, 720, 3, setup);

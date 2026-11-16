@@ -141,6 +141,18 @@ xkb_types "dazzle" {
         level_name[Level1] = "Base";
         level_name[Level2] = "Caps";
     };
+    type "FOUR_LEVEL_ALPHABETIC" {
+        modifiers = Shift + Lock + Mod5;
+        map[Shift] = Level2;
+        map[Lock] = Level2;
+        map[Mod5] = Level3;
+        map[Shift + Mod5] = Level4;
+        map[Lock + Mod5] = Level3;
+        level_name[Level1] = "Base";
+        level_name[Level2] = "Shift";
+        level_name[Level3] = "AltGr";
+        level_name[Level4] = "Shift AltGr";
+    };
 };
 xkb_compatibility "dazzle" {
     interpret Caps_Lock + AnyOfOrNone(all) {
