@@ -116,13 +116,23 @@ fn keysym(comptime c: u21) []const u8 {
     };
 }
 
+/// Where a keymap's file is made if the kernel cannot make one in memory
+/// (it was built without memfd_create): the shell's runtime folder (or
+/// /os/sockets, the Dazzle user's), set when it starts.
+pub var file_dir: ?[:0]const u8 = null;
+
 /// A file holding the layout's keymap, for wl_keyboard.keymap: sealed, so
-/// clients can map it but nobody can change it.
+/// clients can map it but nobody can change it (or, without memfd_create,
+/// a file with no name in `file_dir`, which only those given it have).
 pub fn keymapFile(k: locale.Keyboard) !linux.fd_t {
     const text = keymap(k);
     const fd_rc = linux.memfd_create("dazzle-keymap", linux.MFD.CLOEXEC | linux.MFD.ALLOW_SEALING);
-    if (linux.errno(fd_rc) != .SUCCESS) return error.SystemResources;
-    const fd: linux.fd_t = @intCast(fd_rc);
+    const fd: linux.fd_t = if (linux.errno(fd_rc) == .SUCCESS) @intCast(fd_rc) else blk: {
+        const dir = file_dir orelse return error.SystemResources;
+        const rc = linux.open(dir, .{ .ACCMODE = .RDWR, .TMPFILE = true, .DIRECTORY = true, .CLOEXEC = true }, 0o600);
+        if (linux.errno(rc) != .SUCCESS) return error.SystemResources;
+        break :blk @intCast(rc);
+    };
     errdefer _ = linux.close(fd);
     var at: usize = 0;
     while (at < text.len) {

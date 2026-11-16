@@ -77,6 +77,8 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
     // Run elsewhere (on Raspberry Pi OS), the socket goes where other
     // compositors' do.
     const runtime_dir = std.process.Environ.getPosix(init.environ, "XDG_RUNTIME_DIR");
+    // For keymaps' files, where the kernel cannot make them in memory.
+    keyboard.file_dir = runtime_dir orelse "/os/sockets";
 
     const dev = try vc4.device.open();
     const output = try vc4.drm.waitForOutput(dev.fd);
