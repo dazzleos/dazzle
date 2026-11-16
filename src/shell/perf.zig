@@ -7,6 +7,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
 const kete = @import("kete");
+const locale = @import("locale");
 const glass = @import("glass.zig");
 const dock = @import("dock.zig");
 const kete_panel = @import("kete_panel.zig");
@@ -368,11 +369,11 @@ pub const Overlay = struct {
             const gpu_mem_frac: f32 = if (stats.gpu_total > 0) @as(f32, @floatFromInt(stats.gpu_used)) / @as(f32, @floatFromInt(stats.gpu_total)) else 0;
             const cpu_frac: f32 = (stats.cpu_busy orelse 0) / 100;
             const rows = [5]Meter{
-                .{ .label = "FPS", .value = lines.fpsText(), .fraction = stats.fps / 60, .color = if (stats.fps > 0 and stats.fps < 30) fps_low_color else fps_color, .colors = c, .scale = s },
-                .{ .label = "CPU", .value = lines.cpuText(), .fraction = cpu_frac, .color = if (cpu_frac >= 0.9) high_color else cpu_color, .colors = c, .scale = s },
-                .{ .label = "GPU", .value = lines.gpuText(), .fraction = gpu_frac, .color = if (gpu_frac >= 0.9) high_color else gpu_color, .colors = c, .scale = s },
-                .{ .label = "Memory", .value = lines.memText(), .fraction = mem_frac, .color = if (mem_frac >= 0.9) high_color else mem_color, .colors = c, .scale = s },
-                .{ .label = "GPU Memory", .value = lines.gpuMemText(), .fraction = gpu_mem_frac, .color = if (gpu_mem_frac >= 0.9) high_color else gpu_mem_color, .colors = c, .scale = s },
+                .{ .label = locale.text("FPS"), .value = lines.fpsText(), .fraction = stats.fps / 60, .color = if (stats.fps > 0 and stats.fps < 30) fps_low_color else fps_color, .colors = c, .scale = s },
+                .{ .label = locale.text("CPU"), .value = lines.cpuText(), .fraction = cpu_frac, .color = if (cpu_frac >= 0.9) high_color else cpu_color, .colors = c, .scale = s },
+                .{ .label = locale.text("GPU"), .value = lines.gpuText(), .fraction = gpu_frac, .color = if (gpu_frac >= 0.9) high_color else gpu_color, .colors = c, .scale = s },
+                .{ .label = locale.text("Memory"), .value = lines.memText(), .fraction = mem_frac, .color = if (mem_frac >= 0.9) high_color else mem_color, .colors = c, .scale = s },
+                .{ .label = locale.text("GPU Memory"), .value = lines.gpuMemText(), .fraction = gpu_mem_frac, .color = if (gpu_mem_frac >= 0.9) high_color else gpu_mem_color, .colors = c, .scale = s },
             };
             var children: [rows.len]kete.Widget = undefined;
             for (&children, rows) |*ch, r| ch.* = cx.make(kete.SizedBox{ .height = 32 * s, .child = cx.make(r) });

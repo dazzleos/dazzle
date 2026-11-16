@@ -6,6 +6,7 @@
 //! `Usage` and `Network` are read again every second.
 
 const std = @import("std");
+const locale = @import("locale");
 const linux = std.os.linux;
 const sys = @import("sys");
 
@@ -119,7 +120,7 @@ pub const Card = struct {
         const gb = @as(f64, @floatFromInt(c.bytes)) / 1e9;
         const size = if (gb >= 1) std.fmt.bufPrint(&size_buf, "{d:.0} GB", .{gb}) catch "" else std.fmt.bufPrint(&size_buf, "{d:.0} MB", .{gb * 1000}) catch "";
         if (c.maker.len == 0) return std.fmt.bufPrint(buf, "{s}", .{size}) catch "";
-        return std.fmt.bufPrint(buf, "{s}, made by {s}", .{ size, c.maker }) catch "";
+        return locale.bufPrint(buf, "{s}, made by {s}", .{ size, c.maker });
     }
 };
 
@@ -499,7 +500,7 @@ pub fn formatBytes(buf: []u8, bytes: u64) []const u8 {
     var v = b;
     var u: usize = 0;
     while (v >= 1024 and u + 1 < units.len) : (u += 1) v /= 1024;
-    if (u == 0) return std.fmt.bufPrint(buf, "{d} bytes", .{bytes}) catch "";
+    if (u == 0) return locale.bufPrint(buf, "{d} bytes", .{bytes});
     if (v < 10) return std.fmt.bufPrint(buf, "{d:.1} {s}", .{ v, units[u] }) catch "";
     return std.fmt.bufPrint(buf, "{d:.0} {s}", .{ v, units[u] }) catch "";
 }

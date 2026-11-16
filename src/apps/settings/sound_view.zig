@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const kete = @import("kete");
+const locale = @import("locale");
 const audio = @import("audio");
 const view = @import("view.zig");
 
@@ -83,7 +84,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
         .volume_up;
 
     const vol_label = if (self.sound.muted)
-        "Muted"
+        locale.text("Muted")
     else
         cx.fmt("{d}%", .{self.sound.volume});
 
@@ -122,7 +123,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
         .cross_axis_alignment = .center,
         .spacing = 12,
         .children = &.{
-            b.label("Volume"),
+            b.label(locale.text("Volume")),
             cx.make(kete.Expanded{ .child = vol_controls }),
         },
     })) catch {};
@@ -130,7 +131,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     // Output devices row.
     const devs = self.audio_devices.slice();
     if (devs.len == 0) {
-        rows.append(a, b.item("Output", "No audio output devices found")) catch {};
+        rows.append(a, b.item(locale.text("Output"), locale.text("No audio output devices found"))) catch {};
     } else {
         const active = audio.activeDevice(self.audio_devices, &self.sound);
         var dev_rows: std.ArrayList(kete.Widget) = .empty;
@@ -183,7 +184,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
         dev_rows.append(a, cx.make(kete.Row{
             .children = &.{
                 cx.make(kete.OutlinedButton{
-                    .label = "Test sound",
+                    .label = locale.text("Test sound"),
                     .icon = .volume_up,
                     .on_press = if (self.actions != null) .of(state, State.onTestSound) else null,
                 }),
@@ -194,7 +195,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
             .cross_axis_alignment = .start,
             .spacing = 12,
             .children = &.{
-                b.label("Output"),
+                b.label(locale.text("Output")),
                 cx.make(kete.Expanded{
                     .child = cx.make(kete.Column{
                         .cross_axis_alignment = .stretch,

@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const kete = @import("kete");
+const locale = @import("locale");
 const kete_vc4 = @import("kete_vc4");
 const appearance_settings = @import("appearance");
 const gfx = kete.gfx;
@@ -106,10 +107,10 @@ pub const State = struct {
 
 pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     const cx = b.cx;
-    const report = self.manager orelse return b.scroll(.wifi, b.page(&.{b.item("Status", "The network manager is not running")}));
-    if (report.denied) return b.scroll(.wifi, b.page(&.{b.item("Status", "Not allowed to scan")}));
+    const report = self.manager orelse return b.scroll(.wifi, b.page(&.{b.item(locale.text("Status"), locale.text("The network manager is not running"))}));
+    if (report.denied) return b.scroll(.wifi, b.page(&.{b.item(locale.text("Status"), locale.text("Not allowed to scan"))}));
     const adapters = report.wifiAdapters();
-    if (adapters.len == 0) return b.scroll(.wifi, b.page(&.{b.item("Status", "No Wi-Fi adapter")}));
+    if (adapters.len == 0) return b.scroll(.wifi, b.page(&.{b.item(locale.text("Status"), locale.text("No Wi-Fi adapter"))}));
     const idx = @min(state.adapter, adapters.len - 1);
     state.adapter = idx;
     const adapter = adapters[idx];
@@ -140,7 +141,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     const status_row = statusRow(self, b, state, adapter.name(), &report.connection, hs, is_hotspot, report.scanning);
     const address_row = addressRow(self, b, state, adapter.name(), &report.connection, hs, current_hs, is_hotspot);
     const m = adapter.mac;
-    const mac_row = b.item("MAC address", cx.fmt("{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}", .{ m[0], m[1], m[2], m[3], m[4], m[5] }));
+    const mac_row = b.item(locale.text("MAC address"), cx.fmt("{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}", .{ m[0], m[1], m[2], m[3], m[4], m[5] }));
 
     if (active_hs) {
         const qr_ssid = if (hs.ssid_len > 0) hs.ssid() else state.hotspot_ssid.text();
@@ -182,9 +183,9 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     }
 
     const net_label = if (nets.len > 0)
-        cx.make(kete.Padding{ .padding = .{ .top = 19 }, .child = b.label("Network") })
+        cx.make(kete.Padding{ .padding = .{ .top = 19 }, .child = b.label(locale.text("Network")) })
     else
-        b.label("Network");
+        b.label(locale.text("Network"));
     // The networks scroll in their card, which takes the height left;
     // the rest of the page stays where it is.
     const net_content = if (nets.len > 0)
@@ -198,7 +199,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
             }) }),
         })
     else if (!report.scanning)
-        b.value("No networks found")
+        b.value(locale.text("No networks found"))
     else
         cx.make(kete.SizedBox.empty);
     rows.append(a, cx.make(kete.Expanded{ .child = cx.make(kete.Row{ .cross_axis_alignment = .start, .spacing = 12, .children = &.{
@@ -250,26 +251,26 @@ fn statusRow(
     const cx = b.cx;
     if (is_hotspot) {
         const text = switch (hs.state) {
-            .off => "Inactive",
-            .active => "Active",
-            .failed => cx.fmt("Could not start access point: {s}", .{hs.failure.label()}),
+            .off => locale.text("Inactive"),
+            .active => locale.text("Active"),
+            .failed => kete_vc4.textf(cx, "Could not start access point: {s}", .{hs.failure.label()}),
         };
-        return b.item("Status", text);
+        return b.item(locale.text("Status"), text);
     }
     const on_this = c.adapter_len == 0 or std.mem.eql(u8, c.adapter(), adapter_name);
     const name = printable(cx, c.ssid());
-    const base = if (!on_this) "Not connected" else switch (c.state) {
-        .idle => "Not connected",
-        .connected => cx.fmt("Connected to {s}", .{name}),
-        .connecting, .authenticating, .addressing => cx.fmt("{s}: {s}…", .{ name, c.state.label() }),
-        .failed => cx.fmt("Could not connect to {s}: {s}", .{ name, c.failure.label() }),
+    const base = if (!on_this) locale.text("Not connected") else switch (c.state) {
+        .idle => locale.text("Not connected"),
+        .connected => kete_vc4.textf(cx, "Connected to {s}", .{name}),
+        .connecting, .authenticating, .addressing => kete_vc4.textf(cx, "{s}: {s}…", .{ name, c.state.label() }),
+        .failed => kete_vc4.textf(cx, "Could not connect to {s}: {s}", .{ name, c.failure.label() }),
     };
     const show_scan = scanning and (!on_this or switch (c.state) {
         .idle, .connected, .failed => true,
         .connecting, .authenticating, .addressing => false,
     });
-    const text = if (show_scan) cx.fmt("{s}, scanning…", .{base}) else base;
-    return b.item("Status", text);
+    const text = if (show_scan) kete_vc4.textf(cx, "{s}, scanning…", .{base}) else base;
+    return b.item(locale.text("Status"), text);
 }
 
 /// The IPv4 address in CIDR format (`<ip>/<prefix>`) assigned to this host
@@ -295,14 +296,14 @@ fn addressRow(
         const on_this = c.adapter_len == 0 or std.mem.eql(u8, c.adapter(), adapter_name);
         const method = if (c.addressing == .static) "static" else "DHCP";
         break :blk if (on_this and c.state == .connected)
-            (if (c.address) |ip| cx.fmt("{d}.{d}.{d}.{d}/{d} ({s})", .{ ip[0], ip[1], ip[2], ip[3], c.prefix, method }) else "Not assigned")
+            (if (c.address) |ip| kete_vc4.textf(cx, "{d}.{d}.{d}.{d}/{d} ({s})", .{ ip[0], ip[1], ip[2], ip[3], c.prefix, method }) else locale.text("Not assigned"))
         else
-            "Not assigned";
+            locale.text("Not assigned");
     };
     const can_configure = self.actions != null and (!is_hotspot or !active_hs);
     return cx.make(kete.Row{ .cross_axis_alignment = .start, .spacing = 12, .children = &.{
         cx.make(kete.SizedBox{ .width = 150, .child = cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 4, .children = &.{
-            cx.make(kete.Text{ .text = "Address", .style = .{ .size = 18, .color = t.on_surface_variant }, .wrap = false }),
+            cx.make(kete.Text{ .text = locale.text("Address"), .style = .{ .size = 18, .color = t.on_surface_variant }, .wrap = false }),
             cx.make(AddressConfigButton{
                 .state = state,
                 .actions = if (can_configure) self.actions else null,
@@ -424,7 +425,7 @@ pub const AddressConfigButton = struct {
                 const on_apply: ?kete.Callback = if (st.actions != null) .of(st, BtnState.applyAp) else null;
                 const key = (@as(u64, page_st.ap_address_id) << 1) | 0x2000_0000;
                 rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-                    cx.make(kete.SizedBox{ .width = 110, .child = cx.make(kete.Text{ .text = "Address", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
+                    cx.make(kete.SizedBox{ .width = 110, .child = cx.make(kete.Text{ .text = locale.text("Address"), .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
                     cx.make(kete.Expanded{ .child = cx.make(kete.TextField{
                         .placeholder = "192.168.4.1/24",
                         .initial = page_st.ap_address.text(),
@@ -435,24 +436,24 @@ pub const AddressConfigButton = struct {
                     }).withKey(key) }),
                 } })) catch {};
                 if (page_st.ap_address_invalid) rows.append(a, cx.make(kete.Text{
-                    .text = "Give a host address and prefix length (192.168.4.1/24)",
+                    .text = locale.text("Give a host address and prefix length (192.168.4.1/24)"),
                     .style = .{ .size = 15, .color = t.@"error" },
                 })) catch {};
                 rows.append(a, cx.make(kete.Row{ .main_axis_alignment = .end, .children = &.{
-                    cx.make(kete.OutlinedButton{ .label = "Apply", .on_press = on_apply }),
+                    cx.make(kete.OutlinedButton{ .label = locale.text("Apply"), .on_press = on_apply }),
                 } })) catch {};
             } else {
                 const static = page_st.static_form or st.current == .static;
                 rows.append(a, cx.make(kete.Align{ .height_factor = 1, .child = cx.make(PillBar{ .children = &.{
                     cx.make(PillButton{
-                        .label = "DHCP",
+                        .label = locale.text("DHCP"),
                         .selected = !static,
                         .first = true,
                         .last = false,
                         .on_press = if (st.actions != null) .of(st, BtnState.chooseDhcp) else null,
                     }),
                     cx.make(PillButton{
-                        .label = "Static",
+                        .label = locale.text("Static"),
                         .selected = static,
                         .first = false,
                         .last = true,
@@ -461,9 +462,9 @@ pub const AddressConfigButton = struct {
                 } }) })) catch {};
 
                 if (!static) {
-                    const gw_text = if (st.gateway) |g| cx.fmt("{d}.{d}.{d}.{d} (DHCP)", .{ g[0], g[1], g[2], g[3] }) else "None";
+                    const gw_text = if (st.gateway) |g| kete_vc4.textf(cx, "{d}.{d}.{d}.{d} (DHCP)", .{ g[0], g[1], g[2], g[3] }) else locale.text("None");
                     rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-                        cx.make(kete.SizedBox{ .width = 110, .child = cx.make(kete.Text{ .text = "Gateway", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
+                        cx.make(kete.SizedBox{ .width = 110, .child = cx.make(kete.Text{ .text = locale.text("Gateway"), .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
                         cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = gw_text, .style = .{ .size = 16, .color = t.on_surface }, .wrap = false }) }),
                     } })) catch {};
                 } else {
@@ -491,9 +492,9 @@ pub const AddressConfigButton = struct {
                     const on_apply: ?kete.Callback = if (st.actions != null) .of(st, BtnState.applyClient) else null;
                     const key = (@as(u64, page_st.static_id) << 1) | 0x1000_0000;
                     rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-                        cx.make(kete.SizedBox{ .width = 110, .child = cx.make(kete.Text{ .text = "Address", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
+                        cx.make(kete.SizedBox{ .width = 110, .child = cx.make(kete.Text{ .text = locale.text("Address"), .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
                         cx.make(kete.Expanded{ .child = cx.make(kete.TextField{
-                            .placeholder = "Address/prefix",
+                            .placeholder = locale.text("Address/prefix"),
                             .initial = page_st.static_address.text(),
                             .max_len = 32,
                             .size = 16,
@@ -502,9 +503,9 @@ pub const AddressConfigButton = struct {
                         }).withKey(key) }),
                     } })) catch {};
                     rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-                        cx.make(kete.SizedBox{ .width = 110, .child = cx.make(kete.Text{ .text = "Gateway", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
+                        cx.make(kete.SizedBox{ .width = 110, .child = cx.make(kete.Text{ .text = locale.text("Gateway"), .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
                         cx.make(kete.Expanded{ .child = cx.make(kete.TextField{
-                            .placeholder = "Gateway",
+                            .placeholder = locale.text("Gateway"),
                             .initial = page_st.static_gateway.text(),
                             .max_len = 32,
                             .size = 16,
@@ -513,11 +514,11 @@ pub const AddressConfigButton = struct {
                         }).withKey(key | 1) }),
                     } })) catch {};
                     if (page_st.static_invalid) rows.append(a, cx.make(kete.Text{
-                        .text = "Give an address and prefix length (192.168.1.50/24), and a gateway or none",
+                        .text = locale.text("Give an address and prefix length (192.168.1.50/24), and a gateway or none"),
                         .style = .{ .size = 15, .color = t.@"error" },
                     })) catch {};
                     rows.append(a, cx.make(kete.Row{ .main_axis_alignment = .end, .children = &.{
-                        cx.make(kete.OutlinedButton{ .label = "Apply", .on_press = on_apply }),
+                        cx.make(kete.OutlinedButton{ .label = locale.text("Apply"), .on_press = on_apply }),
                     } })) catch {};
                 }
             }
@@ -684,13 +685,13 @@ fn modeRow(
         .default_upstream = default_upstream,
     };
     const mode_menu = cx.make(ModeMenu{
-        .options = &mode_options,
+        .options = modeOptions(cx.arena),
         .value = mode,
         .on_changed = if (self.actions != null) .of(choice, ModeChoice.choose) else null,
     });
     if (!is_hotspot) {
         return cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-            b.label("Mode"),
+            b.label(locale.text("Mode")),
             mode_menu,
         } });
     }
@@ -699,10 +700,10 @@ fn modeRow(
     const on_start: ?kete.Callback = if (self.actions != null and can_start) .of(choice, ModeChoice.start) else null;
     const on_stop: ?kete.Callback = if (self.actions != null) .of(choice, ModeChoice.stop) else null;
     return cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-        b.label("Mode"),
+        b.label(locale.text("Mode")),
         mode_menu,
         cx.make(kete.OutlinedButton{
-            .label = if (active) "Stop" else "Start",
+            .label = if (active) locale.text("Stop") else locale.text("Start"),
             .on_press = if (active) on_stop else on_start,
         }),
     } });
@@ -740,9 +741,9 @@ fn hotspotRows(
 
     const key = (@as(u64, state.form_id) << 2) | 0x4000_0000;
     rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-        b.label("Name"),
+        b.label(locale.text("Name")),
         cx.make(kete.Expanded{ .child = cx.make(kete.TextField{
-            .placeholder = "Name",
+            .placeholder = locale.text("Name"),
             .initial = state.hotspot_ssid.text(),
             .max_len = 32,
             .size = 18,
@@ -752,9 +753,9 @@ fn hotspotRows(
         }).withKey(key) }),
     } })) catch {};
     rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-        b.label("Password"),
+        b.label(locale.text("Password")),
         cx.make(kete.Expanded{ .child = cx.make(kete.TextField{
-            .placeholder = "Password",
+            .placeholder = locale.text("Password"),
             .initial = state.hotspot_password.text(),
             .max_len = 63,
             .obscure = true,
@@ -766,14 +767,14 @@ fn hotspotRows(
     } })) catch {};
     const selected_opt = upstreams.find(state.hotspot_upstream.slice());
     const internet_note: ?[]const u8 = if (upstreams.len == 0)
-        "No other network connection is available"
+        locale.text("No other network connection is available")
     else if (selected_opt) |opt|
-        (if (opt.ethernet and !opt.connected) "Connect an Ethernet cable to share the internet" else null)
+        (if (opt.ethernet and !opt.connected) locale.text("Connect an Ethernet cable to share the internet") else null)
     else
         null;
     const sel = state.hotspot_upstream.slice();
     const upstream_opts = a.alloc([]const u8, 1 + upstreams.len) catch return;
-    upstream_opts[0] = "None";
+    upstream_opts[0] = locale.text("None");
     var selected_upstream: usize = 0;
     for (upstreams.slice(), 0..) |opt, i| {
         upstream_opts[i + 1] = cx.fmt("{s}", .{opt.label.slice()});
@@ -789,7 +790,7 @@ fn hotspotRows(
         .on_selected = if (!active and self.actions != null and upstreams.len > 0) .of(up_pick, UpstreamPick.select) else null,
     });
     rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-        b.label("Upstream"),
+        b.label(locale.text("Upstream")),
         internet_menu,
         if (internet_note) |note|
             cx.make(kete.Expanded{ .child = cx.make(kete.Text{
@@ -802,14 +803,14 @@ fn hotspotRows(
     if (state.hotspot_invalid) rows.append(a, cx.make(kete.Row{ .spacing = 12, .children = &.{
         cx.make(kete.SizedBox{ .width = 150 }),
         cx.make(kete.Expanded{ .child = cx.make(kete.Text{
-            .text = "Give a name (1–32 characters) and a password of 8–63 characters",
+            .text = locale.text("Give a name (1–32 characters) and a password of 8–63 characters"),
             .style = .{ .size = 16, .color = cx.theme().@"error" },
         }) }),
     } })) catch {};
 
     const clients = hs.clientSlice();
     if (clients.len == 0) {
-        rows.append(a, b.item("Clients", "None")) catch {};
+        rows.append(a, b.item(locale.text("Clients"), locale.text("None"))) catch {};
     } else {
         var client_rows: std.ArrayList(kete.Widget) = .empty;
         for (clients) |*cl| {
@@ -818,17 +819,17 @@ fn hotspotRows(
             const line = if (cl.name_len > 0) blk: {
                 const cname = printable(cx, cl.name());
                 break :blk if (cl.address) |ip|
-                    cx.fmt("{s} ({d}.{d}.{d}.{d}, {s})", .{ cname, ip[0], ip[1], ip[2], ip[3], mac_str })
+                    kete_vc4.textf(cx, "{s} ({d}.{d}.{d}.{d}, {s})", .{ cname, ip[0], ip[1], ip[2], ip[3], mac_str })
                 else
-                    cx.fmt("{s} ({s})", .{ cname, mac_str });
+                    kete_vc4.textf(cx, "{s} ({s})", .{ cname, mac_str });
             } else if (cl.address) |ip|
-                cx.fmt("{d}.{d}.{d}.{d} ({s})", .{ ip[0], ip[1], ip[2], ip[3], mac_str })
+                kete_vc4.textf(cx, "{d}.{d}.{d}.{d} ({s})", .{ ip[0], ip[1], ip[2], ip[3], mac_str })
             else
                 mac_str;
             client_rows.append(a, b.value(line)) catch {};
         }
         rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .start, .spacing = 12, .children = &.{
-            b.label("Clients"),
+            b.label(locale.text("Clients")),
             cx.make(kete.Expanded{ .child = b.page(client_rows.items) }),
         } })) catch {};
     }
@@ -838,10 +839,13 @@ fn hotspotRows(
 /// "Access Point" in a menu.
 pub const ModeMenu = kete.Select(Mode);
 
-const mode_options = [_]ModeMenu.Option{
-    .labeled(.client, "Client"),
-    .labeled(.access_point, "Access Point"),
-};
+/// The modes, in the system's language (in `a`).
+fn modeOptions(a: std.mem.Allocator) []const ModeMenu.Option {
+    return a.dupe(ModeMenu.Option, &.{
+        .labeled(.client, locale.text("Client")),
+        .labeled(.access_point, locale.text("Access Point")),
+    }) catch &.{};
+}
 
 /// The interface whose internet connection is shared over the access point.
 pub const InternetMenu = struct {
@@ -957,17 +961,17 @@ fn joinForm(self: *const Settings, b: Builder, state: *State, adapter_name: []co
     const t = &cx.ui.theme;
     const on_connect: ?kete.Callback = if (self.actions) |acts| .of(act(cx, acts, state, adapter_name, n.ssid()), Act.connect) else null;
     const field: kete.Widget = switch (n.security) {
-        .open => cx.make(kete.Text{ .text = "An open network: what is sent can be seen", .style = .{ .size = 16, .color = t.on_surface_variant } }),
+        .open => cx.make(kete.Text{ .text = locale.text("An open network: what is sent can be seen"), .style = .{ .size = 16, .color = t.on_surface_variant } }),
         .wpa2, .wpa3 => cx.make(kete.TextField{
             .initial = state.password_buf[0..state.password_len],
-            .placeholder = "Password",
+            .placeholder = locale.text("Password"),
             .obscure = true,
             .autofocus = true,
             .size = 18,
             .on_changed = .of(state, State.setPassword),
             .on_submit = on_connect,
         }).withKey(std.hash.Fnv1a_64.hash(n.ssid())),
-        else => cx.make(kete.Text{ .text = cx.fmt("{s} networks are not supported yet", .{n.security.label()}), .style = .{ .size = 16, .color = t.on_surface_variant } }),
+        else => cx.make(kete.Text{ .text = kete_vc4.textf(cx, "{s} networks are not supported yet", .{n.security.label()}), .style = .{ .size = 16, .color = t.on_surface_variant } }),
     };
     const supported = n.security == .open or n.security == .wpa2 or n.security == .wpa3;
     return cx.make(kete.Padding{
@@ -977,7 +981,7 @@ fn joinForm(self: *const Settings, b: Builder, state: *State, adapter_name: []co
             .spacing = 12,
             .children = &.{
                 cx.make(kete.Expanded{ .child = field }),
-                cx.make(kete.OutlinedButton{ .label = "Connect", .on_press = if (supported) on_connect else null }),
+                cx.make(kete.OutlinedButton{ .label = locale.text("Connect"), .on_press = if (supported) on_connect else null }),
             },
         }),
     });
@@ -1060,7 +1064,7 @@ fn networkRow(
     return cx.make(kete.ListItem{
         .headline = printable(cx, n.ssid()),
         .leading = cx.make(Signal{ .bars = n.bars(), .locked = n.security != .open, .size = 20 }),
-        .trailing = if (joined) cx.make(kete.OutlinedButton{ .label = "Disconnect", .on_press = on_disconnect }) else null,
+        .trailing = if (joined) cx.make(kete.OutlinedButton{ .label = locale.text("Disconnect"), .on_press = on_disconnect }) else null,
         .selected = chosen or joined,
         .on_press = on_press,
     });

@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const kete = @import("kete");
+const kete_vc4 = @import("kete_vc4");
 const gfx = kete.gfx;
 const locale = @import("locale");
 const info = @import("info.zig");
@@ -63,9 +64,9 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     const model = self.system.model.slice();
     var rows: std.ArrayList(kete.Widget) = .empty;
     rows.append(a, b.value(view.orUnknown(model))) catch {};
-    if (self.system.serial.len > 0) rows.append(a, cx.make(kete.Text{ .text = cx.fmt("Serial: {s}", .{self.system.serial.slice()}), .style = .{ .size = 16, .color = t.on_surface_variant } })) catch {};
+    if (self.system.serial.len > 0) rows.append(a, cx.make(kete.Text{ .text = kete_vc4.textf(cx, "Serial: {s}", .{self.system.serial.slice()}), .style = .{ .size = 16, .color = t.on_surface_variant } })) catch {};
     const drawing = board.forModel(model) orelse {
-        rows.append(a, b.value("There is no drawing of this board")) catch {};
+        rows.append(a, b.value(locale.text("There is no drawing of this board"))) catch {};
         return b.scroll(.board, b.page(rows.items));
     };
     // The processor (or the GPIO header when asked for), until something
@@ -79,7 +80,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     const about = board.describe(part);
     rows.appendSlice(a, &.{
         cx.make(kete.Padding{ .padding = .symmetric(0, 8), .child = cx.make(kete.Align{ .alignment = .center_left, .child = cx.make(BoardView{ .board = drawing, .selected = picked, .on_select = partPicker(state) }) }) }),
-        cx.make(kete.Text{ .text = if (part.chip.len > 0) cx.fmt("{s}: {s}", .{ about.title, part.chip }) else about.title, .style = .{ .size = 20, .color = t.on_surface } }),
+        cx.make(kete.Text{ .text = if (part.chip.len > 0) kete_vc4.textf(cx, "{s}: {s}", .{ about.title, part.chip }) else about.title, .style = .{ .size = 20, .color = t.on_surface } }),
         cx.make(kete.Text{ .text = cx.fmt("{s}{s}", .{ about.about, if (part.underside) " (underneath the board)" else "" }), .style = .{ .size = 16, .color = t.on_surface_variant } }),
     }) catch {};
     // What it is doing now, where that is known.
@@ -88,11 +89,11 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     var b2: [32]u8 = undefined;
     var card_buf: [64]u8 = undefined;
     const now: ?[]const u8 = switch (part.kind) {
-        .soc => if (u.cpu_busy) |busy| (if (u.temperature) |c| cx.fmt("{d:.0}% busy, at {s}", .{ busy, locale.formatTemperature(&b1, c) }) else cx.fmt("{d:.0}% busy", .{busy})) else null,
-        .soc_with_ram => if (u.cpu_busy) |busy| cx.fmt("{d:.0}% busy; {s} of {s} of memory in use", .{ busy, info.formatBytes(&b1, u.memUsed()), info.formatBytes(&b2, u.mem_total) }) else null,
-        .ram => cx.fmt("{s} of {s} in use", .{ info.formatBytes(&b1, u.memUsed()), info.formatBytes(&b2, u.mem_total) }),
+        .soc => if (u.cpu_busy) |busy| (if (u.temperature) |c| kete_vc4.textf(cx, "{d:.0}% busy, at {s}", .{ busy, locale.formatTemperature(&b1, c) }) else kete_vc4.textf(cx, "{d:.0}% busy", .{busy})) else null,
+        .soc_with_ram => if (u.cpu_busy) |busy| kete_vc4.textf(cx, "{d:.0}% busy; {s} of {s} of memory in use", .{ busy, info.formatBytes(&b1, u.memUsed()), info.formatBytes(&b2, u.mem_total) }) else null,
+        .ram => kete_vc4.textf(cx, "{s} of {s} in use", .{ info.formatBytes(&b1, u.memUsed()), info.formatBytes(&b2, u.mem_total) }),
         .micro_sd, .sd, .emmc => if (self.system.card.bytes > 0) cx.fmt("{s}", .{self.system.card.describe(&card_buf)}) else null,
-        .usb, .usb_double, .usb_otg => if (self.usb.len == 0) "Nothing is plugged in" else null,
+        .usb, .usb_double, .usb_otg => if (self.usb.len == 0) locale.text("Nothing is plugged in") else null,
         else => null,
     };
     if (now) |text| rows.append(a, cx.make(kete.Text{ .text = text, .style = .{ .size = 16, .color = t.on_surface } })) catch {};
@@ -122,7 +123,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
         if (pins.set_failure) |why| {
             err_msg = why;
         } else if (pins.last_error) |why| {
-            err_msg = cx.fmt("It could not be set up: {s}", .{why});
+            err_msg = kete_vc4.textf(cx, "It could not be set up: {s}", .{why});
         }
     }
     if (err_msg.len == 0) {
@@ -238,10 +239,10 @@ fn pinColourKey(cx: *kete.BuildContext) kete.Widget {
     const entries = [_]struct { Color, []const u8 }{
         .{ red, "5V" },
         .{ orange, "3.3V" },
-        .{ grey, "Ground" },
-        .{ blue, "Input" },
-        .{ green, "Output" },
-        .{ purple, "Other" },
+        .{ grey, locale.text("Ground") },
+        .{ blue, locale.text("Input") },
+        .{ green, locale.text("Output") },
+        .{ purple, locale.text("Other") },
     };
     var items: std.ArrayList(kete.Widget) = .empty;
     for (entries) |e| {
@@ -260,9 +261,9 @@ fn gpioDoing(cx: *kete.BuildContext, pins: *const gpio.Pins, g: u6) []const u8 {
     const l = &pins.lines[g];
     const level = if (l.high) "high" else "low";
     return switch (l.function) {
-        .output => cx.fmt("Output, {s}", .{level}),
-        .input => cx.fmt("Input, {s}", .{level}),
-        else => |f| if (pins.altName(g, f.alt().?)) |n| n else cx.fmt("Alternate function {d}", .{f.alt().?}),
+        .output => kete_vc4.textf(cx, "Output, {s}", .{level}),
+        .input => kete_vc4.textf(cx, "Input, {s}", .{level}),
+        else => |f| if (pins.altName(g, f.alt().?)) |n| n else kete_vc4.textf(cx, "Alternate function {d}", .{f.alt().?}),
     };
 }
 
@@ -279,33 +280,33 @@ fn pinDetail(
     var rows: std.ArrayList(kete.Widget) = .empty;
     switch (pin) {
         .power_5v => {
-            rows.append(a, cx.make(kete.Text{ .text = cx.fmt("5V, pin {d}", .{pin_num}), .style = .{ .size = 18, .color = t.on_surface } })) catch {};
-            rows.append(a, cx.make(kete.Text{ .text = "5 V power from the board's power supply", .style = .{ .size = 16, .color = t.on_surface_variant } })) catch {};
+            rows.append(a, cx.make(kete.Text{ .text = kete_vc4.textf(cx, "5V, pin {d}", .{pin_num}), .style = .{ .size = 18, .color = t.on_surface } })) catch {};
+            rows.append(a, cx.make(kete.Text{ .text = locale.text("5 V power from the board's power supply"), .style = .{ .size = 16, .color = t.on_surface_variant } })) catch {};
         },
         .power_3v3 => {
-            rows.append(a, cx.make(kete.Text{ .text = cx.fmt("3.3V, pin {d}", .{pin_num}), .style = .{ .size = 18, .color = t.on_surface } })) catch {};
-            rows.append(a, cx.make(kete.Text{ .text = "3.3 V power from the board", .style = .{ .size = 16, .color = t.on_surface_variant } })) catch {};
+            rows.append(a, cx.make(kete.Text{ .text = kete_vc4.textf(cx, "3.3V, pin {d}", .{pin_num}), .style = .{ .size = 18, .color = t.on_surface } })) catch {};
+            rows.append(a, cx.make(kete.Text{ .text = locale.text("3.3 V power from the board"), .style = .{ .size = 16, .color = t.on_surface_variant } })) catch {};
         },
         .ground => {
-            rows.append(a, cx.make(kete.Text{ .text = cx.fmt("Ground, pin {d}", .{pin_num}), .style = .{ .size = 18, .color = t.on_surface } })) catch {};
-            rows.append(a, cx.make(kete.Text{ .text = "Ground (0 V)", .style = .{ .size = 16, .color = t.on_surface_variant } })) catch {};
+            rows.append(a, cx.make(kete.Text{ .text = kete_vc4.textf(cx, "Ground, pin {d}", .{pin_num}), .style = .{ .size = 18, .color = t.on_surface } })) catch {};
+            rows.append(a, cx.make(kete.Text{ .text = locale.text("Ground (0 V)"), .style = .{ .size = 16, .color = t.on_surface_variant } })) catch {};
         },
         .gpio => |g| {
             const l = &pins.lines[g];
             const title = if (gpio.usualName(g)) |u|
-                cx.fmt("GPIO {d} ({s}), pin {d}", .{ g, u, pin_num })
+                kete_vc4.textf(cx, "GPIO {d} ({s}), pin {d}", .{ g, u, pin_num })
             else
-                cx.fmt("GPIO {d}, pin {d}", .{ g, pin_num });
+                kete_vc4.textf(cx, "GPIO {d}, pin {d}", .{ g, pin_num });
             rows.append(a, cx.make(kete.Text{ .text = title, .style = .{ .size = 18, .color = t.on_surface } })) catch {};
             rows.append(a, cx.make(kete.Text{ .text = gpioDoing(cx, pins, g), .style = .{ .size = 16, .color = t.on_surface } })) catch {};
             if (l.function.alt() != null) rows.append(a, cx.make(kete.Text{
-                .text = cx.fmt("It is {s} now", .{if (l.high) "high" else "low"}),
+                .text = kete_vc4.textf(cx, "It is {s} now", .{if (l.high) "high" else "low"}),
                 .style = .{ .size = 16, .color = t.on_surface_variant },
             })) catch {};
             if (l.used) {
                 const who = l.consumer();
                 rows.append(a, cx.make(kete.Text{
-                    .text = if (who.len > 0) cx.fmt("In use by {s}, so it cannot be changed here", .{who}) else "In use by the system, so it cannot be changed here",
+                    .text = if (who.len > 0) kete_vc4.textf(cx, "In use by {s}, so it cannot be changed here", .{who}) else locale.text("In use by the system, so it cannot be changed here"),
                     .style = .{ .size = 15, .color = t.on_surface_variant },
                 })) catch {};
             } else {
@@ -316,9 +317,9 @@ fn pinDetail(
                 } else null;
                 rows.append(a, cx.make(kete.Row{ .fill = false, .children = &.{
                     cx.make(PinModeMenu{
-                        .options = &mode_options,
+                        .options = modeOptions(a),
                         .value = pins.mode(g),
-                        .placeholder = "Set mode",
+                        .placeholder = locale.text("Set mode"),
                         .on_changed = if (pick) |p| .of(p, PinPick.set) else null,
                     }),
                 } })) catch {};
@@ -331,13 +332,16 @@ fn pinDetail(
 /// Menu button for configuring a GPIO pin's mode.
 pub const PinModeMenu = kete.Select(Mode);
 
-const mode_options = [_]PinModeMenu.Option{
-    .labeled(.input, "Input"),
-    .labeled(.input_pull_up, "Input, pulled up"),
-    .labeled(.input_pull_down, "Input, pulled down"),
-    .labeled(.output_low, "Output, low"),
-    .labeled(.output_high, "Output, high"),
-};
+/// The modes a pin can be set to, in the system's language (in `a`).
+fn modeOptions(a: std.mem.Allocator) []const PinModeMenu.Option {
+    return a.dupe(PinModeMenu.Option, &.{
+        .labeled(.input, locale.text("Input")),
+        .labeled(.input_pull_up, locale.text("Input, pulled up")),
+        .labeled(.input_pull_down, locale.text("Input, pulled down")),
+        .labeled(.output_low, locale.text("Output, low")),
+        .labeled(.output_high, locale.text("Output, high")),
+    }) catch &.{};
+}
 
 const PinPick = struct {
     actions: *Actions,

@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const kete = @import("kete");
+const locale = @import("locale");
 const kete_vc4 = @import("kete_vc4");
 const appearance_settings = @import("appearance");
 const builtin = appearance_settings.backgrounds;
@@ -81,14 +82,14 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     const theme_bar = cx.make(kete.PillBar{
         .children = &.{
             cx.make(kete.PillButton{
-                .label = "Dark",
+                .label = locale.text("Dark"),
                 .icon = .dark_mode,
                 .selected = self.appearance.theme == .dark,
                 .first = true,
                 .on_press = if (self.actions != null) .of(state, State.setDark) else null,
             }),
             cx.make(kete.PillButton{
-                .label = "Light",
+                .label = locale.text("Light"),
                 .icon = .light_mode,
                 .selected = self.appearance.theme == .light,
                 .last = true,
@@ -101,7 +102,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
         .cross_axis_alignment = .center,
         .spacing = 12,
         .children = &.{
-            b.label("Theme"),
+            b.label(locale.text("Theme")),
             theme_bar,
         },
     })) catch {};
@@ -112,7 +113,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
         .cross_axis_alignment = .start,
         .spacing = 8,
         .children = cx.makeAll(.{
-            b.label("Background"),
+            b.label(locale.text("Background")),
             photoRow(cx, self, state),
         }),
     })) catch {};
@@ -122,9 +123,9 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
         .cross_axis_alignment = .start,
         .spacing = 4,
         .children = cx.makeAll(.{
-            b.label("Dock"),
-            kete.SwitchRow{ .value = self.appearance.clock, .on_changed = if (self.actions != null) .of(state, State.setClock) else null, .label = "Show the time" },
-            kete.SwitchRow{ .value = self.appearance.network, .on_changed = if (self.actions != null) .of(state, State.setNetwork) else null, .label = "Show the network status" },
+            b.label(locale.text("Dock")),
+            kete.SwitchRow{ .value = self.appearance.clock, .on_changed = if (self.actions != null) .of(state, State.setClock) else null, .label = locale.text("Show the time") },
+            kete.SwitchRow{ .value = self.appearance.network, .on_changed = if (self.actions != null) .of(state, State.setNetwork) else null, .label = locale.text("Show the network status") },
         }),
     })) catch {};
 

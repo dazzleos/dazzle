@@ -5,6 +5,8 @@
 
 const std = @import("std");
 const kete = @import("kete");
+const kete_vc4 = @import("kete_vc4");
+const locale = @import("locale");
 const gfx = kete.gfx;
 const store = @import("store");
 const sys_mod = @import("sys");
@@ -123,7 +125,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     const a = cx.arena;
     const os_busy = self.update.status == .checking or self.update.status == .downloading or self.update.status == .installing;
     const busy = apps.busy != null or os_busy;
-    const err_msg = if (apps.message.len > 0 and !std.mem.startsWith(u8, apps.message, "Cannot get the list of apps"))
+    const err_msg = if (apps.message.len > 0 and !std.mem.startsWith(u8, apps.message, locale.text("Cannot get the list of apps")))
         apps.message
     else
         "";
@@ -141,7 +143,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     // Parental controls may stop apps being installed or removed (updates
     // still come).
     const fixed = if (self.parental) |p| p.on and p.limits.block_software else false;
-    if (fixed) rows.append(a, cx.make(kete.Text{ .text = "Parental controls stop apps being installed or removed", .style = .{ .size = 15, .color = t.on_surface_variant } })) catch {};
+    if (fixed) rows.append(a, cx.make(kete.Text{ .text = locale.text("Parental controls stop apps being installed or removed"), .style = .{ .size = 15, .color = t.on_surface_variant } })) catch {};
     var updates: usize = @intFromBool(self.update.status == .available);
     for (apps.list, 0..) |app, i| {
         const installed = i < apps.installed.len and apps.installed[i];
@@ -154,18 +156,18 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
             cx.make(kete.Spinner{ .size = 28 })
         else if (updatable)
             cx.make(kete.Row{ .fill = false, .cross_axis_alignment = .center, .spacing = 8, .children = cx.makeAll(.{
-                kete.OutlinedButton{ .label = "Update", .icon = .download, .on_press = if (enabled) .of(x.?, AppAct.install) else null },
+                kete.OutlinedButton{ .label = locale.text("Update"), .icon = .download, .on_press = if (enabled) .of(x.?, AppAct.install) else null },
                 kete.OutlinedButton{ .icon = .delete, .destructive = true, .on_press = if (enabled and !fixed) .of(x.?, AppAct.remove) else null },
             }) })
         else if (installed)
             cx.make(kete.OutlinedButton{ .icon = .delete, .destructive = true, .on_press = if (enabled and !fixed) .of(x.?, AppAct.remove) else null })
         else
-            cx.make(kete.OutlinedButton{ .label = "Install", .icon = .download, .on_press = if (enabled and !fixed) .of(x.?, AppAct.install) else null });
+            cx.make(kete.OutlinedButton{ .label = locale.text("Install"), .icon = .download, .on_press = if (enabled and !fixed) .of(x.?, AppAct.install) else null });
         var size_buf: [32]u8 = undefined;
         const detail = if (i >= apps.offered)
-            "Installed, and no longer offered"
+            locale.text("Installed, and no longer offered")
         else if (app.description.len > 0)
-            cx.fmt("{s} · {s}", .{ app.description, info.formatBytes(&size_buf, app.size) })
+            kete_vc4.textf(cx, "{s} · {s}", .{ app.description, info.formatBytes(&size_buf, app.size) })
         else
             cx.fmt("{s}", .{info.formatBytes(&size_buf, app.size)});
         const app_icon: ?*const gfx.Image = if (i < apps.icons.len) apps.icons[i] else null;
@@ -179,30 +181,30 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
         } })) catch {};
     }
     const status = if (apps.busy) |name|
-        (if (name.len == 0) "Getting the list of apps…" else if (std.mem.eql(u8, name, "*")) "Updating…" else "Installing…")
+        (if (name.len == 0) locale.text("Getting the list of apps…") else if (std.mem.eql(u8, name, "*")) locale.text("Updating…") else locale.text("Installing…"))
     else if (self.update.status == .checking)
-        "Checking for updates…"
+        locale.text("Checking for updates…")
     else if (self.update.status == .downloading or self.update.status == .installing)
-        "Updating…"
+        locale.text("Updating…")
     else if (updates == 1)
-        "1 update available"
+        locale.text("1 update available")
     else if (updates > 1)
-        cx.fmt("{d} updates available", .{updates})
+        kete_vc4.textf(cx, "{d} updates available", .{updates})
     else if (apps.list.len == 0)
-        "No list of apps yet: is the network up?"
+        locale.text("No list of apps yet: is the network up?")
     else
-        "All apps updated";
+        locale.text("All apps updated");
     var footer_children: std.ArrayList(kete.Widget) = .empty;
     footer_children.append(a, cx.make(kete.Expanded{ .child = b.value(status) })) catch {};
     if (updates > 0) {
         footer_children.append(a, cx.make(kete.OutlinedButton{
-            .label = "Update all",
+            .label = locale.text("Update all"),
             .icon = .download,
             .on_press = if (self.actions != null and !busy) .of(appAct(cx, self.actions.?, state, ""), AppAct.updateAll) else null,
         })) catch {};
     }
     footer_children.append(a, cx.make(kete.OutlinedButton{
-        .label = "Refresh",
+        .label = locale.text("Refresh"),
         .icon = .refresh,
         .on_press = if (self.actions != null and !busy) .of(appAct(cx, self.actions.?, state, ""), AppAct.refresh) else null,
     })) catch {};
@@ -256,23 +258,23 @@ fn dazzleRows(self: *const Settings, b: Builder, state: *State, rows: *std.Array
     const u = &self.update;
     var size_buf: [32]u8 = undefined;
     const detail = if (self.usage.storage.system > 0)
-        cx.fmt("The operating system · {s}", .{info.formatBytes(&size_buf, self.usage.storage.system)})
+        kete_vc4.textf(cx, "The operating system · {s}", .{info.formatBytes(&size_buf, self.usage.storage.system)})
     else
-        "The operating system";
+        locale.text("The operating system");
     const Button = struct { label: []const u8, icon: kete.IconName, flag: enum { download, restart } };
     const available_text = if (u.message.len > 0)
         u.message
     else if (u.size > 0)
-        cx.fmt("Dazzle {s} is available · {s}", .{ u.available, info.formatBytes(&size_buf, u.size) })
+        kete_vc4.textf(cx, "Dazzle {s} is available · {s}", .{ u.available, info.formatBytes(&size_buf, u.size) })
     else
-        cx.fmt("Dazzle {s} is available", .{u.available});
+        kete_vc4.textf(cx, "Dazzle {s} is available", .{u.available});
     const text: []const u8, const button: ?Button, const busy = switch (u.status) {
         .unknown, .current => .{ if (u.message.len > 0) u.message else detail, null, false },
-        .checking => .{ "Checking for updates…", null, true },
-        .available => .{ available_text, Button{ .label = "Update", .icon = .download, .flag = .download }, false },
-        .downloading => .{ "Downloading the update…", null, true },
-        .installing => .{ "Installing the update…", null, true },
-        .ready => .{ if (u.message.len > 0) u.message else "The update is installed: restart to use it", Button{ .label = "Restart", .icon = .restart_alt, .flag = .restart }, false },
+        .checking => .{ locale.text("Checking for updates…"), null, true },
+        .available => .{ available_text, Button{ .label = locale.text("Update"), .icon = .download, .flag = .download }, false },
+        .downloading => .{ locale.text("Downloading the update…"), null, true },
+        .installing => .{ locale.text("Installing the update…"), null, true },
+        .ready => .{ if (u.message.len > 0) u.message else locale.text("The update is installed: restart to use it"), Button{ .label = locale.text("Restart"), .icon = .restart_alt, .flag = .restart }, false },
     };
     const end: kete.Widget = if (busy) cx.make(kete.Spinner{ .size = 28 }) else if (button) |btn| cx.make(kete.OutlinedButton{
         .label = btn.label,
@@ -288,7 +290,7 @@ fn dazzleRows(self: *const Settings, b: Builder, state: *State, rows: *std.Array
             softwareIcon(cx, u.icon),
             cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 2, .children = &.{
                 cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 4, .children = &.{
-                    cx.make(kete.Text{ .text = "Dazzle", .style = .{ .size = 18, .color = t.on_surface }, .wrap = false }),
+                    cx.make(kete.Text{ .text = locale.text("Dazzle"), .style = .{ .size = 18, .color = t.on_surface }, .wrap = false }),
                     cx.make(kete.Icon{ .icon = if (state.dazzle_expanded) .expand_more else .chevron_right, .size = 20, .color = t.on_surface_variant }),
                 } }),
                 cx.make(kete.Text{ .text = text, .style = .{ .size = 15, .color = t.on_surface_variant } }),
@@ -305,7 +307,7 @@ fn dazzleRows(self: *const Settings, b: Builder, state: *State, rows: *std.Array
             .fill = false,
             .spacing = 4,
             .children = &.{
-                dazzleDetail(cx, "Build", self.commit),
+                dazzleDetail(cx, locale.text("Build"), self.commit),
                 dazzleDetail(cx, "Linux", view.orUnknown(self.system.kernel.slice())),
             },
         }) })) catch {};
@@ -458,14 +460,14 @@ pub const ServerConfigButton = struct {
             var rows: std.ArrayList(kete.Widget) = .empty;
             rows.append(a, cx.make(kete.Align{ .height_factor = 1, .child = cx.make(kete.PillBar{ .children = &.{
                 cx.make(kete.PillButton{
-                    .label = "Default",
+                    .label = locale.text("Default"),
                     .selected = !custom,
                     .first = true,
                     .last = false,
                     .on_press = if (st.actions != null) .of(st, BtnState.chooseDefault) else null,
                 }),
                 cx.make(kete.PillButton{
-                    .label = "Custom",
+                    .label = locale.text("Custom"),
                     .selected = custom,
                     .first = false,
                     .last = true,
@@ -475,7 +477,7 @@ pub const ServerConfigButton = struct {
 
             if (!custom) {
                 rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-                    cx.make(kete.SizedBox{ .width = 70, .child = cx.make(kete.Text{ .text = "Server", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
+                    cx.make(kete.SizedBox{ .width = 70, .child = cx.make(kete.Text{ .text = locale.text("Server"), .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
                     cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = st.default_source, .style = .{ .size = 16, .color = t.on_surface } }) }),
                 } })) catch {};
             } else {
@@ -488,7 +490,7 @@ pub const ServerConfigButton = struct {
                 const on_apply: ?kete.Callback = if (st.actions != null) .of(st, BtnState.apply) else null;
                 const key = @as(u64, page_st.form_id);
                 rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-                    cx.make(kete.SizedBox{ .width = 70, .child = cx.make(kete.Text{ .text = "Server", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
+                    cx.make(kete.SizedBox{ .width = 70, .child = cx.make(kete.Text{ .text = locale.text("Server"), .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
                     cx.make(kete.Expanded{ .child = cx.make(kete.TextField{
                         .placeholder = "https://example.com/dazzle",
                         .initial = page_st.server_url.text(),
@@ -499,16 +501,16 @@ pub const ServerConfigButton = struct {
                     }).withKey(key) }),
                 } })) catch {};
                 if (page_st.server_invalid) rows.append(a, cx.make(kete.Text{
-                    .text = "Give an https:// URL",
+                    .text = locale.text("Give an https:// URL"),
                     .style = .{ .size = 15, .color = t.@"error" },
                 })) catch {};
                 rows.append(a, cx.make(kete.Row{ .main_axis_alignment = .end, .children = &.{
-                    cx.make(kete.OutlinedButton{ .label = "Apply", .on_press = on_apply }),
+                    cx.make(kete.OutlinedButton{ .label = locale.text("Apply"), .on_press = on_apply }),
                 } })) catch {};
             }
 
             rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-                cx.make(kete.SizedBox{ .width = 70, .child = cx.make(kete.Text{ .text = "Keys", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
+                cx.make(kete.SizedBox{ .width = 70, .child = cx.make(kete.Text{ .text = locale.text("Keys"), .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
                 cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = st.default_key, .style = .{ .size = 15, .color = t.on_surface }, .wrap = false, .ellipsis = true }) }),
             } })) catch {};
             for (st.subscribed_keys) |k| {
@@ -528,17 +530,17 @@ pub const ServerConfigButton = struct {
             const on_subscribe: ?kete.Callback = if (st.actions != null) .of(st, BtnState.subscribeKey) else null;
             rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
                 cx.make(kete.Expanded{ .child = cx.make(kete.TextField{
-                    .placeholder = "Ed25519 public key (64 hex characters)",
+                    .placeholder = locale.text("Ed25519 public key (64 hex characters)"),
                     .initial = page_st.key_input.text(),
                     .max_len = store.key_hex_len,
                     .size = 15,
                     .on_changed = .of(page_st, PageState.setKeyInput),
                     .on_submit = on_subscribe,
                 }).withKey(@as(u64, page_st.key_form_id)) }),
-                cx.make(kete.OutlinedButton{ .label = "Subscribe", .on_press = on_subscribe }),
+                cx.make(kete.OutlinedButton{ .label = locale.text("Subscribe"), .on_press = on_subscribe }),
             } })) catch {};
             if (page_st.key_invalid) rows.append(a, cx.make(kete.Text{
-                .text = "Give a 64-character hex Ed25519 public key",
+                .text = locale.text("Give a 64-character hex Ed25519 public key"),
                 .style = .{ .size = 15, .color = t.@"error" },
             })) catch {};
 

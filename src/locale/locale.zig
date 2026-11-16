@@ -459,17 +459,48 @@ pub var current: Language = .en_gb;
 
 /// `s` (Dazzle's British English) in the current language.
 pub fn text(comptime s: []const u8) []const u8 {
-    const us = comptime lookup(&us_spelling, s);
     return switch (current) {
-        .en_us => us,
-        else => s,
+        inline else => |l| comptime textIn(l, s),
     };
 }
 
-fn lookup(table: []const [2][]const u8, comptime s: []const u8) []const u8 {
-    for (table) |pair| if (std.mem.eql(u8, pair[0], s)) return pair[1];
-    return s;
+/// `fmt` (a format, in British English) in the current language, with
+/// `args`, into `buf`: the translation keeps the format's arguments, in
+/// order.
+pub fn bufPrint(buf: []u8, comptime fmt: []const u8, args: anytype) []const u8 {
+    return switch (current) {
+        inline else => |l| std.fmt.bufPrint(buf, comptime textIn(l, fmt), args) catch "",
+    };
 }
+
+/// `s` in language `l`. Every text shown in Spanish has its translation
+/// (spanish.zig): one missing is an error when it is built.
+pub fn textIn(comptime l: Language, comptime s: []const u8) []const u8 {
+    @setEvalBranchQuota(1_000_000);
+    if (l == .en_us) return lookup(&us_spelling, s) orelse s;
+    if (!l.spanish()) return s;
+    if (!hasWords(s)) return s;
+    if (l == .es_es) if (lookup(&spanish.spain, s)) |t| return t;
+    return lookup(&spanish.latin_america, s) orelse @compileError("no Spanish for \"" ++ s ++ "\" (see spanish.zig)");
+}
+
+/// Whether `s` has words to translate: letters outside its format's
+/// arguments ("{s} · {s}" has none).
+fn hasWords(comptime s: []const u8) bool {
+    var in_arg = false;
+    for (s) |c| {
+        if (c == '{') in_arg = true else if (c == '}') in_arg = false else if (!in_arg and std.ascii.isAlphabetic(c)) return true;
+    }
+    return false;
+}
+
+fn lookup(table: []const [2][]const u8, comptime s: []const u8) ?[]const u8 {
+    for (table) |pair| if (std.mem.eql(u8, pair[0], s)) return pair[1];
+    return null;
+}
+
+/// The Spanish translations.
+pub const spanish = @import("spanish.zig");
 
 /// American spelling, where it differs (Canada spells as Britain does).
 const us_spelling = [_][2][]const u8{

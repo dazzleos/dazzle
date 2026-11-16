@@ -231,16 +231,16 @@ pub const Setup = struct {
         };
         const last = state.page + 1 == pages.len;
         const next_label = if (last)
-            "Finish"
+            locale.text("Finish")
         else if (which == .wifi and !self.wifiConnected())
-            "Skip"
+            locale.text("Skip")
         else
-            "Next";
+            locale.text("Next");
         return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 24, .children = &.{
-            cx.make(kete.Text{ .text = "Welcome to Dazzle", .style = .{ .size = 40, .color = t.primary } }),
+            cx.make(kete.Text{ .text = locale.text("Welcome to Dazzle"), .style = .{ .size = 40, .color = t.primary } }),
             body,
             cx.make(kete.Row{ .spacing = 12, .main_axis_alignment = .end, .children = &.{
-                if (state.page > 0) cx.make(kete.OutlinedButton{ .label = "Back", .icon = .arrow_back, .on_press = .of(nav, Nav.back) }) else cx.make(kete.SizedBox.empty),
+                if (state.page > 0) cx.make(kete.OutlinedButton{ .label = locale.text("Back"), .icon = .arrow_back, .on_press = .of(nav, Nav.back) }) else cx.make(kete.SizedBox.empty),
                 cx.make(kete.OutlinedButton{ .label = next_label, .icon = if (last) .check else null, .trailing_icon = if (last) null else .arrow_forward, .on_press = .of(nav, Nav.next) }),
             } }),
         } });
@@ -253,16 +253,16 @@ pub const Setup = struct {
         for (std.enums.values(locale.Keyboard)) |k| keyboards.append(a, .{ .label = k.name() }) catch {};
         const heading: kete.TextStyle = .{ .size = 20, .color = t.on_surface_variant };
         return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 12, .children = &.{
-            cx.make(kete.Text{ .text = "Language and keyboard", .style = .{ .size = 28 } }),
+            cx.make(kete.Text{ .text = locale.text("Language and keyboard"), .style = .{ .size = 28 } }),
             cx.make(kete.Row{ .spacing = 24, .cross_axis_alignment = .start, .children = &.{
                 cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .start, .fill = false, .spacing = 4, .children = &.{
-                    cx.make(kete.Text{ .text = "Language", .style = heading }),
+                    cx.make(kete.Text{ .text = locale.text("Language"), .style = heading }),
                     cx.make(kete_vc4.LanguagePicker{ .language = state.language, .on_changed = .of(state, State.setLanguage), .height = 160 }),
                 } }) }),
                 cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 4, .children = &.{
-                    cx.make(kete.Text{ .text = "Keyboard", .style = heading }),
+                    cx.make(kete.Text{ .text = locale.text("Keyboard"), .style = heading }),
                     cx.make(kete.DropdownMenu{ .options = keyboards.items, .selected = @intFromEnum(state.keyboard), .on_selected = .of(state, State.pickKeyboard), .width = 260 }),
-                    cx.make(kete.Padding{ .padding = .{ .top = 8 }, .child = cx.make(kete.TextField{ .placeholder = "Type here to try it", .width = std.math.inf(f32) }) }),
+                    cx.make(kete.Padding{ .padding = .{ .top = 8 }, .child = cx.make(kete.TextField{ .placeholder = locale.text("Type here to try it"), .width = std.math.inf(f32) }) }),
                 } }) }),
             } }),
         } });
@@ -272,8 +272,8 @@ pub const Setup = struct {
     fn timePage(cx: *kete.BuildContext, state: *State) kete.Widget {
         const t = cx.theme();
         return cx.make(kete.Column{ .cross_axis_alignment = .start, .fill = false, .spacing = 12, .children = cx.arena.dupe(kete.Widget, &.{
-            cx.make(kete.Text{ .text = "Time zone", .style = .{ .size = 28 } }),
-            cx.make(kete.Text{ .text = "Where the computer is, for its clock", .style = .{ .size = 18, .color = t.on_surface_variant } }),
+            cx.make(kete.Text{ .text = locale.text("Time zone"), .style = .{ .size = 28 } }),
+            cx.make(kete.Text{ .text = locale.text("Where the computer is, for its clock"), .style = .{ .size = 18, .color = t.on_surface_variant } }),
             cx.make(kete_vc4.TimeZonePicker{ .zone = state.timezone, .on_changed = .of(state, State.setTimeZone) }),
         }) catch &.{} });
     }
@@ -281,9 +281,9 @@ pub const Setup = struct {
     fn hostnamePage(_: *const Setup, cx: *kete.BuildContext, state: *State, nav: *Nav) kete.Widget {
         const t = cx.theme();
         return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 12, .children = &.{
-            cx.make(kete.Text{ .text = "Name this computer", .style = .{ .size = 28 } }),
+            cx.make(kete.Text{ .text = locale.text("Name this computer"), .style = .{ .size = 28 } }),
             cx.make(kete.Text{
-                .text = "Other computers on the network know it by this name. It can have lowercase letters, numbers and hyphens.",
+                .text = locale.text("Other computers on the network know it by this name. It can have lowercase letters, numbers and hyphens."),
                 .style = .{ .size = 18, .color = t.on_surface_variant },
             }),
             cx.make(kete.TextField{
@@ -295,7 +295,7 @@ pub const Setup = struct {
                 .on_submit = .of(nav, Nav.next),
             }),
             if (state.name_invalid) cx.make(kete.Text{
-                .text = "Use 1 to 63 lowercase letters, numbers and hyphens, not starting or ending with a hyphen",
+                .text = locale.text("Use 1 to 63 lowercase letters, numbers and hyphens, not starting or ending with a hyphen"),
                 .style = .{ .size = 16, .color = t.@"error" },
             }) else cx.make(kete.SizedBox.empty),
         } });
@@ -305,28 +305,28 @@ pub const Setup = struct {
         const t = cx.theme();
         const a = cx.arena;
         var rows: std.ArrayList(kete.Widget) = .empty;
-        rows.append(a, cx.make(kete.Text{ .text = "Connect to Wi-Fi", .style = .{ .size = 28 } })) catch {};
+        rows.append(a, cx.make(kete.Text{ .text = locale.text("Connect to Wi-Fi"), .style = .{ .size = 28 } })) catch {};
         const report = self.wifi orelse return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 12, .children = rows.items });
         const conn = &report.connection;
         const name = printable(cx, conn.ssid());
         switch (conn.state) {
             .idle => rows.append(a, cx.make(kete.Text{
-                .text = "Choose a network to connect to, or skip to set up the network later in Settings.",
+                .text = locale.text("Choose a network to connect to, or skip to set up the network later in Settings."),
                 .style = .{ .size = 18, .color = t.on_surface_variant },
             })) catch {},
             .connecting, .authenticating, .addressing => rows.append(a, cx.make(kete.Row{ .spacing = 12, .cross_axis_alignment = .center, .children = &.{
                 cx.make(kete.Spinner{ .size = 20 }),
                 cx.make(kete.Expanded{ .child = cx.make(kete.Text{
-                    .text = cx.fmt("{s}: {s}…", .{ name, conn.state.label() }),
+                    .text = kete_vc4.textf(cx, "{s}: {s}…", .{ name, conn.state.label() }),
                     .style = .{ .size = 18, .color = t.on_surface_variant },
                 }) }),
             } })) catch {},
             .connected => rows.append(a, cx.make(kete.Text{
-                .text = cx.fmt("Connected to {s}", .{name}),
+                .text = kete_vc4.textf(cx, "Connected to {s}", .{name}),
                 .style = .{ .size = 18, .color = t.on_surface_variant },
             })) catch {},
             .failed => rows.append(a, cx.make(kete.Text{
-                .text = cx.fmt("Could not connect to {s}: {s}", .{ name, conn.failure.label() }),
+                .text = kete_vc4.textf(cx, "Could not connect to {s}: {s}", .{ name, conn.failure.label() }),
                 .style = .{ .size = 18, .color = t.@"error" },
             })) catch {},
         }
@@ -336,10 +336,10 @@ pub const Setup = struct {
             if (report.scanning) {
                 rows.append(a, cx.make(kete.Row{ .spacing = 12, .cross_axis_alignment = .center, .children = &.{
                     cx.make(kete.Spinner{ .size = 24 }),
-                    cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = "Scanning for networks…", .style = .{ .size = 18, .color = t.on_surface_variant } }) }),
+                    cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = locale.text("Scanning for networks…"), .style = .{ .size = 18, .color = t.on_surface_variant } }) }),
                 } })) catch {};
             } else {
-                rows.append(a, cx.make(kete.Text{ .text = "No networks found", .style = .{ .size = 18, .color = t.on_surface_variant } })) catch {};
+                rows.append(a, cx.make(kete.Text{ .text = locale.text("No networks found"), .style = .{ .size = 18, .color = t.on_surface_variant } })) catch {};
             }
             return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 12, .children = rows.items });
         }
@@ -393,17 +393,17 @@ pub const Setup = struct {
         const t = cx.theme();
         const on_connect: ?kete.Callback = if (self.actions) |acts| .of(act(cx, acts, state, n.ssid()), Act.connect) else null;
         const field: kete.Widget = switch (n.security) {
-            .open => cx.make(kete.Text{ .text = "An open network: what is sent can be seen", .style = .{ .size = 16, .color = t.on_surface_variant } }),
+            .open => cx.make(kete.Text{ .text = locale.text("An open network: what is sent can be seen"), .style = .{ .size = 16, .color = t.on_surface_variant } }),
             .wpa2, .wpa3 => cx.make(kete.TextField{
                 .initial = state.password_buf[0..state.password_len],
-                .placeholder = "Password",
+                .placeholder = locale.text("Password"),
                 .obscure = true,
                 .autofocus = true,
                 .size = 18,
                 .on_changed = .of(state, State.setPassword),
                 .on_submit = on_connect,
             }).withKey(std.hash.Fnv1a_64.hash(n.ssid())),
-            else => cx.make(kete.Text{ .text = cx.fmt("{s} networks are not supported yet", .{n.security.label()}), .style = .{ .size = 16, .color = t.on_surface_variant } }),
+            else => cx.make(kete.Text{ .text = kete_vc4.textf(cx, "{s} networks are not supported yet", .{n.security.label()}), .style = .{ .size = 16, .color = t.on_surface_variant } }),
         };
         const supported = n.security == .open or n.security == .wpa2 or n.security == .wpa3;
         return cx.make(kete.Padding{
@@ -413,7 +413,7 @@ pub const Setup = struct {
                 .spacing = 12,
                 .children = &.{
                     cx.make(kete.Expanded{ .child = field }),
-                    cx.make(kete.OutlinedButton{ .label = "Connect", .on_press = if (supported) on_connect else null }),
+                    cx.make(kete.OutlinedButton{ .label = locale.text("Connect"), .on_press = if (supported) on_connect else null }),
                 },
             }),
         });
@@ -424,18 +424,18 @@ pub const Setup = struct {
         const a = cx.arena;
         var rows: std.ArrayList(kete.Widget) = .empty;
         rows.appendSlice(a, &.{
-            cx.make(kete.Text{ .text = "Choose your apps", .style = .{ .size = 28 } }),
+            cx.make(kete.Text{ .text = locale.text("Choose your apps"), .style = .{ .size = 28 } }),
             cx.make(kete.Text{
-                .text = "They are installed when you finish. You can add or remove apps later in Settings.",
+                .text = locale.text("They are installed when you finish. You can add or remove apps later in Settings."),
                 .style = .{ .size = 18, .color = t.on_surface_variant },
             }),
         }) catch {};
         const apps = &self.apps;
         if (apps.list.len == 0) {
             const why = if (apps.loading or apps.message.len == 0)
-                "Getting the list of apps…"
+                locale.text("Getting the list of apps…")
             else
-                cx.fmt("The list of apps could not be got: {s}. You can install apps later in Settings.", .{apps.message});
+                kete_vc4.textf(cx, "The list of apps could not be got: {s}. You can install apps later in Settings.", .{apps.message});
             rows.append(a, cx.make(kete.Row{ .spacing = 12, .cross_axis_alignment = .center, .children = &.{
                 if (apps.loading or apps.message.len == 0) cx.make(kete.Spinner{ .size = 24 }) else cx.make(kete.SizedBox.empty),
                 cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = why, .style = .{ .size = 18, .color = t.on_surface_variant } }) }),
@@ -463,27 +463,27 @@ pub const Setup = struct {
         const r = self.report;
         if (r != null and r.?.storage == .failed) {
             return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 16, .children = &.{
-                cx.make(kete.Text{ .text = "The SD card could not be prepared", .style = .{ .size = 28 } }),
+                cx.make(kete.Text{ .text = locale.text("The SD card could not be prepared"), .style = .{ .size = 28 } }),
                 cx.make(kete.Text{
-                    .text = cx.fmt("Dazzle cannot keep files: {s}. Setup will run again when the computer next starts.", .{r.?.failure.label()}),
+                    .text = kete_vc4.textf(cx, "Dazzle cannot keep files: {s}. Setup will run again when the computer next starts.", .{r.?.failure.label()}),
                     .style = .{ .size = 18, .color = t.on_surface_variant },
                 }),
                 cx.make(kete.Row{ .main_axis_alignment = .end, .children = &.{
-                    cx.make(kete.OutlinedButton{ .label = "Continue", .on_press = .of(nav, Nav.continueWithout) }),
+                    cx.make(kete.OutlinedButton{ .label = locale.text("Continue"), .on_press = .of(nav, Nav.continueWithout) }),
                 } }),
             } });
         }
         if (self.apps.installing) |title| {
             return cx.make(kete.Column{ .fill = false, .spacing = 20, .children = &.{
                 cx.make(kete.Spinner{ .size = 64 }),
-                cx.make(kete.Text{ .text = cx.fmt("Installing {s}", .{title}), .style = .{ .size = 24 } }),
-                cx.make(kete.Text{ .text = cx.fmt("{d} of {d}", .{ self.apps.done + 1, self.apps.total }), .style = .{ .size = 18, .color = t.on_surface_variant } }),
+                cx.make(kete.Text{ .text = kete_vc4.textf(cx, "Installing {s}", .{title}), .style = .{ .size = 24 } }),
+                cx.make(kete.Text{ .text = kete_vc4.textf(cx, "{d} of {d}", .{ self.apps.done + 1, self.apps.total }), .style = .{ .size = 18, .color = t.on_surface_variant } }),
             } });
         }
         const progress = if (r) |rep| (if (rep.storage == .preparing) cx.fmt("{d}%", .{rep.progress}) else "") else "";
         return cx.make(kete.Column{ .fill = false, .spacing = 20, .children = &.{
             cx.make(kete.Spinner{ .size = 64 }),
-            cx.make(kete.Text{ .text = "Getting the SD card ready", .style = .{ .size = 24 } }),
+            cx.make(kete.Text{ .text = locale.text("Getting the SD card ready"), .style = .{ .size = 24 } }),
             cx.make(kete.Text{ .text = progress, .style = .{ .size = 18, .color = t.on_surface_variant } }),
         } });
     }
@@ -536,7 +536,7 @@ fn networkRow(
     return cx.make(kete.ListItem{
         .headline = printable(cx, n.ssid()),
         .leading = cx.make(Signal{ .bars = n.bars(), .locked = n.security != .open, .size = 20 }),
-        .trailing = if (joined) cx.make(kete.OutlinedButton{ .label = "Disconnect", .on_press = on_disconnect }) else null,
+        .trailing = if (joined) cx.make(kete.OutlinedButton{ .label = locale.text("Disconnect"), .on_press = on_disconnect }) else null,
         .selected = chosen or joined,
         .on_press = on_press,
     });
@@ -910,6 +910,27 @@ fn up(n: *kete.WidgetNode, comptime T: type) ?*kete.WidgetNode {
     var at: ?*kete.WidgetNode = n;
     while (at) |a| : (at = a.parent) if (a.widget.is(T)) return a;
     return null;
+}
+
+test "every page fits, in Spanish too" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
+    defer u.destroy();
+    var actions: Actions = .{};
+    const report: proto.Report = .{ .storage = .preparing, .progress = 10 };
+    const setup: Setup = .{ .suggestion = "awesome-elephant", .report = &report, .actions = &actions };
+    defer locale.current = .en_gb;
+    var n: u64 = 0;
+    for ([_]locale.Language{ .en_gb, .es_es, .es_ar }) |lang| for (0..pages.len) |page| for ([_][2]u32{ .{ 1920, 1080 }, .{ 800, 600 }, .{ 640, 480 } }) |size| {
+        locale.current = lang;
+        n += 1;
+        u.frame(size[0], size[1], n, setup);
+        u.root.?.state(Setup.State).page = @intCast(page);
+        n += 1;
+        u.frame(size[0], size[1], n, setup);
+        errdefer std.debug.print("the {s} page overflows at {d}x{d} in {s}\n", .{ @tagName(pages[page]), size[0], size[1], lang.code() });
+        try testing.expect(!overflows(u.root.?));
+    };
 }
 
 test "the language and keyboard: the keyboard goes with the language, until one is picked" {

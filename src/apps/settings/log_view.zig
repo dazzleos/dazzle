@@ -7,6 +7,7 @@
 const std = @import("std");
 const sys = @import("sys");
 const kete = @import("kete");
+const locale = @import("locale");
 const kete_vc4 = @import("kete_vc4");
 const gfx = kete.gfx;
 const log = @import("log.zig");
@@ -36,10 +37,10 @@ pub const State = struct {
 pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     const cx = b.cx;
     const a = cx.arena;
-    const problems = cx.make(kete.SwitchRow{ .value = state.problems, .on_changed = .of(state, State.setProblems), .label = "Only warnings and errors" });
+    const problems = cx.make(kete.SwitchRow{ .value = state.problems, .on_changed = .of(state, State.setProblems), .label = locale.text("Only warnings and errors") });
     const serving = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 10, .children = cx.makeAll(.{ serveRow(self, b), remoteRow(self, b) }) });
-    const l = self.log orelse return b.page(&.{ serving, problems, b.value("Reading the log…") });
-    if (l.failed) return b.page(&.{ serving, b.value("The log cannot be read") });
+    const l = self.log orelse return b.page(&.{ serving, problems, b.value(locale.text("Reading the log…")) });
+    if (l.failed) return b.page(&.{ serving, b.value(locale.text("The log cannot be read")) });
     // The lines shown, newest first.
     var shown: std.ArrayList(*const log.Line) = .empty;
     for (0..l.count) |i| {
@@ -64,16 +65,16 @@ fn serveRow(self: *const Settings, b: Builder) kete.Widget {
     const on = self.log_server orelse return cx.make(kete.SizedBox.empty);
     const host = self.system.hostname.slice();
     const note = if (!on)
-        "Lets other computers on the network read the log in a browser. Anyone on the network can read it."
+        locale.text("Lets other computers on the network read the log in a browser. Anyone on the network can read it.")
     else if (host.len > 0)
-        cx.fmt("Anyone on the network can read the log at http://{s}/ (and http://{s}/follow as it is written).", .{ host, host })
+        kete_vc4.textf(cx, "Anyone on the network can read the log at http://{s}/ (and http://{s}/follow as it is written).", .{ host, host })
     else
-        "Anyone on the network can read the log, at this computer's address.";
+        locale.text("Anyone on the network can read the log, at this computer's address.");
     return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 4, .children = &.{
         cx.make(kete.SwitchRow{
             .value = on,
             .on_changed = if (self.actions) |a| .of(a, setLogServer) else null,
-            .label = "Serve the log over HTTP",
+            .label = locale.text("Serve the log over HTTP"),
         }),
         cx.make(kete.Text{ .text = note, .style = .{ .size = 14, .color = t.on_surface_variant } }),
     } });
@@ -90,14 +91,14 @@ fn remoteRow(self: *const Settings, b: Builder) kete.Widget {
     const t = cx.theme();
     const host = self.system.hostname.slice();
     const note = if (self.remote_code) |code|
-        cx.fmt("Code {d}. With it, a computer on the network can move the pointer, type, open and close apps and windows, take screenshots, install updates and restart, at http://{s}:{d}/. Turn this off when you are done.", .{ code, if (host.len > 0) host else "this computer", sys.remote.port })
+        kete_vc4.textf(cx, "Code {d}. With it, a computer on the network can move the pointer, type, open and close apps and windows, take screenshots, install updates and restart, at http://{s}:{d}/. Turn this off when you are done.", .{ code, if (host.len > 0) host else locale.text("this computer"), sys.remote.port })
     else
         "For testing Dazzle from another computer: it can then move the pointer, type, open and close apps and windows, take screenshots, install updates and restart, with a code shown here.";
     return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 4, .children = &.{
         cx.make(kete.SwitchRow{
             .value = self.remote_code != null,
             .on_changed = if (self.actions) |a| .of(a, setRemote) else null,
-            .label = "Let other computers control this one",
+            .label = locale.text("Let other computers control this one"),
         }),
         cx.make(kete.Text{ .text = note, .style = .{ .size = 14, .color = t.on_surface_variant } }),
     } });

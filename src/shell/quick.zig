@@ -7,6 +7,7 @@
 const std = @import("std");
 const sys = @import("sys");
 const kete = @import("kete");
+const locale = @import("locale");
 const icons = @import("icons");
 const glass = @import("glass.zig");
 const dock = @import("dock.zig");
@@ -59,12 +60,12 @@ pub const NetworkSummary = struct {
     pub fn ethernetText(n: *const NetworkSummary, buf: []u8) ?[]const u8 {
         return switch (n.ethernet) {
             .none => null,
-            .unplugged => "Ethernet not connected",
-            .connecting => "Ethernet connecting",
-            .connected => if (n.speed == 0) "Ethernet connected" else if (n.speed % 1000 == 0)
-                std.fmt.bufPrint(buf, "Ethernet connected · {d} Gb/s", .{n.speed / 1000}) catch "Ethernet connected"
+            .unplugged => locale.text("Ethernet not connected"),
+            .connecting => locale.text("Ethernet connecting"),
+            .connected => if (n.speed == 0) locale.text("Ethernet connected") else if (n.speed % 1000 == 0)
+                locale.bufPrint(buf, "Ethernet connected · {d} Gb/s", .{n.speed / 1000})
             else
-                std.fmt.bufPrint(buf, "Ethernet connected · {d} Mb/s", .{n.speed}) catch "Ethernet connected",
+                locale.bufPrint(buf, "Ethernet connected · {d} Mb/s", .{n.speed}),
         };
     }
 
@@ -72,10 +73,10 @@ pub const NetworkSummary = struct {
     pub fn wifiText(n: *const NetworkSummary, buf: []u8) ?[]const u8 {
         return switch (n.wifi) {
             .none => null,
-            .not_connected => "Wi-Fi not connected",
-            .connecting => std.fmt.bufPrint(buf, "Wi-Fi connecting to {s}", .{n.ssid()}) catch "Wi-Fi connecting",
-            .connected => std.fmt.bufPrint(buf, "Wi-Fi connected to {s}", .{n.ssid()}) catch "Wi-Fi connected",
-            .hotspot => std.fmt.bufPrint(buf, "Wi-Fi hotspot {s} on", .{n.ssid()}) catch "Wi-Fi hotspot on",
+            .not_connected => locale.text("Wi-Fi not connected"),
+            .connecting => locale.bufPrint(buf, "Wi-Fi connecting to {s}", .{n.ssid()}),
+            .connected => locale.bufPrint(buf, "Wi-Fi connected to {s}", .{n.ssid()}),
+            .hotspot => locale.bufPrint(buf, "Wi-Fi hotspot {s} on", .{n.ssid()}),
         };
     }
 };
@@ -97,9 +98,9 @@ pub const Updates = enum {
     pub fn text(u: Updates) []const u8 {
         return switch (u) {
             .none => "",
-            .system => "System update available",
-            .apps => "App updates available",
-            .both => "System and app updates available",
+            .system => locale.text("System update available"),
+            .apps => locale.text("App updates available"),
+            .both => locale.text("System and app updates available"),
         };
     }
 };
@@ -432,7 +433,7 @@ pub const Quick = struct {
                 count += 1;
             }
             if (count == 0) {
-                lines[0] = .{ .icon = .public_off, .text = "No network adapter" };
+                lines[0] = .{ .icon = .public_off, .text = locale.text("No network adapter") };
                 count = 1;
             }
             for (lines[0..count], 0..) |line, i| {
@@ -453,7 +454,7 @@ pub const Quick = struct {
                 .radius = .all(12 * s),
                 .child = cx.make(kete.Align{ .child = cx.make(kete.Row{ .fill = false, .cross_axis_alignment = .center, .spacing = 8 * s, .children = a.dupe(kete.Widget, &.{
                     cx.make(kete.Icon{ .icon = .power_settings_new, .size = @round(small_icon * s), .color = argb(color) }),
-                    cx.make(kete.Text{ .text = if (q.power_armed) "Click again to power off" else "Power off", .style = .{ .size = @round(text_size * s), .color = argb(color) }, .wrap = false }),
+                    cx.make(kete.Text{ .text = if (q.power_armed) locale.text("Click again to power off") else locale.text("Power off"), .style = .{ .size = @round(text_size * s), .color = argb(color) }, .wrap = false }),
                 }) catch &.{} }) }),
             }))) catch {};
             return cx.make(kete.Overlay{ .children = layers.items });

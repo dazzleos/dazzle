@@ -9,6 +9,7 @@
 const std = @import("std");
 const sys = @import("sys");
 const kete = @import("kete");
+const kete_vc4 = @import("kete_vc4");
 const locale = @import("locale");
 const info = @import("info.zig");
 const view = @import("view.zig");
@@ -92,19 +93,19 @@ pub fn build(self: *const Settings, b: Builder, st: *State) kete.Widget {
     const t = cx.theme();
     const a = cx.arena;
     st.actions = self.actions;
-    const p = self.parental orelse return b.page(&.{b.value("Asking the system…")});
+    const p = self.parental orelse return b.page(&.{b.value(locale.text("Asking the system…"))});
     if (!st.have_draft) {
         st.draft = p.limits;
         st.have_draft = true;
     }
     var rows: std.ArrayList(kete.Widget) = .empty;
-    if (self.parental_wrong) rows.append(a, cx.make(kete.Text{ .text = "That is not the password", .style = .{ .size = 16, .color = t.@"error" } })) catch {};
+    if (self.parental_wrong) rows.append(a, cx.make(kete.Text{ .text = locale.text("That is not the password"), .style = .{ .size = 16, .color = t.@"error" } })) catch {};
     if (p.on) {
         // How today goes, for whoever uses it to see: how much of the
         // day's time is used, what is left (more with the password), and
         // when downtime comes; and turning parental controls off.
         const now = p.now(sys.realtimeSec());
-        rows.append(a, cx.make(kete.Text{ .text = "Parental controls", .style = .{ .size = 24, .color = t.on_surface }, .wrap = false })) catch {};
+        rows.append(a, cx.make(kete.Text{ .text = locale.text("Parental controls"), .style = .{ .size = 24, .color = t.on_surface }, .wrap = false })) catch {};
         if (p.allowed) |allowed| {
             const fraction: f32 = if (allowed == 0) 1 else @min(1, @as(f32, @floatFromInt(p.used)) / @as(f32, @floatFromInt(allowed)));
             rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = a.dupe(kete.Widget, &.{
@@ -113,37 +114,37 @@ pub fn build(self: *const Settings, b: Builder, st: *State) kete.Widget {
             }) catch &.{} })) catch {};
         }
         var buf: [64]u8 = undefined;
-        const remaining = if (p.allowed) |allowed| cx.fmt("{s} remaining today", .{durationAnd(&buf, allowed -| p.used)}) else "No limit today";
+        const remaining = if (p.allowed) |allowed| kete_vc4.textf(cx, "{s} remaining today", .{durationAnd(&buf, allowed -| p.used)}) else locale.text("No limit today");
         rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = a.dupe(kete.Widget, &.{
             cx.make(kete.Expanded{ .child = b.value(remaining) }),
-            cx.make(kete.OutlinedButton{ .label = "Add time", .icon = .add, .on_press = if (self.actions != null) .of(st, State.openBonus) else null }),
+            cx.make(kete.OutlinedButton{ .label = locale.text("Add time"), .icon = .add, .on_press = if (self.actions != null) .of(st, State.openBonus) else null }),
         }) catch &.{} })) catch {};
         if (p.limits.downtime) |d| if (p.lock != .downtime) {
             const local = sys.parental.Local.in(now, self.locale.timezone);
             const secs = @mod(@as(i64, d.start) * 60 - local.second, std.time.s_per_day);
             var dbuf: [64]u8 = undefined;
-            rows.append(a, b.value(cx.fmt("Downtime in {s}", .{durationAnd(&dbuf, @intCast(@divFloor(secs + 59, 60)))}))) catch {};
+            rows.append(a, b.value(kete_vc4.textf(cx, "Downtime in {s}", .{durationAnd(&dbuf, @intCast(@divFloor(secs + 59, 60)))}))) catch {};
         };
         rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 12 }, .child = cx.make(kete.Row{ .children = a.dupe(kete.Widget, &.{
-            cx.make(kete.OutlinedButton{ .label = "Turn off parental controls", .on_press = if (self.actions != null) .of(st, State.openTurnOff) else null }),
+            cx.make(kete.OutlinedButton{ .label = locale.text("Turn off parental controls"), .on_press = if (self.actions != null) .of(st, State.openTurnOff) else null }),
         }) catch &.{} }) })) catch {};
         return b.page(rows.items);
     }
     // Off: the limits to choose, and turning them on.
     // Titles, each with its switch at the right.
-    rows.append(a, titleRow(cx, "Parental controls", 24, st.form == .turn_on, if (self.actions != null) .of(st, State.setOn) else null)) catch {};
+    rows.append(a, titleRow(cx, locale.text("Parental controls"), 24, st.form == .turn_on, if (self.actions != null) .of(st, State.setOn) else null)) catch {};
     const limited = st.draft.weekday != null or st.draft.weekend != null;
-    rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 12 }, .child = titleRow(cx, "Daily limits", 20, limited, .of(st, setLimited)) })) catch {};
+    rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 12 }, .child = titleRow(cx, locale.text("Daily limits"), 20, limited, .of(st, setLimited)) })) catch {};
     if (limited) {
-        rows.append(a, choiceRow(b, "Weekdays", durationOptions(cx), indexOfDuration(st.draft.weekday), .of(st, setWeekday))) catch {};
-        rows.append(a, choiceRow(b, "Weekends", durationOptions(cx), indexOfDuration(st.draft.weekend), .of(st, setWeekend))) catch {};
+        rows.append(a, choiceRow(b, locale.text("Weekdays"), durationOptions(cx), indexOfDuration(st.draft.weekday), .of(st, setWeekday))) catch {};
+        rows.append(a, choiceRow(b, locale.text("Weekends"), durationOptions(cx), indexOfDuration(st.draft.weekend), .of(st, setWeekend))) catch {};
     }
-    rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 20 }, .child = titleRow(cx, "Downtime", 20, st.draft.downtime != null, .of(st, setDowntime)) })) catch {};
+    rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 20 }, .child = titleRow(cx, locale.text("Downtime"), 20, st.draft.downtime != null, .of(st, setDowntime)) })) catch {};
     if (st.draft.downtime) |d| {
-        rows.append(a, choiceRow(b, "From", timeOptions(cx), d.start / 30, .of(st, setDowntimeStart))) catch {};
-        rows.append(a, choiceRow(b, "To", timeOptions(cx), d.end / 30, .of(st, setDowntimeEnd))) catch {};
+        rows.append(a, choiceRow(b, locale.text("From"), timeOptions(cx), d.start / 30, .of(st, setDowntimeStart))) catch {};
+        rows.append(a, choiceRow(b, locale.text("To"), timeOptions(cx), d.end / 30, .of(st, setDowntimeEnd))) catch {};
     }
-    rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 20 }, .child = titleRow(cx, "Stop apps being installed or removed", 18, st.draft.block_software, .of(st, setBlockSoftware)) })) catch {};
+    rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 20 }, .child = titleRow(cx, locale.text("Stop apps being installed or removed"), 18, st.draft.block_software, .of(st, setBlockSoftware)) })) catch {};
     return b.page(rows.items);
 }
 
@@ -169,29 +170,29 @@ pub fn withDialog(self: *const Settings, b: Builder, st: *State, child: kete.Wid
         items.append(a, cx.make(kete.DropdownMenu{ .options = opts, .selected = std.mem.indexOfScalar(u16, &bonuses, st.bonus), .on_selected = .of(st, setBonus), .width = 320 })) catch {};
     }
     const key = @as(u64, st.form_id) << 8 | 0x7a000000;
-    items.append(a, cx.make(kete.TextField{ .placeholder = "Password", .obscure = true, .max_len = sys.parental.max_password, .width = 320, .initial = st.password.slice(), .on_changed = .of(st, State.setPassword), .on_submit = go, .autofocus = true }).withKey(key)) catch {};
-    if (st.form == .turn_on) items.append(a, cx.make(kete.TextField{ .placeholder = "Password again", .obscure = true, .max_len = sys.parental.max_password, .width = 320, .initial = st.again.slice(), .on_changed = .of(st, State.setAgain), .on_submit = go }).withKey(key | 1)) catch {};
-    if (st.mismatch) items.append(a, cx.make(kete.Text{ .text = if (st.form == .turn_on) "Give the same password twice" else "Give the password", .style = .{ .size = 15, .color = t.@"error" } })) catch {};
+    items.append(a, cx.make(kete.TextField{ .placeholder = locale.text("Password"), .obscure = true, .max_len = sys.parental.max_password, .width = 320, .initial = st.password.slice(), .on_changed = .of(st, State.setPassword), .on_submit = go, .autofocus = true }).withKey(key)) catch {};
+    if (st.form == .turn_on) items.append(a, cx.make(kete.TextField{ .placeholder = locale.text("Password again"), .obscure = true, .max_len = sys.parental.max_password, .width = 320, .initial = st.again.slice(), .on_changed = .of(st, State.setAgain), .on_submit = go }).withKey(key | 1)) catch {};
+    if (st.mismatch) items.append(a, cx.make(kete.Text{ .text = if (st.form == .turn_on) locale.text("Give the same password twice") else locale.text("Give the password"), .style = .{ .size = 15, .color = t.@"error" } })) catch {};
     return cx.make(kete.Dialog{
         .icon = .lock,
         .title = switch (st.form) {
-            .turn_on => "Turn on parental controls",
-            .turn_off => "Turn off parental controls",
-            else => "More time today",
+            .turn_on => locale.text("Turn on parental controls"),
+            .turn_off => locale.text("Turn off parental controls"),
+            else => locale.text("More time today"),
         },
         .description = switch (st.form) {
-            .turn_on => "Choose a password for a parent to unlock with. It is asked for each time parental controls are turned on.",
-            .turn_off => "Give the parent's password.",
-            else => "How much more time, and the parent's password.",
+            .turn_on => locale.text("Choose a password for a parent to unlock with. It is asked for each time parental controls are turned on."),
+            .turn_off => locale.text("Give the parent's password."),
+            else => locale.text("How much more time, and the parent's password."),
         },
         .content = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 10, .children = items.items }),
         .confirm_label = switch (st.form) {
-            .turn_on => "Turn on",
-            .turn_off => "Turn off",
-            else => "Give it",
+            .turn_on => locale.text("Turn on"),
+            .turn_off => locale.text("Turn off"),
+            else => locale.text("Give it"),
         },
         .on_confirm = go,
-        .dismiss_label = "Cancel",
+        .dismiss_label = locale.text("Cancel"),
         .on_dismiss = .of(st, State.cancel),
         .width = 400,
         .child = child,
@@ -305,8 +306,8 @@ fn timeOptions(cx: *kete.BuildContext) []const kete.MenuItem {
 
 /// "Unlimited", "Not allowed", "45 minutes", "1 hour", "2 hours 30 minutes".
 fn limitText(buf: []u8, m: ?u16) []const u8 {
-    const minutes = m orelse return "Unlimited";
-    if (minutes == 0) return "Not allowed";
+    const minutes = m orelse return locale.text("Unlimited");
+    if (minutes == 0) return locale.text("Not allowed");
     return duration(buf, minutes);
 }
 
@@ -315,18 +316,18 @@ fn durationAnd(buf: []u8, minutes: u32) []const u8 {
     const h = minutes / 60;
     const m = minutes % 60;
     if (h == 0 or m == 0) return duration(buf, minutes);
-    return std.fmt.bufPrint(buf, "{d} hour{s} and {d} minute{s}", .{ h, if (h == 1) "" else "s", m, if (m == 1) "" else "s" }) catch "";
+    return locale.bufPrint(buf, "{d} hour{s} and {d} minute{s}", .{ h, if (h == 1) "" else "s", m, if (m == 1) "" else "s" });
 }
 
 fn duration(buf: []u8, minutes: u32) []const u8 {
     const h = minutes / 60;
     const m = minutes % 60;
     return (if (h == 0)
-        std.fmt.bufPrint(buf, "{d} minute{s}", .{ m, if (m == 1) "" else "s" })
+        locale.bufPrint(buf, "{d} minute{s}", .{ m, if (m == 1) "" else "s" })
     else if (m == 0)
-        std.fmt.bufPrint(buf, "{d} hour{s}", .{ h, if (h == 1) "" else "s" })
+        locale.bufPrint(buf, "{d} hour{s}", .{ h, if (h == 1) "" else "s" })
     else
-        std.fmt.bufPrint(buf, "{d} hour{s} {d} minute{s}", .{ h, if (h == 1) "" else "s", m, if (m == 1) "" else "s" })) catch "";
+        locale.bufPrint(buf, "{d} hour{s} {d} minute{s}", .{ h, if (h == 1) "" else "s", m, if (m == 1) "" else "s" }));
 }
 
 fn clockOf(buf: []u8, minute_of_day: u16) []const u8 {
@@ -339,14 +340,13 @@ fn when(buf: []u8, t: i64, now: i64, zone: sys.parental.TimeZone) []const u8 {
     const today = sys.parental.Local.in(now, zone);
     var clock_buf: [16]u8 = undefined;
     const clock = clockOf(&clock_buf, at.minute());
-    const names = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
     const days = at.day - today.day;
-    return (if (days <= 0)
-        std.fmt.bufPrint(buf, "At {s}", .{clock})
+    return if (days <= 0)
+        locale.bufPrint(buf, "At {s}", .{clock})
     else if (days == 1)
-        std.fmt.bufPrint(buf, "Tomorrow at {s}", .{clock})
+        locale.bufPrint(buf, "Tomorrow at {s}", .{clock})
     else
-        std.fmt.bufPrint(buf, "On {s} at {s}", .{ names[at.weekday], clock })) catch "";
+        locale.bufPrint(buf, "On {s} at {s}", .{ locale.weekdayName(at.weekday), clock });
 }
 
 const testing = std.testing;

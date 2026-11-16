@@ -168,7 +168,7 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
     var shown: view.Settings = .{ .commit = build, .system = &system, .usage = usage, .network = &network };
     const root: Root = .{ .shown = &shown };
     const window = try host.app.openWindow(.{
-        .title = "Settings",
+        .title = locale.text("Settings"),
         .root = .of(&root),
         .size = view.open_size,
         .min_size = view.min_size,

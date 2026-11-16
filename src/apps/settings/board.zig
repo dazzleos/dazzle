@@ -10,6 +10,7 @@
 //! 3 B+, say) share their connectors, and differ in their chips.
 
 const std = @import("std");
+const locale = @import("locale");
 
 pub const Rect = struct { x: f32, y: f32, w: f32, h: f32 };
 
@@ -434,7 +435,7 @@ pub fn forModel(model: []const u8) ?*const Board {
 pub fn describe(p: *const Part) struct { title: []const u8, about: []const u8 } {
     return switch (p.kind) {
         .soc => .{
-            .title = "Processor and graphics",
+            .title = locale.text("Processor and graphics"),
             .about = if (std.mem.eql(u8, p.chip, "BCM2712"))
                 "The system on a chip: the processor that runs Dazzle and its apps, and the VideoCore VII graphics processor Dazzle draws everything with"
             else if (std.mem.eql(u8, p.chip, "BCM2711"))
@@ -442,38 +443,38 @@ pub fn describe(p: *const Part) struct { title: []const u8, about: []const u8 } 
             else
                 "The system on a chip: the processor that runs Dazzle and its apps, and the VideoCore IV graphics processor Dazzle draws everything with",
         },
-        .soc_with_ram => .{ .title = "Processor, graphics and memory", .about = "The system on a chip (the processor that runs Dazzle, and the VideoCore IV graphics processor Dazzle draws with), with the memory stacked on top of it" },
-        .ram => .{ .title = "Memory", .about = if (p.underside) "The memory the processor and graphics share, underneath the board" else "The memory the processor and graphics share" },
-        .usb_ethernet => .{ .title = "USB and Ethernet", .about = "A USB hub, for the USB ports, with the wired network adapter on it" },
-        .usb_controller => .{ .title = "USB controller", .about = "For the USB ports, connected to the processor by PCI Express" },
-        .southbridge => .{ .title = "I/O controller", .about = "The RP1 southbridge: runs the GPIO header, USB ports, Ethernet, cameras and displays, connected to the processor by PCI Express" },
-        .ethernet_phy => .{ .title = "Ethernet transceiver", .about = "For the Gigabit Ethernet port" },
-        .wireless, .wireless_can => .{ .title = "Wi-Fi and Bluetooth", .about = "The wireless network adapter (Dazzle uses its Wi-Fi)" },
-        .antenna => .{ .title = "Antenna", .about = "For Wi-Fi and Bluetooth" },
-        .pmic => .{ .title = "Power", .about = "Makes the voltages the chips need from the 5 V supply" },
-        .emmc => .{ .title = "Flash storage", .about = "Storage on the module itself, underneath (Lite modules have none, and use an SD card instead)" },
-        .gpio => .{ .title = "GPIO header", .about = "General-purpose pins for electronics: sensors, lights, buttons and add-on boards (HATs)" },
-        .gpio_holes => .{ .title = "GPIO", .about = "General-purpose pins for electronics, for a header to be soldered in" },
-        .usb, .usb_double => .{ .title = "USB", .about = "For keyboards, mice, USB drives and network adapters" },
-        .usb_otg => .{ .title = "USB", .about = "A micro USB port: for a keyboard, mouse or USB drive (through an adapter or hub)" },
-        .power => .{ .title = "Power", .about = "5 V in, through a micro USB cable" },
-        .usb_c_power => .{ .title = "Power", .about = "5 V in, through a USB-C cable" },
-        .power_button => .{ .title = "Power button", .about = "Turns the Raspberry Pi on and off" },
-        .ethernet => .{ .title = "Ethernet", .about = "The wired network" },
-        .hdmi => .{ .title = "HDMI", .about = "The screen, and its sound" },
-        .mini_hdmi => .{ .title = "Mini HDMI", .about = "The screen, and its sound (through a mini HDMI cable or adapter)" },
-        .micro_hdmi => .{ .title = "Micro HDMI", .about = "The screen, and its sound (through a micro HDMI cable or adapter)" },
-        .audio => .{ .title = "Audio and video", .about = "A 3.5 mm jack: headphones or speakers, and composite video for an old television" },
-        .composite => .{ .title = "Composite video", .about = "For an old television" },
-        .camera => .{ .title = "Camera", .about = "For a Raspberry Pi camera module, by its ribbon cable" },
-        .display => .{ .title = "Display", .about = "For the Raspberry Pi touch display, by its ribbon cable" },
-        .camera_display => .{ .title = "Camera or display", .about = "For a Raspberry Pi camera module or touch display, by its ribbon cable" },
-        .pcie => .{ .title = "PCI Express", .about = "For an NVMe SSD or other PCI Express add-on board, by its ribbon cable" },
-        .micro_sd => .{ .title = "microSD card", .about = "Where Dazzle and your files are kept" },
-        .sd => .{ .title = "SD card", .about = "Where Dazzle and your files are kept" },
-        .edge => .{ .title = "Edge connector", .about = "Plugs into a carrier board, which has the connectors" },
-        .act_led => .{ .title = "Activity LED", .about = "Blinks green when the SD card is being read or written" },
-        .pwr_led => .{ .title = "Power LED", .about = "Glows red when the board has 5 V power" },
+        .soc_with_ram => .{ .title = locale.text("Processor, graphics and memory"), .about = "The system on a chip (the processor that runs Dazzle, and the VideoCore IV graphics processor Dazzle draws with), with the memory stacked on top of it" },
+        .ram => .{ .title = locale.text("Memory"), .about = if (p.underside) locale.text("The memory the processor and graphics share, underneath the board") else locale.text("The memory the processor and graphics share") },
+        .usb_ethernet => .{ .title = locale.text("USB and Ethernet"), .about = locale.text("A USB hub, for the USB ports, with the wired network adapter on it") },
+        .usb_controller => .{ .title = locale.text("USB controller"), .about = locale.text("For the USB ports, connected to the processor by PCI Express") },
+        .southbridge => .{ .title = locale.text("I/O controller"), .about = "The RP1 southbridge: runs the GPIO header, USB ports, Ethernet, cameras and displays, connected to the processor by PCI Express" },
+        .ethernet_phy => .{ .title = locale.text("Ethernet transceiver"), .about = locale.text("For the Gigabit Ethernet port") },
+        .wireless, .wireless_can => .{ .title = locale.text("Wi-Fi and Bluetooth"), .about = locale.text("The wireless network adapter (Dazzle uses its Wi-Fi)") },
+        .antenna => .{ .title = locale.text("Antenna"), .about = locale.text("For Wi-Fi and Bluetooth") },
+        .pmic => .{ .title = locale.text("Power"), .about = locale.text("Makes the voltages the chips need from the 5 V supply") },
+        .emmc => .{ .title = locale.text("Flash storage"), .about = locale.text("Storage on the module itself, underneath (Lite modules have none, and use an SD card instead)") },
+        .gpio => .{ .title = locale.text("GPIO header"), .about = locale.text("General-purpose pins for electronics: sensors, lights, buttons and add-on boards (HATs)") },
+        .gpio_holes => .{ .title = locale.text("GPIO"), .about = locale.text("General-purpose pins for electronics, for a header to be soldered in") },
+        .usb, .usb_double => .{ .title = locale.text("USB"), .about = locale.text("For keyboards, mice, USB drives and network adapters") },
+        .usb_otg => .{ .title = locale.text("USB"), .about = locale.text("A micro USB port: for a keyboard, mouse or USB drive (through an adapter or hub)") },
+        .power => .{ .title = locale.text("Power"), .about = locale.text("5 V in, through a micro USB cable") },
+        .usb_c_power => .{ .title = locale.text("Power"), .about = locale.text("5 V in, through a USB-C cable") },
+        .power_button => .{ .title = locale.text("Power button"), .about = locale.text("Turns the Raspberry Pi on and off") },
+        .ethernet => .{ .title = locale.text("Ethernet"), .about = locale.text("The wired network") },
+        .hdmi => .{ .title = locale.text("HDMI"), .about = locale.text("The screen, and its sound") },
+        .mini_hdmi => .{ .title = locale.text("Mini HDMI"), .about = locale.text("The screen, and its sound (through a mini HDMI cable or adapter)") },
+        .micro_hdmi => .{ .title = locale.text("Micro HDMI"), .about = locale.text("The screen, and its sound (through a micro HDMI cable or adapter)") },
+        .audio => .{ .title = locale.text("Audio and video"), .about = locale.text("A 3.5 mm jack: headphones or speakers, and composite video for an old television") },
+        .composite => .{ .title = locale.text("Composite video"), .about = locale.text("For an old television") },
+        .camera => .{ .title = locale.text("Camera"), .about = locale.text("For a Raspberry Pi camera module, by its ribbon cable") },
+        .display => .{ .title = locale.text("Display"), .about = locale.text("For the Raspberry Pi touch display, by its ribbon cable") },
+        .camera_display => .{ .title = locale.text("Camera or display"), .about = locale.text("For a Raspberry Pi camera module or touch display, by its ribbon cable") },
+        .pcie => .{ .title = locale.text("PCI Express"), .about = locale.text("For an NVMe SSD or other PCI Express add-on board, by its ribbon cable") },
+        .micro_sd => .{ .title = locale.text("microSD card"), .about = locale.text("Where Dazzle and your files are kept") },
+        .sd => .{ .title = locale.text("SD card"), .about = locale.text("Where Dazzle and your files are kept") },
+        .edge => .{ .title = locale.text("Edge connector"), .about = locale.text("Plugs into a carrier board, which has the connectors") },
+        .act_led => .{ .title = locale.text("Activity LED"), .about = locale.text("Blinks green when the SD card is being read or written") },
+        .pwr_led => .{ .title = locale.text("Power LED"), .about = locale.text("Glows red when the board has 5 V power") },
     };
 }
 

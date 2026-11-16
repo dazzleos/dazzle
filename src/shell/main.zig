@@ -392,8 +392,8 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
             notice.theme = dock.theme;
             var body_buf: [300]u8 = undefined;
             if (r.saved) {
-                notice.show(.photo_camera, "Screenshot saved", std.fmt.bufPrint(&body_buf, "Saved as \u{201c}{s}\u{201d} in your files", .{r.text()}) catch r.text(), sys.nowNs());
-            } else notice.show(.warning, "Screenshot not saved", r.text(), sys.nowNs());
+                notice.show(.photo_camera, locale.text("Screenshot saved"), std.fmt.bufPrint(&body_buf, "Saved as \u{201c}{s}\u{201d} in your files", .{r.text()}) catch r.text(), sys.nowNs());
+            } else notice.show(.warning, locale.text("Screenshot not saved"), r.text(), sys.nowNs());
             server.damaged = true;
         };
         // What changed in /data/apps, or all of it if it has just appeared
@@ -925,8 +925,8 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
             notice.theme = dock.theme;
             var body_buf: [64]u8 = undefined;
             if (remote.code) |code| {
-                notice.show(.warning, "Remote control is on", std.fmt.bufPrint(&body_buf, "Code {d}, port {d}", .{ code, sys.remote.port }) catch "", sys.nowNs());
-            } else notice.show(.check, "Remote control is off", "", sys.nowNs());
+                notice.show(.warning, locale.text("Remote control is on"), std.fmt.bufPrint(&body_buf, "Code {d}, port {d}", .{ code, sys.remote.port }) catch "", sys.nowNs());
+            } else notice.show(.check, locale.text("Remote control is off"), "", sys.nowNs());
             server.damaged = true;
         };
         if (apps_changes.appearance) {

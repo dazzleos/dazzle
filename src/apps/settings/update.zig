@@ -97,7 +97,7 @@ pub const Updater = struct {
     }
 
     fn setMessage(u: *Updater, comptime fmt: []const u8, args: anytype) void {
-        u.message_len = if (std.fmt.bufPrint(&u.message_buf, fmt, args)) |t| t.len else |_| 0;
+        u.message_len = locale.bufPrint(&u.message_buf, fmt, args).len;
     }
 
     /// The system that can be downloaded, if it is offered.

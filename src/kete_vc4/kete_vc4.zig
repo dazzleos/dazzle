@@ -23,10 +23,19 @@ const sys = @import("sys");
 const app = @import("app");
 const appearance = @import("appearance");
 const dazzle_font = @import("font");
+const locale = @import("locale");
 const linux = std.os.linux;
 
 pub const renderer = @import("renderer.zig");
 pub const window = @import("window.zig");
+/// `fmt` (a format, in British English) in the system's language (see
+/// `locale.text`), with `args`, in the frame's arena: `cx.fmt`, translated.
+pub fn textf(cx: *kete.BuildContext, comptime fmt: []const u8, args: anytype) []const u8 {
+    return switch (locale.current) {
+        inline else => |l| cx.fmt(comptime locale.textIn(l, fmt), args),
+    };
+}
+
 /// Choosing a time zone (setup's, and Settings').
 pub const TimeZonePicker = @import("timezone_picker.zig").TimeZonePicker;
 /// Choosing a language, by searching (setup's, and Settings').

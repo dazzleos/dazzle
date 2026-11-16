@@ -3,6 +3,8 @@
 
 const std = @import("std");
 const kete = @import("kete");
+const kete_vc4 = @import("kete_vc4");
+const locale = @import("locale");
 const gfx = kete.gfx;
 const info = @import("info.zig");
 const sys_mod = @import("sys");
@@ -45,15 +47,15 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     var b1: [32]u8 = undefined;
     var b2: [32]u8 = undefined;
     const cores = self.system.cores;
-    const cpu = if (u.cpu_busy) |busy| cx.fmt("{d:.0}% busy ({d} {s})", .{ busy, cores, if (cores == 1) "core" else "cores" }) else "Measuring…";
-    const mem = cx.fmt("{s} of {s} in use", .{ info.formatBytes(&b1, u.memUsed()), info.formatBytes(&b2, u.mem_total) });
+    const cpu = if (u.cpu_busy) |busy| kete_vc4.textf(cx, "{d:.0}% busy ({d} {s})", .{ busy, cores, if (cores == 1) locale.text("core") else locale.text("cores") }) else locale.text("Measuring…");
+    const mem = kete_vc4.textf(cx, "{s} of {s} in use", .{ info.formatBytes(&b1, u.memUsed()), info.formatBytes(&b2, u.mem_total) });
     return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .children = &.{
         cx.make(kete.Expanded{ .child = cx.make(kete.Snackbar{
-            .message = if (self.video_memory.failed and !state.dismissed) "It could not be changed" else "",
+            .message = if (self.video_memory.failed and !state.dismissed) locale.text("It could not be changed") else "",
             .on_dismiss = .of(state, State.dismiss),
             .child = b.scroll(.resources, b.page(&.{
                 meterRow(b, "CPU", cpu, (u.cpu_busy orelse 0) / 100),
-                meterRow(b, "CPU Memory", mem, fraction(u.memUsed(), u.mem_total)),
+                meterRow(b, locale.text("CPU Memory"), mem, fraction(u.memUsed(), u.mem_total)),
                 gpuMemoryRow(self, b, state),
                 storageRow(b, u.storage),
             })),
@@ -66,7 +68,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
                 .child = cx.make(view.PageWidth{
                     .child = cx.make(kete.Row{ .children = &.{
                         cx.make(kete.Expanded{ .child = cx.make(kete.Text{
-                            .text = "Press Meta+I to toggle the resource overlay",
+                            .text = locale.text("Press Meta+I to toggle the resource overlay"),
                             .style = .{ .size = 16, .color = t.on_surface_variant },
                         }) }),
                     } }),
@@ -122,11 +124,11 @@ fn storageRow(b: Builder, st: info.Storage) kete.Widget {
     const t = &cx.ui.theme;
     const total = st.total();
     const parts = [_]struct { name: []const u8, bytes: u64, color: gfx.Color }{
-        .{ .name = "System", .bytes = st.system, .color = t.primary },
-        .{ .name = "Apps", .bytes = st.apps, .color = apps_color },
-        .{ .name = "User", .bytes = st.user, .color = user_color },
+        .{ .name = locale.text("System"), .bytes = st.system, .color = t.primary },
+        .{ .name = locale.text("Apps"), .bytes = st.apps, .color = apps_color },
+        .{ .name = locale.text("User"), .bytes = st.user, .color = user_color },
         // The bar's track.
-        .{ .name = "Free", .bytes = st.free, .color = t.surface_container_highest },
+        .{ .name = locale.text("Free"), .bytes = st.free, .color = t.surface_container_highest },
     };
     const a = cx.arena;
     const segments = a.alloc(SegmentBar.Segment, parts.len - 1) catch return cx.make(kete.SizedBox.empty);
@@ -137,14 +139,14 @@ fn storageRow(b: Builder, st: info.Storage) kete.Widget {
         if (i < segments.len) segments[i] = .{ .fraction = fraction(part.bytes, total), .color = part.color };
         k.* = cx.make(kete.Row{ .spacing = 6, .cross_axis_alignment = .center, .children = &.{
             cx.make(kete.SizedBox{ .width = dot, .height = dot, .child = cx.make(kete.RoundedBox{ .color = part.color, .radius = .all(dot / 2) }) }),
-            cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = cx.fmt("{s} {s}", .{ part.name, info.formatBytes(&buf, part.bytes) }), .style = .{ .size = 16, .color = t.on_surface }, .wrap = false, .ellipsis = true }) }),
+            cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = kete_vc4.textf(cx, "{s} {s}", .{ part.name, info.formatBytes(&buf, part.bytes) }), .style = .{ .size = 16, .color = t.on_surface }, .wrap = false, .ellipsis = true }) }),
         } });
     }
     return cx.make(kete.Row{
         .cross_axis_alignment = .start,
         .spacing = 12,
         .children = &.{
-            b.label("Storage"),
+            b.label(locale.text("Storage")),
             cx.make(kete.Expanded{
                 .child = cx.make(kete.Column{
                     .cross_axis_alignment = .stretch,
@@ -172,7 +174,7 @@ fn gpuMemoryRow(self: *const Settings, b: Builder, page_state: *State) kete.Widg
     var b1: [32]u8 = undefined;
     var b2: [32]u8 = undefined;
     var b3: [32]u8 = undefined;
-    const gpu = if (u.gpu_total > 0) cx.fmt("{s} of {s} in use", .{ info.formatBytes(&b1, u.gpuUsed()), info.formatBytes(&b2, u.gpu_total) }) else "Unknown";
+    const gpu = if (u.gpu_total > 0) kete_vc4.textf(cx, "{s} of {s} in use", .{ info.formatBytes(&b1, u.gpuUsed()), info.formatBytes(&b2, u.gpu_total) }) else locale.text("Unknown");
     const pending = vm.next != null and vm.now != vm.next;
     const ram_mib = u.mem_total >> 20;
     const a = cx.arena;
@@ -184,15 +186,15 @@ fn gpuMemoryRow(self: *const Settings, b: Builder, page_state: *State) kete.Widg
     if (!vm.failed and pending) {
         col.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
             cx.make(kete.Expanded{ .child = cx.make(kete.Text{
-                .text = cx.fmt("{s} after a restart", .{info.formatBytes(&b3, @as(u64, vm.next.?) << 20)}),
+                .text = kete_vc4.textf(cx, "{s} after a restart", .{info.formatBytes(&b3, @as(u64, vm.next.?) << 20)}),
                 .style = .{ .size = 15, .color = t.on_surface_variant },
             }) }),
-            cx.make(kete.OutlinedButton{ .label = "Restart", .icon = .restart_alt, .on_press = if (self.actions) |acts| .of(acts, restartNow) else null }),
+            cx.make(kete.OutlinedButton{ .label = locale.text("Restart"), .icon = .restart_alt, .on_press = if (self.actions) |acts| .of(acts, restartNow) else null }),
         } })) catch {};
     }
     return cx.make(kete.Row{ .cross_axis_alignment = .start, .spacing = 12, .children = &.{
         cx.make(kete.SizedBox{ .width = 150, .child = cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 4, .children = &.{
-            cx.make(kete.Text{ .text = "GPU memory", .style = .{ .size = 18, .color = t.on_surface_variant }, .wrap = false }),
+            cx.make(kete.Text{ .text = locale.text("GPU memory"), .style = .{ .size = 18, .color = t.on_surface_variant }, .wrap = false }),
             cx.make(VideoMemoryMenu{ .chosen = vm.next, .ram_mib = ram_mib, .actions = if (vm.next != null) self.actions else null, .page_state = page_state }),
         } }) }),
         cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 6, .children = col.items }) }),

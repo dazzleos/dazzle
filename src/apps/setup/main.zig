@@ -104,7 +104,7 @@ fn run(init: std.process.Init) !void {
 
     var shown: Shown = .{ .suggestion = suggestion, .start_locale = start_locale, .actions = &actions };
     const window = try host.app.openWindow(.{
-        .title = "Setup",
+        .title = locale.text("Setup"),
         .root = .of(&shown),
         .size = view.open_size,
         .on_close_request = .close,

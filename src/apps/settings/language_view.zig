@@ -22,21 +22,21 @@ pub fn build(self: *const Settings, b: Builder) kete.Widget {
     picker.* = .{ .actions = self.actions, .current = self.locale };
     var rows: std.ArrayList(kete.Widget) = .empty;
     const heading: kete.TextStyle = .{ .size = 18, .color = t.on_surface_variant };
-    rows.append(a, cx.make(kete.Text{ .text = "Language", .style = heading })) catch {};
+    rows.append(a, cx.make(kete.Text{ .text = locale.text("Language"), .style = heading })) catch {};
     rows.append(a, cx.make(kete.SizedBox{ .width = 380, .child = cx.make(kete_vc4.LanguagePicker{
         .language = self.locale.language,
         .on_changed = if (self.actions != null) .of(picker, LocalePick.language) else null,
         .height = 240,
     }) })) catch {};
-    rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 12 }, .child = cx.make(kete.Text{ .text = "Keyboard", .style = heading }) })) catch {};
+    rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 12 }, .child = cx.make(kete.Text{ .text = locale.text("Keyboard"), .style = heading }) })) catch {};
     for (std.enums.values(locale.Keyboard)) |k| rows.append(a, cx.make(kete.RadioRow(locale.Keyboard){
         .value = k,
         .group_value = self.locale.keyboard,
         .on_changed = if (self.actions != null) .of(picker, LocalePick.keyboard) else null,
         .label = k.name(),
     })) catch {};
-    rows.append(a, cx.make(kete.Row{ .children = &.{cx.make(kete.TextField{ .placeholder = "Type here to try the keyboard", .width = 360 })} })) catch {};
-    rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 12 }, .child = cx.make(kete.Text{ .text = "Time zone", .style = heading }) })) catch {};
+    rows.append(a, cx.make(kete.Row{ .children = &.{cx.make(kete.TextField{ .placeholder = locale.text("Type here to try the keyboard"), .width = 360 })} })) catch {};
+    rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 12 }, .child = cx.make(kete.Text{ .text = locale.text("Time zone"), .style = heading }) })) catch {};
     rows.append(a, cx.make(kete_vc4.TimeZonePicker{
         .zone = self.locale.timezone,
         .on_changed = if (self.actions != null) .of(picker, LocalePick.timezone) else null,

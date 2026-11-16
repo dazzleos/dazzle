@@ -11,6 +11,7 @@
 const std = @import("std");
 const sys = @import("sys");
 const kete = @import("kete");
+const kete_vc4 = @import("kete_vc4");
 const locale = @import("locale");
 const kete_panel = @import("kete_panel.zig");
 
@@ -69,22 +70,22 @@ pub const View = struct {
         const p = self.parental;
         var when_buf: [64]u8 = undefined;
         const until = if (p.until) |at|
-            cx.fmt("This computer can be used again {s}", .{whenText(&when_buf, at, p.now(self.system_now), self.zone)})
+            kete_vc4.textf(cx, "This computer can be used again {s}", .{whenText(&when_buf, at, p.now(self.system_now), self.zone)})
         else
-            "This computer cannot be used again this week";
+            locale.text("This computer cannot be used again this week");
         var rows: std.ArrayList(kete.Widget) = .empty;
         const a = cx.arena;
         rows.appendSlice(a, &.{
             cx.make(kete.Icon{ .icon = .lock, .size = 44, .color = t.primary }),
             cx.make(kete.Text{ .text = switch (p.lock) {
-                .downtime => "It is downtime",
-                else => "Time is up for today",
+                .downtime => locale.text("It is downtime"),
+                else => locale.text("Time is up for today"),
             }, .style = .{ .size = 26, .color = t.on_surface }, .wrap = false }),
             cx.make(kete.Text{ .text = until, .style = .{ .size = 17, .color = t.on_surface_variant }, .wrap = false }),
             cx.make(kete.SizedBox{ .height = 8 }),
-            cx.make(kete.Text{ .text = "A parent can unlock it with the password", .style = .{ .size = 15, .color = t.on_surface_variant }, .wrap = false }),
+            cx.make(kete.Text{ .text = locale.text("A parent can unlock it with the password"), .style = .{ .size = 15, .color = t.on_surface_variant }, .wrap = false }),
             cx.make(kete.TextField{
-                .placeholder = "Password",
+                .placeholder = locale.text("Password"),
                 .obscure = true,
                 .max_len = sys.parental.max_password,
                 .width = 400,
@@ -93,7 +94,7 @@ pub const View = struct {
                 .on_submit = .of(self.entry, Entry.submit),
             }).withKey(@as(u64, self.entry.field) | 0x10c0_0000),
         }) catch {};
-        if (self.entry.wrong) rows.append(a, cx.make(kete.Text{ .text = "That is not the password", .style = .{ .size = 15, .color = t.@"error" }, .wrap = false })) catch {};
+        if (self.entry.wrong) rows.append(a, cx.make(kete.Text{ .text = locale.text("That is not the password"), .style = .{ .size = 15, .color = t.@"error" }, .wrap = false })) catch {};
         return cx.make(kete.RoundedBox{
             .color = t.surface_container,
             .border_width = 1,
@@ -137,13 +138,12 @@ pub fn whenText(buf: []u8, t: i64, now: i64, zone: sys.parental.TimeZone) []cons
     var clock_buf: [16]u8 = undefined;
     const clock = locale.formatClock(&clock_buf, at.second / 3600, at.second / 60 % 60);
     const days = at.day - today.day;
-    const names = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
-    return (if (days <= 0)
-        std.fmt.bufPrint(buf, "at {s}", .{clock})
+    return if (days <= 0)
+        locale.bufPrint(buf, "at {s}", .{clock})
     else if (days == 1)
-        std.fmt.bufPrint(buf, "tomorrow at {s}", .{clock})
+        locale.bufPrint(buf, "tomorrow at {s}", .{clock})
     else
-        std.fmt.bufPrint(buf, "on {s} at {s}", .{ names[at.weekday], clock })) catch "";
+        locale.bufPrint(buf, "on {s} at {s}", .{ locale.weekdayName(at.weekday), clock });
 }
 
 /// The warnings as time runs out, in seconds left.
@@ -189,11 +189,11 @@ pub const Warnings = struct {
         const downtime = if (p.limits.downtime) |d| local.minute() == d.start else false;
         const half = buf.len / 2;
         var when_buf: [64]u8 = undefined;
-        const title = (if (downtime)
-            std.fmt.bufPrint(buf[0..half], "Downtime in {d} minute{s}", .{ minutes, if (minutes == 1) "" else "s" })
+        const title = if (downtime)
+            locale.bufPrint(buf[0..half], "Downtime in {d} minute{s}", .{ minutes, if (minutes == 1) "" else "s" })
         else
-            std.fmt.bufPrint(buf[0..half], "{d} minute{s} left today", .{ minutes, if (minutes == 1) "" else "s" })) catch return null;
-        const body = std.fmt.bufPrint(buf[half..], "The computer locks {s}", .{whenText(&when_buf, t, now, zone)}) catch return null;
+            locale.bufPrint(buf[0..half], "{d} minute{s} left today", .{ minutes, if (minutes == 1) "" else "s" });
+        const body = locale.bufPrint(buf[half..], "The computer locks {s}", .{whenText(&when_buf, t, now, zone)});
         return .{ .title = title, .body = body };
     }
 };

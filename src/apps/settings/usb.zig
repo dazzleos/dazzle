@@ -7,6 +7,7 @@
 //! left out.
 
 const std = @import("std");
+const locale = @import("locale");
 const sys = @import("sys");
 const linux = std.os.linux;
 
@@ -28,17 +29,17 @@ pub const Kind = enum {
 
     pub fn label(k: Kind) []const u8 {
         return switch (k) {
-            .keyboard => "Keyboard",
-            .mouse => "Mouse",
-            .input => "Input device",
-            .storage => "Storage",
-            .hub => "Hub",
-            .network => "Network adapter",
-            .wireless => "Wireless adapter",
-            .audio => "Sound",
-            .camera => "Camera",
-            .printer => "Printer",
-            .other => "Device",
+            .keyboard => locale.text("Keyboard"),
+            .mouse => locale.text("Mouse"),
+            .input => locale.text("Input device"),
+            .storage => locale.text("Storage"),
+            .hub => locale.text("Hub"),
+            .network => locale.text("Network adapter"),
+            .wireless => locale.text("Wireless adapter"),
+            .audio => locale.text("Sound"),
+            .camera => locale.text("Camera"),
+            .printer => locale.text("Printer"),
+            .other => locale.text("Device"),
         };
     }
 };
@@ -75,7 +76,7 @@ pub const Device = struct {
     /// What to call it: its product's name, or its numbers.
     pub fn name(d: *const Device, buf: []u8) []const u8 {
         if (d.product.len > 0) return d.product.slice();
-        return std.fmt.bufPrint(buf, "USB device {x:0>4}:{x:0>4}", .{ d.vendor_id, d.product_id }) catch "USB device";
+        return locale.bufPrint(buf, "USB device {x:0>4}:{x:0>4}", .{ d.vendor_id, d.product_id });
     }
 };
 

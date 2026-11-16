@@ -256,16 +256,16 @@ pub const Page = enum {
 
     pub fn label(p: Page) []const u8 {
         return switch (p) {
-            .wifi => wifi_view.label,
-            .ethernet => ethernet_view.label,
-            .sound => sound_view.label,
-            .appearance => appearance_view.label,
-            .board => board_view.label,
-            .apps => software_view.label,
-            .resources => resources_view.label,
-            .language => language_view.label,
-            .parental => parental_view.label,
-            .log => log_view.label,
+            .wifi => locale.text(wifi_view.label),
+            .ethernet => locale.text(ethernet_view.label),
+            .sound => locale.text(sound_view.label),
+            .appearance => locale.text(appearance_view.label),
+            .board => locale.text(board_view.label),
+            .apps => locale.text(software_view.label),
+            .resources => locale.text(resources_view.label),
+            .language => locale.text(language_view.label),
+            .parental => locale.text(parental_view.label),
+            .log => locale.text(log_view.label),
         };
     }
 
@@ -334,7 +334,7 @@ pub fn showGpio(u: *kete.ui.WindowUi) bool {
 }
 
 pub fn orUnknown(s: []const u8) []const u8 {
-    return if (s.len == 0) "Unknown" else s;
+    return if (s.len == 0) locale.text("Unknown") else s;
 }
 
 /// Makes the pages and their rows.
@@ -617,6 +617,34 @@ test "everything is shown, and fits from the smallest window to the biggest" {
 }
 
 test "no page needs the window wider than the least it can be" {
+    const f = try kete.font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
+    defer u.destroy();
+    const d = sample();
+    const wifi = sampleWifi();
+    var n: u64 = 0;
+    // In English, and in Spanish (longer).
+    defer locale.current = .en_gb;
+    for ([_]locale.Language{ .en_gb, .es_es, .es_mx }) |lang| for (std.enums.values(Page)) |pg| {
+        locale.current = lang;
+        n += 1;
+        u.frame(1000, 680, n, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps });
+        _ = showPage(u, pg);
+        n += 1;
+        u.frame(1000, 680, n, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps });
+        errdefer std.debug.print("the {s} page needs {d} pixels in {s}\n", .{ @tagName(pg), u.min_size[0], lang.code() });
+        try testing.expect(u.min_size[0] <= min_size[0]);
+        // Every page, at every size, fits.
+        for (test_sizes) |size| {
+            n += 1;
+            u.frame(size[0], size[1], n, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps });
+            errdefer std.debug.print("the {s} page overflows at {d}x{d} in {s}\n", .{ @tagName(pg), size[0], size[1], lang.code() });
+            try testing.expect(!overflows(u.root.?));
+        }
+    };
+}
+
+test "no page needs the window wider than the least it can be (English, each page)" {
     const f = try kete.font.Font.init(@embedFile("FiraSans-Regular.ttf"));
     const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();

@@ -4,6 +4,8 @@
 
 const std = @import("std");
 const kete = @import("kete");
+const kete_vc4 = @import("kete_vc4");
+const locale = @import("locale");
 const info = @import("info.zig");
 const view = @import("view.zig");
 
@@ -58,7 +60,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     const a = cx.arena;
     const ifaces = net.slice();
     if (ifaces.len == 0) {
-        rows.append(a, b.item("Status", "No adapter: plug in a USB Ethernet adapter")) catch {};
+        rows.append(a, b.item(locale.text("Status"), locale.text("No adapter: plug in a USB Ethernet adapter"))) catch {};
         return b.page(rows.items);
     }
     const idx = @min(state.adapter, ifaces.len - 1);
@@ -78,22 +80,22 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     }
     const i = &ifaces[idx];
     const status = if (!std.mem.eql(u8, i.state.slice(), "up") and !i.carrier)
-        (if (std.mem.eql(u8, i.state.slice(), "down")) "Not connected: no cable" else cx.fmt("Not connected ({s})", .{i.state.slice()}))
+        (if (std.mem.eql(u8, i.state.slice(), "down")) locale.text("Not connected: no cable") else kete_vc4.textf(cx, "Not connected ({s})", .{i.state.slice()}))
     else if (i.speed) |mbps|
-        cx.fmt("Connected at {d} Mb/s", .{mbps})
+        kete_vc4.textf(cx, "Connected at {d} Mb/s", .{mbps})
     else
-        "Connected";
-    rows.append(a, b.item("Status", status)) catch {};
+        locale.text("Connected");
+    rows.append(a, b.item(locale.text("Status"), status)) catch {};
     const current = addressing(self, i.name.slice());
     const method = if (current == .static) "static" else "DHCP";
     const address = if (i.ip) |ip|
-        cx.fmt("{d}.{d}.{d}.{d}/{d} ({s})", .{ ip[0], ip[1], ip[2], ip[3], i.prefix, method })
+        kete_vc4.textf(cx, "{d}.{d}.{d}.{d}/{d} ({s})", .{ ip[0], ip[1], ip[2], ip[3], i.prefix, method })
     else if (i.carrier)
-        cx.fmt("Waiting for an address ({s})", .{method})
+        kete_vc4.textf(cx, "Waiting for an address ({s})", .{method})
     else
-        "Not assigned";
+        locale.text("Not assigned");
     rows.append(a, addressRow(self, b, state, i, current, address)) catch {};
-    if (i.mac.len > 0) rows.append(a, b.item("MAC address", i.mac.slice())) catch {};
+    if (i.mac.len > 0) rows.append(a, b.item(locale.text("MAC address"), i.mac.slice())) catch {};
     return b.page(rows.items);
 }
 
@@ -109,7 +111,7 @@ fn addressRow(
     const t = cx.theme();
     return cx.make(kete.Row{ .cross_axis_alignment = .start, .spacing = 12, .children = &.{
         cx.make(kete.SizedBox{ .width = 150, .child = cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 4, .children = &.{
-            cx.make(kete.Text{ .text = "Address", .style = .{ .size = 18, .color = t.on_surface_variant }, .wrap = false }),
+            cx.make(kete.Text{ .text = locale.text("Address"), .style = .{ .size = 18, .color = t.on_surface_variant }, .wrap = false }),
             cx.make(AddressConfigButton{
                 .state = state,
                 .actions = if (self.manager != null) self.actions else null,
@@ -223,14 +225,14 @@ pub const AddressConfigButton = struct {
             var rows: std.ArrayList(kete.Widget) = .empty;
             rows.append(a, cx.make(kete.Align{ .height_factor = 1, .child = cx.make(PillBar{ .children = &.{
                 cx.make(PillButton{
-                    .label = "DHCP",
+                    .label = locale.text("DHCP"),
                     .selected = !static,
                     .first = true,
                     .last = false,
                     .on_press = if (st.actions != null) .of(st, BtnState.chooseDhcp) else null,
                 }),
                 cx.make(PillButton{
-                    .label = "Static",
+                    .label = locale.text("Static"),
                     .selected = static,
                     .first = false,
                     .last = true,
@@ -239,9 +241,9 @@ pub const AddressConfigButton = struct {
             } }) })) catch {};
 
             if (!static) {
-                const gw_text = if (st.gateway) |g| cx.fmt("{d}.{d}.{d}.{d} (DHCP)", .{ g[0], g[1], g[2], g[3] }) else "None";
+                const gw_text = if (st.gateway) |g| kete_vc4.textf(cx, "{d}.{d}.{d}.{d} (DHCP)", .{ g[0], g[1], g[2], g[3] }) else locale.text("None");
                 rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-                    cx.make(kete.SizedBox{ .width = 110, .child = cx.make(kete.Text{ .text = "Gateway", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
+                    cx.make(kete.SizedBox{ .width = 110, .child = cx.make(kete.Text{ .text = locale.text("Gateway"), .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
                     cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = gw_text, .style = .{ .size = 16, .color = t.on_surface }, .wrap = false }) }),
                 } })) catch {};
             } else {
@@ -269,9 +271,9 @@ pub const AddressConfigButton = struct {
                 const on_apply: ?kete.Callback = if (st.actions != null) .of(st, BtnState.apply) else null;
                 const key = @as(u64, page_st.form_id) << 1;
                 rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-                    cx.make(kete.SizedBox{ .width = 110, .child = cx.make(kete.Text{ .text = "Address", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
+                    cx.make(kete.SizedBox{ .width = 110, .child = cx.make(kete.Text{ .text = locale.text("Address"), .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
                     cx.make(kete.Expanded{ .child = cx.make(kete.TextField{
-                        .placeholder = "Address/prefix",
+                        .placeholder = locale.text("Address/prefix"),
                         .initial = page_st.address.text(),
                         .max_len = page_st.address.buf.len,
                         .size = 16,
@@ -280,9 +282,9 @@ pub const AddressConfigButton = struct {
                     }).withKey(key) }),
                 } })) catch {};
                 rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-                    cx.make(kete.SizedBox{ .width = 110, .child = cx.make(kete.Text{ .text = "Gateway", .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
+                    cx.make(kete.SizedBox{ .width = 110, .child = cx.make(kete.Text{ .text = locale.text("Gateway"), .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
                     cx.make(kete.Expanded{ .child = cx.make(kete.TextField{
-                        .placeholder = "Gateway",
+                        .placeholder = locale.text("Gateway"),
                         .initial = page_st.gateway.text(),
                         .max_len = page_st.gateway.buf.len,
                         .size = 16,
@@ -291,11 +293,11 @@ pub const AddressConfigButton = struct {
                     }).withKey(key | 1) }),
                 } })) catch {};
                 if (page_st.static_invalid) rows.append(a, cx.make(kete.Text{
-                    .text = "Give an address and prefix length (192.168.1.50/24), and a gateway or none",
+                    .text = locale.text("Give an address and prefix length (192.168.1.50/24), and a gateway or none"),
                     .style = .{ .size = 15, .color = t.@"error" },
                 })) catch {};
                 rows.append(a, cx.make(kete.Row{ .main_axis_alignment = .end, .children = &.{
-                    cx.make(kete.OutlinedButton{ .label = "Apply", .on_press = on_apply }),
+                    cx.make(kete.OutlinedButton{ .label = locale.text("Apply"), .on_press = on_apply }),
                 } })) catch {};
             }
 
