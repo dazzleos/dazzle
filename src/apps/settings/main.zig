@@ -342,6 +342,7 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
                 if (!r.denied) {
                     chosen = l;
                     locale.current = l.language;
+                    window.setTitle(locale.text("Settings"));
                 }
             } else print(sys.log_warning ++ "dazzle-settings: the system did not answer\n", .{});
             dirty = true;

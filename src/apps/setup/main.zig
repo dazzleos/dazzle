@@ -164,6 +164,7 @@ fn run(init: std.process.Init) !void {
         if (actions.locale) |l| {
             actions.locale = null;
             locale.current = l.language;
+            window.setTitle(locale.text("Setup"));
             host.display.setKeyboard(l.keyboard);
             worker.setLocale(l);
             host.redraw();

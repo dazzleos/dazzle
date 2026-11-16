@@ -110,7 +110,8 @@ pub const latin_america = [_][2][]const u8{
     .{ "Board", "Placa" },
     .{ "Software", "Software" },
     .{ "Resources", "Recursos" },
-    .{ "Parental", "Control parental" },
+    // Short, for the list of pages (the page itself says "Control parental").
+    .{ "Parental", "Familia" },
     .{ "Log", "Registro" },
 
     // Common words.
