@@ -148,6 +148,9 @@ pub const Panel = struct {
     /// picture (`render`), each time it is drawn.
     frame_times: Times = .{},
     render_times: Times = .{},
+    /// Drawn on the GPU: of `render_times`, the GPU's part (from handing
+    /// it the frame to its finishing).
+    gpu_times: Times = .{},
 
     pub fn destroy(p: *Panel) void {
         p.ui.destroy();
@@ -232,6 +235,7 @@ pub const Panel = struct {
             return .{};
         };
         p.render_times.add(sys.nowNs() - framed, count);
+        p.gpu_times.add(g.renderer.takeStats().gpu_ns, count);
         return picture;
     }
 

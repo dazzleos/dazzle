@@ -1486,7 +1486,7 @@ fn panelStatus(gpa: std.mem.Allocator, out: *std.ArrayList(u8), renderer: *const
     for (panels) |entry| {
         const id, const p = entry;
         const copies = renderer.panelTimes(id);
-        try out.print(gpa, "  {s} {d}x{d}\n    frame {f}\n    render {f}\n    texture {f}\n    overlay {f}\n", .{ @tagName(id), p.width, p.height, p.frame_times, p.render_times, copies[0], copies[1] });
+        try out.print(gpa, "  {s} {d}x{d}\n    frame {f}\n    render {f}\n    of it the GPU {f}\n    texture {f}\n    overlay {f}\n", .{ @tagName(id), p.width, p.height, p.frame_times, p.render_times, p.gpu_times, copies[0], copies[1] });
     }
 }
 
