@@ -29,6 +29,7 @@ pub const Language = enum {
     es_cl,
     es_pe,
     es_us,
+    zh_cn,
 
     /// Its code, as BCP 47 writes it: "en-GB".
     pub fn code(l: Language) []const u8 {
@@ -45,6 +46,7 @@ pub const Language = enum {
             .es_cl => "es-CL",
             .es_pe => "es-PE",
             .es_us => "es-US",
+            .zh_cn => "zh-CN",
         };
     }
 
@@ -76,6 +78,7 @@ pub const Language = enum {
             .es_cl => "Español (Chile)",
             .es_pe => "Español (Perú)",
             .es_us => "Español (Estados Unidos)",
+            .zh_cn => "中文（简体）",
         };
     }
 
@@ -89,6 +92,7 @@ pub const Language = enum {
             .es_cl => "Spanish (Chile)",
             .es_pe => "Spanish (Peru)",
             .es_us => "Spanish (United States)",
+            .zh_cn => "Chinese (Simplified)",
             else => l.name(),
         };
     }
@@ -109,6 +113,7 @@ pub const Language = enum {
             .es_cl => "America/Santiago",
             .es_pe => "America/Lima",
             .es_us => "America/New_York",
+            .zh_cn => "Asia/Shanghai",
         }) orelse .utc;
     }
 
@@ -118,6 +123,7 @@ pub const Language = enum {
             .en_gb => .gb,
             .es_es => .es,
             .es_mx, .es_ar, .es_co, .es_cl, .es_pe => .latam,
+            .zh_cn => .pinyin,
             else => .us,
         };
     }
@@ -135,7 +141,7 @@ pub const Language = enum {
 
     pub fn clock(l: Language) Clock {
         return switch (l) {
-            .en_gb, .es_es, .es_ar, .es_cl => .@"24_hour",
+            .en_gb, .es_es, .es_ar, .es_cl, .zh_cn => .@"24_hour",
             .en_us, .en_ca => .@"12_hour_upper",
             .en_au, .en_nz => .@"12_hour_lower",
             .es_mx, .es_co, .es_pe, .es_us => .@"12_hour_spanish",
@@ -160,6 +166,8 @@ pub const Keyboard = enum {
     gb,
     es,
     latam,
+    /// A US keyboard, typing Chinese through kete's pinyin input method.
+    pinyin,
 
     pub fn name(k: Keyboard) []const u8 {
         return switch (k) {
@@ -167,6 +175,7 @@ pub const Keyboard = enum {
             .gb => "English (UK)",
             .es => "Español (España)",
             .latam => "Español (Latinoamérica)",
+            .pinyin => "中文（拼音）",
         };
     }
 
@@ -186,6 +195,7 @@ pub const Keyboard = enum {
             .gb => &gb_keys,
             .es => &es_keys,
             .latam => &latam_keys,
+            .pinyin => &us_keys,
         };
     }
 
@@ -478,6 +488,10 @@ pub fn bufPrint(buf: []u8, comptime fmt: []const u8, args: anytype) []const u8 {
 pub fn textIn(comptime l: Language, comptime s: []const u8) []const u8 {
     @setEvalBranchQuota(1_000_000);
     if (l == .en_us) return lookup(&us_spelling, s) orelse s;
+    if (l == .zh_cn) {
+        if (!hasWords(s)) return s;
+        return lookup(&chinese.simplified, s) orelse @compileError("no Chinese for \"" ++ s ++ "\" (see chinese.zig)");
+    }
     if (!l.spanish()) return s;
     if (!hasWords(s)) return s;
     if (l == .es_es) if (lookup(&spanish.spain, s)) |t| return t;
@@ -501,6 +515,8 @@ fn lookup(table: []const [2][]const u8, comptime s: []const u8) ?[]const u8 {
 
 /// The Spanish translations.
 pub const spanish = @import("spanish.zig");
+/// The Chinese translations.
+pub const chinese = @import("chinese.zig");
 
 /// American spelling, where it differs (Canada spells as Britain does).
 const us_spelling = [_][2][]const u8{
@@ -515,10 +531,28 @@ const weekdays = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thu
 const months_es = [_][]const u8{ "ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sept", "oct", "nov", "dic" };
 const months_long_es = [_][]const u8{ "enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre" };
 const weekdays_es = [_][]const u8{ "domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado" };
+const weekdays_zh = [_][]const u8{ "星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六" };
 
 /// A day of the week's name (0: Sunday), in the current language.
 pub fn weekdayName(d: u3) []const u8 {
+    if (current == .zh_cn) return weekdays_zh[@min(d, 6)];
     return (if (current.spanish()) weekdays_es else weekdays)[@min(d, 6)];
+}
+
+/// The ending a count's word takes: "s" for more than one (or none) in
+/// English and Spanish ("5 minutes", "5 minutos"); none in Chinese.
+pub fn plural(n: anytype) []const u8 {
+    if (current == .zh_cn) return "";
+    return if (n == 1) "" else "s";
+}
+
+/// A date in full, with its day of the week: "Monday, 16 November 2026",
+/// "lunes, 16 de noviembre de 2026" or "2026年11月16日 星期一".
+pub fn formatFullDate(buf: []u8, weekday: u3, day: u32, month: u32, year: u32) []const u8 {
+    var date_buf: [40]u8 = undefined;
+    const date = formatLongDate(&date_buf, day, month, year);
+    if (current == .zh_cn) return std.fmt.bufPrint(buf, "{s} {s}", .{ date, weekdayName(weekday) }) catch "";
+    return std.fmt.bufPrint(buf, "{s}, {s}", .{ weekdayName(weekday), date }) catch "";
 }
 
 /// A time of day: "18:05", "6:05 PM", "6:05 pm" or "6:05 p. m.".
@@ -535,6 +569,10 @@ pub fn formatClock(buf: []u8, hour: u32, minute: u32) []const u8 {
 /// A date: "7 Oct", "Oct 7" or "7 oct", with the year ("7 Oct 2025",
 /// "Oct 7, 2025", "7 oct 2025") if `year` is given.
 pub fn formatDate(buf: []u8, day: u32, month: u32, year: ?u32) []const u8 {
+    if (current == .zh_cn) {
+        if (year) |y| return std.fmt.bufPrint(buf, "{d}年{d}月{d}日", .{ y, month, day }) catch "";
+        return std.fmt.bufPrint(buf, "{d}月{d}日", .{ month, day }) catch "";
+    }
     const m = (if (current.spanish()) months_es else months)[@min(month, 12) -| 1];
     if (current.monthFirst()) {
         if (year) |y| return std.fmt.bufPrint(buf, "{s} {d}, {d}", .{ m, day, y }) catch "";
@@ -548,6 +586,7 @@ pub fn formatDate(buf: []u8, day: u32, month: u32, year: ?u32) []const u8 {
 /// 2026".
 pub fn formatLongDate(buf: []u8, day: u32, month: u32, year: u32) []const u8 {
     const i = @min(month, 12) -| 1;
+    if (current == .zh_cn) return std.fmt.bufPrint(buf, "{d}年{d}月{d}日", .{ year, month, day }) catch "";
     if (current.spanish()) return std.fmt.bufPrint(buf, "{d} de {s} de {d}", .{ day, months_long_es[i], year }) catch "";
     if (current.monthFirst()) return std.fmt.bufPrint(buf, "{s} {d}, {d}", .{ months_long[i], day, year }) catch "";
     return std.fmt.bufPrint(buf, "{d} {s} {d}", .{ day, months_long[i], year }) catch "";
@@ -565,8 +604,10 @@ pub fn formatWhen(buf: []u8, secs: i64, now: i64) []const u8 {
     const in_day: u32 = @intCast(@mod(secs, day_secs));
     if (day == today or day == today - 1) {
         var clock_buf: [16]u8 = undefined;
+        const clock = formatClock(&clock_buf, in_day / 3600, in_day / 60 % 60);
+        if (current == .zh_cn) return std.fmt.bufPrint(buf, "{s} {s}", .{ if (day == today) "今天" else "昨天", clock }) catch "";
         const word = if (current.spanish()) (if (day == today) "Hoy" else "Ayer") else if (day == today) "Today" else "Yesterday";
-        return std.fmt.bufPrint(buf, "{s}, {s}", .{ word, formatClock(&clock_buf, in_day / 3600, in_day / 60 % 60) }) catch "";
+        return std.fmt.bufPrint(buf, "{s}, {s}", .{ word, clock }) catch "";
     }
     const date = (std.time.epoch.EpochDay{ .day = @intCast(day) }).calculateYearDay();
     const md = date.calculateMonthDay();
@@ -692,6 +733,15 @@ test "dates, times and temperatures, in each language" {
     try testing.expectEqualStrings("48.3 °C", formatTemperature(&buf, 48.3));
     current = .es_us;
     try testing.expectEqualStrings("118.9 °F", formatTemperature(&buf, 48.3));
+    // Chinese.
+    current = .zh_cn;
+    try testing.expectEqualStrings("今天 10:32", formatWhen(&buf, now, now));
+    try testing.expectEqualStrings("2025年12月31日", formatWhen(&buf, 1767225600 - 60, now));
+    try testing.expectEqualStrings("2026年10月7日", formatLongDate(&buf, 7, 10, 2026));
+    var full: [64]u8 = undefined;
+    try testing.expectEqualStrings("2026年10月7日 星期三", formatFullDate(&full, 3, 7, 10, 2026));
+    try testing.expectEqualStrings("设置", text("Settings"));
+    try testing.expectEqualStrings("今天还剩 5 分钟", bufPrint(&full, "{d} minute{s} left today", .{ 5, plural(5) }));
 }
 
 test "languages" {

@@ -27,9 +27,7 @@ pub const Time = struct {
     /// "Monday, 16 November 2026", "Monday, November 16, 2026" or "lunes,
     /// 16 de noviembre de 2026".
     pub fn dateText(t: Time, buf: []u8) []const u8 {
-        var date_buf: [40]u8 = undefined;
-        const date = locale.formatLongDate(&date_buf, t.local.day, t.local.month, t.local.year);
-        return std.fmt.bufPrint(buf, "{s}, {s}", .{ locale.weekdayName(t.local.weekday), date }) catch "";
+        return locale.formatFullDate(buf, t.local.weekday, t.local.day, t.local.month, t.local.year);
     }
 };
 

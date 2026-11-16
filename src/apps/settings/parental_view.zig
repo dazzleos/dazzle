@@ -316,18 +316,18 @@ fn durationAnd(buf: []u8, minutes: u32) []const u8 {
     const h = minutes / 60;
     const m = minutes % 60;
     if (h == 0 or m == 0) return duration(buf, minutes);
-    return locale.bufPrint(buf, "{d} hour{s} and {d} minute{s}", .{ h, if (h == 1) "" else "s", m, if (m == 1) "" else "s" });
+    return locale.bufPrint(buf, "{d} hour{s} and {d} minute{s}", .{ h, locale.plural(h), m, locale.plural(m) });
 }
 
 fn duration(buf: []u8, minutes: u32) []const u8 {
     const h = minutes / 60;
     const m = minutes % 60;
     return (if (h == 0)
-        locale.bufPrint(buf, "{d} minute{s}", .{ m, if (m == 1) "" else "s" })
+        locale.bufPrint(buf, "{d} minute{s}", .{ m, locale.plural(m) })
     else if (m == 0)
-        locale.bufPrint(buf, "{d} hour{s}", .{ h, if (h == 1) "" else "s" })
+        locale.bufPrint(buf, "{d} hour{s}", .{ h, locale.plural(h) })
     else
-        locale.bufPrint(buf, "{d} hour{s} {d} minute{s}", .{ h, if (h == 1) "" else "s", m, if (m == 1) "" else "s" }));
+        locale.bufPrint(buf, "{d} hour{s} {d} minute{s}", .{ h, locale.plural(h), m, locale.plural(m) }));
 }
 
 fn clockOf(buf: []u8, minute_of_day: u16) []const u8 {
