@@ -73,7 +73,7 @@ pub const Notice = struct {
         const least = @min(@as(u32, @intFromFloat(@round(min_width * s))), maxWidth(n.screen_width, s));
         n.width = std.math.clamp(natural[0], least, maxWidth(n.screen_width, s));
         const count = @as(usize, n.width) * n.height;
-        const drawn = n.panel.draw(n.width, n.height, now, view);
+        const drawn = n.panel.draw(n.width, n.height, now, view).pixels;
         if (drawn.len == count) @memcpy(n.pixels[0..count], drawn) else @memset(n.pixels[0..count], 0);
         n.shown_ns = now;
         n.opacity = -1;

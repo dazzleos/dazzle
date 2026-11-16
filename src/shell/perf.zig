@@ -280,8 +280,9 @@ fn readDrmEngineNs(client_pids: []const linux.pid_t) ?u64 {
 pub const Overlay = struct {
     /// Where it is drawn (kete's).
     panel: *kete_panel.Panel,
-    /// Its picture, as `draw` last drew it.
-    pixels: []const u32 = &.{},
+    /// Its picture, as `draw` last drew it (on the GPU, if the kit has
+    /// it).
+    drawn: kete_panel.Picture = .{},
     width: u32,
     height: u32,
     x: i32,
@@ -297,7 +298,7 @@ pub const Overlay = struct {
         const margin: i32 = @intFromFloat(@round(dock.Dock.margin * scale));
         const x: i32 = @max(0, @as(i32, @intCast(screen_width)) - @as(i32, @intCast(width)) - margin);
         const y: i32 = @max(0, @as(i32, @intCast(screen_height)) - @as(i32, @intCast(height)) - margin);
-        return .{ .panel = try kit.panel(), .width = width, .height = height, .x = x, .y = y, .scale = scale };
+        return .{ .panel = try kit.gpuPanel(), .width = width, .height = height, .x = x, .y = y, .scale = scale };
     }
 
     pub fn deinit(o: *Overlay) void {
@@ -305,14 +306,14 @@ pub const Overlay = struct {
     }
 
     /// Its picture, `width` by `height`.
-    pub fn picture(o: *const Overlay) []const u32 {
-        return o.pixels;
+    pub fn picture(o: *const Overlay) kete_panel.Picture {
+        return o.drawn;
     }
 
     /// Draws `stats` in a see-through box like the dock's, in `theme`
     /// (with kete: see `View`).
     pub fn draw(o: *Overlay, stats: Stats, theme: dock.Theme) void {
-        o.pixels = o.panel.draw(o.width, o.height, 0, View{ .stats = stats, .theme = theme, .scale = o.scale });
+        o.drawn = o.panel.draw(o.width, o.height, 0, View{ .stats = stats, .theme = theme, .scale = o.scale });
     }
 
     /// A row: what it is, how much, and a bar.
@@ -461,23 +462,23 @@ test "overlay draws a see-through box like the dock's, with meter bars, in the b
         .gpu_total = 128 * 1024 * 1024,
     }, .dark);
     const box = dock.Theme.dark.colors().background;
-    const track = o.pixels[65 * o.width + o.width - 30];
+    const track = o.drawn.pixels[65 * o.width + o.width - 30];
     // Rounded: none of it at the corner; the box's colour, see-through,
     // inside.
-    try testing.expectEqual(@as(u32, 0), o.pixels[0] >> 24);
-    try testing.expectEqual(@as(u32, glass.alpha) << 24 | (box & 0xffffff), o.pixels[o.height / 2 * o.width + 4]);
+    try testing.expectEqual(@as(u32, 0), o.drawn.pixels[0] >> 24);
+    try testing.expectEqual(@as(u32, glass.alpha) << 24 | (box & 0xffffff), o.drawn.pixels[o.height / 2 * o.width + 4]);
     // The tracks are darker than the box, and more opaque.
     try testing.expect(track >> 24 > glass.alpha and track >> 24 < 0xff);
     try testing.expect((track & 0xff) < (box & 0xff));
     // First row (FPS = 60, full green bar) at y = 10 + 21 + 2 = 33.
-    try testing.expectEqual(@as(u32, fps_color), o.pixels[33 * o.width + o.width / 2]);
+    try testing.expectEqual(@as(u32, fps_color), o.drawn.pixels[33 * o.width + o.width / 2]);
     // Second row (CPU = 50%, half blue bar, half track) at y = 10 + 32 + 21 + 2 = 65.
-    try testing.expectEqual(@as(u32, cpu_color), o.pixels[65 * o.width + 30]);
+    try testing.expectEqual(@as(u32, cpu_color), o.drawn.pixels[65 * o.width + 30]);
     // Third row (GPU = 95% >= 90%, high_color) at y = 10 + 64 + 21 + 2 = 97.
-    try testing.expectEqual(@as(u32, high_color), o.pixels[97 * o.width + 30]);
+    try testing.expectEqual(@as(u32, high_color), o.drawn.pixels[97 * o.width + 30]);
     // Fifth row (GPU Memory = 50%, gpu_mem_color) at y = 10 + 128 + 21 + 2 = 161.
-    try testing.expectEqual(@as(u32, gpu_mem_color), o.pixels[161 * o.width + 30]);
-    try testing.expectEqual(track, o.pixels[161 * o.width + o.width - 30]);
+    try testing.expectEqual(@as(u32, gpu_mem_color), o.drawn.pixels[161 * o.width + 30]);
+    try testing.expectEqual(track, o.drawn.pixels[161 * o.width + o.width - 30]);
 }
 
 test "drawn again as the numbers change, the same as drawn afresh" {
@@ -493,7 +494,7 @@ test "drawn again as the numbers change, the same as drawn afresh" {
         o.draw(stats, .dark);
         fresh.panel.width = 0;
         fresh.draw(stats, .dark);
-        try testing.expectEqualSlices(u32, fresh.picture(), o.picture());
+        try testing.expectEqualSlices(u32, fresh.picture().pixels, o.picture().pixels);
     }
 }
 

@@ -81,8 +81,9 @@ pub const preview_color = 0x55d0bcff;
 pub const max_windows = 48;
 
 /// A panel's picture, drawn at (`x`, `y`) on the screen (blended, as it
-/// is see-through in places).
-pub const PanelQuad = struct { texture: server.Texture, x: i32 = 0, y: i32 };
+/// is see-through in places): straight, or premultiplied (drawn by the
+/// GPU).
+pub const PanelQuad = struct { texture: server.Texture, x: i32 = 0, y: i32, premultiplied: bool = false };
 
 /// The programs a frame is drawn with: textures as they are, blended (the
 /// snap preview), and rounded windows' corners and shadows.
@@ -130,7 +131,7 @@ pub fn recordFrame(frame: *render.Frame, pipelines: Pipelines, preview: server.T
         quads += 1;
     }
     for (panels) |panel| if (panel) |pq| {
-        try quad(frame, pipelines.blended, vbo, quads, pq.texture, pq.x, pq.y, pq.texture.width, pq.texture.height, 0, null);
+        try quad(frame, if (pq.premultiplied) pipelines.premultiplied else pipelines.blended, vbo, quads, pq.texture, pq.x, pq.y, pq.texture.width, pq.texture.height, 0, null);
         quads += 1;
     };
 }
@@ -276,9 +277,10 @@ comptime {
 /// A buffer the display can show.
 const Scanout = struct { bo: vc4.Bo, fb_id: u32 };
 
-/// The shell's own panels on the screen, drawn on the CPU: the dock, the
-/// performance overlay, the dock's tooltip and its quick settings, and
-/// notifications. Each is see-through in
+/// The shell's own panels on the screen: the dock, the performance
+/// overlay, the dock's tooltip and its quick settings, and notifications,
+/// drawn on the CPU (as pixels) or the GPU (as a texture; see
+/// kete_panel.zig). Each is see-through in
 /// places (its pixels' alpha says where), and drawn blended. On an overlay
 /// plane, it is in a band if it has one (`setPanelBand`), which the plane
 /// fills, with the background drawn behind it; otherwise alone, the
@@ -298,9 +300,12 @@ const n_panels = @typeInfo(PanelId).@"enum".field_names.len;
 
 /// A panel's picture, copied where it is needed when a frame is drawn: into
 /// an overlay plane's buffer above a window shown directly, or (when the
-/// frame is composited) a texture.
+/// frame is composited) a texture. A picture drawn by the GPU is a texture
+/// already, and is drawn into an overlay plane's buffer by the GPU.
 const Panel = struct {
     pixels: []const u32 = &.{},
+    /// Drawn by the GPU: its texture (premultiplied), in place of `pixels`.
+    gpu_texture: ?u32 = null,
     width: u32 = 0,
     height: u32 = 0,
     x: i32 = 0,
@@ -435,23 +440,18 @@ pub const Renderer = struct {
         }
     }
 
-    /// Replaces a panel's picture, `width` by `height` pixels shown with
-    /// its top at `y`. The pixels must stay until the next call.
-    pub fn setPanel(r: *Renderer, id: PanelId, pixels: []const u32, width: u32, height: u32, y: i32) void {
-        r.setPanelAt(id, pixels, width, height, 0, y);
-    }
-
-    /// Replaces a panel's picture, `width` by `height` pixels shown with
-    /// its top left at (`x`, `y`). The pixels must stay until the next call.
-    pub fn setPanelAt(r: *Renderer, id: PanelId, pixels: []const u32, width: u32, height: u32, x: i32, y: i32) void {
+    /// Replaces a panel's picture, shown with its top left at (`x`, `y`).
+    /// Its pixels, or its texture, must stay until the next call.
+    pub fn setPanelAt(r: *Renderer, id: PanelId, picture: kete_panel.Picture, x: i32, y: i32) void {
         const p = &r.panels[@intFromEnum(id)];
-        p.pixels = pixels;
-        p.width = width;
-        p.height = height;
+        p.pixels = picture.pixels;
+        p.gpu_texture = picture.texture;
+        p.width = picture.width;
+        p.height = picture.height;
         p.x = x;
         p.y = y;
         p.dirty = true;
-        p.texture_stale = true;
+        p.texture_stale = picture.texture == null;
     }
 
     /// The time spent copying panel `id`'s picture for the display: as a
@@ -574,19 +574,27 @@ pub const Renderer = struct {
     /// Writes the panel's picture into an overlay buffer: in a band, over
     /// the background there.
     fn drawPlane(r: *Renderer, p: *Panel, plane: Scanout) void {
+        if (p.gpu_texture) |handle| return r.drawPlaneGpu(p, plane, handle) catch |err| {
+            sys.print(sys.log_warning ++ "dazzle-shell: a panel's overlay is not drawn: {s}\n", .{@errorName(err)});
+        };
         const size = p.plane_size;
-        const dst = std.mem.bytesAsSlice(u32, plane.bo.map[0 .. size[0] * size[1] * 4]);
+        // Its rows are `stride` pixels apart (see `panelPlane`).
+        const stride = render.Target.pitch(.argb8888, @intCast(size[0])) / 4;
+        const dst = std.mem.bytesAsSlice(u32, plane.bo.map[0 .. stride * size[1] * 4]);
         const band_y = p.band_y orelse {
-            const src = p.pixels[0 .. p.width * p.height];
-            if (alphaPlane(p)) {
-                for (dst, src) |*d, s| d.* = glass.premultiply(s);
-            } else @memcpy(dst, src);
+            for (0..size[1]) |row| {
+                const line = dst[row * stride ..][0..size[0]];
+                const src = p.pixels[row * p.width ..][0..p.width];
+                if (alphaPlane(p)) {
+                    for (line, src) |*d, s| d.* = glass.premultiply(s);
+                } else @memcpy(line, src);
+            }
             return;
         };
         p.band_stamp = r.band_stamp;
         const bottom_rows = r.background_bottom.len / r.width;
         for (0..size[1]) |row| {
-            const line = dst[row * size[0] ..][0..size[0]];
+            const line = dst[row * stride ..][0..size[0]];
             const screen_y = @as(usize, @intCast(band_y)) + row;
             // The background image's row there, or its colour.
             if (screen_y + bottom_rows >= r.height) {
@@ -627,11 +635,42 @@ pub const Renderer = struct {
         return out;
     }
 
+    /// The panel's texture (drawn by the GPU) drawn into an overlay buffer
+    /// by the GPU, as `drawPlane` does on the CPU: alone, as it is
+    /// (premultiplied, as the plane takes it), or in a band over the
+    /// background (as `composite` draws it there).
+    fn drawPlaneGpu(r: *Renderer, p: *Panel, plane: Scanout, handle: u32) !void {
+        const size = p.plane_size;
+        const band_y = p.band_y;
+        if (band_y != null) p.band_stamp = r.band_stamp;
+        const top = band_y orelse p.y;
+        const left = if (band_y != null) p.x else 0;
+        static_frame.begin(.{
+            .handle = plane.bo.handle,
+            .width = @intCast(size[0]),
+            .height = @intCast(size[1]),
+            .tiling = .linear,
+            .format = if (alphaPlane(p)) .argb8888 else .xrgb8888,
+        }, .{ .clear = if (band_y != null) r.background else 0 });
+        var n: usize = 0;
+        if (band_y) |y| if (r.background_image) |bg| {
+            try quad(&static_frame, &r.quads, r.vbo, n, bg, 0, -y, bg.width, bg.height, 0, null);
+            n += 1;
+        };
+        const t: server.Texture = .{ .handle = handle, .width = p.width, .height = p.height, .format = .argb8888 };
+        try quad(&static_frame, &r.premultiplied, r.vbo, n, t, left, p.y - top, p.width, p.height, 0, null);
+        const seqno = try r.dev.submit(static_frame.finish());
+        try r.dev.waitSeqno(seqno, std.time.ns_per_s);
+    }
+
     fn panelPlane(r: *Renderer, p: *Panel, i: u1, size: [2]u32) ?Scanout {
         if (p.planes[i]) |plane| return plane;
-        const bo = r.dev.createBo(size[0] * size[1] * 4) catch return null;
+        // Rows as the GPU draws them (whole micro-tiles across), for a
+        // picture it draws.
+        const pitch = render.Target.pitch(.argb8888, @intCast(size[0]));
+        const bo = r.dev.createBo(pitch * size[1]) catch return null;
         const format = if (alphaPlane(p)) vc4.drm.format_argb8888 else vc4.drm.format_xrgb8888;
-        const fb = vc4.drm.addFramebuffer(r.dev.fd, bo.kmsHandle(), size[0], size[1], size[0] * 4, format) catch {
+        const fb = vc4.drm.addFramebuffer(r.dev.fd, bo.kmsHandle(), size[0], size[1], pitch, format) catch {
             r.dev.destroyBo(bo);
             return null;
         };
@@ -813,6 +852,10 @@ pub const Renderer = struct {
         var quads: [n_panels]?PanelQuad = @splat(null);
         for (&r.panels, &quads) |*p, *q| {
             if (p.width == 0 or p.height == 0 or p.hidden) continue;
+            if (p.gpu_texture) |handle| {
+                q.* = .{ .texture = .{ .handle = handle, .width = p.width, .height = p.height, .format = .argb8888 }, .x = p.x, .y = p.y, .premultiplied = true };
+                continue;
+            }
             if (p.texture_stale) {
                 const started = sys.nowNs();
                 p.texture = try uploadPixels(r, p.texture, std.mem.sliceAsBytes(p.pixels), p.width, p.height, p.width * 4, .argb8888);

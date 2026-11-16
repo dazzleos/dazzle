@@ -209,7 +209,7 @@ pub const Renderer = struct {
                 // with a frame in flight that may be drawing it, another
                 // (the kernel keeps the old one until it is done).
                 if (r.pipelined) {
-                    const bo = try r.dev.createBo(t.bo.map.len);
+                    const bo = try r.dev.createBo(@intCast(t.bo.map.len));
                     r.dev.destroyBo(t.bo);
                     t.bo = bo;
                 }

@@ -115,7 +115,7 @@ pub const Screen = struct {
     entry: Entry = .{},
 
     /// Its picture, as `p` says, `width` by `height`.
-    pub fn draw(s: *Screen, p: Parental) []const u32 {
+    pub fn draw(s: *Screen, p: Parental) kete_panel.Picture {
         return s.panel.draw(width, height, sys.nowNs(), View{ .parental = p, .system_now = sys.realtimeSec(), .entry = &s.entry });
     }
 
@@ -208,7 +208,7 @@ test "the lock screen: typed by the keyboard's layout, Enter tries it" {
     // A try: the field empties.
     entry.clear();
     entry.wrong = true;
-    const px = p.draw(width, height, 3, view);
+    const px = p.draw(width, height, 3, view).pixels;
     try testing.expectEqual(@as(usize, width * height), px.len);
     try testing.expect(px[(height / 2) * width + width / 2] >> 24 == 0xff);
     try testing.expectEqual(@as(u8, 0), entry.len);

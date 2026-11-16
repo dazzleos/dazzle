@@ -498,10 +498,10 @@ pub const Dock = struct {
     /// Where the box, and the tooltip, are drawn (kete's).
     panel: *kete_panel.Panel,
     tip_panel: *kete_panel.Panel,
-    /// The box's picture, `width` by `height` (rows `width` apart), see-
-    /// through (`glass`), and wholly outside its rounded corners (the
-    /// panel's, as `draw` last drew it).
-    pixels: []const u32 = &.{},
+    /// The box's picture, `width` by `height`, see-through (`glass`), and
+    /// wholly outside its rounded corners (the panel's, as `draw` last drew
+    /// it: on the GPU, if the kit has it).
+    drawn: kete_panel.Picture = .{},
     width: u32,
     height: u32,
     screen_width: u32,
@@ -581,7 +581,7 @@ pub const Dock = struct {
     pub fn init(kit: *kete_panel.Kit, apps: []App, screen_width: u32, screen_height: u32) !Dock {
         const scale = @min(@as(f32, @floatFromInt(screen_width)) / 1920, @as(f32, @floatFromInt(screen_height)) / 1080);
         const height: u32 = @intFromFloat(@round((icon_size + 2 * box_pad) * scale));
-        const panel = try kit.panel();
+        const panel = try kit.gpuPanel();
         errdefer panel.destroy();
         var d: Dock = .{
             .panel = panel,
@@ -775,8 +775,8 @@ pub const Dock = struct {
     }
 
     /// Its picture, as `draw` last drew it.
-    pub fn picture(d: *const Dock) []const u32 {
-        return d.pixels;
+    pub fn picture(d: *const Dock) kete_panel.Picture {
+        return d.drawn;
     }
 
     /// Where app `i`'s icon is, in the box: the icons and the status box
@@ -832,7 +832,7 @@ pub const Dock = struct {
     /// Draws it as it is now (with kete: see `View`).
     pub fn draw(d: *Dock) void {
         d.width = d.boxWidth();
-        d.pixels = d.panel.draw(d.width, d.height, 0, View{ .d = d });
+        d.drawn = d.panel.draw(d.width, d.height, 0, View{ .d = d });
     }
 
     /// The box as kete widgets: the box, each icon in the row (where the
@@ -1022,7 +1022,7 @@ pub const Dock = struct {
     }
 
     /// The tooltip's picture: the app's name, centred above its icon.
-    pub const Tooltip = struct { pixels: []const u32, width: u32, height: u32, x: i32, y: i32 };
+    pub const Tooltip = struct { picture: kete_panel.Picture, x: i32, y: i32 };
 
     fn tooltipHeight(scale: f32) u32 {
         return @intFromFloat(@round(34 * scale));
@@ -1043,14 +1043,14 @@ pub const Dock = struct {
         const view: TooltipView = .{ .text = d.apps[i].label, .theme = d.theme, .scale = d.scale };
         const h = tooltipHeight(d.scale);
         const w: u32 = @min(d.tip_panel.naturalSize(view)[0], tooltipMaxWidth(d.scale));
-        const pixels = d.tip_panel.draw(w, h, now, view);
-        if (pixels.len == 0) return null;
+        const tip = d.tip_panel.draw(w, h, now, view);
+        if (tip.isEmpty()) return null;
         // Above the icon, clear of the dock, and on the screen.
         const r = d.iconRect(i);
         const at = d.place();
         const fw: f32 = @floatFromInt(w);
         const x = std.math.clamp(@round(@as(f32, @floatFromInt(at.x)) + r.x + r.size / 2 - fw / 2), 0, @as(f32, @floatFromInt(d.screen_width)) - fw);
-        return .{ .pixels = pixels, .width = w, .height = h, .x = @intFromFloat(x), .y = at.y - @as(i32, @intCast(h)) - @as(i32, @intFromFloat(@round(8 * d.scale))) };
+        return .{ .picture = tip, .x = @intFromFloat(x), .y = at.y - @as(i32, @intCast(h)) - @as(i32, @intFromFloat(@round(8 * d.scale))) };
     }
 
     /// The tooltip, as kete widgets: the app's name in a small rounded box.
@@ -1165,7 +1165,7 @@ test "icons and the status box are in a row in a box, and clicks find the apps" 
     d.draw();
     const at = struct {
         fn f(dock: *const Dock, x: f32, y: f32) u32 {
-            return dock.pixels[@as(usize, @intFromFloat(y)) * dock.width + @as(usize, @intFromFloat(x))];
+            return dock.drawn.pixels[@as(usize, @intFromFloat(y)) * dock.width + @as(usize, @intFromFloat(x))];
         }
     }.f;
     try testing.expectEqual(@as(u32, glassy(background)), at(&d, @floatFromInt(d.width / 2), 2));
@@ -1215,9 +1215,9 @@ test "the dock floats in a rounded box in the middle of the bottom, and slides d
     try testing.expectApproxEqAbs(first.y, @as(f32, @floatFromInt(d.height)) - (first.y + first.size), 0.5);
     try testing.expectApproxEqAbs(first.y, @as(f32, @floatFromInt(d.width)) - (status.x + status.width), 1);
     // Wholly see-through outside its corners, partly in the middle.
-    try testing.expectEqual(@as(u32, 0), d.picture()[0] >> 24);
-    try testing.expectEqual(@as(u32, 0), d.picture()[d.width - 1] >> 24);
-    try testing.expectEqual(@as(u32, glass.alpha), d.picture()[d.width / 2] >> 24);
+    try testing.expectEqual(@as(u32, 0), d.picture().pixels[0] >> 24);
+    try testing.expectEqual(@as(u32, 0), d.picture().pixels[d.width - 1] >> 24);
+    try testing.expectEqual(@as(u32, glass.alpha), d.picture().pixels[d.width / 2] >> 24);
     // The screen's points map into it, or are beside it.
     const r0 = d.iconRect(0);
     const l = d.local(@as(f64, @floatFromInt(at.x)) + r0.x + 1, @as(f64, @floatFromInt(at.y)) + r0.y + 1).?;
@@ -1252,7 +1252,7 @@ test "with updates, the status box is wider and starts with the update icon" {
     const box_middle_y: usize = @intFromFloat(without.y + without.height / 2);
     const at = struct {
         fn f(dock: *const Dock, x: f32, y: usize) u32 {
-            return dock.pixels[y * dock.width + @as(usize, @intFromFloat(x))];
+            return dock.drawn.pixels[y * dock.width + @as(usize, @intFromFloat(x))];
         }
     }.f;
     const box_without = d.boxWidth();
@@ -1430,15 +1430,15 @@ test "resting the pointer on an icon shows the app's name above it, a while late
     try testing.expect(d.tooltipDue() == null);
     // Above the dock, centred over the icon.
     const at = d.place();
-    try testing.expect(tip.y + @as(i32, @intCast(tip.height)) < at.y);
-    const middle = @as(f32, @floatFromInt(tip.x)) + @as(f32, @floatFromInt(tip.width)) / 2;
+    try testing.expect(tip.y + @as(i32, @intCast(tip.picture.height)) < at.y);
+    const middle = @as(f32, @floatFromInt(tip.x)) + @as(f32, @floatFromInt(tip.picture.width)) / 2;
     try testing.expectApproxEqAbs(@as(f32, @floatFromInt(at.x)) + r0.x + r0.size / 2, middle, 1);
     // Its corners are see-through, and its middle not; the name is drawn.
     const c = Theme.dark.colors();
-    try testing.expectEqual(@as(u32, 0), tip.pixels[0] >> 24);
-    try testing.expectEqual(c.tooltip_background, tip.pixels[(tip.height / 2) * tip.width + 2]);
+    try testing.expectEqual(@as(u32, 0), tip.picture.pixels[0] >> 24);
+    try testing.expectEqual(c.tooltip_background, tip.picture.pixels[(tip.picture.height / 2) * tip.picture.width + 2]);
     var text_pixels: usize = 0;
-    for (tip.pixels) |px| if (px != c.tooltip_background and px >> 24 == 0xff) {
+    for (tip.picture.pixels) |px| if (px != c.tooltip_background and px >> 24 == 0xff) {
         text_pixels += 1;
     };
     try testing.expect(text_pixels > 20);

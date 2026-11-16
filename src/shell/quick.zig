@@ -147,9 +147,9 @@ const armed_color = 0xffd04050;
 pub const Quick = struct {
     /// Where it is drawn (kete's).
     panel: *kete_panel.Panel,
-    /// Its picture, `width` by `height` (rows `width` apart), as `draw`
-    /// last drew it.
-    pixels: []const u32 = &.{},
+    /// Its picture, `width` by `height`, as `draw` last drew it (on the
+    /// GPU, if the kit has it).
+    drawn: kete_panel.Picture = .{},
     width: u32,
     height: u32,
     scale: f32,
@@ -173,7 +173,7 @@ pub const Quick = struct {
         const width: u32 = @intFromFloat(@round(box_width * scale));
         const most: u32 = @intFromFloat(@ceil(max_height * scale));
         return .{
-            .panel = try kit.panel(),
+            .panel = try kit.gpuPanel(),
             .width = width,
             .height = most,
             .scale = scale,
@@ -352,14 +352,14 @@ pub const Quick = struct {
         q.power_armed = false;
     }
 
-    pub fn picture(q: *const Quick) []const u32 {
-        return q.pixels;
+    pub fn picture(q: *const Quick) kete_panel.Picture {
+        return q.drawn;
     }
 
     /// Draws it as it is now (with kete: see `View`).
     pub fn draw(q: *Quick) void {
         q.height = @intFromFloat(q.layout().height);
-        q.pixels = q.panel.draw(q.width, q.height, 0, View{ .q = q });
+        q.drawn = q.panel.draw(q.width, q.height, 0, View{ .q = q });
     }
 
     /// It as kete widgets, each where its layout puts it.
@@ -578,7 +578,7 @@ test "the popup sits above the status box, and its parts take clicks" {
     try testing.expect(q.hit(5, 2) == null);
 
     // A see-through box, the corners cut; the power button solid.
-    const pic = q.picture();
+    const pic = q.picture().pixels;
     try testing.expectEqual(@as(u32, 0), pic[0] >> 24);
     try testing.expectEqual(@as(u32, glass.alpha), pic[@as(usize, q.height / 2) * q.width + 2] >> 24);
     const px: usize = @intFromFloat(l.power.x + 4);

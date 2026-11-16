@@ -115,8 +115,9 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
     for (apps) |app| print("dazzle-shell: app {s} ({s})\n", .{ app.label, app.path });
     took.step(.apps);
     // The shell's UI is kete's: its panels share the font (and its
-    // glyphs) and the renderer.
+    // glyphs) and the renderers; the big ones are drawn on the GPU.
     const kit = try kete_panel.Kit.create(gpa, io, ui_font_data, emoji);
+    kit.useGpu(renderer.dev) catch |err| print(sys.log_warning ++ "dazzle-shell: the panels are drawn on the CPU: {s}\n", .{@errorName(err)});
     var dock = try dock_mod.Dock.init(kit, apps, renderer.width, renderer.height);
     // The quick settings, over the status box when it is clicked: the
     // volume, the network, updates and powering off.
@@ -657,7 +658,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                                 perf_gpu_ns = 0;
                                 var pids: [max_clients]linux.pid_t = undefined;
                                 perf.draw(perf_monitor.sample(now_ns, 0, 0, clientPids(&server, &pids)), dock.theme);
-                                renderer.setPanelAt(.perf, perf.picture(), perf.width, perf.height, perf.x, perf.y);
+                                renderer.setPanelAt(.perf, perf.picture(), perf.x, perf.y);
                             }
                             panels_damaged = true;
                             continue;
@@ -811,7 +812,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         // The name of the app whose icon the pointer rests on, once it has
         // rested a while.
         if (dock.drawTooltip(sys.nowNs())) |tip| {
-            renderer.setPanelAt(.tooltip, tip.pixels, tip.width, tip.height, tip.x, tip.y);
+            renderer.setPanelAt(.tooltip, tip.picture, tip.x, tip.y);
             panels_damaged = true;
         }
 
@@ -959,7 +960,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                 perf.draw(perf_monitor.sample(t_now, perf_frames, perf_gpu_ns, clientPids(&server, &pids)), dock.theme);
                 perf_frames = 0;
                 perf_gpu_ns = 0;
-                renderer.setPanelAt(.perf, perf.picture(), perf.width, perf.height, perf.x, perf.y);
+                renderer.setPanelAt(.perf, perf.picture(), perf.x, perf.y);
                 panels_damaged = true;
             }
         }
@@ -979,7 +980,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
             const box = dock.place();
             const status = dock.statusRect();
             quick.place(box.x + @as(i32, @intFromFloat(@round(status.x + status.width))), box.y, renderer.width);
-            renderer.setPanelAt(.quick, quick.picture(), quick.width, quick.height, quick.x, quick.y);
+            renderer.setPanelAt(.quick, quick.picture(), quick.x, quick.y);
             panels_damaged = true;
         }
         quick_dirty = false;
@@ -1449,7 +1450,7 @@ fn dockArea(dock: *const dock_mod.Dock) server_mod.Rect {
 /// Gives the renderer the dock's latest picture, where it is.
 fn showDock(renderer: *render.Renderer, dock: *const dock_mod.Dock) void {
     const at = dock.place();
-    renderer.setPanelAt(.dock, dock.picture(), dock.width, dock.height, at.x, at.y);
+    renderer.setPanelAt(.dock, dock.picture(), at.x, at.y);
 }
 
 /// Up to `out.len` of the events queued (by remote control), taken from
@@ -1511,10 +1512,10 @@ fn applyParental(p: sys.system.Parental, have: *sys.system.Parental, locked: *bo
 }
 
 fn drawLock(lock: *lock_mod.Screen, p: sys.system.Parental, renderer: *render.Renderer) void {
-    const pixels = lock.draw(p);
-    if (pixels.len == 0) return;
+    const picture = lock.draw(p);
+    if (picture.isEmpty()) return;
     const at = lock_mod.Screen.place(renderer.width, renderer.height);
-    renderer.setPanelAt(.lock, pixels, lock_mod.width, lock_mod.height, at[0], at[1]);
+    renderer.setPanelAt(.lock, picture, at[0], at[1]);
 }
 
 /// A key on the lock screen; Enter tries the password (the system manager
@@ -1565,7 +1566,7 @@ fn animateNotice(notice: *notice_mod.Notice, renderer: *render.Renderer, server:
     const was_shown = notice.shown_ns != null;
     if (notice.frame(now)) |pixels| {
         const at = notice.place();
-        renderer.setPanelAt(.notice, pixels, notice.width, notice.height, at[0], at[1]);
+        renderer.setPanelAt(.notice, .{ .width = notice.width, .height = notice.height, .pixels = pixels }, at[0], at[1]);
         server.damaged = true;
     } else if (was_shown and notice.shown_ns == null) server.damaged = true;
 }
