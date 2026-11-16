@@ -188,7 +188,9 @@ pub const Warnings = struct {
 const testing = std.testing;
 
 test "the lock screen: typed by the keyboard's layout, Enter tries it" {
-    const p = try kete_panel.Panel.create(testing.allocator, testing.io, @embedFile("FiraSans-Regular.ttf"));
+    const kit = try kete_panel.Kit.create(testing.allocator, testing.io, @embedFile("FiraSans-Regular.ttf"), null);
+    defer kit.destroy();
+    const p = try kit.panel();
     defer p.destroy();
     p.setKeyboard(.gb);
     var entry: Entry = .{};

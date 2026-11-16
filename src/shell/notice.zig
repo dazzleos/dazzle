@@ -5,10 +5,10 @@
 //! (and where).
 
 const std = @import("std");
-const font = @import("font");
-const icons = @import("icons");
+const kete = @import("kete");
 const glass = @import("glass.zig");
 const dock = @import("dock.zig");
+const kete_panel = @import("kete_panel.zig");
 
 /// How long it takes to fade in, stays, and takes to fade out.
 pub const fade_in_ns = 150 * std.time.ns_per_ms;
@@ -28,12 +28,10 @@ const body_size = 15;
 const top_margin = 16;
 
 pub const Notice = struct {
-    font: ?font.Font,
-    icon_font: ?font.Font,
-    cache: font.GlyphCache,
-    /// Room for the widest it gets, three times: drawn over black (and
-    /// then its picture, see-through), over white, and as it is shown,
-    /// faded.
+    /// Where it is drawn (kete's: see kete_panel.zig).
+    panel: *kete_panel.Panel,
+    /// Its picture as drawn, and as it is shown, faded: room for the
+    /// widest it gets, twice.
     pixels: []u32,
     width: u32 = 0,
     height: u32,
@@ -46,14 +44,12 @@ pub const Notice = struct {
     /// changes).
     opacity: f32 = 0,
 
-    pub fn init(gpa: std.mem.Allocator, f: ?font.Font, screen_width: u32, scale: f32) !Notice {
+    pub fn init(gpa: std.mem.Allocator, panel: *kete_panel.Panel, screen_width: u32, scale: f32) !Notice {
         const most = maxWidth(screen_width, scale);
         const height: u32 = @intFromFloat(@round(box_height * scale));
         return .{
-            .font = f,
-            .icon_font = font.Font.init(icons.font_data) catch null,
-            .cache = font.GlyphCache.init(gpa),
-            .pixels = try gpa.alloc(u32, 3 * @as(usize, most) * height),
+            .panel = panel,
+            .pixels = try gpa.alloc(u32, 2 * @as(usize, most) * height),
             .height = height,
             .scale = scale,
             .screen_width = screen_width,
@@ -62,7 +58,6 @@ pub const Notice = struct {
 
     pub fn deinit(n: *Notice, gpa: std.mem.Allocator) void {
         gpa.free(n.pixels);
-        n.cache.deinit();
     }
 
     fn maxWidth(screen_width: u32, scale: f32) u32 {
@@ -71,43 +66,17 @@ pub const Notice = struct {
 
     /// Shows `title` and `body` beside `icon`, from `now`, in place of
     /// what showed.
-    pub fn show(n: *Notice, icon: icons.Icon, title: []const u8, body: []const u8, now: u64) void {
+    pub fn show(n: *Notice, icon: kete.IconName, title: []const u8, body: []const u8, now: u64) void {
+        const view: View = .{ .theme = n.theme, .scale = n.scale, .icon = icon, .title = title, .body = body };
         const s = n.scale;
-        const title_style: ?font.Style = if (n.font) |*f| .{ .font = f, .size = @round(title_size * s), .color = 0 } else null;
-        const body_style: ?font.Style = if (n.font) |*f| .{ .font = f, .size = @round(body_size * s), .color = 0 } else null;
-        const text_w = if (title_style) |ts| @max(font.measure(ts, title), font.measure(body_style.?, body)) else 0;
-        const want = 2 * pad * s + (icon_size + icon_gap) * s + text_w;
-        n.width = std.math.clamp(@as(u32, @intFromFloat(@ceil(want))), @min(@as(u32, @intFromFloat(@round(min_width * s))), maxWidth(n.screen_width, s)), maxWidth(n.screen_width, s));
+        const natural = n.panel.naturalSize(view);
+        const least = @min(@as(u32, @intFromFloat(@round(min_width * s))), maxWidth(n.screen_width, s));
+        n.width = std.math.clamp(natural[0], least, maxWidth(n.screen_width, s));
         const count = @as(usize, n.width) * n.height;
-        const over_black: font.Canvas = .{ .pixels = n.pixels[0..count], .width = n.width, .height = n.height, .stride = n.width };
-        const over_white: font.Canvas = .{ .pixels = n.pixels[count .. 2 * count], .width = n.width, .height = n.height, .stride = n.width };
-        n.drawContents(over_black, glass.black, icon, title, body);
-        n.drawContents(over_white, glass.white, icon, title, body);
-        glass.compose(over_black.pixels, over_white.pixels, n.theme.colors().background);
-        glass.cutCorners(over_black, @round(dock.Dock.box_radius * s));
+        const drawn = n.panel.draw(n.width, n.height, now, view);
+        if (drawn.len == count) @memcpy(n.pixels[0..count], drawn) else @memset(n.pixels[0..count], 0);
         n.shown_ns = now;
         n.opacity = -1;
-    }
-
-    fn drawContents(n: *Notice, canvas: font.Canvas, base: u32, icon: icons.Icon, title: []const u8, body: []const u8) void {
-        const s = n.scale;
-        const c = n.theme.colors();
-        canvas.fill(0, 0, n.width, n.height, base);
-        const h: f32 = @floatFromInt(n.height);
-        if (n.icon_font) |*f| {
-            const size = @round(icon_size * s);
-            var buf: [4]u8 = undefined;
-            // Icons fill the em square, with the baseline at the bottom.
-            _ = font.draw(canvas, &n.cache, .{ .font = f, .size = size, .color = c.dot }, @round(pad * s), @round((h - size) / 2) + size, icons.text(icon, &buf)) catch {};
-        }
-        const f = if (n.font) |*f| f else return;
-        const x = @round((pad + icon_size + icon_gap) * s);
-        const room = @as(f32, @floatFromInt(n.width)) - x - pad * s;
-        const title_style: font.Style = .{ .font = f, .size = @round(title_size * s), .color = c.dot };
-        const body_style: font.Style = .{ .font = f, .size = @round(body_size * s), .color = dimmed(c.dot) };
-        var buf: [256]u8 = undefined;
-        _ = font.draw(canvas, &n.cache, title_style, x, @round(h / 2 - 4 * s), fit(title_style, title, room, &buf)) catch {};
-        _ = font.draw(canvas, &n.cache, body_style, x, @round(h / 2 + body_style.ascent() + 2 * s), fit(body_style, body, room, &buf)) catch {};
     }
 
     /// How opaque it is at `now` (0: gone).
@@ -148,7 +117,7 @@ pub const Notice = struct {
         n.opacity = k;
         const count = @as(usize, n.width) * n.height;
         const src = n.pixels[0..count];
-        const out = n.pixels[2 * count .. 3 * count];
+        const out = n.pixels[count .. 2 * count];
         const a: u32 = @intFromFloat(@round(k * 256));
         for (out, src) |*o, p| o.* = (p & 0x00ffffff) | ((p >> 24) * a >> 8) << 24;
         return out;
@@ -160,30 +129,55 @@ pub const Notice = struct {
     }
 };
 
-/// The text colour, a little dimmer: for the line under the title.
-fn dimmed(c: u32) u32 {
-    return (c & 0x00ffffff) | 0xb8000000;
+// The icons notices are shown with (for kete's icon font, which has only
+// the icons named).
+comptime {
+    _ = &[_]kete.IconName{ .photo_camera, .warning, .check, .schedule };
 }
 
-/// `text`, cut short with an ellipsis if it is wider than `room` (in
-/// `buf`).
-fn fit(style: font.Style, text: []const u8, room: f32, buf: []u8) []const u8 {
-    if (font.measure(style, text) <= room) return text;
-    var n = text.len;
-    while (n > 0) {
-        n -= 1;
-        // Not in the middle of a character.
-        if (n < text.len and text[n] & 0xc0 == 0x80) continue;
-        const shown = std.fmt.bufPrint(buf, "{s}…", .{text[0..n]}) catch return text;
-        if (font.measure(style, shown) <= room) return shown;
+/// What it shows, as kete widgets: the icon, and the title with a line
+/// under it, in a see-through box like the dock's.
+const View = struct {
+    theme: dock.Theme,
+    scale: f32,
+    icon: kete.IconName,
+    title: []const u8,
+    body: []const u8,
+
+    pub fn build(v: *const View, cx: *kete.BuildContext) kete.Widget {
+        const c = v.theme.colors();
+        const s = v.scale;
+        const text = kete.gfx.Color.argb(c.dot);
+        const dim = kete.gfx.Color.argb((c.dot & 0x00ffffff) | 0xb8000000);
+        var lines: std.ArrayList(kete.Widget) = .empty;
+        const a = cx.arena;
+        lines.append(a, cx.make(kete.Text{ .text = v.title, .style = .{ .size = @round(title_size * s), .color = text }, .wrap = false, .ellipsis = true })) catch {};
+        if (v.body.len > 0) lines.append(a, cx.make(kete.Text{ .text = v.body, .style = .{ .size = @round(body_size * s), .color = dim }, .wrap = false, .ellipsis = true })) catch {};
+        return cx.make(kete.RoundedBox{
+            .color = kete.gfx.Color.argb((c.background & 0x00ffffff) | @as(u32, glass.alpha) << 24),
+            .radius = .all(@round(dock.Dock.box_radius * s)),
+            .child = cx.make(kete.Padding{ .padding = .{ .left = @round(pad * s), .right = @round(pad * s) }, .child = cx.make(kete.SizedBox{ .height = @round(box_height * s), .child = cx.make(kete.Row{
+                .fill = false,
+                .cross_axis_alignment = .center,
+                .spacing = @round(icon_gap * s),
+                .children = a.dupe(kete.Widget, &.{
+                    cx.make(kete.Icon{ .icon = v.icon, .size = @round(icon_size * s), .color = text }),
+                    // No wider than the widest notice has room for.
+                    cx.make(kete.ConstrainedBox{ .constraints = .{ .max_w = (max_width - 2 * pad - icon_size - icon_gap) * s }, .child = cx.make(kete.Column{ .fill = false, .spacing = @round(2 * s), .children = lines.items }) }),
+                }) catch &.{},
+            }) }) }),
+        });
     }
-    return "…";
-}
+};
 
 const testing = std.testing;
 
 test "a notice fades in, stays, fades out, and is gone; a new one takes its place" {
-    var n = try Notice.init(testing.allocator, null, 1920, 1);
+    const kit = try kete_panel.Kit.create(testing.allocator, testing.io, @embedFile("FiraSans-Regular.ttf"), null);
+    defer kit.destroy();
+    const panel = try kit.panel();
+    defer panel.destroy();
+    var n = try Notice.init(testing.allocator, panel, 1920, 1);
     defer n.deinit(testing.allocator);
     const ms = std.time.ns_per_ms;
     try testing.expect(!n.visible(0));
@@ -213,14 +207,7 @@ test "a notice fades in, stays, fades out, and is gone; a new one takes its plac
     n.show(.warning, "Two", "", 5100 * ms);
     try testing.expectEqual(@as(?u64, 5100 * ms), n.shown_ns);
     try testing.expectEqual(@as(f32, 1), n.opacityAt(5300 * ms));
-}
-
-test "a long line is cut short with an ellipsis" {
-    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const style: font.Style = .{ .font = &f, .size = 15, .color = 0 };
-    var buf: [256]u8 = undefined;
-    try testing.expectEqualStrings("Short", fit(style, "Short", 200, &buf));
-    const cut = fit(style, "Saved as a very long file name indeed.png", 120, &buf);
-    try testing.expect(std.mem.endsWith(u8, cut, "…"));
-    try testing.expect(font.measure(style, cut) <= 120);
+    // A long line: as wide as it may be, and cut short.
+    n.show(.warning, "Screenshot saved", "Saved as \u{201c}A screenshot with a very long name indeed, longer than the screen has room for.png\u{201d} in your files", 6000 * ms);
+    try testing.expect(n.width > max_width - 20 and n.width <= max_width);
 }

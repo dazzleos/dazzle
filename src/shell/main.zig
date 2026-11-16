@@ -89,26 +89,17 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         if (renderer.display.kms) |k| (if (k.overlays[vc4.kms.max_overlays - 1] != null) "atomic mode setting with overlay planes" else "atomic mode setting, too few overlay planes") else "legacy mode setting (no direct scanout)",
     });
 
-    var ui_font: ?font.Font = null;
-    // Its file, for the shell's kete UI too.
+    // The fonts the shell's kete UI draws text in: the system's, with the
+    // emoji font for what it has not.
     var ui_font_data: ?[]const u8 = null;
-    var emoji_font: ?font.Font = null;
     var font_buf: [512]u8 = undefined;
     const font_path = sys.fontFile(&font_buf, font.default_font_file);
     if (sys.readFileAlloc(gpa, font_path, 32 * 1024 * 1024)) |data| {
-        if (font.Font.init(data)) |f| {
-            ui_font = f;
-            ui_font_data = data;
-        } else |err| print("dazzle-shell: font: {s}\n", .{@errorName(err)});
+        ui_font_data = data;
     } else |err| print(sys.log_warning ++ "dazzle-shell: cannot read {s}: {s}\n", .{ font_path, @errorName(err) });
     var emoji_buf: [512]u8 = undefined;
     const emoji_path = sys.fontFile(&emoji_buf, font.emoji_font_file);
-    if (sys.readFileAlloc(gpa, emoji_path, 32 * 1024 * 1024)) |data| {
-        if (font.Font.init(data)) |ef| emoji_font = ef else |_| {}
-    } else |_| {}
-    if (ui_font) |*f| if (emoji_font) |*ef| {
-        f.fallback = ef;
-    };
+    const emoji: ?[]const u8 = if (linux.errno(linux.access(emoji_path, linux.F_OK)) == .SUCCESS) emoji_path else null;
 
     took.step(.fonts);
     // The shell's own apps are beside it; the others are in /data/apps.
@@ -123,21 +114,24 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
     defer apps_watch.deinit();
     for (apps) |app| print("dazzle-shell: app {s} ({s})\n", .{ app.label, app.path });
     took.step(.apps);
-    var dock = try dock_mod.Dock.init(gpa, ui_font, apps, renderer.width, renderer.height);
+    // The shell's UI is kete's: its panels share the font (and its
+    // glyphs) and the renderer.
+    const kit = try kete_panel.Kit.create(gpa, io, ui_font_data, emoji);
+    var dock = try dock_mod.Dock.init(kit, apps, renderer.width, renderer.height);
     // The quick settings, over the status box when it is clicked: the
     // volume, the network, updates and powering off.
-    var quick = try quick_mod.Quick.init(gpa, ui_font, dock.scale);
+    var quick = try quick_mod.Quick.init(kit, dock.scale);
     // It needs drawing again (while shown).
     var quick_dirty = false;
     // The touch dragging its slider.
     var quick_touch: ?i32 = null;
     var audio_devices = audio.listDevices();
     // Notifications, at the top of the screen (a screenshot was saved).
-    var notice = try notice_mod.Notice.init(gpa, ui_font, renderer.width, dock.scale);
+    var notice = try notice_mod.Notice.init(gpa, try kit.panel(), renderer.width, dock.scale);
     // Parental controls (the system manager keeps them): while it says the
     // computer is locked, the lock screen in place of the windows and the
     // dock; before then, warnings as time runs out.
-    var lock: lock_mod.Screen = .{ .panel = try kete_panel.Panel.create(gpa, io, ui_font_data) };
+    var lock: lock_mod.Screen = .{ .panel = try kit.panel() };
     var parental: sys.system.Parental = .{};
     var locked = false;
     var warnings: lock_mod.Warnings = .{};
@@ -185,7 +179,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
     const band_y: u32 = renderer.height - dock.bandHeight();
     const with_dock: server_mod.Rect = .{ .x = 0, .y = 0, .width = renderer.width, .height = band_y };
     renderer.setPanelBand(.dock, @intCast(band_y));
-    var perf = try perf_mod.Overlay.init(gpa, ui_font, renderer.width, renderer.height);
+    var perf = try perf_mod.Overlay.init(kit, renderer.width, renderer.height);
     var perf_monitor: perf_mod.Monitor = .{};
     var perf_shown = false;
     var shortcut_key: ?u32 = null;

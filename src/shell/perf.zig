@@ -6,9 +6,10 @@
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
-const font = @import("font");
+const kete = @import("kete");
 const glass = @import("glass.zig");
 const dock = @import("dock.zig");
+const kete_panel = @import("kete_panel.zig");
 
 /// Text and the bars' tracks, in each theme.
 const Colors = struct { label: u32, value: u32, track: u32 };
@@ -277,16 +278,17 @@ fn readDrmEngineNs(client_pids: []const linux.pid_t) ?u64 {
 }
 
 pub const Overlay = struct {
-    font: ?font.Font,
-    cache: font.GlyphCache,
-    pixels: []u32,
+    /// Where it is drawn (kete's).
+    panel: *kete_panel.Panel,
+    /// Its picture, as `draw` last drew it.
+    pixels: []const u32 = &.{},
     width: u32,
     height: u32,
     x: i32,
     y: i32,
     scale: f32,
 
-    pub fn init(gpa: std.mem.Allocator, f: ?font.Font, screen_width: u32, screen_height: u32) !Overlay {
+    pub fn init(kit: *kete_panel.Kit, screen_width: u32, screen_height: u32) !Overlay {
         const raw_scale = @min(@as(f32, @floatFromInt(screen_width)) / 1920, @as(f32, @floatFromInt(screen_height)) / 1080);
         const scale = @max(raw_scale, 0.5);
         const width: u32 = @min(screen_width, @as(u32, @intFromFloat(@round(280 * scale))));
@@ -295,147 +297,95 @@ pub const Overlay = struct {
         const margin: i32 = @intFromFloat(@round(dock.Dock.margin * scale));
         const x: i32 = @max(0, @as(i32, @intCast(screen_width)) - @as(i32, @intCast(width)) - margin);
         const y: i32 = @max(0, @as(i32, @intCast(screen_height)) - @as(i32, @intCast(height)) - margin);
-        return .{
-            .font = f,
-            .cache = font.GlyphCache.init(gpa),
-            // Twice: the second is where it is drawn over white.
-            .pixels = try gpa.alloc(u32, 2 * @as(usize, width) * height),
-            .width = width,
-            .height = height,
-            .x = x,
-            .y = y,
-            .scale = scale,
-        };
+        return .{ .panel = try kit.panel(), .width = width, .height = height, .x = x, .y = y, .scale = scale };
     }
 
-    pub fn deinit(o: *Overlay, gpa: std.mem.Allocator) void {
-        gpa.free(o.pixels);
-        o.cache.deinit();
+    pub fn deinit(o: *Overlay) void {
+        o.panel.destroy();
     }
 
     /// Its picture, `width` by `height`.
     pub fn picture(o: *const Overlay) []const u32 {
-        return o.pixels[0 .. @as(usize, o.width) * o.height];
+        return o.pixels;
     }
 
-    /// Draws `stats` in a see-through box like the dock's, in `theme`.
+    /// Draws `stats` in a see-through box like the dock's, in `theme`
+    /// (with kete: see `View`).
     pub fn draw(o: *Overlay, stats: Stats, theme: dock.Theme) void {
-        const n = @as(usize, o.width) * o.height;
-        const over_black: font.Canvas = .{ .pixels = o.pixels[0..n], .width = o.width, .height = o.height, .stride = o.width };
-        const over_white: font.Canvas = .{ .pixels = o.pixels[n .. 2 * n], .width = o.width, .height = o.height, .stride = o.width };
-        o.drawContents(over_black, glass.black, stats, colors(theme));
-        o.drawContents(over_white, glass.white, stats, colors(theme));
-        glass.compose(over_black.pixels, over_white.pixels, theme.colors().background);
-        glass.cutCorners(over_black, @round(dock.Dock.box_radius * o.scale));
+        o.pixels = o.panel.draw(o.width, o.height, 0, View{ .stats = stats, .theme = theme, .scale = o.scale });
     }
 
-    fn drawContents(o: *Overlay, canvas: font.Canvas, base: u32, stats: Stats, c: Colors) void {
-        canvas.fill(0, 0, o.width, o.height, base);
+    /// A row: what it is, how much, and a bar.
+    const Meter = struct {
+        label: []const u8,
+        value: []const u8,
+        fraction: f32,
+        color: u32,
+        colors: Colors,
+        scale: f32,
 
-        const lines = formatLines(stats);
-        const gpu_frac: f32 = (stats.gpu_busy orelse 0) / 100;
-        const mem_frac: f32 = if (stats.mem_total > 0)
-            @as(f32, @floatFromInt(stats.mem_used)) / @as(f32, @floatFromInt(stats.mem_total))
-        else
-            0;
-        const gpu_mem_frac: f32 = if (stats.gpu_total > 0)
-            @as(f32, @floatFromInt(stats.gpu_used)) / @as(f32, @floatFromInt(stats.gpu_total))
-        else
-            0;
-        const cpu_frac: f32 = (stats.cpu_busy orelse 0) / 100;
-        const fps_frac: f32 = stats.fps / 60;
-
-        const Row = struct {
-            label: []const u8,
-            value: []const u8,
-            fraction: f32,
-            color: u32,
-        };
-        const rows = [5]Row{
-            .{
-                .label = "FPS",
-                .value = lines.fpsText(),
-                .fraction = fps_frac,
-                .color = if (stats.fps > 0 and stats.fps < 30) fps_low_color else fps_color,
-            },
-            .{
-                .label = "CPU",
-                .value = lines.cpuText(),
-                .fraction = cpu_frac,
-                .color = if (cpu_frac >= 0.9) high_color else cpu_color,
-            },
-            .{
-                .label = "GPU",
-                .value = lines.gpuText(),
-                .fraction = gpu_frac,
-                .color = if (gpu_frac >= 0.9) high_color else gpu_color,
-            },
-            .{
-                .label = "Memory",
-                .value = lines.memText(),
-                .fraction = mem_frac,
-                .color = if (mem_frac >= 0.9) high_color else mem_color,
-            },
-            .{
-                .label = "GPU Memory",
-                .value = lines.gpuMemText(),
-                .fraction = gpu_mem_frac,
-                .color = if (gpu_mem_frac >= 0.9) high_color else gpu_mem_color,
-            },
-        };
-
-        const pad_x = 14 * o.scale;
-        const pad_y = 10 * o.scale;
-        const row_h = 32 * o.scale;
-        const bar_h = @max(3, @round(5 * o.scale));
-        const bar_w = @max(1, @as(f32, @floatFromInt(o.width)) - 2 * pad_x);
-        const text_size = @round(15 * o.scale);
-
-        for (rows, 0..) |r, i| {
-            const y0 = pad_y + @as(f32, @floatFromInt(i)) * row_h;
-            if (o.font) |*f| {
-                const label_style: font.Style = .{ .font = f, .size = text_size, .color = c.label };
-                const value_style: font.Style = .{ .font = f, .size = text_size, .color = c.value };
-                const baseline = @round(y0 + label_style.ascent());
-                _ = font.draw(canvas, &o.cache, label_style, @round(pad_x), baseline, r.label) catch {};
-                const lw = font.measure(label_style, r.label);
-                const vw = font.measure(value_style, r.value);
-                const vx = @max(pad_x + lw + 8 * o.scale, @as(f32, @floatFromInt(o.width)) - pad_x - vw);
-                _ = font.draw(canvas, &o.cache, value_style, @round(vx), baseline, r.value) catch {};
-            }
-            const bar_y = @round(y0 + 21 * o.scale);
-            roundedRect(canvas, pad_x, bar_y, bar_w, bar_h, bar_h / 2, c.track);
-            const clamped = std.math.clamp(if (std.math.isFinite(r.fraction)) r.fraction else 0, 0, 1);
-            if (clamped > 0) {
-                const fill_w = @max(bar_h, bar_w * clamped);
-                roundedRect(canvas, pad_x, bar_y, fill_w, bar_h, bar_h / 2, r.color);
-            }
+        pub fn layout(_: *const Meter, _: *kete.WidgetNode, c: kete.Constraints) kete.Size {
+            return c.constrain(.{ .w = c.max_w, .h = c.max_h });
         }
-    }
-};
 
-/// Fills a rectangle with rounded corners, anti-aliased (blended, if the
-/// colour is see-through).
-fn roundedRect(c: font.Canvas, x: f32, y: f32, w: f32, h: f32, radius: f32, color: u32) void {
-    const x0: u32 = @intFromFloat(std.math.clamp(@floor(x), 0, @as(f32, @floatFromInt(c.width))));
-    const y0: u32 = @intFromFloat(std.math.clamp(@floor(y), 0, @as(f32, @floatFromInt(c.height))));
-    const x1: u32 = @intFromFloat(std.math.clamp(@ceil(x + w), 0, @as(f32, @floatFromInt(c.width))));
-    const y1: u32 = @intFromFloat(std.math.clamp(@ceil(y + h), 0, @as(f32, @floatFromInt(c.height))));
-    const cx = x + w / 2;
-    const cy = y + h / 2;
-    const r = @min(radius, @min(w, h) / 2);
-    for (y0..y1) |py| for (x0..x1) |px| {
-        const qx = @abs(@as(f32, @floatFromInt(px)) + 0.5 - cx) - (w / 2 - r);
-        const qy = @abs(@as(f32, @floatFromInt(py)) + 0.5 - cy) - (h / 2 - r);
-        const outside = std.math.hypot(@max(qx, 0), @max(qy, 0)) + @min(@max(qx, qy), 0) - r;
-        const coverage = std.math.clamp(0.5 - outside, 0, 1);
-        if (coverage <= 0) continue;
-        const p = &c.pixels[py * c.stride + px];
-        // As much as the colour is opaque.
-        const a: f32 = @floatFromInt(color >> 24);
-        p.* = font.text.blend(p.*, color, @intFromFloat(@round(coverage * a)));
+        pub fn paint(m: *const Meter, n: *kete.WidgetNode, p: *kete.Painter) void {
+            const argb = kete.gfx.Color.argb;
+            const s = m.scale;
+            const w = n.size.w;
+            if (p.ui.font) |f| {
+                const style: kete.font.Style = .{ .font = f, .size = @round(15 * s) };
+                const baseline = @round(style.ascent());
+                _ = p.text(style.size, 0, baseline, m.label, argb(m.colors.label));
+                const lw = kete.font.measure(style, m.label);
+                const vw = kete.font.measure(style, m.value);
+                _ = p.text(style.size, @round(@max(lw + 8 * s, w - vw)), baseline, m.value, argb(m.colors.value));
+            }
+            const bar_h = @max(3, @round(5 * s));
+            const bar_y = @round(21 * s);
+            const cv = p.canvas();
+            cv.fillRoundedRect(.{ .x = 0, .y = bar_y, .w = w, .h = bar_h }, .all(bar_h / 2), argb(m.colors.track));
+            const k = std.math.clamp(if (std.math.isFinite(m.fraction)) m.fraction else 0, 0, 1);
+            if (k > 0) cv.fillRoundedRect(.{ .x = 0, .y = bar_y, .w = @max(bar_h, w * k), .h = bar_h }, .all(bar_h / 2), argb(m.color));
+        }
     };
-}
+
+    /// It as kete widgets: the see-through box, and a meter a row.
+    const View = struct {
+        stats: Stats,
+        theme: dock.Theme,
+        scale: f32,
+
+        pub fn build(v: *const View, cx: *kete.BuildContext) kete.Widget {
+            const stats = v.stats;
+            const s = v.scale;
+            const c = colors(v.theme);
+            const a = cx.arena;
+            const lines = a.create(Lines) catch return cx.make(kete.SizedBox.empty);
+            lines.* = formatLines(stats);
+            const gpu_frac: f32 = (stats.gpu_busy orelse 0) / 100;
+            const mem_frac: f32 = if (stats.mem_total > 0) @as(f32, @floatFromInt(stats.mem_used)) / @as(f32, @floatFromInt(stats.mem_total)) else 0;
+            const gpu_mem_frac: f32 = if (stats.gpu_total > 0) @as(f32, @floatFromInt(stats.gpu_used)) / @as(f32, @floatFromInt(stats.gpu_total)) else 0;
+            const cpu_frac: f32 = (stats.cpu_busy orelse 0) / 100;
+            const rows = [5]Meter{
+                .{ .label = "FPS", .value = lines.fpsText(), .fraction = stats.fps / 60, .color = if (stats.fps > 0 and stats.fps < 30) fps_low_color else fps_color, .colors = c, .scale = s },
+                .{ .label = "CPU", .value = lines.cpuText(), .fraction = cpu_frac, .color = if (cpu_frac >= 0.9) high_color else cpu_color, .colors = c, .scale = s },
+                .{ .label = "GPU", .value = lines.gpuText(), .fraction = gpu_frac, .color = if (gpu_frac >= 0.9) high_color else gpu_color, .colors = c, .scale = s },
+                .{ .label = "Memory", .value = lines.memText(), .fraction = mem_frac, .color = if (mem_frac >= 0.9) high_color else mem_color, .colors = c, .scale = s },
+                .{ .label = "GPU Memory", .value = lines.gpuMemText(), .fraction = gpu_mem_frac, .color = if (gpu_mem_frac >= 0.9) high_color else gpu_mem_color, .colors = c, .scale = s },
+            };
+            var children: [rows.len]kete.Widget = undefined;
+            for (&children, rows) |*ch, r| ch.* = cx.make(kete.SizedBox{ .height = 32 * s, .child = cx.make(r) });
+            return cx.make(kete.RoundedBox{
+                .color = kete.gfx.Color.argb((v.theme.colors().background & 0x00ffffff) | @as(u32, glass.alpha) << 24),
+                .radius = .all(@round(dock.Dock.box_radius * s)),
+                .child = cx.make(kete.Padding{ .padding = .{ .left = 14 * s, .right = 14 * s, .top = 10 * s }, .child = cx.make(kete.Column{
+                    .cross_axis_alignment = .stretch,
+                    .children = a.dupe(kete.Widget, &children) catch &.{},
+                }) }),
+            });
+        }
+    };
+};
 
 const testing = std.testing;
 
@@ -492,8 +442,10 @@ test "formatting FPS, CPU, GPU, memory and GPU memory lines" {
 }
 
 test "overlay draws a see-through box like the dock's, with meter bars, in the bottom right" {
-    var o = try Overlay.init(testing.allocator, null, 1920, 1080);
-    defer o.deinit(testing.allocator);
+    const kit = try kete_panel.Kit.create(testing.allocator, testing.io, @embedFile("FiraSans-Regular.ttf"), null);
+    defer kit.destroy();
+    var o = try Overlay.init(kit, 1920, 1080);
+    defer o.deinit();
     try testing.expectEqual(@as(u32, 280), o.width);
     try testing.expectEqual(@as(u32, 180), o.height);
     try testing.expectEqual(@as(i32, 1920 - 280 - 8), o.x);
@@ -526,6 +478,23 @@ test "overlay draws a see-through box like the dock's, with meter bars, in the b
     // Fifth row (GPU Memory = 50%, gpu_mem_color) at y = 10 + 128 + 21 + 2 = 161.
     try testing.expectEqual(@as(u32, gpu_mem_color), o.pixels[161 * o.width + 30]);
     try testing.expectEqual(track, o.pixels[161 * o.width + o.width - 30]);
+}
+
+test "drawn again as the numbers change, the same as drawn afresh" {
+    const kit = try kete_panel.Kit.create(testing.allocator, testing.io, @embedFile("FiraSans-Regular.ttf"), null);
+    defer kit.destroy();
+    var o = try Overlay.init(kit, 1920, 1080);
+    defer o.deinit();
+    var fresh = try Overlay.init(kit, 1920, 1080);
+    defer fresh.deinit();
+    for (0..4) |i| {
+        const k: f32 = @floatFromInt(i);
+        const stats: Stats = .{ .fps = 30 + 9 * k, .cpu_busy = 10 + 20 * k, .gpu_busy = 5 * k, .mem_used = (100 + 50 * i) << 20, .mem_total = 400 << 20, .gpu_used = (10 + i) << 20, .gpu_total = 64 << 20 };
+        o.draw(stats, .dark);
+        fresh.panel.width = 0;
+        fresh.draw(stats, .dark);
+        try testing.expectEqualSlices(u32, fresh.picture(), o.picture());
+    }
 }
 
 test "monitor samples this machine" {

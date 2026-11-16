@@ -6,10 +6,12 @@
 
 const std = @import("std");
 const sys = @import("sys");
-const font = @import("font");
+const kete = @import("kete");
 const icons = @import("icons");
 const glass = @import("glass.zig");
 const dock = @import("dock.zig");
+const kete_panel = @import("kete_panel.zig");
+const ui_icons = @import("ui_icons.zig");
 
 /// How the computer is connected, as the popup says it: each kind of
 /// adapter it has.
@@ -143,12 +145,11 @@ const accent = 0xff3f7ee8;
 const armed_color = 0xffd04050;
 
 pub const Quick = struct {
-    font: ?font.Font,
-    icon_font: ?font.Font,
-    cache: font.GlyphCache,
-    /// Its picture, `width` by `height` (rows `width` apart); room for the
-    /// tallest it gets, twice: the second is where it is drawn over white.
-    pixels: []u32,
+    /// Where it is drawn (kete's).
+    panel: *kete_panel.Panel,
+    /// Its picture, `width` by `height` (rows `width` apart), as `draw`
+    /// last drew it.
+    pixels: []const u32 = &.{},
     width: u32,
     height: u32,
     scale: f32,
@@ -168,23 +169,19 @@ pub const Quick = struct {
     /// turns off.
     power_armed: bool = false,
 
-    pub fn init(gpa: std.mem.Allocator, f: ?font.Font, scale: f32) !Quick {
+    pub fn init(kit: *kete_panel.Kit, scale: f32) !Quick {
         const width: u32 = @intFromFloat(@round(box_width * scale));
         const most: u32 = @intFromFloat(@ceil(max_height * scale));
         return .{
-            .font = f,
-            .icon_font = font.Font.init(icons.font_data) catch null,
-            .cache = font.GlyphCache.init(gpa),
-            .pixels = try gpa.alloc(u32, 2 * @as(usize, width) * most),
+            .panel = try kit.panel(),
             .width = width,
             .height = most,
             .scale = scale,
         };
     }
 
-    pub fn deinit(q: *Quick, gpa: std.mem.Allocator) void {
-        gpa.free(q.pixels);
-        q.cache.deinit();
+    pub fn deinit(q: *Quick) void {
+        q.panel.destroy();
     }
 
     /// Where its parts are, in it.
@@ -356,136 +353,156 @@ pub const Quick = struct {
     }
 
     pub fn picture(q: *const Quick) []const u32 {
-        return q.pixels[0 .. @as(usize, q.width) * q.height];
+        return q.pixels;
     }
 
+    /// Draws it as it is now (with kete: see `View`).
     pub fn draw(q: *Quick) void {
         q.height = @intFromFloat(q.layout().height);
-        const n = @as(usize, q.width) * q.height;
-        const over_black: font.Canvas = .{ .pixels = q.pixels[0..n], .width = q.width, .height = q.height, .stride = q.width };
-        const over_white: font.Canvas = .{ .pixels = q.pixels[n .. 2 * n], .width = q.width, .height = q.height, .stride = q.width };
-        q.drawContents(over_black, glass.black);
-        q.drawContents(over_white, glass.white);
-        glass.compose(over_black.pixels, over_white.pixels, q.theme.colors().background);
-        glass.cutCorners(over_black, @round(dock.Dock.box_radius * q.scale));
+        q.pixels = q.panel.draw(q.width, q.height, 0, View{ .q = q });
     }
 
-    fn drawContents(q: *Quick, canvas: font.Canvas, base: u32) void {
-        const c = q.theme.colors();
-        const s = q.scale;
-        const w: f32 = @floatFromInt(q.width);
-        const l = q.layout();
-        canvas.fill(0, 0, q.width, q.height, base);
-        const text_color = c.dot;
+    /// It as kete widgets, each where its layout puts it.
+    const View = struct {
+        q: *const Quick,
 
-        // The volume: its icon (clicked: muted), the slider and how loud.
-        const mute = q.muteRect();
-        if (q.hover == .mute) glass.fillRounded(canvas, mute.x, mute.y, mute.w, mute.h, 10 * s, c.hover_background);
-        const vol_icon = @round(volume_icon * s);
-        q.icon(canvas, q.volume.icon(), vol_icon, pad * s, l.volume_y + (volume_row * s - vol_icon) / 2, text_color);
-        const slider = q.sliderRect();
-        const track_y = l.volume_y + (volume_row * s - track_height * s) / 2;
-        const th = track_height * s;
-        glass.fillRounded(canvas, slider.x, track_y, slider.w, th, th / 2, c.status_border);
-        const k = @as(f32, @floatFromInt(q.volume.volume)) / 100;
-        const fill = if (q.volume.active()) accent else c.status_inactive;
-        if (k > 0) glass.fillRounded(canvas, slider.x, track_y, @max(th, slider.w * k), th, th / 2, fill);
-        const knob = knob_radius * s * (if (q.hover == .slider or q.dragging) @as(f32, 1.15) else 1);
-        const knob_x = slider.x + slider.w * k;
-        glass.fillRounded(canvas, knob_x - knob, track_y + th / 2 - knob, 2 * knob, 2 * knob, knob, text_color);
-        if (q.font) |*f| {
-            var pbuf: [8]u8 = undefined;
-            const pct = std.fmt.bufPrint(&pbuf, "{d}%", .{q.volume.volume}) catch "";
-            const style: font.Style = .{ .font = f, .size = @round(text_size * s), .color = text_color };
-            const tw = font.measure(style, pct);
-            _ = font.draw(canvas, &q.cache, style, @round(w - pad * s - tw), @round(l.volume_y + volume_row * s / 2 + style.ascent() * 0.36), pct) catch {};
+        pub fn build(v: *const View, cx: *kete.BuildContext) kete.Widget {
+            const q = v.q;
+            const c = q.theme.colors();
+            const s = q.scale;
+            const w: f32 = @floatFromInt(q.width);
+            const l = q.layout();
+            const a = cx.arena;
+            const argb = kete.gfx.Color.argb;
+            var layers: std.ArrayList(kete.Widget) = .empty;
+            layers.append(a, cx.make(Fill{ .color = (c.background & 0x00ffffff) | @as(u32, glass.alpha) << 24, .radius = @round(dock.Dock.box_radius * s) })) catch {};
+            // The volume: its icon (clicked: muted), the slider and how loud.
+            layers.append(a, placed(cx, 0, l.volume_y, w, volume_row * s, cx.make(Volume{
+                .theme = q.theme,
+                .scale = s,
+                .volume = q.volume,
+                .mute_hover = q.hover == .mute,
+                .knob_big = q.hover == .slider or q.dragging,
+                .mute = q.muteRect(),
+                .slider = q.sliderRect(),
+            }))) catch {};
+            for (l.divider_ys) |dy| layers.append(a, placed(cx, pad * s, @round(dy), w - 2 * pad * s, @max(1, @round(s)), cx.make(Fill{ .color = c.status_border }))) catch {};
+            // The network: a line for each kind of adapter.
+            var lines: [2]struct { icon: kete.IconName, text: []const u8 } = undefined;
+            var count: usize = 0;
+            if (q.network.ethernetText(a.alloc(u8, 64) catch &.{})) |t| {
+                lines[count] = .{ .icon = .lan, .text = t };
+                count += 1;
+            }
+            if (q.network.wifiText(a.alloc(u8, 96) catch &.{})) |t| {
+                lines[count] = .{ .icon = switch (q.network.wifi) {
+                    .connected, .connecting => .wifi,
+                    .hotspot => .wifi_tethering,
+                    else => .wifi_off,
+                }, .text = t };
+                count += 1;
+            }
+            if (count == 0) {
+                lines[0] = .{ .icon = .public_off, .text = "No network adapter" };
+                count = 1;
+            }
+            for (lines[0..count], 0..) |line, i| {
+                const y = l.network_y + @as(f32, @floatFromInt(i)) * network_row * s;
+                layers.append(a, placed(cx, pad * s, y, w - 2 * pad * s, network_row * s, iconRow(cx, s, line.icon, line.text, argb(c.dot), null))) catch {};
+            }
+            // Updates, if there are any: clicked, Settings' Software page.
+            if (l.updates) |r| layers.append(a, placed(cx, r.x, r.y, r.w, r.h, cx.make(kete.RoundedBox{
+                .color = argb(if (q.hover == .updates) c.hover_background else 0),
+                .radius = .all(10 * s),
+                .child = cx.make(kete.Padding{ .padding = .{ .left = pad * s / 2, .right = pad * s / 2 }, .child = iconRow(cx, s, .system_update_alt, q.updates.text(), argb(c.dot), .chevron_right) }),
+            }))) catch {};
+            // Turning the computer off: pressed once, it asks to be sure.
+            const pw = l.power;
+            const color: u32 = if (q.power_armed) 0xffffffff else c.dot;
+            layers.append(a, placed(cx, pw.x, pw.y, pw.w, pw.h, cx.make(kete.RoundedBox{
+                .color = argb(if (q.power_armed) armed_color else if (q.hover == .power) c.status_border else c.hover_background),
+                .radius = .all(12 * s),
+                .child = cx.make(kete.Align{ .child = cx.make(kete.Row{ .fill = false, .cross_axis_alignment = .center, .spacing = 8 * s, .children = a.dupe(kete.Widget, &.{
+                    cx.make(kete.Icon{ .icon = .power_settings_new, .size = @round(small_icon * s), .color = argb(color) }),
+                    cx.make(kete.Text{ .text = if (q.power_armed) "Click again to power off" else "Power off", .style = .{ .size = @round(text_size * s), .color = argb(color) }, .wrap = false }),
+                }) catch &.{} }) }),
+            }))) catch {};
+            return cx.make(kete.Overlay{ .children = layers.items });
         }
+    };
 
-        for (l.divider_ys) |dy| canvas.fill(@intFromFloat(pad * s), @intFromFloat(@round(dy)), @intFromFloat(w - 2 * pad * s), @max(1, @as(u32, @intFromFloat(@round(s)))), c.status_border);
-
-        // The network: a line for each kind of adapter.
-        var lines: [2]struct { icon: icons.Icon, text: []const u8 } = undefined;
-        var count: usize = 0;
-        var eth_buf: [64]u8 = undefined;
-        var wifi_buf: [96]u8 = undefined;
-        if (q.network.ethernetText(&eth_buf)) |t| {
-            lines[count] = .{ .icon = .lan, .text = t };
-            count += 1;
-        }
-        if (q.network.wifiText(&wifi_buf)) |t| {
-            lines[count] = .{ .icon = switch (q.network.wifi) {
-                .connected, .connecting => .wifi,
-                .hotspot => .wifi_tethering,
-                else => .wifi_off,
-            }, .text = t };
-            count += 1;
-        }
-        if (count == 0) {
-            lines[0] = .{ .icon = .public_off, .text = "No network adapter" };
-            count = 1;
-        }
-        for (lines[0..count], 0..) |line, i| {
-            const y = l.network_y + @as(f32, @floatFromInt(i)) * network_row * s;
-            q.iconRow(canvas, line.icon, line.text, y, network_row * s, text_color);
-        }
-
-        // Updates, if there are any: clicked, Settings' Software page.
-        if (l.updates) |r| {
-            if (q.hover == .updates) glass.fillRounded(canvas, r.x, r.y, r.w, r.h, 10 * s, c.hover_background);
-            q.iconRow(canvas, .system_update_alt, q.updates.text(), r.y, r.h, text_color);
-            const ic = @round(small_icon * s);
-            q.icon(canvas, .chevron_right, ic, r.x + r.w - pad * s / 2 - ic, r.y + (r.h - ic) / 2, text_color);
-        }
-
-        // Turning the computer off: pressed once, it asks to be sure.
-        const p = l.power;
-        const button: u32 = if (q.power_armed) armed_color else if (q.hover == .power) c.status_border else c.hover_background;
-        glass.fillRounded(canvas, p.x, p.y, p.w, p.h, 12 * s, button);
-        const label = if (q.power_armed) "Click again to power off" else "Power off";
-        const color: u32 = if (q.power_armed) 0xffffffff else text_color;
-        const ic = @round(small_icon * s);
-        const gap = 8 * s;
-        const tw = if (q.font) |*f| font.measure(.{ .font = f, .size = @round(text_size * s), .color = color }, label) else 0;
-        const x0 = @round(p.x + (p.w - (ic + gap + tw)) / 2);
-        q.icon(canvas, .power_settings_new, ic, x0, p.y + (p.h - ic) / 2, color);
-        if (q.font) |*f| {
-            const style: font.Style = .{ .font = f, .size = @round(text_size * s), .color = color };
-            _ = font.draw(canvas, &q.cache, style, x0 + ic + gap, @round(p.y + p.h / 2 + style.ascent() * 0.36), label) catch {};
-        }
+    /// `child`, `w` by `h`, at (`x`, `y`) in it.
+    fn placed(cx: *kete.BuildContext, x: f32, y: f32, w: f32, h: f32, child: kete.Widget) kete.Widget {
+        return cx.make(kete.Align{ .alignment = .top_left, .child = cx.make(kete.Padding{ .padding = .{ .left = x, .top = y }, .child = cx.make(kete.SizedBox{ .width = w, .height = h, .child = child }) }) });
     }
 
-    /// An icon `size` big with its top left at (`x`, `y`).
-    fn icon(q: *Quick, canvas: font.Canvas, which: icons.Icon, size: f32, x: f32, y: f32, color: u32) void {
-        const f = if (q.icon_font) |*f| f else return;
-        var buf: [4]u8 = undefined;
-        // Icons fill the em square, with the baseline at the bottom.
-        _ = font.draw(canvas, &q.cache, .{ .font = f, .size = size, .color = color }, @round(x), @round(y) + size, icons.text(which, &buf)) catch {};
+    /// An icon and text after it, cut short (with an ellipsis) if it is too
+    /// long; and another icon at the end, if any.
+    fn iconRow(cx: *kete.BuildContext, s: f32, which: kete.IconName, text: []const u8, color: kete.gfx.Color, end: ?kete.IconName) kete.Widget {
+        const a = cx.arena;
+        var items: std.ArrayList(kete.Widget) = .empty;
+        items.appendSlice(a, &.{
+            cx.make(kete.Icon{ .icon = which, .size = @round(small_icon * s), .color = color }),
+            cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = text, .style = .{ .size = @round(text_size * s), .color = color }, .wrap = false, .ellipsis = true }) }),
+        }) catch {};
+        if (end) |e| items.append(a, cx.make(kete.Icon{ .icon = e, .size = @round(small_icon * s), .color = color })) catch {};
+        return cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 10 * s, .children = items.items });
     }
 
-    /// An icon and text after it, in a row `h` high at `y`, cut short (with
-    /// an ellipsis) if it is too long.
-    fn iconRow(q: *Quick, canvas: font.Canvas, which: icons.Icon, text: []const u8, y: f32, h: f32, color: u32) void {
-        const s = q.scale;
-        const ic = @round(small_icon * s);
-        q.icon(canvas, which, ic, pad * s, y + (h - ic) / 2, color);
-        const f = if (q.font) |*f| f else return;
-        const style: font.Style = .{ .font = f, .size = @round(text_size * s), .color = color };
-        const x = pad * s + ic + 10 * s;
-        const room = @as(f32, @floatFromInt(q.width)) - x - pad * s;
-        var shown = text;
-        var buf: [128]u8 = undefined;
-        if (font.measure(style, text) > room) {
-            var n = text.len;
-            while (n > 0) {
-                n -= 1;
-                // Not in the middle of a character.
-                if (n < text.len and text[n] & 0xc0 == 0x80) continue;
-                shown = std.fmt.bufPrint(&buf, "{s}…", .{text[0..n]}) catch text;
-                if (font.measure(style, shown) <= room) break;
+    /// A rounded rectangle filling where it is put.
+    const Fill = struct {
+        color: u32,
+        radius: f32 = 0,
+
+        pub fn layout(_: *const Fill, _: *kete.WidgetNode, c: kete.Constraints) kete.Size {
+            return c.constrain(.{ .w = c.max_w, .h = c.max_h });
+        }
+
+        pub fn paint(f: *const Fill, n: *kete.WidgetNode, p: *kete.Painter) void {
+            const r: kete.gfx.Rect = .{ .x = 0, .y = 0, .w = n.size.w, .h = n.size.h };
+            if (f.radius > 0) p.canvas().fillRoundedRect(r, .all(f.radius), kete.gfx.Color.argb(f.color)) else p.canvas().fillRect(r, kete.gfx.Color.argb(f.color));
+        }
+    };
+
+    /// The volume's row: its icon (the mute button), the slider and how
+    /// loud, at the rectangles given (in the popup).
+    const Volume = struct {
+        theme: dock.Theme,
+        scale: f32,
+        volume: dock.VolumeStatus,
+        mute_hover: bool,
+        knob_big: bool,
+        mute: Rect,
+        slider: Rect,
+
+        pub fn layout(_: *const Volume, _: *kete.WidgetNode, c: kete.Constraints) kete.Size {
+            return c.constrain(.{ .w = c.max_w, .h = c.max_h });
+        }
+
+        pub fn paint(v: *const Volume, n: *kete.WidgetNode, p: *kete.Painter) void {
+            const c = v.theme.colors();
+            const argb = kete.gfx.Color.argb;
+            const s = v.scale;
+            const cv = p.canvas();
+            const h = n.size.h;
+            if (v.mute_hover) cv.fillRoundedRect(.{ .x = v.mute.x, .y = 0, .w = v.mute.w, .h = v.mute.h }, .all(10 * s), argb(c.hover_background));
+            const vol_icon = @round(volume_icon * s);
+            p.icon(ui_icons.of(v.volume.icon()), @round(pad * s), @round((h - vol_icon) / 2), vol_icon, argb(c.dot));
+            const th = track_height * s;
+            const track_y = (h - th) / 2;
+            cv.fillRoundedRect(.{ .x = v.slider.x, .y = track_y, .w = v.slider.w, .h = th }, .all(th / 2), argb(c.status_border));
+            const k = @as(f32, @floatFromInt(v.volume.volume)) / 100;
+            if (k > 0) cv.fillRoundedRect(.{ .x = v.slider.x, .y = track_y, .w = @max(th, v.slider.w * k), .h = th }, .all(th / 2), argb(if (v.volume.active()) accent else c.status_inactive));
+            const knob = knob_radius * s * (if (v.knob_big) @as(f32, 1.15) else 1);
+            cv.fillCircle(.{ v.slider.x + v.slider.w * k, track_y + th / 2 }, knob, argb(c.dot));
+            if (p.ui.font) |f| {
+                var pbuf: [8]u8 = undefined;
+                const pct = std.fmt.bufPrint(&pbuf, "{d}%", .{v.volume.volume}) catch "";
+                const style: kete.font.Style = .{ .font = f, .size = @round(text_size * s) };
+                _ = p.text(style.size, @round(n.size.w - pad * s - kete.font.measure(style, pct)), @round(h / 2 + style.ascent() * 0.36), pct, argb(c.dot));
             }
         }
-        _ = font.draw(canvas, &q.cache, style, @round(x), @round(y + h / 2 + style.ascent() * 0.36), shown) catch {};
-    }
+    };
 };
 
 const testing = std.testing;
@@ -530,8 +547,10 @@ test "updates are described by what they are of" {
 }
 
 test "the popup sits above the status box, and its parts take clicks" {
-    var q = try Quick.init(testing.allocator, null, 1);
-    defer q.deinit(testing.allocator);
+    const kit = try kete_panel.Kit.create(testing.allocator, testing.io, @embedFile("FiraSans-Regular.ttf"), null);
+    defer kit.destroy();
+    var q = try Quick.init(kit, 1);
+    defer q.deinit();
     q.network.ethernet = .connected;
     q.volume = .{ .volume = 40, .muted = false };
     q.draw();
@@ -568,8 +587,10 @@ test "the popup sits above the status box, and its parts take clicks" {
 }
 
 test "pressing the popup's parts mutes, drags the slider, and asks twice before powering off" {
-    var q = try Quick.init(testing.allocator, null, 1);
-    defer q.deinit(testing.allocator);
+    const kit = try kete_panel.Kit.create(testing.allocator, testing.io, @embedFile("FiraSans-Regular.ttf"), null);
+    defer kit.destroy();
+    var q = try Quick.init(kit, 1);
+    defer q.deinit();
     q.volume = .{ .volume = 40, .muted = false };
     q.updates = .apps;
     q.draw();

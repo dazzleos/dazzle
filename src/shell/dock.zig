@@ -20,8 +20,10 @@ const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
 const evdev = sys.evdev;
-const font = @import("font");
+const kete = @import("kete");
 const glass = @import("glass.zig");
+const kete_panel = @import("kete_panel.zig");
+const ui_icons = @import("ui_icons.zig");
 const icons = @import("icons");
 const audio = @import("audio");
 const theme_settings = @import("appearance");
@@ -493,14 +495,13 @@ pub fn label(gpa: std.mem.Allocator, name: []const u8) ![]const u8 {
 }
 
 pub const Dock = struct {
-    font: ?font.Font,
-    icon_font: ?font.Font,
-    cache: font.GlyphCache,
+    /// Where the box, and the tooltip, are drawn (kete's).
+    panel: *kete_panel.Panel,
+    tip_panel: *kete_panel.Panel,
     /// The box's picture, `width` by `height` (rows `width` apart), see-
-    /// through (`glass`), and wholly outside its rounded corners. Room for
-    /// the screen's width, twice: the second is where it is drawn over
-    /// white.
-    pixels: []u32,
+    /// through (`glass`), and wholly outside its rounded corners (the
+    /// panel's, as `draw` last drew it).
+    pixels: []const u32 = &.{},
     width: u32,
     height: u32,
     screen_width: u32,
@@ -523,9 +524,7 @@ pub const Dock = struct {
     /// (the pointer has rested a while), and the app whose it shows.
     tooltip_at: ?u64 = null,
     tooltip_shown: ?usize = null,
-    /// Its picture (`drawTooltip`), and the screen's height (the dock is
-    /// at its bottom).
-    tooltip_pixels: []u32,
+    /// The screen's height (the dock is at its bottom).
     screen_height: u32,
     /// How far down it is, out of the way of a fullscreen window (0: in
     /// its place, 1: off the bottom of the screen), and on its way: from
@@ -579,15 +578,14 @@ pub const Dock = struct {
         }
     };
 
-    pub fn init(gpa: std.mem.Allocator, f: ?font.Font, apps: []App, screen_width: u32, screen_height: u32) !Dock {
+    pub fn init(kit: *kete_panel.Kit, apps: []App, screen_width: u32, screen_height: u32) !Dock {
         const scale = @min(@as(f32, @floatFromInt(screen_width)) / 1920, @as(f32, @floatFromInt(screen_height)) / 1080);
         const height: u32 = @intFromFloat(@round((icon_size + 2 * box_pad) * scale));
+        const panel = try kit.panel();
+        errdefer panel.destroy();
         var d: Dock = .{
-            .font = f,
-            .icon_font = font.Font.init(icons.font_data) catch null,
-            .cache = font.GlyphCache.init(gpa),
-            .pixels = try gpa.alloc(u32, 2 * @as(usize, screen_width) * height),
-            .tooltip_pixels = try gpa.alloc(u32, @as(usize, tooltipMaxWidth(scale)) * tooltipHeight(scale)),
+            .panel = panel,
+            .tip_panel = try kit.panel(),
             .screen_height = screen_height,
             .screen_width = screen_width,
             .width = screen_width,
@@ -599,6 +597,11 @@ pub const Dock = struct {
         d.entries_len = @min(apps.len, max_entries);
         for (d.entries[0..d.entries_len], 0..) |*e, i| e.* = .{ .app = i };
         return d;
+    }
+
+    pub fn deinit(d: *Dock) void {
+        d.panel.destroy();
+        d.tip_panel.destroy();
     }
 
     /// The apps are now `new` (`apps`, which they replace, is to be freed
@@ -773,7 +776,7 @@ pub const Dock = struct {
 
     /// Its picture, as `draw` last drew it.
     pub fn picture(d: *const Dock) []const u32 {
-        return d.pixels[0 .. @as(usize, d.width) * d.height];
+        return d.pixels;
     }
 
     /// Where app `i`'s icon is, in the box: the icons and the status box
@@ -826,82 +829,171 @@ pub const Dock = struct {
         return null;
     }
 
+    /// Draws it as it is now (with kete: see `View`).
     pub fn draw(d: *Dock) void {
         d.width = d.boxWidth();
-        const n = @as(usize, d.width) * d.height;
-        const over_black: font.Canvas = .{ .pixels = d.pixels[0..n], .width = d.width, .height = d.height, .stride = d.width };
-        const over_white: font.Canvas = .{ .pixels = d.pixels[n .. 2 * n], .width = d.width, .height = d.height, .stride = d.width };
-        d.drawContents(over_black, glass.black);
-        d.drawContents(over_white, glass.white);
-        // In a see-through box, its corners rounded.
-        glass.compose(over_black.pixels, over_white.pixels, d.theme.colors().background);
-        glass.cutCorners(over_black, @round(box_radius * d.scale));
+        d.pixels = d.panel.draw(d.width, d.height, 0, View{ .d = d });
     }
 
-    /// What is in the box, over `base`.
-    fn drawContents(d: *Dock, canvas: font.Canvas, base: u32) void {
-        const c = d.theme.colors();
-        canvas.fill(0, 0, d.width, d.height, base);
-        const icon_font: ?*const font.Font = if (d.icon_font) |*f| f else null;
-        for (d.entries[0..d.entries_len], 0..) |e, j| {
-            if (e.k <= 0) continue;
-            const r = d.entryRect(j);
-            // As big as it is on its way in or out.
-            const k = e.k;
-            const app: ?*const App = if (e.app) |i| &d.apps[i] else null;
-            const look: Look = if (app) |a| .of(a) else e.gone;
-            if (e.app != null and d.hover == e.app.?) {
-                const pad = 4 * d.scale * k;
-                roundedRect(canvas, r.x - pad, r.y - pad, r.size + 2 * pad, r.size + 2 * pad, 14 * d.scale * k, c.hover_background);
+    /// The box as kete widgets: the box, each icon in the row (where the
+    /// dock's layout puts it: they grow and shrink, and move along, as apps
+    /// come and go), and the status box. Each its own widget, so a change
+    /// to one (the pointer moving over the icons) draws only it again.
+    const View = struct {
+        d: *const Dock,
+
+        pub fn build(v: *const View, cx: *kete.BuildContext) kete.Widget {
+            const d = v.d;
+            const a = cx.arena;
+            var layers: std.ArrayList(kete.Widget) = .empty;
+            layers.append(a, cx.make(Box{ .color = glassy(d.theme.colors().background), .radius = @round(box_radius * d.scale) })) catch {};
+            for (d.entries[0..d.entries_len], 0..) |e, j| {
+                if (e.k <= 0) continue;
+                const r = d.entryRect(j);
+                const app: ?*const App = if (e.app) |i| &d.apps[i] else null;
+                const tile: Tile = .{
+                    .look = if (app) |ap| .of(ap) else e.gone,
+                    .hover = e.app != null and d.hover == e.app.?,
+                    .running = if (app) |ap| ap.pid != null else false,
+                    .k = e.k,
+                    .scale = d.scale,
+                    .theme = d.theme,
+                };
+                const at = tile.origin(r);
+                layers.append(a, placed(cx, at[0], at[1], tile.width(r), tile.height(r), cx.make(tile))) catch {};
             }
-            roundedRect(canvas, r.x, r.y, r.size, r.size, 12 * d.scale * k, look.color);
-            if (look.icon != null and icon_font != null) {
-                // Icons fill the em square, with the baseline at the bottom.
-                const size = @round(36 * d.scale * k);
-                const style: font.Style = .{ .font = icon_font.?, .size = size, .color = 0xffffffff };
-                var buf: [4]u8 = undefined;
-                const x = @round(r.x + (r.size - size) / 2);
-                const y = @round(r.y + (r.size - size) / 2);
-                if (size >= 1) _ = font.draw(canvas, &d.cache, style, x, y + size, icons.text(look.icon.?, &buf)) catch {};
-            } else if (d.font) |*f| if (look.initial_len > 0 and 30 * d.scale * k >= 1) {
-                const style: font.Style = .{ .font = f, .size = 30 * d.scale * k, .color = 0xffffffff };
-                const initial = look.initial[0..look.initial_len];
-                const baseline = r.y + r.size / 2 + style.ascent() * 0.36;
-                _ = font.draw(canvas, &d.cache, style, r.x + (r.size - font.measure(style, initial)) / 2, baseline, initial) catch {};
-            };
-            if (app) |a| if (a.pid != null) {
-                const dot = 6 * d.scale * k;
-                const full = icon_size * d.scale;
-                roundedRect(canvas, r.x + (r.size - dot) / 2, box_pad * d.scale + full + 3 * d.scale, dot, dot, dot / 2, c.dot);
-            };
+            const rs = d.statusRect();
+            layers.append(a, placed(cx, rs.x, rs.y, rs.width, rs.height, cx.make(Status{
+                .theme = d.theme,
+                .scale = d.scale,
+                .updates = d.updates,
+                .volume = d.volume,
+                .network = d.network,
+                .activity = d.activity,
+            }))) catch {};
+            return cx.make(kete.Overlay{ .children = layers.items });
         }
-        const rs = d.statusRect();
-        roundedRectOutline(canvas, rs.x, rs.y, rs.width, rs.height, 12 * d.scale, @max(1.5, 2 * d.scale), c.status_border);
-        if (icon_font) |f| {
-            const size = @round(36 * d.scale);
-            const pad = @round(10 * d.scale);
-            const y = @round(rs.y + (rs.height - size) / 2);
-            const update_x = @round(rs.x + pad);
-            const vol_x = if (d.updates) @round(update_x + update_icon_width * d.scale) else update_x;
-            const arrow = @round(18 * d.scale);
-            const arrows_x = @round(rs.x + rs.width - pad - arrow);
-            const net_x = @round(arrows_x - 4 * d.scale - size);
-            var buf: [4]u8 = undefined;
-            if (d.updates) _ = font.draw(canvas, &d.cache, .{ .font = f, .size = size, .color = c.dot }, update_x, y + size, icons.text(.system_update_alt, &buf)) catch {};
-            const vol_color: u32 = if (d.volume.active()) c.status_active else c.status_inactive;
-            _ = font.draw(canvas, &d.cache, .{ .font = f, .size = size, .color = vol_color }, vol_x, y + size, icons.text(d.volume.icon(), &buf)) catch {};
-            const net_color: u32 = if (d.network.connected()) c.status_active else c.status_inactive;
-            _ = font.draw(canvas, &d.cache, .{ .font = f, .size = size, .color = net_color }, net_x, y + size, icons.text(d.network.icon(), &buf)) catch {};
-            // Sending above receiving, each lit while data moves that way.
-            if (d.network.connected()) {
-                const mid = rs.y + rs.height / 2;
-                const up_color: u32 = if (d.activity.sending) c.status_active else c.status_inactive;
-                const down_color: u32 = if (d.activity.receiving) c.status_active else c.status_inactive;
-                _ = font.draw(canvas, &d.cache, .{ .font = f, .size = arrow, .color = up_color }, arrows_x, @round(mid), icons.text(.arrow_upward, &buf)) catch {};
-                _ = font.draw(canvas, &d.cache, .{ .font = f, .size = arrow, .color = down_color }, arrows_x, @round(mid + arrow), icons.text(.arrow_downward, &buf)) catch {};
-            }
-        }
+    };
+
+    /// `child`, `w` by `h`, at (`x`, `y`) in the box.
+    fn placed(cx: *kete.BuildContext, x: f32, y: f32, w: f32, h: f32, child: kete.Widget) kete.Widget {
+        return cx.make(kete.Align{ .alignment = .top_left, .child = cx.make(kete.Padding{ .padding = .{ .left = x, .top = y }, .child = cx.make(kete.SizedBox{ .width = w, .height = h, .child = child }) }) });
     }
+
+    /// The see-through box, its corners rounded.
+    const Box = struct {
+        color: u32,
+        radius: f32,
+
+        pub fn layout(_: *const Box, _: *kete.WidgetNode, c: kete.Constraints) kete.Size {
+            return c.constrain(.{ .w = c.max_w, .h = c.max_h });
+        }
+
+        pub fn paint(b: *const Box, n: *kete.WidgetNode, p: *kete.Painter) void {
+            p.canvas().fillRoundedRect(.{ .x = 0, .y = 0, .w = n.size.w, .h = n.size.h }, .all(b.radius), kete.gfx.Color.argb(b.color));
+        }
+    };
+
+    /// An app's icon: its coloured square, its symbol or initial, the
+    /// highlight behind it while the pointer is on it, and the dot under
+    /// it while it runs; as big as it is (`k`, on its way in or out).
+    const Tile = struct {
+        look: Look,
+        hover: bool,
+        running: bool,
+        k: f32,
+        scale: f32,
+        theme: Theme,
+
+        /// The highlight's margin round the square.
+        fn margin(t: Tile) f32 {
+            return 4 * t.scale * t.k;
+        }
+
+        fn origin(t: Tile, r: Rect) [2]f32 {
+            return .{ r.x - t.margin(), r.y - t.margin() };
+        }
+
+        fn width(t: Tile, r: Rect) f32 {
+            return r.size + 2 * t.margin();
+        }
+
+        /// Down to under the running dot.
+        fn height(t: Tile, r: Rect) f32 {
+            const full = icon_size * t.scale;
+            return box_pad * t.scale + full + 3 * t.scale + 6 * t.scale * t.k - (r.y - t.margin());
+        }
+
+        pub fn layout(_: *const Tile, _: *kete.WidgetNode, c: kete.Constraints) kete.Size {
+            return c.constrain(.{ .w = c.max_w, .h = c.max_h });
+        }
+
+        pub fn paint(t: *const Tile, n: *kete.WidgetNode, p: *kete.Painter) void {
+            const c = t.theme.colors();
+            const argb = kete.gfx.Color.argb;
+            const cv = p.canvas();
+            const pad = t.margin();
+            const size = n.size.w - 2 * pad;
+            const s = t.scale;
+            const k = t.k;
+            if (t.hover) cv.fillRoundedRect(.{ .x = 0, .y = 0, .w = size + 2 * pad, .h = size + 2 * pad }, .all(14 * s * k), argb(c.hover_background));
+            cv.fillRoundedRect(.{ .x = pad, .y = pad, .w = size, .h = size }, .all(12 * s * k), argb(t.look.color));
+            if (t.look.icon) |icon| {
+                const isz = @round(36 * s * k);
+                if (isz >= 1) p.icon(ui_icons.of(icon), pad + (size - isz) / 2, pad + (size - isz) / 2, isz, argb(0xffffffff));
+            } else if (p.ui.font) |f| if (t.look.initial_len > 0 and 30 * s * k >= 1) {
+                const style: kete.font.Style = .{ .font = f, .size = 30 * s * k };
+                const initial = t.look.initial[0..t.look.initial_len];
+                _ = p.text(style.size, pad + (size - kete.font.measure(style, initial)) / 2, pad + size / 2 + style.ascent() * 0.36, initial, argb(0xffffffff));
+            };
+            if (t.running) {
+                const dot = 6 * s * k;
+                cv.fillRoundedRect(.{ .x = pad + (size - dot) / 2, .y = n.size.h - dot, .w = dot, .h = dot }, .all(dot / 2), argb(c.dot));
+            }
+        }
+    };
+
+    /// The status box: an outline, updates, the volume and the network.
+    const Status = struct {
+        theme: Theme,
+        scale: f32,
+        updates: bool,
+        volume: VolumeStatus,
+        network: NetworkStatus,
+        activity: Activity,
+
+        pub fn layout(_: *const Status, _: *kete.WidgetNode, c: kete.Constraints) kete.Size {
+            return c.constrain(.{ .w = c.max_w, .h = c.max_h });
+        }
+
+        pub fn paint(st: *const Status, n: *kete.WidgetNode, p: *kete.Painter) void {
+            const c = st.theme.colors();
+            const argb = kete.gfx.Color.argb;
+            const s = st.scale;
+            const w = n.size.w;
+            const h = n.size.h;
+            // Its outline, inside its edge.
+            const stroke = @max(1.5, 2 * s);
+            p.canvas().strokeRoundedRect(.{ .x = stroke / 2, .y = stroke / 2, .w = w - stroke, .h = h - stroke }, .all(12 * s - stroke / 2), stroke, argb(c.status_border));
+            const size = @round(36 * s);
+            const pad = @round(10 * s);
+            const y = @round((h - size) / 2);
+            const update_x = pad;
+            const vol_x = if (st.updates) @round(update_x + update_icon_width * s) else update_x;
+            const arrow = @round(18 * s);
+            const arrows_x = @round(w - pad - arrow);
+            const net_x = @round(arrows_x - 4 * s - size);
+            if (st.updates) p.icon(.system_update_alt, update_x, y, size, argb(c.dot));
+            p.icon(ui_icons.of(st.volume.icon()), vol_x, y, size, argb(if (st.volume.active()) c.status_active else c.status_inactive));
+            p.icon(ui_icons.of(st.network.icon()), net_x, y, size, argb(if (st.network.connected()) c.status_active else c.status_inactive));
+            // Sending above receiving, each lit while data moves that way.
+            if (st.network.connected()) {
+                const mid = @round(h / 2);
+                p.icon(.arrow_upward, arrows_x, mid - arrow, arrow, argb(if (st.activity.sending) c.status_active else c.status_inactive));
+                p.icon(.arrow_downward, arrows_x, mid, arrow, argb(if (st.activity.receiving) c.status_active else c.status_inactive));
+            }
+        }
+    };
 
     /// Moves the hover highlight for the pointer at (`x`, `y`) in the dock
     /// (null: elsewhere), at `now`. Returns whether it changed (and with
@@ -946,23 +1038,13 @@ pub const Dock = struct {
         const due = d.tooltip_at orelse return null;
         const i = d.hover orelse return null;
         if (now < due or d.tooltip_shown != null) return null;
-        const f = if (d.font) |*f| f else return null;
         d.tooltip_at = null;
         d.tooltip_shown = i;
-        const c = d.theme.colors();
-        const text = d.apps[i].label;
-        const style: font.Style = .{ .font = f, .size = @round(18 * d.scale), .color = c.tooltip_text };
-        const pad = @round(12 * d.scale);
+        const view: TooltipView = .{ .text = d.apps[i].label, .theme = d.theme, .scale = d.scale };
         const h = tooltipHeight(d.scale);
-        const w: u32 = @min(@as(u32, @intFromFloat(@ceil(font.measure(style, text) + 2 * pad))), tooltipMaxWidth(d.scale));
-        const pixels = d.tooltip_pixels[0 .. @as(usize, w) * h];
-        const canvas: font.Canvas = .{ .pixels = pixels, .width = w, .height = h, .stride = w };
-        canvas.fill(0, 0, w, h, c.tooltip_background);
-        const fh: f32 = @floatFromInt(h);
-        const baseline = @round(fh / 2 + style.ascent() * 0.36);
-        _ = font.draw(canvas, &d.cache, style, pad, baseline, text) catch {};
-        // Rounded: what is outside its corners is see-through.
-        glass.cutCorners(canvas, @round(6 * d.scale));
+        const w: u32 = @min(d.tip_panel.naturalSize(view)[0], tooltipMaxWidth(d.scale));
+        const pixels = d.tip_panel.draw(w, h, now, view);
+        if (pixels.len == 0) return null;
         // Above the icon, clear of the dock, and on the screen.
         const r = d.iconRect(i);
         const at = d.place();
@@ -970,6 +1052,28 @@ pub const Dock = struct {
         const x = std.math.clamp(@round(@as(f32, @floatFromInt(at.x)) + r.x + r.size / 2 - fw / 2), 0, @as(f32, @floatFromInt(d.screen_width)) - fw);
         return .{ .pixels = pixels, .width = w, .height = h, .x = @intFromFloat(x), .y = at.y - @as(i32, @intCast(h)) - @as(i32, @intFromFloat(@round(8 * d.scale))) };
     }
+
+    /// The tooltip, as kete widgets: the app's name in a small rounded box.
+    const TooltipView = struct {
+        text: []const u8,
+        theme: Theme,
+        scale: f32,
+
+        pub fn build(v: *const TooltipView, cx: *kete.BuildContext) kete.Widget {
+            const c = v.theme.colors();
+            const s = v.scale;
+            return cx.make(kete.RoundedBox{
+                .color = kete.gfx.Color.argb(c.tooltip_background),
+                .radius = .all(@round(6 * s)),
+                .child = cx.make(kete.Padding{ .padding = .{ .left = @round(12 * s), .right = @round(12 * s) }, .child = cx.make(kete.SizedBox{ .height = @round(34 * s), .child = cx.make(kete.Align{ .alignment = .center_left, .child = cx.make(kete.Text{
+                    .text = v.text,
+                    .style = .{ .size = @round(18 * s), .color = kete.gfx.Color.argb(c.tooltip_text) },
+                    .wrap = false,
+                    .ellipsis = true,
+                }) }) }) }),
+            });
+        }
+    };
 };
 
 fn easeInOut(t: f32) f32 {
@@ -979,51 +1083,11 @@ fn easeInOut(t: f32) f32 {
     return 1 - u * u * u / 2;
 }
 
-/// Fills a rectangle with rounded corners, anti-aliased.
-fn roundedRect(c: font.Canvas, x: f32, y: f32, w: f32, h: f32, radius: f32, color: u32) void {
-    const x0: u32 = @intFromFloat(std.math.clamp(@floor(x), 0, @as(f32, @floatFromInt(c.width))));
-    const y0: u32 = @intFromFloat(std.math.clamp(@floor(y), 0, @as(f32, @floatFromInt(c.height))));
-    const x1: u32 = @intFromFloat(std.math.clamp(@ceil(x + w), 0, @as(f32, @floatFromInt(c.width))));
-    const y1: u32 = @intFromFloat(std.math.clamp(@ceil(y + h), 0, @as(f32, @floatFromInt(c.height))));
-    const cx = x + w / 2;
-    const cy = y + h / 2;
-    const r = @min(radius, @min(w, h) / 2);
-    for (y0..y1) |py| for (x0..x1) |px| {
-        // Distance from the pixel's centre to the shape's edge.
-        const qx = @abs(@as(f32, @floatFromInt(px)) + 0.5 - cx) - (w / 2 - r);
-        const qy = @abs(@as(f32, @floatFromInt(py)) + 0.5 - cy) - (h / 2 - r);
-        const outside = std.math.hypot(@max(qx, 0), @max(qy, 0)) + @min(@max(qx, qy), 0) - r;
-        const coverage = std.math.clamp(0.5 - outside, 0, 1);
-        if (coverage <= 0) continue;
-        const p = &c.pixels[py * c.stride + px];
-        p.* = font.text.blend(p.*, color, @intFromFloat(@round(coverage * 255)));
-    };
-}
-
-/// Strokes the outline of a rectangle with rounded corners, anti-aliased,
-/// leaving its interior unfilled.
-fn roundedRectOutline(c: font.Canvas, x: f32, y: f32, w: f32, h: f32, radius: f32, stroke: f32, color: u32) void {
-    const x0: u32 = @intFromFloat(std.math.clamp(@floor(x), 0, @as(f32, @floatFromInt(c.width))));
-    const y0: u32 = @intFromFloat(std.math.clamp(@floor(y), 0, @as(f32, @floatFromInt(c.height))));
-    const x1: u32 = @intFromFloat(std.math.clamp(@ceil(x + w), 0, @as(f32, @floatFromInt(c.width))));
-    const y1: u32 = @intFromFloat(std.math.clamp(@ceil(y + h), 0, @as(f32, @floatFromInt(c.height))));
-    const cx = x + w / 2;
-    const cy = y + h / 2;
-    const r = @min(radius, @min(w, h) / 2);
-    const half_s = stroke / 2;
-    for (y0..y1) |py| for (x0..x1) |px| {
-        const qx = @abs(@as(f32, @floatFromInt(px)) + 0.5 - cx) - (w / 2 - r);
-        const qy = @abs(@as(f32, @floatFromInt(py)) + 0.5 - cy) - (h / 2 - r);
-        const outside = std.math.hypot(@max(qx, 0), @max(qy, 0)) + @min(@max(qx, qy), 0) - r;
-        const dist = @abs(outside + half_s) - half_s;
-        const coverage = std.math.clamp(0.5 - dist, 0, 1);
-        if (coverage <= 0) continue;
-        const p = &c.pixels[py * c.stride + px];
-        p.* = font.text.blend(p.*, color, @intFromFloat(@round(coverage * 255)));
-    };
-}
-
 const testing = std.testing;
+
+fn testKit() !*kete_panel.Kit {
+    return kete_panel.Kit.create(testing.allocator, testing.io, @embedFile("FiraSans-Regular.ttf"), null);
+}
 
 test "the apps and the settings in the apps directory are noticed changing" {
     var path_buf: [64]u8 = undefined;
@@ -1071,10 +1135,10 @@ test "icons and the status box are in a row in a box, and clicks find the apps" 
         .{ .name = "a", .label = "A", .path = "/apps/a/a", .icon = .folder },
         .{ .name = "b", .label = "B", .path = "/apps/b/b" },
     };
-    var d = try Dock.init(testing.allocator, null, &apps, 1920, 1080);
-    defer testing.allocator.free(d.pixels);
-    defer testing.allocator.free(d.tooltip_pixels);
-    defer d.cache.deinit();
+    const kit = try testKit();
+    defer kit.destroy();
+    var d = try Dock.init(kit, &apps, 1920, 1080);
+    defer d.deinit();
     try testing.expectEqual(@as(u32, 80), d.height);
     const r0 = d.iconRect(0);
     const r1 = d.iconRect(1);
@@ -1132,10 +1196,10 @@ test "the dock floats in a rounded box in the middle of the bottom, and slides d
         .{ .name = "a", .label = "A", .path = "/apps/a/a", .icon = .folder },
         .{ .name = "b", .label = "B", .path = "/apps/b/b" },
     };
-    var d = try Dock.init(testing.allocator, null, &apps, 1920, 1080);
-    defer testing.allocator.free(d.pixels);
-    defer testing.allocator.free(d.tooltip_pixels);
-    defer d.cache.deinit();
+    const kit = try testKit();
+    defer kit.destroy();
+    var d = try Dock.init(kit, &apps, 1920, 1080);
+    defer d.deinit();
     d.draw();
     // Just big enough: the icons and status box, padded.
     try testing.expect(d.width < 500);
@@ -1179,10 +1243,10 @@ test "the dock floats in a rounded box in the middle of the bottom, and slides d
 
 test "with updates, the status box is wider and starts with the update icon" {
     var apps = [_]App{.{ .name = "a", .label = "A", .path = "/apps/a/a", .icon = .folder }};
-    var d = try Dock.init(testing.allocator, null, &apps, 1920, 1080);
-    defer testing.allocator.free(d.pixels);
-    defer testing.allocator.free(d.tooltip_pixels);
-    defer d.cache.deinit();
+    const kit = try testKit();
+    defer kit.destroy();
+    var d = try Dock.init(kit, &apps, 1920, 1080);
+    defer d.deinit();
     const without = d.statusRect();
     d.draw();
     const box_middle_y: usize = @intFromFloat(without.y + without.height / 2);
@@ -1349,11 +1413,10 @@ test "resting the pointer on an icon shows the app's name above it, a while late
         .{ .name = "dazzle-files", .label = "Files", .path = "/apps/files/files", .icon = .folder },
         .{ .name = "dazzle-settings", .label = "Settings", .path = "/apps/settings/settings", .icon = .settings },
     };
-    const fira = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    var d = try Dock.init(testing.allocator, fira, &apps, 1920, 1080);
-    defer testing.allocator.free(d.pixels);
-    defer testing.allocator.free(d.tooltip_pixels);
-    defer d.cache.deinit();
+    const kit = try testKit();
+    defer kit.destroy();
+    var d = try Dock.init(kit, &apps, 1920, 1080);
+    defer d.deinit();
     const r0 = d.iconRect(0);
     const r1 = d.iconRect(1);
     const ms = std.time.ns_per_ms;
@@ -1400,10 +1463,10 @@ test "an app installed grows in, one removed shrinks out, and the others move al
         .{ .name = "a", .label = "A", .path = "/apps/a/a", .icon = .folder },
         .{ .name = "c", .label = "C", .path = "/apps/c/c" },
     };
-    var d = try Dock.init(testing.allocator, null, &apps, 1920, 1080);
-    defer testing.allocator.free(d.pixels);
-    defer testing.allocator.free(d.tooltip_pixels);
-    defer d.cache.deinit();
+    const kit = try testKit();
+    defer kit.destroy();
+    var d = try Dock.init(kit, &apps, 1920, 1080);
+    defer d.deinit();
     const ms = std.time.ns_per_ms;
     const two = d.boxWidth();
     const c_before = d.iconRect(1).x;
