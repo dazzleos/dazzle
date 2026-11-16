@@ -488,13 +488,27 @@ pub const Renderer = struct {
         for (&r.panels) |*p| p.hidden = hidden;
     }
 
+    /// The overlay plane each panel is shown on, above a window shown
+    /// directly: those that may show over one for long (a notification,
+    /// as it fades in and out, too). With any other showing (the tooltip,
+    /// the quick settings, the lock screen), the frame is composited.
+    const panel_planes = std.enums.directEnumArray(PanelId, ?usize, 0, .{
+        .dock = 0,
+        .perf = 1,
+        .tooltip = null,
+        .quick = null,
+        .notice = 2,
+        .lock = null,
+    });
+
     fn panelLayers(r: *Renderer) ?vc4.kms.Overlays {
         const kms = r.display.kms orelse return null;
         var out: vc4.kms.Overlays = @splat(null);
         for (&r.panels, 0..) |*p, i| {
             if (p.width == 0 or p.height == 0 or p.hidden) continue;
-            if (i >= kms.overlays.len or kms.overlays[i] == null) return null;
-            out[i] = r.panelLayer(p) orelse return null;
+            const plane = panel_planes[i] orelse return null;
+            if (plane >= kms.overlays.len or kms.overlays[plane] == null) return null;
+            out[plane] = r.panelLayer(p) orelse return null;
         }
         return out;
     }

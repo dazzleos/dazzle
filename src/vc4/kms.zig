@@ -168,8 +168,9 @@ const PlaneProps = struct {
 
 pub const Plane = struct { id: u32, props: PlaneProps };
 
-/// Overlay planes `Kms` uses, at most.
-pub const max_overlays = 2;
+/// Overlay planes `Kms` uses, at most (the shell's: the dock, the
+/// performance overlay and a notification).
+pub const max_overlays = 3;
 
 /// What is shown on each overlay plane (null: nothing).
 pub const Overlays = [max_overlays]?Layer;
