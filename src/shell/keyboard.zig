@@ -128,28 +128,56 @@ pub var file_dir: ?[:0]const u8 = null;
 pub fn keymapFile(k: locale.Keyboard) !linux.fd_t {
     const text = keymap(k);
     const fd_rc = linux.memfd_create("dazzle-keymap", linux.MFD.CLOEXEC | linux.MFD.ALLOW_SEALING);
-    const fd: linux.fd_t = if (linux.errno(fd_rc) == .SUCCESS) @intCast(fd_rc) else try unnamedFile(linux.errno(fd_rc));
-    errdefer _ = linux.close(fd);
-    var at: usize = 0;
-    while (at < text.len) {
-        const rc = linux.write(fd, text[at..].ptr, text.len - at);
-        if (linux.errno(rc) != .SUCCESS or rc == 0) {
-            sys.print(sys.log_warning ++ "dazzle-shell: keymap: cannot write its file: {s}\n", .{@tagName(linux.errno(rc))});
-            return error.SystemResources;
+    if (linux.errno(fd_rc) == .SUCCESS) {
+        const fd: linux.fd_t = @intCast(fd_rc);
+        if (writeAll(fd, text)) {
+            const seals = linux.F.SEAL_SEAL | linux.F.SEAL_SHRINK | linux.F.SEAL_GROW | linux.F.SEAL_WRITE;
+            _ = linux.fcntl(fd, linux.F.ADD_SEALS, seals);
+            return fd;
+        } else |why| {
+            // Some kernels' memfd_create gives what cannot be written to:
+            // a file elsewhere, then.
+            _ = linux.close(fd);
+            const fd2 = try unnamedFile(@errorName(why));
+            errdefer _ = linux.close(fd2);
+            writeAll(fd2, text) catch |e| {
+                sys.print(sys.log_warning ++ "dazzle-shell: keymap: cannot write its file: {s}\n", .{@errorName(e)});
+                return error.SystemResources;
+            };
+            return fd2;
         }
-        at += rc;
     }
-    const seals = linux.F.SEAL_SEAL | linux.F.SEAL_SHRINK | linux.F.SEAL_GROW | linux.F.SEAL_WRITE;
-    _ = linux.fcntl(fd, linux.F.ADD_SEALS, seals);
+    const fd = try unnamedFile(@tagName(linux.errno(fd_rc)));
+    errdefer _ = linux.close(fd);
+    writeAll(fd, text) catch |e| {
+        sys.print(sys.log_warning ++ "dazzle-shell: keymap: cannot write its file: {s}\n", .{@errorName(e)});
+        return error.SystemResources;
+    };
     return fd;
 }
 
+/// Writes all of `text` to `fd`; the error is why not (errno's name).
+fn writeAll(fd: linux.fd_t, text: []const u8) error{ INVAL, NOSPC, IO, Other }!void {
+    var at: usize = 0;
+    while (at < text.len) {
+        const rc = linux.write(fd, text[at..].ptr, text.len - at);
+        switch (linux.errno(rc)) {
+            .SUCCESS => if (rc == 0) return error.IO,
+            .INVAL => return error.INVAL,
+            .NOSPC => return error.NOSPC,
+            .IO => return error.IO,
+            else => return error.Other,
+        }
+        at += rc;
+    }
+}
+
 /// A file with no name in `file_dir`, for a keymap where memfd_create
-/// failed (with `why`): made with no name (O_TMPFILE), or, where the file
+/// failed (`why` says how): made with no name (O_TMPFILE), or, where the file
 /// system cannot (the initramfs's), made and its name taken away at once.
-fn unnamedFile(why: linux.E) !linux.fd_t {
+fn unnamedFile(why: []const u8) !linux.fd_t {
     const dir = file_dir orelse {
-        sys.print(sys.log_warning ++ "dazzle-shell: keymap: memfd_create: {s}, and nowhere else to make it\n", .{@tagName(why)});
+        sys.print(sys.log_warning ++ "dazzle-shell: keymap: memfd_create: {s}, and nowhere else to make it\n", .{why});
         return error.SystemResources;
     };
     const rc = linux.open(dir, .{ .ACCMODE = .RDWR, .TMPFILE = true, .DIRECTORY = true, .CLOEXEC = true }, 0o600);
@@ -158,7 +186,7 @@ fn unnamedFile(why: linux.E) !linux.fd_t {
     const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/.keymap-{d}", .{ dir, linux.getpid() }, 0) catch return error.SystemResources;
     const named = linux.open(path, .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, 0o600);
     if (linux.errno(named) != .SUCCESS) {
-        sys.print(sys.log_warning ++ "dazzle-shell: keymap: memfd_create: {s}; {s}: {s}\n", .{ @tagName(why), path, @tagName(linux.errno(named)) });
+        sys.print(sys.log_warning ++ "dazzle-shell: keymap: memfd_create: {s}; {s}: {s}\n", .{ why, path, @tagName(linux.errno(named)) });
         return error.SystemResources;
     }
     _ = linux.unlink(path);
