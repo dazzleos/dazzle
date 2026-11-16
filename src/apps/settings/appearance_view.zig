@@ -43,6 +43,20 @@ pub const State = struct {
         acts.appearance = next;
     }
 
+    fn setClock(st: *State, on: bool) void {
+        const acts = st.actions orelse return;
+        var next = acts.appearance orelse st.appearance;
+        next.clock = on;
+        acts.appearance = next;
+    }
+
+    fn setNetwork(st: *State, on: bool) void {
+        const acts = st.actions orelse return;
+        var next = acts.appearance orelse st.appearance;
+        next.network = on;
+        acts.appearance = next;
+    }
+
     fn setImage(comptime bg: builtin.BuiltIn) fn (*State) void {
         return struct {
             fn set(st: *State) void {
@@ -100,6 +114,17 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
         .children = cx.makeAll(.{
             b.label("Background"),
             photoRow(cx, self, state),
+        }),
+    })) catch {};
+
+    // What the dock shows beside the volume.
+    rows.append(a, cx.make(kete.Column{
+        .cross_axis_alignment = .start,
+        .spacing = 4,
+        .children = cx.makeAll(.{
+            b.label("Dock"),
+            kete.SwitchRow{ .value = self.appearance.clock, .on_changed = if (self.actions != null) .of(state, State.setClock) else null, .label = "Show the time" },
+            kete.SwitchRow{ .value = self.appearance.network, .on_changed = if (self.actions != null) .of(state, State.setNetwork) else null, .label = "Show the network status" },
         }),
     })) catch {};
 
@@ -295,6 +320,23 @@ test "Appearance page toggles between Dark and Light theme" {
     try testing.expectEqual(kete.Theme.light.surface, u.theme.surface);
     view.click(u, view.up(view.findText(u.root.?, "Dark").?, kete.Pressable).?);
     try testing.expectEqual(appearance_settings.Mode.dark, actions.appearance.?.theme);
+}
+
+test "the dock's time and network status turned off, and on" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
+    defer u.destroy();
+    const d = view.sample();
+    var actions: Actions = .{};
+    const settings: Settings = .{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .appearance = .{} };
+    u.frame(1280, 720, 1, settings);
+    _ = view.showPage(u, .appearance);
+    u.frame(1280, 720, 2, settings);
+    view.click(u, view.up(view.findText(u.root.?, "Show the time").?, kete.SwitchRow).?);
+    try testing.expect(!actions.appearance.?.clock and actions.appearance.?.network);
+    actions = .{};
+    view.click(u, view.up(view.findText(u.root.?, "Show the network status").?, kete.SwitchRow).?);
+    try testing.expect(actions.appearance.?.clock and !actions.appearance.?.network);
 }
 
 test "a built-in photo is picked as the background, shown by its rounded thumbnail" {

@@ -44,6 +44,56 @@ pub const TimeZone = enum(u16) {
         return out;
     }
 
+    /// Its area: "Pacific", "America" (for "America/Argentina/Buenos_Aires"
+    /// too), or "UTC".
+    pub fn area(z: TimeZone) []const u8 {
+        const n = z.name();
+        return n[0 .. std.mem.indexOfScalar(u8, n, '/') orelse n.len];
+    }
+
+    /// Its city (with the region in an area, if any), for people to read:
+    /// "Auckland", "Argentina/Buenos Aires"; "UTC" for UTC.
+    pub fn city(z: TimeZone, buf: []u8) []const u8 {
+        const n = z.name();
+        const slash = std.mem.indexOfScalar(u8, n, '/') orelse return n;
+        const rest = n[slash + 1 ..];
+        if (rest.len > buf.len) return rest;
+        const out = buf[0..rest.len];
+        @memcpy(out, rest);
+        std.mem.replaceScalar(u8, out, '_', ' ');
+        return out;
+    }
+
+    /// The zones in `area_name`, in order: from `first`, `count` of them
+    /// (the table is sorted by name, so an area's are together).
+    pub fn inArea(area_name: []const u8) struct { first: u16, count: u16 } {
+        var first: ?u16 = null;
+        var n: u16 = 0;
+        for (table.zones, 0..) |_, i| {
+            const z: TimeZone = @enumFromInt(i);
+            if (!std.mem.eql(u8, z.area(), area_name)) continue;
+            if (first == null) first = @intCast(i);
+            n += 1;
+        }
+        return .{ .first = first orelse 0, .count = n };
+    }
+
+    /// The areas, in order: UTC, then Africa, America and so on.
+    pub const areas = blk: {
+        @setEvalBranchQuota(100_000);
+        var list: []const []const u8 = &.{};
+        for (0..table.zones.len) |i| {
+            const n = table.zones[i].name;
+            const a = n[0 .. std.mem.indexOfScalar(u8, n, '/') orelse n.len];
+            const seen = for (list) |have| {
+                if (std.mem.eql(u8, have, a)) break true;
+            } else false;
+            if (!seen) list = list ++ .{a};
+        }
+        const out: [list.len][]const u8 = list[0..list.len].*;
+        break :blk out;
+    };
+
     pub fn fromName(n: []const u8) ?TimeZone {
         for (table.zones, 0..) |z, i| if (std.mem.eql(u8, z.name, n)) return @enumFromInt(i);
         return null;
@@ -310,6 +360,17 @@ test "London, New York, India and Lord Howe Island" {
     try testing.expectEqual(@as(i32, 11 * 3600), TimeZone.fromName("Australia/Lord_Howe").?.offsetAt(t));
     try testing.expectEqual(@as(i32, 10 * 3600 + 1800), TimeZone.fromName("Australia/Lord_Howe").?.offsetAt(summer));
     try testing.expectEqual(@as(i32, 0), TimeZone.utc.offsetAt(t));
+}
+
+test "areas, and the zones in each" {
+    try testing.expectEqualStrings("UTC", TimeZone.areas[0]);
+    try testing.expectEqualStrings("Africa", TimeZone.areas[1]);
+    const pacific = TimeZone.inArea("Pacific");
+    try testing.expect(pacific.count > 20);
+    for (0..pacific.count) |i| try testing.expectEqualStrings("Pacific", @as(TimeZone, @enumFromInt(pacific.first + i)).area());
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("Argentina/Buenos Aires", TimeZone.fromName("America/Argentina/Buenos_Aires").?.city(&buf));
+    try testing.expectEqual(@as(u16, 1), TimeZone.inArea("UTC").count);
 }
 
 test "names for people to read" {

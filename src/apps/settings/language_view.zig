@@ -1,9 +1,10 @@
-//! The Language page: the language and keyboard layout, and a field to
-//! try the keyboard in.
+//! The Language page: the language and keyboard layout (and a field to
+//! try the keyboard in), and the time zone.
 
 const std = @import("std");
 const kete = @import("kete");
 const locale = @import("locale");
+const kete_vc4 = @import("kete_vc4");
 const view = @import("view.zig");
 
 const Settings = view.Settings;
@@ -36,6 +37,11 @@ pub fn build(self: *const Settings, b: Builder) kete.Widget {
         .label = k.name(),
     })) catch {};
     rows.append(a, cx.make(kete.Row{ .children = &.{cx.make(kete.TextField{ .placeholder = "Type here to try the keyboard", .width = 360 })} })) catch {};
+    rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 12 }, .child = cx.make(kete.Text{ .text = "Time zone", .style = heading }) })) catch {};
+    rows.append(a, cx.make(kete_vc4.TimeZonePicker{
+        .zone = self.locale.timezone,
+        .on_changed = if (self.actions != null) .of(picker, LocalePick.timezone) else null,
+    })) catch {};
     return b.page(rows.items);
 }
 
@@ -50,6 +56,10 @@ const LocalePick = struct {
 
     fn keyboard(p: *LocalePick, k: locale.Keyboard) void {
         if (p.actions) |a| a.locale = .{ .language = p.current.language, .keyboard = k, .timezone = p.current.timezone };
+    }
+
+    fn timezone(p: *LocalePick, z: locale.TimeZone) void {
+        if (p.actions) |a| a.locale = .{ .language = p.current.language, .keyboard = p.current.keyboard, .timezone = z };
     }
 };
 
@@ -72,4 +82,7 @@ test "the language and keyboard: picking one keeps the other" {
     view.click(u, view.findText(u.root.?, "English (US)").?);
     try testing.expectEqual(locale.Settings{ .language = .en_gb, .keyboard = .us }, actions.locale.?);
     try testing.expect(view.findType(u.root.?, kete.TextField) != null);
+    // The time zone, by area and city.
+    try testing.expect(view.findText(u.root.?, "Time zone") != null);
+    try testing.expect(view.findType(u.root.?, kete_vc4.TimeZonePicker) != null);
 }

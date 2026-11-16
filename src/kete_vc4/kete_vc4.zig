@@ -27,6 +27,8 @@ const linux = std.os.linux;
 
 pub const renderer = @import("renderer.zig");
 pub const window = @import("window.zig");
+/// Choosing a time zone (setup's, and Settings').
+pub const TimeZonePicker = @import("timezone_picker.zig").TimeZonePicker;
 pub const Renderer = renderer.Renderer;
 pub const Window = window.Window;
 pub const Display = window.Display;
@@ -254,4 +256,8 @@ fn channelDistance(a: u32, b: u32) u32 {
         most = @max(most, @abs(x - y));
     }
     return most;
+}
+
+test {
+    _ = @import("timezone_picker.zig");
 }
