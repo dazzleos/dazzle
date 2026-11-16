@@ -231,12 +231,51 @@ fn grantGpuAccess() void {
         reportDisplayDevices();
     }
 
+    keepGpuAwake();
+
     var path_buf: [32]u8 = undefined;
     for (0..max_cards) |n| {
         for ([_]struct { []const u8, usize }{ .{ "card", n }, .{ "renderD", 128 + n } }) |node| {
             const path = std.mem.printSentinel(&path_buf, "/dev/dri/{s}{d}", .{ node[0], node[1] }, 0) catch continue;
             _ = sys.check(linux.chown(path.ptr, sys.user.uid, sys.user.gid)) catch continue;
             _ = linux.fchmodat(linux.AT.FDCWD, path.ptr, 0o660);
+        }
+    }
+}
+
+/// How long the GPU is left on after it was last used, in milliseconds.
+/// The vc4 driver turns it off after 40 ms (a little over two frames),
+/// and turning it on again (through the firmware) takes some 25 ms, which
+/// the next frame waits for: so a frame after any pause (the pointer
+/// coming to rest, a key typed) would be late. Left on for a few seconds,
+/// it is turned on again only after a real rest.
+const gpu_idle_ms = 5000;
+
+/// Gives the GPU (vc4's 3D part, the platform device named for its node,
+/// "<address>.v3d") `gpu_idle_ms` before the driver turns it off.
+fn keepGpuAwake() void {
+    const base = "/sys/bus/platform/devices";
+    const dir = sys.open(base, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }) catch return;
+    defer sys.close(dir);
+    var dents: [8192]u8 align(8) = undefined;
+    while (true) {
+        const n = sys.check(linux.getdents64(dir, &dents, dents.len)) catch return;
+        if (n == 0) return;
+        var at: usize = 0;
+        while (at < n) {
+            const reclen = std.mem.readInt(u16, dents[at + 16 ..][0..2], .little);
+            const name = std.mem.sliceTo(dents[at + 19 .. at + reclen], 0);
+            at += reclen;
+            if (!std.mem.endsWith(u8, name, ".v3d")) continue;
+            var path_buf: [128]u8 = undefined;
+            const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/{s}/power/autosuspend_delay_ms", .{ base, name }, 0) catch continue;
+            const fd = sys.open(path, .{ .ACCMODE = .WRONLY, .CLOEXEC = true }) catch |err| {
+                print(sys.log_warning ++ "dazzle: cannot keep the GPU on ({s}): {s}\n", .{ name, @errorName(err) });
+                continue;
+            };
+            defer sys.close(fd);
+            const value = std.fmt.comptimePrint("{d}", .{gpu_idle_ms});
+            _ = linux.write(fd, value, value.len);
         }
     }
 }
