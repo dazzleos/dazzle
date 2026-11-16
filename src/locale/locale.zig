@@ -35,6 +35,7 @@ pub const Language = enum {
     de_de,
     pt_br,
     pt_pt,
+    ja_jp,
 
     /// Its code, as BCP 47 writes it: "en-GB".
     pub fn code(l: Language) []const u8 {
@@ -57,6 +58,7 @@ pub const Language = enum {
             .de_de => "de-DE",
             .pt_br => "pt-BR",
             .pt_pt => "pt-PT",
+            .ja_jp => "ja-JP",
         };
     }
 
@@ -69,6 +71,7 @@ pub const Language = enum {
             .fr_fr, .fr_ca => .french,
             .de_de => .german,
             .pt_br, .pt_pt => .portuguese,
+            .ja_jp => .japanese,
         };
     }
 
@@ -103,6 +106,7 @@ pub const Language = enum {
             .de_de => "Deutsch (Deutschland)",
             .pt_br => "Português (Brasil)",
             .pt_pt => "Português (Portugal)",
+            .ja_jp => "日本語",
         };
     }
 
@@ -122,6 +126,7 @@ pub const Language = enum {
             .de_de => "German (Germany)",
             .pt_br => "Portuguese (Brazil)",
             .pt_pt => "Portuguese (Portugal)",
+            .ja_jp => "Japanese",
             else => l.name(),
         };
     }
@@ -148,6 +153,7 @@ pub const Language = enum {
             .de_de => "Europe/Berlin",
             .pt_br => "America/Sao_Paulo",
             .pt_pt => "Europe/Lisbon",
+            .ja_jp => "Asia/Tokyo",
         }) orelse .utc;
     }
 
@@ -162,6 +168,7 @@ pub const Language = enum {
             .de_de => .de,
             .pt_br => .br,
             .pt_pt => .pt,
+            .ja_jp => .romaji,
             // Canada's French keyboard is QWERTY: the US one, to start.
             else => .us,
         };
@@ -180,7 +187,7 @@ pub const Language = enum {
 
     pub fn clock(l: Language) Clock {
         return switch (l) {
-            .en_gb, .es_es, .es_ar, .es_cl, .zh_cn, .fr_fr, .fr_ca, .de_de, .pt_br, .pt_pt => .@"24_hour",
+            .en_gb, .es_es, .es_ar, .es_cl, .zh_cn, .fr_fr, .fr_ca, .de_de, .pt_br, .pt_pt, .ja_jp => .@"24_hour",
             .en_us, .en_ca => .@"12_hour_upper",
             .en_au, .en_nz => .@"12_hour_lower",
             .es_mx, .es_co, .es_pe, .es_us => .@"12_hour_spanish",
@@ -211,6 +218,8 @@ pub const Keyboard = enum {
     de,
     br,
     pt,
+    /// A US keyboard, typing Japanese through kete's romaji input method.
+    romaji,
 
     pub fn name(k: Keyboard) []const u8 {
         return switch (k) {
@@ -223,6 +232,7 @@ pub const Keyboard = enum {
             .de => "Deutsch (QWERTZ)",
             .br => "Português (Brasil, ABNT2)",
             .pt => "Português (Portugal)",
+            .romaji => "日本語（ローマ字）",
         };
     }
 
@@ -247,6 +257,7 @@ pub const Keyboard = enum {
             .de => &de_keys,
             .br => &br_keys,
             .pt => &pt_keys,
+            .romaji => &us_keys,
         };
     }
 
@@ -716,6 +727,7 @@ pub fn textIn(comptime l: Language, comptime s: []const u8) []const u8 {
         .french => lookup(&french.france, s),
         .german => lookup(&german.germany, s),
         .portuguese => lookup(&portuguese.brazil, s),
+        .japanese => lookup(&japanese.japan, s),
     };
     return t orelse @compileError("no " ++ @tagName(l.family()) ++ " for \"" ++ s ++ "\" (see " ++ @tagName(l.family()) ++ ".zig)");
 }
@@ -742,9 +754,10 @@ pub const chinese = @import("chinese.zig");
 pub const french = @import("french.zig");
 pub const german = @import("german.zig");
 pub const portuguese = @import("portuguese.zig");
+pub const japanese = @import("japanese.zig");
 
 /// The kinds of language, by their words and ways.
-pub const Family = enum { english, spanish, chinese, french, german, portuguese };
+pub const Family = enum { english, spanish, chinese, french, german, portuguese, japanese };
 
 /// American spelling, where it differs (Canada spells as Britain does).
 const us_spelling = [_][2][]const u8{
@@ -805,6 +818,13 @@ const calendars = std.enums.directEnumArray(Family, Calendar, 0, .{
         .today = "Hoje",
         .yesterday = "Ontem",
     },
+    .japanese = .{
+        .months = .{ "1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月" },
+        .months_long = .{ "1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月" },
+        .weekdays = .{ "日曜日", "月曜日", "火曜日", "水曜日", "木曜日", "金曜日", "土曜日" },
+        .today = "今日",
+        .yesterday = "昨日",
+    },
 });
 
 fn calendar() *const Calendar {
@@ -821,7 +841,7 @@ pub fn weekdayName(d: u3) []const u8 {
 /// none in Chinese or German (whose translations say the word whole).
 pub fn plural(n: anytype) []const u8 {
     return switch (current.family()) {
-        .chinese, .german => "",
+        .chinese, .german, .japanese => "",
         else => if (n == 1) "" else "s",
     };
 }
@@ -833,7 +853,7 @@ pub fn formatFullDate(buf: []u8, weekday: u3, day: u32, month: u32, year: u32) [
     var date_buf: [48]u8 = undefined;
     const date = formatLongDate(&date_buf, day, month, year);
     return switch (current.family()) {
-        .chinese => std.fmt.bufPrint(buf, "{s} {s}", .{ date, weekdayName(weekday) }),
+        .chinese, .japanese => std.fmt.bufPrint(buf, "{s} {s}", .{ date, weekdayName(weekday) }),
         .french => std.fmt.bufPrint(buf, "{s} {s}", .{ weekdayName(weekday), date }),
         else => std.fmt.bufPrint(buf, "{s}, {s}", .{ weekdayName(weekday), date }),
     } catch "";
@@ -855,7 +875,7 @@ pub fn formatClock(buf: []u8, hour: u32, minute: u32) []const u8 {
 pub fn formatDate(buf: []u8, day: u32, month: u32, year: ?u32) []const u8 {
     const m = calendar().months[@min(month, 12) -| 1];
     return (switch (current.family()) {
-        .chinese => if (year) |y| std.fmt.bufPrint(buf, "{d}年{d}月{d}日", .{ y, month, day }) else std.fmt.bufPrint(buf, "{d}月{d}日", .{ month, day }),
+        .chinese, .japanese => if (year) |y| std.fmt.bufPrint(buf, "{d}年{d}月{d}日", .{ y, month, day }) else std.fmt.bufPrint(buf, "{d}月{d}日", .{ month, day }),
         .german => if (year) |y| std.fmt.bufPrint(buf, "{d}. {s} {d}", .{ day, m, y }) else std.fmt.bufPrint(buf, "{d}. {s}", .{ day, m }),
         .portuguese => if (year) |y| std.fmt.bufPrint(buf, "{d} de {s} de {d}", .{ day, m, y }) else std.fmt.bufPrint(buf, "{d} de {s}", .{ day, m }),
         else => if (current.monthFirst())
@@ -869,7 +889,7 @@ pub fn formatDate(buf: []u8, day: u32, month: u32, year: ?u32) []const u8 {
 pub fn formatLongDate(buf: []u8, day: u32, month: u32, year: u32) []const u8 {
     const m = calendar().months_long[@min(month, 12) -| 1];
     return (switch (current.family()) {
-        .chinese => std.fmt.bufPrint(buf, "{d}年{d}月{d}日", .{ year, month, day }),
+        .chinese, .japanese => std.fmt.bufPrint(buf, "{d}年{d}月{d}日", .{ year, month, day }),
         .spanish, .portuguese => std.fmt.bufPrint(buf, "{d} de {s} de {d}", .{ day, m, year }),
         .german => std.fmt.bufPrint(buf, "{d}. {s} {d}", .{ day, m, year }),
         else => if (current.monthFirst()) std.fmt.bufPrint(buf, "{s} {d}, {d}", .{ m, day, year }) else std.fmt.bufPrint(buf, "{d} {s} {d}", .{ day, m, year }),
@@ -890,7 +910,7 @@ pub fn formatWhen(buf: []u8, secs: i64, now: i64) []const u8 {
         var clock_buf: [16]u8 = undefined;
         const clock = formatClock(&clock_buf, in_day / 3600, in_day / 60 % 60);
         const word = if (day == today) calendar().today else calendar().yesterday;
-        if (current.family() == .chinese) return std.fmt.bufPrint(buf, "{s} {s}", .{ word, clock }) catch "";
+        if (current.family() == .chinese or current.family() == .japanese) return std.fmt.bufPrint(buf, "{s} {s}", .{ word, clock }) catch "";
         return std.fmt.bufPrint(buf, "{s}, {s}", .{ word, clock }) catch "";
     }
     const date = (std.time.epoch.EpochDay{ .day = @intCast(day) }).calculateYearDay();
@@ -1056,6 +1076,12 @@ test "dates, times and temperatures, in each language" {
     try testing.expectEqualStrings("Definições", text("Settings"));
     // Portugal's own words, and Brazil's where it has none.
     try testing.expectEqualStrings("Aparência", text("Appearance"));
+    // Japanese.
+    current = .ja_jp;
+    try testing.expectEqualStrings("昨日 18:05", formatWhen(&buf, 1791331200 - 6 * 3600 + 5 * 60, now));
+    try testing.expectEqualStrings("2026年10月7日 水曜日", formatFullDate(&full, 3, 7, 10, 2026));
+    try testing.expectEqualStrings("今日はあと 5 分", bufPrint(&full, "{d} minute{s} left today", .{ 5, plural(5) }));
+    try testing.expectEqualStrings("設定", text("Settings"));
 }
 
 test "languages" {

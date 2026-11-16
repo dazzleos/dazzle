@@ -921,7 +921,7 @@ test "every page fits, in Spanish too" {
     const setup: Setup = .{ .suggestion = "awesome-elephant", .report = &report, .actions = &actions };
     defer locale.current = .en_gb;
     var n: u64 = 0;
-    for ([_]locale.Language{ .en_gb, .es_es, .es_ar, .zh_cn, .fr_fr, .de_de, .pt_br }) |lang| for (0..pages.len) |page| for ([_][2]u32{ .{ 1920, 1080 }, .{ 800, 600 }, .{ 640, 480 } }) |size| {
+    for ([_]locale.Language{ .en_gb, .es_es, .es_ar, .zh_cn, .fr_fr, .de_de, .pt_br, .ja_jp }) |lang| for (0..pages.len) |page| for ([_][2]u32{ .{ 1920, 1080 }, .{ 800, 600 }, .{ 640, 480 } }) |size| {
         locale.current = lang;
         n += 1;
         u.frame(size[0], size[1], n, setup);

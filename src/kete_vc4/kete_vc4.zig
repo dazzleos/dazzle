@@ -112,11 +112,14 @@ pub const Host = struct {
     /// kete's step (see `kete.App.step`), and the system's theme taken if
     /// it changed. False when the app should end.
     pub fn step(h: *Host, idle_timeout_ns: u64) !bool {
-        // Chinese typed through kete's pinyin input method, with that
-        // keyboard.
+        // Chinese and Japanese typed through kete's input methods (pinyin,
+        // romaji), with those keyboards.
         if (h.display.openWindowOrNull()) |w| {
-            const k = w.keyboard orelse w.win.layout;
-            h.app.shared.input_language = if (k == .pinyin) .pinyin else .none;
+            h.app.shared.input_language = switch (w.keyboard orelse w.win.layout) {
+                .pinyin => .pinyin,
+                .romaji => .romaji,
+                else => .none,
+            };
         }
         const going = try h.app.step(idle_timeout_ns);
         if (h.theme_watch.changed()) followThemeOf(h);
