@@ -129,10 +129,17 @@ pub const Notice = struct {
     }
 };
 
-// The icons notices are shown with (for kete's icon font, which has only
-// the icons named).
-comptime {
-    _ = &[_]kete.IconName{ .photo_camera, .warning, .check, .schedule };
+/// The icons notices are shown with (kete's icon font has only the icons
+/// named in the source): the shell's own, and the default for remote
+/// control's.
+pub const icons = [_]kete.IconName{ .photo_camera, .warning, .check, .schedule, .notifications };
+
+/// The icon named `name`, if notices have it (`icons`); `.notifications`
+/// if no name is given.
+pub fn iconNamed(name: ?[]const u8) ?kete.IconName {
+    const n = name orelse return .notifications;
+    for (icons) |i| if (std.mem.eql(u8, @tagName(i), n)) return i;
+    return null;
 }
 
 /// What it shows, as kete widgets: the icon, and the title with a line

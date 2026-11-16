@@ -25,6 +25,11 @@
 //!                                   (fullscreen), leaves fullscreen
 //!                                   (windowed), closes or raises the top
 //!                                   window (of the app, or by its title)
+//!     /notify?title=[&body=][&icon=warning]
+//!                                   shows a notification (its icon one
+//!                                   of the shell's own: photo_camera,
+//!                                   warning, check, schedule or
+//!                                   notifications, the default)
 //!     /updates                      how updates stand, as text
 //!     /check                        checks for updates now
 //!     /update                       checks, then installs everything
@@ -57,6 +62,9 @@ pub const Command = union(enum) {
     /// What to do to the top window, of `app` (its app ID or title) or of
     /// all.
     window: struct { action: WindowAction, app: ?[]const u8 },
+    /// A notification to show: its title and body (in the request's
+    /// buffer), and its icon's name, if one was given.
+    notify: struct { title: []const u8, body: []const u8, icon: ?[]const u8 },
     updates,
     check,
     update,
@@ -204,6 +212,14 @@ fn parse(text: []const u8, code: u32, text_buf: []u8) Parsed {
         .action = std.meta.stringToEnum(WindowAction, param(query, "do") orelse return .bad) orelse return .bad,
         .app = if (param(query, "app")) |a| decode(a, text_buf) orelse return .bad else null,
     } } };
+    if (std.mem.eql(u8, path, "/notify")) {
+        const half = text_buf.len / 2;
+        return .{ .command = .{ .notify = .{
+            .title = decode(param(query, "title") orelse return .bad, text_buf[0..half]) orelse return .bad,
+            .body = if (param(query, "body")) |b| decode(b, text_buf[half..]) orelse return .bad else "",
+            .icon = param(query, "icon"),
+        } } };
+    }
     if (std.mem.eql(u8, path, "/updates")) return .{ .command = .updates };
     if (std.mem.eql(u8, path, "/check")) return .{ .command = .check };
     if (std.mem.eql(u8, path, "/update")) return .{ .command = .update };
@@ -270,6 +286,11 @@ test "requests are read with their code, and others turned away" {
     try testing.expect(parse("GET /status?code=123456 HTTP/1.1\r\n\r\n", 123456, &buf).command == .status);
     try testing.expectEqual(Parsed.not_found, parse("GET /reboot?code=123456 HTTP/1.1\r\n\r\n", 123456, &buf));
     try testing.expectEqual(Parsed.bad, parse("POST /status?code=123456 HTTP/1.1\r\n\r\n", 123456, &buf));
+    const note = parse("GET /notify?code=123456&title=Hello+there&body=It%27s%20me&icon=warning HTTP/1.1\r\n\r\n", 123456, &buf).command.notify;
+    try testing.expectEqualStrings("Hello there", note.title);
+    try testing.expectEqualStrings("It's me", note.body);
+    try testing.expectEqualStrings("warning", note.icon.?);
+    try testing.expectEqual(Parsed.bad, parse("GET /notify?code=123456&body=x HTTP/1.1\r\n\r\n", 123456, &buf));
     const click = parse("GET /click?code=123456&x=10.5&y=20&button=right HTTP/1.1\r\n\r\n", 123456, &buf).command.click;
     try testing.expectEqual(@as(f64, 10.5), click.x);
     try testing.expectEqual(sys.evdev.btn_left + 1, click.button);

@@ -532,6 +532,12 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                         };
                         req.respond("200 OK", "text/plain", "ok\n");
                     },
+                    .notify => |note| {
+                        if (notice_mod.iconNamed(note.icon)) |icon| {
+                            notice.show(icon, note.title, note.body, sys.nowNs());
+                            req.respond("200 OK", "text/plain", "ok\n");
+                        } else req.respond("400 Bad Request", "text/plain", "No such icon\n");
+                    },
                     .launch => |name| {
                         const found = for (apps) |*a| {
                             if (std.mem.eql(u8, a.name, name)) break a;
