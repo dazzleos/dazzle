@@ -106,51 +106,13 @@ pub const Panel = struct {
         p.ui.frame(width, height, now_ns, root);
         var img: kete.gfx.software.Image = .{ .pixels = p.pixels[0..count], .width = width, .height = height };
         var vps: [kete.ui.damage.Region.max_rects]kete.gfx.Viewport = undefined;
-        // kete's damage rectangles may overlap, and the software renderer
-        // draws each in turn: where they do, what is see-through would be
-        // blended twice. Merged, every pixel is drawn once.
-        const damage: ?[]const kete.gfx.Viewport = if (whole) null else disjoint(p.ui.damagedViewports(&vps), &vps);
+        // kete's damage rectangles never overlap, so what is see-through
+        // is blended once.
+        const damage: ?[]const kete.gfx.Viewport = if (whole) null else p.ui.damagedViewports(&vps);
         if (damage) |d| if (d.len == 0) return p.pixels[0..count];
         img.clearDamage(damage, 0);
         p.ui.render(&img, damage) catch {};
         return p.pixels[0..count];
-    }
-
-    /// `rects` (in `out`), those overlapping merged into one about them,
-    /// till none do.
-    fn disjoint(rects: []const kete.gfx.Viewport, out: []kete.gfx.Viewport) []const kete.gfx.Viewport {
-        var n = rects.len;
-        if (out.ptr != rects.ptr) @memcpy(out[0..n], rects);
-        var merged = true;
-        while (merged) {
-            merged = false;
-            var i: usize = 0;
-            while (i < n) : (i += 1) {
-                var j = i + 1;
-                while (j < n) {
-                    if (overlap(out[i], out[j])) {
-                        out[i] = unite(out[i], out[j]);
-                        out[j] = out[n - 1];
-                        n -= 1;
-                        merged = true;
-                    } else j += 1;
-                }
-            }
-        }
-        return out[0..n];
-    }
-
-    fn overlap(a: kete.gfx.Viewport, b: kete.gfx.Viewport) bool {
-        return a.x < b.x + @as(i32, @intCast(b.width)) and b.x < a.x + @as(i32, @intCast(a.width)) and
-            a.y < b.y + @as(i32, @intCast(b.height)) and b.y < a.y + @as(i32, @intCast(a.height));
-    }
-
-    fn unite(a: kete.gfx.Viewport, b: kete.gfx.Viewport) kete.gfx.Viewport {
-        const x0 = @min(a.x, b.x);
-        const y0 = @min(a.y, b.y);
-        const x1 = @max(a.x + @as(i32, @intCast(a.width)), b.x + @as(i32, @intCast(b.width)));
-        const y1 = @max(a.y + @as(i32, @intCast(a.height)), b.y + @as(i32, @intCast(b.height)));
-        return .{ .x = x0, .y = y0, .width = @intCast(x1 - x0), .height = @intCast(y1 - y0) };
     }
 
     /// A key (a Linux key code) went down or up.
