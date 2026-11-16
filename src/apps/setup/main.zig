@@ -84,6 +84,13 @@ fn run(init: std.process.Init) !void {
     var name_buf: [32]u8 = undefined;
     const suggestion = names.random(&name_buf);
     var actions: view.Actions = .{};
+    // No time zone yet: the language's, as the first page shows it, kept
+    // whether or not another is picked.
+    if (start_locale.timezone == .utc) actions.locale = .{
+        .language = start_locale.language,
+        .keyboard = start_locale.keyboard,
+        .timezone = start_locale.language.timeZone(),
+    };
     // The apps that can be installed (once the card is ready), and those
     // chosen, left to install.
     var server_url_buf: [store.max_url_len]u8 = undefined;

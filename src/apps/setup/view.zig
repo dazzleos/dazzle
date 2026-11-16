@@ -4,6 +4,7 @@
 //!
 //! * the language and the keyboard (which changes with the language, until
 //!   one is picked), with a field to try the keyboard in;
+//! * the time zone (the language's, until one is picked);
 //! * the computer's name, filled in with a random one;
 //! * the Wi-Fi network to join (if Ethernet did not connect and there is a
 //!   Wi-Fi adapter), or Skip to set up the network later in Settings;
@@ -29,8 +30,8 @@ const net = sys.network;
 /// The size the window opens at: one step at a time.
 pub const open_size = [2]u32{ 880, 620 };
 
-pub const Page = enum { language, hostname, wifi, apps };
-pub const pages = [_]Page{ .language, .hostname, .wifi, .apps };
+pub const Page = enum { language, time, hostname, wifi, apps };
+pub const pages = [_]Page{ .language, .time, .hostname, .wifi, .apps };
 
 /// The most apps that can be chosen (the catalogue's first).
 pub const max_apps = 64;
@@ -117,14 +118,24 @@ pub const Setup = struct {
         skipped: u64 = 0,
         language: locale.Language = .en_us,
         keyboard: locale.Keyboard = .us,
-        /// The keyboard was picked (rather than going with the language).
+        timezone: locale.TimeZone = .utc,
+        /// The keyboard, and the zone, were picked (rather than going with
+        /// the language).
         keyboard_picked: bool = false,
+        timezone_picked: bool = false,
         /// Where the window's choices go.
         actions: ?*Actions = null,
 
         fn setLanguage(st: *State, l: locale.Language) void {
             st.language = l;
             if (!st.keyboard_picked) st.keyboard = l.keyboard();
+            if (!st.timezone_picked) st.timezone = l.timeZone();
+            st.chose();
+        }
+
+        fn setTimeZone(st: *State, z: locale.TimeZone) void {
+            st.timezone = z;
+            st.timezone_picked = true;
             st.chose();
         }
 
@@ -135,7 +146,7 @@ pub const Setup = struct {
         }
 
         fn chose(st: *State) void {
-            if (st.actions) |a| a.locale = .{ .language = st.language, .keyboard = st.keyboard };
+            if (st.actions) |a| a.locale = .{ .language = st.language, .keyboard = st.keyboard, .timezone = st.timezone };
         }
 
         fn chosen(st: *const State, i: usize) bool {
@@ -174,7 +185,10 @@ pub const Setup = struct {
     }
 
     pub fn initState(self: *const Setup) State {
-        var st: State = .{ .language = self.locale.language, .keyboard = self.locale.keyboard };
+        // A zone already chosen (setup run again) is kept; otherwise the
+        // language's.
+        const zone = if (self.locale.timezone != .utc) self.locale.timezone else self.locale.language.timeZone();
+        var st: State = .{ .language = self.locale.language, .keyboard = self.locale.keyboard, .timezone = zone, .timezone_picked = self.locale.timezone != .utc };
         st.setName(self.suggestion);
         return st;
     }
@@ -206,6 +220,7 @@ pub const Setup = struct {
         const which = pages[state.page];
         const body = switch (which) {
             .language => languagePage(cx, state),
+            .time => timePage(cx, state),
             .hostname => self.hostnamePage(cx, state, nav),
             .wifi => self.wifiPage(cx, state),
             .apps => self.appsPage(cx, state),
@@ -259,6 +274,16 @@ pub const Setup = struct {
                 } }) }),
             } }),
         } });
+    }
+
+    /// The time zone: its area, then its city.
+    fn timePage(cx: *kete.BuildContext, state: *State) kete.Widget {
+        const t = cx.theme();
+        return cx.make(kete.Column{ .cross_axis_alignment = .start, .fill = false, .spacing = 12, .children = cx.arena.dupe(kete.Widget, &.{
+            cx.make(kete.Text{ .text = "Time zone", .style = .{ .size = 28 } }),
+            cx.make(kete.Text{ .text = "Where the computer is, for its clock", .style = .{ .size = 18, .color = t.on_surface_variant } }),
+            cx.make(kete_vc4.TimeZonePicker{ .zone = state.timezone, .on_changed = .of(state, State.setTimeZone) }),
+        }) catch &.{} });
     }
 
     fn hostnamePage(_: *const Setup, cx: *kete.BuildContext, state: *State, nav: *Nav) kete.Widget {
@@ -644,7 +669,7 @@ const Nav = struct {
                 st.page = @intFromEnum(Page.apps);
                 return;
             },
-            .language, .apps => {},
+            .language, .time, .apps => {},
         }
         if (st.page + 1 < pages.len) {
             st.page += 1;
@@ -730,8 +755,14 @@ test "naming the computer, then waiting for the card" {
         Draw(u, &report, &actions, &now, size);
         try testing.expect(!overflows(u.root.?));
     }
-    // The language first; then the name, which fits too.
+    // The language first; then the time zone and the name, which fit too.
     try testing.expect(findText(u.root.?, "Language and keyboard") != null);
+    click(u, findText(u.root.?, "Next").?);
+    for ([_][2]u32{ .{ 1920, 1080 }, .{ 640, 480 } }) |size| {
+        Draw(u, &report, &actions, &now, size);
+        try testing.expect(!overflows(u.root.?));
+    }
+    try testing.expect(findType(u.root.?, kete_vc4.TimeZonePicker) != null);
     click(u, findText(u.root.?, "Next").?);
     for ([_][2]u32{ .{ 1920, 1080 }, .{ 640, 480 } }) |size| {
         Draw(u, &report, &actions, &now, size);
@@ -795,6 +826,9 @@ test "Wi-Fi networks are shown when Ethernet is not connected and a Wi-Fi adapte
 
     var setup: Setup = .{ .suggestion = "my-pi", .report = &report, .wifi = &wifi, .actions = &actions };
     u.frame(1280, 720, 0, setup);
+    click(u, findText(u.root.?, "Next").?);
+    u.frame(1280, 720, 1, setup);
+    // The time zone, then the name.
     click(u, findText(u.root.?, "Next").?);
     u.frame(1280, 720, 1, setup);
     try testing.expect(findText(u.root.?, "Name this computer") != null);
@@ -907,7 +941,8 @@ test "the language and keyboard: the keyboard goes with the language, until one 
     u.frame(1280, 720, 2, setup);
     click(u, findText(u.root.?, "English (Australia)").?);
     u.frame(1280, 720, 3, setup);
-    try testing.expectEqual(locale.Settings{ .language = .en_au, .keyboard = .us }, actions.locale.?);
+    // The time zone goes with the language too: Sydney's, for Australia.
+    try testing.expectEqual(locale.Settings{ .language = .en_au, .keyboard = .us, .timezone = locale.TimeZone.fromName("Australia/Sydney").? }, actions.locale.?);
     // Somewhere to try it.
     try testing.expect(findType(u.root.?, kete.TextField) != null);
     try testing.expect(!overflows(u.root.?));
