@@ -17,6 +17,8 @@ const kete_panel = @import("kete_panel.zig");
 const p = @import("wayland").protocol;
 
 const input_method = @import("input_method/input_method.zig");
+const conversion = @import("input_method/conversion.zig");
+const sys = @import("sys");
 const Server = server_mod.Server;
 const TextInput = server_mod.TextInput;
 
@@ -30,6 +32,10 @@ pub const Ime = struct {
     changed: bool = false,
     /// The keys it took as they went down: it takes them coming up too.
     taken: std.StaticBitSet(256) = .empty,
+    /// The Japanese language pack's files, mapped (its pages read from the
+    /// card as they are used), and its dictionary, once it is installed.
+    japanese: ?struct { dict: sys.files.Mapped, conn: sys.files.Mapped } = null,
+    dictionary: conversion.Dictionary = undefined,
 
     /// Offers a key (a Linux key code) to the input method, before the
     /// app with the keyboard gets it, after `s.modifiers` has noted it.
@@ -57,6 +63,7 @@ pub const Ime = struct {
             .romaji => .romaji,
             else => .none,
         };
+        if (ime.im.language == .romaji and ime.im.composing == null) ime.loadJapanese();
         // Other keyboards: nothing to compose.
         if (ime.im.language == .none and ime.im.composing == null) return false;
         const m = &s.modifiers;
@@ -81,13 +88,35 @@ pub const Ime = struct {
         if (out.taken or out.commit != null or out.preedit) ime.changed = true;
         if (out.commit == null and !out.preedit) return;
         if (out.commit) |c| s.textInputCommitString(c);
-        // Each `done` clears the preedit unless it is sent again.
+        // Each `done` clears the preedit unless it is sent again; the
+        // phrase being converted is marked (its "cursor").
         if (ime.im.composing != null) {
             const text = ime.im.composed();
-            const len: i32 = @intCast(text.len);
-            s.textInputPreedit(text, len, len);
+            const m = ime.im.marked();
+            s.textInputPreedit(text, @intCast(m.begin), @intCast(m.end));
         }
         s.textInputDone();
+    }
+
+    /// Maps the Japanese language pack's dictionary, if it is installed and
+    /// not yet mapped, for the input method to convert with.
+    fn loadJapanese(ime: *Ime) void {
+        if (ime.japanese != null) return;
+        const dir = sys.system.apps_dir ++ "/dazzle-language-ja/";
+        const dict = sys.files.Mapped.open(dir ++ "ja.dict") catch return;
+        const conn = sys.files.Mapped.open(dir ++ "ja.conn") catch {
+            dict.close();
+            return;
+        };
+        ime.dictionary = conversion.Dictionary.init(dict.data, conn.data) catch {
+            sys.print(sys.log_warning ++ "dazzle-shell: the Japanese language pack's dictionary is damaged\n", .{});
+            dict.close();
+            conn.close();
+            return;
+        };
+        ime.japanese = .{ .dict = dict, .conn = conn };
+        ime.im.dictionary = &ime.dictionary;
+        sys.print("dazzle-shell: converting Japanese with the language pack's dictionary\n", .{});
     }
 
     /// Stops composing, without putting anything in: the text input it

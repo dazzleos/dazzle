@@ -23,8 +23,14 @@
 //!   last kana back, Escape drops them all. Punctuation is Japanese (、。
 //!   「」), and Shift tapped alone switches to English. The kanji are
 //!   Unihan's, for each reading (kana_table.zig), with a few hundred
-//!   common words (japanese_words.zig): there is no dictionary of
-//!   phrases, as a full input method would have.
+//!   common words (japanese_words.zig).
+//!   With the Japanese language pack's dictionary (`dictionary`), Space
+//!   converts all of it instead, a phrase at a time (see conversion.zig):
+//!   私は|学校に|行きます. Left and Right go between the phrases, and
+//!   Shift with them makes the one chosen shorter or longer (the rest
+//!   converted again); Space, Down and Up go through its candidates, a
+//!   digit picks one; Enter puts it all in, and Escape or Backspace go
+//!   back to the kana. Typing goes on with what is converted put in.
 
 const std = @import("std");
 const kete = @import("kete");
@@ -32,6 +38,7 @@ const widget = kete.ui.widget;
 const pinyin_table = @import("pinyin_table.zig");
 const kana_table = @import("kana_table.zig");
 const japanese_words = @import("japanese_words.zig");
+const conversion = @import("conversion.zig");
 
 const Key = widget.Event.Key;
 
@@ -92,6 +99,15 @@ pub const InputMethod = struct {
     pool_len: usize = 0,
     hira_buf: [256]u8 = undefined,
     kata_buf: [256]u8 = undefined,
+    /// The Japanese language pack's dictionary, if it is installed: kana
+    /// are converted a phrase at a time.
+    dictionary: ?*const conversion.Dictionary = null,
+    /// For conversions.
+    gpa: std.mem.Allocator = std.heap.page_allocator,
+    /// Kana converted (after Space), and the phrase chosen.
+    converted: ?conversion.Conversion = null,
+    segment: usize = 0,
+    converted_buf: [512]u8 = undefined,
     /// What the last key put in the text (`Outcome.commit`).
     commit_buf: [512]u8 = undefined,
 
@@ -105,10 +121,23 @@ pub const InputMethod = struct {
         preedit: bool = false,
     };
 
-    /// What is composed, as it shows: as typed, or (kana) as it reads.
-    pub fn composed(im: *const InputMethod) []const u8 {
+    /// What is composed, as it shows: as typed, or (kana) as it reads, or
+    /// as it is converted.
+    pub fn composed(im: *InputMethod) []const u8 {
+        if (im.converted) |*c| return c.text(&im.converted_buf);
         if (im.composing == .kana) return im.shown_buf[0..im.shown_len];
         return im.buf[0..im.len];
+    }
+
+    /// Where the phrase chosen is in `composed()` (converting), or the end
+    /// of it.
+    pub fn marked(im: *InputMethod) struct { begin: usize, end: usize } {
+        if (im.converted) |*c| {
+            const sp = c.span(im.segment);
+            return .{ .begin = sp.begin, .end = sp.end };
+        }
+        const n = im.composed().len;
+        return .{ .begin = n, .end = n };
     }
 
     /// Whether candidates show.
@@ -220,6 +249,11 @@ pub const InputMethod = struct {
     }
 
     fn kanaKey(im: *InputMethod, k: Key) Outcome {
+        if (im.converted != null) return im.convertedKey(k);
+        // With the dictionary, Space converts it all.
+        if (k.key == .space and im.dictionary != null) {
+            if (im.convert()) return .{ .taken = true, .preedit = true };
+        }
         switch (k.key) {
             // Dropped.
             .escape => {
@@ -278,9 +312,122 @@ pub const InputMethod = struct {
         return out;
     }
 
+    /// Converts what is composed (its hiragana) a phrase at a time; false
+    /// if it cannot be.
+    fn convert(im: *InputMethod) bool {
+        const d = im.dictionary orelse return false;
+        if (im.pool_len == 0) return false;
+        const hira = im.pool[0].text;
+        im.converted = conversion.Conversion.init(im.gpa, d, hira) catch return false;
+        if (im.converted.?.segments.items.len == 0) {
+            im.dropConversion();
+            return false;
+        }
+        im.segment = 0;
+        im.fillSegment();
+        return true;
+    }
+
+    fn dropConversion(im: *InputMethod) void {
+        if (im.converted) |*c| c.deinit();
+        im.converted = null;
+        im.segment = 0;
+    }
+
+    /// The candidates for the phrase chosen, as it is first.
+    fn fillSegment(im: *InputMethod) void {
+        const c = &im.converted.?;
+        var texts: [pool_size][]const u8 = undefined;
+        const cands = c.candidates(im.segment, &texts) catch texts[0..0];
+        for (cands, im.pool[0..cands.len]) |t, *p| p.* = .{ .text = t };
+        im.pool_len = cands.len;
+        im.first = 0;
+        im.selected = 0;
+        im.fillKana();
+    }
+
+    /// The phrase chosen written as the candidate selected.
+    fn applyChoice(im: *InputMethod) void {
+        const c = &im.converted.?;
+        if (im.count == 0) return;
+        c.choose(im.segment, im.candidates[im.selected].text);
+    }
+
+    fn convertedKey(im: *InputMethod, k: Key) Outcome {
+        const c = &im.converted.?;
+        switch (k.key) {
+            // Back to the kana.
+            .escape, .backspace => {
+                im.dropConversion();
+                im.findKana();
+                return .{ .taken = true, .preedit = true };
+            },
+            .enter, .keypad_enter => return im.commitConverted(true),
+            .left, .right => {
+                const right = k.key == .right;
+                if (k.shift) {
+                    // Shorter or longer.
+                    _ = c.resize(im.segment, right) catch false;
+                } else if (right and im.segment + 1 < c.segments.items.len) {
+                    im.segment += 1;
+                } else if (!right and im.segment > 0) {
+                    im.segment -= 1;
+                } else return .{ .taken = true };
+                im.fillSegment();
+                return .{ .taken = true, .preedit = true };
+            },
+            .space, .down, .page_down, .up, .page_up => {
+                if (k.key == .space and im.first + im.selected + 1 >= im.pool_len) {
+                    im.first = 0;
+                    im.selected = 0;
+                    im.fillKana();
+                } else im.move(k.key == .space or k.key == .down or k.key == .page_down);
+                im.applyChoice();
+                return .{ .taken = true, .preedit = true };
+            },
+            else => {},
+        }
+        const ch = k.char orelse return .{ .taken = true };
+        if (ch >= '1' and ch <= '9') {
+            const i = ch - '1';
+            if (i < im.count) {
+                im.selected = i;
+                im.applyChoice();
+            }
+            return .{ .taken = true, .preedit = true };
+        }
+        // Typing on: what is converted goes in, then the key starts anew.
+        var out = im.commitConverted(false);
+        const done = out.commit.?;
+        const next = im.key(k);
+        if (next.taken) {
+            out.taken = true;
+            if (next.commit) |more| {
+                const n = @min(more.len, im.commit_buf.len - done.len);
+                std.mem.copyForwards(u8, im.commit_buf[done.len..][0..n], more[0..n]);
+                out.commit = im.commit_buf[0 .. done.len + n];
+            }
+        }
+        return out;
+    }
+
+    /// What is converted goes in.
+    fn commitConverted(im: *InputMethod, taken: bool) Outcome {
+        const c = &im.converted.?;
+        const t = c.text(&im.commit_buf);
+        im.dropConversion();
+        im.reset();
+        return .{ .taken = taken, .commit = t, .preedit = true };
+    }
+
     /// Chooses the candidate shown at `i` (clicked).
     pub fn choose(im: *InputMethod, i: usize) Outcome {
         if (i >= im.count) return .{};
+        if (im.converted != null) {
+            im.selected = i;
+            im.applyChoice();
+            return .{ .taken = true, .preedit = true };
+        }
         im.selected = i;
         return im.commitChosen();
     }
@@ -289,6 +436,7 @@ pub const InputMethod = struct {
     /// goes in as it is.
     pub fn finish(im: *InputMethod) Outcome {
         if (im.composing == null) return .{};
+        if (im.converted != null) return im.commitConverted(true);
         return im.commitRaw(true);
     }
 
@@ -302,6 +450,7 @@ pub const InputMethod = struct {
     }
 
     fn reset(im: *InputMethod) void {
+        im.dropConversion();
         im.composing = null;
         im.len = 0;
         im.count = 0;
@@ -395,6 +544,12 @@ pub const InputMethod = struct {
         const kata = toKatakana(hira, &im.kata_buf);
         im.pool_len = 0;
         im.addCandidate(.{ .text = hira });
+        // With the dictionary: none shown while typing; Space converts.
+        if (im.dictionary != null) {
+            im.addCandidate(.{ .text = kata });
+            im.count = 0;
+            return;
+        }
         im.addWords(hira, 0);
         im.addCandidate(.{ .text = kata });
         im.addReadings(hira, 0);
@@ -808,4 +963,49 @@ test "romaji: small tsu, n, long vowels, punctuation and Backspace" {
     // Punctuation: Japanese.
     _ = press(&im, .escape, null);
     try testing.expectEqualStrings("。", press(&im, .period, '.').commit.?);
+}
+
+test "romaji with the language pack: Space converts, Left and Right go between phrases, Enter puts it in" {
+    const d = try conversion.Dictionary.init(@embedFile("ja.dict"), @embedFile("ja.conn"));
+    var im: InputMethod = .{ .language = .romaji, .dictionary = &d, .gpa = testing.allocator };
+    defer im.reset();
+    typeText(&im, "watashihagakkouniikimasu");
+    try testing.expectEqualStrings("わたしはがっこうにいきます", im.composed());
+    // No candidates while typing.
+    try testing.expect(!im.showing());
+    _ = press(&im, .space, ' ');
+    try testing.expectEqualStrings("私は学校に行きます", im.composed());
+    // The first phrase is marked, and its candidates show.
+    try testing.expectEqual(@as(usize, 0), im.marked().begin);
+    try testing.expectEqual("私は".len, im.marked().end);
+    try testing.expect(im.showing());
+    // To the second, and Space: its next candidate.
+    _ = press(&im, .right, null);
+    try testing.expectEqual("私は".len, im.marked().begin);
+    _ = press(&im, .space, ' ');
+    try testing.expect(!std.mem.eql(u8, im.composed(), "私は学校に行きます"));
+    _ = press(&im, .up, null);
+    try testing.expectEqualStrings("私は学校に行きます", im.composed());
+    const out = press(&im, .enter, null);
+    try testing.expectEqualStrings("私は学校に行きます", out.commit.?);
+    try testing.expect(im.composing == null);
+}
+
+test "romaji with the language pack: Shift+Left makes a phrase shorter, Escape goes back to the kana, typing goes on" {
+    const d = try conversion.Dictionary.init(@embedFile("ja.dict"), @embedFile("ja.conn"));
+    var im: InputMethod = .{ .language = .romaji, .dictionary = &d, .gpa = testing.allocator };
+    defer im.reset();
+    typeText(&im, "shashinwotorimashita");
+    _ = press(&im, .space, ' ');
+    try testing.expectEqualStrings("写真を", im.composed()[im.marked().begin..im.marked().end]);
+    _ = im.key(.{ .key = .left, .pressed = true, .shift = true });
+    try testing.expectEqualStrings("写真", im.composed()[im.marked().begin..im.marked().end]);
+    _ = press(&im, .escape, null);
+    try testing.expectEqualStrings("しゃしんをとりました", im.composed());
+    // Converted, then a letter: it goes in, and the letter starts anew.
+    _ = press(&im, .space, ' ');
+    const out = press(&im, .a, 'k');
+    try testing.expect(out.taken);
+    try testing.expect(std.mem.startsWith(u8, out.commit.?, "写真を"));
+    try testing.expectEqualStrings("k", im.composed());
 }
