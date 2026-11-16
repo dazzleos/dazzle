@@ -193,6 +193,8 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
     var super_alone = false;
     var perf_frames: u32 = 0;
     var perf_gpu_ns: u64 = 0;
+    // What the frames cost, for remote control's status.
+    var frame_times: FrameTimes = .{};
     renderer.setPanelHidden(.perf, true);
     renderer.setPanelHidden(.quick, true);
     renderer.setPanelHidden(.notice, true);
@@ -460,6 +462,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                         var out: std.ArrayList(u8) = .empty;
                         defer out.deinit(gpa);
                         remoteStatus(gpa, &out, &server, apps, &renderer, &pointer) catch {};
+                        out.print(gpa, "frames:\n  composited {f}\n  shown directly {f}\n", .{ frame_times.composited, frame_times.direct }) catch {};
                         panelStatus(gpa, &out, &renderer, &.{
                             .{ .dock, dock.panel },
                             .{ .tooltip, dock.tip_panel },
@@ -1030,7 +1033,10 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
             // Not while the dock slides: it would leave its band.
             if (!locked) if (top) |t| if (!dock.sliding()) if (server.scanoutBuffer(t)) |b| {
                 const at = server.windowRect(t);
-                if (renderer.showDirect(b.dmabuf.?, at.x, at.y, .{ at.width, at.height })) |at_once| {
+                const direct_started = sys.nowNs();
+                const shown = renderer.showDirect(b.dmabuf.?, at.x, at.y, .{ at.width, at.height });
+                if (shown != null) frame_times.direct.add(sys.nowNs() - direct_started, 0);
+                if (shown) |at_once| {
                     server.holdBuffer(b);
                     scanout.queued = b;
                     if (count_frame) perf_frames += 1;
@@ -1047,6 +1053,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
             if (on_screen == null) {
                 var windows: [render.max_windows]render.Window = undefined;
                 if (renderer.composite(if (locked) &.{} else frameWindows(&server, &windows))) |timing| {
+                    frame_times.composited.add(timing.cpu_ns + timing.gpu_ns, @as(u64, renderer.width) * renderer.height);
                     if (count_frame) perf_frames += 1;
                     perf_gpu_ns += timing.gpu_ns;
                     on_screen = renderer.show() catch |err| blk: {
@@ -1477,6 +1484,15 @@ fn remoteStatus(gpa: std.mem.Allocator, out: *std.ArrayList(u8), server: *const 
     try out.print(gpa, "apps:\n", .{});
     for (apps) |a| try out.print(gpa, "  {s}{s}\n", .{ a.name, if (a.pid != null) " (running)" else "" });
 }
+
+/// What the screen's frames have cost: composited (the GPU drawing the
+/// whole screen; preparing the panels' pictures for it too), or shown
+/// directly (a window's buffer on the display, the panels on planes over
+/// it, drawn into them as they changed).
+const FrameTimes = struct {
+    composited: kete_panel.Times = .{},
+    direct: kete_panel.Times = .{},
+};
 
 /// What drawing each panel has cost (see `kete_panel.Times`): its
 /// widgets laid out and painted, drawn into its picture on the CPU, and
