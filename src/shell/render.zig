@@ -26,6 +26,7 @@ const shader = @import("shader");
 
 const background_mod = @import("background.zig");
 const glass = @import("glass.zig");
+const kete_panel = @import("kete_panel.zig");
 
 const render = vc4.render;
 const texture = vc4.texture;
@@ -321,6 +322,10 @@ const Panel = struct {
     /// The overlay buffers' size, and the background they were drawn over.
     plane_size: [2]u32 = .{ 0, 0 },
     band_stamp: u32 = 0,
+    /// Its picture copied for the display: uploaded as a texture, or
+    /// written into an overlay buffer.
+    upload_times: kete_panel.Times = .{},
+    plane_times: kete_panel.Times = .{},
 };
 
 const n_cursors = @typeInfo(cursor.Shape).@"enum".field_names.len;
@@ -449,6 +454,13 @@ pub const Renderer = struct {
         p.texture_stale = true;
     }
 
+    /// The time spent copying panel `id`'s picture for the display: as a
+    /// texture, and into overlay buffers.
+    pub fn panelTimes(r: *const Renderer, id: PanelId) [2]kete_panel.Times {
+        const p = &r.panels[@intFromEnum(id)];
+        return .{ p.upload_times, p.plane_times };
+    }
+
     /// Moves a panel, its picture as it is.
     pub fn movePanel(r: *Renderer, id: PanelId, x: i32, y: i32) void {
         const p = &r.panels[@intFromEnum(id)];
@@ -540,7 +552,9 @@ pub const Renderer = struct {
         if (p.dirty or (p.band_y != null and p.band_stamp != r.band_stamp)) {
             const next = p.shown +% 1;
             const plane = r.panelPlane(p, next, size) orelse return null;
+            const started = sys.nowNs();
             r.drawPlane(p, plane);
+            p.plane_times.add(sys.nowNs() - started, @as(u64, size[0]) * size[1]);
             p.shown = next;
             p.dirty = false;
         }
@@ -800,7 +814,9 @@ pub const Renderer = struct {
         for (&r.panels, &quads) |*p, *q| {
             if (p.width == 0 or p.height == 0 or p.hidden) continue;
             if (p.texture_stale) {
+                const started = sys.nowNs();
                 p.texture = try uploadPixels(r, p.texture, std.mem.sliceAsBytes(p.pixels), p.width, p.height, p.width * 4, .argb8888);
+                p.upload_times.add(sys.nowNs() - started, @as(u64, p.width) * p.height);
                 p.texture_stale = false;
             }
             q.* = .{ .texture = p.texture.?, .x = p.x, .y = p.y };

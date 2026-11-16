@@ -459,6 +459,14 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                         var out: std.ArrayList(u8) = .empty;
                         defer out.deinit(gpa);
                         remoteStatus(gpa, &out, &server, apps, &renderer, &pointer) catch {};
+                        panelStatus(gpa, &out, &renderer, &.{
+                            .{ .dock, dock.panel },
+                            .{ .tooltip, dock.tip_panel },
+                            .{ .quick, quick.panel },
+                            .{ .notice, notice.panel },
+                            .{ .perf, perf.panel },
+                            .{ .lock, lock.panel },
+                        }) catch {};
                         req.respond("200 OK", "text/plain; charset=utf-8", out.items);
                     },
                     .screenshot => {
@@ -1467,6 +1475,18 @@ fn remoteStatus(gpa: std.mem.Allocator, out: *std.ArrayList(u8), server: *const 
     }
     try out.print(gpa, "apps:\n", .{});
     for (apps) |a| try out.print(gpa, "  {s}{s}\n", .{ a.name, if (a.pid != null) " (running)" else "" });
+}
+
+/// What drawing each panel has cost (see `kete_panel.Times`): its
+/// widgets laid out and painted, drawn into its picture on the CPU, and
+/// copied for the display.
+fn panelStatus(gpa: std.mem.Allocator, out: *std.ArrayList(u8), renderer: *const render.Renderer, panels: []const struct { render.PanelId, *const kete_panel.Panel }) !void {
+    try out.print(gpa, "panels:\n", .{});
+    for (panels) |entry| {
+        const id, const p = entry;
+        const copies = renderer.panelTimes(id);
+        try out.print(gpa, "  {s} {d}x{d}\n    frame {f}\n    render {f}\n    texture {f}\n    overlay {f}\n", .{ @tagName(id), p.width, p.height, p.frame_times, p.render_times, copies[0], copies[1] });
+    }
 }
 
 /// Fades the notification in or out, a frame each refresh while it does;

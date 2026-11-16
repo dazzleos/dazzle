@@ -13,6 +13,30 @@ const kete = @import("kete");
 const locale = @import("locale");
 const appearance = @import("appearance");
 const keyboard = @import("keyboard.zig");
+const sys = @import("sys");
+
+/// How long something took, over the times it was done: for remote
+/// control's status, to see what the panels cost on the computer itself.
+pub const Times = struct {
+    count: u32 = 0,
+    total_ns: u64 = 0,
+    max_ns: u64 = 0,
+    /// The pixels it was done for, over all of them.
+    pixels: u64 = 0,
+
+    pub fn add(t: *Times, ns: u64, pixels: u64) void {
+        t.count += 1;
+        t.total_ns += ns;
+        t.max_ns = @max(t.max_ns, ns);
+        t.pixels += pixels;
+    }
+
+    /// "<count>x avg <µs> max <µs>, <pixels> px avg".
+    pub fn format(t: Times, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        if (t.count == 0) return w.writeAll("none");
+        try w.print("{d}x avg {d} us max {d} us, {d} px avg", .{ t.count, t.total_ns / t.count / 1000, t.max_ns / 1000, t.pixels / t.count });
+    }
+};
 
 /// What the panels share.
 pub const Kit = struct {
@@ -56,6 +80,10 @@ pub const Panel = struct {
     width: u32 = 0,
     height: u32 = 0,
     keyboard_layout: ?locale.Keyboard = null,
+    /// Its widgets laid out and painted (`frame`), and drawn into its
+    /// picture (`render`), each time it is drawn.
+    frame_times: Times = .{},
+    render_times: Times = .{},
 
     pub fn destroy(p: *Panel) void {
         p.ui.destroy();
@@ -103,7 +131,10 @@ pub const Panel = struct {
         }
         p.width = width;
         p.height = height;
+        const started = sys.nowNs();
         p.ui.frame(width, height, now_ns, root);
+        const framed = sys.nowNs();
+        p.frame_times.add(framed - started, count);
         var img: kete.gfx.software.Image = .{ .pixels = p.pixels[0..count], .width = width, .height = height };
         var vps: [kete.ui.damage.Region.max_rects]kete.gfx.Viewport = undefined;
         // kete's damage rectangles never overlap, so what is see-through
@@ -112,6 +143,12 @@ pub const Panel = struct {
         if (damage) |d| if (d.len == 0) return p.pixels[0..count];
         img.clearDamage(damage, 0);
         p.ui.render(&img, damage) catch {};
+        var drawn: u64 = count;
+        if (damage) |d| {
+            drawn = 0;
+            for (d) |v| drawn += @as(u64, v.width) * v.height;
+        }
+        p.render_times.add(sys.nowNs() - framed, drawn);
         return p.pixels[0..count];
     }
 
