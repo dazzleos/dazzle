@@ -432,7 +432,9 @@ fn readInterface(name: []const u8, sock: ?linux.fd_t) Interface {
     }
     i.rx_bytes = number(sysfs(name, "statistics/rx_bytes", &buf));
     i.tx_bytes = number(sysfs(name, "statistics/tx_bytes", &buf));
-    if (sock) |fd| {
+    // With the cable out, an address kept for when it is back (as DHCP
+    // does) is not in use: it is not shown.
+    if (sock) |fd| if (i.carrier) {
         var req: linux.ifreq = std.mem.zeroes(linux.ifreq);
         @memcpy(req.ifrn.name[0..@min(name.len, req.ifrn.name.len - 1)], name[0..@min(name.len, req.ifrn.name.len - 1)]);
         if (linux.errno(linux.ioctl(fd, linux.SIOCGIFADDR, @intFromPtr(&req))) == .SUCCESS and req.ifru.addr.family == linux.AF.INET) {
@@ -443,7 +445,7 @@ fn readInterface(name: []const u8, sock: ?linux.fd_t) Interface {
                 i.prefix = @popCount(mask.addr);
             }
         }
-    }
+    };
     return i;
 }
 

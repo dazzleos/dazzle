@@ -167,7 +167,9 @@ const Ethernet = struct {
             r.addEthernet(.{
                 .adapter = a,
                 .addressing = s.addressing,
-                .address = ipv4.interfaceAddress(s.ifc.name()),
+                // With the cable out, DHCP keeps the address for when it
+                // is back, but it is not in use: none is reported.
+                .address = if (a.up) ipv4.interfaceAddress(s.ifc.name()) else null,
             });
         };
     }
