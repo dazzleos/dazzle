@@ -113,8 +113,48 @@ fn addAppArchives(b: *std.Build, apps: []const App) *std.Build.Step {
             catalogue.addFileArg(archive);
         }
     }
+    // The language packs (see tools/mkcatalogue.zig): their data, not
+    // programs, beside the apps.
+    for (language_packs) |lp| {
+        const name = b.fmt("dazzle-language-{s}", .{lp.code});
+        const pack = b.addRunArtifact(hostTool(b, "mkapp"));
+        const tar = pack.addOutputFileArg(b.fmt("{s}.tar", .{name}));
+        pack.addArgs(&.{ name, "-" });
+        pack.addPrefixedFileArg("version=", version_file);
+        pack.addPrefixedFileArg("NOTICE=", b.path(b.fmt("languages/{s}/NOTICE", .{lp.code})));
+        for (lp.files) |f| pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), languageFile(b, lp.code, f));
+        const compress = b.addSystemCommand(&.{ "xz", "-9", "--block-size=4MiB", "-c" });
+        compress.step.dependOn(&xz.step);
+        compress.addFileArg(tar);
+        const archive = compress.captureStdOut(.{ .basename = b.fmt("{s}.tar.xz", .{name}) });
+        step.dependOn(&b.addInstallFile(archive, b.fmt("apps/{s}.tar.xz", .{name})).step);
+        catalogue.addArgs(&.{ name, lp.title, lp.description, "" });
+        catalogue.addFileArg(archive);
+    }
     step.dependOn(&b.addInstallFile(json, "apps/apps.json").step);
     return step;
+}
+
+/// A language pack: data for a language that is too big for every
+/// computer to have, fetched with the language (see store.zig). Its files
+/// are in languages/<code>/, compressed (<file>.xz), with NOTICE.
+const LanguagePack = struct {
+    code: []const u8,
+    title: []const u8,
+    description: []const u8,
+    files: []const []const u8,
+};
+
+const language_packs = [_]LanguagePack{
+    // Made by tools/gen_japanese.zig.
+    .{ .code = "ja", .title = "Japanese input", .description = "Converts kana to kanji a phrase at a time", .files = &.{ "ja.dict", "ja.conn" } },
+};
+
+/// A language pack's file, uncompressed.
+fn languageFile(b: *std.Build, code: []const u8, file: []const u8) std.Build.LazyPath {
+    const unxz = b.addSystemCommand(&.{ "xz", "-dc" });
+    unxz.addFileArg(b.path(b.fmt("languages/{s}/{s}.xz", .{ code, file })));
+    return unxz.captureStdOut(.{ .basename = file });
 }
 
 /// The icon font, cut down to Dazzle's icons, and their codepoints (see
@@ -1475,6 +1515,9 @@ pub fn build(b: *std.Build) void {
     // The shell's tests draw text (the dock's tooltips) in the system font.
     const host_shell = addProgramModule(b, "src/shell/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_shell.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
+    // And convert Japanese with its language pack's dictionary.
+    host_shell.addAnonymousImport("ja.dict", .{ .root_source_file = languageFile(b, "ja", "ja.dict") });
+    host_shell.addAnonymousImport("ja.conn", .{ .root_source_file = languageFile(b, "ja", "ja.conn") });
     _ = addKete(b, host_shell, host, b.graph.host, test_optimize, "src/shell");
     // The demo's layout is tested with its real font.
     const host_demo = addProgramModule(b, "src/apps/demo/main.zig", b.graph.host, test_optimize, host, shaders, false);

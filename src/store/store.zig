@@ -62,19 +62,49 @@ pub const App = struct {
     size: u64,
     sha256: []const u8,
     signature: []const u8 = "",
+    /// A language pack's language (its code): data the system uses for
+    /// it (Japanese's dictionary), installed like an app but not one (it
+    /// has no program, and is not listed with the apps).
+    language: []const u8 = "",
 };
 
 pub const Catalogue = struct {
     version: []const u8 = "",
     time: u64 = 0,
+    /// The apps, then the language packs (see `parseCatalogue`).
     apps: []const App,
+    /// How many of them are apps.
+    n_apps: usize = 0,
 };
 
+/// The catalogue in `json`: its apps first, then its language packs.
 pub fn parseCatalogue(gpa: std.mem.Allocator, json: []const u8) !std.json.Parsed(Catalogue) {
-    const parsed = try std.json.parseFromSlice(Catalogue, gpa, json, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
+    var parsed = try std.json.parseFromSlice(Catalogue, gpa, json, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
     errdefer parsed.deinit();
     for (parsed.value.apps) |a| if (!validName(a.name)) return error.BadCatalogue;
+    const all: []App = @constCast(parsed.value.apps);
+    std.mem.sort(App, all, {}, struct {
+        fn lt(_: void, a: App, b: App) bool {
+            return a.language.len == 0 and b.language.len != 0;
+        }
+    }.lt);
+    var n: usize = 0;
+    while (n < all.len and all[n].language.len == 0) n += 1;
+    parsed.value.n_apps = n;
     return parsed;
+}
+
+/// The language pack for `code` ("ja") in `catalogue`, if it has one.
+pub fn languagePackIn(catalogue: Catalogue, code: []const u8) ?App {
+    for (catalogue.apps[catalogue.n_apps..]) |a| if (std.mem.eql(u8, a.language, code)) return a;
+    return null;
+}
+
+/// Whether language pack `name` is installed in `dir`.
+pub fn isPackInstalled(dir: []const u8, name: []const u8) bool {
+    var buf: [256]u8 = undefined;
+    const path = std.mem.printSentinel(&buf, "{s}/{s}/version", .{ dir, name }, 0) catch return false;
+    return linux.errno(linux.access(path, linux.F_OK)) == .SUCCESS;
 }
 
 /// An app's name, as a folder in /apps: lower case letters, digits and
@@ -731,6 +761,8 @@ pub fn fetchCatalogue(client: *Client, gpa: std.mem.Allocator, base_url: []const
     const icons_path = try std.mem.printSentinel(&icons_buf, "{s}/.icons", .{dir}, 0);
     _ = linux.mkdir(icons_path, 0o755);
     for (parsed.value.apps) |a| {
+        // Language packs have no icon.
+        if (a.language.len != 0) continue;
         var rel_buf: [96]u8 = undefined;
         const icon_rel = if (validIconPath(a.icon))
             a.icon
@@ -959,8 +991,14 @@ pub const Store = struct {
         s.catalogue = parsed;
     }
 
+    /// The catalogue's apps (not its language packs).
     pub fn apps(s: *const Store) []const App {
-        return if (s.catalogue) |c| c.value.apps else &.{};
+        return if (s.catalogue) |c| c.value.apps[0..c.value.n_apps] else &.{};
+    }
+
+    /// The catalogue's language pack for `code` ("ja"), if it has one.
+    pub fn languagePack(s: *const Store, code: []const u8) ?App {
+        return if (s.catalogue) |c| languagePackIn(c.value, code) else null;
     }
 
     pub fn message(s: *const Store) []const u8 {
@@ -1110,6 +1148,19 @@ pub fn loadOsManifest(gpa: std.mem.Allocator) ?std.json.Parsed(OsManifest) {
 }
 
 const testing = std.testing;
+
+test "language packs come after the apps, apart from them" {
+    const c = try parseCatalogue(testing.allocator,
+        \\{"version": "abc", "apps": [
+        \\  {"name": "dazzle-language-ja", "title": "Japanese", "file": "dazzle-language-ja.tar.xz", "size": 10, "sha256": "00", "language": "ja"},
+        \\  {"name": "dazzle-demo", "title": "Demo", "file": "dazzle-demo.tar.xz", "size": 10, "sha256": "00"}]}
+    );
+    defer c.deinit();
+    try testing.expectEqual(@as(usize, 1), c.value.n_apps);
+    try testing.expectEqualStrings("dazzle-demo", c.value.apps[0].name);
+    try testing.expectEqualStrings("dazzle-language-ja", languagePackIn(c.value, "ja").?.name);
+    try testing.expect(languagePackIn(c.value, "zh") == null);
+}
 
 test "the catalogue: apps, and names that are folders" {
     const json =

@@ -18,7 +18,8 @@
 //!           "file": "dazzle-demo.tar.xz",
 //!           "size": 104321,
 //!           "sha256": "<64 hex digits>",
-//!           "signature": "<128 hex digits>"
+//!           "signature": "<128 hex digits>",
+//!           "language": ""
 //!         }
 //!       ]
 //!     }
@@ -43,7 +44,14 @@ pub const App = struct {
     size: u64,
     sha256: []const u8,
     signature: []const u8 = "",
+    /// For a language pack ("dazzle-language-<code>"): its language's
+    /// code. Settings fetches it with the language, and lists it apart
+    /// from the apps.
+    language: []const u8 = "",
 };
+
+/// Language packs' names start so, then their language's code.
+pub const language_prefix = "dazzle-language-";
 
 pub const Catalogue = struct {
     version: []const u8,
@@ -84,6 +92,7 @@ pub fn main(init: std.process.Init) !void {
             .size = archive.len,
             .sha256 = try hexSha256(arena, archive),
             .signature = try hexSignature(arena, archive, kp),
+            .language = if (std.mem.startsWith(u8, args[i], language_prefix)) args[i][language_prefix.len..] else "",
         });
     }
     const json = try write(arena, .{ .version = version, .time = time, .apps = apps.items });

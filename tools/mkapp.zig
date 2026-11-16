@@ -6,7 +6,8 @@
 //! Usage: mkapp <output.tar> <name> <program> [--exe=<name>=<file> | --dir=<prefix>=<dir> | --exclude=<prefix> | <file name>=<file>]...
 //!
 //! The archive holds <name>/<name> (the program) and <name>/<file name>
-//! for each other file or directory entry.
+//! for each other file or directory entry. A language pack (data, not an
+//! app) has no program: "-".
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -22,7 +23,8 @@ pub fn main(init: std.process.Init) !void {
     const cwd = std.Io.Dir.cwd();
     var files: std.ArrayList(Entry) = .empty;
     var excludes: std.ArrayList([]const u8) = .empty;
-    try files.append(arena, .{
+    // "-": none (a language pack: data, not an app).
+    if (!std.mem.eql(u8, args[3], "-")) try files.append(arena, .{
         .path = name,
         .data = try cwd.readFileAlloc(init.io, args[3], arena, .limited(256 << 20)),
         .mode = 0o755,
