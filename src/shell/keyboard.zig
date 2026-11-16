@@ -12,6 +12,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const locale = @import("locale");
+const sys = @import("sys");
 
 /// The keymap for a layout, as XKB text (with the NUL the protocol counts
 /// in its size).
@@ -127,22 +128,41 @@ pub var file_dir: ?[:0]const u8 = null;
 pub fn keymapFile(k: locale.Keyboard) !linux.fd_t {
     const text = keymap(k);
     const fd_rc = linux.memfd_create("dazzle-keymap", linux.MFD.CLOEXEC | linux.MFD.ALLOW_SEALING);
-    const fd: linux.fd_t = if (linux.errno(fd_rc) == .SUCCESS) @intCast(fd_rc) else blk: {
-        const dir = file_dir orelse return error.SystemResources;
-        const rc = linux.open(dir, .{ .ACCMODE = .RDWR, .TMPFILE = true, .DIRECTORY = true, .CLOEXEC = true }, 0o600);
-        if (linux.errno(rc) != .SUCCESS) return error.SystemResources;
-        break :blk @intCast(rc);
-    };
+    const fd: linux.fd_t = if (linux.errno(fd_rc) == .SUCCESS) @intCast(fd_rc) else try unnamedFile(linux.errno(fd_rc));
     errdefer _ = linux.close(fd);
     var at: usize = 0;
     while (at < text.len) {
         const rc = linux.write(fd, text[at..].ptr, text.len - at);
-        if (linux.errno(rc) != .SUCCESS or rc == 0) return error.SystemResources;
+        if (linux.errno(rc) != .SUCCESS or rc == 0) {
+            sys.print(sys.log_warning ++ "dazzle-shell: keymap: cannot write its file: {s}\n", .{@tagName(linux.errno(rc))});
+            return error.SystemResources;
+        }
         at += rc;
     }
     const seals = linux.F.SEAL_SEAL | linux.F.SEAL_SHRINK | linux.F.SEAL_GROW | linux.F.SEAL_WRITE;
     _ = linux.fcntl(fd, linux.F.ADD_SEALS, seals);
     return fd;
+}
+
+/// A file with no name in `file_dir`, for a keymap where memfd_create
+/// failed (with `why`): made with no name (O_TMPFILE), or, where the file
+/// system cannot (the initramfs's), made and its name taken away at once.
+fn unnamedFile(why: linux.E) !linux.fd_t {
+    const dir = file_dir orelse {
+        sys.print(sys.log_warning ++ "dazzle-shell: keymap: memfd_create: {s}, and nowhere else to make it\n", .{@tagName(why)});
+        return error.SystemResources;
+    };
+    const rc = linux.open(dir, .{ .ACCMODE = .RDWR, .TMPFILE = true, .DIRECTORY = true, .CLOEXEC = true }, 0o600);
+    if (linux.errno(rc) == .SUCCESS) return @intCast(rc);
+    var path_buf: [256]u8 = undefined;
+    const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/.keymap-{d}", .{ dir, linux.getpid() }, 0) catch return error.SystemResources;
+    const named = linux.open(path, .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, 0o600);
+    if (linux.errno(named) != .SUCCESS) {
+        sys.print(sys.log_warning ++ "dazzle-shell: keymap: memfd_create: {s}; {s}: {s}\n", .{ @tagName(why), path, @tagName(linux.errno(named)) });
+        return error.SystemResources;
+    }
+    _ = linux.unlink(path);
+    return @intCast(named);
 }
 
 /// The keymap's modifiers, as wl_keyboard.modifiers masks (XKB's real
