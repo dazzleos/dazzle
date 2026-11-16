@@ -42,6 +42,9 @@ pub const emoji_font_file = "TwemojiMozilla.ttf";
 /// Sans lacks), which text falls back to after the emoji font.
 pub const cjk_font_file = "DroidSansFallbackFull.ttf";
 
+/// The font in /os/fonts for Arabic, which text falls back to after that.
+pub const arabic_font_file = "NotoSansArabic-Regular.ttf";
+
 test {
     _ = opentype;
     _ = raster;

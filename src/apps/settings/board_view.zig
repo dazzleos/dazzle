@@ -168,7 +168,8 @@ fn appendGpioSection(
         top_row.append(a, pinDot(cx, state, pins, header[i], i, picked_idx == i)) catch {};
         bottom_row.append(a, pinDot(cx, state, pins, header[i + 1], i + 1, picked_idx == i + 1)) catch {};
     }
-    rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 6 }, .child = cx.make(kete.Column{
+    // The pins as they are on the board, in Arabic too.
+    rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 6 }, .child = cx.make(kete.LeftToRight{ .child = cx.make(kete.Column{
         .cross_axis_alignment = .start,
         .fill = false,
         .spacing = 3,
@@ -176,7 +177,7 @@ fn appendGpioSection(
             cx.make(kete.Row{ .fill = false, .spacing = 3, .children = top_row.items }),
             cx.make(kete.Row{ .fill = false, .spacing = 3, .children = bottom_row.items }),
         },
-    }) })) catch {};
+    }) }) })) catch {};
 
     // Key for the pin colours.
     rows.append(a, pinColourKey(cx)) catch {};

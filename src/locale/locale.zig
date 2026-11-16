@@ -36,6 +36,7 @@ pub const Language = enum {
     pt_br,
     pt_pt,
     ja_jp,
+    ar_eg,
 
     /// Its code, as BCP 47 writes it: "en-GB".
     pub fn code(l: Language) []const u8 {
@@ -59,6 +60,7 @@ pub const Language = enum {
             .pt_br => "pt-BR",
             .pt_pt => "pt-PT",
             .ja_jp => "ja-JP",
+            .ar_eg => "ar-EG",
         };
     }
 
@@ -72,7 +74,13 @@ pub const Language = enum {
             .de_de => .german,
             .pt_br, .pt_pt => .portuguese,
             .ja_jp => .japanese,
+            .ar_eg => .arabic,
         };
+    }
+
+    /// Written right to left (and its interface laid out so).
+    pub fn rightToLeft(l: Language) bool {
+        return l.family() == .arabic;
     }
 
     /// Spanish (of any country).
@@ -107,6 +115,7 @@ pub const Language = enum {
             .pt_br => "Português (Brasil)",
             .pt_pt => "Português (Portugal)",
             .ja_jp => "日本語",
+            .ar_eg => "العربية (مصر)",
         };
     }
 
@@ -127,6 +136,7 @@ pub const Language = enum {
             .pt_br => "Portuguese (Brazil)",
             .pt_pt => "Portuguese (Portugal)",
             .ja_jp => "Japanese",
+            .ar_eg => "Arabic (Egypt)",
             else => l.name(),
         };
     }
@@ -154,6 +164,7 @@ pub const Language = enum {
             .pt_br => "America/Sao_Paulo",
             .pt_pt => "Europe/Lisbon",
             .ja_jp => "Asia/Tokyo",
+            .ar_eg => "Africa/Cairo",
         }) orelse .utc;
     }
 
@@ -169,6 +180,7 @@ pub const Language = enum {
             .pt_br => .br,
             .pt_pt => .pt,
             .ja_jp => .romaji,
+            .ar_eg => .ar,
             // Canada's French keyboard is QWERTY: the US one, to start.
             else => .us,
         };
@@ -183,6 +195,8 @@ pub const Language = enum {
         @"12_hour_lower",
         /// 6:05 p. m.
         @"12_hour_spanish",
+        /// 6:05 م
+        @"12_hour_arabic",
     };
 
     pub fn clock(l: Language) Clock {
@@ -191,6 +205,7 @@ pub const Language = enum {
             .en_us, .en_ca => .@"12_hour_upper",
             .en_au, .en_nz => .@"12_hour_lower",
             .es_mx, .es_co, .es_pe, .es_us => .@"12_hour_spanish",
+            .ar_eg => .@"12_hour_arabic",
         };
     }
 
@@ -220,6 +235,8 @@ pub const Keyboard = enum {
     pt,
     /// A US keyboard, typing Japanese through kete's romaji input method.
     romaji,
+    /// Arabic (the standard layout, with Western digits).
+    ar,
 
     pub fn name(k: Keyboard) []const u8 {
         return switch (k) {
@@ -233,6 +250,7 @@ pub const Keyboard = enum {
             .br => "Português (Brasil, ABNT2)",
             .pt => "Português (Portugal)",
             .romaji => "日本語（ローマ字）",
+            .ar => "العربية",
         };
     }
 
@@ -258,6 +276,7 @@ pub const Keyboard = enum {
             .br => &br_keys,
             .pt => &pt_keys,
             .romaji => &us_keys,
+            .ar => &ar_keys,
         };
     }
 
@@ -338,6 +357,22 @@ const us_keys = row(2, "1234567890-=", "!@#$%^&*()_+") ++
         // The key beside the left Shift, on keyboards that have one.
         .{ .code = 86, .plain = '<', .shifted = '>' },
     };
+
+/// The standard Arabic keyboard (XKB's "ara"), with Western digits: Arabic
+/// letters, and with Shift the harakat and punctuation. Lam-alef, a key of
+/// its own, types its ligature's presentation form (one character here).
+const ar_keys = blk: {
+    @setEvalBranchQuota(20_000);
+    break :blk row(2, "1234567890-=", "!@#$%^&*()_+") ++
+    row(16, "ضصثقفغعهخحجد", "\u{064E}\u{064B}\u{064F}\u{064C}\u{FEF9}إ‘÷×؛<>") ++
+    row(30, "شسيبلاتنمكطذ", "\u{0650}\u{064D}][\u{FEF7}أـ،/:\"\u{0651}") ++
+    [_]Key{.{ .code = 43, .plain = '\\', .shifted = '|' }} ++
+    row(44, "ئءؤر\u{FEFB}ىةوزظ", "~\u{0652}}{\u{FEF5}آ’,.؟") ++
+    [_]Key{
+        .{ .code = 57, .plain = ' ', .shifted = ' ' },
+        .{ .code = 86, .plain = '<', .shifted = '>' },
+    };
+};
 
 /// A UK keyboard: the US one with ", £, @, ¬ and # where the UK has them,
 /// the extra key beside the left Shift, and the euro on AltGr+4.
@@ -728,6 +763,7 @@ pub fn textIn(comptime l: Language, comptime s: []const u8) []const u8 {
         .german => lookup(&german.germany, s),
         .portuguese => lookup(&portuguese.brazil, s),
         .japanese => lookup(&japanese.japan, s),
+        .arabic => lookup(&arabic.arabic, s),
     };
     return t orelse @compileError("no " ++ @tagName(l.family()) ++ " for \"" ++ s ++ "\" (see " ++ @tagName(l.family()) ++ ".zig)");
 }
@@ -755,9 +791,10 @@ pub const french = @import("french.zig");
 pub const german = @import("german.zig");
 pub const portuguese = @import("portuguese.zig");
 pub const japanese = @import("japanese.zig");
+pub const arabic = @import("arabic.zig");
 
 /// The kinds of language, by their words and ways.
-pub const Family = enum { english, spanish, chinese, french, german, portuguese, japanese };
+pub const Family = enum { english, spanish, chinese, french, german, portuguese, japanese, arabic };
 
 /// American spelling, where it differs (Canada spells as Britain does).
 const us_spelling = [_][2][]const u8{
@@ -825,6 +862,14 @@ const calendars = std.enums.directEnumArray(Family, Calendar, 0, .{
         .today = "今日",
         .yesterday = "昨日",
     },
+    // Egypt's names for the months.
+    .arabic = .{
+        .months = .{ "يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر" },
+        .months_long = .{ "يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر" },
+        .weekdays = .{ "الأحد", "الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت" },
+        .today = "اليوم",
+        .yesterday = "أمس",
+    },
 });
 
 fn calendar() *const Calendar {
@@ -841,7 +886,7 @@ pub fn weekdayName(d: u3) []const u8 {
 /// none in Chinese or German (whose translations say the word whole).
 pub fn plural(n: anytype) []const u8 {
     return switch (current.family()) {
-        .chinese, .german, .japanese => "",
+        .chinese, .german, .japanese, .arabic => "",
         else => if (n == 1) "" else "s",
     };
 }
@@ -855,6 +900,7 @@ pub fn formatFullDate(buf: []u8, weekday: u3, day: u32, month: u32, year: u32) [
     return switch (current.family()) {
         .chinese, .japanese => std.fmt.bufPrint(buf, "{s} {s}", .{ date, weekdayName(weekday) }),
         .french => std.fmt.bufPrint(buf, "{s} {s}", .{ weekdayName(weekday), date }),
+        .arabic => std.fmt.bufPrint(buf, "{s}، {s}", .{ weekdayName(weekday), date }),
         else => std.fmt.bufPrint(buf, "{s}, {s}", .{ weekdayName(weekday), date }),
     } catch "";
 }
@@ -867,6 +913,7 @@ pub fn formatClock(buf: []u8, hour: u32, minute: u32) []const u8 {
         .@"12_hour_upper" => std.fmt.bufPrint(buf, "{d}:{d:0>2} {s}", .{ h12, minute, if (hour < 12) "AM" else "PM" }),
         .@"12_hour_lower" => std.fmt.bufPrint(buf, "{d}:{d:0>2} {s}", .{ h12, minute, if (hour < 12) "am" else "pm" }),
         .@"12_hour_spanish" => std.fmt.bufPrint(buf, "{d}:{d:0>2} {s}", .{ h12, minute, if (hour < 12) "a. m." else "p. m." }),
+        .@"12_hour_arabic" => std.fmt.bufPrint(buf, "{d}:{d:0>2} {s}", .{ h12, minute, if (hour < 12) "ص" else "م" }),
     } catch "";
 }
 
@@ -911,6 +958,7 @@ pub fn formatWhen(buf: []u8, secs: i64, now: i64) []const u8 {
         const clock = formatClock(&clock_buf, in_day / 3600, in_day / 60 % 60);
         const word = if (day == today) calendar().today else calendar().yesterday;
         if (current.family() == .chinese or current.family() == .japanese) return std.fmt.bufPrint(buf, "{s} {s}", .{ word, clock }) catch "";
+        if (current.family() == .arabic) return std.fmt.bufPrint(buf, "{s}، {s}", .{ word, clock }) catch "";
         return std.fmt.bufPrint(buf, "{s}, {s}", .{ word, clock }) catch "";
     }
     const date = (std.time.epoch.EpochDay{ .day = @intCast(day) }).calculateYearDay();
@@ -981,6 +1029,11 @@ test "keyboards" {
     try testing.expectEqual(@as(?u21, 'Ç'), Keyboard.br.char(39, true, false, false));
     try testing.expectEqual(@as(?u21, dead_tilde), Keyboard.br.char(40, false, false, false));
     try testing.expectEqual(@as(?u21, '«'), Keyboard.pt.char(13, false, false, false));
+    // Arabic: letters, and Shift's harakat.
+    try testing.expectEqual(@as(?u21, 'ش'), Keyboard.ar.char(30, false, false, false));
+    try testing.expectEqual(@as(?u21, 'ش'), Keyboard.ar.char(30, false, true, false));
+    try testing.expectEqual(@as(?u21, 0x0650), Keyboard.ar.char(30, true, false, false));
+    try testing.expectEqual(@as(?u21, 'ظ'), Keyboard.ar.char(53, false, false, false));
     // Numeric keypad.
     for ([_]u32{ 82, 79, 80, 81, 75, 76, 77, 71, 72, 73, 83, 78, 74, 55, 98, 117 }, "0123456789.+-*/=") |code, expected| {
         try testing.expectEqual(@as(?u21, expected), Keyboard.us.char(code, false, false, false));
@@ -1082,6 +1135,12 @@ test "dates, times and temperatures, in each language" {
     try testing.expectEqualStrings("2026年10月7日 水曜日", formatFullDate(&full, 3, 7, 10, 2026));
     try testing.expectEqualStrings("今日はあと 5 分", bufPrint(&full, "{d} minute{s} left today", .{ 5, plural(5) }));
     try testing.expectEqualStrings("設定", text("Settings"));
+    // Arabic.
+    current = .ar_eg;
+    try testing.expectEqualStrings("أمس، 6:05 م", formatWhen(&buf, 1791331200 - 6 * 3600 + 5 * 60, now));
+    try testing.expectEqualStrings("الأربعاء، 7 أكتوبر 2026", formatFullDate(&full, 3, 7, 10, 2026));
+    try testing.expectEqualStrings("الإعدادات", text("Settings"));
+    try testing.expect(current.rightToLeft() and !Language.ja_jp.rightToLeft());
 }
 
 test "languages" {

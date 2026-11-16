@@ -118,9 +118,10 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
     took.step(.apps);
     // The shell's UI is kete's: its panels share the font (and its
     // glyphs) and the renderers; the big ones are drawn on the GPU.
-    // Chinese, and other scripts Fira Sans lacks.
+    // Chinese, Japanese, Arabic, and other scripts Fira Sans lacks.
     var cjk_buf: [256]u8 = undefined;
-    const kit = try kete_panel.Kit.create(gpa, io, ui_font_data, emoji, &.{sys.fontFile(&cjk_buf, font.cjk_font_file)});
+    var arabic_buf: [256]u8 = undefined;
+    const kit = try kete_panel.Kit.create(gpa, io, ui_font_data, emoji, &.{ sys.fontFile(&cjk_buf, font.cjk_font_file), sys.fontFile(&arabic_buf, font.arabic_font_file) });
     kit.useGpu(renderer.dev) catch |err| print(sys.log_warning ++ "dazzle-shell: the panels are drawn on the CPU: {s}\n", .{@errorName(err)});
     var dock = try dock_mod.Dock.init(kit, apps, renderer.width, renderer.height);
     // The quick settings, over the status box when it is clicked: the
@@ -1583,6 +1584,8 @@ fn applyLocale(l: locale.Settings, server: *server_mod.Server, lock: *lock_mod.S
     // The language says how the time is written (18:05, 6:05 PM).
     const language_changed = l.language != locale.current;
     locale.current = l.language;
+    // Arabic: the panels laid out right to left (they share the kit's).
+    dock.panel.ui.shared.right_to_left = l.language.rightToLeft();
     if (language_changed) dock.time = null;
     if (l.timezone == lock.zone) return language_changed;
     print("dazzle-shell: time zone {s}\n", .{l.timezone.name()});

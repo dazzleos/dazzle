@@ -87,12 +87,13 @@ pub const Host = struct {
         var font_buf: [256]u8 = undefined;
         var emoji_buf: [256]u8 = undefined;
         var cjk_buf: [256]u8 = undefined;
+        var arabic_buf: [256]u8 = undefined;
         h.app = try kete.App.init(gpa, io, environ, .{
             .app_id = options.app_id,
             .font_path = sys.fontFile(&font_buf, dazzle_font.default_font_file),
             .emoji_font_path = sys.fontFile(&emoji_buf, dazzle_font.emoji_font_file),
-            // Chinese, and other scripts Fira Sans lacks.
-            .fallback_font_paths = &.{sys.fontFile(&cjk_buf, dazzle_font.cjk_font_file)},
+            // Chinese, Japanese, Arabic, and other scripts Fira Sans lacks.
+            .fallback_font_paths = &.{ sys.fontFile(&cjk_buf, dazzle_font.cjk_font_file), sys.fontFile(&arabic_buf, dazzle_font.arabic_font_file) },
             .display = h.display.display(),
             .on_last_window_closed = options.on_last_window_closed,
         });
@@ -121,6 +122,8 @@ pub const Host = struct {
                 else => .none,
             };
         }
+        // Arabic: laid out right to left.
+        h.app.setRightToLeft(locale.current.rightToLeft());
         const going = try h.app.step(idle_timeout_ns);
         if (h.theme_watch.changed()) followThemeOf(h);
         return going;

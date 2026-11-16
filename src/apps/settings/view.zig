@@ -617,7 +617,10 @@ test "everything is shown, and fits from the smallest window to the biggest" {
 }
 
 test "no page needs the window wider than the least it can be" {
-    const f = try kete.font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    var f = try kete.font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    // Arabic in its font, as on the device.
+    const arabic = try kete.font.Font.init(@embedFile("NotoSansArabic-Regular.ttf"));
+    f.fallback = &arabic;
     const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
     const d = sample();
@@ -625,7 +628,7 @@ test "no page needs the window wider than the least it can be" {
     var n: u64 = 0;
     // In English, and in Spanish (longer).
     defer locale.current = .en_gb;
-    for ([_]locale.Language{ .en_gb, .es_es, .es_mx, .zh_cn, .fr_fr, .de_de, .pt_br, .pt_pt, .ja_jp }) |lang| for (std.enums.values(Page)) |pg| {
+    for ([_]locale.Language{ .en_gb, .es_es, .es_mx, .zh_cn, .fr_fr, .de_de, .pt_br, .pt_pt, .ja_jp, .ar_eg }) |lang| for (std.enums.values(Page)) |pg| {
         locale.current = lang;
         n += 1;
         u.frame(1000, 680, n, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = sample_apps });

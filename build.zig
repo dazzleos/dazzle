@@ -1363,6 +1363,8 @@ pub fn build(b: *std.Build) void {
     run_mkinitramfs.addPrefixedFileArg("--file=os/fonts/TwemojiMozilla-LICENSE.txt=", b.path("fonts/TwemojiMozilla-LICENSE.txt"));
     run_mkinitramfs.addPrefixedFileArg("--file=os/fonts/DroidSansFallbackFull.ttf=", b.path("fonts/DroidSansFallbackFull.ttf"));
     run_mkinitramfs.addPrefixedFileArg("--file=os/fonts/DroidSansFallback-LICENSE.txt=", b.path("fonts/DroidSansFallback-LICENSE.txt"));
+    run_mkinitramfs.addPrefixedFileArg("--file=os/fonts/NotoSansArabic-Regular.ttf=", b.path("fonts/NotoSansArabic-Regular.ttf"));
+    run_mkinitramfs.addPrefixedFileArg("--file=os/fonts/NotoSansArabic-LICENSE.txt=", b.path("fonts/NotoSansArabic-LICENSE.txt"));
     // The third-party software built into the system's programs, and its
     // licences (each app has its own: see below).
     addNotices(b, run_mkinitramfs, "os/NOTICES", "Dazzle's system programs", &.{"MaterialIcons"});
@@ -1480,6 +1482,8 @@ pub fn build(b: *std.Build) void {
     _ = addKete(b, host_demo, host, b.graph.host, test_optimize, "src/apps/demo");
     const host_settings = addProgramModule(b, "src/apps/settings/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_settings.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
+    // Arabic is laid out in its own font, as on the device.
+    host_settings.addAnonymousImport("NotoSansArabic-Regular.ttf", .{ .root_source_file = b.path("fonts/NotoSansArabic-Regular.ttf") });
     _ = addKete(b, host_settings, host, b.graph.host, test_optimize, "src/apps/settings");
     addBackgroundThumbnails(b, host_settings);
     const host_files = addProgramModule(b, "src/apps/files/main.zig", b.graph.host, test_optimize, host, shaders, false);
