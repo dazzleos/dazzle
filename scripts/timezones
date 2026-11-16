@@ -1,0 +1,35 @@
+#!/bin/sh
+# Writes src/locale/timezones.zig, the time zones Dazzle offers, from the
+# tz database installed on this computer (as tzdata does on Debian and
+# Ubuntu): each zone named in zone.tab (one or more for every country),
+# and its rule for local time now and to come, the POSIX TZ string ending
+# its TZif file (such as "NZST-12NZDT,M9.5.0,M4.1.0/3").
+#
+# Usage: scripts/timezones [zoneinfo directory]   (default /usr/share/zoneinfo)
+#
+# Run it again when the tz database changes (a country changes its
+# offset, or its daylight saving time), and commit what it writes.
+set -eu
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+ZONEINFO=${1:-/usr/share/zoneinfo}
+OUT="$ROOT/src/locale/timezones.zig"
+VERSION=$(cat "$ZONEINFO/tzdata.zi" 2>/dev/null | sed -n 's/^# version //p' | head -n 1)
+
+{
+	echo "//! The time zones Dazzle offers: their names (as the tz database's"
+	echo "//! zone.tab has them) and their rules for local time (POSIX TZ"
+	echo "//! strings; see timezone.zig). Written by scripts/timezones from"
+	echo "//! tzdata ${VERSION:-(version unknown)}: do not edit."
+	echo
+	echo "pub const Zone = struct { name: []const u8, rule: []const u8 };"
+	echo
+	echo "pub const zones = [_]Zone{"
+	echo "    .{ .name = \"UTC\", .rule = \"UTC0\" },"
+	grep -v '^#' "$ZONEINFO/zone.tab" | cut -f3 | LC_ALL=C sort | while read -r name; do
+		rule=$(tail -n 1 "$ZONEINFO/$name")
+		echo "    .{ .name = \"$name\", .rule = \"$rule\" },"
+	done
+	echo "};"
+} >"$OUT"
+echo "Wrote $(grep -c '\.name' "$OUT") zones to $OUT"

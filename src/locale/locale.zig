@@ -1,8 +1,9 @@
-//! Languages and keyboards: which the computer uses (`Settings`, kept in
-//! /data/system/locale and chosen in setup and Settings), and what they
-//! mean for the apps: the keys' characters (`Keyboard.char`), how dates,
-//! times and temperatures are written, and the words that differ between
-//! languages (`text`).
+//! Languages, keyboards and time zones: which the computer uses
+//! (`Settings`, kept in /data/system/locale and chosen in setup and
+//! Settings), and what they mean for the apps: the keys' characters
+//! (`Keyboard.char`), local time (`TimeZone`), how dates, times and
+//! temperatures are written, and the words that differ between languages
+//! (`text`).
 //!
 //! Dazzle's text is written in British English; a language that writes
 //! something differently says so in its table (see `text`).
@@ -12,6 +13,8 @@
 
 const std = @import("std");
 const linux = std.os.linux;
+pub const timezone = @import("timezone.zig");
+pub const TimeZone = timezone.TimeZone;
 
 pub const Language = enum {
     en_us,
@@ -45,6 +48,18 @@ pub const Language = enum {
             .en_nz => "English (New Zealand)",
             .en_ca => "English (Canada)",
         };
+    }
+
+    /// The time zone most people there are in (or, in a country of
+    /// several, its capital's), to start with.
+    pub fn timeZone(l: Language) TimeZone {
+        return TimeZone.fromName(switch (l) {
+            .en_us => "America/New_York",
+            .en_gb => "Europe/London",
+            .en_au => "Australia/Sydney",
+            .en_nz => "Pacific/Auckland",
+            .en_ca => "America/Toronto",
+        }) orelse .utc;
     }
 
     /// The keyboard most people there have.
@@ -205,9 +220,10 @@ pub const settings_file = "/data/system/locale";
 pub const Settings = struct {
     language: Language = .en_us,
     keyboard: Keyboard = .us,
+    timezone: TimeZone = .utc,
 
-    /// "language en-GB\nkeyboard gb\n"; what is missing or not known stays
-    /// as it is by default.
+    /// "language en-GB\nkeyboard gb\ntimezone Europe/London\n"; what is
+    /// missing or not known stays as it is by default.
     pub fn parse(text_: []const u8) Settings {
         var s: Settings = .{};
         var lines = std.mem.tokenizeScalar(u8, text_, '\n');
@@ -219,13 +235,15 @@ pub const Settings = struct {
                 if (Language.fromCode(value)) |l| s.language = l;
             } else if (std.mem.eql(u8, key, "keyboard")) {
                 if (Keyboard.fromCode(value)) |k| s.keyboard = k;
+            } else if (std.mem.eql(u8, key, "timezone")) {
+                if (TimeZone.fromName(value)) |z| s.timezone = z;
             }
         }
         return s;
     }
 
     pub fn write(s: Settings, buf: []u8) []const u8 {
-        return std.fmt.bufPrint(buf, "language {s}\nkeyboard {s}\n", .{ s.language.code(), s.keyboard.code() }) catch "";
+        return std.fmt.bufPrint(buf, "language {s}\nkeyboard {s}\ntimezone {s}\n", .{ s.language.code(), s.keyboard.code(), s.timezone.name() }) catch "";
     }
 };
 
@@ -333,6 +351,10 @@ pub fn formatTemperature(buf: []u8, celsius: f32) []const u8 {
 
 const testing = std.testing;
 
+test {
+    _ = timezone;
+}
+
 test "keyboards" {
     // US.
     try testing.expectEqual(@as(?u21, 'a'), Keyboard.us.char(30, false, false, false));
@@ -365,8 +387,8 @@ test "keyboards" {
 
 test "settings, kept as text" {
     var buf: [64]u8 = undefined;
-    const s: Settings = .{ .language = .en_nz, .keyboard = .gb };
-    try testing.expectEqualStrings("language en-NZ\nkeyboard gb\n", s.write(&buf));
+    const s: Settings = .{ .language = .en_nz, .keyboard = .gb, .timezone = TimeZone.fromName("Pacific/Auckland").? };
+    try testing.expectEqualStrings("language en-NZ\nkeyboard gb\ntimezone Pacific/Auckland\n", s.write(&buf));
     try testing.expectEqual(s, Settings.parse(s.write(&buf)));
     try testing.expectEqual(Settings{}, Settings.parse("language xx-XX\nkeyboard dvorak\nnonsense\n"));
     try testing.expectEqual(Language.en_ca, Settings.parse("language en-ca").language);
