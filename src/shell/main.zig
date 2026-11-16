@@ -1879,6 +1879,7 @@ test {
     _ = @import("screenshot.zig");
     _ = @import("keyboard.zig");
     _ = @import("protocol_test.zig");
+    _ = @import("input_method/input_method.zig");
     _ = @import("placement.zig");
     _ = @import("render.zig");
     _ = @import("background.zig");

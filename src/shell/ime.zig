@@ -1,13 +1,13 @@
-//! The system's input method: kete's (emoji by name, Chinese by pinyin,
-//! Japanese by romaji; see kete's input_method.zig), run by the shell for
+//! The system's input method (emoji by name, Chinese by pinyin, Japanese by
+//! romaji; see input_method/input_method.zig), run by the shell for
 //! the app that has the keyboard, in the text field it has enabled
 //! (`zwp_text_input_v3`). Each key goes to it before the app: what it takes
 //! the app does not get; what it composes goes to the app as the input
 //! method's preedit, and what it puts in as its commit. Its candidates
 //! show in a panel by the text's cursor. The keyboard layout says which
 //! language it composes (pinyin, romaji); emoji are for every layout. Never
-//! in a password field. Apps that have kete's input method in them leave
-//! it to this (see `own_input_method`).
+//! in a password field. kete's apps leave emoji to it too (see kete's
+//! `own_input_method`).
 
 const std = @import("std");
 const kete = @import("kete");
@@ -17,7 +17,7 @@ const keyboard = @import("keyboard.zig");
 const kete_panel = @import("kete_panel.zig");
 const p = @import("wayland").protocol;
 
-const input_method = kete.ui.input_method;
+const input_method = @import("input_method/input_method.zig");
 const Server = server_mod.Server;
 const TextInput = server_mod.TextInput;
 
