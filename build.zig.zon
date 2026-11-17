@@ -18,5 +18,9 @@
         "build.zig.zon",
         "src",
         "tools",
+        // For apps in repositories of their own (see build.zig, `addApp`).
+        "fonts",
+        "notices",
+        "LICENSE",
     },
 }

@@ -1,5 +1,6 @@
 const std = @import("std");
-const Icon = @import("src/icons/names.zig").Icon;
+/// The icons apps can have in the dock (see `addApp`).
+pub const Icon = @import("src/icons/names.zig").Icon;
 const builtin_backgrounds = @import("src/appearance/backgrounds.zig");
 const kete_build = @import("kete");
 
@@ -69,27 +70,39 @@ const App = struct {
     /// Extra arguments to `mkapp` (and the step that prepares them, if any).
     extra_args: []const []const u8 = &.{},
     extra_step: ?*std.Build.Step = null,
+    /// Its icon.png and screenshot.png (beside its main.zig if not given).
+    icon_png: ?std.Build.LazyPath = null,
+    screenshot: ?std.Build.LazyPath = null,
 };
 
 /// Each app as an archive to download (zig-out/apps/<name>.tar.xz: its
 /// folder, as in /apps), and the catalogue of them (zig-out/apps/apps.json;
 /// see tools/mkcatalogue.zig), published beside the image.
 fn addAppArchives(b: *std.Build, apps: []const App) *std.Build.Step {
+    return appArchives(b, b, apps, .{ .languages = true, .sources = appSources(b) });
+}
+
+/// The apps' archives and catalogue, installed in `b`'s zig-out/apps, made
+/// with Dazzle's tools (`d`: Dazzle's own build, or the dependency's, for
+/// apps in repositories of their own); with Dazzle's language packs, and
+/// other catalogues' places (see tools/mkcatalogue.zig), for Dazzle's.
+fn appArchives(b: *std.Build, d: *std.Build, apps: []const App, opts: struct { languages: bool = false, sources: []const []const u8 = &.{} }) *std.Build.Step {
     const step = b.step("app-archives", "The apps' archives (zig-out/apps)");
-    const xz = requireTools(b, &.{"xz:xz-utils"});
+    const xz = requireTools(d, &.{"xz:xz-utils"});
     const commit = gitCommit(b);
     const commit_time = gitCommitTime(b);
     const version_file = b.addWriteFiles().add("version", b.fmt("{d} {s}\n", .{ commit_time, commit }));
-    const catalogue = b.addRunArtifact(hostTool(b, "mkcatalogue"));
+    const catalogue = b.addRunArtifact(hostTool(d, "mkcatalogue"));
     catalogue.addArg(b.fmt("--key={s}", .{signingKey(b).seed_hex}));
+    for (opts.sources) |src| catalogue.addArg(b.fmt("--source={s}", .{src}));
     const json = catalogue.addOutputFileArg("apps.json");
     catalogue.addArgs(&.{ commit, b.fmt("{d}", .{commit_time}) });
     for (apps) |a| {
         const name = a.exe.name;
         const app_dir = std.fs.path.dirname(a.exe.root_module.root_source_file.?.src_path.sub_path).?;
-        const icon_png = b.path(b.fmt("{s}/icon.png", .{app_dir}));
+        const icon_png = a.icon_png orelse b.path(b.fmt("{s}/icon.png", .{app_dir}));
         const icon_rel = b.fmt("{s}.png", .{name});
-        const pack = b.addRunArtifact(hostTool(b, "mkapp"));
+        const pack = b.addRunArtifact(hostTool(d, "mkapp"));
         if (a.extra_step) |es| pack.step.dependOn(es);
         const tar = pack.addOutputFileArg(b.fmt("{s}.tar", .{name}));
         pack.addArg(name);
@@ -103,7 +116,7 @@ fn addAppArchives(b: *std.Build, apps: []const App) *std.Build.Step {
             const handles = b.addWriteFiles().add(b.fmt("{s}.handles", .{name}), text.items);
             pack.addPrefixedFileArg(b.fmt("{s}.handles=", .{name}), handles);
         }
-        pack.addPrefixedFileArg("NOTICES=", noticesFile(b, b.fmt("the {s} app", .{a.title}), a.notices));
+        pack.addPrefixedFileArg("NOTICES=", noticesFile(d, b.fmt("the {s} app", .{a.title}), a.notices));
         pack.addArgs(a.extra_args);
         const compress = b.addSystemCommand(&.{ "xz", "-9", "--block-size=4MiB", "-c" });
         compress.step.dependOn(&xz.step);
@@ -114,16 +127,16 @@ fn addAppArchives(b: *std.Build, apps: []const App) *std.Build.Step {
             step.dependOn(&b.addInstallFile(icon_png, b.fmt("apps/{s}", .{icon_rel})).step);
             // Its screenshot, if it has one.
             const shot_src = b.fmt("{s}/screenshot.png", .{app_dir});
-            const has_shot = exists(b, shot_src);
-            const shot_rel = if (has_shot) b.fmt("{s}-screenshot.png", .{name}) else "";
-            if (has_shot) step.dependOn(&b.addInstallFile(b.path(shot_src), b.fmt("apps/{s}", .{shot_rel})).step);
+            const shot: ?std.Build.LazyPath = a.screenshot orelse if (exists(b, shot_src)) b.path(shot_src) else null;
+            const shot_rel = if (shot != null) b.fmt("{s}-screenshot.png", .{name}) else "";
+            if (shot) |p| step.dependOn(&b.addInstallFile(p, b.fmt("apps/{s}", .{shot_rel})).step);
             catalogue.addArgs(&.{ name, a.title, desc, a.about, icon_rel, shot_rel });
             catalogue.addFileArg(archive);
         }
     }
     // The language packs (see tools/mkcatalogue.zig): their data, not
     // programs, beside the apps.
-    for (language_packs) |lp| {
+    if (opts.languages) for (language_packs) |lp| {
         const name = b.fmt("dazzle-language-{s}", .{lp.code});
         const pack = b.addRunArtifact(hostTool(b, "mkapp"));
         const tar = pack.addOutputFileArg(b.fmt("{s}.tar", .{name}));
@@ -138,7 +151,7 @@ fn addAppArchives(b: *std.Build, apps: []const App) *std.Build.Step {
         step.dependOn(&b.addInstallFile(archive, b.fmt("apps/{s}.tar.xz", .{name})).step);
         catalogue.addArgs(&.{ name, lp.title, lp.description, "", "", "" });
         catalogue.addFileArg(archive);
-    }
+    };
     step.dependOn(&b.addInstallFile(json, "apps/apps.json").step);
     return step;
 }
@@ -235,38 +248,6 @@ fn addMapData(b: *std.Build) std.Build.LazyPath {
     run.addFileArg(b.path("src/apps/maps/data/ne_110m_admin_0_countries.geojson"));
     run.addFileArg(b.path("src/apps/maps/data/ne_50m_admin_0_countries.geojson"));
     return run.addOutputFileArg("map_data.zig");
-}
-
-/// Motu's tiles (each strip as the GPU takes it, with its mipmaps) and
-/// icons, drawn at build time (see tools/mktiles.zig), for the game to
-/// `@embedFile("tiles-<n>.bin")` and `@embedFile("icons.bin")`.
-fn addMotuTiles(b: *std.Build, m: *std.Build.Module) void {
-    const State = struct {
-        var files: ?[5]std.Build.LazyPath = null;
-    };
-    const files = State.files orelse blk: {
-        const tool = b.addExecutable(.{
-            .name = "mktiles",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("tools/mktiles.zig"),
-                .target = b.graph.host,
-                // Hundreds of thousands of noisy pixels: seconds unoptimized.
-                .optimize = .ReleaseFast,
-                .imports = &.{
-                    .{ .name = "textures", .module = b.createModule(.{ .root_source_file = b.path("src/apps/motu/textures.zig") }) },
-                    .{ .name = "texture", .module = b.createModule(.{ .root_source_file = b.path("src/vc4/texture.zig") }) },
-                },
-            }),
-        });
-        const run = b.addRunArtifact(tool);
-        var out: [5]std.Build.LazyPath = undefined;
-        for (0..4) |i| out[i] = run.addOutputFileArg(b.fmt("tiles-{d}.bin", .{i}));
-        out[4] = run.addOutputFileArg("icons.bin");
-        State.files = out;
-        break :blk out;
-    };
-    for (0..4) |i| m.addAnonymousImport(b.fmt("tiles-{d}.bin", .{i}), .{ .root_source_file = files[i] });
-    m.addAnonymousImport("icons.bin", .{ .root_source_file = files[4] });
 }
 
 /// The land as a flat map draws it, from Natural Earth's 110m countries
@@ -420,7 +401,7 @@ fn addGpuModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
 }
 
 /// Who embeds a shader program.
-const ShaderOwner = enum { gfx, demo, shell, motu, maps };
+const ShaderOwner = enum { gfx, demo, shell, maps, app };
 
 /// The shader programs: Zig sources compiled to SPIR-V, then for the GPU
 /// by tools/shaderc.zig (with the render state that changes their code),
@@ -435,15 +416,6 @@ const shader_programs = [_]struct { source: []const u8, name: ?[]const u8 = null
     .{ .source = "src/gfx/shaders/text.zig", .owner = .gfx, .args = &.{"--blend=source-over"} },
     .{ .source = "src/gfx/shaders/image.zig", .owner = .gfx, .args = &.{"--blend=source-over"} },
     .{ .source = "src/apps/demo/shaders/polyhedron.zig", .owner = .demo, .args = &.{"--depth-test"} },
-    // The voxel game's: blocks (solid, then glass and plants blended),
-    // water, the sky, the outline of the block picked, and the world drawn
-    // smaller stretched over the view.
-    .{ .source = "src/apps/motu/shaders/terrain.zig", .owner = .motu, .args = &.{"--depth-test"} },
-    .{ .source = "src/apps/motu/shaders/terrain.zig", .name = "terrain_blend", .owner = .motu, .args = &.{ "--depth-test", "--blend=source-over" } },
-    .{ .source = "src/apps/motu/shaders/water.zig", .owner = .motu, .args = &.{ "--depth-test", "--blend=source-over" } },
-    .{ .source = "src/apps/motu/shaders/sky.zig", .owner = .motu, .args = &.{"--depth-test"} },
-    .{ .source = "src/apps/motu/shaders/upscale.zig", .owner = .motu, .args = &.{} },
-    .{ .source = "src/apps/motu/shaders/line.zig", .owner = .motu, .args = &.{"--depth-test"} },
     .{ .source = "src/shell/shaders/quad.zig", .owner = .shell, .args = &.{} },
     // The same, blended: the shaded preview of where a window will go.
     .{ .source = "src/shell/shaders/quad.zig", .name = "quad_blend", .owner = .shell, .args = &.{"--blend=source-over"} },
@@ -477,25 +449,50 @@ const ShaderBlob = struct {
 /// Compiles the shader programs (once: they are the same for every
 /// target).
 fn addShaders(b: *std.Build) []const ShaderBlob {
-    const shaderc = hostTool(b, "shaderc");
-    _, _, const shader = addGpuModules(b, b.graph.host, .safe);
-    shaderc.root_module.addImport("shader", shader);
+    return shadersOf(b, null);
+}
 
-    const blobs = b.allocator.alloc(ShaderBlob, shader_programs.len) catch @panic("OOM");
-    for (shader_programs, blobs) |p, *blob| {
+/// Dazzle's shader programs (only `owner`'s, if given).
+fn shadersOf(b: *std.Build, owner: ?ShaderOwner) []const ShaderBlob {
+    var blobs: std.ArrayList(ShaderBlob) = .empty;
+    for (shader_programs) |p| {
+        if (owner != null and p.owner != owner.?) continue;
         const name = p.name orelse std.fs.path.stem(p.source);
-        const spirv = addSpirv(b, name, p.source);
-        const run = b.addRunArtifact(shaderc);
-        run.addFileArg(spirv);
-        const program = run.addOutputFileArg(b.fmt("{s}.shader", .{name}));
-        run.addArgs(p.args);
-        blob.* = .{ .name = name, .owner = p.owner, .spirv = spirv, .program = program };
+        blobs.append(b.allocator, shaderBlob(b, name, p.owner, b.path(p.source), p.args)) catch @panic("OOM");
     }
-    return blobs;
+    return blobs.items;
+}
+
+/// A shader program compiled from its Zig source (anywhere) by Dazzle's
+/// shader compiler (`b` is Dazzle's build).
+fn shaderBlob(b: *std.Build, name: []const u8, owner: ShaderOwner, source: std.Build.LazyPath, args: []const []const u8) ShaderBlob {
+    const State = struct {
+        var shaderc: ?*std.Build.Step.Compile = null;
+        var owner_build: ?*std.Build = null;
+    };
+    if (State.owner_build != b) {
+        const tool = hostTool(b, "shaderc");
+        _, _, const shader = addGpuModules(b, b.graph.host, .safe);
+        tool.root_module.addImport("shader", shader);
+        State.shaderc = tool;
+        State.owner_build = b;
+    }
+    const spirv = spirvOf(b, name, source);
+    const run = b.addRunArtifact(State.shaderc.?);
+    run.addFileArg(spirv);
+    const program = run.addOutputFileArg(b.fmt("{s}.shader", .{name}));
+    run.addArgs(args);
+    return .{ .name = name, .owner = owner, .spirv = spirv, .program = program };
 }
 
 /// A shader's Zig source compiled to SPIR-V.
 fn addSpirv(b: *std.Build, name: []const u8, source: []const u8) std.Build.LazyPath {
+    return spirvOf(b, name, b.path(source));
+}
+
+/// A shader's Zig source (anywhere) compiled to SPIR-V, with Dazzle's
+/// `gpu` module (`b` is Dazzle's build).
+fn spirvOf(b: *std.Build, name: []const u8, source: std.Build.LazyPath) std.Build.LazyPath {
     const spirv_target = b.resolveTargetQuery(.{ .cpu_arch = .spirv64, .os_tag = .vulkan, .ofmt = .spirv });
     const gpu = b.createModule(.{
         .root_source_file = b.path("src/shader/gpu.zig"),
@@ -505,7 +502,7 @@ fn addSpirv(b: *std.Build, name: []const u8, source: []const u8) std.Build.LazyP
     const obj = b.addObject(.{
         .name = name,
         .root_module = b.createModule(.{
-            .root_source_file = b.path(source),
+            .root_source_file = source,
             .target = spirv_target,
             .optimize = .fast,
             .imports = &.{.{ .name = "gpu", .module = gpu }},
@@ -532,6 +529,14 @@ fn appsUrl(b: *std.Build) []const u8 {
     State.url = b.option([]const u8, "apps-url", "Where Settings downloads apps and their catalogue (apps.json) from") orelse
         "https://github.com/dazzleos/dazzle/releases/latest/download";
     return State.url.?;
+}
+
+/// The other catalogues Dazzle's lists (apps.json's "sources"): those of
+/// apps in repositories of their own, each published as its own release.
+/// Settings lists their apps with Dazzle's (see src/store/store.zig).
+fn appSources(b: *std.Build) []const []const u8 {
+    const default: []const []const u8 = &.{"https://github.com/dazzleos/motu/releases/latest/download"};
+    return b.option([]const []const u8, "app-sources", "Other app catalogues Dazzle's lists (default: dazzleos' app repositories')") orelse default;
 }
 
 const SigningKey = struct {
@@ -616,8 +621,17 @@ fn gitCommitTime(b: *std.Build) u64 {
 /// A program's root module. The Pi builds (`pi_build`) are stripped (unless
 /// built for debugging); host tests keep their symbols.
 fn addProgramModule(b: *std.Build, path: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.Optimize, m: Modules, shaders: []const ShaderBlob, pi_build: bool) *std.Build.Module {
+    const module = programModule(b, b.path(path), target, optimize, m, pi_build);
+    // src/<owner>/main.zig embeds its shader programs.
+    const dir = std.fs.path.basename(std.fs.path.dirname(path).?);
+    if (std.meta.stringToEnum(ShaderOwner, dir)) |owner| addShaderImports(module, shaders, owner);
+    return module;
+}
+
+/// A program's root module, `root`, with Dazzle's modules to import.
+fn programModule(b: *std.Build, root: std.Build.LazyPath, target: std.Build.ResolvedTarget, optimize: std.builtin.Optimize, m: Modules, pi_build: bool) *std.Build.Module {
     const module = b.createModule(.{
-        .root_source_file = b.path(path),
+        .root_source_file = root,
         .target = target,
         .optimize = optimize,
         .strip = if (pi_build) optimize != .debug else null,
@@ -638,9 +652,6 @@ fn addProgramModule(b: *std.Build, path: []const u8, target: std.Build.ResolvedT
             .{ .name = "audio", .module = m.audio },
         },
     });
-    // src/<owner>/main.zig embeds its shader programs.
-    const dir = std.fs.path.basename(std.fs.path.dirname(path).?);
-    if (std.meta.stringToEnum(ShaderOwner, dir)) |owner| addShaderImports(module, shaders, owner);
     return module;
 }
 
@@ -675,9 +686,17 @@ fn addBootScreen(b: *std.Build, module: *std.Build.Module, target: std.Build.Res
 ///
 ///     comptime { _ = &[_]kete.IconName{ .cloud, .download }; }
 fn addKete(b: *std.Build, module: *std.Build.Module, m: Modules, target: std.Build.ResolvedTarget, optimize: std.builtin.Optimize, app_dir: []const u8) *std.Build.Module {
+    return keteFor(b, module, m, target, optimize, b.path(app_dir), std.fs.path.basename(app_dir));
+}
+
+/// Gives `module` kete, and kete_vc4 (Dazzle's windows and drawing for
+/// it, and its shared widgets), with kete's icon font cut down to the
+/// icons named in `app_dir` and kete_vc4. `b` is Dazzle's build (its own,
+/// or the dependency's).
+fn keteFor(b: *std.Build, module: *std.Build.Module, m: Modules, target: std.Build.ResolvedTarget, optimize: std.builtin.Optimize, app_dir: std.Build.LazyPath, name: []const u8) *std.Build.Module {
     const dep = b.dependency("kete", .{});
-    const icon_font = kete_build.addIconFontScanned(dep.builder, &.{ b.path(app_dir), b.path("src/kete_vc4") });
-    const kete = kete_build.createModules(dep.builder, b.fmt("kete-{s}-{s}", .{ std.fs.path.basename(app_dir), @tagName(target.result.cpu.arch) }), target, optimize, icon_font, .{
+    const icon_font = kete_build.addIconFontScanned(dep.builder, &.{ app_dir, b.path("src/kete_vc4") });
+    const kete = kete_build.createModules(dep.builder, b.fmt("kete-{s}-{s}", .{ name, @tagName(target.result.cpu.arch) }), target, optimize, icon_font, .{
         .backends = false,
         .embed_fonts = false,
     }).kete;
@@ -1306,27 +1325,148 @@ fn addQemu(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) void {
     step.dependOn(&qemu.step);
 }
 
-pub fn build(b: *std.Build) void {
-    // The Raspberry Pi Zero / Zero W: BCM2835, ARM1176JZF-S with VFPv2. The
-    // same programs run on the Pi 3 A+'s Cortex-A53 (in AArch32, which runs
-    // ARMv6 code). No libc: the programs talk to the kernel through raw
-    // system calls.
-    const target = b.resolveTargetQuery(.{
+// --- Apps in repositories of their own -------------------------------------------------
+
+/// An app in a repository of its own, built with Dazzle's modules and
+/// tools: its build.zig.zon depends on Dazzle (as "dazzle"), and its
+/// build.zig is
+///
+///     const dazzle = @import("dazzle");
+///     pub fn build(b: *std.Build) void {
+///         _ = dazzle.addApp(b, .{ .name = "motu", .icon = .landscape, ... });
+///     }
+///
+/// `zig build` makes its program (zig-out/bin), its archive and catalogue
+/// (zig-out/apps: published as its repository's release, which Dazzle's
+/// catalogue lists among its "sources"), signed with `-Dsigning-key` or
+/// DAZZLE_SIGNING_KEY as Dazzle's apps are; `zig build test` runs its
+/// tests on the build machine.
+pub const AppSpec = struct {
+    /// The program's name, and the app's (in /data/apps).
+    name: []const u8,
+    /// Its main.zig, in the app's repository; its icon.png (64 by 64) and
+    /// screenshot.png (if it has one) are beside it.
+    root_source_file: []const u8 = "src/main.zig",
+    /// Its icon in the dock.
+    icon: Icon,
+    /// What Settings' Software says of it.
+    title: []const u8,
+    description: []const u8,
+    about: []const u8 = "",
+    /// The kinds of files it opens (MIME types), for Files to offer it.
+    handles: []const []const u8 = &.{},
+    /// Third-party software built into it (Dazzle's notices/ sections).
+    notices: []const []const u8 = &.{"MaterialIcons"},
+    /// Its shader programs: Zig sources in its repository, compiled by
+    /// Dazzle's shader compiler and embedded as
+    /// `@embedFile("<name>.shader")` (named after the source, unless
+    /// given a name).
+    shaders: []const AppShader = &.{},
+};
+
+pub const AppShader = struct {
+    source: []const u8,
+    name: ?[]const u8 = null,
+    /// The render state that changes its code: "--depth-test",
+    /// "--blend=source-over" and so on (see tools/shaderc.zig).
+    args: []const []const u8 = &.{},
+};
+
+/// What `addApp` made, for an app's build to add to: its program's module
+/// on the Pi and on the build machine (for its tests), and its program.
+pub const AppParts = struct {
+    exe: *std.Build.Step.Compile,
+    module: *std.Build.Module,
+    host_module: *std.Build.Module,
+    /// Dazzle (the dependency), for files of its an app's build needs.
+    dazzle: *std.Build.Dependency,
+};
+
+/// Builds an app in a repository of its own (see `AppSpec`): `zig build`
+/// and `zig build test` in its repository.
+pub fn addApp(b: *std.Build, spec: AppSpec) AppParts {
+    const dazzle = b.dependency("dazzle", .{ .sdk = true });
+    const d = dazzle.builder;
+    const target = piTarget(b);
+    const optimize, const test_optimize = optimizeModes(b);
+    const gfx_shaders = shadersOf(d, .gfx);
+    const icon_font = addIconFont(d);
+    const root = b.path(spec.root_source_file);
+    const app_dir = b.path(std.fs.path.dirname(spec.root_source_file) orelse ".");
+    var app_shaders: std.ArrayList(ShaderBlob) = .empty;
+    for (spec.shaders) |sh| {
+        const name = sh.name orelse std.fs.path.stem(sh.source);
+        app_shaders.append(b.allocator, shaderBlob(d, name, .app, b.path(sh.source), sh.args)) catch @panic("OOM");
+    }
+
+    const pi = addModules(d, target, optimize, gfx_shaders, icon_font);
+    const module = programModule(d, root, target, optimize, pi, true);
+    addShaderImports(module, app_shaders.items, .app);
+    _ = keteFor(d, module, pi, target, optimize, app_dir, spec.name);
+    const exe = b.addExecutable(.{ .name = spec.name, .root_module = module });
+    b.installArtifact(exe);
+
+    const dir = std.fs.path.dirname(spec.root_source_file) orelse ".";
+    const shot = b.fmt("{s}/screenshot.png", .{dir});
+    const apps = b.allocator.dupe(App, &.{.{
+        .exe = exe,
+        .icon = spec.icon,
+        .title = spec.title,
+        .description = spec.description,
+        .about = spec.about,
+        .handles = spec.handles,
+        .notices = spec.notices,
+        .icon_png = b.path(b.fmt("{s}/icon.png", .{dir})),
+        .screenshot = if (exists(b, shot)) b.path(shot) else null,
+    }}) catch @panic("OOM");
+    const apps_step = b.step("apps", "Build the app's archive and its catalogue (zig-out/apps)");
+    apps_step.dependOn(appArchives(b, d, apps, .{}));
+    b.getInstallStep().dependOn(apps_step);
+
+    // Its tests, on the build machine, drawing text in the system font.
+    const host = addModules(d, b.graph.host, test_optimize, gfx_shaders, icon_font);
+    const host_module = programModule(d, root, b.graph.host, test_optimize, host, false);
+    addShaderImports(host_module, app_shaders.items, .app);
+    host_module.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = d.path("fonts/FiraSans-Regular.ttf") });
+    _ = keteFor(d, host_module, host, b.graph.host, test_optimize, app_dir, spec.name);
+    const test_step = b.step("test", "Run the app's tests on the build machine");
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host_module })).step);
+
+    return .{ .exe = exe, .module = module, .host_module = host_module, .dazzle = dazzle };
+}
+
+/// The Raspberry Pi Zero / Zero W: BCM2835, ARM1176JZF-S with VFPv2. The
+/// same programs run on the Pi 3 A+'s Cortex-A53 (in AArch32, which runs
+/// ARMv6 code). No libc: the programs talk to the kernel through raw
+/// system calls.
+fn piTarget(b: *std.Build) std.Build.ResolvedTarget {
+    return b.resolveTargetQuery(.{
         .cpu_arch = .arm,
         .cpu_model = .{ .explicit = &std.Target.arm.cpu.arm1176jzf_s },
         .os_tag = .linux,
         .abi = .eabihf,
     });
-    // The Pi programs are optimized for speed unless told otherwise (a
-    // Debug build is far too slow on a Pi Zero); host tests default to
-    // Debug, for their safety checks.
+}
+
+/// The Pi programs are optimized for speed unless told otherwise (a Debug
+/// build is far too slow on a Pi Zero); host tests default to Debug, for
+/// their safety checks.
+fn optimizeModes(b: *std.Build) struct { std.builtin.Optimize, std.builtin.Optimize } {
     const explicit_optimize = b.option(std.builtin.Optimize, "optimize", "Optimization mode (default: fast for the Pi, debug for host tests)");
     const optimize: std.builtin.Optimize = explicit_optimize orelse switch (b.graph.release_mode) {
         .off, .any, .fast => .fast,
         .small => .small,
         .safe => .safe,
     };
-    const test_optimize = explicit_optimize orelse .debug;
+    return .{ optimize, explicit_optimize orelse .debug };
+}
+
+pub fn build(b: *std.Build) void {
+    // An app's build (see `addApp`) wants only Dazzle's modules and tools,
+    // not the system and its image.
+    if (b.option(bool, "sdk", "Only what apps in repositories of their own build with (see addApp)") orelse false) return;
+    const target = piTarget(b);
+    const optimize, const test_optimize = optimizeModes(b);
 
     const shaders = addShaders(b);
     const icon_font = addIconFont(b);
@@ -1389,14 +1529,6 @@ pub fn build(b: *std.Build) void {
         .root_module = chat_module,
     });
     const install_chat = b.addInstallArtifact(chat_exe, .{});
-    const motu_module = addProgramModule(b, "src/apps/motu/main.zig", target, optimize, pi, shaders, true);
-    addMotuTiles(b, motu_module);
-    _ = addKete(b, motu_module, pi, target, optimize, "src/apps/motu");
-    const motu_exe = b.addExecutable(.{
-        .name = "motu",
-        .root_module = motu_module,
-    });
-    const install_motu = b.addInstallArtifact(motu_exe, .{});
     const setup_module = addProgramModule(b, "src/apps/setup/main.zig", target, optimize, pi, shaders, true);
     _ = addKete(b, setup_module, pi, target, optimize, "src/apps/setup");
     const setup_exe = b.addExecutable(.{
@@ -1499,7 +1631,6 @@ pub fn build(b: *std.Build) void {
         .{ .exe = files_exe, .icon = .folder, .title = "Files", .description = "Browse your files", .about = "Browse the files on this computer and on USB drives plugged into it: open them with the app that opens their kind, see photos, and make, rename, copy, move and delete files and folders." },
         .{ .exe = camera_exe, .icon = .photo_camera, .title = "Camera", .description = "Take photos and videos", .about = "Take photos and record videos with a Raspberry Pi camera module, with a live view to frame them. They are kept in your files, to see and share." },
         .{ .exe = text_editor_exe, .icon = .edit_note, .title = "Text Editor", .description = "Edit text files", .about = "Write and edit plain text files: notes, lists, code and configuration. It opens text files from Files, and keeps what you write as you go.", .handles = &.{"text/plain"} },
-        .{ .exe = motu_exe, .icon = .landscape, .title = "Motu", .description = "Build islands out of blocks", .about = "Build on a tropical atoll of blocks: shape the islands, build huts, paddle a canoe across the lagoon, and look out to sea with a telescope. Islands are kept between games, and friends on the same network can play on yours." },
         .{ .exe = logger_exe, .icon = .show_chart, .title = "Data Logger", .description = "Record inputs from the GPIO pins", .about = "Record what the GPIO pins read over time, from buttons, switches and sensors, and see it drawn as a chart as it comes in." },
         .{ .exe = chat_exe, .icon = .chat, .title = "Chat", .description = "Chat with others on your network in rooms", .about = "Talk with others on the same network in rooms, without an account or the internet: anyone running Chat nearby can join." },
         .{ .exe = maps_exe, .icon = .public, .title = "Maps", .description = "Explore the Earth on a 3D globe", .about = "Explore the Earth on a 3D globe: spin it, zoom in to countries and see their names and borders." },
@@ -1529,7 +1660,7 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(apps_step);
     const install_initramfs = b.addInstallFile(initramfs, "initramfs.cpio");
     const programs_step = b.step("programs", "Build just the programs (zig-out/bin) and zig-out/initramfs.cpio");
-    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_settings.step, &install_files.step, &install_camera.step, &install_text_editor.step, &install_logger.step, &install_chat.step, &install_motu.step, &install_maps.step, &install_terminal.step, &install_develop.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
+    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_settings.step, &install_files.step, &install_camera.step, &install_text_editor.step, &install_logger.step, &install_chat.step, &install_maps.step, &install_terminal.step, &install_develop.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
         programs_step.dependOn(st);
         b.getInstallStep().dependOn(st);
     }
@@ -1592,10 +1723,6 @@ pub fn build(b: *std.Build) void {
     // Kete's frames, drawn with Dazzle's shaders in the QPU simulator.
     const host_kete_vc4 = addKete(b, host_text_editor, host, b.graph.host, test_optimize, "src/apps/text_editor");
     host_kete_vc4.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
-    const host_motu = addProgramModule(b, "src/apps/motu/main.zig", b.graph.host, test_optimize, host, shaders, false);
-    addMotuTiles(b, host_motu);
-    host_motu.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
-    _ = addKete(b, host_motu, host, b.graph.host, test_optimize, "src/apps/motu");
     const host_logger = addProgramModule(b, "src/apps/logger/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_logger.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     _ = addKete(b, host_logger, host, b.graph.host, test_optimize, "src/apps/logger");
@@ -1638,7 +1765,6 @@ pub fn build(b: *std.Build) void {
         host_text_editor,
         host_logger,
         host_chat,
-        host_motu,
         host_setup,
         host_maps,
         host_terminal,
@@ -1649,6 +1775,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(t).step);
     }
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hostTool(b, "mkapp").root_module })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hostTool(b, "mkcatalogue").root_module })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hostTool(b, "mkimage").root_module })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hostTool(b, "mkmap").root_module })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hostTool(b, "mkworld").root_module })).step);
