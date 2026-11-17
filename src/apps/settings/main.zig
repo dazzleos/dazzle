@@ -159,6 +159,8 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
     defer updater.deinit();
     var icons: view.software_view.IconSet = .init(gpa);
     defer icons.deinit();
+    var screenshots: view.software_view.Screenshots = .init(gpa);
+    defer screenshots.deinit();
     var icons_dirty = true;
     var video_memory_failed = false;
     // Remote control, as Settings last saw (or set) it.
@@ -532,6 +534,7 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
             }
             if (icons_dirty) {
                 icons_dirty = false;
+                screenshots.deinit();
                 icons.reload(
                     store.os_icon_file,
                     store.update_icon_file,
@@ -563,6 +566,7 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
                     .installed = installed[0..catalogue.len],
                     .updatable = updatable[0..catalogue.len],
                     .icons = icons.appIcons(catalogue.len),
+                    .screenshots = &screenshots,
                     .busy = apps.busy(),
                     .message = apps.message(),
                     .source = server_url,

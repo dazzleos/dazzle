@@ -38,6 +38,8 @@ pub const Apps = struct {
     /// uninstalled, not on disk or a newer version is available); null
     /// for the fallback icon.
     icons: []const ?*const gfx.Image = &.{},
+    /// Apps' screenshots, decoded as their pages are shown.
+    screenshots: ?*Screenshots = null,
     /// The app being installed ("" for the list itself, "*" for updating
     /// all); null if nothing is under way.
     busy: ?[]const u8 = null,
@@ -349,13 +351,12 @@ fn detailsRows(self: *const Settings, b: Builder, state: *State, i: usize, busy:
     }) catch &.{} })) catch {};
     if (fixed) rows.append(a, cx.make(kete.Text{ .text = locale.text("Parental controls stop apps being installed or removed"), .style = .{ .size = 15, .color = t.on_surface_variant } })) catch {};
     // Its screenshot, as the catalogue was got.
-    if (app.screenshot.len > 0) {
-        const path = std.fmt.allocPrint(a, "{s}/{s}.png", .{ store.screenshots_dir, app.name }) catch "";
+    if (app.screenshot.len > 0) if (apps.screenshots) |shots| if (shots.get(app.name)) |img| {
         rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 8 }, .child = cx.make(kete.Align{ .alignment = .center, .height_factor = 1, .child = cx.make(kete.SizedBox{
             .height = 360,
-            .child = cx.make(kete.Image{ .source = .{ .file = path } }),
+            .child = cx.make(kete.Image{ .source = .{ .image = img } }),
         }) }) })) catch {};
-    }
+    };
     if (app.about.len > 0) rows.append(a, cx.make(kete.Text{ .text = app.about, .style = .{ .size = 16, .color = t.on_surface } })) catch {};
 }
 
@@ -702,6 +703,47 @@ fn softwareIcon(cx: *kete.BuildContext, image: ?*const gfx.Image) kete.Widget {
     }
     return cx.make(kete.SizedBox{ .width = 64, .height = 64, .child = cx.make(kete.Align{ .child = cx.make(kete.Icon{ .icon = .apps, .size = 48, .color = t.on_surface_variant }) }) });
 }
+
+/// The screenshot of the app whose page is shown, decoded from
+/// `store.screenshots_dir` when it is first wanted (and again after the
+/// catalogue is got, as it may have changed).
+pub const Screenshots = struct {
+    gpa: std.mem.Allocator,
+    dir: []const u8 = store.screenshots_dir,
+    name_buf: [64]u8 = undefined,
+    name_len: usize = 0,
+    tried: bool = false,
+    decoded: ?gfx.png.Decoded = null,
+    image: gfx.Image = undefined,
+
+    pub fn init(gpa: std.mem.Allocator) Screenshots {
+        return .{ .gpa = gpa };
+    }
+
+    pub fn deinit(s: *Screenshots) void {
+        if (s.decoded) |d| s.gpa.free(d.pixels);
+        s.decoded = null;
+        s.tried = false;
+    }
+
+    /// `name`'s screenshot, if it has one that can be read.
+    pub fn get(s: *Screenshots, name: []const u8) ?*const gfx.Image {
+        if (!s.tried or !std.mem.eql(u8, s.name_buf[0..s.name_len], name)) {
+            s.deinit();
+            s.tried = true;
+            s.name_len = @min(name.len, s.name_buf.len);
+            @memcpy(s.name_buf[0..s.name_len], name[0..s.name_len]);
+            var path_buf: [256]u8 = undefined;
+            const path = std.mem.printSentinel(&path_buf, "{s}/{s}.png", .{ s.dir, name }, 0) catch return null;
+            const bytes = sys_mod.readFileAlloc(s.gpa, path, store.max_screenshot) catch return null;
+            defer s.gpa.free(bytes);
+            const d = gfx.png.decode(s.gpa, bytes) catch return null;
+            s.decoded = d;
+            s.image = .init(d.pixels, d.width, d.height);
+        }
+        return if (s.decoded != null) &s.image else null;
+    }
+};
 
 pub const max_icons = 64;
 
@@ -1230,4 +1272,30 @@ test "subscribing and removing Ed25519 signing keys in the software settings pop
     const del_icon = view.findIcon(u.menu_root.?, .delete).?;
     view.click(u, view.up(del_icon, kete.IconButton).?);
     try testing.expectEqualStrings(&pub_hex, actions.unsubscribe_key.?.slice());
+}
+
+test "an app's screenshot is decoded when its page is shown, and only once" {
+    const linux = std.os.linux;
+    var dir_buf: [64]u8 = undefined;
+    const root = try std.mem.printSentinel(&dir_buf, "/tmp/dazzle-shots-test-{d}", .{linux.getpid()}, 0);
+    _ = linux.mkdir(root, 0o755);
+    defer sys_mod.files.removeTree(root);
+    var pixels: [8 * 4]u32 = undefined;
+    @memset(&pixels, 0xff336699);
+    const png = try gfx.png.encodeRgba(testing.allocator, &pixels, 8, 4);
+    defer testing.allocator.free(png);
+    var path_buf: [128]u8 = undefined;
+    try sys_mod.files.writeNew(try std.mem.printSentinel(&path_buf, "{s}/dazzle-demo.png", .{root}, 0), png);
+
+    var shots: Screenshots = .init(testing.allocator);
+    shots.dir = root;
+    defer shots.deinit();
+    const img = shots.get("dazzle-demo").?;
+    try testing.expectEqual(@as(u32, 8), img.width);
+    try testing.expectEqual(@as(u32, 4), img.height);
+    // The same one again, as it was.
+    try testing.expectEqual(img, shots.get("dazzle-demo").?);
+    // One without a screenshot.
+    try testing.expect(shots.get("dazzle-other") == null);
+    try testing.expect(shots.get("dazzle-demo") != null);
 }
