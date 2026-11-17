@@ -50,16 +50,21 @@ pub const Downtime = struct {
 /// What a parent chooses.
 pub const Limits = struct {
     /// Minutes a day on weekdays, and on Saturdays and Sundays (null: as
-    /// long as they like).
-    weekday: ?u16 = 120,
-    weekend: ?u16 = 180,
+    /// long as they like). None, to start with.
+    weekday: ?u16 = null,
+    weekend: ?u16 = null,
     /// When it may not be used (null: any time).
-    downtime: ?Downtime = .{ .start = 20 * 60, .end = 7 * 60 },
+    downtime: ?Downtime = null,
     /// Apps may not be installed or removed.
-    block_software: bool = true,
+    block_software: bool = false,
 
     /// The most minutes a day can have.
     pub const most_minutes = 24 * 60;
+
+    /// Whether it limits anything.
+    pub fn any(l: Limits) bool {
+        return l.weekday != null or l.weekend != null or l.downtime != null or l.block_software;
+    }
 
     pub fn valid(l: Limits) bool {
         if (l.weekday) |m| if (m > most_minutes) return false;

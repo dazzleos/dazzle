@@ -96,7 +96,6 @@ pub const france = [_][2][]const u8{
     .{ "Board", "Carte" },
     .{ "Software", "Logiciels" },
     .{ "Resources", "Ressources" },
-    .{ "Parental", "Famille" },
     .{ "Debug", "Débogage" },
     .{ "Address", "Adresse" },
     .{ "Address/prefix", "Adresse/préfixe" },
@@ -344,6 +343,10 @@ pub const france = [_][2][]const u8{
     .{ "Its language pack is installed", "Son module linguistique est installé" },
     .{ "Change", "Modifier" },
     .{ "No time zone matches", "Aucun fuseau horaire ne correspond" },
+    .{ "Limits", "Limites" },
+    .{ "Enable limits", "Activer les limites" },
+    .{ "Disable limits", "Désactiver les limites" },
+    .{ "This computer will have these limits, and a password will be needed to turn them off.", "Cet ordinateur aura ces limites, et un mot de passe sera nécessaire pour les désactiver." },
 };
 
 /// Canada's, where it differs.

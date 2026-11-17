@@ -111,7 +111,6 @@ pub const latin_america = [_][2][]const u8{
     .{ "Software", "Software" },
     .{ "Resources", "Recursos" },
     // Short, for the list of pages (the page itself says "Control parental").
-    .{ "Parental", "Familia" },
     .{ "Debug", "Depuración" },
 
     // Common words.
@@ -382,6 +381,10 @@ pub const latin_america = [_][2][]const u8{
     .{ "Its language pack is installed", "Su paquete de idioma está instalado" },
     .{ "Change", "Cambiar" },
     .{ "No time zone matches", "Ninguna zona horaria coincide" },
+    .{ "Limits", "Límites" },
+    .{ "Enable limits", "Activar límites" },
+    .{ "Disable limits", "Desactivar límites" },
+    .{ "This computer will have these limits, and a password will be needed to turn them off.", "Esta computadora tendrá estos límites, y se necesitará una contraseña para desactivarlos." },
 };
 
 /// Spain's, where it differs.

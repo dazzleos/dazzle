@@ -97,7 +97,6 @@ pub const germany = [_][2][]const u8{
     .{ "Board", "Platine" },
     .{ "Software", "Software" },
     .{ "Resources", "Ressourcen" },
-    .{ "Parental", "Familie" },
     .{ "Debug", "Debugging" },
     .{ "Address", "Adresse" },
     .{ "Address/prefix", "Adresse/Präfix" },
@@ -345,4 +344,8 @@ pub const germany = [_][2][]const u8{
     .{ "Its language pack is installed", "Sein Sprachpaket ist installiert" },
     .{ "Change", "Ändern" },
     .{ "No time zone matches", "Keine Zeitzone passt" },
+    .{ "Limits", "Limits" },
+    .{ "Enable limits", "Limits aktivieren" },
+    .{ "Disable limits", "Limits deaktivieren" },
+    .{ "This computer will have these limits, and a password will be needed to turn them off.", "Dieser Computer hat dann diese Limits, und zum Ausschalten wird ein Passwort benötigt." },
 };

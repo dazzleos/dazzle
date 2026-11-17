@@ -96,7 +96,6 @@ pub const brazil = [_][2][]const u8{
     .{ "Board", "Placa" },
     .{ "Software", "Software" },
     .{ "Resources", "Recursos" },
-    .{ "Parental", "Família" },
     .{ "Debug", "Depuração" },
     .{ "Address", "Endereço" },
     .{ "Address/prefix", "Endereço/prefixo" },
@@ -344,6 +343,10 @@ pub const brazil = [_][2][]const u8{
     .{ "Its language pack is installed", "Seu pacote de idioma está instalado" },
     .{ "Change", "Alterar" },
     .{ "No time zone matches", "Nenhum fuso horário corresponde" },
+    .{ "Limits", "Limites" },
+    .{ "Enable limits", "Ativar limites" },
+    .{ "Disable limits", "Desativar limites" },
+    .{ "This computer will have these limits, and a password will be needed to turn them off.", "Este computador terá estes limites, e será preciso uma senha para desativá-los." },
 };
 
 /// Portugal's, where it differs.

@@ -96,7 +96,6 @@ pub const japan = [_][2][]const u8{
     .{ "Board", "ボード" },
     .{ "Software", "ソフト" },
     .{ "Resources", "リソース" },
-    .{ "Parental", "保護者" },
     .{ "Debug", "デバッグ" },
     .{ "Address", "アドレス" },
     .{ "Address/prefix", "アドレス/プレフィックス" },
@@ -344,4 +343,8 @@ pub const japan = [_][2][]const u8{
     .{ "Its language pack is installed", "言語パックはインストール済みです" },
     .{ "Change", "変更" },
     .{ "No time zone matches", "一致するタイムゾーンがありません" },
+    .{ "Limits", "制限" },
+    .{ "Enable limits", "制限を有効にする" },
+    .{ "Disable limits", "制限を無効にする" },
+    .{ "This computer will have these limits, and a password will be needed to turn them off.", "このコンピューターにこれらの制限がかかり、解除するにはパスワードが必要になります。" },
 };

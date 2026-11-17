@@ -1,7 +1,8 @@
-//! The Parental controls page (see `sys.parental`; the system manager
-//! keeps them). While they are off: how long the computer may be used on
-//! weekdays and at weekends, downtime, and whether apps may
-//! be installed or removed; turning them on asks for a password, twice.
+//! The Limits page: parental controls (see `sys.parental`; the system
+//! manager keeps them). While they are off: how long the computer may be
+//! used on weekdays and at weekends (unlimited, to start with), downtime,
+//! and whether apps may be installed or removed; and, once something is
+//! limited, Enable limits, which asks for a password, twice.
 //! While they are on: not those, but how today goes, for whoever is using
 //! it to see (the time used, what is left, when it locks), and for a
 //! parent, with the password, more time today or turning them off.
@@ -20,7 +21,7 @@ const Builder = view.Builder;
 const Limits = sys.parental.Limits;
 const Password = info.Str(sys.parental.max_password);
 
-pub const label = "Parental";
+pub const label = "Limits";
 pub const icon: kete.IconName = .family_restroom;
 
 /// What a parent asks for, with the password.
@@ -79,9 +80,6 @@ pub const State = struct {
         st.mismatch = false;
     }
 
-    fn setOn(st: *State, on: bool) void {
-        if (on) st.open(.turn_on) else st.open(.none);
-    }
 };
 
 /// Durations to choose from, in minutes (0: not at all; null: unlimited).
@@ -105,7 +103,6 @@ pub fn build(self: *const Settings, b: Builder, st: *State) kete.Widget {
         // day's time is used, what is left (more with the password), and
         // when downtime comes; and turning parental controls off.
         const now = p.now(sys.realtimeSec());
-        rows.append(a, cx.make(kete.Text{ .text = locale.text("Parental controls"), .style = .{ .size = 24, .color = t.on_surface }, .wrap = false })) catch {};
         if (p.allowed) |allowed| {
             const fraction: f32 = if (allowed == 0) 1 else @min(1, @as(f32, @floatFromInt(p.used)) / @as(f32, @floatFromInt(allowed)));
             rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = a.dupe(kete.Widget, &.{
@@ -126,25 +123,24 @@ pub fn build(self: *const Settings, b: Builder, st: *State) kete.Widget {
             rows.append(a, b.value(kete_vc4.textf(cx, "Downtime in {s}", .{durationAnd(&dbuf, @intCast(@divFloor(secs + 59, 60)))}))) catch {};
         };
         rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 12 }, .child = cx.make(kete.Row{ .children = a.dupe(kete.Widget, &.{
-            cx.make(kete.OutlinedButton{ .label = locale.text("Turn off parental controls"), .on_press = if (self.actions != null) .of(st, State.openTurnOff) else null }),
+            cx.make(kete.OutlinedButton{ .label = locale.text("Disable limits"), .on_press = if (self.actions != null) .of(st, State.openTurnOff) else null }),
         }) catch &.{} }) })) catch {};
         return b.page(rows.items);
     }
-    // Off: the limits to choose, and turning them on.
-    // Titles, each with its switch at the right.
-    rows.append(a, titleRow(cx, locale.text("Parental controls"), 24, st.form == .turn_on, if (self.actions != null) .of(st, State.setOn) else null)) catch {};
-    const limited = st.draft.weekday != null or st.draft.weekend != null;
-    rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 12 }, .child = titleRow(cx, locale.text("Daily limits"), 20, limited, .of(st, setLimited)) })) catch {};
-    if (limited) {
-        rows.append(a, choiceRow(b, locale.text("Weekdays"), durationOptions(cx), indexOfDuration(st.draft.weekday), .of(st, setWeekday))) catch {};
-        rows.append(a, choiceRow(b, locale.text("Weekends"), durationOptions(cx), indexOfDuration(st.draft.weekend), .of(st, setWeekend))) catch {};
-    }
-    rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 20 }, .child = titleRow(cx, locale.text("Downtime"), 20, st.draft.downtime != null, .of(st, setDowntime)) })) catch {};
+    // Off: the limits to choose (none, to start with), and enabling them.
+    rows.append(a, choiceRow(b, locale.text("Weekdays"), durationOptions(cx), indexOfDuration(st.draft.weekday), .of(st, setWeekday))) catch {};
+    rows.append(a, choiceRow(b, locale.text("Weekends"), durationOptions(cx), indexOfDuration(st.draft.weekend), .of(st, setWeekend))) catch {};
+    rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 12 }, .child = cx.make(kete.SwitchRow{ .value = st.draft.downtime != null, .on_changed = .of(st, setDowntime), .label = locale.text("Downtime") }) })) catch {};
     if (st.draft.downtime) |d| {
         rows.append(a, choiceRow(b, locale.text("From"), timeOptions(cx), d.start / 30, .of(st, setDowntimeStart))) catch {};
         rows.append(a, choiceRow(b, locale.text("To"), timeOptions(cx), d.end / 30, .of(st, setDowntimeEnd))) catch {};
     }
-    rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 20 }, .child = titleRow(cx, locale.text("Stop apps being installed or removed"), 18, st.draft.block_software, .of(st, setBlockSoftware)) })) catch {};
+    rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 12 }, .child = cx.make(kete.SwitchRow{ .value = st.draft.block_software, .on_changed = .of(st, setBlockSoftware), .label = locale.text("Stop apps being installed or removed") }) })) catch {};
+    // Enabling them: once something is limited.
+    rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 24 }, .child = cx.make(kete.Row{ .children = a.dupe(kete.Widget, &.{
+        cx.make(kete.FilledButton{ .label = locale.text("Enable limits"), .on_press = if (self.actions != null and st.draft.any()) .of(st, State.openTurnOn) else null }),
+    }) catch &.{} }) })) catch {};
+    rows.append(a, cx.make(kete.Text{ .text = locale.text("This computer will have these limits, and a password will be needed to turn them off."), .style = .{ .size = 15, .color = t.on_surface_variant } })) catch {};
     return b.page(rows.items);
 }
 
@@ -176,8 +172,8 @@ pub fn withDialog(self: *const Settings, b: Builder, st: *State, child: kete.Wid
     return cx.make(kete.Dialog{
         .icon = .lock,
         .title = switch (st.form) {
-            .turn_on => locale.text("Turn on parental controls"),
-            .turn_off => locale.text("Turn off parental controls"),
+            .turn_on => locale.text("Enable limits"),
+            .turn_off => locale.text("Disable limits"),
             else => locale.text("More time today"),
         },
         .description = switch (st.form) {
@@ -197,15 +193,6 @@ pub fn withDialog(self: *const Settings, b: Builder, st: *State, child: kete.Wid
         .width = 400,
         .child = child,
     });
-}
-
-/// A title, its switch at the right.
-fn titleRow(cx: *kete.BuildContext, text: []const u8, size: f32, value: bool, on_changed: ?kete.ValueCallback(bool)) kete.Widget {
-    return cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = cx.arena.dupe(kete.Widget, &.{
-        cx.make(kete.Text{ .text = text, .style = .{ .size = size, .color = cx.theme().on_surface }, .wrap = false }),
-        cx.make(kete.Expanded{ .child = cx.make(kete.SizedBox.empty) }),
-        cx.make(kete.Switch{ .value = value, .on_changed = on_changed }),
-    }) catch &.{} });
 }
 
 fn choiceRow(b: Builder, name: []const u8, options: []const kete.MenuItem, selected: ?usize, on: kete.ValueCallback(usize)) kete.Widget {
@@ -244,12 +231,6 @@ fn submitBonus(st: *State) void {
     }
     actions.parental_bonus = .{ .password = st.password, .minutes = st.bonus };
     st.open(.none);
-}
-
-/// Daily limits, or none (the time unlimited).
-fn setLimited(st: *State, on: bool) void {
-    st.draft.weekday = if (on) 120 else null;
-    st.draft.weekend = if (on) 180 else null;
 }
 
 fn setWeekday(st: *State, i: usize) void {
@@ -362,14 +343,23 @@ test "off: the limits are chosen, and turning on asks for the password twice" {
     u.frame(1600, 900, 0, settings);
     _ = view.showPage(u, .parental);
     u.frame(1600, 900, 1, settings);
+    // No title or switch for the whole: the limits, unlimited to start
+    // with, and Enable limits, not yet to be pressed.
+    try testing.expect(view.findText(u.root.?, "Parental controls") == null);
     try testing.expect(view.findText(u.root.?, "Weekdays") != null);
-    try testing.expect(view.findText(u.root.?, "2 hours") != null);
+    try testing.expect(view.findText(u.root.?, "Unlimited") != null);
     try testing.expect(view.findText(u.root.?, "Stop apps being installed or removed") != null);
-    // Turned on: the form, which wants the same password twice.
+    try testing.expect(view.findText(u.root.?, "This computer will have these limits, and a password will be needed to turn them off.") != null);
+    const enable = view.up(view.findText(u.root.?, "Enable limits").?, kete.FilledButton).?;
+    try testing.expect(enable.widget.as(kete.FilledButton).?.on_press == null);
+    // A limit chosen: it can be.
     const st = &view.settingsState(u).?.parental;
-    st.setOn(true);
+    setWeekday(st, 2);
     u.frame(1600, 900, 2, settings);
-    try testing.expect(view.findText(u.root.?, "Turn on parental controls") != null);
+    view.click(u, view.up(view.findText(u.root.?, "Enable limits").?, kete.FilledButton).?);
+    u.frame(1600, 900, 3, settings);
+    // The form, which wants the same password twice.
+    try testing.expect(view.findText(u.root.?, "Enable limits") != null);
     try testing.expect(view.findType(u.root.?, kete.Dialog) != null);
     st.setPassword("sesame");
     st.setAgain("sesamE");
@@ -405,7 +395,7 @@ test "on: today's use, not the settings; a parent turns them off or gives more t
     try testing.expect(view.findText(u.root.?, "28%") != null);
     try testing.expect(view.findText(u.root.?, "1 hour and 48 minutes remaining today") != null);
     try testing.expect(view.findText(u.root.?, "Add time") != null);
-    try testing.expect(view.findText(u.root.?, "Turn off parental controls") != null);
+    try testing.expect(view.findText(u.root.?, "Disable limits") != null);
     try testing.expect(view.findText(u.root.?, "Weekdays") == null);
     try testing.expect(view.findType(u.root.?, kete.DropdownMenu) == null);
     try testing.expect(view.findText(u.root.?, "Stop apps being installed or removed") == null);

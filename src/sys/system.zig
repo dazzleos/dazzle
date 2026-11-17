@@ -707,7 +707,7 @@ test "requests and reports go through the socket" {
     var r: Report = .{ .storage = .preparing, .progress = 42, .hostname = Hostname.parse("awesome-elephant").? };
     var buf: [512]u8 = undefined;
     const text = r.write(&buf);
-    try testing.expectEqualStrings("storage preparing 42\nhostname awesome-elephant\nversion a -\nversion b -\nupdate none\nlocale en-US us UTC\nvideo_memory - -\nlog_server off\nparental off 120 180 1200 420 block\nparental_status none - - 0 - 0 0\nend\n", text);
+    try testing.expectEqualStrings("storage preparing 42\nhostname awesome-elephant\nversion a -\nversion b -\nupdate none\nlocale en-US us UTC\nvideo_memory - -\nlog_server off\nparental off - - - - allow\nparental_status none - - 0 - 0 0\nend\n", text);
     const back = Report.parse(text).?;
     try testing.expectEqual(StorageState.preparing, back.storage);
     try testing.expectEqual(@as(u8, 42), back.progress);

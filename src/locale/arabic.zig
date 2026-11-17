@@ -97,7 +97,6 @@ pub const arabic = [_][2][]const u8{
     .{ "Board", "اللوحة" },
     .{ "Software", "البرامج" },
     .{ "Resources", "الموارد" },
-    .{ "Parental", "الأسرة" },
     .{ "Debug", "التصحيح" },
     .{ "Address", "العنوان" },
     .{ "Address/prefix", "العنوان/البادئة" },
@@ -345,4 +344,8 @@ pub const arabic = [_][2][]const u8{
     .{ "Its language pack is installed", "حزمة اللغة مثبتة" },
     .{ "Change", "تغيير" },
     .{ "No time zone matches", "لا توجد منطقة زمنية مطابقة" },
+    .{ "Limits", "الحدود" },
+    .{ "Enable limits", "تفعيل الحدود" },
+    .{ "Disable limits", "إيقاف الحدود" },
+    .{ "This computer will have these limits, and a password will be needed to turn them off.", "سيخضع هذا الكمبيوتر لهذه الحدود، وستلزم كلمة مرور لإيقافها." },
 };

@@ -96,7 +96,6 @@ pub const simplified = [_][2][]const u8{
     .{ "Board", "主板" },
     .{ "Software", "软件" },
     .{ "Resources", "资源" },
-    .{ "Parental", "家长控制" },
     .{ "Debug", "调试" },
     .{ "Address", "地址" },
     .{ "Address/prefix", "地址/前缀" },
@@ -344,4 +343,8 @@ pub const simplified = [_][2][]const u8{
     .{ "Its language pack is installed", "语言包已安装" },
     .{ "Change", "更改" },
     .{ "No time zone matches", "没有匹配的时区" },
+    .{ "Limits", "限制" },
+    .{ "Enable limits", "启用限制" },
+    .{ "Disable limits", "停用限制" },
+    .{ "This computer will have these limits, and a password will be needed to turn them off.", "这台电脑将受这些限制，关闭它们需要密码。" },
 };
