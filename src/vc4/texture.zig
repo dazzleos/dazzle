@@ -314,42 +314,107 @@ pub fn uploadMipmaps(gpa: std.mem.Allocator, dst: []u8, pixels: []const u32, wid
     while (level <= levels) : (level += 1) {
         const sz = levelSize(width, height, level);
         const dims = mipSliceDims(width, height, level);
-        const next = try gpa.alloc(u32, sz[0] * sz[1]);
-        for (0..sz[1]) |y| for (0..sz[0]) |x| {
-            var sum: [4]f32 = .{ 0, 0, 0, 0 };
-            var n: f32 = 0;
-            for ([2]u32{ 0, 1 }) |dy| for ([2]u32{ 0, 1 }) |dx| {
-                const sx = @min(@as(u32, @intCast(x)) * 2 + dx, pw - 1);
-                const sy = @min(@as(u32, @intCast(y)) * 2 + dy, ph - 1);
-                const c = prev[sy * pw + sx];
-                const a: f32 = @floatFromInt(c >> 24);
-                sum[0] += a;
-                for (0..3) |k| sum[k + 1] += a * @as(f32, @floatFromInt(c >> @intCast(16 - k * 8) & 0xff));
-                n += 1;
-            };
-            var out: u32 = @as(u32, @intFromFloat(@round(sum[0] / n))) << 24;
-            if (sum[0] > 0) switch (kind) {
-                .colour => for (0..3) |k| {
-                    out |= @as(u32, @intFromFloat(@round(sum[k + 1] / sum[0]))) << @intCast(16 - k * 8);
-                },
-                .normal => {
-                    var v: [3]f32 = undefined;
-                    for (&v, 0..) |*e, k| e.* = sum[k + 1] / sum[0] / 127.5 - 1;
-                    const len = @sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-                    for (v, 0..) |e, k| {
-                        const unit = if (len > 1e-4) e / len else @as(f32, if (k == 2) 1 else 0);
-                        out |= @as(u32, @intFromFloat(std.math.clamp(@round((unit + 1) * 127.5), 0, 255))) << @intCast(16 - k * 8);
-                    }
-                },
-            };
-            next[y * sz[0] + x] = out;
-        };
+        const next = try nextLevel(gpa, prev, pw, ph, sz, kind);
         uploadRect(dst[levelOffset(width, height, layout, level)..], dims[0], dims[1], .{ .x = 0, .y = 0, .width = sz[0], .height = sz[1] }, next, sz[0]);
         gpa.free(prev);
         prev = next;
         pw = sz[0];
         ph = sz[1];
         if (level == 15) break;
+    }
+}
+
+/// Level `sz` big from the one before it (`prev`, `pw` by `ph`): each
+/// pixel the average of four (see `uploadMipmaps`).
+fn nextLevel(gpa: std.mem.Allocator, prev: []const u32, pw: u32, ph: u32, sz: [2]u32, kind: MipKind) ![]u32 {
+    const next = try gpa.alloc(u32, sz[0] * sz[1]);
+    for (0..sz[1]) |y| for (0..sz[0]) |x| {
+        var sum: [4]f32 = .{ 0, 0, 0, 0 };
+        var n: f32 = 0;
+        for ([2]u32{ 0, 1 }) |dy| for ([2]u32{ 0, 1 }) |dx| {
+            const sx = @min(@as(u32, @intCast(x)) * 2 + dx, pw - 1);
+            const sy = @min(@as(u32, @intCast(y)) * 2 + dy, ph - 1);
+            const c = prev[sy * pw + sx];
+            const a: f32 = @floatFromInt(c >> 24);
+            sum[0] += a;
+            for (0..3) |k| sum[k + 1] += a * @as(f32, @floatFromInt(c >> @intCast(16 - k * 8) & 0xff));
+            n += 1;
+        };
+        var out: u32 = @as(u32, @intFromFloat(@round(sum[0] / n))) << 24;
+        if (sum[0] > 0) switch (kind) {
+            .colour => for (0..3) |k| {
+                out |= @as(u32, @intFromFloat(@round(sum[k + 1] / sum[0]))) << @intCast(16 - k * 8);
+            },
+            .normal => {
+                var v: [3]f32 = undefined;
+                for (&v, 0..) |*e, k| e.* = sum[k + 1] / sum[0] / 127.5 - 1;
+                const len = @sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+                for (v, 0..) |e, k| {
+                    const unit = if (len > 1e-4) e / len else @as(f32, if (k == 2) 1 else 0);
+                    out |= @as(u32, @intFromFloat(std.math.clamp(@round((unit + 1) * 127.5), 0, 255))) << @intCast(16 - k * 8);
+                }
+            },
+        };
+        next[y * sz[0] + x] = out;
+    };
+    return next;
+}
+
+/// The layout of an image of `format` with `levels` levels after level 0
+/// (as `mipmapLayout`, for the GPU's layouts without UIF).
+pub fn mipmapLayoutOf(format: Format, width: u32, height: u32, levels: u4) Mipmapped {
+    var below: u32 = 0;
+    var i: u4 = 1;
+    while (i <= levels) : (i += 1) {
+        const d = levelSize(width, height, i);
+        below += imageSizeOf(format, d[0], d[1]);
+        if (i == 15) break;
+    }
+    const base = std.mem.alignForward(u32, below, 4096);
+    return .{ .size = base + imageSizeOf(format, width, height), .base = base };
+}
+
+/// Where level `level` starts, in an image laid out as `mipmapLayoutOf`.
+pub fn levelOffsetOf(format: Format, width: u32, height: u32, layout: Mipmapped, level: u4) u32 {
+    var offset = layout.base;
+    var i: u4 = 1;
+    while (i <= level) : (i += 1) {
+        const d = levelSize(width, height, i);
+        offset -= imageSizeOf(format, d[0], d[1]);
+        if (i == 15) break;
+    }
+    return offset;
+}
+
+/// A 16-bit format's texel from a 32-bit one (0xAARRGGBB) at (x, y) in its
+/// level (to dither by).
+pub const Pack16 = *const fn (c: u32, x: u32, y: u32) u16;
+
+/// Uploads a 32-bit image (0xAARRGGBB, raster order) and its smaller
+/// levels (as `uploadMipmaps`) as a 16-bit `format` (RGB565 or RGBA4444),
+/// each texel made by `pack`, into `dst` as `mipmapLayoutOf` says.
+pub fn uploadMipmapsOf(gpa: std.mem.Allocator, format: Format, dst: []u8, pixels: []const u32, width: u32, height: u32, levels: u4, kind: MipKind, pack: Pack16) !void {
+    std.debug.assert(format.bytesPerPixel() == 2);
+    const layout = mipmapLayoutOf(format, width, height, levels);
+    std.debug.assert(dst.len >= layout.size);
+    var prev = try gpa.dupe(u32, pixels);
+    defer gpa.free(prev);
+    var sz: [2]u32 = .{ width, height };
+    var level: u4 = 0;
+    while (true) {
+        const texels = try gpa.alloc(u16, sz[0] * sz[1]);
+        defer gpa.free(texels);
+        for (0..sz[1]) |y| for (0..sz[0]) |x| {
+            texels[y * sz[0] + x] = pack(prev[y * sz[0] + x], @intCast(x), @intCast(y));
+        };
+        uploadRectOf(format, dst[levelOffsetOf(format, width, height, layout, level)..], sz[0], sz[1], .{ .x = 0, .y = 0, .width = sz[0], .height = sz[1] }, std.mem.sliceAsBytes(texels), sz[0] * 2);
+        if (level == levels or level == 15) break;
+        level += 1;
+        const next_sz = levelSize(width, height, level);
+        const next = try nextLevel(gpa, prev, sz[0], sz[1], next_sz, kind);
+        gpa.free(prev);
+        prev = next;
+        sz = next_sz;
     }
 }
 
@@ -715,4 +780,29 @@ test "V3D 4.2 UIF tiling: uif_xor, ublinear, and lineartile match uploadRectOf" 
     }
     const m = mipmapLayout(256, 256, 8);
     try std.testing.expect(m.base > 0 and m.base % 4096 == 0);
+}
+
+test "16-bit mipmapped images: each level where the layout says, the texels as packed" {
+    const gpa = std.testing.allocator;
+    const w = 64;
+    const h = 32;
+    var pixels: [w * h]u32 = undefined;
+    for (&pixels, 0..) |*p, i| p.* = 0xff000000 | @as(u32, @intCast(i % 256));
+    const layout = mipmapLayoutOf(.rgba4444, w, h, 3);
+    // Levels below level 0, which is 4 KB aligned at the end.
+    try std.testing.expectEqual(@as(u32, 0), layout.base % 4096);
+    try std.testing.expectEqual(layout.base + imageSizeOf(.rgba4444, w, h), layout.size);
+    try std.testing.expect(levelOffsetOf(.rgba4444, w, h, layout, 1) < layout.base);
+    const dst = try gpa.alloc(u8, layout.size);
+    defer gpa.free(dst);
+    @memset(dst, 0);
+    const pack = struct {
+        fn f(c: u32, _: u32, _: u32) u16 {
+            return @truncate(c);
+        }
+    }.f;
+    try uploadMipmapsOf(gpa, .rgba4444, dst, &pixels, w, h, 3, .colour, pack);
+    // Level 0's texel (5, 3), where the tiled layout puts it.
+    const off = layout.base + texelOffsetOf(.rgba4444, w, h, 5, 3);
+    try std.testing.expectEqual(@as(u16, @truncate(pixels[3 * w + 5])), std.mem.readInt(u16, dst[off..][0..2], .little));
 }

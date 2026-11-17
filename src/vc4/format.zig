@@ -32,11 +32,17 @@ pub const Format = enum {
     /// 8 bits of alpha (or coverage); textures only. The texture unit
     /// returns it as alpha, with black for the colour.
     a8,
+    /// 16 bits, 4 for each channel; textures only. The texture unit
+    /// returns the top 4 bits as a 32-bit texel's low byte, then the next
+    /// two, and the low 4 bits as its top byte (alpha): for 0xAARRGGBB,
+    /// blue in the top 4, then green, red, and alpha in the low 4 (found
+    /// on a Pi 3's GPU).
+    rgba4444,
 
     pub fn bytesPerPixel(f: Format) u32 {
         return switch (f) {
             .xrgb8888, .argb8888 => 4,
-            .rgb565 => 2,
+            .rgb565, .rgba4444 => 2,
             .a8 => 1,
         };
     }
@@ -48,6 +54,7 @@ pub const Format = enum {
             .argb8888 => code("AR24"),
             .rgb565 => code("BG16"),
             .a8 => code("R8  "),
+            .rgba4444 => code("RA12"),
         };
     }
 
@@ -65,6 +72,7 @@ pub const Format = enum {
             .xrgb8888, .argb8888 => .rgba8888,
             .rgb565 => .rgb565,
             .a8 => .alpha,
+            .rgba4444 => .rgba4444,
         };
     }
 
@@ -76,7 +84,7 @@ pub const Format = enum {
         return switch (f) {
             .xrgb8888, .argb8888 => cl.render_config_format_rgba8888,
             .rgb565 => cl.render_config_format_bgr565,
-            .a8 => unreachable, // not a render target
+            .a8, .rgba4444 => unreachable, // not a render target
         };
     }
 
@@ -84,13 +92,13 @@ pub const Format = enum {
         return switch (f) {
             .xrgb8888, .argb8888 => cl.loadstore_format_rgba8888,
             .rgb565 => cl.loadstore_format_bgr565,
-            .a8 => unreachable, // not a render target
+            .a8, .rgba4444 => unreachable, // not a render target
         };
     }
 
     /// Whether the GPU can render into it.
     pub fn renderable(f: Format) bool {
-        return f != .a8;
+        return f != .a8 and f != .rgba4444;
     }
 
     /// A micro-tile, the 64 bytes the tiled layouts are made of: 4x4

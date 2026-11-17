@@ -91,7 +91,7 @@ fn shmCode(f: vc4.Format) u32 {
         .argb8888 => p.wl_shm.format.argb8888,
         .xrgb8888 => p.wl_shm.format.xrgb8888,
         .rgb565 => p.wl_shm.format.rgb565,
-        .a8 => unreachable, // textures only
+        .a8, .rgba4444 => unreachable, // textures only
     };
 }
 
