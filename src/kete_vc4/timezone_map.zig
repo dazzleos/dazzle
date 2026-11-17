@@ -179,12 +179,11 @@ const MapView = struct {
         const old = p.clipTo(.{ .x = 0, .y = 0, .w = size.w, .h = size.h });
         defer p.restoreClip(old);
         c = p.canvas();
-        const land = t.on_surface_variant.withAlpha(0.35);
-        for (world.rings) |r| {
-            const pts = a.alloc(kete.Point, r[1]) catch return;
-            for (world.points[r[0]..][0..r[1]], pts) |w, *q| q.* = at(size, @as(f32, @floatFromInt(w[1])) / 100, @as(f32, @floatFromInt(w[0])) / 100);
-            c.fillPath(&.{pts}, land);
-        }
+        // Opaque, so the triangles' shared edges do not show.
+        const land = mix(t.surface_container, t.on_surface_variant, 0.35);
+        const pts = a.alloc(kete.Point, world.points.len) catch return;
+        for (world.points, pts) |w, *q| q.* = at(size, @as(f32, @floatFromInt(w[1])) / 100, @as(f32, @floatFromInt(w[0])) / 100);
+        for (world.triangles) |tri| c.fillPolygon(&.{ pts[tri[0]], pts[tri[1]], pts[tri[2]] }, land);
         // The zones' places.
         const dot = t.on_surface.withAlpha(0.55);
         for (1..TimeZone.count) |i| {
@@ -199,6 +198,11 @@ const MapView = struct {
         }
     }
 };
+
+/// `b` over `a`, `f` of the way.
+fn mix(a: kete.gfx.Color, b: kete.gfx.Color, f: f32) kete.gfx.Color {
+    return .{ .r = a.r + (b.r - a.r) * f, .g = a.g + (b.g - a.g) * f, .b = a.b + (b.b - a.b) * f, .a = 1 };
+}
 
 const testing = std.testing;
 
