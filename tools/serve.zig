@@ -6,7 +6,13 @@
 //! Software server. `store.Client` trusts the deterministic `Dazzle Test CA`
 //! root certificate used by `tls_server`.
 //!
-//! Usage: zig build serve [-- [--port=8443] [--host=<ip-or-host>] [zig-out]]
+//! Apps in repositories of their own (Motu's, say) are served beside
+//! Dazzle's with `--source=<name>=<their zig-out>`: their catalogue and
+//! files at `/<name>/`, and Dazzle's catalogue served listing those as its
+//! sources (in place of the releases it lists), so Settings gets them all
+//! from here.
+//!
+//! Usage: zig build serve [-- [--port=8443] [--host=<ip-or-host>] [--source=<name>=<dir>]... [zig-out]]
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -31,6 +37,12 @@ pub const fallback_os_json =
     \\
 ;
 
+/// Another repository's apps, served at `/<name>/` from `<dir>/apps`.
+pub const Source = struct { name: []const u8, dir: []const u8 };
+
+/// The sources given (set once, before connections are taken).
+var sources: []const Source = &.{};
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const arena = init.arena.allocator();
@@ -48,8 +60,22 @@ pub fn main(init: std.process.Init) !void {
             };
         } else if (std.mem.startsWith(u8, arg, "--host=")) {
             host_override = arg["--host=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--source=")) {
+            const spec = arg["--source=".len..];
+            const eq = std.mem.indexOfScalar(u8, spec, '=') orelse {
+                std.debug.print("serve: --source wants <name>=<dir>, not '{s}'\n", .{spec});
+                std.process.exit(2);
+            };
+            if (!validSlug(spec[0..eq])) {
+                std.debug.print("serve: a source's name is lower case letters, digits and dashes: '{s}'\n", .{spec[0..eq]});
+                std.process.exit(2);
+            }
+            const list = try arena.alloc(Source, sources.len + 1);
+            @memcpy(list[0..sources.len], sources);
+            list[sources.len] = .{ .name = spec[0..eq], .dir = std.mem.trimEnd(u8, spec[eq + 1 ..], "/") };
+            sources = list;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            std.debug.print("usage: dazzle-serve [--port=8443] [--host=<ip-or-host>] [zig-out]\n", .{});
+            std.debug.print("usage: dazzle-serve [--port=8443] [--host=<ip-or-host>] [--source=<name>=<dir>]... [zig-out]\n", .{});
             return;
         } else if (std.mem.startsWith(u8, arg, "-")) {
             std.debug.print("serve: unknown option '{s}'\n", .{arg});
@@ -69,6 +95,7 @@ pub fn main(init: std.process.Init) !void {
     var stdout_w = std.Io.File.stdout().writer(init.io, &stdout_buf);
     const out = &stdout_w.interface;
     try out.print("Serving Dazzle software from {s}/os and {s}/apps\n", .{ root_dir, root_dir });
+    for (sources) |src| try out.print("  and {s}'s apps from {s}/apps at /{s}/\n", .{ src.name, src.dir, src.name });
     try out.print("URL for Settings -> Software -> Software server:\n\n", .{});
     try out.print("  https://{s}:{d}\n\n", .{ host, listener.port });
     try out.flush();
@@ -222,14 +249,22 @@ pub fn handleConnection(gpa: std.mem.Allocator, io: std.Io, fd: linux.fd_t, root
 
 fn servePath(gpa: std.mem.Allocator, io: std.Io, tls_conn: *tls_server.Conn, root_dir: []const u8, target: []const u8) !void {
     var path_buf: [512]u8 = undefined;
-    const fs_path = resolveRequestPath(&path_buf, root_dir, target) orelse {
+    const fs_path = resolveSourcePath(&path_buf, sources, target) orelse resolveRequestPath(&path_buf, root_dir, target) orelse {
         std.debug.print("GET {s} -> 404\n", .{target});
         return sendResponse(tls_conn, 404, "Not Found", "text/plain", "Not Found\n");
     };
 
     const cwd = std.Io.Dir.cwd();
     const content_type = contentTypeFor(target);
-    if (cwd.readFileAlloc(io, fs_path, gpa, .limited(256 << 20))) |body| {
+    if (cwd.readFileAlloc(io, fs_path, gpa, .limited(256 << 20))) |file| {
+        // Dazzle's catalogue lists the sources served here.
+        const body = if (sources.len > 0 and std.mem.eql(u8, withoutQuery(target), "/apps.json")) blk: {
+            defer gpa.free(file);
+            const names = try gpa.alloc([]const u8, sources.len);
+            defer gpa.free(names);
+            for (sources, names) |src, *n| n.* = src.name;
+            break :blk try withSources(gpa, file, names);
+        } else file;
         defer gpa.free(body);
         std.debug.print("GET {s} -> 200 ({d} bytes)\n", .{ target, body.len });
         return sendResponse(tls_conn, 200, "OK", content_type, body);
@@ -249,6 +284,38 @@ fn servePath(gpa: std.mem.Allocator, io: std.Io, tls_conn: *tls_server.Conn, roo
         std.debug.print("GET {s} -> 404 ({s} missing)\n", .{ target, fs_path });
         return sendResponse(tls_conn, 404, "Not Found", "text/plain", "Not Found\n");
     }
+}
+
+fn withoutQuery(target: []const u8) []const u8 {
+    return if (std.mem.indexOfScalar(u8, target, '?')) |q| target[0..q] else target;
+}
+
+/// Where a request for a source's file (`/<name>/apps.json`,
+/// `/<name>/<app>.png`, `/<name>/<app>.tar.xz`) is: in its `<dir>/apps`.
+pub fn resolveSourcePath(buf: *[512]u8, list: []const Source, req_path: []const u8) ?[]const u8 {
+    const path = withoutQuery(req_path);
+    for (list) |src| {
+        if (path.len < src.name.len + 2 or path[0] != '/' or !std.mem.eql(u8, path[1 .. 1 + src.name.len], src.name) or path[1 + src.name.len] != '/') continue;
+        const rest = path[1 + src.name.len ..];
+        // Its apps, not a system of its own.
+        if (std.mem.eql(u8, rest, "/os.json") or std.mem.eql(u8, rest, "/icon.png") or std.mem.eql(u8, rest, "/dazzle-os.tar.xz")) return null;
+        return resolveRequestPath(buf, src.dir, rest);
+    }
+    return null;
+}
+
+/// The catalogue `json` with `names` as its sources (in place of those it
+/// had).
+pub fn withSources(gpa: std.mem.Allocator, json: []const u8, names: []const []const u8) ![]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.BadCatalogue;
+    var list = std.json.Array.init(parsed.arena.allocator());
+    for (names) |n| try list.append(.{ .string = n });
+    try parsed.value.object.put(parsed.arena.allocator(), "sources", .{ .array = list });
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    try std.json.Stringify.value(parsed.value, .{ .whitespace = .indent_2 }, &out.writer);
+    return out.toOwnedSlice();
 }
 
 fn contentTypeFor(target: []const u8) []const u8 {
@@ -288,4 +355,24 @@ test "resolveRequestPath maps OS and app routes to zig-out/os and zig-out/apps" 
     try std.testing.expect(resolveRequestPath(&buf, "zig-out", "/icons/dazzle-files.png") == null);
     try std.testing.expect(resolveRequestPath(&buf, "zig-out", "/../secret.tar.xz") == null);
     try std.testing.expect(resolveRequestPath(&buf, "zig-out", "/unknown.txt") == null);
+}
+
+test "other repositories' apps are served at /<name>/, and Dazzle's catalogue lists them" {
+    var buf: [512]u8 = undefined;
+    const list = [_]Source{.{ .name = "motu", .dir = "../motu/zig-out" }};
+    try std.testing.expectEqualStrings("../motu/zig-out/apps/apps.json", resolveSourcePath(&buf, &list, "/motu/apps.json").?);
+    try std.testing.expectEqualStrings("../motu/zig-out/apps/motu.tar.xz", resolveSourcePath(&buf, &list, "/motu/motu.tar.xz").?);
+    try std.testing.expectEqualStrings("../motu/zig-out/apps/motu-screenshot.png", resolveSourcePath(&buf, &list, "/motu/motu-screenshot.png").?);
+    try std.testing.expect(resolveSourcePath(&buf, &list, "/motu/os.json") == null);
+    try std.testing.expect(resolveSourcePath(&buf, &list, "/motu/../x.tar.xz") == null);
+    try std.testing.expect(resolveSourcePath(&buf, &list, "/motus/apps.json") == null);
+    try std.testing.expect(resolveSourcePath(&buf, &list, "/apps.json") == null);
+
+    const gpa = std.testing.allocator;
+    const out = try withSources(gpa, "{\"version\":\"a\",\"apps\":[],\"sources\":[\"https://example.com\"]}", &.{"motu"});
+    defer gpa.free(out);
+    const back = try std.json.parseFromSlice(struct { sources: []const []const u8 }, gpa, out, .{ .ignore_unknown_fields = true });
+    defer back.deinit();
+    try std.testing.expectEqual(@as(usize, 1), back.value.sources.len);
+    try std.testing.expectEqualStrings("motu", back.value.sources[0]);
 }
