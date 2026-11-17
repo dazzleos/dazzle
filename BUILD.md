@@ -41,6 +41,7 @@ scripts/zig build test       # the unit tests, on the build machine
 scripts/zig build programs   # just the programs
 scripts/zig build kernel     # just the kernels
 scripts/zig build serve      # serve zig-out/os and zig-out/apps over HTTPS
+                             # (-- --source=motu=../motu/zig-out: and Motu's)
 scripts/zig build qemu       # boot in QEMU, as a Pi Zero
 ```
 

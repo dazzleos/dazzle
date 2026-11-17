@@ -145,6 +145,27 @@ icon, size, SHA-256 and Ed25519 signature. At build time, `mkcatalogue` and
 (`/data/apps/.keys`). Because `/data/apps` is owned by the Dazzle user,
 installing and removing apps requires no root privileges.
 
+### Apps in repositories of their own
+
+Some apps live in repositories of their own (Motu, in `dazzleos/motu`).
+Their `build.zig.zon` depends on Dazzle, and their `build.zig` calls
+Dazzle's `addApp`, which builds them with the same modules (`kete_vc4` and
+the rest), shader compiler and packaging as Dazzle's own apps, and makes
+their archive and catalogue, signed with the same key. Each publishes them
+as its own "latest" release.
+
+Dazzle's catalogue lists those catalogues as its `sources` (`-Dapp-sources`
+to change them). Settings fetches each and keeps one catalogue of them
+all: a source's apps that Dazzle does not have (and none of its language
+packs), each remembering where it came from, so its archive, icon and
+screenshot are downloaded from there. A source that cannot be reached
+keeps the apps it had. A new app repository needs only a Dazzle release,
+not a system update.
+
+To test an app repository's build on a Pi, serve it beside Dazzle's:
+`scripts/zig build serve -- --source=motu=../motu/zig-out` serves its
+catalogue at `/motu/`, and Dazzle's catalogue listing it as the source.
+
 ## OS updates
 
 OS updates are published as `dazzle-os.tar.xz` (the contents of one OS slot)
