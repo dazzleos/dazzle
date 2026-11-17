@@ -266,6 +266,8 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
         .subscribed_keys = apps.subscribed_keys,
     })) catch {};
     const footer = cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = footer_children.items });
+    // A scroll of its own for each tab and app's page: each starts at its top.
+    const scroll_key: u64 = @as(u64, @intFromEnum(Page.apps)) + 1 + if (shown) |i| 16 + @as(u64, i) else @as(u64, @intFromEnum(state.tab)) * 4;
     return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .children = &.{
         cx.make(kete.Expanded{ .child = cx.make(kete.Snackbar{
             .message = snackbar_msg,
@@ -276,7 +278,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
                     .alignment = .top_center,
                     .child = cx.make(view.PageWidth{ .child = b.page(rows.items) }),
                 }),
-            }) }).withKey(@as(u64, @intFromEnum(Page.apps)) + 1),
+            }) }).withKey(scroll_key),
         }) }),
         cx.make(kete.Padding{
             .padding = .{ .left = 24, .top = 12, .right = 24, .bottom = 24 },
