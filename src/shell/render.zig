@@ -907,15 +907,16 @@ pub const Renderer = struct {
     /// once, or, when video memory has no room for a buffer the screen's
     /// size (8 MB at 1080p, in one piece: an app may have most of it), a
     /// band of rows at a time.
-    pub fn capture(r: *Renderer, gpa: std.mem.Allocator, windows: []const Window) ![]u32 {
+    pub fn capture(r: *Renderer, gpa: std.mem.Allocator, windows: []const Window, force_bands: bool) ![]u32 {
         var quads = try r.panelQuads();
         // A notification (perhaps of the last screenshot) is not in it.
         quads[@intFromEnum(PanelId.notice)] = null;
         const pitch = render.Target.pitch(.xrgb8888, @intCast(r.width));
         const pixels = try gpa.alloc(u32, @as(usize, r.width) * r.height);
         errdefer gpa.free(pixels);
-        const whole = r.dev.createBo(pitch * r.height) catch null;
+        const whole = if (force_bands) null else r.dev.createBo(pitch * r.height) catch null;
         const rows: u32 = if (whole != null) r.height else capture_band;
+        if (whole == null) sys.print("dazzle-shell: a screenshot drawn in bands of {d} rows{s}\n", .{ capture_band, if (force_bands) " (as asked)" else " (no room for it all at once)" });
         const bo = whole orelse try r.dev.createBo(pitch * capture_band);
         defer r.dev.destroyBo(bo);
         defer band_top = 0;

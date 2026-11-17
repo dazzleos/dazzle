@@ -529,9 +529,9 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                         }) catch {};
                         req.respond("200 OK", "text/plain; charset=utf-8", out.items);
                     },
-                    .screenshot => {
+                    .screenshot => |bands| {
                         var windows: [render.max_windows]render.Window = undefined;
-                        if (renderer.capture(gpa, if (locked) &.{} else frameWindows(&server, &windows))) |pixels| {
+                        if (renderer.capture(gpa, if (locked) &.{} else frameWindows(&server, &windows), bands)) |pixels| {
                             defer gpa.free(pixels);
                             if (@import("gfx").png.encode(gpa, pixels, renderer.width, renderer.height)) |data| {
                                 defer gpa.free(data);
@@ -896,7 +896,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         if (screenshot_wanted) {
             screenshot_wanted = false;
             var windows: [render.max_windows]render.Window = undefined;
-            if (renderer.capture(gpa, if (locked) &.{} else frameWindows(&server, &windows))) |pixels| {
+            if (renderer.capture(gpa, if (locked) &.{} else frameWindows(&server, &windows), false)) |pixels| {
                 screenshot.save(gpa, screenshot.folder, pixels, renderer.width, renderer.height, shot_pipe[1]);
             } else |err| print(sys.log_warning ++ "dazzle-shell: cannot take a screenshot: {s}\n", .{@errorName(err)});
         }

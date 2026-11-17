@@ -5,6 +5,8 @@
 //!     /status                       the screen, the pointer, the windows
 //!                                   and the apps, as text
 //!     /screenshot                   the screen, as a PNG
+//!     /screenshot?bands=1           the same, drawn a band at a time (as
+//!                                   when video memory is short), to try it
 //!     /pointer?x=&y=                moves the pointer there
 //!     /move?dx=&dy=                 moves the pointer by that much (as a
 //!                                   mouse does: an app that has taken
@@ -47,7 +49,8 @@ const sys = @import("sys");
 /// What a request asks for.
 pub const Command = union(enum) {
     status,
-    screenshot,
+    /// Whether to draw it a band at a time, even with room for all of it.
+    screenshot: bool,
     pointer: [2]f64,
     move: [2]f64,
     click: struct { x: f64, y: f64, button: u32 },
@@ -185,7 +188,7 @@ fn parse(text: []const u8, code: u32, text_buf: []u8) Parsed {
         }
     }.f;
     if (std.mem.eql(u8, path, "/status")) return .{ .command = .status };
-    if (std.mem.eql(u8, path, "/screenshot")) return .{ .command = .screenshot };
+    if (std.mem.eql(u8, path, "/screenshot")) return .{ .command = .{ .screenshot = if (param(query, "bands")) |v| std.mem.eql(u8, v, "1") else false } };
     if (std.mem.eql(u8, path, "/pointer")) return .{ .command = .{ .pointer = .{ num(query, "x") orelse return .bad, num(query, "y") orelse return .bad } } };
     if (std.mem.eql(u8, path, "/move")) return .{ .command = .{ .move = .{ num(query, "dx") orelse return .bad, num(query, "dy") orelse return .bad } } };
     if (std.mem.eql(u8, path, "/click")) return .{ .command = .{ .click = .{
@@ -297,6 +300,8 @@ test "requests are read with their code, and others turned away" {
     try testing.expectEqualStrings("Hello, there!", parse("GET /type?code=123456&text=Hello%2C+there%21 HTTP/1.1\r\n\r\n", 123456, &buf).command.type);
     try testing.expectEqual(@as(?bool, false), parse("GET /key?code=123456&key=28&pressed=0 HTTP/1.1\r\n\r\n", 123456, &buf).command.key.pressed);
     try testing.expectEqualStrings("motu", parse("GET /launch?code=123456&app=motu HTTP/1.1\r\n\r\n", 123456, &buf).command.launch);
+    try testing.expectEqual(false, parse("GET /screenshot?code=123456 HTTP/1.1\r\n\r\n", 123456, &buf).command.screenshot);
+    try testing.expectEqual(true, parse("GET /screenshot?code=123456&bands=1 HTTP/1.1\r\n\r\n", 123456, &buf).command.screenshot);
 }
 
 test "apps, windows and updates are controlled directly" {
