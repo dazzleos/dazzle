@@ -343,6 +343,7 @@ pub const france = [_][2][]const u8{
     .{ "Basic input until its language pack is installed", "Saisie de base jusqu’à l’installation de son module linguistique" },
     .{ "Its language pack is installed", "Son module linguistique est installé" },
     .{ "Change", "Modifier" },
+    .{ "No time zone matches", "Aucun fuseau horaire ne correspond" },
 };
 
 /// Canada's, where it differs.

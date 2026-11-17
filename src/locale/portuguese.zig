@@ -343,6 +343,7 @@ pub const brazil = [_][2][]const u8{
     .{ "Basic input until its language pack is installed", "Entrada básica até que seu pacote de idioma seja instalado" },
     .{ "Its language pack is installed", "Seu pacote de idioma está instalado" },
     .{ "Change", "Alterar" },
+    .{ "No time zone matches", "Nenhum fuso horário corresponde" },
 };
 
 /// Portugal's, where it differs.

@@ -344,4 +344,5 @@ pub const germany = [_][2][]const u8{
     .{ "Basic input until its language pack is installed", "Einfache Eingabe, bis sein Sprachpaket installiert ist" },
     .{ "Its language pack is installed", "Sein Sprachpaket ist installiert" },
     .{ "Change", "Ändern" },
+    .{ "No time zone matches", "Keine Zeitzone passt" },
 };

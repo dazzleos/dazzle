@@ -343,4 +343,5 @@ pub const simplified = [_][2][]const u8{
     .{ "Basic input until its language pack is installed", "安装语言包之前使用基本输入" },
     .{ "Its language pack is installed", "语言包已安装" },
     .{ "Change", "更改" },
+    .{ "No time zone matches", "没有匹配的时区" },
 };

@@ -229,6 +229,14 @@ fn addMapData(b: *std.Build) std.Build.LazyPath {
     return run.addOutputFileArg("map_data.zig");
 }
 
+/// The land as a flat map draws it, from Natural Earth's 110m countries
+/// (see tools/mkworld.zig).
+fn addWorldMap(b: *std.Build) std.Build.LazyPath {
+    const run = b.addRunArtifact(hostTool(b, "mkworld"));
+    run.addFileArg(b.path("src/apps/maps/data/ne_110m_admin_0_countries.geojson"));
+    return run.addOutputFileArg("world_map.zig");
+}
+
 /// The library modules, built for one target:
 ///
 /// * `sys`: Linux system call helpers shared by everything
@@ -647,6 +655,8 @@ fn addKete(b: *std.Build, module: *std.Build.Module, m: Modules, target: std.Bui
             .{ .name = "locale", .module = m.locale },
             .{ .name = "appearance", .module = m.appearance },
             .{ .name = "font", .module = m.font },
+            // The land, for choosing a time zone on a map.
+            .{ .name = "world_map", .module = b.createModule(.{ .root_source_file = addWorldMap(b), .target = target, .optimize = optimize }) },
         },
     });
     module.addImport("kete", kete);
@@ -1598,6 +1608,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hostTool(b, "mkapp").root_module })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hostTool(b, "mkimage").root_module })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hostTool(b, "mkmap").root_module })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hostTool(b, "mkworld").root_module })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hostTool(b, "mkos").root_module })).step);
 
     const serve_exe = b.addExecutable(.{

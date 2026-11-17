@@ -509,6 +509,13 @@ pub fn up(n: *kete.WidgetNode, comptime T: type) ?*kete.WidgetNode {
     return null;
 }
 
+/// Clicks at `p`, in the window.
+pub fn clickAt(u: *kete.ui.WindowUi, p: kete.Point) void {
+    u.pointerMotion(p);
+    u.pointerButton(p, .left, true);
+    u.pointerButton(p, .left, false);
+}
+
 pub fn click(u: *kete.ui.WindowUi, n: *kete.WidgetNode) void {
     const at = n.position();
     const p: kete.Point = .{ at[0] + 4, at[1] + n.size.h / 2 };

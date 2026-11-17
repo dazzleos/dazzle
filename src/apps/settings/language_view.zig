@@ -52,10 +52,8 @@ pub fn build(self: *const Settings, b: Builder, st: *State) kete.Widget {
     }
     rows.append(a, cx.make(kete.Row{ .children = &.{cx.make(kete.TextField{ .placeholder = locale.text("Type here to try the keyboard"), .width = 360 })} })) catch {};
     rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 12 }, .child = cx.make(kete.Text{ .text = locale.text("Time zone"), .style = heading }) })) catch {};
-    rows.append(a, cx.make(kete_vc4.TimeZonePicker{
-        .zone = self.locale.timezone,
-        .on_changed = if (can) .of(picker, LocalePick.timezone) else null,
-    })) catch {};
+    var zone_buf: [96]u8 = undefined;
+    rows.append(a, chosenRow(cx, a.dupe(u8, self.locale.timezone.label(&zone_buf)) catch "", if (can) .of(st, State.openTimeZone) else null)) catch {};
     return b.page(rows.items);
 }
 
@@ -70,9 +68,10 @@ fn chosenRow(cx: *kete.BuildContext, name: []const u8, on_change: ?kete.Callback
 /// The page's state: the dialog open to change the language or the
 /// keyboard, and what is picked in it (put in place with Apply).
 pub const State = struct {
-    dialog: enum { none, language, keyboard } = .none,
+    dialog: enum { none, language, keyboard, timezone } = .none,
     language: locale.Language = .en_gb,
     keyboard: locale.Keyboard = .us,
+    timezone: locale.TimeZone = .utc,
     /// As last built.
     current: locale.Settings = .{},
     actions: ?*Actions = null,
@@ -85,6 +84,15 @@ pub const State = struct {
     fn openKeyboard(st: *State) void {
         st.keyboard = st.current.keyboard;
         st.dialog = .keyboard;
+    }
+
+    fn openTimeZone(st: *State) void {
+        st.timezone = st.current.timezone;
+        st.dialog = .timezone;
+    }
+
+    fn pickTimeZone(st: *State, z: locale.TimeZone) void {
+        st.timezone = z;
     }
 
     fn pickLanguage(st: *State, l: locale.Language) void {
@@ -100,6 +108,7 @@ pub const State = struct {
         switch (st.dialog) {
             .language => l.language = st.language,
             .keyboard => l.keyboard = st.keyboard,
+            .timezone => l.timezone = st.timezone,
             .none => {},
         }
         if (st.actions) |a| if (!std.meta.eql(l, st.current)) {
@@ -120,36 +129,44 @@ pub fn withDialog(self: *const Settings, b: Builder, st: *State, child: kete.Wid
     if (st.dialog == .none or self.actions == null) return child;
     const content = switch (st.dialog) {
         .language => cx.make(kete_vc4.LanguagePicker{ .language = st.language, .on_changed = .of(st, State.pickLanguage), .height = 280 }),
+        .timezone => cx.make(kete_vc4.TimeZoneMap{ .zone = st.timezone, .on_changed = .of(st, State.pickTimeZone), .width = 560 }),
         else => cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 12, .children = cx.arena.dupe(kete.Widget, &.{
             cx.make(kete_vc4.KeyboardPicker{ .keyboard = st.keyboard, .on_changed = .of(st, State.pickKeyboard), .height = 200 }),
             cx.make(kete_vc4.KeyboardPicture{ .keyboard = st.keyboard, .unit = 24 }),
         }) catch &.{} }),
     };
     return cx.make(kete.Dialog{
-        .icon = if (st.dialog == .language) .language else .keyboard,
-        .title = if (st.dialog == .language) locale.text("Language") else locale.text("Keyboard"),
+        .icon = switch (st.dialog) {
+            .language => .language,
+            .timezone => null,
+            else => .keyboard,
+        },
+        .title = switch (st.dialog) {
+            .language => locale.text("Language"),
+            .timezone => locale.text("Time zone"),
+            else => locale.text("Keyboard"),
+        },
         .content = content,
         .confirm_label = locale.text("Apply"),
         .on_confirm = .of(st, State.apply),
         .dismiss_label = locale.text("Cancel"),
         .on_dismiss = .of(st, State.cancel),
-        .width = if (st.dialog == .language) 440 else 480,
+        .width = switch (st.dialog) {
+            .language => 440,
+            .timezone => 608,
+            else => 480,
+        },
         .child = child,
     });
 }
 
-/// Picking a time zone (keeping the language and keyboard), and asking for
-/// the language pack.
+/// Asking for the keyboard's language pack.
 const LocalePick = struct {
     actions: ?*Actions,
     current: locale.Settings,
 
     fn installPack(p: *LocalePick) void {
         if (p.actions) |a| a.install_language_pack = true;
-    }
-
-    fn timezone(p: *LocalePick, z: locale.TimeZone) void {
-        if (p.actions) |a| a.locale = .{ .language = p.current.language, .keyboard = p.current.keyboard, .timezone = z };
     }
 };
 
@@ -199,9 +216,9 @@ test "the language and keyboard: changed in a dialog, keeping the other" {
     view.click(u, view.up(view.findText(u.root.?, "Apply").?, kete.FilledButton).?);
     try testing.expectEqual(locale.Settings{ .language = .en_gb, .keyboard = .us }, actions.locale.?);
     try testing.expect(view.findType(u.root.?, kete.TextField) != null);
-    // The time zone, by area and city.
+    // The time zone, by name; changed on the map.
     try testing.expect(view.findText(u.root.?, "Time zone") != null);
-    try testing.expect(view.findType(u.root.?, kete_vc4.TimeZonePicker) != null);
+    try testing.expect(view.findText(u.root.?, "UTC") != null);
 }
 
 test "a keyboard's language pack: Install, then installed" {
@@ -225,4 +242,30 @@ test "a keyboard's language pack: Install, then installed" {
     settings.language_pack = .none;
     u.frame(1600, 1600, 3, settings);
     try testing.expect(view.findText(u.root.?, "Its language pack is installed") == null);
+}
+
+test "the time zone: changed on a map" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
+    defer u.destroy();
+    const d = view.sample();
+    var actions: Actions = .{};
+    const settings: Settings = .{ .commit = "574d538", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .locale = .{ .language = .en_gb, .keyboard = .gb } };
+    u.frame(1600, 1000, 0, settings);
+    u.root.?.state(Settings.State).page = .language;
+    u.frame(1600, 1000, 1, settings);
+    // Its Change: the third.
+    view.click(u, view.findType(view.up(view.findText(u.root.?, "UTC").?, kete.Row).?, kete.OutlinedButton).?);
+    u.frame(1600, 1000, 2, settings);
+    const map = view.findType(u.root.?, kete_vc4.TimeZoneMap.Map).?;
+    // Auckland, clicked on the map, then Apply.
+    const auckland = locale.TimeZone.fromName("Pacific/Auckland").?;
+    const pl = auckland.place().?;
+    const q = kete_vc4.TimeZoneMap.Map.at(map.size, pl.lat, pl.lon);
+    view.clickAt(u, .{ map.position()[0] + q[0], map.position()[1] + q[1] });
+    u.frame(1600, 1000, 3, settings);
+    try testing.expect(view.findText(u.root.?, "Auckland (Pacific)") != null);
+    view.click(u, view.up(view.findText(u.root.?, "Apply").?, kete.FilledButton).?);
+    try testing.expectEqual(auckland, actions.locale.?.timezone);
+    try testing.expectEqual(locale.Language.en_gb, actions.locale.?.language);
 }

@@ -381,6 +381,7 @@ pub const latin_america = [_][2][]const u8{
     .{ "Basic input until its language pack is installed", "Entrada básica hasta que se instale su paquete de idioma" },
     .{ "Its language pack is installed", "Su paquete de idioma está instalado" },
     .{ "Change", "Cambiar" },
+    .{ "No time zone matches", "Ninguna zona horaria coincide" },
 };
 
 /// Spain's, where it differs.

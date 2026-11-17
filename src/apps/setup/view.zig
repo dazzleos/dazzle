@@ -236,9 +236,12 @@ pub const Setup = struct {
             locale.text("Skip")
         else
             locale.text("Next");
-        return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 24, .children = &.{
+        // The time page's map takes the height there is (the others are
+        // as tall as they need).
+        const fill = which == .time;
+        return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = fill, .spacing = 24, .children = &.{
             cx.make(kete.Text{ .text = locale.text("Welcome to Dazzle"), .style = .{ .size = 40, .color = t.primary } }),
-            body,
+            if (fill) cx.make(kete.Expanded{ .child = body }) else body,
             cx.make(kete.Row{ .spacing = 12, .main_axis_alignment = .end, .children = &.{
                 if (state.page > 0) cx.make(kete.OutlinedButton{ .label = locale.text("Back"), .icon = .arrow_back, .on_press = .of(nav, Nav.back) }) else cx.make(kete.SizedBox.empty),
                 cx.make(kete.OutlinedButton{ .label = next_label, .icon = if (last) .check else null, .trailing_icon = if (last) null else .arrow_forward, .on_press = .of(nav, Nav.next) }),
@@ -268,13 +271,14 @@ pub const Setup = struct {
         } });
     }
 
-    /// The time zone: its area, then its city.
+    /// The time zone: on a map, or found by its city.
     fn timePage(cx: *kete.BuildContext, state: *State) kete.Widget {
         const t = cx.theme();
-        return cx.make(kete.Column{ .cross_axis_alignment = .start, .fill = false, .spacing = 12, .children = cx.arena.dupe(kete.Widget, &.{
+        // The map as big as the page has room for.
+        return cx.make(kete.Column{ .cross_axis_alignment = .start, .spacing = 12, .children = cx.arena.dupe(kete.Widget, &.{
             cx.make(kete.Text{ .text = locale.text("Time zone"), .style = .{ .size = 28 } }),
             cx.make(kete.Text{ .text = locale.text("Where the computer is, for its clock"), .style = .{ .size = 18, .color = t.on_surface_variant } }),
-            cx.make(kete_vc4.TimeZonePicker{ .zone = state.timezone, .on_changed = .of(state, State.setTimeZone) }),
+            cx.make(kete.Expanded{ .child = cx.make(kete_vc4.TimeZoneMap{ .zone = state.timezone, .on_changed = .of(state, State.setTimeZone), .width = 720, .fill_height = true }) }),
         }) catch &.{} });
     }
 
@@ -754,7 +758,7 @@ test "naming the computer, then waiting for the card" {
         Draw(u, &report, &actions, &now, size);
         try testing.expect(!overflows(u.root.?));
     }
-    try testing.expect(findType(u.root.?, kete_vc4.TimeZonePicker) != null);
+    try testing.expect(findType(u.root.?, kete_vc4.TimeZoneMap) != null);
     click(u, findText(u.root.?, "Next").?);
     for ([_][2]u32{ .{ 1920, 1080 }, .{ 640, 480 } }) |size| {
         Draw(u, &report, &actions, &now, size);

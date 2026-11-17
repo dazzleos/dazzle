@@ -344,4 +344,5 @@ pub const arabic = [_][2][]const u8{
     .{ "Basic input until its language pack is installed", "إدخال أساسي حتى تثبيت حزمة اللغة الخاصة به" },
     .{ "Its language pack is installed", "حزمة اللغة مثبتة" },
     .{ "Change", "تغيير" },
+    .{ "No time zone matches", "لا توجد منطقة زمنية مطابقة" },
 };

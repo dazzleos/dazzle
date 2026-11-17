@@ -34,6 +34,14 @@ pub const TimeZone = enum(u16) {
         return table.zones[@intFromEnum(z)].name;
     }
 
+    /// Where its place is (zone.tab's: in degrees north and east), if it
+    /// has one (UTC has none).
+    pub fn place(z: TimeZone) ?struct { lat: f32, lon: f32 } {
+        const zone = table.zones[@intFromEnum(z)];
+        if (!zone.located) return null;
+        return .{ .lat = zone.lat, .lon = zone.lon };
+    }
+
     /// "Auckland (Pacific)", "Buenos Aires (America/Argentina)": its city,
     /// then its area, for people to read.
     pub fn label(z: TimeZone, buf: []u8) []const u8 {
@@ -377,4 +385,16 @@ test "names for people to read" {
     var buf: [64]u8 = undefined;
     try testing.expectEqualStrings("Buenos Aires (America/Argentina)", TimeZone.fromName("America/Argentina/Buenos_Aires").?.label(&buf));
     try testing.expectEqualStrings("UTC", TimeZone.utc.label(&buf));
+}
+
+test "zones' places" {
+    const auckland = TimeZone.fromName("Pacific/Auckland").?.place().?;
+    try testing.expectApproxEqAbs(@as(f32, -36.87), auckland.lat, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 174.77), auckland.lon, 0.01);
+    try testing.expect(TimeZone.utc.place() == null);
+    // Every other zone has one, on the Earth.
+    for (1..TimeZone.count) |i| {
+        const p = @as(TimeZone, @enumFromInt(i)).place().?;
+        try testing.expect(p.lat >= -90 and p.lat <= 90 and p.lon >= -180 and p.lon <= 180);
+    }
 }

@@ -343,4 +343,5 @@ pub const japan = [_][2][]const u8{
     .{ "Basic input until its language pack is installed", "言語パックをインストールするまでは基本入力です" },
     .{ "Its language pack is installed", "言語パックはインストール済みです" },
     .{ "Change", "変更" },
+    .{ "No time zone matches", "一致するタイムゾーンがありません" },
 };

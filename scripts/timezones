@@ -18,17 +18,34 @@ VERSION=$(cat "$ZONEINFO/tzdata.zi" 2>/dev/null | sed -n 's/^# version //p' | he
 
 {
 	echo "//! The time zones Dazzle offers: their names (as the tz database's"
-	echo "//! zone.tab has them) and their rules for local time (POSIX TZ"
-	echo "//! strings; see timezone.zig). Written by scripts/timezones from"
-	echo "//! tzdata ${VERSION:-(version unknown)}: do not edit."
+	echo "//! zone.tab has them), their rules for local time (POSIX TZ"
+	echo "//! strings; see timezone.zig), and where their places are (zone.tab's"
+	echo "//! coordinates, in degrees north and east). Written by"
+	echo "//! scripts/timezones from tzdata ${VERSION:-(version unknown)}: do not"
+	echo "//! edit."
 	echo
-	echo "pub const Zone = struct { name: []const u8, rule: []const u8 };"
+	echo "pub const Zone = struct { name: []const u8, rule: []const u8, lat: f32 = 0, lon: f32 = 0, located: bool = true };"
 	echo
 	echo "pub const zones = [_]Zone{"
-	echo "    .{ .name = \"UTC\", .rule = \"UTC0\" },"
-	grep -v '^#' "$ZONEINFO/zone.tab" | cut -f3 | LC_ALL=C sort | while read -r name; do
+	echo "    .{ .name = \"UTC\", .rule = \"UTC0\", .located = false },"
+	grep -v '^#' "$ZONEINFO/zone.tab" | cut -f2,3 | LC_ALL=C sort -t "$(printf '\t')" -k2 | while IFS="$(printf '\t')" read -r coords name; do
 		rule=$(tail -n 1 "$ZONEINFO/$name")
-		echo "    .{ .name = \"$name\", .rule = \"$rule\" },"
+		# ISO 6709: +DDMM+DDDMM or +DDMMSS+DDDMMSS.
+		place=$(echo "$coords" | awk '{
+			s = $0; n = length(s)
+			for (i = 2; i <= n; i++) { c = substr(s, i, 1); if (c == "+" || c == "-") break }
+			la = substr(s, 1, i - 1); lo = substr(s, i)
+			printf "%.4f %.4f", dms(la, 2), dms(lo, 3)
+		}
+		function dms(t, d,   sign, v) {
+			sign = substr(t, 1, 1) == "-" ? -1 : 1
+			v = substr(t, 2 + d, 2) / 60 + substr(t, 2, d)
+			if (length(t) > 1 + d + 2) v += substr(t, 4 + d, 2) / 3600
+			return sign * v
+		}')
+		lat=${place% *}
+		lon=${place#* }
+		echo "    .{ .name = \"$name\", .rule = \"$rule\", .lat = $lat, .lon = $lon },"
 	done
 	echo "};"
 } >"$OUT"
