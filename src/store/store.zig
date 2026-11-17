@@ -504,9 +504,10 @@ pub fn unpack(gpa: std.mem.Allocator, archive: []const u8, dir: []const u8, name
     var new_buf: [512]u8 = undefined;
     const new = try std.mem.printSentinel(&new_buf, "{s}/{s}", .{ staging, name }, 0);
     _ = try sys.check(linux.mkdir(new, 0o755));
-    // Only the app's own folder.
+    // Only the app's own folder: with its program, or (a language pack)
+    // its version.
     try sys.archive.extract(gpa, archive, name, new);
-    if (!isInstalled(staging, name)) return error.BadArchive;
+    if (!isInstalled(staging, name) and !isPackInstalled(staging, name)) return error.BadArchive;
 
     // Into place: an installed copy out of the way first.
     var app_buf: [256]u8 = undefined;
@@ -1254,6 +1255,17 @@ test "a download is checked against the catalogue and its Ed25519 signature" {
 
     unsubscribeKeyAt(keys_path, &other_pub_hex);
     try testing.expectEqual(@as(usize, 0), loadKeysFrom(keys_path).len);
+}
+
+test "a language pack unpacks too, without a program" {
+    var dir_buf: [64]u8 = undefined;
+    const dir = try std.mem.printSentinel(&dir_buf, "/tmp/dazzle-pack-test-{d}", .{linux.getpid()}, 0);
+    _ = linux.mkdir(dir, 0o755);
+    defer sys.files.removeTree(dir);
+    try unpack(testing.allocator, @embedFile("testdata/pack.tar.xz"), dir, "dazzle-language-xx");
+    try testing.expect(isPackInstalled(dir, "dazzle-language-xx"));
+    try testing.expect(!isInstalled(dir, "dazzle-language-xx"));
+    try testing.expect(installedEntry(dir, .{ .name = "dazzle-language-xx", .title = "", .file = "", .size = 0, .sha256 = "", .language = "xx" }));
 }
 
 test "installing unpacks the app's folder into place, again replaces it, removing deletes it" {
