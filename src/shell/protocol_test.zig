@@ -888,6 +888,58 @@ test "touches go to the surface they went down on, and can move its window" {
     try testing.expectEqual(@as(u32, 1), touch_heard.counts[p.wl_touch.event.up]);
 }
 
+test "a window moved to the work area's edge sticks there until the pointer goes 32 pixels on, as GNOME's do" {
+    var w: World = .{};
+    w.init();
+    defer w.deinit();
+    const a = try w.connect();
+    const compositor = try a.bind(p.wl_compositor.name, 4, null);
+    const wm_base = try a.bind(p.xdg_wm_base.name, 6, null);
+    const shm = try a.bind(p.wl_shm.name, 1, null);
+    const seat = try a.bind(p.wl_seat.name, 5, null);
+    const pointer = try a.d.newObject(null);
+    var m = try seat.request(p.wl_seat.request.get_pointer);
+    m.uint(pointer.id).end();
+    var win: Window = .{ .surface = undefined, .xdg = undefined, .toplevel = undefined };
+    try win.open(a, compositor, wm_base, shm, null);
+    m = try win.toplevel.request(p.xdg_toplevel.request.unset_maximized);
+    m.end();
+    try win.redraw(a, shm, 400, 280);
+    const t = w.server.topWindow().?;
+    const wa = w.server.work_area;
+    // Grabbed 100 px in from its left edge.
+    const gx: f64 = @floatFromInt(t.x + 100);
+    const gy: f64 = @floatFromInt(t.y + 20);
+    w.server.pointerMotion(1, gx, gy);
+    w.server.pointerButton(2, evdev.btn_left, true);
+    try w.pump();
+    m = try win.toplevel.request(p.xdg_toplevel.request.move);
+    m.uint(seat.id).uint(w.server.press_serial).end();
+    try w.pump();
+    const edge: f64 = @floatFromInt(wa.x);
+    // Its left edge to the work area's, then 31 px past: it stays.
+    w.server.pointerMotion(3, edge + 100, gy);
+    try testing.expectEqual(wa.x, t.x);
+    w.server.pointerMotion(3, edge + 100 - 20, gy);
+    try testing.expectEqual(wa.x, t.x);
+    w.server.pointerMotion(3, edge + 100 - 31, gy);
+    try testing.expectEqual(wa.x, t.x);
+    // 32 past: it follows the pointer again, and on.
+    w.server.pointerMotion(3, edge + 100 - 32, gy);
+    try testing.expectEqual(wa.x - 32, t.x);
+    w.server.pointerMotion(3, edge + 100 - 40, gy);
+    try testing.expectEqual(wa.x - 40, t.x);
+    // Back in: no resistance.
+    w.server.pointerMotion(3, edge + 100 + 10, gy);
+    try testing.expectEqual(wa.x + 10, t.x);
+    // Its bottom edge at the work area's (above the dock): it stays too.
+    const bottom: f64 = @floatFromInt(wa.y + @as(i32, @intCast(wa.height)));
+    w.server.pointerMotion(3, edge + 100 + 10, bottom - 280 + 20 + 16);
+    try testing.expectEqual(wa.y + @as(i32, @intCast(wa.height)) - 280, t.y);
+    w.server.pointerButton(4, evdev.btn_left, false);
+    try w.pump();
+}
+
 test "a window dragged to the left or right edge fills that half, to the top fills the work area, and dragged away is restored" {
     var w: World = .{};
     w.init();

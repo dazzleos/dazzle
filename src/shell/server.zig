@@ -3946,8 +3946,41 @@ pub const Server = struct {
             g = s.unsnap(g);
             s.grab = g;
         }
-        s.moveWindow(g.t, x - g.dx, y - g.dy);
+        const at = s.resistEdges(g.t, x - g.dx, y - g.dy);
+        s.moveWindow(g.t, at[0], at[1]);
         s.setSnap(s.snapAt(x, y));
+    }
+
+    /// Where a window moved to (`x`, `y`) by the pointer goes, the work
+    /// area's edges resisting, as GNOME's do (mutter's edge-resistance.c):
+    /// moving towards one, its edge stops at it until the pointer would
+    /// take it `edge_resistance` past, then follows the pointer again.
+    fn resistEdges(s: *const Server, t: *const Toplevel, x: f64, y: f64) [2]f64 {
+        const wa = s.work_area;
+        const size = s.windowRect(t);
+        const w: f64 = @floatFromInt(size.width);
+        const h: f64 = @floatFromInt(size.height);
+        const left: f64 = @floatFromInt(wa.x);
+        const right = left + @as(f64, @floatFromInt(wa.width));
+        const bottom = @as(f64, @floatFromInt(wa.y)) + @as(f64, @floatFromInt(wa.height));
+        const old_x: f64 = @floatFromInt(t.x);
+        const old_y: f64 = @floatFromInt(t.y);
+        return .{
+            resist(old_x, x, left, right - w),
+            resist(old_y, y, -std.math.inf(f64), bottom - h),
+        };
+    }
+
+    /// How far past an edge the pointer takes a window before it goes on.
+    pub const edge_resistance = 32;
+
+    /// `new` (from `old`), stopped at `low` or `high` if it is moving
+    /// past it, from it or within, by less than `edge_resistance`.
+    fn resist(old: f64, new: f64, low: f64, high: f64) f64 {
+        const e: f64 = edge_resistance;
+        if (new < old and old >= low and new < low and low - new < e) return low;
+        if (new > old and old <= high and new > high and new - high < e) return high;
+        return new;
     }
 
     /// A maximized or tiled window dragged away is restored to its own
