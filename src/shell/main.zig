@@ -1566,8 +1566,19 @@ fn remoteStatus(gpa: std.mem.Allocator, out: *std.ArrayList(u8), server: *const 
         const r = server.windowRect(t);
         try out.print(gpa, "  \"{s}\" at {d},{d} {d}x{d}{s}{s}{s}\n", .{ t.title(), r.x, r.y, r.width, r.height, if (t.maximized) " maximized" else "", if (t.fullscreen) " fullscreen" else "", if (t.suspended) " covered" else "" });
     }
+    // Memory, and video memory (the CMA pool every GPU buffer comes from):
+    // used of all.
+    if (sys.meminfo()) |mi| {
+        const mib = 1024 * 1024;
+        try out.print(gpa, "memory {d} MB of {d} MB\nvideo memory {d} MB of {d} MB\n", .{ (mi.total -| mi.available) / mib, mi.total / mib, (mi.cma_total -| mi.cma_free) / mib, mi.cma_total / mib });
+        if (perf_mod.drmMemoryOf(null)) |b| try out.print(gpa, "  the shell's {d} MB\n", .{b / mib});
+    }
     try out.print(gpa, "apps:\n", .{});
-    for (apps) |a| try out.print(gpa, "  {s}{s}\n", .{ a.name, if (a.pid != null) " (running)" else "" });
+    for (apps) |a| {
+        try out.print(gpa, "  {s}{s}", .{ a.name, if (a.pid != null) " (running)" else "" });
+        if (a.pid) |pid| if (perf_mod.drmMemoryOf(pid)) |b| try out.print(gpa, ", {d} MB of video memory", .{b / (1024 * 1024)});
+        try out.print(gpa, "\n", .{});
+    }
 }
 
 /// What the screen's frames have cost: composited (the GPU drawing the

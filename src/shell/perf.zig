@@ -171,6 +171,76 @@ pub fn parseDrmFdinfo(text: []const u8) ?struct { client_id: u64, engine_ns: u64
     return .{ .client_id = client_id orelse return null, .engine_ns = max_engine_ns orelse return null };
 }
 
+/// The video memory a DRM file's fdinfo says its client holds (its
+/// `drm-total-<region>` lines, added up), in bytes; null if it says none.
+pub fn parseDrmMemory(text: []const u8) ?struct { client_id: u64, bytes: u64 } {
+    var client_id: ?u64 = null;
+    var bytes: ?u64 = null;
+    var lines = std.mem.tokenizeScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const key = std.mem.trim(u8, line[0..colon], " \t");
+        const val = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        if (std.mem.eql(u8, key, "drm-client-id")) {
+            client_id = std.fmt.parseInt(u64, val, 10) catch null;
+        } else if (std.mem.startsWith(u8, key, "drm-total-")) {
+            var toks = std.mem.tokenizeAny(u8, val, " \t");
+            const num = std.fmt.parseInt(u64, toks.next() orelse continue, 10) catch continue;
+            const unit = toks.next() orelse "";
+            const scale: u64 = if (std.mem.eql(u8, unit, "KiB")) 1024 else if (std.mem.eql(u8, unit, "MiB")) 1024 * 1024 else 1;
+            bytes = (bytes orelse 0) + num * scale;
+        }
+    }
+    return .{ .client_id = client_id orelse return null, .bytes = bytes orelse return null };
+}
+
+/// The video memory process `pid` holds (`self` for this one), as its DRM
+/// files' fdinfo says; null if they say nothing of it.
+pub fn drmMemoryOf(pid: ?linux.pid_t) ?u64 {
+    var dir_buf: [48]u8 = undefined;
+    const dir_path = (if (pid) |p| std.mem.printSentinel(&dir_buf, "/proc/{d}/fdinfo", .{p}, 0) else std.mem.printSentinel(&dir_buf, "/proc/self/fdinfo", .{}, 0)) catch return null;
+    const dir = sys.open(dir_path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }) catch return null;
+    defer sys.close(dir);
+    var seen: [16]u64 = undefined;
+    var n_seen: usize = 0;
+    var total: ?u64 = null;
+    var dents: [2048]u8 align(8) = undefined;
+    while (true) {
+        const n = sys.check(linux.getdents64(dir, &dents, dents.len)) catch break;
+        if (n == 0) break;
+        var at: usize = 0;
+        while (at < n) {
+            const reclen = std.mem.readInt(u16, dents[at + 16 ..][0..2], .little);
+            const name = std.mem.sliceTo(dents[at + 19 .. at + reclen], 0);
+            at += reclen;
+            if (name.len == 0 or name[0] == '.') continue;
+            var path_buf: [96]u8 = undefined;
+            const p = std.mem.printSentinel(&path_buf, "{s}/{s}", .{ dir_path, name }, 0) catch continue;
+            var fbuf: [2048]u8 = undefined;
+            const text = sys.readFile(p, &fbuf) orelse continue;
+            const info = parseDrmMemory(text) orelse continue;
+            // One client, perhaps opened more than once.
+            const dup = for (seen[0..n_seen]) |id| {
+                if (id == info.client_id) break true;
+            } else false;
+            if (dup) continue;
+            if (n_seen < seen.len) {
+                seen[n_seen] = info.client_id;
+                n_seen += 1;
+            }
+            total = (total orelse 0) + info.bytes;
+        }
+    }
+    return total;
+}
+
+test "a DRM client's video memory, from its fdinfo" {
+    const m = parseDrmMemory("drm-driver:\tvc4\ndrm-client-id:\t7\ndrm-total-memory:\t2048 KiB\ndrm-resident-memory:\t2048 KiB\n").?;
+    try std.testing.expectEqual(@as(u64, 7), m.client_id);
+    try std.testing.expectEqual(@as(u64, 2 << 20), m.bytes);
+    try std.testing.expect(parseDrmMemory("drm-client-id:\t7\n") == null);
+}
+
 pub const Monitor = struct {
     last_ns: ?u64 = null,
     last_cpu: ?[2]u64 = null,
