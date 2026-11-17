@@ -23,9 +23,10 @@
 //!
 //! The window is resized by dragging its edges when it is not maximized
 //! (or tiled: xdg_toplevel's tiled states, filling half the work area):
-//! a press within `resize_border` of an edge (inside the window: it has
-//! nothing outside) asks the shell to resize it (xdg_toplevel.resize)
-//! rather than going to the app, and the pointer shows a resize arrow
+//! a press on its outer pixel (`resize_border`; the shell takes it from
+//! there out into the shadow it draws) asks the shell to resize it
+//! (xdg_toplevel.resize) rather than going to the app, and the pointer
+//! shows a resize arrow
 //! there (with wp_cursor_shape_v1, if the shell has it). The app says how
 //! small it may be with `setMinSize`, and draws at whatever size it is
 //! given at or above that.
@@ -245,9 +246,10 @@ pub const InputEvent = union(enum) {
 /// Used when the compositor leaves the size to us.
 const default_size = [2]u32{ 1280, 720 };
 
-/// How far in from a window's edges a press resizes it, and how far along
-/// them from a corner the corner is taken.
-pub const resize_border = 6;
+/// How far in from a window's edges a press resizes it (the outer pixel:
+/// the shell takes the band out into its shadow), and how far along them
+/// from a corner the corner is taken.
+pub const resize_border = 1;
 pub const resize_corner = 20;
 
 /// A window's edges (xdg_toplevel.resize_edge's bits).

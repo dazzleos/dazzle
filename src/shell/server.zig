@@ -780,6 +780,10 @@ pub const Server = struct {
     /// its corner) or resizing. The pointer focuses on no surface
     /// meanwhile.
     grab: ?Grab = null,
+    /// The pointer is over a window's resize border (its outer pixel and
+    /// into its shadow; see `edgeAt`): the window and its edges. A press
+    /// there resizes it, and no client has the pointer meanwhile.
+    edge_hover: ?EdgeHit = null,
     /// The pointer's picture the client under it chose (an arrow until it
     /// does), or a custom cursor surface set by `wl_pointer.set_cursor`.
     client_cursor: Cursor = .arrow,
@@ -851,6 +855,14 @@ pub const Server = struct {
 
     /// The smallest a window may be made, whatever the client says.
     pub const min_size = 64;
+
+    /// A window's resize border, as GTK has it: from its outer pixel out
+    /// into its shadow this far, the corners this far along its sides.
+    pub const resize_handle = 12;
+    pub const resize_corner = 24;
+
+    /// A window's edges under the pointer.
+    pub const EdgeHit = struct { t: *Toplevel, edges: u32 };
 
     /// How much of a window a move leaves in the work area, so it can be
     /// moved back.
@@ -1170,6 +1182,9 @@ pub const Server = struct {
     fn unmap(s: *Server, t: *Toplevel) void {
         if (s.grab) |g| if (g.t == t) {
             s.grab = null;
+        };
+        if (s.edge_hover) |e| if (e.t == t) {
+            s.edge_hover = null;
         };
         // Its popups close.
         var n = s.popups.items.len;
@@ -1948,13 +1963,18 @@ pub const Server = struct {
     pub fn cursor(s: *const Server) Cursor {
         if (s.pointerLocked()) return .hidden;
         const g = s.grab orelse {
+            if (s.edge_hover) |e| return edgeCursor(e.edges);
             if (s.pointer_focus != null) {
                 if (s.cursor_surface != null) return .hidden;
                 return s.client_cursor;
             }
             return .arrow;
         };
-        const edges = if (g.resize) |r| r.edges else 0;
+        return edgeCursor(if (g.resize) |r| r.edges else 0);
+    }
+
+    /// The resize arrow for `edges` (an arrow for none).
+    fn edgeCursor(edges: u32) Cursor {
         const v = edges & (edge_top | edge_bottom);
         const h = edges & (edge_left | edge_right);
         if (v != 0 and h != 0) return if ((v == edge_top) == (h == edge_left)) .resize_diagonal_down else .resize_diagonal_up;
@@ -4264,6 +4284,17 @@ pub const Server = struct {
             if (s.buttons_down == 0 and d.touch == null) s.endDrag();
             return;
         }
+        // A press on a window's resize border resizes it.
+        if (pressed and s.buttons_down == bit and button == evdev.btn_left) if (s.edge_hover) |e| {
+            s.dismissGrabs();
+            if (e.t != s.topWindow()) {
+                s.raiseToplevel(e.t);
+                s.updateFocus();
+            }
+            s.edge_hover = null;
+            s.startResize(e.t, e.edges, .{ .press_x = s.pointer_x, .press_y = s.pointer_y, .x = s.pointer_x, .y = s.pointer_y });
+            return;
+        };
         if (pressed) {
             // Clicking anything but the grabbing client's own surfaces
             // closes its menus.
@@ -4468,6 +4499,58 @@ pub const Server = struct {
             y < @as(f64, @floatFromInt(r.y + @as(i32, @intCast(r.height))));
     }
 
+    /// The window whose resize border (`resize_handle`) is at (`x`, `y`),
+    /// and its edges there, if a window's is, and nothing is above it
+    /// there: a floating window with a shadow, that can be resized.
+    pub fn edgeAt(s: *Server, x: f64, y: f64) ?EdgeHit {
+        if (!rectHas(s.screen(), x, y)) return null;
+        for (s.shell_areas) |area| if (area) |r| if (rectHas(r, x, y)) return null;
+        var i = s.toplevels.items.len;
+        while (i > 0) {
+            i -= 1;
+            const t = s.toplevels.items[i];
+            if (!t.shown() or t.suspended) continue;
+            var j = s.popups.items.len;
+            while (j > 0) {
+                j -= 1;
+                const ps = s.popups.items[j].xdg.surface orelse continue;
+                if (s.rootToplevel(ps) != t) continue;
+                if (s.hitTree(ps, x, y) != null) return null;
+            }
+            const surf = t.xdg.surface orelse continue;
+            const resizable = rounding(t) > 0 and (t.max_width == 0 or t.max_width != t.min_width or t.max_height == 0 or t.max_height != t.min_height);
+            if (resizable) {
+                const r = s.windowRect(t);
+                if (edgesOf(r, x, y)) |edges| return if (edges == 0) null else .{ .t = t, .edges = edges };
+            }
+            if (s.hitTree(surf, x, y) != null) return null;
+        }
+        return null;
+    }
+
+    /// The edges of window `r` (`resize_handle` out from it, its outer
+    /// pixel in) at (`x`, `y`): 0 within it, null outside it all.
+    fn edgesOf(r: Rect, x: f64, y: f64) ?u32 {
+        const h: f64 = resize_handle;
+        const left: f64 = @floatFromInt(r.x);
+        const top: f64 = @floatFromInt(r.y);
+        const right = left + @as(f64, @floatFromInt(r.width));
+        const bottom = top + @as(f64, @floatFromInt(r.height));
+        if (x < left - h or x >= right + h or y < top - h or y >= bottom + h) return null;
+        var edges: u32 = 0;
+        if (x < left + 1) edges |= edge_left else if (x >= right - 1) edges |= edge_right;
+        if (y < top + 1) edges |= edge_top else if (y >= bottom - 1) edges |= edge_bottom;
+        // Near a corner: both edges at it.
+        const c: f64 = resize_corner;
+        if (edges & (edge_left | edge_right) != 0 and edges & (edge_top | edge_bottom) == 0) {
+            if (y < top + c) edges |= edge_top else if (y >= bottom - c) edges |= edge_bottom;
+        }
+        if (edges & (edge_top | edge_bottom) != 0 and edges & (edge_left | edge_right) == 0) {
+            if (x < left + c) edges |= edge_left else if (x >= right - c) edges |= edge_right;
+        }
+        return edges;
+    }
+
     fn surfaceAt(s: *Server, x: f64, y: f64) ?*Surface {
         // Windows can be anywhere on the screen, but the shell's parts of
         // it are over them.
@@ -4504,7 +4587,14 @@ pub const Server = struct {
     /// is over none; while a button is held down, the surface it was
     /// pressed on keeps the pointer until the button is released.
     fn updatePointerFocus(s: *Server) bool {
-        const under = if (s.grab != null or s.drag != null or s.overview)
+        // Over a window's resize border, no client has the pointer.
+        if (s.grab == null and s.drag == null and !s.overview and s.buttons_down == 0) {
+            const hit = s.edgeAt(s.pointer_x, s.pointer_y);
+            const was = s.edge_hover;
+            s.edge_hover = hit;
+            if (!std.meta.eql(hit, was)) s.damaged = true;
+        }
+        const under = if (s.grab != null or s.drag != null or s.overview or s.edge_hover != null)
             null
         else if (s.buttons_down != 0)
             (if (s.pointer_focus) |surf| if (surf.texture() != null and s.surfaceOrigin(surf) != null) surf else null else null)

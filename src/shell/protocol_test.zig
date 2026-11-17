@@ -1929,6 +1929,57 @@ test "zwp_text_input_v3 sends enter/leave with focus, commits client state, and 
     w.server.keyboardKey(17, 37, false);
 }
 
+test "a window with a shadow is resized from its outer pixel out into its shadow, as GTK's are" {
+    var w: World = .{};
+    w.init();
+    defer w.deinit();
+    const a = try w.connect();
+    const compositor = try a.bind(p.wl_compositor.name, 4, null);
+    const wm_base = try a.bind(p.xdg_wm_base.name, 6, null);
+    const shm = try a.bind(p.wl_shm.name, 1, null);
+    const seat = try a.bind(p.wl_seat.name, 5, null);
+    const mgr = try a.bind(p.dazzle_decoration_manager_v1.name, 1, null);
+    var pointer_heard: Heard = .{};
+    const pointer = try a.d.newObject(pointer_heard.listener());
+    var m = try seat.request(p.wl_seat.request.get_pointer);
+    m.uint(pointer.id).end();
+    var win: Window = .{ .surface = undefined, .xdg = undefined, .toplevel = undefined };
+    try win.open(a, compositor, wm_base, shm, null);
+    var deco_heard: Heard = .{};
+    const deco = try a.d.newObject(deco_heard.listener());
+    m = try mgr.request(p.dazzle_decoration_manager_v1.request.get_decoration);
+    m.uint(deco.id).uint(win.toplevel.id).end();
+    m = try win.toplevel.request(p.xdg_toplevel.request.unset_maximized);
+    m.end();
+    try win.redraw(a, shm, 400, 280);
+    const t = w.server.topWindow().?;
+    const r = w.server.windowRect(t);
+    const left: f64 = @floatFromInt(r.x);
+    const top: f64 = @floatFromInt(r.y);
+    const mid_y = top + 140;
+    // In the shadow, up to 12 px out: the left edge; on its outer pixel
+    // too; but not further out, nor further in.
+    try testing.expectEqual(@as(u32, Server.edge_left), w.server.edgeAt(left - 11.5, mid_y).?.edges);
+    try testing.expectEqual(@as(u32, Server.edge_left), w.server.edgeAt(left + 0.5, mid_y).?.edges);
+    try testing.expect(w.server.edgeAt(left - 12.5, mid_y) == null);
+    try testing.expect(w.server.edgeAt(left + 1.5, mid_y) == null);
+    // Near a corner: both edges.
+    try testing.expectEqual(@as(u32, Server.edge_left | Server.edge_top), w.server.edgeAt(left - 4, top + 20).?.edges);
+    try testing.expectEqual(@as(u32, Server.edge_left | Server.edge_top), w.server.edgeAt(left + 20, top - 4).?.edges);
+    // There, the resize arrow, and the window does not have the pointer.
+    w.server.pointerMotion(1, left - 6, mid_y);
+    try w.pump();
+    try testing.expectEqual(Server.Cursor.resize_horizontal, w.server.cursor());
+    try testing.expect(w.server.pointer_focus == null);
+    // A press drags its left edge.
+    w.server.pointerButton(2, evdev.btn_left, true);
+    w.server.pointerMotion(3, left - 46, mid_y);
+    try w.pump();
+    try testing.expect(w.server.grab != null and w.server.grab.?.resize.?.edges == Server.edge_left);
+    w.server.pointerButton(4, evdev.btn_left, false);
+    try testing.expect(w.server.grab == null);
+}
+
 test "a window whose client asks is drawn rounded, with a shadow, unless square; other windows are drawn as they are" {
     var w: World = .{};
     w.init();
