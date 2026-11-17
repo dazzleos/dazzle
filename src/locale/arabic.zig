@@ -343,4 +343,5 @@ pub const arabic = [_][2][]const u8{
     .{ "USB device {x:0>4}:{x:0>4}", "جهاز USB {x:0>4}:{x:0>4}" },
     .{ "Basic input until its language pack is installed", "إدخال أساسي حتى تثبيت حزمة اللغة الخاصة به" },
     .{ "Its language pack is installed", "حزمة اللغة مثبتة" },
+    .{ "Change", "تغيير" },
 };

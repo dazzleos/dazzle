@@ -199,6 +199,7 @@ pub const Settings = struct {
         resources: resources_view.State = .{},
         log: log_view.State = .{},
         parental: parental_view.State = .{},
+        language: language_view.State = .{},
 
         fn selectPage(st: *State, idx: usize) void {
             if (idx < @typeInfo(Page).@"enum".field_values.len) st.page = @enumFromInt(idx);
@@ -230,7 +231,7 @@ pub const Settings = struct {
             .board => board_view.build(self, b, &state.board),
             .apps => software_view.build(self, b, &state.software),
             .resources => resources_view.build(self, b, &state.resources),
-            .language => b.scroll(.language, language_view.build(self, b)),
+            .language => b.scroll(.language, language_view.build(self, b, &state.language)),
             .parental => b.scroll(.parental, parental_view.build(self, b, &state.parental)),
             .log => b.scroll(.log, log_view.build(self, b, &state.log)),
         };
@@ -241,10 +242,11 @@ pub const Settings = struct {
                 .child = right,
             }) }),
         } });
-        // A parent's password asked for, over the window.
-        return parental_view.withDialog(self, b, &state.parental, cx.make(kete.Column{ .cross_axis_alignment = .stretch, .children = &.{
+        // A parent's password asked for, or the language or keyboard
+        // changed, over the window.
+        return parental_view.withDialog(self, b, &state.parental, language_view.withDialog(self, b, &state.language, cx.make(kete.Column{ .cross_axis_alignment = .stretch, .children = &.{
             cx.make(kete.Expanded{ .child = content }),
-        } }));
+        } })));
     }
 };
 

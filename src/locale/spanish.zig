@@ -380,6 +380,7 @@ pub const latin_america = [_][2][]const u8{
     .{ "USB device {x:0>4}:{x:0>4}", "Dispositivo USB {x:0>4}:{x:0>4}" },
     .{ "Basic input until its language pack is installed", "Entrada básica hasta que se instale su paquete de idioma" },
     .{ "Its language pack is installed", "Su paquete de idioma está instalado" },
+    .{ "Change", "Cambiar" },
 };
 
 /// Spain's, where it differs.

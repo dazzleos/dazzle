@@ -40,6 +40,8 @@ pub fn textf(cx: *kete.BuildContext, comptime fmt: []const u8, args: anytype) []
 pub const TimeZonePicker = @import("timezone_picker.zig").TimeZonePicker;
 /// Choosing a language, by searching (setup's, and Settings').
 pub const LanguagePicker = @import("language_picker.zig").LanguagePicker;
+pub const KeyboardPicture = @import("keyboard_picture.zig").KeyboardPicture;
+pub const KeyboardPicker = @import("keyboard_picture.zig").KeyboardPicker;
 pub const Renderer = renderer.Renderer;
 pub const Window = window.Window;
 pub const Display = window.Display;
@@ -278,4 +280,5 @@ fn channelDistance(a: u32, b: u32) u32 {
 test {
     _ = @import("timezone_picker.zig");
     _ = @import("language_picker.zig");
+    _ = @import("keyboard_picture.zig");
 }

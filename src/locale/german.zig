@@ -343,4 +343,5 @@ pub const germany = [_][2][]const u8{
     .{ "USB device {x:0>4}:{x:0>4}", "USB-Gerät {x:0>4}:{x:0>4}" },
     .{ "Basic input until its language pack is installed", "Einfache Eingabe, bis sein Sprachpaket installiert ist" },
     .{ "Its language pack is installed", "Sein Sprachpaket ist installiert" },
+    .{ "Change", "Ändern" },
 };

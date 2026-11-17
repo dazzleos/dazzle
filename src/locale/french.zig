@@ -342,6 +342,7 @@ pub const france = [_][2][]const u8{
     .{ "USB device {x:0>4}:{x:0>4}", "Périphérique USB {x:0>4}:{x:0>4}" },
     .{ "Basic input until its language pack is installed", "Saisie de base jusqu’à l’installation de son module linguistique" },
     .{ "Its language pack is installed", "Son module linguistique est installé" },
+    .{ "Change", "Modifier" },
 };
 
 /// Canada's, where it differs.

@@ -342,4 +342,5 @@ pub const japan = [_][2][]const u8{
     .{ "USB device {x:0>4}:{x:0>4}", "USB デバイス {x:0>4}:{x:0>4}" },
     .{ "Basic input until its language pack is installed", "言語パックをインストールするまでは基本入力です" },
     .{ "Its language pack is installed", "言語パックはインストール済みです" },
+    .{ "Change", "変更" },
 };
