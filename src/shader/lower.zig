@@ -1521,9 +1521,16 @@ pub fn lower(
 
 /// Perspective divide and viewport transform, then the shaded vertex
 /// header: Xs|Ys (12.4 fixed point), Zs and 1/Wc.
+///
+/// The SFU's reciprocal is only approximate: where a corner lands on the
+/// screen would be off by a tenth of a pixel or more across a 1080p
+/// screen, so a corner part way along another triangle's edge (as merged
+/// faces have) could leave a crack beside it. One Newton-Raphson step,
+/// r(2 - wr), makes it as good as a float can be (as Mesa's vc4 does).
 fn screenHeader(l: *Lowerer, pos: []const Value) void {
     const s = l.s;
-    const rcp_w = s.recip(pos[3]);
+    const rough = s.recip(pos[3]);
+    const rcp_w = s.fmul(rough, s.fsub(l.k(2), s.fmul(pos[3], rough)));
     const vp = l.iface.uniform_words;
     const xs = s.fmul(s.fmul(pos[0], s.uniform(vp)), rcp_w);
     const ys = s.fmul(s.fmul(pos[1], s.uniform(vp + 1)), rcp_w);
