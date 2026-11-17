@@ -98,7 +98,7 @@ pub const germany = [_][2][]const u8{
     .{ "Software", "Software" },
     .{ "Resources", "Ressourcen" },
     .{ "Parental", "Familie" },
-    .{ "Log", "Protokoll" },
+    .{ "Debug", "Debugging" },
     .{ "Address", "Adresse" },
     .{ "Address/prefix", "Adresse/Präfix" },
     .{ "Gateway", "Gateway" },

@@ -97,7 +97,7 @@ pub const simplified = [_][2][]const u8{
     .{ "Software", "软件" },
     .{ "Resources", "资源" },
     .{ "Parental", "家长控制" },
-    .{ "Log", "日志" },
+    .{ "Debug", "调试" },
     .{ "Address", "地址" },
     .{ "Address/prefix", "地址/前缀" },
     .{ "Gateway", "网关" },

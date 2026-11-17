@@ -98,7 +98,7 @@ pub const arabic = [_][2][]const u8{
     .{ "Software", "البرامج" },
     .{ "Resources", "الموارد" },
     .{ "Parental", "الأسرة" },
-    .{ "Log", "السجل" },
+    .{ "Debug", "التصحيح" },
     .{ "Address", "العنوان" },
     .{ "Address/prefix", "العنوان/البادئة" },
     .{ "Gateway", "البوابة" },

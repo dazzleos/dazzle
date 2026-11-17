@@ -97,7 +97,7 @@ pub const france = [_][2][]const u8{
     .{ "Software", "Logiciels" },
     .{ "Resources", "Ressources" },
     .{ "Parental", "Famille" },
-    .{ "Log", "Journal" },
+    .{ "Debug", "Débogage" },
     .{ "Address", "Adresse" },
     .{ "Address/prefix", "Adresse/préfixe" },
     .{ "Gateway", "Passerelle" },

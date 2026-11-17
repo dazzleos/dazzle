@@ -1,4 +1,4 @@
-//! The Log page: the system's log, newest first, with when each message
+//! The Debug page: the system's log, newest first, with when each message
 //! came (since the system started) and what it says, warnings and errors
 //! in colour; or only those. And whether it is served over HTTP, for
 //! reading in a browser on another computer (off unless turned on: anyone
@@ -17,8 +17,10 @@ const Settings = view.Settings;
 const Builder = view.Builder;
 const Actions = view.Actions;
 
-pub const label = "Log";
-pub const icon: kete.IconName = .article;
+/// "Debug": the log, and what developers turn on (serving the log,
+/// remote control).
+pub const label = "Debug";
+pub const icon: kete.IconName = .bug_report;
 
 const log_row_height = 26;
 

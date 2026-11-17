@@ -97,7 +97,7 @@ pub const japan = [_][2][]const u8{
     .{ "Software", "ソフト" },
     .{ "Resources", "リソース" },
     .{ "Parental", "保護者" },
-    .{ "Log", "ログ" },
+    .{ "Debug", "デバッグ" },
     .{ "Address", "アドレス" },
     .{ "Address/prefix", "アドレス/プレフィックス" },
     .{ "Gateway", "ゲートウェイ" },
