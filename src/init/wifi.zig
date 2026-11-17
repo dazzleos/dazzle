@@ -49,6 +49,14 @@ const retry_ns = 5 * std.time.ns_per_s;
 const eth_p_pae: u16 = 0x888e;
 
 /// Joining a network, and staying joined.
+/// The reason an access point gives for disconnecting when the 4-way
+/// handshake timed out (802.11's reason code 15).
+const reason_handshake_timeout = 15;
+/// How many times a join dropped by the access point is tried again, and
+/// after how long.
+const max_rejoins = 2;
+const rejoin_ns = 500 * std.time.ns_per_ms;
+
 const Join = struct {
     ssid_buf: [32]u8 = undefined,
     ssid_len: u8 = 0,
@@ -74,8 +82,10 @@ const Join = struct {
     pending_eapol_src: [6]u8 = @splat(0),
     started_ns: u64 = 0,
     dhcp_pid: ?linux.pid_t = null,
-    /// When to try again after losing the connection.
+    /// When to try again after losing the connection (or, joining, after
+    /// the access point dropped it: `rejoins` times so far).
     retry_at: ?u64 = null,
+    rejoins: u8 = 0,
 
     fn ssid(j: *const Join) []const u8 {
         return j.ssid_buf[0..j.ssid_len];
@@ -901,9 +911,23 @@ pub const Manager = struct {
             // disconnection now is the end of the previous connection.
             .connecting => {},
             .authenticating => {
-                // A disconnection after message 1 came (and 3 did not)
-                // means the access point did not accept message 2's MIC.
-                const wrong = state == .authenticating and j.handshake.message1_count > 0 and !j.handshake.complete;
+                // An access point that does not accept message 2's MIC (the
+                // password is wrong) sends message 1 again, then gives up
+                // (reason 15, the 4-way handshake timing out). Dropped
+                // before then, as one does that still has this computer's
+                // connection from before it restarted (reason 2, previous
+                // authentication no longer valid), it is joined again.
+                const wrong = !j.handshake.complete and (j.handshake.message1_count > 1 or reason == reason_handshake_timeout);
+                if (!wrong and j.rejoins < max_rejoins) {
+                    print("dazzle: wifi: disconnected while joining (reason {d}); trying again\n", .{reason});
+                    j.rejoins += 1;
+                    if (j.eapol) |fd| sys.close(fd);
+                    j.eapol = null;
+                    j.started_ns = now;
+                    j.retry_at = now + rejoin_ns;
+                    m.setState(.connecting);
+                    return;
+                }
                 print("dazzle: wifi: disconnected (reason {d})\n", .{reason});
                 m.fail(if (wrong) .wrong_password else .rejected);
             },
@@ -1025,7 +1049,10 @@ pub const Manager = struct {
     pub fn tick(m: *Manager, now: u64) void {
         const j = &(m.join orelse return);
         switch (m.report.connection.state) {
-            .connecting, .authenticating => if (now -| j.started_ns > connect_timeout_ns) {
+            // Joining again, after the access point dropped it.
+            .connecting, .authenticating => if (j.retry_at) |t| {
+                if (now >= t) m.startJoin(now) catch m.fail(.rejected);
+            } else if (now -| j.started_ns > connect_timeout_ns) {
                 if (!j.has_bss) {
                     m.report.connection.state = .failed;
                     m.report.connection.failure = .not_found;
