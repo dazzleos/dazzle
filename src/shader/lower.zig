@@ -89,6 +89,7 @@ const Ptr = struct {
 
 /// GLSL.std.450 extended instructions.
 const Glsl = struct {
+    const trunc = 3;
     const fabs = 4;
     const floor = 8;
     const pow = 26;
@@ -299,6 +300,11 @@ const Lowerer = struct {
     fn neg(l: *Lowerer, a: Value) Value {
         return l.s.fsub(l.k(0), a);
     }
+    /// Toward zero: two instructions (as `floor` is, for values not below
+    /// zero, without its correction for those that are).
+    fn trunc(l: *Lowerer, a: Value) Value {
+        return l.s.unary(.itof, l.s.unary(.ftoi, a));
+    }
     fn fabs(l: *Lowerer, a: Value) Value {
         return l.s.binary(.fmaxabs, a, a);
     }
@@ -374,6 +380,7 @@ const Lowerer = struct {
         };
         if (args.len < need) return error.InvalidSpirv;
         return switch (number) {
+            Glsl.trunc => l.map1(args[0], trunc),
             Glsl.fabs => l.map1(args[0], fabs),
             Glsl.floor => l.floor(inst, args[0]),
             Glsl.sqrt => l.map1(args[0], sqrt),
