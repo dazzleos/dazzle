@@ -380,7 +380,7 @@ fn addGpuModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
 }
 
 /// Who embeds a shader program.
-const ShaderOwner = enum { gfx, demo, shell, blocks, maps };
+const ShaderOwner = enum { gfx, demo, shell, motu, maps };
 
 /// The shader programs: Zig sources compiled to SPIR-V, then for the GPU
 /// by tools/shaderc.zig (with the render state that changes their code),
@@ -398,12 +398,12 @@ const shader_programs = [_]struct { source: []const u8, name: ?[]const u8 = null
     // The voxel game's: blocks (solid, then glass and plants blended),
     // water, the sky, the outline of the block picked, and the world drawn
     // smaller stretched over the view.
-    .{ .source = "src/apps/blocks/shaders/terrain.zig", .owner = .blocks, .args = &.{"--depth-test"} },
-    .{ .source = "src/apps/blocks/shaders/terrain.zig", .name = "terrain_blend", .owner = .blocks, .args = &.{ "--depth-test", "--blend=source-over" } },
-    .{ .source = "src/apps/blocks/shaders/water.zig", .owner = .blocks, .args = &.{ "--depth-test", "--blend=source-over" } },
-    .{ .source = "src/apps/blocks/shaders/sky.zig", .owner = .blocks, .args = &.{"--depth-test"} },
-    .{ .source = "src/apps/blocks/shaders/upscale.zig", .owner = .blocks, .args = &.{} },
-    .{ .source = "src/apps/blocks/shaders/line.zig", .owner = .blocks, .args = &.{"--depth-test"} },
+    .{ .source = "src/apps/motu/shaders/terrain.zig", .owner = .motu, .args = &.{"--depth-test"} },
+    .{ .source = "src/apps/motu/shaders/terrain.zig", .name = "terrain_blend", .owner = .motu, .args = &.{ "--depth-test", "--blend=source-over" } },
+    .{ .source = "src/apps/motu/shaders/water.zig", .owner = .motu, .args = &.{ "--depth-test", "--blend=source-over" } },
+    .{ .source = "src/apps/motu/shaders/sky.zig", .owner = .motu, .args = &.{"--depth-test"} },
+    .{ .source = "src/apps/motu/shaders/upscale.zig", .owner = .motu, .args = &.{} },
+    .{ .source = "src/apps/motu/shaders/line.zig", .owner = .motu, .args = &.{"--depth-test"} },
     .{ .source = "src/shell/shaders/quad.zig", .owner = .shell, .args = &.{} },
     // The same, blended: the shaded preview of where a window will go.
     .{ .source = "src/shell/shaders/quad.zig", .name = "quad_blend", .owner = .shell, .args = &.{"--blend=source-over"} },
@@ -1349,13 +1349,13 @@ pub fn build(b: *std.Build) void {
         .root_module = chat_module,
     });
     const install_chat = b.addInstallArtifact(chat_exe, .{});
-    const blocks_module = addProgramModule(b, "src/apps/blocks/main.zig", target, optimize, pi, shaders, true);
-    _ = addKete(b, blocks_module, pi, target, optimize, "src/apps/blocks");
-    const blocks_exe = b.addExecutable(.{
-        .name = "dazzle-blocks",
-        .root_module = blocks_module,
+    const motu_module = addProgramModule(b, "src/apps/motu/main.zig", target, optimize, pi, shaders, true);
+    _ = addKete(b, motu_module, pi, target, optimize, "src/apps/motu");
+    const motu_exe = b.addExecutable(.{
+        .name = "motu",
+        .root_module = motu_module,
     });
-    const install_blocks = b.addInstallArtifact(blocks_exe, .{});
+    const install_motu = b.addInstallArtifact(motu_exe, .{});
     const setup_module = addProgramModule(b, "src/apps/setup/main.zig", target, optimize, pi, shaders, true);
     _ = addKete(b, setup_module, pi, target, optimize, "src/apps/setup");
     const setup_exe = b.addExecutable(.{
@@ -1458,7 +1458,7 @@ pub fn build(b: *std.Build) void {
         .{ .exe = files_exe, .icon = .folder, .title = "Files", .description = "Browse your files" },
         .{ .exe = camera_exe, .icon = .photo_camera, .title = "Camera", .description = "Take photos and videos" },
         .{ .exe = text_editor_exe, .icon = .edit_note, .title = "Text Editor", .description = "Edit text files", .handles = &.{"text/plain"} },
-        .{ .exe = blocks_exe, .icon = .landscape, .title = "Blocks", .description = "Build worlds out of blocks" },
+        .{ .exe = motu_exe, .icon = .landscape, .title = "Motu", .description = "Build islands out of blocks" },
         .{ .exe = logger_exe, .icon = .show_chart, .title = "Data Logger", .description = "Record inputs from the GPIO pins" },
         .{ .exe = chat_exe, .icon = .chat, .title = "Chat", .description = "Chat with others on your network in rooms" },
         .{ .exe = maps_exe, .icon = .public, .title = "Maps", .description = "Explore the Earth on a 3D globe" },
@@ -1487,7 +1487,7 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(apps_step);
     const install_initramfs = b.addInstallFile(initramfs, "initramfs.cpio");
     const programs_step = b.step("programs", "Build just the programs (zig-out/bin) and zig-out/initramfs.cpio");
-    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_settings.step, &install_files.step, &install_camera.step, &install_text_editor.step, &install_logger.step, &install_chat.step, &install_blocks.step, &install_maps.step, &install_terminal.step, &install_develop.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
+    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_settings.step, &install_files.step, &install_camera.step, &install_text_editor.step, &install_logger.step, &install_chat.step, &install_motu.step, &install_maps.step, &install_terminal.step, &install_develop.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
         programs_step.dependOn(st);
         b.getInstallStep().dependOn(st);
     }
@@ -1550,9 +1550,9 @@ pub fn build(b: *std.Build) void {
     // Kete's frames, drawn with Dazzle's shaders in the QPU simulator.
     const host_kete_vc4 = addKete(b, host_text_editor, host, b.graph.host, test_optimize, "src/apps/text_editor");
     host_kete_vc4.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
-    const host_blocks = addProgramModule(b, "src/apps/blocks/main.zig", b.graph.host, test_optimize, host, shaders, false);
-    host_blocks.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
-    _ = addKete(b, host_blocks, host, b.graph.host, test_optimize, "src/apps/blocks");
+    const host_motu = addProgramModule(b, "src/apps/motu/main.zig", b.graph.host, test_optimize, host, shaders, false);
+    host_motu.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
+    _ = addKete(b, host_motu, host, b.graph.host, test_optimize, "src/apps/motu");
     const host_logger = addProgramModule(b, "src/apps/logger/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_logger.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     _ = addKete(b, host_logger, host, b.graph.host, test_optimize, "src/apps/logger");
@@ -1595,7 +1595,7 @@ pub fn build(b: *std.Build) void {
         host_text_editor,
         host_logger,
         host_chat,
-        host_blocks,
+        host_motu,
         host_setup,
         host_maps,
         host_terminal,

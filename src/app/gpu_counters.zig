@@ -1,7 +1,7 @@
 //! The GPU's performance counters, counting in an app's windows' frames
 //! (on the Pi 0 to 3's GPU, which has them): what its shader processors
 //! spent their time on, and how many triangles and pixels it drew, for
-//! the log. Apps say where their frames' time goes with it (Blocks while
+//! the log. Apps say where their frames' time goes with it (Motu while
 //! "What is drawn" is shown, Maps while it draws).
 
 const std = @import("std");

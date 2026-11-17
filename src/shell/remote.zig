@@ -8,7 +8,7 @@
 //!     /pointer?x=&y=                moves the pointer there
 //!     /move?dx=&dy=                 moves the pointer by that much (as a
 //!                                   mouse does: an app that has taken
-//!                                   the pointer, as Blocks does, turns)
+//!                                   the pointer, as Motu does, turns)
 //!     /click?x=&y=[&button=right]   moves the pointer there and clicks
 //!     /button?button=left&pressed=1 presses (or lets go of) a button
 //!     /scroll?dy=                   scrolls (positive: down)
@@ -16,11 +16,11 @@
 //!                                   lets it go, or only one of those
 //!     /type?text=                   types the text (US keys: letters,
 //!                                   digits, space and common punctuation)
-//!     /launch?app=dazzle-blocks     opens an app, or brings it to the top
-//!     /quit?app=dazzle-blocks[&force=1]
+//!     /launch?app=motu     opens an app, or brings it to the top
+//!     /quit?app=motu[&force=1]
 //!                                   asks the app's windows to close (or
 //!                                   ends it at once)
-//!     /window?do=maximize[&app=dazzle-blocks]
+//!     /window?do=maximize[&app=motu]
 //!                                   maximizes, restores, makes fullscreen
 //!                                   (fullscreen), leaves fullscreen
 //!                                   (windowed), closes or raises the top
@@ -296,18 +296,18 @@ test "requests are read with their code, and others turned away" {
     try testing.expectEqual(sys.evdev.btn_left + 1, click.button);
     try testing.expectEqualStrings("Hello, there!", parse("GET /type?code=123456&text=Hello%2C+there%21 HTTP/1.1\r\n\r\n", 123456, &buf).command.type);
     try testing.expectEqual(@as(?bool, false), parse("GET /key?code=123456&key=28&pressed=0 HTTP/1.1\r\n\r\n", 123456, &buf).command.key.pressed);
-    try testing.expectEqualStrings("dazzle-blocks", parse("GET /launch?code=123456&app=dazzle-blocks HTTP/1.1\r\n\r\n", 123456, &buf).command.launch);
+    try testing.expectEqualStrings("motu", parse("GET /launch?code=123456&app=motu HTTP/1.1\r\n\r\n", 123456, &buf).command.launch);
 }
 
 test "apps, windows and updates are controlled directly" {
     var buf: [64]u8 = undefined;
-    const quit = parse("GET /quit?code=123456&app=dazzle-blocks&force=1 HTTP/1.1\r\n\r\n", 123456, &buf).command.quit;
-    try testing.expectEqualStrings("dazzle-blocks", quit.app);
+    const quit = parse("GET /quit?code=123456&app=motu&force=1 HTTP/1.1\r\n\r\n", 123456, &buf).command.quit;
+    try testing.expectEqualStrings("motu", quit.app);
     try testing.expect(quit.force);
-    try testing.expect(!parse("GET /quit?code=123456&app=dazzle-blocks HTTP/1.1\r\n\r\n", 123456, &buf).command.quit.force);
-    const w = parse("GET /window?code=123456&do=fullscreen&app=Blocks HTTP/1.1\r\n\r\n", 123456, &buf).command.window;
+    try testing.expect(!parse("GET /quit?code=123456&app=motu HTTP/1.1\r\n\r\n", 123456, &buf).command.quit.force);
+    const w = parse("GET /window?code=123456&do=fullscreen&app=Motu HTTP/1.1\r\n\r\n", 123456, &buf).command.window;
     try testing.expectEqual(WindowAction.fullscreen, w.action);
-    try testing.expectEqualStrings("Blocks", w.app.?);
+    try testing.expectEqualStrings("Motu", w.app.?);
     try testing.expect(parse("GET /window?code=123456&do=maximize HTTP/1.1\r\n\r\n", 123456, &buf).command.window.app == null);
     try testing.expect(parse("GET /window?code=123456&do=explode HTTP/1.1\r\n\r\n", 123456, &buf) == .bad);
     try testing.expect(parse("GET /update?code=123456 HTTP/1.1\r\n\r\n", 123456, &buf).command == .update);

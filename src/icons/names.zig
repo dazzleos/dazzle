@@ -84,7 +84,7 @@ pub const Icon = enum {
     // The camera.
     photo_camera,
     no_photography,
-    // Blocks.
+    // Motu.
     landscape,
     person_add,
     computer,
