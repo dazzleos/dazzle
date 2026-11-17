@@ -234,8 +234,19 @@ fn quad(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, index: us
 
 /// Draws the rectangle at (x, y), (qw, qh) big, with texture coordinates
 /// `uv` at its top left, bottom left, top right and bottom right corners.
-fn rect(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, index: usize, t: server.Texture, x: i32, y: i32, qw: u32, qh: u32, uv: [4][2]f32, filter: texture.Filter, scissor: ?render.Viewport) !void {
+/// The screen's row at the top of the frame being drawn: 0, but for a
+/// screenshot taken in bands (see `Renderer.capture`), each band's top.
+var band_top: i32 = 0;
+
+fn rect(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, index: usize, t: server.Texture, x: i32, y_screen: i32, qw: u32, qh: u32, uv: [4][2]f32, filter: texture.Filter, scissor_screen: ?render.Viewport) !void {
     std.debug.assert(index < max_quads);
+    const y = y_screen - band_top;
+    const scissor: ?render.Viewport = if (scissor_screen) |sc| blk: {
+        // In the band (or nothing of it, if it is not).
+        const top = @max(sc.y - band_top, 0);
+        const bottom = @max(sc.y - band_top + @as(i32, @intCast(sc.height)), top);
+        break :blk .{ .x = sc.x, .y = top, .width = sc.width, .height = @intCast(bottom - top) };
+    } else null;
     // Two triangles, in clip space, with texture coordinates.
     const w: f32 = @floatFromInt(frame.target.width);
     const h: f32 = @floatFromInt(frame.target.height);
@@ -888,22 +899,39 @@ pub const Renderer = struct {
     /// draws them; the cursor is left out), drawn again into a buffer of
     /// its own and read back: `width` by `height` pixels, 0xffRRGGBB, in
     /// `gpa`. Waits for the GPU; only while no frame is being drawn.
+    /// How many rows of the screen a screenshot is drawn at a time when
+    /// video memory has no room for all of it at once.
+    const capture_band = 64;
+
+    /// The screen, drawn again (without a notification on it): all at
+    /// once, or, when video memory has no room for a buffer the screen's
+    /// size (8 MB at 1080p, in one piece: an app may have most of it), a
+    /// band of rows at a time.
     pub fn capture(r: *Renderer, gpa: std.mem.Allocator, windows: []const Window) ![]u32 {
         var quads = try r.panelQuads();
         // A notification (perhaps of the last screenshot) is not in it.
         quads[@intFromEnum(PanelId.notice)] = null;
         const pitch = render.Target.pitch(.xrgb8888, @intCast(r.width));
-        const bo = try r.dev.createBo(pitch * r.height);
-        defer r.dev.destroyBo(bo);
-        capture_frame.begin(.{ .handle = bo.handle, .width = @intCast(r.width), .height = @intCast(r.height), .tiling = .linear }, .{ .clear = r.background });
-        try recordFrame(&capture_frame, r.pipelines(), try r.previewTexture(), r.background_image, r.vbo, &quads, windows);
-        const seqno = try r.dev.submit(capture_frame.finish());
-        try r.dev.waitSeqno(seqno, std.time.ns_per_s);
         const pixels = try gpa.alloc(u32, @as(usize, r.width) * r.height);
-        for (0..r.height) |y| {
-            const row = std.mem.bytesAsSlice(u32, bo.map[y * pitch ..][0 .. r.width * 4]);
-            // Windows' buffers need not be opaque where the screen is.
-            for (pixels[y * r.width ..][0..r.width], row) |*out, in| out.* = in | 0xff000000;
+        errdefer gpa.free(pixels);
+        const whole = r.dev.createBo(pitch * r.height) catch null;
+        const rows: u32 = if (whole != null) r.height else capture_band;
+        const bo = whole orelse try r.dev.createBo(pitch * capture_band);
+        defer r.dev.destroyBo(bo);
+        defer band_top = 0;
+        var top: u32 = 0;
+        while (top < r.height) : (top += rows) {
+            const n = @min(rows, r.height - top);
+            band_top = @intCast(top);
+            capture_frame.begin(.{ .handle = bo.handle, .width = @intCast(r.width), .height = @intCast(n), .tiling = .linear }, .{ .clear = r.background });
+            try recordFrame(&capture_frame, r.pipelines(), try r.previewTexture(), r.background_image, r.vbo, &quads, windows);
+            const seqno = try r.dev.submit(capture_frame.finish());
+            try r.dev.waitSeqno(seqno, std.time.ns_per_s);
+            for (0..n) |y| {
+                const row = std.mem.bytesAsSlice(u32, bo.map[y * pitch ..][0 .. r.width * 4]);
+                // Windows' buffers need not be opaque where the screen is.
+                for (pixels[(top + y) * r.width ..][0..r.width], row) |*out, in| out.* = in | 0xff000000;
+            }
         }
         return pixels;
     }
