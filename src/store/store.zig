@@ -32,6 +32,11 @@ pub const Ed25519 = std.crypto.sign.Ed25519;
 
 pub const apps_dir = sys.system.apps_dir;
 pub const icons_dir = apps_dir ++ "/.icons";
+/// Where apps' screenshots are kept (`<name>.png`), as the catalogue was
+/// got.
+pub const screenshots_dir = apps_dir ++ "/.screenshots";
+/// The biggest a screenshot may be.
+pub const max_screenshot = 1 << 20;
 pub const os_icon_file = "/os/icon.png";
 pub const update_icon_file = sys.system.update_dir ++ "/icon.png";
 pub const icon_size = 64;
@@ -58,6 +63,10 @@ pub const App = struct {
     version: []const u8 = "",
     time: u64 = 0,
     icon: []const u8 = "",
+    /// More about it, and its screenshot (a PNG beside the catalogue, ""
+    /// for none), for its page in Settings.
+    about: []const u8 = "",
+    screenshot: []const u8 = "",
     file: []const u8,
     size: u64,
     sha256: []const u8,
@@ -786,6 +795,25 @@ pub fn fetchCatalogue(client: *Client, gpa: std.mem.Allocator, base_url: []const
         _ = linux.unlink(icon_tmp);
         sys.files.writeNew(icon_tmp, png) catch continue;
         _ = linux.rename(icon_tmp, icon_dst);
+    }
+    // And their screenshots.
+    var shots_buf: [256]u8 = undefined;
+    const shots_path = try std.mem.printSentinel(&shots_buf, "{s}/.screenshots", .{dir}, 0);
+    _ = linux.mkdir(shots_path, 0o755);
+    for (parsed.value.apps) |a| {
+        if (a.screenshot.len == 0 or !validIconPath(a.screenshot)) continue;
+        const shot_url = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ base_url, a.screenshot });
+        defer gpa.free(shot_url);
+        const png = client.download(shot_url) catch continue;
+        defer gpa.free(png);
+        if (png.len > max_screenshot or png.len < 8 or !std.mem.eql(u8, png[0..8], "\x89PNG\r\n\x1a\n")) continue;
+        var tmp2_buf: [256]u8 = undefined;
+        var dst_buf: [256]u8 = undefined;
+        const shot_tmp = std.mem.printSentinel(&tmp2_buf, "{s}/{s}.png.new", .{ shots_path, a.name }, 0) catch continue;
+        const shot_dst = std.mem.printSentinel(&dst_buf, "{s}/{s}.png", .{ shots_path, a.name }, 0) catch continue;
+        _ = linux.unlink(shot_tmp);
+        sys.files.writeNew(shot_tmp, png) catch continue;
+        _ = linux.rename(shot_tmp, shot_dst);
     }
 }
 

@@ -347,4 +347,10 @@ pub const simplified = [_][2][]const u8{
     .{ "Enable limits", "启用限制" },
     .{ "Disable limits", "停用限制" },
     .{ "This computer will have these limits, and a password will be needed to turn them off.", "这台电脑将受这些限制，关闭它们需要密码。" },
+    .{ "Installed", "已安装" },
+    .{ "Available", "可安装" },
+    .{ "Update available", "有更新" },
+    .{ "No app matches", "没有匹配的应用" },
+    .{ "Every app is installed", "所有应用都已安装" },
+    .{ "Remove", "移除" },
 };

@@ -347,4 +347,10 @@ pub const japan = [_][2][]const u8{
     .{ "Enable limits", "制限を有効にする" },
     .{ "Disable limits", "制限を無効にする" },
     .{ "This computer will have these limits, and a password will be needed to turn them off.", "このコンピューターにこれらの制限がかかり、解除するにはパスワードが必要になります。" },
+    .{ "Installed", "インストール済み" },
+    .{ "Available", "入手可能" },
+    .{ "Update available", "アップデートあり" },
+    .{ "No app matches", "一致するアプリがありません" },
+    .{ "Every app is installed", "すべてのアプリがインストール済みです" },
+    .{ "Remove", "削除" },
 };

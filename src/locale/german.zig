@@ -348,4 +348,10 @@ pub const germany = [_][2][]const u8{
     .{ "Enable limits", "Limits aktivieren" },
     .{ "Disable limits", "Limits deaktivieren" },
     .{ "This computer will have these limits, and a password will be needed to turn them off.", "Dieser Computer hat dann diese Limits, und zum Ausschalten wird ein Passwort benötigt." },
+    .{ "Installed", "Installiert" },
+    .{ "Available", "Verfügbar" },
+    .{ "Update available", "Aktualisierung verfügbar" },
+    .{ "No app matches", "Keine App passt" },
+    .{ "Every app is installed", "Alle Apps sind installiert" },
+    .{ "Remove", "Entfernen" },
 };

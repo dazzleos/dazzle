@@ -348,4 +348,10 @@ pub const arabic = [_][2][]const u8{
     .{ "Enable limits", "تفعيل الحدود" },
     .{ "Disable limits", "إيقاف الحدود" },
     .{ "This computer will have these limits, and a password will be needed to turn them off.", "سيخضع هذا الكمبيوتر لهذه الحدود، وستلزم كلمة مرور لإيقافها." },
+    .{ "Installed", "المثبتة" },
+    .{ "Available", "المتاحة" },
+    .{ "Update available", "يتوفر تحديث" },
+    .{ "No app matches", "لا يوجد تطبيق مطابق" },
+    .{ "Every app is installed", "كل التطبيقات مثبتة" },
+    .{ "Remove", "إزالة" },
 };

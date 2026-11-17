@@ -1,7 +1,9 @@
-//! The Software page: Dazzle itself (with Update or Restart, and an
-//! expander showing the build and kernel version) and the catalogue's
-//! apps (with Install, Update or Remove beside each), in a scrollable
-//! list above a fixed status bar with Update all and Refresh.
+//! The Software page, in two tabs: Installed (Dazzle itself, with Update
+//! or Restart and an expander showing the build and kernel version, and
+//! the apps installed) and Available (the catalogue's other apps, with a
+//! field to search them). An app clicked shows its page: what it is, its
+//! screenshot, and Install, Update or Remove; Back returns to the list.
+//! Under them, a fixed status bar with Update all and Refresh.
 
 const std = @import("std");
 const kete = @import("kete");
@@ -85,6 +87,26 @@ pub const State = struct {
     key_form_id: u32 = 1000,
     key_input: Field = .{},
     key_invalid: bool = false,
+    /// The tab shown, what is searched for in Available, and the app
+    /// whose page is shown (instead of the list), if any.
+    tab: Tab = .installed,
+    query: Field = .{},
+    details: ?Actions.AppName = null,
+
+    pub const Tab = enum { installed, available };
+
+    fn selectTab(st: *State, i: usize) void {
+        st.tab = if (i == 0) .installed else .available;
+        st.details = null;
+    }
+
+    fn setQuery(st: *State, q: []const u8) void {
+        st.query.set(q);
+    }
+
+    fn back(st: *State) void {
+        st.details = null;
+    }
 
     pub const Field = struct {
         buf: [store.max_url_len]u8 = undefined,
@@ -139,46 +161,71 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
         state.dismissed = false;
     }
     const snackbar_msg = if (state.dismissed) "" else err_msg;
-    dazzleRows(self, b, state, &rows);
-    // Parental controls may stop apps being installed or removed (updates
-    // still come).
     const fixed = if (self.parental) |p| p.on and p.limits.block_software else false;
-    if (fixed) rows.append(a, cx.make(kete.Text{ .text = locale.text("Parental controls stop apps being installed or removed"), .style = .{ .size = 15, .color = t.on_surface_variant } })) catch {};
     var updates: usize = @intFromBool(self.update.status == .available);
-    for (apps.list, 0..) |app, i| {
+    for (apps.list, 0..) |_, i| {
         const installed = i < apps.installed.len and apps.installed[i];
-        const updatable = installed and i < apps.updatable.len and apps.updatable[i];
-        if (updatable) updates += 1;
-        const this_busy = if (apps.busy) |n| std.mem.eql(u8, n, app.name) or (std.mem.eql(u8, n, "*") and updatable) else false;
-        const enabled = self.actions != null and !busy;
-        const x = if (self.actions) |acts| appAct(cx, acts, state, app.name) else null;
-        const button: kete.Widget = if (this_busy)
-            cx.make(kete.Spinner{ .size = 28 })
-        else if (updatable)
-            cx.make(kete.Row{ .fill = false, .cross_axis_alignment = .center, .spacing = 8, .children = cx.makeAll(.{
-                kete.OutlinedButton{ .label = locale.text("Update"), .icon = .download, .on_press = if (enabled) .of(x.?, AppAct.install) else null },
-                kete.OutlinedButton{ .icon = .delete, .destructive = true, .on_press = if (enabled and !fixed) .of(x.?, AppAct.remove) else null },
-            }) })
-        else if (installed)
-            cx.make(kete.OutlinedButton{ .icon = .delete, .destructive = true, .on_press = if (enabled and !fixed) .of(x.?, AppAct.remove) else null })
-        else
-            cx.make(kete.OutlinedButton{ .label = locale.text("Install"), .icon = .download, .on_press = if (enabled and !fixed) .of(x.?, AppAct.install) else null });
-        var size_buf: [32]u8 = undefined;
-        const detail = if (i >= apps.offered)
-            locale.text("Installed, and no longer offered")
-        else if (app.description.len > 0)
-            kete_vc4.textf(cx, "{s} · {s}", .{ app.description, info.formatBytes(&size_buf, app.size) })
-        else
-            cx.fmt("{s}", .{info.formatBytes(&size_buf, app.size)});
-        const app_icon: ?*const gfx.Image = if (i < apps.icons.len) apps.icons[i] else null;
-        rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = &.{
-            softwareIcon(cx, app_icon),
-            cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 2, .children = &.{
-                cx.make(kete.Text{ .text = app.title, .style = .{ .size = 18, .color = t.on_surface }, .wrap = false, .ellipsis = true }),
-                cx.make(kete.Text{ .text = detail, .style = .{ .size = 15, .color = t.on_surface_variant } }),
-            } }) }),
-            button,
-        } })) catch {};
+        if (installed and i < apps.updatable.len and apps.updatable[i]) updates += 1;
+    }
+    // An app's page, or the tab's list.
+    const shown: ?usize = if (state.details) |d| for (apps.list, 0..) |app, i| {
+        if (std.mem.eql(u8, app.name, d.slice())) break i;
+    } else null else null;
+    if (shown) |i| {
+        detailsRows(self, b, state, i, busy, fixed, &rows);
+    } else {
+        rows.append(a, cx.make(kete.TabBar{
+            .tabs = a.dupe(kete.Tab, &.{
+                .{ .label = locale.text("Installed"), .icon = .apps, .badge = if (updates > 0) @intCast(updates) else null },
+                .{ .label = locale.text("Available"), .icon = .download },
+            }) catch &.{},
+            .selected = @intFromEnum(state.tab),
+            .on_select = .of(state, State.selectTab),
+        })) catch {};
+        if (state.tab == .installed) {
+            dazzleRows(self, b, state, &rows);
+        } else {
+            rows.append(a, cx.make(kete.TextField{ .placeholder = locale.text("Search"), .initial = state.query.text(), .on_changed = .of(state, State.setQuery), .width = std.math.inf(f32) })) catch {};
+        }
+        // Parental controls may stop apps being installed or removed
+        // (updates still come).
+        if (fixed) rows.append(a, cx.make(kete.Text{ .text = locale.text("Parental controls stop apps being installed or removed"), .style = .{ .size = 15, .color = t.on_surface_variant } })) catch {};
+        var listed: usize = 0;
+        for (apps.list, 0..) |app, i| {
+            const installed = i < apps.installed.len and apps.installed[i];
+            const updatable = installed and i < apps.updatable.len and apps.updatable[i];
+            if ((state.tab == .installed) != installed) continue;
+            if (state.tab == .available and (i >= apps.offered or !matches(app, state.query.text()))) continue;
+            listed += 1;
+            const this_busy = if (apps.busy) |n| std.mem.eql(u8, n, app.name) or (std.mem.eql(u8, n, "*") and updatable) else false;
+            var size_buf: [32]u8 = undefined;
+            const detail = if (i >= apps.offered)
+                locale.text("Installed, and no longer offered")
+            else if (updatable)
+                locale.text("Update available")
+            else if (app.description.len > 0)
+                kete_vc4.textf(cx, "{s} · {s}", .{ app.description, info.formatBytes(&size_buf, app.size) })
+            else
+                cx.fmt("{s}", .{info.formatBytes(&size_buf, app.size)});
+            const app_icon: ?*const gfx.Image = if (i < apps.icons.len) apps.icons[i] else null;
+            const open = a.create(OpenApp) catch continue;
+            open.* = .{ .state = state, .name = .init(app.name) };
+            rows.append(a, cx.make(kete.Pressable{
+                .on_press = .of(open, OpenApp.open),
+                .child = cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = a.dupe(kete.Widget, &.{
+                    softwareIcon(cx, app_icon),
+                    cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 2, .children = a.dupe(kete.Widget, &.{
+                        cx.make(kete.Text{ .text = app.title, .style = .{ .size = 18, .color = t.on_surface }, .wrap = false, .ellipsis = true }),
+                        cx.make(kete.Text{ .text = detail, .style = .{ .size = 15, .color = t.on_surface_variant } }),
+                    }) catch &.{} }) }),
+                    if (this_busy) cx.make(kete.Spinner{ .size = 28 }) else cx.make(kete.Icon{ .icon = .chevron_right, .size = 24, .color = t.on_surface_variant }),
+                }) catch &.{} }),
+            })) catch {};
+        }
+        if (listed == 0 and state.tab == .available and apps.list.len > 0) rows.append(a, cx.make(kete.Text{
+            .text = if (state.query.len > 0) locale.text("No app matches") else locale.text("Every app is installed"),
+            .style = .{ .size = 15, .color = t.on_surface_variant },
+        })) catch {};
     }
     const status = if (apps.busy) |name|
         (if (name.len == 0) locale.text("Getting the list of apps…") else if (std.mem.eql(u8, name, "*")) locale.text("Updating…") else locale.text("Installing…"))
@@ -238,6 +285,78 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
             }),
         }),
     } });
+}
+
+/// An app's row clicked: its page.
+const OpenApp = struct {
+    state: *State,
+    name: Actions.AppName,
+
+    fn open(o: *OpenApp) void {
+        o.state.details = o.name;
+    }
+};
+
+/// Whether `app`'s name, title or description has `q` in it.
+fn matches(app: store.App, q: []const u8) bool {
+    const query = std.mem.trim(u8, q, " ");
+    if (query.len == 0) return true;
+    return std.ascii.findIgnoreCase(app.title, query) != null or std.ascii.findIgnoreCase(app.description, query) != null or std.ascii.findIgnoreCase(app.name, query) != null;
+}
+
+/// App `i`'s page: Back, its icon, name and what it is; Install, Update
+/// or Remove; its screenshot, and more about it.
+fn detailsRows(self: *const Settings, b: Builder, state: *State, i: usize, busy: bool, fixed: bool, rows: *std.ArrayList(kete.Widget)) void {
+    const cx = b.cx;
+    const t = &cx.ui.theme;
+    const a = cx.arena;
+    const apps = &self.apps;
+    const app = apps.list[i];
+    const installed = i < apps.installed.len and apps.installed[i];
+    const updatable = installed and i < apps.updatable.len and apps.updatable[i];
+    const this_busy = if (apps.busy) |n| std.mem.eql(u8, n, app.name) or (std.mem.eql(u8, n, "*") and updatable) else false;
+    const enabled = self.actions != null and !busy;
+    const x = if (self.actions) |acts| appAct(cx, acts, state, app.name) else null;
+    rows.append(a, cx.make(kete.Row{ .children = a.dupe(kete.Widget, &.{
+        cx.make(kete.TextButton{ .label = locale.text("Back"), .icon = .arrow_back, .on_press = .of(state, State.back) }),
+    }) catch &.{} })) catch {};
+    var buttons: std.ArrayList(kete.Widget) = .empty;
+    if (this_busy) {
+        buttons.append(a, cx.make(kete.Spinner{ .size = 28 })) catch {};
+    } else {
+        if (updatable) buttons.append(a, cx.make(kete.FilledButton{ .label = locale.text("Update"), .icon = .download, .on_press = if (enabled) .of(x.?, AppAct.install) else null })) catch {};
+        if (installed) {
+            buttons.append(a, cx.make(kete.OutlinedButton{ .label = locale.text("Remove"), .icon = .delete, .destructive = true, .on_press = if (enabled and !fixed) .of(x.?, AppAct.remove) else null })) catch {};
+        } else {
+            buttons.append(a, cx.make(kete.FilledButton{ .label = locale.text("Install"), .icon = .download, .on_press = if (enabled and !fixed) .of(x.?, AppAct.install) else null })) catch {};
+        }
+    }
+    var size_buf: [32]u8 = undefined;
+    const detail = if (i >= apps.offered)
+        locale.text("Installed, and no longer offered")
+    else if (app.description.len > 0)
+        kete_vc4.textf(cx, "{s} · {s}", .{ app.description, info.formatBytes(&size_buf, app.size) })
+    else
+        cx.fmt("{s}", .{info.formatBytes(&size_buf, app.size)});
+    const app_icon: ?*const gfx.Image = if (i < apps.icons.len) apps.icons[i] else null;
+    rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = a.dupe(kete.Widget, &.{
+        softwareIcon(cx, app_icon),
+        cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 2, .children = a.dupe(kete.Widget, &.{
+            cx.make(kete.Text{ .text = app.title, .style = .{ .size = 24, .color = t.on_surface }, .wrap = false, .ellipsis = true }),
+            cx.make(kete.Text{ .text = detail, .style = .{ .size = 15, .color = t.on_surface_variant } }),
+        }) catch &.{} }) }),
+        cx.make(kete.Row{ .fill = false, .cross_axis_alignment = .center, .spacing = 8, .children = buttons.items }),
+    }) catch &.{} })) catch {};
+    if (fixed) rows.append(a, cx.make(kete.Text{ .text = locale.text("Parental controls stop apps being installed or removed"), .style = .{ .size = 15, .color = t.on_surface_variant } })) catch {};
+    // Its screenshot, as the catalogue was got.
+    if (app.screenshot.len > 0) {
+        const path = std.fmt.allocPrint(a, "{s}/{s}.png", .{ store.screenshots_dir, app.name }) catch "";
+        rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 8 }, .child = cx.make(kete.Align{ .alignment = .center, .height_factor = 1, .child = cx.make(kete.SizedBox{
+            .height = 360,
+            .child = cx.make(kete.Image{ .source = .{ .file = path } }),
+        }) }) })) catch {};
+    }
+    if (app.about.len > 0) rows.append(a, cx.make(kete.Text{ .text = app.about, .style = .{ .size = 16, .color = t.on_surface } })) catch {};
 }
 
 fn downloadUpdate(a: *Actions) void {
@@ -695,9 +814,30 @@ test "installing and removing apps, and getting their list again" {
     u.frame(1920, 960, 1, settings);
     try testing.expect(view.findText(u.root.?, "All apps updated") != null);
     try testing.expect(view.findText(u.root.?, "Update all") == null);
-    view.click(u, view.up(view.findText(u.root.?, "Install").?, kete.OutlinedButton).?);
+    // Installed: Demo (and Dazzle), not Files; no buttons in the list.
+    try testing.expect(view.findText(u.root.?, "Demo") != null and view.findText(u.root.?, "Files") == null);
+    try testing.expect(view.findText(u.root.?, "Install") == null);
+    // Available: Files, found by searching; its page has Install.
+    view.click(u, view.findText(u.root.?, "Available").?);
+    u.frame(1920, 960, 2, settings);
+    const st = &u.root.?.state(Settings.State).software;
+    st.setQuery("demo");
+    u.frame(1920, 960, 3, settings);
+    try testing.expect(view.findText(u.root.?, "Files") == null and view.findText(u.root.?, "No app matches") != null);
+    st.setQuery("your");
+    u.frame(1920, 960, 4, settings);
+    view.click(u, view.up(view.findText(u.root.?, "Files").?, kete.Pressable).?);
+    u.frame(1920, 960, 5, settings);
+    view.click(u, view.up(view.findText(u.root.?, "Install").?, kete.FilledButton).?);
     try testing.expectEqualStrings("dazzle-files", actions.install.?.slice());
-    view.click(u, view.up(view.findIcon(u.root.?, .delete).?, kete.OutlinedButton).?);
+    // Back, to the list; Installed, Demo's page, Remove.
+    view.click(u, view.up(view.findText(u.root.?, "Back").?, kete.TextButton).?);
+    u.frame(1920, 960, 6, settings);
+    view.click(u, view.findText(u.root.?, "Installed").?);
+    u.frame(1920, 960, 7, settings);
+    view.click(u, view.up(view.findText(u.root.?, "Demo").?, kete.Pressable).?);
+    u.frame(1920, 960, 8, settings);
+    view.click(u, view.up(view.findText(u.root.?, "Remove").?, kete.OutlinedButton).?);
     try testing.expectEqualStrings("dazzle-demo", actions.remove.?.slice());
     view.click(u, view.up(view.findText(u.root.?, "Refresh").?, kete.OutlinedButton).?);
     try testing.expect(actions.refresh_apps);
@@ -706,11 +846,11 @@ test "installing and removing apps, and getting their list again" {
     // pressed.
     actions = .{};
     settings.apps.busy = "dazzle-files";
-    u.frame(1920, 960, 2, settings);
-    try testing.expect(view.findText(u.root.?, "Install") == null);
+    u.frame(1920, 960, 9, settings);
     try testing.expect(view.findText(u.root.?, "Installing…") != null);
-    view.click(u, view.up(view.findIcon(u.root.?, .delete).?, kete.OutlinedButton).?);
+    view.click(u, view.up(view.findText(u.root.?, "Remove").?, kete.OutlinedButton).?);
     try testing.expect(actions.remove == null);
+    view.click(u, view.up(view.findText(u.root.?, "Back").?, kete.TextButton).?);
 
     // An install error shows in a dismissible snackbar.
     settings.apps = view.sample_apps;
@@ -751,7 +891,9 @@ test "an installed app the catalogue no longer offers is listed, and can be remo
     u.frame(1920, 960, 1, settings);
     try testing.expect(view.findText(u.root.?, "Kete Demo") != null);
     try testing.expect(view.findText(u.root.?, "Installed, and no longer offered") != null);
-    view.click(u, view.up(view.findIcon(u.root.?, .delete).?, kete.OutlinedButton).?);
+    view.click(u, view.up(view.findText(u.root.?, "Kete Demo").?, kete.Pressable).?);
+    u.frame(1920, 960, 2, settings);
+    view.click(u, view.up(view.findText(u.root.?, "Remove").?, kete.OutlinedButton).?);
     try testing.expectEqualStrings("dazzle-kete-demo", actions.remove.?.slice());
 }
 
@@ -779,14 +921,19 @@ test "updates: offered, downloaded, installed, then a restart" {
     settings.apps.updatable = &.{ true, false };
     u.frame(1920, 960, 2, settings);
     try testing.expect(view.findText(u.root.?, "2 updates available") != null);
-    // An app with an update can still be removed: its delete button is
-    // to the right of its Update.
-    const app_delete = view.up(view.findIcon(u.root.?, .delete).?, kete.OutlinedButton).?;
-    const app_update = view.up(view.findText(view.up(app_delete, kete.Row).?, "Update").?, kete.OutlinedButton).?;
-    try testing.expect(app_delete.position()[0] > app_update.position()[0]);
-    view.click(u, app_delete);
-    try testing.expectEqualStrings("dazzle-demo", actions.remove.?.slice());
+    // An app with an update says so, and its page has Update, and Remove
+    // to its right.
+    try testing.expect(view.findText(u.root.?, "Update available") != null);
+    view.click(u, view.up(view.findText(u.root.?, "Demo").?, kete.Pressable).?);
+    u.frame(1920, 960, 20, settings);
+    const app_update = view.up(view.findText(u.root.?, "Update").?, kete.FilledButton).?;
+    const app_remove = view.up(view.findText(u.root.?, "Remove").?, kete.OutlinedButton).?;
+    try testing.expect(app_remove.position()[0] > app_update.position()[0]);
+    view.click(u, app_update);
+    try testing.expectEqualStrings("dazzle-demo", actions.install.?.slice());
     actions = .{};
+    view.click(u, view.up(view.findText(u.root.?, "Back").?, kete.TextButton).?);
+    u.frame(1920, 960, 21, settings);
 
     // Build and kernel details are shown when Dazzle is expanded.
     try testing.expect(view.findText(u.root.?, "de14aa2 (7 October 2026)") == null);
@@ -931,7 +1078,7 @@ test "the software list scrolls vertically while the bottom bar stays visible" {
         .system = &d.sys,
         .usage = d.usage,
         .network = &d.net,
-        .apps = .{ .list = &many_apps, .installed = &.{ true, false, false, false, false, false, false, false } },
+        .apps = .{ .list = &many_apps, .installed = &.{ true, true, true, true, true, true, true, true } },
     };
     u.frame(view.min_size[0], view.min_size[1], 0, settings);
     u.root.?.state(Settings.State).page = .apps;

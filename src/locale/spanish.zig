@@ -385,6 +385,12 @@ pub const latin_america = [_][2][]const u8{
     .{ "Enable limits", "Activar límites" },
     .{ "Disable limits", "Desactivar límites" },
     .{ "This computer will have these limits, and a password will be needed to turn them off.", "Esta computadora tendrá estos límites, y se necesitará una contraseña para desactivarlos." },
+    .{ "Installed", "Instaladas" },
+    .{ "Available", "Disponibles" },
+    .{ "Update available", "Actualización disponible" },
+    .{ "No app matches", "Ninguna aplicación coincide" },
+    .{ "Every app is installed", "Todas las aplicaciones están instaladas" },
+    .{ "Remove", "Quitar" },
 };
 
 /// Spain's, where it differs.

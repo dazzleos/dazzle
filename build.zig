@@ -58,6 +58,9 @@ const App = struct {
     icon: Icon,
     title: []const u8,
     description: ?[]const u8 = null,
+    /// More about it, for its page in Settings' Software (with its
+    /// screenshot, screenshot.png beside its icon, if it has one).
+    about: []const u8 = "",
     /// The kinds of files it opens (MIME types), for Files to offer it:
     /// <name>.handles in its folder (see src/sys/apps.zig).
     handles: []const []const u8 = &.{},
@@ -109,7 +112,12 @@ fn addAppArchives(b: *std.Build, apps: []const App) *std.Build.Step {
         step.dependOn(&b.addInstallFile(archive, b.fmt("apps/{s}.tar.xz", .{name})).step);
         if (a.description) |desc| {
             step.dependOn(&b.addInstallFile(icon_png, b.fmt("apps/{s}", .{icon_rel})).step);
-            catalogue.addArgs(&.{ name, a.title, desc, icon_rel });
+            // Its screenshot, if it has one.
+            const shot_src = b.fmt("{s}/screenshot.png", .{app_dir});
+            const has_shot = exists(b, shot_src);
+            const shot_rel = if (has_shot) b.fmt("{s}-screenshot.png", .{name}) else "";
+            if (has_shot) step.dependOn(&b.addInstallFile(b.path(shot_src), b.fmt("apps/{s}", .{shot_rel})).step);
+            catalogue.addArgs(&.{ name, a.title, desc, a.about, icon_rel, shot_rel });
             catalogue.addFileArg(archive);
         }
     }
@@ -128,7 +136,7 @@ fn addAppArchives(b: *std.Build, apps: []const App) *std.Build.Step {
         compress.addFileArg(tar);
         const archive = compress.captureStdOut(.{ .basename = b.fmt("{s}.tar.xz", .{name}) });
         step.dependOn(&b.addInstallFile(archive, b.fmt("apps/{s}.tar.xz", .{name})).step);
-        catalogue.addArgs(&.{ name, lp.title, lp.description, "" });
+        catalogue.addArgs(&.{ name, lp.title, lp.description, "", "", "" });
         catalogue.addFileArg(archive);
     }
     step.dependOn(&b.addInstallFile(json, "apps/apps.json").step);
@@ -1455,19 +1463,20 @@ pub fn build(b: *std.Build) void {
     const zig_root = fromRoot(b, "build/zig/zig-arm-linux-" ++ zig_version);
     const apps = [_]App{
         .{ .exe = demo_exe, .icon = .view_in_ar, .title = "Demo" },
-        .{ .exe = files_exe, .icon = .folder, .title = "Files", .description = "Browse your files" },
-        .{ .exe = camera_exe, .icon = .photo_camera, .title = "Camera", .description = "Take photos and videos" },
-        .{ .exe = text_editor_exe, .icon = .edit_note, .title = "Text Editor", .description = "Edit text files", .handles = &.{"text/plain"} },
-        .{ .exe = motu_exe, .icon = .landscape, .title = "Motu", .description = "Build islands out of blocks" },
-        .{ .exe = logger_exe, .icon = .show_chart, .title = "Data Logger", .description = "Record inputs from the GPIO pins" },
-        .{ .exe = chat_exe, .icon = .chat, .title = "Chat", .description = "Chat with others on your network in rooms" },
-        .{ .exe = maps_exe, .icon = .public, .title = "Maps", .description = "Explore the Earth on a 3D globe" },
-        .{ .exe = terminal_exe, .icon = .terminal, .title = "Terminal", .description = "Run command-line tools" },
+        .{ .exe = files_exe, .icon = .folder, .title = "Files", .description = "Browse your files", .about = "Browse the files on this computer and on USB drives plugged into it: open them with the app that opens their kind, see photos, and make, rename, copy, move and delete files and folders." },
+        .{ .exe = camera_exe, .icon = .photo_camera, .title = "Camera", .description = "Take photos and videos", .about = "Take photos and record videos with a Raspberry Pi camera module, with a live view to frame them. They are kept in your files, to see and share." },
+        .{ .exe = text_editor_exe, .icon = .edit_note, .title = "Text Editor", .description = "Edit text files", .about = "Write and edit plain text files: notes, lists, code and configuration. It opens text files from Files, and keeps what you write as you go.", .handles = &.{"text/plain"} },
+        .{ .exe = motu_exe, .icon = .landscape, .title = "Motu", .description = "Build islands out of blocks", .about = "Build on a tropical atoll of blocks: shape the islands, build huts, paddle a canoe across the lagoon, and look out to sea with a telescope. Islands are kept between games, and friends on the same network can play on yours." },
+        .{ .exe = logger_exe, .icon = .show_chart, .title = "Data Logger", .description = "Record inputs from the GPIO pins", .about = "Record what the GPIO pins read over time, from buttons, switches and sensors, and see it drawn as a chart as it comes in." },
+        .{ .exe = chat_exe, .icon = .chat, .title = "Chat", .description = "Chat with others on your network in rooms", .about = "Talk with others on the same network in rooms, without an account or the internet: anyone running Chat nearby can join." },
+        .{ .exe = maps_exe, .icon = .public, .title = "Maps", .description = "Explore the Earth on a 3D globe", .about = "Explore the Earth on a 3D globe: spin it, zoom in to countries and see their names and borders." },
+        .{ .exe = terminal_exe, .icon = .terminal, .title = "Terminal", .description = "Run command-line tools", .about = "Run command-line tools: look round the files, see what the system is doing, and try commands, in a terminal with its own shell." },
         .{
             .exe = develop_exe,
             .icon = .code,
             .title = "Develop",
             .description = "Write and run Zig programs",
+            .about = "Write programs in Zig and run them on this computer: an editor beside the output, with the Zig compiler built in.",
             .notices = &.{ "MaterialIcons", "Zig" },
             .extra_step = fetchArmZig(b),
             .extra_args = &.{

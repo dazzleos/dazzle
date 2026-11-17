@@ -347,6 +347,12 @@ pub const brazil = [_][2][]const u8{
     .{ "Enable limits", "Ativar limites" },
     .{ "Disable limits", "Desativar limites" },
     .{ "This computer will have these limits, and a password will be needed to turn them off.", "Este computador terá estes limites, e será preciso uma senha para desativá-los." },
+    .{ "Installed", "Instalados" },
+    .{ "Available", "Disponíveis" },
+    .{ "Update available", "Atualização disponível" },
+    .{ "No app matches", "Nenhum app corresponde" },
+    .{ "Every app is installed", "Todos os apps estão instalados" },
+    .{ "Remove", "Remover" },
 };
 
 /// Portugal's, where it differs.

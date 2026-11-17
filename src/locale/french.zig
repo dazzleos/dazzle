@@ -347,6 +347,12 @@ pub const france = [_][2][]const u8{
     .{ "Enable limits", "Activer les limites" },
     .{ "Disable limits", "Désactiver les limites" },
     .{ "This computer will have these limits, and a password will be needed to turn them off.", "Cet ordinateur aura ces limites, et un mot de passe sera nécessaire pour les désactiver." },
+    .{ "Installed", "Installées" },
+    .{ "Available", "Disponibles" },
+    .{ "Update available", "Mise à jour disponible" },
+    .{ "No app matches", "Aucune application ne correspond" },
+    .{ "Every app is installed", "Toutes les applications sont installées" },
+    .{ "Remove", "Supprimer" },
 };
 
 /// Canada's, where it differs.

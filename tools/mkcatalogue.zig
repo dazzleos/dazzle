@@ -15,6 +15,8 @@
 //!           "version": "<the commit they were built from>",
 //!           "time": <when it was committed, in seconds since 1970>,
 //!           "icon": "dazzle-demo.png",
+//!           "about": "<more about it>",
+//!           "screenshot": "dazzle-demo-screenshot.png",
 //!           "file": "dazzle-demo.tar.xz",
 //!           "size": 104321,
 //!           "sha256": "<64 hex digits>",
@@ -24,7 +26,7 @@
 //!       ]
 //!     }
 //!
-//! Usage: mkcatalogue [--key=<64-hex-seed>] <apps.json> <version> <time> (<name> <title> <description> <icon> <archive>)...
+//! Usage: mkcatalogue [--key=<64-hex-seed>] <apps.json> <version> <time> (<name> <title> <description> <about> <icon> <screenshot> <archive>)...
 
 const std = @import("std");
 pub const Ed25519 = std.crypto.sign.Ed25519;
@@ -40,6 +42,10 @@ pub const App = struct {
     version: []const u8 = "",
     time: u64 = 0,
     icon: []const u8,
+    /// More about it, and its screenshot ("" for none), for its page in
+    /// Settings.
+    about: []const u8 = "",
+    screenshot: []const u8 = "",
     file: []const u8,
     size: u64,
     sha256: []const u8,
@@ -68,8 +74,8 @@ pub fn main(init: std.process.Init) !void {
         seed = try parseSeed(args[base]["--key=".len..]);
         base += 1;
     }
-    if (args.len < base + 3 or (args.len - (base + 3)) % 5 != 0) {
-        std.debug.print("usage: mkcatalogue [--key=<64-hex-seed>] <apps.json> <version> <time> (<name> <title> <description> <icon> <archive>)...\n", .{});
+    if (args.len < base + 3 or (args.len - (base + 3)) % 7 != 0) {
+        std.debug.print("usage: mkcatalogue [--key=<64-hex-seed>] <apps.json> <version> <time> (<name> <title> <description> <about> <icon> <screenshot> <archive>)...\n", .{});
         std.process.exit(2);
     }
     const kp = keyPair(seed);
@@ -79,15 +85,17 @@ pub fn main(init: std.process.Init) !void {
     const cwd = std.Io.Dir.cwd();
     var apps: std.ArrayList(App) = .empty;
     var i: usize = base + 3;
-    while (i < args.len) : (i += 5) {
-        const archive = try cwd.readFileAlloc(init.io, args[i + 4], arena, .limited(256 << 20));
+    while (i < args.len) : (i += 7) {
+        const archive = try cwd.readFileAlloc(init.io, args[i + 6], arena, .limited(256 << 20));
         try apps.append(arena, .{
             .name = args[i],
             .title = args[i + 1],
             .description = args[i + 2],
+            .about = args[i + 3],
             .version = version,
             .time = time,
-            .icon = args[i + 3],
+            .icon = args[i + 4],
+            .screenshot = args[i + 5],
             .file = try std.fmt.allocPrint(arena, "{s}.tar.xz", .{args[i]}),
             .size = archive.len,
             .sha256 = try hexSha256(arena, archive),
