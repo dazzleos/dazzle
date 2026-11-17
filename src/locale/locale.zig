@@ -254,6 +254,16 @@ pub const Keyboard = enum {
         };
     }
 
+    /// Whether its keyboards are ISO's shape (an extra key beside the left
+    /// Shift, and a tall Enter), as Europe's and Latin America's are,
+    /// rather than ANSI's (as the US's).
+    pub fn iso(k: Keyboard) bool {
+        return switch (k) {
+            .gb, .es, .latam, .fr, .de, .br, .pt => true,
+            .us, .pinyin, .romaji, .ar => false,
+        };
+    }
+
     /// The language pack with its full input method (see the shell's
     /// ime.zig), if it has one: the code it is published by.
     pub fn languagePack(k: Keyboard) ?[]const u8 {

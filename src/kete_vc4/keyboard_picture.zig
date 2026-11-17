@@ -25,9 +25,7 @@ pub const KeyboardPicture = struct {
 
     pub fn build(self: *const KeyboardPicture, cx: *kete.BuildContext) kete.Widget {
         const a = cx.arena;
-        const iso = for (self.keyboard.keys()) |k| {
-            if (k.code == 86) break true;
-        } else false;
+        const iso = self.keyboard.iso();
         // Each row is 15 keys wide.
         const rows = [_][]const Slot{
             &(numbers ++ [_]Slot{.{ .code = 0, .width = 2 }}),
@@ -70,11 +68,11 @@ pub const KeyboardPicture = struct {
             const plain = shown(k.plain);
             const shifted = shown(k.shifted);
             label = if (k.capsLetter() or k.plain == k.shifted)
-                cx.make(kete.Align.center(text(cx, shifted, u * 0.45, t.on_surface)))
+                cx.make(kete.Align.center(text(cx, shifted, u * 0.5, t.on_surface)))
             else
                 cx.make(kete.Column{ .fill = false, .cross_axis_alignment = .center, .children = cx.arena.dupe(kete.Widget, &.{
-                    text(cx, shifted, u * 0.32, t.on_surface_variant),
-                    text(cx, plain, u * 0.4, t.on_surface),
+                    text(cx, shifted, u * 0.36, t.on_surface_variant),
+                    text(cx, plain, u * 0.44, t.on_surface),
                 }) catch &.{} });
         }
         return cx.make(kete.RoundedBox{
@@ -160,4 +158,10 @@ test "keyboards found by their names and codes" {
     try testing.expect(KeyboardPicker.matches(.fr, "AZERTY"));
     try testing.expect(KeyboardPicker.matches(.gb, "gb"));
     try testing.expect(!KeyboardPicker.matches(.us, "azerty"));
+}
+
+test "ANSI's shape, or ISO's" {
+    try testing.expect(!Keyboard.us.iso());
+    try testing.expect(Keyboard.gb.iso());
+    try testing.expect(Keyboard.de.iso());
 }
