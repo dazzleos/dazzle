@@ -43,6 +43,8 @@ pub const Actions = struct {
     /// The app to install, or remove; whether to get the list of apps again.
     install: ?AppName = null,
     remove: ?AppName = null,
+    /// The keyboard's language pack, to be installed.
+    install_language_pack: bool = false,
     refresh_apps: bool = false,
     /// Updates: check for one, download the one offered, update all, restart into it.
     check_update: bool = false,
@@ -143,6 +145,11 @@ pub const PageWidth = struct {
     }
 };
 
+/// How the keyboard's language pack is: none for this keyboard; offered
+/// (can be installed), not offered (no catalogue yet, or not in it),
+/// installing, or installed.
+pub const LanguagePack = enum { none, not_offered, offered, installing, installed };
+
 pub const Settings = struct {
     commit: []const u8,
     /// The language, keyboard and time zone in use.
@@ -171,6 +178,8 @@ pub const Settings = struct {
     manager: ?*const info.manager.Report = null,
     /// The apps that can be installed, and how installing goes.
     apps: software_view.Apps = .{},
+    /// The keyboard's language pack (its full input method), if it has one.
+    language_pack: LanguagePack = .none,
     update: software_view.Update = .{},
     video_memory: resources_view.VideoMemory = .{},
     sound: audio.Settings = .{},

@@ -340,4 +340,6 @@ pub const simplified = [_][2][]const u8{
     .{ "Wireless adapter", "无线适配器" },
     .{ "Printer", "打印机" },
     .{ "USB device {x:0>4}:{x:0>4}", "USB 设备 {x:0>4}:{x:0>4}" },
+    .{ "Basic input until its language pack is installed", "安装语言包之前使用基本输入" },
+    .{ "Its language pack is installed", "语言包已安装" },
 };

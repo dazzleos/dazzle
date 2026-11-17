@@ -189,7 +189,7 @@ pub const Updates = struct {
 
 /// Whether an app installed in `dir` has a newer version in `catalogue`.
 pub fn appsNewer(dir: []const u8, catalogue: []const store.App) bool {
-    for (catalogue) |a| if (store.isInstalled(dir, a.name) and store.hasNewerVersion(dir, a)) return true;
+    for (catalogue) |a| if (store.installedEntry(dir, a) and store.hasNewerVersion(dir, a)) return true;
     return false;
 }
 

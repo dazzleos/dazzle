@@ -340,6 +340,8 @@ pub const brazil = [_][2][]const u8{
     .{ "Wireless adapter", "Adaptador sem fio" },
     .{ "Printer", "Impressora" },
     .{ "USB device {x:0>4}:{x:0>4}", "Dispositivo USB {x:0>4}:{x:0>4}" },
+    .{ "Basic input until its language pack is installed", "Entrada básica até que seu pacote de idioma seja instalado" },
+    .{ "Its language pack is installed", "Seu pacote de idioma está instalado" },
 };
 
 /// Portugal's, where it differs.

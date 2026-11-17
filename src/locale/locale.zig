@@ -254,6 +254,15 @@ pub const Keyboard = enum {
         };
     }
 
+    /// The language pack with its full input method (see the shell's
+    /// ime.zig), if it has one: the code it is published by.
+    pub fn languagePack(k: Keyboard) ?[]const u8 {
+        return switch (k) {
+            .romaji => "ja",
+            else => null,
+        };
+    }
+
     /// Its XKB name.
     pub fn code(k: Keyboard) []const u8 {
         return @tagName(k);

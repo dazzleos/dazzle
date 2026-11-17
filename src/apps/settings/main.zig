@@ -83,6 +83,16 @@ const Wakes = struct {
     }
 };
 
+/// How keyboard `k`'s language pack is, if it has one.
+fn packState(apps: *const store.Store, k: locale.Keyboard) view.LanguagePack {
+    const code = k.languagePack() orelse return .none;
+    var buf: [64]u8 = undefined;
+    const name = std.fmt.bufPrint(&buf, "dazzle-language-{s}", .{code}) catch return .none;
+    if (store.isPackInstalled(store.apps_dir, name)) return .installed;
+    if (apps.busy()) |b| if (std.mem.eql(u8, b, name)) return .installing;
+    return if (apps.languagePack(code) != null) .offered else .not_offered;
+}
+
 fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
     // The language chosen (in setup, or here).
     var chosen = locale.load();
@@ -131,6 +141,10 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
     var server_url: []const u8 = store.loadServerUrl(&server_url_buf, build_info.apps_url);
     var subscribed_keys = store.loadKeys();
     var apps: store.Store = .init(gpa, server_url);
+    // The keyboard's language pack is wanted (its keyboard was picked, or
+    // Install pressed): installed once the catalogue has it.
+    var want_pack = false;
+    var asked_catalogue = false;
     apps.check_os = true;
     var installed: [64]bool = undefined;
     var updatable: [64]bool = undefined;
@@ -343,10 +357,36 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
                     chosen = l;
                     locale.current = l.language;
                     window.setTitle(locale.text("Settings"));
+                    if (l.keyboard.languagePack() != null) want_pack = true;
                 }
             } else print(sys.log_warning ++ "dazzle-settings: the system did not answer\n", .{});
             dirty = true;
         }
+        if (actions.install_language_pack) {
+            actions.install_language_pack = false;
+            want_pack = true;
+        }
+        // The keyboard's language pack (its full input method), wanted:
+        // installed, once the catalogue (downloaded if need be) has it.
+        if (want_pack) if (chosen.keyboard.languagePack()) |code| {
+            var name_buf: [64]u8 = undefined;
+            const name = std.fmt.bufPrint(&name_buf, "dazzle-language-{s}", .{code}) catch "";
+            if (store.isPackInstalled(store.apps_dir, name)) {
+                want_pack = false;
+            } else if (apps.busy() == null) {
+                if (apps.languagePack(code)) |pack| {
+                    apps.install(pack.name);
+                    want_pack = false;
+                    dirty = true;
+                } else if (!asked_catalogue) {
+                    apps.refresh(false);
+                    asked_catalogue = true;
+                    dirty = true;
+                }
+            }
+        } else {
+            want_pack = false;
+        };
         // Video memory chosen: the system manager has the next start use
         // it, and says what that now is.
         if (actions.video_memory) |mib| {
@@ -516,6 +556,7 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
                 .parental_wrong = parental_wrong,
                 .manager = if (report) |*r| r else null,
                 .actions = &actions,
+                .language_pack = packState(&apps, chosen.keyboard),
                 .apps = .{
                     .list = catalogue,
                     .offered = @min(offered.len, catalogue.len),

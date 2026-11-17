@@ -100,6 +100,11 @@ pub fn languagePackIn(catalogue: Catalogue, code: []const u8) ?App {
     return null;
 }
 
+/// Whether `entry` (an app, or a language pack) is installed in `dir`.
+pub fn installedEntry(dir: []const u8, entry: App) bool {
+    return if (entry.language.len != 0) isPackInstalled(dir, entry.name) else isInstalled(dir, entry.name);
+}
+
 /// Whether language pack `name` is installed in `dir`.
 pub fn isPackInstalled(dir: []const u8, name: []const u8) bool {
     var buf: [256]u8 = undefined;
@@ -907,7 +912,7 @@ fn childUpdateAll(gpa: std.mem.Allocator, base_url: []const u8, list: []const Ap
     var client: Client = .init(gpa);
     defer client.deinit();
     for (list) |app| {
-        if (!isInstalled(apps_dir, app.name) or !hasNewerVersion(apps_dir, app)) continue;
+        if (!installedEntry(apps_dir, app) or !hasNewerVersion(apps_dir, app)) continue;
         try downloadAndInstall(&client, gpa, base_url, app);
     }
 }
@@ -996,6 +1001,11 @@ pub const Store = struct {
         return if (s.catalogue) |c| c.value.apps[0..c.value.n_apps] else &.{};
     }
 
+    /// The catalogue's apps and language packs.
+    pub fn entries(s: *const Store) []const App {
+        return if (s.catalogue) |c| c.value.apps else &.{};
+    }
+
     /// The catalogue's language pack for `code` ("ja"), if it has one.
     pub fn languagePack(s: *const Store, code: []const u8) ?App {
         return if (s.catalogue) |c| languagePackIn(c.value, code) else null;
@@ -1027,9 +1037,10 @@ pub const Store = struct {
         s.message_len = 0;
     }
 
+    /// Installs app (or language pack) `name`, from the catalogue.
     pub fn install(s: *Store, name: []const u8) void {
         if (s.job != null) return;
-        for (s.apps()) |a| if (std.mem.eql(u8, a.name, name)) {
+        for (s.entries()) |a| if (std.mem.eql(u8, a.name, name)) {
             s.job = Job.spawn(.install, a.name, childInstall, .{ s.gpa, s.base_url, a }) catch |err| {
                 s.setMessage("Cannot install {s}: {s}", .{ a.title, @errorName(err) });
                 return;
@@ -1043,12 +1054,12 @@ pub const Store = struct {
     pub fn updateAll(s: *Store) void {
         if (s.job != null) return;
         var any = false;
-        for (s.apps()) |a| if (isInstalled(apps_dir, a.name) and hasNewerVersion(apps_dir, a)) {
+        for (s.entries()) |a| if (installedEntry(apps_dir, a) and hasNewerVersion(apps_dir, a)) {
             any = true;
             break;
         };
         if (!any) return;
-        s.job = Job.spawn(.update_all, "*", childUpdateAll, .{ s.gpa, s.base_url, s.apps() }) catch |err| {
+        s.job = Job.spawn(.update_all, "*", childUpdateAll, .{ s.gpa, s.base_url, s.entries() }) catch |err| {
             s.setMessage("Cannot update apps: {s}", .{@errorName(err)});
             return;
         };
