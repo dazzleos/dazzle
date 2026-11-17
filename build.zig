@@ -237,6 +237,38 @@ fn addMapData(b: *std.Build) std.Build.LazyPath {
     return run.addOutputFileArg("map_data.zig");
 }
 
+/// Motu's tiles (each strip as the GPU takes it, with its mipmaps) and
+/// icons, drawn at build time (see tools/mktiles.zig), for the game to
+/// `@embedFile("tiles-<n>.bin")` and `@embedFile("icons.bin")`.
+fn addMotuTiles(b: *std.Build, m: *std.Build.Module) void {
+    const State = struct {
+        var files: ?[5]std.Build.LazyPath = null;
+    };
+    const files = State.files orelse blk: {
+        const tool = b.addExecutable(.{
+            .name = "mktiles",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/mktiles.zig"),
+                .target = b.graph.host,
+                // Hundreds of thousands of noisy pixels: seconds unoptimized.
+                .optimize = .ReleaseFast,
+                .imports = &.{
+                    .{ .name = "textures", .module = b.createModule(.{ .root_source_file = b.path("src/apps/motu/textures.zig") }) },
+                    .{ .name = "texture", .module = b.createModule(.{ .root_source_file = b.path("src/vc4/texture.zig") }) },
+                },
+            }),
+        });
+        const run = b.addRunArtifact(tool);
+        var out: [5]std.Build.LazyPath = undefined;
+        for (0..4) |i| out[i] = run.addOutputFileArg(b.fmt("tiles-{d}.bin", .{i}));
+        out[4] = run.addOutputFileArg("icons.bin");
+        State.files = out;
+        break :blk out;
+    };
+    for (0..4) |i| m.addAnonymousImport(b.fmt("tiles-{d}.bin", .{i}), .{ .root_source_file = files[i] });
+    m.addAnonymousImport("icons.bin", .{ .root_source_file = files[4] });
+}
+
 /// The land as a flat map draws it, from Natural Earth's 110m countries
 /// (see tools/mkworld.zig).
 fn addWorldMap(b: *std.Build) std.Build.LazyPath {
@@ -1358,6 +1390,7 @@ pub fn build(b: *std.Build) void {
     });
     const install_chat = b.addInstallArtifact(chat_exe, .{});
     const motu_module = addProgramModule(b, "src/apps/motu/main.zig", target, optimize, pi, shaders, true);
+    addMotuTiles(b, motu_module);
     _ = addKete(b, motu_module, pi, target, optimize, "src/apps/motu");
     const motu_exe = b.addExecutable(.{
         .name = "motu",
@@ -1560,6 +1593,7 @@ pub fn build(b: *std.Build) void {
     const host_kete_vc4 = addKete(b, host_text_editor, host, b.graph.host, test_optimize, "src/apps/text_editor");
     host_kete_vc4.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_motu = addProgramModule(b, "src/apps/motu/main.zig", b.graph.host, test_optimize, host, shaders, false);
+    addMotuTiles(b, host_motu);
     host_motu.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     _ = addKete(b, host_motu, host, b.graph.host, test_optimize, "src/apps/motu");
     const host_logger = addProgramModule(b, "src/apps/logger/main.zig", b.graph.host, test_optimize, host, shaders, false);
