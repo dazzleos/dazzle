@@ -30,6 +30,9 @@ pub const Ime = struct {
     panel: ?*kete_panel.Panel = null,
     /// The candidates changed since they were last drawn (or hidden).
     changed: bool = false,
+    /// Where the text's cursor was when they were: the app says where it
+    /// is after each change, a little later, so they move with it.
+    drawn_at: server_mod.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
     /// The keys it took as they went down: it takes them coming up too.
     taken: std.StaticBitSet(256) = .empty,
     /// The Japanese language pack's files, mapped (its pages read from the
@@ -140,6 +143,9 @@ pub const Ime = struct {
     pub fn draw(ime: *Ime, s: *Server, now: u64, scale: f32, hidden: *bool) ?Candidates {
         // The app lost the keyboard, or its text field went.
         if (ime.target != null and s.activeTextInput() != ime.target) ime.drop();
+        if (ime.target) |ti| if (ime.showing() and !std.meta.eql(ti.cursor_rect, ime.drawn_at)) {
+            ime.changed = true;
+        };
         if (!ime.changed) return null;
         ime.changed = false;
         if (!ime.showing()) {
@@ -156,6 +162,7 @@ pub const Ime = struct {
         if (picture.isEmpty()) return null;
         // Under the cursor, on the screen; above it if there is no room.
         const r = ti.cursor_rect;
+        ime.drawn_at = r;
         const w: i32 = @intCast(size[0]);
         const h: i32 = @intCast(size[1]);
         const gap: i32 = @intFromFloat(@round(4 * scale));
