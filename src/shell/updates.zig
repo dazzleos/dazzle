@@ -73,6 +73,7 @@ pub const Updates = struct {
     pub fn tick(u: *Updates, now: u64) bool {
         if (now >= u.next_check and u.apps.job == null) {
             u.next_check = now + check_every_ns;
+            u.useServer();
             u.apps.refresh(true);
         }
         var changed = false;
@@ -103,7 +104,20 @@ pub const Updates = struct {
     /// os.json).
     pub fn checkNow(u: *Updates) void {
         u.problem_len = 0;
-        if (u.apps.job == null) u.apps.refresh(true);
+        if (u.apps.job == null) {
+            u.useServer();
+            u.apps.refresh(true);
+        }
+    }
+
+    /// The software server as Settings has it now (it may have been
+    /// changed since the shell started).
+    fn useServer(u: *Updates) void {
+        var buf: [store.max_url_len]u8 = undefined;
+        const now = store.loadServerUrl(&buf, build_info.apps_url);
+        if (std.mem.eql(u8, now, u.apps.base_url)) return;
+        @memcpy(u.url_buf[0..now.len], now);
+        u.apps.setBaseUrl(u.url_buf[0..now.len]);
     }
 
     /// Checks for updates now, then installs everything newer: the apps,
