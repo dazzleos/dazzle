@@ -787,7 +787,7 @@ const PrecomputedTex = struct {
     inline fn init(p: texture.Config) Error!PrecomputedTex {
         const cpp: u32 = switch (p.type) {
             .rgba8888, .rgbx8888, .rgba32r => 4,
-            .rgb565 => 2,
+            .rgb565, .rgba4444 => 2,
             .alpha, .luminance => 1,
             else => return error.Unsupported,
         };
@@ -859,7 +859,16 @@ const PrecomputedTex = struct {
             }
             return @as(u32, memory[offset]) << 24;
         }
-        return pixel.fromRgb565(std.mem.readInt(u16, memory[offset..][0..2], .little));
+        return pt.from16(std.mem.readInt(u16, memory[offset..][0..2], .little));
+    }
+
+    /// A 16-bit texel as a 32-bit one: RGB565, or RGBA4444 (its top 4 bits
+    /// the low byte, the next two the next, its low 4 bits the top: as a
+    /// Pi 3's GPU returns it), each widened to 8 bits.
+    inline fn from16(pt: *const PrecomputedTex, v: u16) u32 {
+        if (pt.cfg.type != .rgba4444) return pixel.fromRgb565(v);
+        const n = [4]u32{ v >> 12 & 0xf, v >> 8 & 0xf, v >> 4 & 0xf, v & 0xf };
+        return n[0] * 17 | (n[1] * 17) << 8 | (n[2] * 17) << 16 | (n[3] * 17) << 24;
     }
 
     inline fn fetchPairFromOffset(pt: *const PrecomputedTex, memory: []const u8, offset: u32) Error![2]u32 {
@@ -877,7 +886,7 @@ const PrecomputedTex = struct {
             return .{ b0 << 24, b1 << 24 };
         }
         const raw = std.mem.readInt(u32, memory[offset..][0..4], .little);
-        return .{ pixel.fromRgb565(@truncate(raw)), pixel.fromRgb565(@truncate(raw >> 16)) };
+        return .{ pt.from16(@truncate(raw)), pt.from16(@truncate(raw >> 16)) };
     }
 
     inline fn fetchAt(pt: *const PrecomputedTex, memory: []const u8, x: u32, y: u32) Error!u32 {
@@ -1255,4 +1264,13 @@ test "QPU vectorized v8muld, v8min, v8max, v8adds, v8subs, and shifts" {
     try std.testing.expectEqual(@as(u32, 0x2080_0805), mulOpVec(.v8min, va, vb)[0]);
     try std.testing.expectEqual(@as(u32, 0xf090_1010), mulOpVec(.v8max, va, vb)[0]);
     try std.testing.expectEqual(@as(u32, 0x05f0_8010), addOpVec(.ror, va, splat(8))[0]);
+}
+
+test "RGBA4444 texels come back as a Pi 3's GPU returns them" {
+    // 0x1248: its top 4 bits the low byte, its low 4 bits the top (alpha).
+    var memory: [texture.imageSizeOf(.rgba4444, 16, 16)]u8 = undefined;
+    var i: usize = 0;
+    while (i < memory.len) : (i += 2) std.mem.writeInt(u16, memory[i..][0..2], 0x1248, .little);
+    const cfg: texture.Config = .{ .type = .rgba4444, .width = 16, .height = 16, .mag_filter = .nearest, .min_filter = .nearest };
+    try std.testing.expectEqual(@as(u32, 0x88442211), try sample(&memory, texture.p0(cfg), texture.p1(cfg), 0.5, 0.5));
 }
