@@ -147,7 +147,10 @@ installing and removing apps requires no root privileges.
 
 ### Apps in repositories of their own
 
-Some apps live in repositories of their own (Motu, in `dazzleos/motu`).
+Some apps live in repositories of their own: Files, Camera, Text Editor,
+Chat, Terminal and Motu (`dazzleos/files`, `dazzleos/camera`,
+`dazzleos/text-editor`, `dazzleos/chat`, `dazzleos/terminal` and
+`dazzleos/motu`).
 Their `build.zig.zon` depends on Dazzle, and their `build.zig` calls
 Dazzle's `addApp`, which builds them with the same modules (`kete_vc4` and
 the rest), shader compiler and packaging as Dazzle's own apps, and makes

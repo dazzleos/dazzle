@@ -535,7 +535,14 @@ fn appsUrl(b: *std.Build) []const u8 {
 /// apps in repositories of their own, each published as its own release.
 /// Settings lists their apps with Dazzle's (see src/store/store.zig).
 fn appSources(b: *std.Build) []const []const u8 {
-    const default: []const []const u8 = &.{"https://github.com/dazzleos/motu/releases/latest/download"};
+    const default: []const []const u8 = &.{
+        "https://github.com/dazzleos/files/releases/latest/download",
+        "https://github.com/dazzleos/camera/releases/latest/download",
+        "https://github.com/dazzleos/text-editor/releases/latest/download",
+        "https://github.com/dazzleos/chat/releases/latest/download",
+        "https://github.com/dazzleos/terminal/releases/latest/download",
+        "https://github.com/dazzleos/motu/releases/latest/download",
+    };
     return b.option([]const []const u8, "app-sources", "Other app catalogues Dazzle's lists (default: dazzleos' app repositories')") orelse default;
 }
 
@@ -1494,27 +1501,6 @@ pub fn build(b: *std.Build) void {
         .root_module = settings_module,
     });
     const install_settings = b.addInstallArtifact(settings_exe, .{});
-    const files_module = addProgramModule(b, "src/apps/files/main.zig", target, optimize, pi, shaders, true);
-    _ = addKete(b, files_module, pi, target, optimize, "src/apps/files");
-    const files_exe = b.addExecutable(.{
-        .name = "dazzle-files",
-        .root_module = files_module,
-    });
-    const install_files = b.addInstallArtifact(files_exe, .{});
-    const camera_module = addProgramModule(b, "src/apps/camera/main.zig", target, optimize, pi, shaders, true);
-    _ = addKete(b, camera_module, pi, target, optimize, "src/apps/camera");
-    const camera_exe = b.addExecutable(.{
-        .name = "dazzle-camera",
-        .root_module = camera_module,
-    });
-    const install_camera = b.addInstallArtifact(camera_exe, .{});
-    const text_editor_module = addProgramModule(b, "src/apps/text_editor/main.zig", target, optimize, pi, shaders, true);
-    _ = addKete(b, text_editor_module, pi, target, optimize, "src/apps/text_editor");
-    const text_editor_exe = b.addExecutable(.{
-        .name = "dazzle-text-editor",
-        .root_module = text_editor_module,
-    });
-    const install_text_editor = b.addInstallArtifact(text_editor_exe, .{});
     const logger_module = addProgramModule(b, "src/apps/logger/main.zig", target, optimize, pi, shaders, true);
     _ = addKete(b, logger_module, pi, target, optimize, "src/apps/logger");
     const logger_exe = b.addExecutable(.{
@@ -1522,13 +1508,6 @@ pub fn build(b: *std.Build) void {
         .root_module = logger_module,
     });
     const install_logger = b.addInstallArtifact(logger_exe, .{});
-    const chat_module = addProgramModule(b, "src/apps/chat/main.zig", target, optimize, pi, shaders, true);
-    _ = addKete(b, chat_module, pi, target, optimize, "src/apps/chat");
-    const chat_exe = b.addExecutable(.{
-        .name = "dazzle-chat",
-        .root_module = chat_module,
-    });
-    const install_chat = b.addInstallArtifact(chat_exe, .{});
     const setup_module = addProgramModule(b, "src/apps/setup/main.zig", target, optimize, pi, shaders, true);
     _ = addKete(b, setup_module, pi, target, optimize, "src/apps/setup");
     const setup_exe = b.addExecutable(.{
@@ -1552,13 +1531,6 @@ pub fn build(b: *std.Build) void {
         .root_module = maps_mod,
     });
     const install_maps = b.addInstallArtifact(maps_exe, .{});
-    const terminal_module = addProgramModule(b, "src/apps/terminal/main.zig", target, optimize, pi, shaders, true);
-    _ = addKete(b, terminal_module, pi, target, optimize, "src/apps/terminal");
-    const terminal_exe = b.addExecutable(.{
-        .name = "dazzle-terminal",
-        .root_module = terminal_module,
-    });
-    const install_terminal = b.addInstallArtifact(terminal_exe, .{});
     const develop_module = addProgramModule(b, "src/apps/develop/main.zig", target, optimize, pi, shaders, true);
     _ = addKete(b, develop_module, pi, target, optimize, "src/apps/develop");
     const develop_exe = b.addExecutable(.{
@@ -1628,13 +1600,8 @@ pub fn build(b: *std.Build) void {
     const zig_root = fromRoot(b, "build/zig/zig-arm-linux-" ++ zig_version);
     const apps = [_]App{
         .{ .exe = demo_exe, .icon = .view_in_ar, .title = "Demo" },
-        .{ .exe = files_exe, .icon = .folder, .title = "Files", .description = "Browse your files", .about = "Browse the files on this computer and on USB drives plugged into it: open them with the app that opens their kind, see photos, and make, rename, copy, move and delete files and folders." },
-        .{ .exe = camera_exe, .icon = .photo_camera, .title = "Camera", .description = "Take photos and videos", .about = "Take photos and record videos with a Raspberry Pi camera module, with a live view to frame them. They are kept in your files, to see and share." },
-        .{ .exe = text_editor_exe, .icon = .edit_note, .title = "Text Editor", .description = "Edit text files", .about = "Write and edit plain text files: notes, lists, code and configuration. It opens text files from Files, and keeps what you write as you go.", .handles = &.{"text/plain"} },
         .{ .exe = logger_exe, .icon = .show_chart, .title = "Data Logger", .description = "Record inputs from the GPIO pins", .about = "Record what the GPIO pins read over time, from buttons, switches and sensors, and see it drawn as a chart as it comes in." },
-        .{ .exe = chat_exe, .icon = .chat, .title = "Chat", .description = "Chat with others on your network in rooms", .about = "Talk with others on the same network in rooms, without an account or the internet: anyone running Chat nearby can join." },
         .{ .exe = maps_exe, .icon = .public, .title = "Maps", .description = "Explore the Earth on a 3D globe", .about = "Explore the Earth on a 3D globe: spin it, zoom in to countries and see their names and borders." },
-        .{ .exe = terminal_exe, .icon = .terminal, .title = "Terminal", .description = "Run command-line tools", .about = "Run command-line tools: look round the files, see what the system is doing, and try commands, in a terminal with its own shell." },
         .{
             .exe = develop_exe,
             .icon = .code,
@@ -1660,7 +1627,7 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(apps_step);
     const install_initramfs = b.addInstallFile(initramfs, "initramfs.cpio");
     const programs_step = b.step("programs", "Build just the programs (zig-out/bin) and zig-out/initramfs.cpio");
-    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_settings.step, &install_files.step, &install_camera.step, &install_text_editor.step, &install_logger.step, &install_chat.step, &install_maps.step, &install_terminal.step, &install_develop.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
+    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_settings.step, &install_logger.step, &install_maps.step, &install_develop.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
         programs_step.dependOn(st);
         b.getInstallStep().dependOn(st);
     }
@@ -1712,23 +1679,11 @@ pub fn build(b: *std.Build) void {
     host_settings.addAnonymousImport("NotoSansArabic-Regular.ttf", .{ .root_source_file = b.path("fonts/NotoSansArabic-Regular.ttf") });
     _ = addKete(b, host_settings, host, b.graph.host, test_optimize, "src/apps/settings");
     addBackgroundThumbnails(b, host_settings);
-    const host_files = addProgramModule(b, "src/apps/files/main.zig", b.graph.host, test_optimize, host, shaders, false);
-    host_files.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
-    _ = addKete(b, host_files, host, b.graph.host, test_optimize, "src/apps/files");
-    const host_camera = addProgramModule(b, "src/apps/camera/main.zig", b.graph.host, test_optimize, host, shaders, false);
-    host_camera.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
-    _ = addKete(b, host_camera, host, b.graph.host, test_optimize, "src/apps/camera");
-    const host_text_editor = addProgramModule(b, "src/apps/text_editor/main.zig", b.graph.host, test_optimize, host, shaders, false);
-    host_text_editor.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
-    // Kete's frames, drawn with Dazzle's shaders in the QPU simulator.
-    const host_kete_vc4 = addKete(b, host_text_editor, host, b.graph.host, test_optimize, "src/apps/text_editor");
-    host_kete_vc4.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_logger = addProgramModule(b, "src/apps/logger/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_logger.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
-    _ = addKete(b, host_logger, host, b.graph.host, test_optimize, "src/apps/logger");
-    const host_chat = addProgramModule(b, "src/apps/chat/main.zig", b.graph.host, test_optimize, host, shaders, false);
-    host_chat.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
-    _ = addKete(b, host_chat, host, b.graph.host, test_optimize, "src/apps/chat");
+    // Kete's frames, drawn with Dazzle's shaders in the QPU simulator.
+    const host_kete_vc4 = addKete(b, host_logger, host, b.graph.host, test_optimize, "src/apps/logger");
+    host_kete_vc4.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     const host_setup = addProgramModule(b, "src/apps/setup/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_setup.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     _ = addKete(b, host_setup, host, b.graph.host, test_optimize, "src/apps/setup");
@@ -1736,9 +1691,6 @@ pub fn build(b: *std.Build) void {
     host_maps.addImport("map_data", b.createModule(.{ .root_source_file = map_data, .target = b.graph.host, .optimize = test_optimize }));
     host_maps.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     _ = addKete(b, host_maps, host, b.graph.host, test_optimize, "src/apps/maps");
-    const host_terminal = addProgramModule(b, "src/apps/terminal/main.zig", b.graph.host, test_optimize, host, shaders, false);
-    host_terminal.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
-    _ = addKete(b, host_terminal, host, b.graph.host, test_optimize, "src/apps/terminal");
     const host_develop = addProgramModule(b, "src/apps/develop/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_develop.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     _ = addKete(b, host_develop, host, b.graph.host, test_optimize, "src/apps/develop");
@@ -1760,14 +1712,9 @@ pub fn build(b: *std.Build) void {
         host_demo,
         host_kete_vc4,
         host_settings,
-        host_files,
-        host_camera,
-        host_text_editor,
         host_logger,
-        host_chat,
         host_setup,
         host_maps,
-        host_terminal,
         host_develop,
         host_shell,
     }) |m| {

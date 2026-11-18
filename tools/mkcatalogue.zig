@@ -24,7 +24,7 @@
 //!           "language": ""
 //!         }
 //!       ],
-//!       "sources": ["https://github.com/dazzleos/motu/releases/latest/download"]
+//!       "sources": ["https://github.com/dazzleos/files/releases/latest/download", ...]
 //!     }
 //!
 //! "sources" are other catalogues, of apps in repositories of their own,
