@@ -607,6 +607,15 @@ pub fn remove(dir: []const u8, name: []const u8) !void {
 /// What the last download asked for, and the HTTP status that said no (0
 /// if none did), for the log (in a job's child process).
 var last_url: []const u8 = "";
+var last_url_buf: [max_url_len]u8 = undefined;
+
+/// Notes `url` as the last asked for: a copy (the URL itself may be freed
+/// before a failure is logged, and reading it then could crash the job).
+fn noteUrl(url: []const u8) void {
+    const n = @min(url.len, last_url_buf.len);
+    @memcpy(last_url_buf[0..n], url[0..n]);
+    last_url = last_url_buf[0..n];
+}
 var last_status: u16 = 0;
 
 /// An HTTP/HTTPS client that keeps its connection open across requests so
@@ -630,7 +639,7 @@ pub const Client = struct {
     /// The HTTP client, ready for `url` (with the certificates loaded, for
     /// HTTPS).
     fn prepare(c: *Client, url: []const u8) !*std.http.Client {
-        last_url = url;
+        noteUrl(url);
         last_status = 0;
         const io = c.threaded.io();
         if (c.http == null) c.http = .{ .allocator = c.gpa, .io = io };
@@ -917,6 +926,9 @@ pub const Job = struct {
         return j.name_buf[0..j.name_len];
     }
 
+    /// What a job says when it has done its work.
+    const done_mark = "+";
+
     /// Starts `work(args...)` in a child process: `name` is what it is
     /// working on (an app's name, or "").
     pub fn spawn(kind: Kind, job_name: []const u8, comptime work: anytype, args: anytype) !Job {
@@ -941,7 +953,10 @@ pub const Job = struct {
                     describe(err);
                 _ = linux.write(fds[1], why.ptr, why.len);
                 logFailure(kind, job_name, err);
+                linux.exit(0);
             };
+            // Done: said so (what says nothing, crashed or was killed).
+            _ = linux.write(fds[1], done_mark.ptr, done_mark.len);
             linux.exit(0);
         }
         sys.close(fds[1]);
@@ -997,10 +1012,14 @@ pub const Job = struct {
             sys.close(j.result);
             return @as(?[]const u8, "it took too long");
         }
+        // (Its status may be gone: the shell's reaper may have had it. What
+        // it said is what counts: done, why it failed, or nothing at all
+        // if it crashed.)
         const n = sys.check(linux.read(j.result, buf.ptr, buf.len)) catch 0;
         sys.close(j.result);
-        const outcome: ?[]const u8 = if (n > 0) buf[0..n] else if (linux.W.IFEXITED(status) and linux.W.EXITSTATUS(status) == 0) null else "it stopped";
-        return outcome;
+        if (n == 0) return @as(?[]const u8, "it stopped");
+        if (std.mem.eql(u8, buf[0..n], done_mark)) return @as(?[]const u8, null);
+        return @as(?[]const u8, buf[0..n]);
     }
 };
 
@@ -1366,6 +1385,45 @@ test "a download is checked against the catalogue and its Ed25519 signature" {
 
     unsubscribeKeyAt(keys_path, &other_pub_hex);
     try testing.expectEqual(@as(usize, 0), loadKeysFrom(keys_path).len);
+}
+
+test "the last URL asked for is kept, though the URL itself is freed" {
+    const url = try std.fmt.allocPrint(testing.allocator, "https://example.com/apps/{s}.tar.xz", .{"overrun"});
+    noteUrl(url);
+    @memset(url, 'x');
+    testing.allocator.free(url);
+    try testing.expectEqualStrings("https://example.com/apps/overrun.tar.xz", last_url);
+}
+
+fn jobDone() !void {}
+
+fn jobFails() !void {
+    noteUrl("https://example.com/apps.json");
+    return error.HostUnreachable;
+}
+
+fn jobCrashes() !void {
+    // (Killed: as a crash leaves it, saying nothing.)
+    _ = linux.kill(linux.getpid(), .KILL);
+}
+
+test "a job: done, failed (and why), or crashed; even if something else reaped it" {
+    for ([_]bool{ false, true }) |reaped_first| {
+        const wants = [_]?[]const u8{ null, "HostUnreachable", "it stopped" };
+        inline for (.{ jobDone, jobFails, jobCrashes }, 0..) |work, k| {
+            const want = wants[k];
+            var j = try Job.spawn(.catalogue, "", work, .{});
+            if (reaped_first) {
+                // As the shell's reaper does.
+                var status: u32 = 0;
+                _ = linux.wait4(j.pid, @ptrCast(&status), 0, null);
+            }
+            var buf: [160]u8 = undefined;
+            var got: ??[]const u8 = null;
+            while (got == null) got = j.finished(&buf);
+            if (want) |w| try testing.expectEqualStrings(w, got.?.?) else try testing.expect(got.? == null);
+        }
+    }
 }
 
 test "a language pack unpacks too, without a program" {
