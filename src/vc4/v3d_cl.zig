@@ -136,7 +136,7 @@ pub fn outputFormat(format: Format) struct { fmt: OutputImageFormat, rb_swap: bo
         // R in 11..15; R/B swap puts B in bits 11..15 and R in 0..4 (DRM_FORMAT_BGR565),
         // matching VC4.
         .rgb565 => .{ .fmt = .bgr565, .rb_swap = true },
-        .a8 => unreachable,
+        .a8, .rgba4444 => unreachable, // not render targets
     };
 }
 
