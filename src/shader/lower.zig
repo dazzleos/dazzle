@@ -1452,8 +1452,9 @@ pub fn lower(
             spirv.StorageClass.uniform => try l.uniformTree(pointee, 0),
             spirv.StorageClass.uniform_constant => .{
                 .image = switch (deco.binding orelse 0) {
-                    // gpu.texture's is not bound (the uniforms are at 0);
-                    // gpu.texture1's is at 2, and gpu.texture2's at 3.
+                    // gpu.texture's is at 1 (the uniforms are at 0; not
+                    // bound, in shaders built before it was), gpu.texture1's
+                    // at 2, and gpu.texture2's at 3.
                     0, 1 => 0,
                     2 => 1,
                     else => 2,

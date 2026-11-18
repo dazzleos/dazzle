@@ -65,6 +65,8 @@ pub fn uniforms(comptime T: type) *addrspace(.uniform) T {
 }
 
 /// Samples the draw's texture at `coord` (0 to 1 across it), as RGBA.
+/// (Its variable is bound at 1, after the uniforms: as Vulkan has them,
+/// for a build of an app on Vulkan.)
 pub fn texture(coord: Vec2) Vec4 {
     return asm volatile (
         \\%f32 = OpTypeFloat 32
@@ -73,6 +75,8 @@ pub fn texture(coord: Vec2) Vec4 {
         \\%simg = OpTypeSampledImage %img
         \\%ptr = OpTypePointer UniformConstant %simg
         \\%tex = OpVariable %ptr UniformConstant
+        \\OpDecorate %tex DescriptorSet 0
+        \\OpDecorate %tex Binding 1
         \\%s = OpLoad %simg %tex
         \\%ret = OpImageSampleImplicitLod %v4 %s %coord
         : [ret] "" (-> Vec4),
@@ -81,8 +85,8 @@ pub fn texture(coord: Vec2) Vec4 {
 }
 
 /// Samples the draw's second texture (texture unit 1) at `coord`, as
-/// RGBA. (Its variable is bound at 2: the uniforms are at 0, and unit 0's
-/// texture is not bound.)
+/// RGBA. (Its variable is bound at 2: the uniforms are at 0, the first
+/// texture at 1.)
 pub fn texture1(coord: Vec2) Vec4 {
     return asm volatile (
         \\%f32 = OpTypeFloat 32
