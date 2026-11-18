@@ -701,11 +701,18 @@ fn addKete(b: *std.Build, module: *std.Build.Module, m: Modules, target: std.Bui
 /// icons named in `app_dir` and kete_vc4. `b` is Dazzle's build (its own,
 /// or the dependency's).
 fn keteFor(b: *std.Build, module: *std.Build.Module, m: Modules, target: std.Build.ResolvedTarget, optimize: std.builtin.Optimize, app_dir: std.Build.LazyPath, name: []const u8) *std.Build.Module {
+    return keteOn(b, module, m, target, optimize, app_dir, name, .dazzle);
+}
+
+/// As `keteFor`; on Linux (an app built to run there), kete with its own
+/// windows (Wayland's) and drawing (Vulkan's), and its fonts in it.
+fn keteOn(b: *std.Build, module: *std.Build.Module, m: Modules, target: std.Build.ResolvedTarget, optimize: std.builtin.Optimize, app_dir: std.Build.LazyPath, name: []const u8, platform: Platform) *std.Build.Module {
     const dep = b.dependency("kete", .{});
     const icon_font = kete_build.addIconFontScanned(dep.builder, &.{ app_dir, b.path("src/kete_vc4") });
-    const kete = kete_build.createModules(dep.builder, b.fmt("kete-{s}-{s}", .{ name, @tagName(target.result.cpu.arch) }), target, optimize, icon_font, .{
-        .backends = false,
-        .embed_fonts = false,
+    const on_linux = platform == .linux;
+    const kete = kete_build.createModules(dep.builder, b.fmt("kete-{s}-{s}{s}", .{ name, @tagName(target.result.cpu.arch), if (on_linux) "-linux" else "" }), target, optimize, icon_font, .{
+        .backends = on_linux,
+        .embed_fonts = on_linux,
     }).kete;
     const kete_vc4 = b.createModule(.{
         .root_source_file = b.path("src/kete_vc4/kete_vc4.zig"),
@@ -1379,6 +1386,12 @@ pub const AppShader = struct {
     args: []const []const u8 = &.{},
 };
 
+/// Where an app built with `addApp` runs: on Dazzle (the Pi; the default),
+/// or on Linux (`-Dplatform=linux`: this computer's kind, with kete's own
+/// windows and drawing; for apps that can, see Motu's gpu.zig). The app's
+/// code sees which as `@import("platform").platform`.
+pub const Platform = enum { dazzle, linux };
+
 /// What `addApp` made, for an app's build to add to: its program's module
 /// on the Pi and on the build machine (for its tests), and its program.
 pub const AppParts = struct {
@@ -1405,7 +1418,11 @@ pub const AppShaderParts = struct {
 pub fn addApp(b: *std.Build, spec: AppSpec) AppParts {
     const dazzle = b.dependency("dazzle", .{ .sdk = true });
     const d = dazzle.builder;
-    const target = piTarget(b);
+    const platform = b.option(Platform, "platform", "Where the app runs: dazzle (the Pi; the default), or linux (this computer's kind)") orelse .dazzle;
+    const platform_options = b.addOptions();
+    platform_options.addOption(Platform, "platform", platform);
+    const platform_module = platform_options.createModule();
+    const target = if (platform == .linux) b.standardTargetOptions(.{}) else piTarget(b);
     const optimize, const test_optimize = optimizeModes(b);
     const gfx_shaders = shadersOf(d, .gfx);
     const icon_font = addIconFont(d);
@@ -1421,11 +1438,23 @@ pub fn addApp(b: *std.Build, spec: AppSpec) AppParts {
     }
 
     const pi = addModules(d, target, optimize, gfx_shaders, icon_font);
-    const module = programModule(d, root, target, optimize, pi, true);
+    const module = programModule(d, root, target, optimize, pi, platform == .dazzle);
+    module.addImport("platform", platform_module);
     addShaderImports(module, app_shaders.items, .app);
-    _ = keteFor(d, module, pi, target, optimize, app_dir, spec.name);
+    // On Linux: each shader's SPIR-V too, `@embedFile("<name>.spv")`, for
+    // Vulkan; and libc (Vulkan's loader is a C library).
+    if (platform == .linux) {
+        for (shader_parts.items) |sh| module.addAnonymousImport(b.fmt("{s}.spv", .{sh.name}), .{ .root_source_file = sh.spirv });
+        module.link_libc = true;
+    }
+    _ = keteOn(d, module, pi, target, optimize, app_dir, spec.name, platform);
     const exe = b.addExecutable(.{ .name = spec.name, .root_module = module });
     b.installArtifact(exe);
+    if (platform == .linux) {
+        // Run it here: `zig build run`.
+        const run = b.addRunArtifact(exe);
+        b.step("run", "Run the app (built for Linux)").dependOn(&run.step);
+    }
 
     const dir = std.fs.path.dirname(spec.root_source_file) orelse ".";
     const shot = b.fmt("{s}/screenshot.png", .{dir});
@@ -1440,13 +1469,17 @@ pub fn addApp(b: *std.Build, spec: AppSpec) AppParts {
         .icon_png = b.path(b.fmt("{s}/icon.png", .{dir})),
         .screenshot = if (exists(b, shot)) b.path(shot) else null,
     }}) catch @panic("OOM");
-    const apps_step = b.step("apps", "Build the app's archive and its catalogue (zig-out/apps)");
-    apps_step.dependOn(appArchives(b, d, apps, .{}));
-    b.getInstallStep().dependOn(apps_step);
+    // Its archive and catalogue: for Dazzle's (not for a build on Linux).
+    if (platform == .dazzle) {
+        const apps_step = b.step("apps", "Build the app's archive and its catalogue (zig-out/apps)");
+        apps_step.dependOn(appArchives(b, d, apps, .{}));
+        b.getInstallStep().dependOn(apps_step);
+    }
 
     // Its tests, on the build machine, drawing text in the system font.
     const host = addModules(d, b.graph.host, test_optimize, gfx_shaders, icon_font);
     const host_module = programModule(d, root, b.graph.host, test_optimize, host, false);
+    host_module.addImport("platform", platform_module);
     addShaderImports(host_module, app_shaders.items, .app);
     host_module.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = d.path("fonts/FiraSans-Regular.ttf") });
     _ = keteFor(d, host_module, host, b.graph.host, test_optimize, app_dir, spec.name);
