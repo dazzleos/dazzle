@@ -1387,6 +1387,17 @@ pub const AppParts = struct {
     host_module: *std.Build.Module,
     /// Dazzle (the dependency), for files of its an app's build needs.
     dazzle: *std.Build.Dependency,
+    /// Its shaders as SPIR-V, with the render state each is for: for a
+    /// build of the app on another GPU's API (Vulkan takes SPIR-V as it
+    /// is), beside the programs Dazzle's compiler makes of them.
+    shaders: []const AppShaderParts,
+};
+
+pub const AppShaderParts = struct {
+    name: []const u8,
+    spirv: std.Build.LazyPath,
+    /// As `AppShader.args`: "--depth-test", "--blend=source-over" and so on.
+    args: []const []const u8,
 };
 
 /// Builds an app in a repository of its own (see `AppSpec`): `zig build`
@@ -1401,9 +1412,12 @@ pub fn addApp(b: *std.Build, spec: AppSpec) AppParts {
     const root = b.path(spec.root_source_file);
     const app_dir = b.path(std.fs.path.dirname(spec.root_source_file) orelse ".");
     var app_shaders: std.ArrayList(ShaderBlob) = .empty;
+    var shader_parts: std.ArrayList(AppShaderParts) = .empty;
     for (spec.shaders) |sh| {
         const name = sh.name orelse std.fs.path.stem(sh.source);
-        app_shaders.append(b.allocator, shaderBlob(d, name, .app, b.path(sh.source), sh.args)) catch @panic("OOM");
+        const blob = shaderBlob(d, name, .app, b.path(sh.source), sh.args);
+        app_shaders.append(b.allocator, blob) catch @panic("OOM");
+        shader_parts.append(b.allocator, .{ .name = name, .spirv = blob.spirv, .args = sh.args }) catch @panic("OOM");
     }
 
     const pi = addModules(d, target, optimize, gfx_shaders, icon_font);
@@ -1439,7 +1453,7 @@ pub fn addApp(b: *std.Build, spec: AppSpec) AppParts {
     const test_step = b.step("test", "Run the app's tests on the build machine");
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host_module })).step);
 
-    return .{ .exe = exe, .module = module, .host_module = host_module, .dazzle = dazzle };
+    return .{ .exe = exe, .module = module, .host_module = host_module, .dazzle = dazzle, .shaders = shader_parts.items };
 }
 
 /// The Raspberry Pi Zero / Zero W: BCM2835, ARM1176JZF-S with VFPv2. The
