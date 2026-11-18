@@ -1404,6 +1404,8 @@ pub const AppParts = struct {
     /// build of the app on another GPU's API (Vulkan takes SPIR-V as it
     /// is), beside the programs Dazzle's compiler makes of them.
     shaders: []const AppShaderParts,
+    /// Where it is built for (`-Dplatform`).
+    platform: Platform,
 };
 
 pub const AppShaderParts = struct {
@@ -1486,7 +1488,7 @@ pub fn addApp(b: *std.Build, spec: AppSpec) AppParts {
     const test_step = b.step("test", "Run the app's tests on the build machine");
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host_module })).step);
 
-    return .{ .exe = exe, .module = module, .host_module = host_module, .dazzle = dazzle, .shaders = shader_parts.items };
+    return .{ .exe = exe, .module = module, .host_module = host_module, .dazzle = dazzle, .shaders = shader_parts.items, .platform = platform };
 }
 
 /// The Raspberry Pi Zero / Zero W: BCM2835, ARM1176JZF-S with VFPv2. The
