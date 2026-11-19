@@ -600,7 +600,7 @@ pub const ServerConfigButton = struct {
             if (!custom) {
                 rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
                     cx.make(kete.SizedBox{ .width = 70, .child = cx.make(kete.Text{ .text = locale.text("Server"), .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
-                    cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = st.default_source, .style = .{ .size = 16, .color = t.on_surface } }) }),
+                    cx.make(kete.Expanded{ .child = fullOnHover(cx, st.default_source, 16, t.on_surface) }),
                 } })) catch {};
             } else {
                 if (!page_st.form_filled) {
@@ -633,14 +633,14 @@ pub const ServerConfigButton = struct {
 
             rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
                 cx.make(kete.SizedBox{ .width = 70, .child = cx.make(kete.Text{ .text = locale.text("Keys"), .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
-                cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = st.default_key, .style = .{ .size = 15, .color = t.on_surface }, .wrap = false, .ellipsis = true }) }),
+                cx.make(kete.Expanded{ .child = fullOnHover(cx, st.default_key, 15, t.on_surface) }),
             } })) catch {};
             for (st.subscribed_keys) |k| {
                 const key_str = cx.fmt("{s}", .{&k});
                 const on_unsub: ?kete.Callback = if (st.actions) |acts| .of(keyAct(cx, acts, k), KeyAct.unsubscribe) else null;
                 rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
                     cx.make(kete.SizedBox{ .width = 70, .child = cx.make(kete.SizedBox.empty) }),
-                    cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = key_str, .style = .{ .size = 15, .color = t.on_surface }, .wrap = false, .ellipsis = true }) }),
+                    cx.make(kete.Expanded{ .child = fullOnHover(cx, key_str, 15, t.on_surface) }),
                     cx.make(kete.IconButton{
                         .icon = .delete,
                         .size = 28,
@@ -845,6 +845,15 @@ fn loadAppIcon(gpa: std.mem.Allocator, dir: []const u8, icons_path: []const u8, 
 
 const testing = std.testing;
 const font = kete.font;
+
+/// `text` on one line, cut short with an ellipsis if it does not fit, and
+/// all of it in a tooltip (a server's URL, a key).
+fn fullOnHover(cx: *kete.BuildContext, text: []const u8, size: f32, color: gfx.Color) kete.Widget {
+    return cx.make(kete.Tooltip{
+        .text = text,
+        .child = cx.make(kete.Text{ .text = text, .style = .{ .size = size, .color = color }, .wrap = false, .ellipsis = true }),
+    });
+}
 
 test "installing and removing apps, and getting their list again" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
@@ -1249,6 +1258,24 @@ test "subscribing and removing Ed25519 signing keys in the software settings pop
     try testing.expect(u.menu_root != null);
     try testing.expect(view.findText(u.menu_root.?, "Keys") != null);
     try testing.expect(view.findText(u.menu_root.?, store.default_signing_key) != null);
+    // The server and the key: on one line each, cut short with an
+    // ellipsis, all of each in a tooltip.
+    const fullOnHoverShows = struct {
+        fn check(root: *kete.WidgetNode, full: []const u8) !void {
+            const text = view.findText(root, full).?;
+            const shown = text.widget.as(kete.Text).?;
+            try testing.expect(!shown.wrap and shown.ellipsis);
+            try testing.expectEqualStrings(full, view.up(text, kete.Tooltip).?.widget.as(kete.Tooltip).?.text);
+        }
+    }.check;
+    try fullOnHoverShows(u.menu_root.?, store.default_signing_key);
+    view.click(u, view.findText(u.menu_root.?, "Default").?);
+    draw(u, settings, &frame_no);
+    try fullOnHoverShows(u.menu_root.?, settings.apps.default_source);
+    try testing.expect(!view.overflows(u.menu_root.?));
+    actions = .{};
+    view.click(u, view.findText(u.menu_root.?, "Custom").?);
+    draw(u, settings, &frame_no);
 
     // Invalid key shows an error message.
     var st = &u.root.?.state(Settings.State).software;
