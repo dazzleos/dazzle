@@ -522,22 +522,15 @@ fn appsUrl(b: *std.Build) []const u8 {
     return State.url.?;
 }
 
-/// The other catalogues Dazzle's lists (apps.json's "sources"): those of
-/// apps in repositories of their own, each published as its own release.
-/// Settings lists their apps with Dazzle's (see src/store/store.zig).
+/// The other catalogues Dazzle's lists (apps.json's "sources"): the
+/// store's (dazzleos/store), which lists the apps of dazzleos' app
+/// repositories, each from one of its builds. Settings lists their apps
+/// with Dazzle's (see src/store/store.zig).
 fn appSources(b: *std.Build) []const []const u8 {
     const default: []const []const u8 = &.{
-        "https://github.com/dazzleos/files/releases/latest/download",
-        "https://github.com/dazzleos/camera/releases/latest/download",
-        "https://github.com/dazzleos/text-editor/releases/latest/download",
-        "https://github.com/dazzleos/chat/releases/latest/download",
-        "https://github.com/dazzleos/terminal/releases/latest/download",
-        "https://github.com/dazzleos/motu/releases/latest/download",
-        "https://github.com/dazzleos/globe/releases/latest/download",
-        "https://github.com/dazzleos/develop/releases/latest/download",
-        "https://github.com/dazzleos/geppetto/releases/latest/download",
+        "https://github.com/dazzleos/store/releases/latest/download",
     };
-    return b.option([]const []const u8, "app-sources", "Other app catalogues Dazzle's lists (default: dazzleos' app repositories')") orelse default;
+    return b.option([]const []const u8, "app-sources", "Other app catalogues Dazzle's lists (default: the store's, dazzleos/store)") orelse default;
 }
 
 const SigningKey = struct {
