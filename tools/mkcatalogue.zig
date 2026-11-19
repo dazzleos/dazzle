@@ -23,18 +23,14 @@
 //!           "signature": "<128 hex digits>",
 //!           "language": ""
 //!         }
-//!       ],
-//!       "sources": ["https://github.com/dazzleos/files/releases/latest/download", ...]
+//!       ]
 //!     }
 //!
-//! "sources" are other catalogues, of apps in repositories of their own,
-//! each published as its own release (made by Dazzle's tools too: see
-//! build.zig, `addApp`): Settings lists their apps with these, each
-//! downloaded from where its catalogue is. A source is a URL, or a path
-//! from where this catalogue is (as dazzle-serve gives other repositories'
-//! apps). Only Dazzle's catalogue has sources.
+//! The store (dazzleos/store) lists the apps of every repository's
+//! catalogue (Dazzle's language packs, the apps in repositories of their
+//! own: see build.zig, `addApp`), each from where its build published it.
 //!
-//! Usage: mkcatalogue [--key=<64-hex-seed>] [--source=<url>]... <apps.json> <version> <time> (<name> <title> <description> <about> <icon> <screenshot> <archive>)...
+//! Usage: mkcatalogue [--key=<64-hex-seed>] <apps.json> <version> <time> (<name> <title> <description> <about> <icon> <screenshot> <archive>)...
 
 const std = @import("std");
 pub const Ed25519 = std.crypto.sign.Ed25519;
@@ -71,8 +67,6 @@ pub const Catalogue = struct {
     version: []const u8,
     time: u64 = 0,
     apps: []const App,
-    /// Other catalogues whose apps are listed with these.
-    sources: []const []const u8 = &.{},
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -84,12 +78,8 @@ pub fn main(init: std.process.Init) !void {
         seed = try parseSeed(args[base]["--key=".len..]);
         base += 1;
     }
-    var sources: std.ArrayList([]const u8) = .empty;
-    while (base < args.len and std.mem.startsWith(u8, args[base], "--source=")) : (base += 1) {
-        try sources.append(arena, args[base]["--source=".len..]);
-    }
     if (args.len < base + 3 or (args.len - (base + 3)) % 7 != 0) {
-        std.debug.print("usage: mkcatalogue [--key=<64-hex-seed>] [--source=<url>]... <apps.json> <version> <time> (<name> <title> <description> <about> <icon> <screenshot> <archive>)...\n", .{});
+        std.debug.print("usage: mkcatalogue [--key=<64-hex-seed>] <apps.json> <version> <time> (<name> <title> <description> <about> <icon> <screenshot> <archive>)...\n", .{});
         std.process.exit(2);
     }
     const kp = keyPair(seed);
@@ -117,7 +107,7 @@ pub fn main(init: std.process.Init) !void {
             .language = if (std.mem.startsWith(u8, args[i], language_prefix)) args[i][language_prefix.len..] else "",
         });
     }
-    const json = try write(arena, .{ .version = version, .time = time, .apps = apps.items, .sources = sources.items });
+    const json = try write(arena, .{ .version = version, .time = time, .apps = apps.items });
     const file = try cwd.createFile(init.io, out_path, .{});
     defer file.close(init.io);
     try file.writeStreamingAll(init.io, json);
@@ -176,22 +166,10 @@ test "the catalogue: each app, with its archive's size, digest and Ed25519 signa
     try std.testing.expectEqualStrings("abc1234", back.version);
     try std.testing.expectEqual(@as(u64, 1791331200), back.time);
     try std.testing.expectEqualStrings("Demo", back.apps[0].title);
-    try std.testing.expectEqual(@as(usize, 0), back.sources.len);
     try std.testing.expectEqualStrings("dazzle-demo.png", back.apps[0].icon);
     try std.testing.expectEqualStrings("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", back.apps[0].sha256);
     try std.testing.expectEqual(@as(usize, 128), back.apps[0].signature.len);
     var sig_bytes: [64]u8 = undefined;
     _ = try std.fmt.hexToBytes(&sig_bytes, back.apps[0].signature);
     try Ed25519.Signature.fromBytes(sig_bytes).verify("abc", kp.public_key);
-}
-
-
-test "a catalogue lists other catalogues, its sources" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const json = try write(a, .{ .version = "abc1234", .apps = &.{}, .sources = &.{ "https://example.com/motu", "motu" } });
-    const back = try std.json.parseFromSliceLeaky(Catalogue, a, json, .{});
-    try std.testing.expectEqual(@as(usize, 2), back.sources.len);
-    try std.testing.expectEqualStrings("motu", back.sources[1]);
 }

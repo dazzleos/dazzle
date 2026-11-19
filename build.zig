@@ -79,14 +79,14 @@ const App = struct {
 /// folder, as in /apps), and the catalogue of them (zig-out/apps/apps.json;
 /// see tools/mkcatalogue.zig), published beside the image.
 fn addAppArchives(b: *std.Build, apps: []const App) *std.Build.Step {
-    return appArchives(b, b, apps, .{ .languages = true, .sources = appSources(b) });
+    return appArchives(b, b, apps, .{ .languages = true });
 }
 
 /// The apps' archives and catalogue, installed in `b`'s zig-out/apps, made
 /// with Dazzle's tools (`d`: Dazzle's own build, or the dependency's, for
-/// apps in repositories of their own); with Dazzle's language packs, and
-/// other catalogues' places (see tools/mkcatalogue.zig), for Dazzle's.
-fn appArchives(b: *std.Build, d: *std.Build, apps: []const App, opts: struct { languages: bool = false, sources: []const []const u8 = &.{} }) *std.Build.Step {
+/// apps in repositories of their own); with Dazzle's language packs, for
+/// Dazzle's.
+fn appArchives(b: *std.Build, d: *std.Build, apps: []const App, opts: struct { languages: bool = false }) *std.Build.Step {
     const step = b.step("app-archives", "The apps' archives (zig-out/apps)");
     const xz = requireTools(d, &.{"xz:xz-utils"});
     const commit = gitCommit(b);
@@ -94,7 +94,6 @@ fn appArchives(b: *std.Build, d: *std.Build, apps: []const App, opts: struct { l
     const version_file = b.addWriteFiles().add("version", b.fmt("{d} {s}\n", .{ commit_time, commit }));
     const catalogue = b.addRunArtifact(hostTool(d, "mkcatalogue"));
     catalogue.addArg(b.fmt("--key={s}", .{signingKey(b).seed_hex}));
-    for (opts.sources) |src| catalogue.addArg(b.fmt("--source={s}", .{src}));
     const json = catalogue.addOutputFileArg("apps.json");
     catalogue.addArgs(&.{ commit, b.fmt("{d}", .{commit_time}) });
     for (apps) |a| {
@@ -521,17 +520,6 @@ fn appsUrl(b: *std.Build) []const u8 {
     State.url = b.option([]const u8, "apps-url", "Where Settings downloads updates, apps and their catalogue (apps.json) from") orelse
         "https://github.com/dazzleos/store/releases/latest/download";
     return State.url.?;
-}
-
-/// The other catalogues Dazzle's lists (apps.json's "sources"): the
-/// store's (dazzleos/store), which lists the apps of dazzleos' app
-/// repositories, each from one of its builds. Settings lists their apps
-/// with Dazzle's (see src/store/store.zig).
-fn appSources(b: *std.Build) []const []const u8 {
-    const default: []const []const u8 = &.{
-        "https://github.com/dazzleos/store/releases/latest/download",
-    };
-    return b.option([]const []const u8, "app-sources", "Other app catalogues Dazzle's lists (default: the store's, dazzleos/store)") orelse default;
 }
 
 const SigningKey = struct {
@@ -1310,8 +1298,8 @@ fn addQemu(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) void {
 ///     }
 ///
 /// `zig build` makes its program (zig-out/bin), its archive and catalogue
-/// (zig-out/apps: published as its repository's release, which Dazzle's
-/// catalogue lists among its "sources"), signed with `-Dsigning-key` or
+/// (zig-out/apps: published as its repository's release, each build's of
+/// which the store, dazzleos/store, lists), signed with `-Dsigning-key` or
 /// DAZZLE_SIGNING_KEY as Dazzle's apps are; `zig build test` runs its
 /// tests on the build machine.
 pub const AppSpec = struct {

@@ -9,10 +9,6 @@
 //! xz. The store's catalogue and update say where each one's files are
 //! (`base`: the release of the build it is).
 //!
-//! A catalogue may list others (its "sources", as Dazzle's own does, and
-//! dazzle-serve's): their apps are listed with its own (the catalogue
-//! kept has them all), each downloaded from where its catalogue is; a
-//! source that cannot be reached keeps the apps it had.
 //!
 //! * Downloading (the catalogue, or an app) is done over HTTPS by a child
 //!   process (`Job`), so the window goes on meanwhile. It trusts the
@@ -83,14 +79,10 @@ pub const App = struct {
     /// it (Japanese's dictionary), installed like an app but not one (it
     /// has no program, and is not listed with the apps).
     language: []const u8 = "",
-    /// Where it is downloaded from (its file, icon and screenshot): as its
-    /// catalogue gives it (the store's give each app's build's place), or
-    /// that catalogue's place, for an app from one of the sources; "" for
-    /// the software server's own.
+    /// Where it is downloaded from (its file, icon and screenshot), as its
+    /// catalogue gives it (the store's give each app's build's place); ""
+    /// for beside the catalogue, on the software server.
     base: []const u8 = "",
-    /// The source it was listed from ("" for the software server's own),
-    /// to keep it listed when that cannot be reached.
-    source: []const u8 = "",
 
     /// Where its files are: its base, or the software server's.
     pub fn baseOr(a: App, server: []const u8) []const u8 {
@@ -105,50 +97,7 @@ pub const Catalogue = struct {
     apps: []const App,
     /// How many of them are apps.
     n_apps: usize = 0,
-    /// Other catalogues whose apps are listed with these (see the top of
-    /// this file).
-    sources: []const []const u8 = &.{},
 };
-
-/// Where source `source` is: a URL, or a name beside the catalogue at
-/// `base_url` (as dazzle-serve gives other repositories' apps); null if it
-/// is neither.
-pub fn sourceUrl(buf: []u8, base_url: []const u8, source: []const u8) ?[]const u8 {
-    const trimmed = std.mem.trimEnd(u8, source, "/");
-    if (std.mem.startsWith(u8, trimmed, "https://") or std.mem.startsWith(u8, trimmed, "http://")) {
-        if (trimmed.len > max_url_len) return null;
-        return trimmed;
-    }
-    if (!validName(trimmed)) return null;
-    return std.fmt.bufPrint(buf, "{s}/{s}", .{ base_url, trimmed }) catch null;
-}
-
-/// The catalogue `main` with its sources' apps (`sources[i]`, from
-/// `urls[i]`; null if it could not be got, when the apps `previous` had
-/// from there are kept): those not already listed, and not language packs
-/// (which are Dazzle's), each knowing where it is from (`source`) and
-/// where its files are (`base`: its own, if its catalogue gives it one).
-pub fn mergeSources(a: std.mem.Allocator, main: Catalogue, urls: []const []const u8, sources: []const ?Catalogue, previous: ?Catalogue) ![]const App {
-    var out: std.ArrayList(App) = .empty;
-    try out.appendSlice(a, main.apps);
-    for (urls, sources) |url, maybe| {
-        const apps: []const App = if (maybe) |c| c.apps else if (previous) |p| p.apps else &.{};
-        for (apps) |app| {
-            if (app.language.len != 0) continue;
-            // Kept from before: only those from this source.
-            if (maybe == null and !std.mem.eql(u8, app.source, url)) continue;
-            const listed = for (out.items) |o| {
-                if (std.mem.eql(u8, o.name, app.name)) break true;
-            } else false;
-            if (listed) continue;
-            var copy = app;
-            copy.source = url;
-            if (maybe != null and app.base.len == 0) copy.base = url;
-            try out.append(a, copy);
-        }
-    }
-    return out.items;
-}
 
 /// The catalogue in `json`: its apps first, then its language packs.
 pub fn parseCatalogue(gpa: std.mem.Allocator, json: []const u8) !std.json.Parsed(Catalogue) {
@@ -829,9 +778,8 @@ pub fn fetchOs(client: *Client, gpa: std.mem.Allocator, base_url: []const u8, di
     } else |_| {}
 }
 
-/// Downloads `apps.json` from `base_url`, and its sources' (see the top of
-/// this file), and each app's `<name>.png` and screenshot from where it
-/// is, into `dir` using `client`: the catalogue kept has them all.
+/// Downloads `apps.json` from `base_url`, and each app's `<name>.png` and
+/// screenshot from where it is, into `dir` using `client`.
 pub fn fetchCatalogue(client: *Client, gpa: std.mem.Allocator, base_url: []const u8, dir: []const u8) !void {
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
@@ -845,34 +793,10 @@ pub fn fetchCatalogue(client: *Client, gpa: std.mem.Allocator, base_url: []const
     var tmp_buf: [256]u8 = undefined;
     const cat_path = try std.mem.printSentinel(&cat_buf, "{s}/.catalogue.json", .{dir}, 0);
     const tmp = try std.mem.printSentinel(&tmp_buf, "{s}/.catalogue.json.new", .{dir}, 0);
-
-    // Its sources' apps, with its own.
-    const previous: ?Catalogue = blk: {
-        const old = sys.readFileAlloc(arena, cat_path, max_download) catch break :blk null;
-        const p = parseCatalogue(arena, old) catch break :blk null;
-        break :blk p.value;
-    };
-    var urls: std.ArrayList([]const u8) = .empty;
-    var sources: std.ArrayList(?Catalogue) = .empty;
-    for (parsed.value.sources) |src| {
-        var url_buf: [max_url_len + 1]u8 = undefined;
-        const src_url = try arena.dupe(u8, sourceUrl(&url_buf, base_url, src) orelse continue);
-        const got: ?Catalogue = blk: {
-            const src_json_url = try std.fmt.allocPrint(arena, "{s}/apps.json", .{src_url});
-            const src_json = client.download(src_json_url) catch break :blk null;
-            defer gpa.free(src_json);
-            const p = parseCatalogue(arena, src_json) catch break :blk null;
-            break :blk p.value;
-        };
-        try urls.append(arena, src_url);
-        try sources.append(arena, got);
-    }
-    const all = try mergeSources(arena, parsed.value, urls.items, sources.items, previous);
-    var out: std.Io.Writer.Allocating = .init(arena);
-    try std.json.Stringify.value(.{ .version = parsed.value.version, .time = parsed.value.time, .apps = all, .sources = parsed.value.sources }, .{ .whitespace = .indent_2 }, &out.writer);
     _ = linux.unlink(tmp);
-    try sys.files.writeNew(tmp, out.written());
+    try sys.files.writeNew(tmp, json);
     _ = try sys.check(linux.rename(tmp, cat_path));
+    const all = parsed.value.apps;
 
     var icons_buf: [256]u8 = undefined;
     const icons_path = try std.mem.printSentinel(&icons_buf, "{s}/.icons", .{dir}, 0);
@@ -1852,65 +1776,3 @@ test "installed apps the catalogue does not have are listed, with titles from th
     try testing.expectEqualStrings("Notes", extra[1].title);
 }
 
-test "a catalogue's sources: where they are, and their apps listed with its own" {
-    var buf: [max_url_len + 1]u8 = undefined;
-    try testing.expectEqualStrings("https://example.com/motu", sourceUrl(&buf, "https://h", "https://example.com/motu/").?);
-    try testing.expectEqualStrings("https://192.168.1.2:8443/motu", sourceUrl(&buf, "https://192.168.1.2:8443", "motu").?);
-    try testing.expect(sourceUrl(&buf, "https://h", "../etc") == null);
-    try testing.expect(sourceUrl(&buf, "https://h", "ftp://x") == null);
-
-    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena_state.deinit();
-    const a = arena_state.allocator();
-    const own = [_]App{
-        .{ .name = "dazzle-files", .title = "Files", .file = "dazzle-files.tar.xz", .size = 1, .sha256 = "00" },
-        .{ .name = "dazzle-language-ja", .title = "Japanese", .file = "j.tar.xz", .size = 1, .sha256 = "00", .language = "ja" },
-    };
-    const motu = [_]App{
-        .{ .name = "motu", .title = "Motu", .file = "motu.tar.xz", .size = 1, .sha256 = "00" },
-        // Already listed (Dazzle's wins), and a language pack (Dazzle's only).
-        .{ .name = "dazzle-files", .title = "Other Files", .file = "f.tar.xz", .size = 1, .sha256 = "00" },
-        .{ .name = "motu-language-x", .title = "X", .file = "x.tar.xz", .size = 1, .sha256 = "00", .language = "x" },
-    };
-    const urls = [_][]const u8{ "https://m", "https://gone" };
-    const previous: Catalogue = .{ .apps = &.{
-        .{ .name = "kept", .title = "Kept", .file = "k.tar.xz", .size = 1, .sha256 = "00", .base = "https://gone", .source = "https://gone" },
-        .{ .name = "elsewhere", .title = "E", .file = "e.tar.xz", .size = 1, .sha256 = "00", .base = "https://other", .source = "https://other" },
-    } };
-    const all = try mergeSources(a, .{ .apps = &own }, &urls, &.{ Catalogue{ .apps = &motu }, null }, previous);
-    try testing.expectEqual(@as(usize, 4), all.len);
-    try testing.expectEqualStrings("dazzle-files", all[0].name);
-    try testing.expectEqualStrings("Files", all[0].title);
-    try testing.expectEqualStrings("", all[0].baseOr(""));
-    try testing.expectEqualStrings("motu", all[2].name);
-    try testing.expectEqualStrings("https://m", all[2].baseOr("https://h"));
-    try testing.expectEqualStrings("https://m", all[2].source);
-    // The source that could not be got: its apps as they were.
-    try testing.expectEqualStrings("kept", all[3].name);
-    try testing.expectEqualStrings("https://gone", all[3].base);
-}
-
-test "a source's apps that say where their files are (a store's) keep that, and stay listed when it cannot be got" {
-    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena_state.deinit();
-    const a = arena_state.allocator();
-    const store_url = "https://github.com/dazzleos/store/releases/latest/download";
-    const build = "https://github.com/dazzleos/motu/releases/download/build-c466279";
-    const store = [_]App{
-        .{ .name = "motu", .title = "Motu", .file = "motu.tar.xz", .size = 1, .sha256 = "00", .base = build },
-        .{ .name = "dazzle-files", .title = "Files", .file = "dazzle-files.tar.xz", .size = 1, .sha256 = "00" },
-    };
-    const got = try mergeSources(a, .{ .apps = &.{} }, &.{store_url}, &.{Catalogue{ .apps = &store }}, null);
-    try testing.expectEqual(@as(usize, 2), got.len);
-    try testing.expectEqualStrings(build, got[0].baseOr("https://h"));
-    try testing.expectEqualStrings(store_url, got[0].source);
-    try testing.expectEqualStrings(store_url, got[1].baseOr("https://h"));
-    // The store not reached: what it listed, kept (as kept, in
-    // .catalogue.json, and read again).
-    var json: std.Io.Writer.Allocating = .init(a);
-    try std.json.Stringify.value(.{ .apps = got }, .{}, &json.writer);
-    const kept = try parseCatalogue(a, json.written());
-    const again = try mergeSources(a, .{ .apps = &.{} }, &.{store_url}, &.{null}, kept.value);
-    try testing.expectEqual(@as(usize, 2), again.len);
-    try testing.expectEqualStrings(build, again[0].base);
-}

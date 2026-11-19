@@ -7,9 +7,9 @@
 //! root certificate used by `tls_server`.
 //!
 //! Apps in repositories of their own (Motu's, say) are served beside
-//! Dazzle's with `--source=<name>=<their zig-out>`: their catalogue and
-//! files at `/<name>/`, and Dazzle's catalogue served listing those as its
-//! sources (in place of the releases it lists), so Settings gets them all
+//! Dazzle's with `--source=<name>=<their zig-out>`: their files at
+//! `/<name>/`, and their apps in the catalogue served, each saying where
+//! its files are (`base`), as the store's do, so Settings gets them all
 //! from here.
 //!
 //! Usage: zig build serve [-- [--port=8443] [--host=<ip-or-host>] [--source=<name>=<dir>]... [zig-out]]
@@ -40,8 +40,10 @@ pub const fallback_os_json =
 /// Another repository's apps, served at `/<name>/` from `<dir>/apps`.
 pub const Source = struct { name: []const u8, dir: []const u8 };
 
-/// The sources given (set once, before connections are taken).
+/// The sources given, and where this is (set once, before connections are
+/// taken).
 var sources: []const Source = &.{};
+var server_url: []const u8 = "";
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
@@ -90,6 +92,7 @@ pub fn main(init: std.process.Init) !void {
 
     var ip_buf: [64]u8 = undefined;
     const host = host_override orelse detectLanIp(&ip_buf);
+    server_url = try std.fmt.allocPrint(arena, "https://{s}:{d}", .{ host, listener.port });
 
     var stdout_buf: [1024]u8 = undefined;
     var stdout_w = std.Io.File.stdout().writer(init.io, &stdout_buf);
@@ -97,7 +100,7 @@ pub fn main(init: std.process.Init) !void {
     try out.print("Serving Dazzle software from {s}/os and {s}/apps\n", .{ root_dir, root_dir });
     for (sources) |src| try out.print("  and {s}'s apps from {s}/apps at /{s}/\n", .{ src.name, src.dir, src.name });
     try out.print("URL for Settings -> Software -> Software server:\n\n", .{});
-    try out.print("  https://{s}:{d}\n\n", .{ host, listener.port });
+    try out.print("  {s}\n\n", .{server_url});
     try out.flush();
 
     // Each connection on a thread of its own: a client keeping one open
@@ -257,13 +260,22 @@ fn servePath(gpa: std.mem.Allocator, io: std.Io, tls_conn: *tls_server.Conn, roo
     const cwd = std.Io.Dir.cwd();
     const content_type = contentTypeFor(target);
     if (cwd.readFileAlloc(io, fs_path, gpa, .limited(256 << 20))) |file| {
-        // Dazzle's catalogue lists the sources served here.
+        // Dazzle's catalogue, with the other repositories' apps.
         const body = if (sources.len > 0 and std.mem.eql(u8, withoutQuery(target), "/apps.json")) blk: {
             defer gpa.free(file);
-            const names = try gpa.alloc([]const u8, sources.len);
-            defer gpa.free(names);
-            for (sources, names) |src, *n| n.* = src.name;
-            break :blk try withSources(gpa, file, names);
+            var arena_state = std.heap.ArenaAllocator.init(gpa);
+            defer arena_state.deinit();
+            const arena = arena_state.allocator();
+            const others = try arena.alloc(Served, sources.len);
+            for (sources, others) |src, *o| {
+                var path_buf2: [512]u8 = undefined;
+                const at = resolveRequestPath(&path_buf2, src.dir, "/apps.json") orelse return error.BadSource;
+                o.* = .{
+                    .base = try std.fmt.allocPrint(arena, "{s}/{s}", .{ server_url, src.name }),
+                    .json = cwd.readFileAlloc(io, at, arena, .limited(1 << 20)) catch "",
+                };
+            }
+            break :blk try withApps(gpa, file, others);
         } else file;
         defer gpa.free(body);
         std.debug.print("GET {s} -> 200 ({d} bytes)\n", .{ target, body.len });
@@ -304,15 +316,32 @@ pub fn resolveSourcePath(buf: *[512]u8, list: []const Source, req_path: []const 
     return null;
 }
 
-/// The catalogue `json` with `names` as its sources (in place of those it
-/// had).
-pub fn withSources(gpa: std.mem.Allocator, json: []const u8, names: []const []const u8) ![]u8 {
+/// Another repository's catalogue (its apps.json, "" if it has none), and
+/// where its files are served.
+pub const Served = struct { base: []const u8, json: []const u8 };
+
+/// The catalogue `json` with the apps of `others` too, each saying where
+/// its files are (`base`).
+pub fn withApps(gpa: std.mem.Allocator, json: []const u8, others: []const Served) ![]u8 {
     var parsed = try std.json.parseFromSlice(std.json.Value, gpa, json, .{});
     defer parsed.deinit();
+    const a = parsed.arena.allocator();
     if (parsed.value != .object) return error.BadCatalogue;
-    var list = std.json.Array.init(parsed.arena.allocator());
-    for (names) |n| try list.append(.{ .string = n });
-    try parsed.value.object.put(parsed.arena.allocator(), "sources", .{ .array = list });
+    const apps = parsed.value.object.getPtr("apps") orelse return error.BadCatalogue;
+    if (apps.* != .array) return error.BadCatalogue;
+    for (others) |o| {
+        if (o.json.len == 0) continue;
+        const other = std.json.parseFromSliceLeaky(std.json.Value, a, o.json, .{}) catch continue;
+        if (other != .object) continue;
+        const list = other.object.get("apps") orelse continue;
+        if (list != .array) continue;
+        for (list.array.items) |app| {
+            if (app != .object) continue;
+            var copy = app;
+            try copy.object.put(a, "base", .{ .string = o.base });
+            try apps.array.append(copy);
+        }
+    }
     var out: std.Io.Writer.Allocating = .init(gpa);
     try std.json.Stringify.value(parsed.value, .{ .whitespace = .indent_2 }, &out.writer);
     return out.toOwnedSlice();
@@ -357,7 +386,7 @@ test "resolveRequestPath maps OS and app routes to zig-out/os and zig-out/apps" 
     try std.testing.expect(resolveRequestPath(&buf, "zig-out", "/unknown.txt") == null);
 }
 
-test "other repositories' apps are served at /<name>/, and Dazzle's catalogue lists them" {
+test "other repositories' apps are served at /<name>/, and in Dazzle's catalogue, each saying where" {
     var buf: [512]u8 = undefined;
     const list = [_]Source{.{ .name = "motu", .dir = "../motu/zig-out" }};
     try std.testing.expectEqualStrings("../motu/zig-out/apps/apps.json", resolveSourcePath(&buf, &list, "/motu/apps.json").?);
@@ -369,10 +398,16 @@ test "other repositories' apps are served at /<name>/, and Dazzle's catalogue li
     try std.testing.expect(resolveSourcePath(&buf, &list, "/apps.json") == null);
 
     const gpa = std.testing.allocator;
-    const out = try withSources(gpa, "{\"version\":\"a\",\"apps\":[],\"sources\":[\"https://example.com\"]}", &.{"motu"});
+    const out = try withApps(gpa, "{\"version\":\"a\",\"apps\":[{\"name\":\"dazzle-language-ja\"}]}", &.{
+        .{ .base = "https://192.168.1.2:8443/motu", .json = "{\"version\":\"b\",\"apps\":[{\"name\":\"motu\"}]}" },
+        .{ .base = "https://192.168.1.2:8443/none", .json = "" },
+    });
     defer gpa.free(out);
-    const back = try std.json.parseFromSlice(struct { sources: []const []const u8 }, gpa, out, .{ .ignore_unknown_fields = true });
+    const App = struct { name: []const u8, base: []const u8 = "" };
+    const back = try std.json.parseFromSlice(struct { apps: []const App }, gpa, out, .{ .ignore_unknown_fields = true });
     defer back.deinit();
-    try std.testing.expectEqual(@as(usize, 1), back.value.sources.len);
-    try std.testing.expectEqualStrings("motu", back.value.sources[0]);
+    try std.testing.expectEqual(@as(usize, 2), back.value.apps.len);
+    try std.testing.expectEqualStrings("", back.value.apps[0].base);
+    try std.testing.expectEqualStrings("motu", back.value.apps[1].name);
+    try std.testing.expectEqualStrings("https://192.168.1.2:8443/motu", back.value.apps[1].base);
 }
