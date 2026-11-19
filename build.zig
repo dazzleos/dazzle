@@ -1376,6 +1376,11 @@ pub const AppSpec = struct {
     /// `@embedFile("<name>.shader")` (named after the source, unless
     /// given a name).
     shaders: []const AppShader = &.{},
+    /// More for its archive (as `App.extra_args` and `extra_step`): files
+    /// bundled with it (Develop's Zig compiler), and the step that makes
+    /// them.
+    extra_args: []const []const u8 = &.{},
+    extra_step: ?*std.Build.Step = null,
 };
 
 pub const AppShader = struct {
@@ -1468,6 +1473,8 @@ pub fn addApp(b: *std.Build, spec: AppSpec) AppParts {
         .about = spec.about,
         .handles = spec.handles,
         .notices = spec.notices,
+        .extra_args = spec.extra_args,
+        .extra_step = spec.extra_step,
         .icon_png = b.path(b.fmt("{s}/icon.png", .{dir})),
         .screenshot = if (exists(b, shot)) b.path(shot) else null,
     }}) catch @panic("OOM");
