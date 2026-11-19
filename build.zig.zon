@@ -21,6 +21,8 @@
         // For apps in repositories of their own (see build.zig, `addApp`).
         "fonts",
         "notices",
+        // Natural Earth's countries, for the world map.
+        "data",
         "LICENSE",
     },
 }
