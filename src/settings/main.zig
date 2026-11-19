@@ -289,16 +289,13 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
             actions.software_server = null;
             dirty = true;
         }
-        if (actions.subscribe_key) |*k| {
-            _ = store.subscribeKey(k.slice());
+        if (actions.software_key) |*k| {
+            // The custom server's key alone (or none).
+            var list: store.KeyList = .{};
+            if (k.slice().len > 0) _ = list.add(k.slice());
+            store.saveKeys(&list);
             subscribed_keys = store.loadKeys();
-            actions.subscribe_key = null;
-            dirty = true;
-        }
-        if (actions.unsubscribe_key) |*k| {
-            store.unsubscribeKey(k.slice());
-            subscribed_keys = store.loadKeys();
-            actions.unsubscribe_key = null;
+            actions.software_key = null;
             dirty = true;
         }
         // Not while parental controls stop it (updating an app is still

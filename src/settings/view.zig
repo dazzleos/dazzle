@@ -54,9 +54,10 @@ pub const Actions = struct {
     /// The software server URL (`https://...`), or empty (`""`) to revert to
     /// the default server.
     software_server: ?info.Str(store.max_url_len) = null,
-    /// A 64-character hex Ed25519 public key to subscribe or unsubscribe.
-    subscribe_key: ?info.Str(store.key_hex_len) = null,
-    unsubscribe_key: ?info.Str(store.key_hex_len) = null,
+    /// A custom software server's key: a 64-character hex Ed25519 public
+    /// key its software is signed with (trusted with the built-in one),
+    /// or empty (`""`) for none.
+    software_key: ?info.Str(store.key_hex_len) = null,
     /// The language and keyboard to use.
     locale: ?locale.Settings = null,
     /// A GPIO pin to set up, and how.
@@ -494,6 +495,12 @@ pub fn findType(node: *kete.WidgetNode, comptime T: type) ?*kete.WidgetNode {
     if (node.widget.is(T)) return node;
     for (node.children.items) |ch| if (findType(ch, T)) |n| return n;
     return null;
+}
+
+/// Every node under `node` (and it) whose widget is a `T`, in order.
+pub fn findAllType(node: *kete.WidgetNode, comptime T: type, out: *std.ArrayList(*kete.WidgetNode)) void {
+    if (node.widget.is(T)) out.append(std.testing.allocator, node) catch {};
+    for (node.children.items) |ch| findAllType(ch, T, out);
 }
 
 pub fn findIcon(node: *kete.WidgetNode, icon: kete.IconName) ?*kete.WidgetNode {

@@ -2,8 +2,9 @@
 //! installed) and Available (the catalogue's other apps, with a field to
 //! search them). An app clicked shows its page: what it is, its
 //! screenshot, and Install, Update or Remove; Dazzle's, how its updates
-//! stand (with Update or Restart), and its build and kernel. Back returns
-//! to the list.
+//! stand (with Update or Restart), and its build and kernel. The gear in
+//! the status bar shows where software comes from (the official store, or
+//! a custom server and its key). Back returns to the list.
 //! Under them, a fixed status bar with Update all and Refresh.
 
 const std = @import("std");
@@ -68,8 +69,6 @@ pub const Update = struct {
     icon: ?*const gfx.Image = null,
 };
 
-const PageState = State;
-
 pub const State = struct {
     /// Whether Dazzle's page is shown (instead of the list).
     dazzle_page: bool = false,
@@ -77,18 +76,26 @@ pub const State = struct {
     dismissed: bool = false,
     last_message_buf: [160]u8 = undefined,
     last_message_len: u8 = 0,
-    /// Whether the form for a custom software server URL is open in the
-    /// popup, what is typed in it, and whether it was not an `https://` URL.
-    custom_form: bool = false,
-    form_filled: bool = false,
-    form_id: u32 = 0,
+    /// Whether the page of where software comes from is shown (instead of
+    /// the list); the source chosen there; what is typed for a custom one
+    /// (its URL and key), and whether they were not an `https://` URL and a
+    /// 64-character hex Ed25519 public key; and the fields' generation (new
+    /// when they are filled again).
+    source_page: bool = false,
+    source_kind: SourceKind = .official,
     server_url: Field = .{},
     server_invalid: bool = false,
-    /// What is typed in the new signing key field in the popup, and whether
-    /// it was not a 64-character hex Ed25519 public key.
-    key_form_id: u32 = 1000,
     key_input: Field = .{},
     key_invalid: bool = false,
+    source_form_id: u32 = 0,
+    /// Where software comes from, as the last frame was built: the server,
+    /// the official one, its key, the custom server's key (if any), and
+    /// where to ask for a change.
+    source_now: []const u8 = store.default_url,
+    official_now: []const u8 = store.default_url,
+    official_key_now: []const u8 = store.default_signing_key,
+    key_now: []const u8 = "",
+    actions_now: ?*Actions = null,
     /// The tab shown, what is searched for in Available, and the app
     /// whose page is shown (instead of the list), if any.
     tab: Tab = .installed,
@@ -96,6 +103,7 @@ pub const State = struct {
     details: ?Actions.AppName = null,
 
     pub const Tab = enum { installed, available };
+    pub const SourceKind = enum { official, custom };
 
     fn selectTab(st: *State, i: usize) void {
         st.tab = if (i == 0) .installed else .available;
@@ -109,6 +117,55 @@ pub const State = struct {
     fn back(st: *State) void {
         st.details = null;
         st.dazzle_page = false;
+        st.source_page = false;
+    }
+
+    fn isCustom(st: *const State) bool {
+        return !std.mem.eql(u8, st.source_now, st.official_now);
+    }
+
+    /// The page of where software comes from, as it is now.
+    pub fn openSource(st: *State) void {
+        st.source_page = true;
+        st.source_kind = if (st.isCustom()) .custom else .official;
+        st.fillSourceForm();
+    }
+
+    /// The custom source's fields: as it is, or (from the official store)
+    /// a URL to start from and no key.
+    fn fillSourceForm(st: *State) void {
+        st.server_invalid = false;
+        st.key_invalid = false;
+        st.server_url.set(if (st.isCustom()) st.source_now else "https://");
+        st.key_input.set(if (st.isCustom()) st.key_now else "");
+        st.source_form_id +%= 1;
+    }
+
+    /// The official store, at once; or a custom server, its URL and key
+    /// to be given (and applied).
+    pub fn chooseSource(st: *State, kind: SourceKind) void {
+        st.source_kind = kind;
+        st.fillSourceForm();
+        if (kind == .official and st.isCustom()) if (st.actions_now) |acts| {
+            acts.software_server = .{};
+            acts.software_key = .{};
+        };
+    }
+
+    /// The custom server and its key, if they are right; then the list.
+    fn applySource(st: *State) void {
+        const url = store.parseHttpsUrl(st.server_url.text());
+        var hex: [store.key_hex_len]u8 = undefined;
+        const key_text = std.mem.trim(u8, st.key_input.text(), " ");
+        const key: ?[]const u8 = if (key_text.len == 0) "" else if (store.parsePublicKey(key_text, &hex) != null) &hex else null;
+        st.server_invalid = url == null;
+        st.key_invalid = key == null;
+        if (url == null or key == null) return;
+        if (st.actions_now) |acts| {
+            acts.software_server = if (std.mem.eql(u8, url.?, st.official_now)) .{} else .of(url.?);
+            acts.software_key = .of(key.?);
+        }
+        st.source_page = false;
     }
 
     pub const Field = struct {
@@ -174,7 +231,14 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     const shown: ?usize = if (state.details) |d| for (apps.list, 0..) |app, i| {
         if (std.mem.eql(u8, app.name, d.slice())) break i;
     } else null else null;
-    if (state.dazzle_page) {
+    state.official_now = if (apps.default_source.len > 0) apps.default_source else store.default_url;
+    state.source_now = if (apps.source.len > 0) apps.source else state.official_now;
+    state.official_key_now = if (apps.default_key.len > 0) apps.default_key else store.default_signing_key;
+    state.key_now = if (apps.subscribed_keys.len > 0) &apps.subscribed_keys[0] else "";
+    state.actions_now = self.actions;
+    if (state.source_page) {
+        sourcePage(self, b, state, &rows);
+    } else if (state.dazzle_page) {
         dazzlePage(self, b, state, &rows);
     } else if (shown) |i| {
         detailsRows(self, b, state, i, busy, fixed, &rows);
@@ -260,14 +324,12 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
         .icon = .refresh,
         .on_press = if (self.actions != null and !busy) .of(appAct(cx, self.actions.?, state, ""), AppAct.refresh) else null,
     })) catch {};
-    footer_children.append(a, cx.make(ServerConfigButton{
-        .state = state,
-        .actions = if (!busy) self.actions else null,
-        .source = if (apps.source.len > 0) apps.source else store.default_url,
-        .default_source = if (apps.default_source.len > 0) apps.default_source else store.default_url,
-        .default_key = if (apps.default_key.len > 0) apps.default_key else store.default_signing_key,
-        .subscribed_keys = apps.subscribed_keys,
-    })) catch {};
+    footer_children.append(a, cx.make(kete.Tooltip{ .text = locale.text("Software source"), .child = cx.make(kete.IconButton{
+        .icon = .settings,
+        .size = 36,
+        .icon_size = 20,
+        .on_press = if (self.actions != null and !busy) .of(state, State.openSource) else null,
+    }) })) catch {};
     const footer = cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = footer_children.items });
     // A scroll of its own for each tab and app's page: each starts at its top.
     const scroll_key: u64 = @as(u64, @intFromEnum(Page.apps)) + 1 + if (shown) |i| 16 + @as(u64, i) else @as(u64, @intFromEnum(state.tab)) * 4;
@@ -500,222 +562,70 @@ fn appAct(cx: *kete.BuildContext, actions: *Actions, state: *State, name: []cons
     return x;
 }
 
-const KeyAct = struct {
-    actions: *Actions,
-    key: [store.key_hex_len]u8,
+pub const SourceMenu = kete.Select(State.SourceKind);
 
-    fn unsubscribe(x: *KeyAct) void {
-        x.actions.unsubscribe_key = .of(&x.key);
-    }
-};
-
-fn keyAct(cx: *kete.BuildContext, actions: *Actions, key: [store.key_hex_len]u8) *KeyAct {
-    const x = cx.arena.create(KeyAct) catch unreachable;
-    x.* = .{ .actions = actions, .key = key };
-    return x;
+/// Where software comes from: Source (the official store, or a custom
+/// server), and its URL and key, which can be changed for a custom one
+/// (and applied).
+fn sourcePage(self: *const Settings, b: Builder, state: *State, rows: *std.ArrayList(kete.Widget)) void {
+    const cx = b.cx;
+    const t = &cx.ui.theme;
+    const a = cx.arena;
+    const custom = state.source_kind == .custom;
+    rows.append(a, cx.make(kete.Row{ .children = a.dupe(kete.Widget, &.{
+        cx.make(kete.TextButton{ .label = locale.text("Back"), .icon = .arrow_back, .on_press = .of(state, State.back) }),
+    }) catch &.{} })) catch {};
+    rows.append(a, cx.make(kete.Text{ .text = locale.text("Software source"), .style = .{ .size = 24, .color = t.on_surface } })) catch {};
+    const options = a.dupe(SourceMenu.Option, &.{
+        .labeled(.official, locale.text("Official store")),
+        .labeled(.custom, locale.text("Custom")),
+    }) catch &.{};
+    rows.append(a, sourceRow(cx, locale.text("Source"), cx.make(kete.Row{ .children = a.dupe(kete.Widget, &.{cx.make(SourceMenu{
+        .options = options,
+        .value = state.source_kind,
+        .on_changed = if (self.actions != null) .of(state, State.chooseSource) else null,
+    })}) catch &.{} }))) catch {};
+    const on_apply: ?kete.Callback = if (self.actions != null) .of(state, State.applySource) else null;
+    const id: u64 = @as(u64, state.source_form_id) * 2;
+    // The official store's: shown as it is (all of it on hover).
+    const url_field = cx.make(kete.TextField{
+        .placeholder = "https://example.com/dazzle",
+        .initial = if (custom) state.server_url.text() else state.official_now,
+        .max_len = state.server_url.buf.len,
+        .size = 16,
+        .width = std.math.inf(f32),
+        .enabled = custom,
+        .on_changed = .of(state, State.setServerUrl),
+        .on_submit = on_apply,
+    }).withKey(id);
+    rows.append(a, sourceRow(cx, locale.text("URL"), if (custom) url_field else cx.make(kete.Tooltip{ .text = state.official_now, .child = url_field }))) catch {};
+    if (state.server_invalid) rows.append(a, cx.make(kete.Text{ .text = locale.text("Give an https:// URL"), .style = .{ .size = 15, .color = t.@"error" } })) catch {};
+    const key_field = cx.make(kete.TextField{
+        .placeholder = locale.text("Ed25519 public key (64 hex characters)"),
+        .initial = if (custom) state.key_input.text() else state.official_key_now,
+        .max_len = store.key_hex_len,
+        .size = 16,
+        .width = std.math.inf(f32),
+        .enabled = custom,
+        .emoji = false,
+        .on_changed = .of(state, State.setKeyInput),
+        .on_submit = on_apply,
+    }).withKey(id + 1);
+    rows.append(a, sourceRow(cx, locale.text("Key"), if (custom) key_field else cx.make(kete.Tooltip{ .text = state.official_key_now, .child = key_field }))) catch {};
+    if (state.key_invalid) rows.append(a, cx.make(kete.Text{ .text = locale.text("Give a 64-character hex Ed25519 public key"), .style = .{ .size = 15, .color = t.@"error" } })) catch {};
+    if (custom) rows.append(a, cx.make(kete.Row{ .main_axis_alignment = .end, .children = a.dupe(kete.Widget, &.{
+        cx.make(kete.FilledButton{ .label = locale.text("Apply"), .on_press = on_apply }),
+    }) catch &.{} })) catch {};
 }
 
-/// An icon button in the Software footer bar: pressing it opens a popup to
-/// switch the software server between the default (`build_info.apps_url`)
-/// and a custom `https://` URL, and to subscribe or remove Ed25519 signing keys.
-pub const ServerConfigButton = struct {
-    state: *PageState,
-    actions: ?*Actions,
-    source: []const u8,
-    default_source: []const u8,
-    default_key: []const u8 = store.default_signing_key,
-    subscribed_keys: []const [store.key_hex_len]u8 = &.{},
-
-    pub const State = BtnState;
-    pub const BtnState = struct {
-        node: ?*kete.WidgetNode = null,
-        state: ?*PageState = null,
-        actions: ?*Actions = null,
-        source: []const u8 = store.default_url,
-        default_source: []const u8 = store.default_url,
-        default_key: []const u8 = store.default_signing_key,
-        subscribed_keys: []const [store.key_hex_len]u8 = &.{},
-
-        fn isCustom(st: *const BtnState) bool {
-            return !std.mem.eql(u8, st.source, st.default_source);
-        }
-
-        fn open(st: *BtnState) void {
-            const n = st.node orelse return;
-            const page_st = st.state orelse return;
-            page_st.server_invalid = false;
-            page_st.key_invalid = false;
-            page_st.custom_form = st.isCustom();
-            if (!st.isCustom()) page_st.form_filled = false;
-            const pos = n.position();
-            n.ui.openPopup(n, .{ pos[0], pos[1] }, .of(st, BtnState.buildPopup));
-        }
-
-        fn chooseDefault(st: *BtnState) void {
-            const page_st = st.state orelse return;
-            page_st.custom_form = false;
-            page_st.form_filled = false;
-            page_st.server_invalid = false;
-            if (st.isCustom()) if (st.actions) |acts| {
-                acts.software_server = .{};
-            };
-        }
-
-        fn chooseCustom(st: *BtnState) void {
-            const page_st = st.state orelse return;
-            page_st.custom_form = true;
-        }
-
-        fn apply(st: *BtnState) void {
-            const page_st = st.state orelse return;
-            const url = store.parseHttpsUrl(page_st.server_url.text()) orelse {
-                page_st.server_invalid = true;
-                return;
-            };
-            page_st.server_invalid = false;
-            page_st.custom_form = false;
-            if (st.actions) |acts| {
-                acts.software_server = if (std.mem.eql(u8, url, st.default_source)) .{} else .of(url);
-            }
-            if (st.node) |n| n.ui.closeMenu();
-        }
-
-        fn subscribeKey(st: *BtnState) void {
-            const page_st = st.state orelse return;
-            var hex: [store.key_hex_len]u8 = undefined;
-            _ = store.parsePublicKey(page_st.key_input.text(), &hex) orelse {
-                page_st.key_invalid = true;
-                return;
-            };
-            page_st.key_invalid = false;
-            page_st.key_input.set("");
-            page_st.key_form_id +%= 1;
-            if (st.actions) |acts| {
-                acts.subscribe_key = .of(&hex);
-            }
-        }
-
-        fn buildPopup(st: *BtnState, cx: *kete.BuildContext) kete.Widget {
-            const page_st = st.state orelse return cx.make(kete.SizedBox.empty);
-            const t = cx.theme();
-            const a = cx.arena;
-            const custom = page_st.custom_form or st.isCustom();
-            var rows: std.ArrayList(kete.Widget) = .empty;
-            rows.append(a, cx.make(kete.Align{ .height_factor = 1, .child = cx.make(kete.PillBar{ .children = &.{
-                cx.make(kete.PillButton{
-                    .label = locale.text("Default"),
-                    .selected = !custom,
-                    .first = true,
-                    .last = false,
-                    .on_press = if (st.actions != null) .of(st, BtnState.chooseDefault) else null,
-                }),
-                cx.make(kete.PillButton{
-                    .label = locale.text("Custom"),
-                    .selected = custom,
-                    .first = false,
-                    .last = true,
-                    .on_press = if (st.actions != null) .of(st, BtnState.chooseCustom) else null,
-                }),
-            } }) })) catch {};
-
-            if (!custom) {
-                rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-                    cx.make(kete.SizedBox{ .width = 70, .child = cx.make(kete.Text{ .text = locale.text("Server"), .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
-                    cx.make(kete.Expanded{ .child = fullOnHover(cx, st.default_source, 16, t.on_surface) }),
-                } })) catch {};
-            } else {
-                if (!page_st.form_filled) {
-                    page_st.form_filled = true;
-                    page_st.form_id +%= 1;
-                    page_st.server_invalid = false;
-                    page_st.server_url.set(if (st.isCustom()) st.source else "https://");
-                }
-                const on_apply: ?kete.Callback = if (st.actions != null) .of(st, BtnState.apply) else null;
-                const key = @as(u64, page_st.form_id);
-                rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-                    cx.make(kete.SizedBox{ .width = 70, .child = cx.make(kete.Text{ .text = locale.text("Server"), .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
-                    cx.make(kete.Expanded{ .child = cx.make(kete.TextField{
-                        .placeholder = "https://example.com/dazzle",
-                        .initial = page_st.server_url.text(),
-                        .max_len = page_st.server_url.buf.len,
-                        .size = 16,
-                        .on_changed = .of(page_st, PageState.setServerUrl),
-                        .on_submit = on_apply,
-                    }).withKey(key) }),
-                } })) catch {};
-                if (page_st.server_invalid) rows.append(a, cx.make(kete.Text{
-                    .text = locale.text("Give an https:// URL"),
-                    .style = .{ .size = 15, .color = t.@"error" },
-                })) catch {};
-                rows.append(a, cx.make(kete.Row{ .main_axis_alignment = .end, .children = &.{
-                    cx.make(kete.OutlinedButton{ .label = locale.text("Apply"), .on_press = on_apply }),
-                } })) catch {};
-            }
-
-            rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-                cx.make(kete.SizedBox{ .width = 70, .child = cx.make(kete.Text{ .text = locale.text("Keys"), .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
-                cx.make(kete.Expanded{ .child = fullOnHover(cx, st.default_key, 15, t.on_surface) }),
-            } })) catch {};
-            for (st.subscribed_keys) |k| {
-                const key_str = cx.fmt("{s}", .{&k});
-                const on_unsub: ?kete.Callback = if (st.actions) |acts| .of(keyAct(cx, acts, k), KeyAct.unsubscribe) else null;
-                rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-                    cx.make(kete.SizedBox{ .width = 70, .child = cx.make(kete.SizedBox.empty) }),
-                    cx.make(kete.Expanded{ .child = fullOnHover(cx, key_str, 15, t.on_surface) }),
-                    cx.make(kete.IconButton{
-                        .icon = .delete,
-                        .size = 28,
-                        .icon_size = 18,
-                        .on_press = on_unsub,
-                    }),
-                } })) catch {};
-            }
-            const on_subscribe: ?kete.Callback = if (st.actions != null) .of(st, BtnState.subscribeKey) else null;
-            rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = &.{
-                cx.make(kete.Expanded{ .child = cx.make(kete.TextField{
-                    .placeholder = locale.text("Ed25519 public key (64 hex characters)"),
-                    .initial = page_st.key_input.text(),
-                    .max_len = store.key_hex_len,
-                    .size = 15,
-                    .on_changed = .of(page_st, PageState.setKeyInput),
-                    .on_submit = on_subscribe,
-                }).withKey(@as(u64, page_st.key_form_id)) }),
-                cx.make(kete.OutlinedButton{ .label = locale.text("Subscribe"), .on_press = on_subscribe }),
-            } })) catch {};
-            if (page_st.key_invalid) rows.append(a, cx.make(kete.Text{
-                .text = locale.text("Give a 64-character hex Ed25519 public key"),
-                .style = .{ .size = 15, .color = t.@"error" },
-            })) catch {};
-
-            return cx.make(kete.RoundedBox{
-                .color = t.surface_container,
-                .border_width = 1,
-                .border_color = t.outline_variant,
-                .radius = .all(8),
-                .child = cx.make(kete.SizedBox{ .width = 420, .child = cx.make(kete.Padding{
-                    .padding = .all(16),
-                    .child = cx.make(kete.Column{ .fill = false, .cross_axis_alignment = .stretch, .spacing = 12, .children = rows.items }),
-                }) }),
-            });
-        }
-    };
-
-    pub fn build(self: *const ServerConfigButton, cx: *kete.BuildContext, state: *BtnState) kete.Widget {
-        state.node = cx.node;
-        state.state = self.state;
-        state.actions = self.actions;
-        state.source = self.source;
-        state.default_source = self.default_source;
-        state.default_key = self.default_key;
-        state.subscribed_keys = self.subscribed_keys;
-        return cx.make(kete.IconButton{
-            .icon = .settings,
-            .size = 36,
-            .icon_size = 20,
-            .on_press = if (self.actions != null) .of(state, BtnState.open) else null,
-        });
-    }
-};
+/// A row of the source page: its name, then `value`.
+fn sourceRow(cx: *kete.BuildContext, name: []const u8, value: kete.Widget) kete.Widget {
+    const t = &cx.ui.theme;
+    return cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = cx.arena.dupe(kete.Widget, &.{
+        cx.make(kete.SizedBox{ .width = 80, .child = cx.make(kete.Text{ .text = name, .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
+        cx.make(kete.Expanded{ .child = value }),
+    }) catch &.{} });
+}
 
 /// Renders a 64x64 PNG icon, or the fallback `.apps` icon when no icon
 /// can be found.
@@ -866,15 +776,6 @@ fn loadAppIcon(gpa: std.mem.Allocator, dir: []const u8, icons_path: []const u8, 
 
 const testing = std.testing;
 const font = kete.font;
-
-/// `text` on one line, cut short with an ellipsis if it does not fit, and
-/// all of it in a tooltip (a server's URL, a key).
-fn fullOnHover(cx: *kete.BuildContext, text: []const u8, size: f32, color: gfx.Color) kete.Widget {
-    return cx.make(kete.Tooltip{
-        .text = text,
-        .child = cx.make(kete.Text{ .text = text, .style = .{ .size = size, .color = color }, .wrap = false, .ellipsis = true }),
-    });
-}
 
 test "installing and removing apps, and getting their list again" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
@@ -1185,75 +1086,7 @@ test "the software list scrolls vertically while the bottom bar stays visible" {
     try testing.expect(status_after + 20 <= @as(f32, @floatFromInt(view.min_size[1])));
 }
 
-test "changing the software server to a custom https URL and back to default" {
-    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
-    defer u.destroy();
-    const d = view.sample();
-    var actions: Actions = .{};
-    var settings: Settings = .{
-        .commit = "x",
-        .actions = &actions,
-        .system = &d.sys,
-        .usage = d.usage,
-        .network = &d.net,
-        .apps = view.sample_apps,
-    };
-    var frame_no: u64 = 0;
-    const draw = struct {
-        fn call(uu: *kete.ui.WindowUi, s: Settings, n: *u64) void {
-            n.* += 1;
-            uu.frame(1920, 960, n.*, s);
-        }
-    }.call;
-
-    draw(u, settings, &frame_no);
-    u.root.?.state(Settings.State).page = .apps;
-    draw(u, settings, &frame_no);
-    try testing.expect(view.findType(u.root.?, ServerConfigButton) != null);
-    try testing.expect(u.menu_root == null);
-
-    // Clicking the configure icon opens the popup showing Default, Custom, and the default server URL.
-    view.click(u, view.findType(u.root.?, ServerConfigButton).?);
-    draw(u, settings, &frame_no);
-    try testing.expect(u.menu_root != null);
-    try testing.expect(view.findText(u.menu_root.?, "Default") != null);
-    try testing.expect(view.findText(u.menu_root.?, "Custom") != null);
-    try testing.expect(view.findText(u.menu_root.?, "https://example.com/apps") != null);
-
-    // Choosing Custom shows the URL text field starting with "https://".
-    view.click(u, view.findText(u.menu_root.?, "Custom").?);
-    draw(u, settings, &frame_no);
-    const field = view.findType(u.menu_root.?, kete.TextField).?;
-    try testing.expectEqualStrings("https://", field.state(kete.TextField.State).text());
-    try testing.expect(!view.overflows(u.menu_root.?));
-
-    // Non-https URL is rejected with an error message.
-    var st = &u.root.?.state(Settings.State).software;
-    st.server_url.set("http://staging.example.com/dazzle");
-    view.click(u, view.findText(u.menu_root.?, "Apply").?);
-    draw(u, settings, &frame_no);
-    try testing.expect(actions.software_server == null);
-    try testing.expect(view.findText(u.menu_root.?, "Give an https:// URL") != null);
-
-    // Valid https URL is accepted (stripping trailing slash) and closes the popup.
-    st = &u.root.?.state(Settings.State).software;
-    st.server_url.set("https://staging.example.com/dazzle/");
-    view.click(u, view.findText(u.menu_root.?, "Apply").?);
-    try testing.expectEqualStrings("https://staging.example.com/dazzle", actions.software_server.?.slice());
-    actions = .{};
-
-    // Reopening when using a custom server opens on Custom; clicking Default resets to default.
-    settings.apps.source = "https://staging.example.com/dazzle";
-    draw(u, settings, &frame_no);
-    view.click(u, view.findType(u.root.?, ServerConfigButton).?);
-    draw(u, settings, &frame_no);
-    try testing.expect(view.findType(u.menu_root.?, kete.TextField) != null);
-    view.click(u, view.findText(u.menu_root.?, "Default").?);
-    try testing.expectEqualStrings("", actions.software_server.?.slice());
-}
-
-test "subscribing and removing Ed25519 signing keys in the software settings popup" {
+test "where software comes from: the official store, or a custom server and its key" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
     const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
@@ -1261,7 +1094,6 @@ test "subscribing and removing Ed25519 signing keys in the software settings pop
     var actions: Actions = .{};
     const kp = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic("test-settings-key-seed-000000001".*);
     const pub_hex = std.fmt.bytesToHex(kp.public_key.toBytes(), .lower);
-    const subscribed = [_][store.key_hex_len]u8{pub_hex};
     var settings: Settings = .{
         .commit = "x",
         .actions = &actions,
@@ -1277,59 +1109,80 @@ test "subscribing and removing Ed25519 signing keys in the software settings pop
             uu.frame(1920, 960, n.*, s);
         }
     }.call;
+    const Fields = struct {
+        fn at(root: *kete.WidgetNode, k: usize) *kete.WidgetNode {
+            var fields: std.ArrayList(*kete.WidgetNode) = .empty;
+            defer fields.deinit(testing.allocator);
+            view.findAllType(root, kete.TextField, &fields);
+            return fields.items[k];
+        }
+        fn text(root: *kete.WidgetNode, k: usize) []const u8 {
+            return at(root, k).state(kete.TextField.State).text();
+        }
+        fn enabled(root: *kete.WidgetNode, k: usize) bool {
+            return at(root, k).widget.as(kete.TextField).?.enabled;
+        }
+    };
 
     draw(u, settings, &frame_no);
     u.root.?.state(Settings.State).page = .apps;
     draw(u, settings, &frame_no);
+    // The gear opens the page: the official store, its URL and key shown,
+    // not to be changed.
+    view.click(u, view.up(view.findIcon(u.root.?, .settings).?, kete.IconButton).?);
+    draw(u, settings, &frame_no);
+    try testing.expect(view.findText(u.root.?, "Software source") != null);
+    try testing.expect(view.findText(u.root.?, "Source") != null and view.findText(u.root.?, "URL") != null and view.findText(u.root.?, "Key") != null);
+    try testing.expect(view.findText(u.root.?, "Official store") != null);
+    try testing.expectEqualStrings(settings.apps.default_source, Fields.text(u.root.?, 0));
+    try testing.expectEqualStrings(store.default_signing_key, Fields.text(u.root.?, 1));
+    try testing.expect(!Fields.enabled(u.root.?, 0) and !Fields.enabled(u.root.?, 1));
+    try testing.expect(view.findText(u.root.?, "Apply") == null);
+    try testing.expect(!view.overflows(u.root.?));
 
-    view.click(u, view.findType(u.root.?, ServerConfigButton).?);
-    draw(u, settings, &frame_no);
-    try testing.expect(u.menu_root != null);
-    try testing.expect(view.findText(u.menu_root.?, "Keys") != null);
-    try testing.expect(view.findText(u.menu_root.?, store.default_signing_key) != null);
-    // The server and the key: on one line each, cut short with an
-    // ellipsis, all of each in a tooltip.
-    const fullOnHoverShows = struct {
-        fn check(root: *kete.WidgetNode, full: []const u8) !void {
-            const text = view.findText(root, full).?;
-            const shown = text.widget.as(kete.Text).?;
-            try testing.expect(!shown.wrap and shown.ellipsis);
-            try testing.expectEqualStrings(full, view.up(text, kete.Tooltip).?.widget.as(kete.Tooltip).?.text);
-        }
-    }.check;
-    try fullOnHoverShows(u.menu_root.?, store.default_signing_key);
-    view.click(u, view.findText(u.menu_root.?, "Default").?);
-    draw(u, settings, &frame_no);
-    try fullOnHoverShows(u.menu_root.?, settings.apps.default_source);
-    try testing.expect(!view.overflows(u.menu_root.?));
-    actions = .{};
-    view.click(u, view.findText(u.menu_root.?, "Custom").?);
-    draw(u, settings, &frame_no);
-
-    // Invalid key shows an error message.
+    // Custom: the URL and key can be given, and applied.
     var st = &u.root.?.state(Settings.State).software;
+    st.chooseSource(.custom);
+    draw(u, settings, &frame_no);
+    try testing.expectEqualStrings("https://", Fields.text(u.root.?, 0));
+    try testing.expectEqualStrings("", Fields.text(u.root.?, 1));
+    try testing.expect(Fields.enabled(u.root.?, 0) and Fields.enabled(u.root.?, 1));
+    try testing.expect(actions.software_server == null and actions.software_key == null);
+    // Not an https:// URL, or not a key: said so, nothing changed.
+    st.server_url.set("http://staging.example.com/dazzle");
     st.key_input.set("not-a-valid-key");
-    view.click(u, view.findText(u.menu_root.?, "Subscribe").?);
+    view.click(u, view.findText(u.root.?, "Apply").?);
     draw(u, settings, &frame_no);
-    try testing.expect(actions.subscribe_key == null);
-    try testing.expect(view.findText(u.menu_root.?, "Give a 64-character hex Ed25519 public key") != null);
-
-    // Valid 64-character hex Ed25519 public key sets subscribe_key action and clears input.
+    try testing.expect(actions.software_server == null and actions.software_key == null);
+    try testing.expect(view.findText(u.root.?, "Give an https:// URL") != null);
+    try testing.expect(view.findText(u.root.?, "Give a 64-character hex Ed25519 public key") != null);
+    // Right: applied (the URL without its last slash), and back to the list.
     st = &u.root.?.state(Settings.State).software;
+    st.server_url.set("https://staging.example.com/dazzle/");
     st.key_input.set(&pub_hex);
-    view.click(u, view.findText(u.menu_root.?, "Subscribe").?);
+    view.click(u, view.findText(u.root.?, "Apply").?);
+    try testing.expectEqualStrings("https://staging.example.com/dazzle", actions.software_server.?.slice());
+    try testing.expectEqualStrings(&pub_hex, actions.software_key.?.slice());
     draw(u, settings, &frame_no);
-    try testing.expectEqualStrings(&pub_hex, actions.subscribe_key.?.slice());
+    try testing.expect(view.findText(u.root.?, "Software source") == null);
     actions = .{};
 
-    // Subscribed keys are displayed with a delete button to unsubscribe.
-    settings.apps.subscribed_keys = &subscribed;
+    // Opened again, using it: Custom, with its URL and key.
+    settings.apps.source = "https://staging.example.com/dazzle";
+    const keys = [_][store.key_hex_len]u8{pub_hex};
+    settings.apps.subscribed_keys = &keys;
     draw(u, settings, &frame_no);
-    try testing.expect(view.findText(u.menu_root.?, &pub_hex) != null);
-    try testing.expect(!view.overflows(u.menu_root.?));
-    const del_icon = view.findIcon(u.menu_root.?, .delete).?;
-    view.click(u, view.up(del_icon, kete.IconButton).?);
-    try testing.expectEqualStrings(&pub_hex, actions.unsubscribe_key.?.slice());
+    view.click(u, view.up(view.findIcon(u.root.?, .settings).?, kete.IconButton).?);
+    draw(u, settings, &frame_no);
+    try testing.expect(view.findText(u.root.?, "Custom") != null);
+    try testing.expectEqualStrings("https://staging.example.com/dazzle", Fields.text(u.root.?, 0));
+    try testing.expectEqualStrings(&pub_hex, Fields.text(u.root.?, 1));
+    try testing.expect(!view.overflows(u.root.?));
+    // The official store again: at once, with the built-in key alone.
+    st = &u.root.?.state(Settings.State).software;
+    st.chooseSource(.official);
+    try testing.expectEqualStrings("", actions.software_server.?.slice());
+    try testing.expectEqualStrings("", actions.software_key.?.slice());
 }
 
 test "an app's screenshot is decoded when its page is shown, and only once" {
