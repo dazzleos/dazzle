@@ -1,8 +1,9 @@
-//! The Software page, in two tabs: Installed (Dazzle itself, with Update
-//! or Restart and an expander showing the build and kernel version, and
-//! the apps installed) and Available (the catalogue's other apps, with a
-//! field to search them). An app clicked shows its page: what it is, its
-//! screenshot, and Install, Update or Remove; Back returns to the list.
+//! The Software page, in two tabs: Installed (Dazzle itself, and the apps
+//! installed) and Available (the catalogue's other apps, with a field to
+//! search them). An app clicked shows its page: what it is, its
+//! screenshot, and Install, Update or Remove; Dazzle's, how its updates
+//! stand (with Update or Restart), and its build and kernel. Back returns
+//! to the list.
 //! Under them, a fixed status bar with Update all and Refresh.
 
 const std = @import("std");
@@ -70,9 +71,8 @@ pub const Update = struct {
 const PageState = State;
 
 pub const State = struct {
-    /// Whether the Dazzle item on the Software page is expanded to show
-    /// the build and kernel version.
-    dazzle_expanded: bool = false,
+    /// Whether Dazzle's page is shown (instead of the list).
+    dazzle_page: bool = false,
     /// Whether the current error snackbar has been dismissed.
     dismissed: bool = false,
     last_message_buf: [160]u8 = undefined,
@@ -108,6 +108,7 @@ pub const State = struct {
 
     fn back(st: *State) void {
         st.details = null;
+        st.dazzle_page = false;
     }
 
     pub const Field = struct {
@@ -124,8 +125,8 @@ pub const State = struct {
         }
     };
 
-    pub fn toggleDazzle(st: *State) void {
-        st.dazzle_expanded = !st.dazzle_expanded;
+    pub fn openDazzle(st: *State) void {
+        st.dazzle_page = true;
     }
 
     pub fn dismissMessage(st: *State) void {
@@ -173,7 +174,9 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     const shown: ?usize = if (state.details) |d| for (apps.list, 0..) |app, i| {
         if (std.mem.eql(u8, app.name, d.slice())) break i;
     } else null else null;
-    if (shown) |i| {
+    if (state.dazzle_page) {
+        dazzlePage(self, b, state, &rows);
+    } else if (shown) |i| {
         detailsRows(self, b, state, i, busy, fixed, &rows);
     } else {
         rows.append(a, cx.make(kete.TabBar{
@@ -370,70 +373,88 @@ fn restartNow(a: *Actions) void {
     a.restart = true;
 }
 
-/// Dazzle itself, at the head of the Software list: how updates stand
-/// (with Update or Restart), and an expander showing the build and
-/// kernel version.
+/// How Dazzle's updates stand: what to say, the button (Update or
+/// Restart) if any, and whether it is under way.
+const DazzleStatus = struct {
+    text: []const u8,
+    button: ?struct { label: []const u8, icon: kete.IconName, restart: bool },
+    busy: bool,
+
+    fn of(self: *const Settings, cx: *kete.BuildContext) DazzleStatus {
+        const u = &self.update;
+        var size_buf: [32]u8 = undefined;
+        const detail = if (self.usage.storage.system > 0)
+            kete_vc4.textf(cx, "The operating system · {s}", .{info.formatBytes(&size_buf, self.usage.storage.system)})
+        else
+            locale.text("The operating system");
+        const available_text = if (u.message.len > 0)
+            u.message
+        else if (u.size > 0)
+            kete_vc4.textf(cx, "Dazzle {s} is available · {s}", .{ u.available, info.formatBytes(&size_buf, u.size) })
+        else
+            kete_vc4.textf(cx, "Dazzle {s} is available", .{u.available});
+        return switch (u.status) {
+            .unknown, .current => .{ .text = if (u.message.len > 0) u.message else detail, .button = null, .busy = false },
+            .checking => .{ .text = locale.text("Checking for updates…"), .button = null, .busy = true },
+            .available => .{ .text = available_text, .button = .{ .label = locale.text("Update"), .icon = .download, .restart = false }, .busy = false },
+            .downloading => .{ .text = locale.text("Downloading the update…"), .button = null, .busy = true },
+            .installing => .{ .text = locale.text("Installing the update…"), .button = null, .busy = true },
+            .ready => .{ .text = if (u.message.len > 0) u.message else locale.text("The update is installed: restart to use it"), .button = .{ .label = locale.text("Restart"), .icon = .restart_alt, .restart = true }, .busy = false },
+        };
+    }
+};
+
+/// Dazzle itself, at the head of the Installed list, as an app is: how its
+/// updates stand, and (pressed) its page.
 fn dazzleRows(self: *const Settings, b: Builder, state: *State, rows: *std.ArrayList(kete.Widget)) void {
     const cx = b.cx;
     const t = &cx.ui.theme;
+    const s = DazzleStatus.of(self, cx);
+    rows.append(cx.arena, cx.make(kete.Pressable{
+        .on_press = .of(state, State.openDazzle),
+        .child = cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = cx.arena.dupe(kete.Widget, &.{
+            softwareIcon(cx, self.update.icon),
+            cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 2, .children = cx.arena.dupe(kete.Widget, &.{
+                cx.make(kete.Text{ .text = locale.text("Dazzle"), .style = .{ .size = 18, .color = t.on_surface }, .wrap = false, .ellipsis = true }),
+                cx.make(kete.Text{ .text = s.text, .style = .{ .size = 15, .color = t.on_surface_variant } }),
+            }) catch &.{} }) }),
+            if (s.busy) cx.make(kete.Spinner{ .size = 28 }) else cx.make(kete.Icon{ .icon = .chevron_right, .size = 24, .color = t.on_surface_variant }),
+        }) catch &.{} }),
+    })) catch {};
+}
+
+/// Dazzle's page, as an app's is: Back, its icon, name and how its updates
+/// stand; Update or Restart; its build and kernel.
+fn dazzlePage(self: *const Settings, b: Builder, state: *State, rows: *std.ArrayList(kete.Widget)) void {
+    const cx = b.cx;
+    const t = &cx.ui.theme;
     const a = cx.arena;
-    const u = &self.update;
-    var size_buf: [32]u8 = undefined;
-    const detail = if (self.usage.storage.system > 0)
-        kete_vc4.textf(cx, "The operating system · {s}", .{info.formatBytes(&size_buf, self.usage.storage.system)})
-    else
-        locale.text("The operating system");
-    const Button = struct { label: []const u8, icon: kete.IconName, flag: enum { download, restart } };
-    const available_text = if (u.message.len > 0)
-        u.message
-    else if (u.size > 0)
-        kete_vc4.textf(cx, "Dazzle {s} is available · {s}", .{ u.available, info.formatBytes(&size_buf, u.size) })
-    else
-        kete_vc4.textf(cx, "Dazzle {s} is available", .{u.available});
-    const text: []const u8, const button: ?Button, const busy = switch (u.status) {
-        .unknown, .current => .{ if (u.message.len > 0) u.message else detail, null, false },
-        .checking => .{ locale.text("Checking for updates…"), null, true },
-        .available => .{ available_text, Button{ .label = locale.text("Update"), .icon = .download, .flag = .download }, false },
-        .downloading => .{ locale.text("Downloading the update…"), null, true },
-        .installing => .{ locale.text("Installing the update…"), null, true },
-        .ready => .{ if (u.message.len > 0) u.message else locale.text("The update is installed: restart to use it"), Button{ .label = locale.text("Restart"), .icon = .restart_alt, .flag = .restart }, false },
-    };
-    const end: kete.Widget = if (busy) cx.make(kete.Spinner{ .size = 28 }) else if (button) |btn| cx.make(kete.OutlinedButton{
+    const s = DazzleStatus.of(self, cx);
+    rows.append(a, cx.make(kete.Row{ .children = a.dupe(kete.Widget, &.{
+        cx.make(kete.TextButton{ .label = locale.text("Back"), .icon = .arrow_back, .on_press = .of(state, State.back) }),
+    }) catch &.{} })) catch {};
+    const end: kete.Widget = if (s.busy) cx.make(kete.Spinner{ .size = 28 }) else if (s.button) |btn| cx.make(kete.FilledButton{
         .label = btn.label,
         .icon = btn.icon,
-        .on_press = if (self.actions) |acts| switch (btn.flag) {
-            .download => .of(acts, downloadUpdate),
-            .restart => .of(acts, restartNow),
-        } else null,
+        .on_press = if (self.actions) |acts| (if (btn.restart) kete.Callback.of(acts, restartNow) else kete.Callback.of(acts, downloadUpdate)) else null,
     }) else cx.make(kete.SizedBox.empty);
-    const header = cx.make(kete.Pressable{
-        .on_press = .of(state, State.toggleDazzle),
-        .child = cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = &.{
-            softwareIcon(cx, u.icon),
-            cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 2, .children = &.{
-                cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 4, .children = &.{
-                    cx.make(kete.Text{ .text = locale.text("Dazzle"), .style = .{ .size = 18, .color = t.on_surface }, .wrap = false }),
-                    cx.make(kete.Icon{ .icon = if (state.dazzle_expanded) .expand_more else .chevron_right, .size = 20, .color = t.on_surface_variant }),
-                } }),
-                cx.make(kete.Text{ .text = text, .style = .{ .size = 15, .color = t.on_surface_variant } }),
-            } }) }),
-        } }),
-    });
-    rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = &.{
-        cx.make(kete.Expanded{ .child = header }),
+    rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = a.dupe(kete.Widget, &.{
+        softwareIcon(cx, self.update.icon),
+        cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 2, .children = a.dupe(kete.Widget, &.{
+            cx.make(kete.Text{ .text = locale.text("Dazzle"), .style = .{ .size = 24, .color = t.on_surface }, .wrap = false, .ellipsis = true }),
+            cx.make(kete.Text{ .text = s.text, .style = .{ .size = 15, .color = t.on_surface_variant } }),
+        }) catch &.{} }) }),
         end,
-    } })) catch {};
-    if (state.dazzle_expanded) {
-        rows.append(a, cx.make(kete.Padding{ .padding = .{ .left = 80 }, .child = cx.make(kete.Column{
-            .cross_axis_alignment = .stretch,
-            .fill = false,
-            .spacing = 4,
-            .children = &.{
-                dazzleDetail(cx, locale.text("Build"), self.commit),
-                dazzleDetail(cx, "Linux", view.orUnknown(self.system.kernel.slice())),
-            },
-        }) })) catch {};
-    }
+    }) catch &.{} })) catch {};
+    rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 8 }, .child = cx.make(kete.Column{
+        .cross_axis_alignment = .stretch,
+        .fill = false,
+        .spacing = 4,
+        .children = a.dupe(kete.Widget, &.{
+            dazzleDetail(cx, locale.text("Build"), self.commit),
+            dazzleDetail(cx, "Linux", view.orUnknown(self.system.kernel.slice())),
+        }) catch &.{},
+    }) })) catch {};
 }
 
 fn dazzleDetail(cx: *kete.BuildContext, name: []const u8, text: []const u8) kete.Widget {
@@ -988,28 +1009,36 @@ test "updates: offered, downloaded, installed, then a restart" {
     view.click(u, view.up(view.findText(u.root.?, "Back").?, kete.TextButton).?);
     u.frame(1920, 960, 21, settings);
 
-    // Build and kernel details are shown when Dazzle is expanded.
+    // Dazzle is listed as an app is (no buttons in the list); its page has
+    // its build and kernel, and Update.
     try testing.expect(view.findText(u.root.?, "de14aa2 (7 October 2026)") == null);
+    try testing.expect(view.findText(u.root.?, "Update") == null);
     view.click(u, view.up(view.findText(u.root.?, "Dazzle").?, kete.Pressable).?);
     u.frame(1920, 960, 3, settings);
     try testing.expect(view.findText(u.root.?, "de14aa2 (7 October 2026)") != null);
     try testing.expect(view.findText(u.root.?, "6.12.0 (armv6l)") != null);
-    view.click(u, view.up(view.findText(u.root.?, "Update").?, kete.OutlinedButton).?);
+    try testing.expect(view.findText(u.root.?, "Dazzle 0123abc (8 October 2026) is available · 4.0 MB") != null);
+    view.click(u, view.up(view.findText(u.root.?, "Update").?, kete.FilledButton).?);
     try testing.expect(actions.download_update);
 
-    // Under way: no update buttons on Dazzle.
+    // Under way: no update buttons on its page.
     settings.apps.updatable = &.{};
     for ([_]update.Status{ .checking, .downloading, .installing }) |s| {
         settings.update = .{ .status = s };
         u.frame(1920, 960, 4, settings);
-        try testing.expect(view.up(view.findText(u.root.?, "Dazzle").?, kete.Row) != null);
+        try testing.expect(view.findText(u.root.?, "Dazzle") != null);
         try testing.expect(view.findText(u.root.?, "Update") == null and view.findText(u.root.?, "Restart") == null);
     }
     settings.update = .{ .status = .ready };
     u.frame(1920, 960, 5, settings);
     try testing.expect(view.findText(u.root.?, "The update is installed: restart to use it") != null);
-    view.click(u, view.up(view.findText(u.root.?, "Restart").?, kete.OutlinedButton).?);
+    view.click(u, view.up(view.findText(u.root.?, "Restart").?, kete.FilledButton).?);
     try testing.expect(actions.restart);
+    // Back to the list.
+    view.click(u, view.up(view.findText(u.root.?, "Back").?, kete.TextButton).?);
+    u.frame(1920, 960, 51, settings);
+    try testing.expect(view.findText(u.root.?, "Back") == null);
+    try testing.expect(view.findText(u.root.?, "de14aa2 (7 October 2026)") == null);
 
     settings.update = .{ .status = .current };
     u.frame(1920, 960, 6, settings);
