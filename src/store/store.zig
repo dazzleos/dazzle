@@ -133,9 +133,8 @@ pub fn mergeSources(a: std.mem.Allocator, main: Catalogue, urls: []const []const
         const apps: []const App = if (maybe) |c| c.apps else if (previous) |p| p.apps else &.{};
         for (apps) |app| {
             if (app.language.len != 0) continue;
-            // Kept from before: only those from this source (older kept
-            // catalogues said so with `base` alone).
-            if (maybe == null and !std.mem.eql(u8, if (app.source.len > 0) app.source else app.base, url)) continue;
+            // Kept from before: only those from this source.
+            if (maybe == null and !std.mem.eql(u8, app.source, url)) continue;
             const listed = for (out.items) |o| {
                 if (std.mem.eql(u8, o.name, app.name)) break true;
             } else false;
@@ -1766,8 +1765,8 @@ test "a catalogue's sources: where they are, and their apps listed with its own"
     };
     const urls = [_][]const u8{ "https://m", "https://gone" };
     const previous: Catalogue = .{ .apps = &.{
-        .{ .name = "kept", .title = "Kept", .file = "k.tar.xz", .size = 1, .sha256 = "00", .base = "https://gone" },
-        .{ .name = "elsewhere", .title = "E", .file = "e.tar.xz", .size = 1, .sha256 = "00", .base = "https://other" },
+        .{ .name = "kept", .title = "Kept", .file = "k.tar.xz", .size = 1, .sha256 = "00", .base = "https://gone", .source = "https://gone" },
+        .{ .name = "elsewhere", .title = "E", .file = "e.tar.xz", .size = 1, .sha256 = "00", .base = "https://other", .source = "https://other" },
     } };
     const all = try mergeSources(a, .{ .apps = &own }, &urls, &.{ Catalogue{ .apps = &motu }, null }, previous);
     try testing.expectEqual(@as(usize, 4), all.len);

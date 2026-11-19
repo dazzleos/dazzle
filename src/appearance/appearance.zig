@@ -91,11 +91,6 @@ pub const Settings = struct {
                 if (key[0] == 'i') s.image = path else s.custom = path;
             }
         }
-        // Written before the last picture from Files was kept apart: the
-        // one shown, if it is one.
-        if (s.custom.slice() == null) if (s.image.slice()) |p| if (backgrounds.find(p) == null) {
-            s.custom = s.image;
-        };
         return s;
     }
 
@@ -184,9 +179,6 @@ test "the last picture chosen in Files is kept while a built-in one shows" {
     const text = s.formatBuf(&buf);
     try testing.expectEqualStrings("theme dark\nclock on\nnetwork on\nimage /os/backgrounds/forest.etc1\ncustom /data/user/sea.png\n", text);
     try testing.expectEqual(s, Settings.parse(text));
-    // Written before it was kept apart: the picture shown is it.
-    try testing.expectEqualStrings("/data/user/old.png", Settings.parse("theme dark\nimage /data/user/old.png\n").custom.slice().?);
-    try testing.expect(Settings.parse("theme dark\nimage /os/backgrounds/forest.etc1\n").custom.slice() == null);
 }
 
 test "the background image is kept, with spaces in its path" {
