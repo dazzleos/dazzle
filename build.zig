@@ -240,21 +240,11 @@ fn addBackgroundThumbnails(b: *std.Build, m: *std.Build.Module) void {
     }
 }
 
-/// The Natural Earth 110m and 50m Admin-0 Countries vector datasets,
-/// triangulated and subdivided at build time by `tools/mkmap.zig`.
-fn addMapData(b: *std.Build) std.Build.LazyPath {
-    const tool = hostTool(b, "mkmap");
-    const run = b.addRunArtifact(tool);
-    run.addFileArg(b.path("src/apps/maps/data/ne_110m_admin_0_countries.geojson"));
-    run.addFileArg(b.path("src/apps/maps/data/ne_50m_admin_0_countries.geojson"));
-    return run.addOutputFileArg("map_data.zig");
-}
-
 /// The land as a flat map draws it, from Natural Earth's 110m countries
 /// (see tools/mkworld.zig).
 fn addWorldMap(b: *std.Build) std.Build.LazyPath {
     const run = b.addRunArtifact(hostTool(b, "mkworld"));
-    run.addFileArg(b.path("src/apps/maps/data/ne_110m_admin_0_countries.geojson"));
+    run.addFileArg(b.path("data/ne_110m_admin_0_countries.geojson"));
     return run.addOutputFileArg("world_map.zig");
 }
 
@@ -401,7 +391,7 @@ fn addGpuModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
 }
 
 /// Who embeds a shader program.
-const ShaderOwner = enum { gfx, demo, shell, maps, app };
+const ShaderOwner = enum { gfx, shell, app, tests };
 
 /// The shader programs: Zig sources compiled to SPIR-V, then for the GPU
 /// by tools/shaderc.zig (with the render state that changes their code),
@@ -415,7 +405,6 @@ const shader_programs = [_]struct { source: []const u8, name: ?[]const u8 = null
     .{ .source = "src/gfx/shaders/solid.zig", .name = "opaque", .owner = .gfx, .args = &.{"--blend=none"} },
     .{ .source = "src/gfx/shaders/text.zig", .owner = .gfx, .args = &.{"--blend=source-over"} },
     .{ .source = "src/gfx/shaders/image.zig", .owner = .gfx, .args = &.{"--blend=source-over"} },
-    .{ .source = "src/apps/demo/shaders/polyhedron.zig", .owner = .demo, .args = &.{"--depth-test"} },
     .{ .source = "src/shell/shaders/quad.zig", .owner = .shell, .args = &.{} },
     // The same, blended: the shaded preview of where a window will go.
     .{ .source = "src/shell/shaders/quad.zig", .name = "quad_blend", .owner = .shell, .args = &.{"--blend=source-over"} },
@@ -424,9 +413,11 @@ const shader_programs = [_]struct { source: []const u8, name: ?[]const u8 = null
     .{ .source = "src/shell/shaders/quad.zig", .name = "quad_premultiplied", .owner = .shell, .args = &.{"--blend=premultiplied-over"} },
     // Rounded windows' corners and shadows.
     .{ .source = "src/shell/shaders/window.zig", .owner = .shell, .args = &.{"--blend=source-over"} },
-    .{ .source = "src/apps/maps/shaders/globe.zig", .owner = .maps, .args = &.{"--depth-test"} },
-    // Its coastlines, borders and parallels, blended over it.
-    .{ .source = "src/apps/maps/shaders/globe_lines.zig", .owner = .maps, .args = &.{"--blend=source-over"} },
+    // For the shader compiler's tests (src/shader/tests.zig): shaders of
+    // apps that have moved to repositories of their own (Demo's, and
+    // Globe's), kept as they were.
+    .{ .source = "src/shader/testdata/polyhedron.zig", .owner = .tests, .args = &.{"--depth-test"} },
+    .{ .source = "src/shader/testdata/globe.zig", .owner = .tests, .args = &.{"--depth-test"} },
 };
 
 /// Shaders the shader tests compile from SPIR-V themselves, embedded as
@@ -542,6 +533,8 @@ fn appSources(b: *std.Build) []const []const u8 {
         "https://github.com/dazzleos/chat/releases/latest/download",
         "https://github.com/dazzleos/terminal/releases/latest/download",
         "https://github.com/dazzleos/motu/releases/latest/download",
+        "https://github.com/dazzleos/globe/releases/latest/download",
+        "https://github.com/dazzleos/develop/releases/latest/download",
     };
     return b.option([]const []const u8, "app-sources", "Other app catalogues Dazzle's lists (default: dazzleos' app repositories')") orelse default;
 }
@@ -1074,35 +1067,6 @@ fn fetchWifiFirmware(b: *std.Build) *std.Build.Step {
     }.url);
 }
 
-/// The ARM Linux Zig compiler bundled into the Develop app, pinned by
-/// version and checksum.
-const zig_version = "0.17.1";
-const zig_arm_archive = [_]struct { name: []const u8, sha256: []const u8 }{
-    .{ .name = "zig-arm-linux-" ++ zig_version ++ ".tar.xz", .sha256 = "45b5262ef4d4d1e70d21683b2ef4c1b765b067f34a13e2aa57d5f92bb02382a9" },
-};
-
-fn fetchArmZig(b: *std.Build) *std.Build.Step {
-    const dir = fromRoot(b, "build/zig");
-    const verify = fetchPinned(b, dir, zig_arm_archive, struct {
-        fn url(bb: *std.Build, f: @TypeOf(zig_arm_archive[0])) []const u8 {
-            return bb.fmt("https://ziglang.org/download/{s}/{s}", .{ zig_version, f.name });
-        }
-    }.url);
-    const tools = requireTools(b, &.{ "tar:tar", "xz:xz-utils" });
-    const unpack = b.addSystemCommand(&.{
-        "sh",
-        "-c",
-        "test -x \"$2/zig-arm-linux-" ++ zig_version ++ "/zig\" || tar -xJf \"$1\" -C \"$2\"",
-        "unpack-zig",
-        b.pathJoin(&.{ dir, zig_arm_archive[0].name }),
-        dir,
-    });
-    unpack.step.dependOn(verify);
-    unpack.step.dependOn(&tools.step);
-    unpack.has_side_effects = true;
-    return &unpack.step;
-}
-
 /// Where the boot partition ends on the card, in MiB, once init has grown it
 /// on the first start: room for both slots to grow several times over
 /// (each holds about 5 MB now), as it cannot grow once /data follows it.
@@ -1533,7 +1497,6 @@ pub fn build(b: *std.Build) void {
 
     const shaders = addShaders(b);
     const icon_font = addIconFont(b);
-    const map_data = addMapData(b);
     const pi = addModules(b, target, optimize, shaders, icon_font);
     // init runs as root; the shell and the apps (its Wayland clients) run
     // as the unprivileged Dazzle user.
@@ -1542,13 +1505,6 @@ pub fn build(b: *std.Build) void {
         .root_module = addBootScreen(b, addProgramModule(b, "src/init/main.zig", target, optimize, pi, shaders, true), target, optimize),
     });
     const install_init = b.addInstallArtifact(init_exe, .{});
-    const demo_module = addProgramModule(b, "src/apps/demo/main.zig", target, optimize, pi, shaders, true);
-    _ = addKete(b, demo_module, pi, target, optimize, "src/apps/demo");
-    const demo_exe = b.addExecutable(.{
-        .name = "dazzle-demo",
-        .root_module = demo_module,
-    });
-    const install_demo = b.addInstallArtifact(demo_exe, .{});
     const settings_module = addProgramModule(b, "src/apps/settings/main.zig", target, optimize, pi, shaders, true);
     _ = addKete(b, settings_module, pi, target, optimize, "src/apps/settings");
     addBackgroundThumbnails(b, settings_module);
@@ -1579,21 +1535,6 @@ pub fn build(b: *std.Build) void {
         .root_module = shell_module,
     });
     const install_shell = b.addInstallArtifact(shell_exe, .{});
-    const maps_mod = addProgramModule(b, "src/apps/maps/main.zig", target, optimize, pi, shaders, true);
-    maps_mod.addImport("map_data", b.createModule(.{ .root_source_file = map_data, .target = target, .optimize = optimize }));
-    _ = addKete(b, maps_mod, pi, target, optimize, "src/apps/maps");
-    const maps_exe = b.addExecutable(.{
-        .name = "dazzle-maps",
-        .root_module = maps_mod,
-    });
-    const install_maps = b.addInstallArtifact(maps_exe, .{});
-    const develop_module = addProgramModule(b, "src/apps/develop/main.zig", target, optimize, pi, shaders, true);
-    _ = addKete(b, develop_module, pi, target, optimize, "src/apps/develop");
-    const develop_exe = b.addExecutable(.{
-        .name = "dazzle-develop",
-        .root_module = develop_module,
-    });
-    const install_develop = b.addInstallArtifact(develop_exe, .{});
 
     // Host tool that packs the init binary into a cpio initramfs.
     const mkinitramfs = b.addExecutable(.{
@@ -1653,37 +1594,15 @@ pub fn build(b: *std.Build) void {
     // are not part of the system or the image: each is an archive to
     // download and install, in setup or from Settings (zig-out/apps/, with
     // the catalogue).
-    const zig_root = fromRoot(b, "build/zig/zig-arm-linux-" ++ zig_version);
     const apps = [_]App{
-        .{ .exe = demo_exe, .icon = .view_in_ar, .title = "Demo" },
         .{ .exe = logger_exe, .icon = .show_chart, .title = "Data Logger", .description = "Record inputs from the GPIO pins", .about = "Record what the GPIO pins read over time, from buttons, switches and sensors, and see it drawn as a chart as it comes in." },
-        .{ .exe = maps_exe, .icon = .public, .title = "Maps", .description = "Explore the Earth on a 3D globe", .about = "Explore the Earth on a 3D globe: spin it, zoom in to countries and see their names and borders." },
-        .{
-            .exe = develop_exe,
-            .icon = .code,
-            .title = "Develop",
-            .description = "Write and run Zig programs",
-            .about = "Write programs in Zig and run them on this computer: an editor beside the output, with the Zig compiler built in.",
-            .notices = &.{ "MaterialIcons", "Zig" },
-            .extra_step = fetchArmZig(b),
-            .extra_args = &.{
-                b.fmt("--exe=zig/zig={s}/zig", .{zig_root}),
-                b.fmt("zig/LICENSE={s}/LICENSE", .{zig_root}),
-                "--exclude=zig/lib/libc",
-                "--exclude=zig/lib/libcxx",
-                "--exclude=zig/lib/libcxxabi",
-                "--exclude=zig/lib/libunwind",
-                "--exclude=zig/lib/tsan",
-                b.fmt("--dir=zig/lib={s}/lib", .{zig_root}),
-            },
-        },
     };
     const apps_step = b.step("apps", "Build the apps' archives and their catalogue (zig-out/apps)");
     apps_step.dependOn(addAppArchives(b, &apps));
     b.getInstallStep().dependOn(apps_step);
     const install_initramfs = b.addInstallFile(initramfs, "initramfs.cpio");
     const programs_step = b.step("programs", "Build just the programs (zig-out/bin) and zig-out/initramfs.cpio");
-    for ([_]*std.Build.Step{ &install_init.step, &install_demo.step, &install_settings.step, &install_logger.step, &install_maps.step, &install_develop.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
+    for ([_]*std.Build.Step{ &install_init.step, &install_settings.step, &install_logger.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
         programs_step.dependOn(st);
         b.getInstallStep().dependOn(st);
     }
@@ -1725,10 +1644,6 @@ pub fn build(b: *std.Build) void {
     host_shell.addAnonymousImport("ja.dict", .{ .root_source_file = languageFile(b, "ja", "ja.dict") });
     host_shell.addAnonymousImport("ja.conn", .{ .root_source_file = languageFile(b, "ja", "ja.conn") });
     _ = addKete(b, host_shell, host, b.graph.host, test_optimize, "src/shell");
-    // The demo's layout is tested with its real font.
-    const host_demo = addProgramModule(b, "src/apps/demo/main.zig", b.graph.host, test_optimize, host, shaders, false);
-    host_demo.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
-    _ = addKete(b, host_demo, host, b.graph.host, test_optimize, "src/apps/demo");
     const host_settings = addProgramModule(b, "src/apps/settings/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_settings.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     // Arabic is laid out in its own font, as on the device.
@@ -1743,13 +1658,6 @@ pub fn build(b: *std.Build) void {
     const host_setup = addProgramModule(b, "src/apps/setup/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_setup.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     _ = addKete(b, host_setup, host, b.graph.host, test_optimize, "src/apps/setup");
-    const host_maps = addProgramModule(b, "src/apps/maps/main.zig", b.graph.host, test_optimize, host, shaders, false);
-    host_maps.addImport("map_data", b.createModule(.{ .root_source_file = map_data, .target = b.graph.host, .optimize = test_optimize }));
-    host_maps.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
-    _ = addKete(b, host_maps, host, b.graph.host, test_optimize, "src/apps/maps");
-    const host_develop = addProgramModule(b, "src/apps/develop/main.zig", b.graph.host, test_optimize, host, shaders, false);
-    host_develop.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
-    _ = addKete(b, host_develop, host, b.graph.host, test_optimize, "src/apps/develop");
     for ([_]*std.Build.Module{
         host.sys,
         host.vc4,
@@ -1765,13 +1673,10 @@ pub fn build(b: *std.Build) void {
         host.video,
         host.audio,
         addBootScreen(b, addProgramModule(b, "src/init/main.zig", b.graph.host, test_optimize, host, shaders, false), b.graph.host, test_optimize),
-        host_demo,
         host_kete_vc4,
         host_settings,
         host_logger,
         host_setup,
-        host_maps,
-        host_develop,
         host_shell,
     }) |m| {
         const t = b.addTest(.{ .root_module = m });
@@ -1780,6 +1685,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hostTool(b, "mkapp").root_module })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hostTool(b, "mkcatalogue").root_module })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hostTool(b, "mkimage").root_module })).step);
+    // (mkworld reads Natural Earth's countries with mkmap's code: Globe's
+    // tool, kept here too.)
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hostTool(b, "mkmap").root_module })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hostTool(b, "mkworld").root_module })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hostTool(b, "mkos").root_module })).step);
