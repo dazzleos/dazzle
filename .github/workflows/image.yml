@@ -87,11 +87,14 @@ jobs:
           cp zig-out/os/* dist/
           ls -l dist
 
+      # Handed to the publish job (and kept a day: the release keeps
+      # them).
       - uses: actions/upload-artifact@v4
         with:
           name: dazzle-image
           path: dist/
           if-no-files-found: error
+          retention-days: 1
 
   publish:
     needs: build
