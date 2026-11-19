@@ -116,6 +116,7 @@ pub const brazil = [_][2][]const u8{
     .{ "None", "Nenhum" },
     .{ "Default", "Padrão" },
     .{ "Custom", "Personalizado" },
+    .{ "{s} of {s}", "{s} de {s}" },
     .{ "Software source", "Origem do software" },
     .{ "Source", "Origem" },
     .{ "Official store", "Loja oficial" },

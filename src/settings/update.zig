@@ -76,7 +76,7 @@ pub const Updater = struct {
             var wstatus: u32 = 0;
             _ = linux.kill(j.pid, .KILL);
             _ = linux.wait4(j.pid, @ptrCast(&wstatus), 0, null);
-            sys.close(j.result);
+            j.release();
             u.job = null;
         };
         u.base_url = base_url;
@@ -138,7 +138,14 @@ pub const Updater = struct {
             u.setMessage("Cannot download the update: {s}", .{@errorName(err)});
             return;
         };
+        u.job.?.setTotal(m.size);
         u.message_len = 0;
+    }
+
+    /// What the job under way has downloaded (and will).
+    pub fn transfer(u: *const Updater) store.Transfer {
+        const j = u.job orelse return .{};
+        return j.transfer();
     }
 
     pub fn restart(u: *Updater) void {

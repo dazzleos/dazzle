@@ -45,6 +45,8 @@ pub const Apps = struct {
     /// The app being installed ("" for the list itself, "*" for updating
     /// all); null if nothing is under way.
     busy: ?[]const u8 = null,
+    /// What it has downloaded so far (and will in all, if known).
+    transfer: store.Transfer = .{},
     /// What happened last.
     message: []const u8 = "",
     /// Where they come from, and the default server URL.
@@ -64,6 +66,8 @@ pub const Update = struct {
     size: u64 = 0,
     /// What went wrong last.
     message: []const u8 = "",
+    /// What the download under way has got (and will in all).
+    transfer: store.Transfer = .{},
     /// Dazzle's 64x64 icon (installed, or from the server when a newer
     /// version is available or none is on disk); null for the fallback icon.
     icon: ?*const gfx.Image = null,
@@ -268,7 +272,10 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
             listed += 1;
             const this_busy = if (apps.busy) |n| std.mem.eql(u8, n, app.name) or (std.mem.eql(u8, n, "*") and updatable) else false;
             var size_buf: [32]u8 = undefined;
-            const detail = if (i >= apps.offered)
+            const installing = if (apps.busy) |n| std.mem.eql(u8, n, app.name) else false;
+            const detail = if (installing)
+                withTransfer(cx, locale.text("Installing…"), apps.transfer)
+            else if (i >= apps.offered)
                 locale.text("Installed, and no longer offered")
             else if (updatable)
                 locale.text("Update available")
@@ -283,10 +290,10 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
                 .on_press = .of(open, OpenApp.open),
                 .child = cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = a.dupe(kete.Widget, &.{
                     softwareIcon(cx, app_icon),
-                    cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 2, .children = a.dupe(kete.Widget, &.{
+                    cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 2, .children = withBar(cx, &.{
                         cx.make(kete.Text{ .text = app.title, .style = .{ .size = 18, .color = t.on_surface }, .wrap = false, .ellipsis = true }),
                         cx.make(kete.Text{ .text = detail, .style = .{ .size = 15, .color = t.on_surface_variant } }),
-                    }) catch &.{} }) }),
+                    }, if (installing) apps.transfer else null) }) }),
                     if (this_busy) cx.make(kete.Spinner{ .size = 28 }) else cx.make(kete.Icon{ .icon = .chevron_right, .size = 24, .color = t.on_surface_variant }),
                 }) catch &.{} }),
             })) catch {};
@@ -297,7 +304,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
         })) catch {};
     }
     const status = if (apps.busy) |name|
-        (if (name.len == 0) locale.text("Getting the list of apps…") else if (std.mem.eql(u8, name, "*")) locale.text("Updating…") else locale.text("Installing…"))
+        (if (name.len == 0) withTransfer(cx, locale.text("Getting the list of apps…"), apps.transfer) else if (std.mem.eql(u8, name, "*")) withTransfer(cx, locale.text("Updating…"), apps.transfer) else locale.text("Installing…"))
     else if (self.update.status == .checking)
         locale.text("Checking for updates…")
     else if (self.update.status == .downloading or self.update.status == .installing)
@@ -311,6 +318,8 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     else
         locale.text("All apps updated");
     var footer_children: std.ArrayList(kete.Widget) = .empty;
+    // Under way: a spinner by what is.
+    if (busy) footer_children.append(a, cx.make(kete.Spinner{ .size = 24 })) catch {};
     footer_children.append(a, cx.make(kete.Expanded{ .child = b.value(status) })) catch {};
     if (updates > 0) {
         footer_children.append(a, cx.make(kete.OutlinedButton{
@@ -401,7 +410,10 @@ fn detailsRows(self: *const Settings, b: Builder, state: *State, i: usize, busy:
         }
     }
     var size_buf: [32]u8 = undefined;
-    const detail = if (i >= apps.offered)
+    const installing = if (apps.busy) |n| std.mem.eql(u8, n, app.name) else false;
+    const detail = if (installing)
+        withTransfer(cx, locale.text("Installing…"), apps.transfer)
+    else if (i >= apps.offered)
         locale.text("Installed, and no longer offered")
     else if (app.description.len > 0)
         kete_vc4.textf(cx, "{s} · {s}", .{ app.description, info.formatBytes(&size_buf, app.size) })
@@ -410,10 +422,10 @@ fn detailsRows(self: *const Settings, b: Builder, state: *State, i: usize, busy:
     const app_icon: ?*const gfx.Image = if (i < apps.icons.len) apps.icons[i] else null;
     rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = a.dupe(kete.Widget, &.{
         softwareIcon(cx, app_icon),
-        cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 2, .children = a.dupe(kete.Widget, &.{
+        cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 2, .children = withBar(cx, &.{
             cx.make(kete.Text{ .text = app.title, .style = .{ .size = 24, .color = t.on_surface }, .wrap = false, .ellipsis = true }),
             cx.make(kete.Text{ .text = detail, .style = .{ .size = 15, .color = t.on_surface_variant } }),
-        }) catch &.{} }) }),
+        }, if (installing) apps.transfer else null) }) }),
         cx.make(kete.Row{ .fill = false, .cross_axis_alignment = .center, .spacing = 8, .children = buttons.items }),
     }) catch &.{} })) catch {};
     if (fixed) rows.append(a, cx.make(kete.Text{ .text = locale.text("Parental controls stop apps being installed or removed"), .style = .{ .size = 15, .color = t.on_surface_variant } })) catch {};
@@ -459,7 +471,7 @@ const DazzleStatus = struct {
             .unknown, .current => .{ .text = if (u.message.len > 0) u.message else detail, .button = null, .busy = false },
             .checking => .{ .text = locale.text("Checking for updates…"), .button = null, .busy = true },
             .available => .{ .text = available_text, .button = .{ .label = locale.text("Update"), .icon = .download, .restart = false }, .busy = false },
-            .downloading => .{ .text = locale.text("Downloading the update…"), .button = null, .busy = true },
+            .downloading => .{ .text = withTransfer(cx, locale.text("Downloading the update…"), u.transfer), .button = null, .busy = true },
             .installing => .{ .text = locale.text("Installing the update…"), .button = null, .busy = true },
             .ready => .{ .text = if (u.message.len > 0) u.message else locale.text("The update is installed: restart to use it"), .button = .{ .label = locale.text("Restart"), .icon = .restart_alt, .restart = true }, .busy = false },
         };
@@ -476,10 +488,10 @@ fn dazzleRows(self: *const Settings, b: Builder, state: *State, rows: *std.Array
         .on_press = .of(state, State.openDazzle),
         .child = cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = cx.arena.dupe(kete.Widget, &.{
             softwareIcon(cx, self.update.icon),
-            cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 2, .children = cx.arena.dupe(kete.Widget, &.{
+            cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 2, .children = withBar(cx, &.{
                 cx.make(kete.Text{ .text = locale.text("Dazzle"), .style = .{ .size = 18, .color = t.on_surface }, .wrap = false, .ellipsis = true }),
                 cx.make(kete.Text{ .text = s.text, .style = .{ .size = 15, .color = t.on_surface_variant } }),
-            }) catch &.{} }) }),
+            }, if (self.update.status == .downloading) self.update.transfer else null) }) }),
             if (s.busy) cx.make(kete.Spinner{ .size = 28 }) else cx.make(kete.Icon{ .icon = .chevron_right, .size = 24, .color = t.on_surface_variant }),
         }) catch &.{} }),
     })) catch {};
@@ -502,10 +514,10 @@ fn dazzlePage(self: *const Settings, b: Builder, state: *State, rows: *std.Array
     }) else cx.make(kete.SizedBox.empty);
     rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = a.dupe(kete.Widget, &.{
         softwareIcon(cx, self.update.icon),
-        cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 2, .children = a.dupe(kete.Widget, &.{
+        cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 2, .children = withBar(cx, &.{
             cx.make(kete.Text{ .text = locale.text("Dazzle"), .style = .{ .size = 24, .color = t.on_surface }, .wrap = false, .ellipsis = true }),
             cx.make(kete.Text{ .text = s.text, .style = .{ .size = 15, .color = t.on_surface_variant } }),
-        }) catch &.{} }) }),
+        }, if (self.update.status == .downloading) self.update.transfer else null) }) }),
         end,
     }) catch &.{} })) catch {};
     rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 8 }, .child = cx.make(kete.Column{
@@ -625,6 +637,31 @@ fn sourceRow(cx: *kete.BuildContext, name: []const u8, value: kete.Widget) kete.
         cx.make(kete.SizedBox{ .width = 80, .child = cx.make(kete.Text{ .text = name, .style = .{ .size = 16, .color = t.on_surface_variant }, .wrap = false }) }),
         cx.make(kete.Expanded{ .child = value }),
     }) catch &.{} });
+}
+
+/// `what` (under way), and how much it has downloaded: "Installing… 1.2
+/// MB of 3.4 MB", or (the total not known) "Getting the list of apps…
+/// 340 KB"; `what` alone until anything has come.
+fn withTransfer(cx: *kete.BuildContext, what: []const u8, tr: store.Transfer) []const u8 {
+    if (tr.done == 0) return what;
+    var done_buf: [32]u8 = undefined;
+    const done = info.formatBytes(&done_buf, tr.done);
+    if (tr.total == 0) return cx.fmt("{s} {s}", .{ what, done });
+    var total_buf: [32]u8 = undefined;
+    return cx.fmt("{s} {s}", .{ what, kete_vc4.textf(cx, "{s} of {s}", .{ done, info.formatBytes(&total_buf, @max(tr.total, tr.done)) }) });
+}
+
+/// `rows` (an item's name and what it says), and under them, while it
+/// downloads something of a known size, a bar of how far it has got.
+fn withBar(cx: *kete.BuildContext, rows: []const kete.Widget, tr: ?store.Transfer) []const kete.Widget {
+    const a = cx.arena;
+    const t = tr orelse return a.dupe(kete.Widget, rows) catch &.{};
+    if (t.total == 0) return a.dupe(kete.Widget, rows) catch &.{};
+    const k: f32 = @floatCast(@min(1, @as(f64, @floatFromInt(t.done)) / @as(f64, @floatFromInt(t.total))));
+    var out = a.alloc(kete.Widget, rows.len + 1) catch return rows;
+    @memcpy(out[0..rows.len], rows);
+    out[rows.len] = cx.make(kete.Padding{ .padding = .{ .top = 4 }, .child = cx.make(kete.ProgressBar{ .value = k }) });
+    return out;
 }
 
 /// Renders a 64x64 PNG icon, or the fallback `.apps` icon when no icon
@@ -955,6 +992,41 @@ test "updates: offered, downloaded, installed, then a restart" {
     settings.update = .{};
     u.frame(1920, 960, 8, settings);
     try testing.expect(view.findText(u.root.?, "The operating system · 600 KB") != null);
+}
+
+test "what downloads shows how far it has got: a bar when its size is known, the amount when not" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
+    defer u.destroy();
+    const d = view.sample();
+    var actions: Actions = .{};
+    var settings: Settings = .{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .apps = view.sample_apps };
+    u.frame(1920, 960, 0, settings);
+    u.root.?.state(Settings.State).page = .apps;
+
+    // The list being got: its size not known, so a spinner and how much.
+    settings.apps.busy = "";
+    settings.apps.transfer = .{ .done = 340 * 1024 };
+    u.frame(1920, 960, 1, settings);
+    try testing.expect(view.findTextContaining(u.root.?, "Getting the list of apps… 340") != null);
+    try testing.expect(view.findType(u.root.?, kete.Spinner) != null);
+    try testing.expect(view.findType(u.root.?, kete.ProgressBar) == null);
+
+    // An app being installed: on its row, how much of all of it, and a bar.
+    settings.apps.busy = "dazzle-demo";
+    settings.apps.transfer = .{ .done = 1 << 20, .total = 4 << 20 };
+    u.frame(1920, 960, 2, settings);
+    try testing.expect(view.findText(u.root.?, "Installing… 1.0 MB of 4.0 MB") != null);
+    try testing.expectApproxEqAbs(@as(f32, 0.25), view.findType(u.root.?, kete.ProgressBar).?.widget.as(kete.ProgressBar).?.value.?, 0.001);
+
+    // Dazzle's update downloading: the same, on its row.
+    settings.apps.busy = null;
+    settings.apps.transfer = .{};
+    settings.update = .{ .status = .downloading, .transfer = .{ .done = 3 << 20, .total = 12 << 20 } };
+    u.frame(1920, 960, 3, settings);
+    try testing.expect(view.findText(u.root.?, "Downloading the update… 3.0 MB of 12 MB") != null);
+    try testing.expectApproxEqAbs(@as(f32, 0.25), view.findType(u.root.?, kete.ProgressBar).?.widget.as(kete.ProgressBar).?.value.?, 0.001);
+    try testing.expect(!view.overflows(u.root.?));
 }
 
 test "software icons: installed when up to date, server when uninstalled, missing on disk or newer available, else fallback" {

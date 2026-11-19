@@ -197,10 +197,13 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
     var available_buf: [64]u8 = undefined;
 
     var next_update: u64 = sys.nowNs() + std.time.ns_per_s;
+    var last_transfer: [2]store.Transfer = .{ .{}, .{} };
     while (true) {
         wakes.set(&host, .{ pages_fd, net_sub.fd, updater.sub.fd, if (view.shownPage(window.ui) == .log) syslog.fd else null });
         const board_page = view.shownPage(window.ui) == .board;
-        const base_until = if (window.suspended) sys.nowNs() + 60 * std.time.ns_per_s else if (board_page) @min(next_update, next_levels) else next_update;
+        // While something downloads: how far it has got, four times a second.
+        const downloading = apps.job != null or updater.job != null;
+        const base_until = if (window.suspended) sys.nowNs() + 60 * std.time.ns_per_s else if (board_page) @min(next_update, next_levels) else if (downloading) @min(next_update, sys.nowNs() + std.time.ns_per_s / 4) else next_update;
         const until = if (test_player != null) @min(base_until, sys.nowNs() + 16 * std.time.ns_per_ms) else base_until;
         if (!try host.step(@max(until -| sys.nowNs(), std.time.ns_per_ms))) return;
         // Covered by another window: nothing is read or drawn, and the
@@ -210,6 +213,11 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
             if (!suspended) next_update = 0;
         }
         const now = sys.nowNs();
+        if (downloading) {
+            const got: [2]store.Transfer = .{ apps.transfer(), updater.transfer() };
+            if (!std.meta.eql(got, last_transfer)) dirty = true;
+            last_transfer = got;
+        }
 
         // The figures change every second.
         if (!window.suspended and now >= next_update) {
@@ -565,6 +573,7 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
                     .icons = icons.appIcons(catalogue.len),
                     .screenshots = &screenshots,
                     .busy = apps.busy(),
+                    .transfer = apps.transfer(),
                     .message = apps.message(),
                     .source = server_url,
                     .default_source = build_info.apps_url,
@@ -584,6 +593,7 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
                     .available = if (updater.available()) |m| std.fmt.bufPrint(&available_buf, "{s} ({s})", .{ m.version, update.formatDate(&date_buf, m.time) }) catch m.version else "",
                     .size = if (updater.available()) |m| m.size else 0,
                     .message = updater.message(),
+                    .transfer = updater.transfer(),
                     .icon = icons.osIcon(),
                 },
             };

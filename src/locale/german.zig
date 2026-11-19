@@ -117,6 +117,7 @@ pub const germany = [_][2][]const u8{
     .{ "None", "Keine" },
     .{ "Default", "Standard" },
     .{ "Custom", "Eigene" },
+    .{ "{s} of {s}", "{s} von {s}" },
     .{ "Software source", "Softwarequelle" },
     .{ "Source", "Quelle" },
     .{ "Official store", "Offizieller Store" },

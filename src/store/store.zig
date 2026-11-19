@@ -682,6 +682,7 @@ pub const Client = struct {
             return error.HttpError;
         }
         if (out.written().len > max_download) return error.TooBig;
+        countDownloaded(out.written().len);
         return out.toOwnedSlice();
     }
 
@@ -749,6 +750,7 @@ const FileWriter = struct {
             self.failure = err;
             return error.WriteFailed;
         };
+        countDownloaded(bytes.len);
         self.written += bytes.len;
     }
 };
@@ -917,6 +919,29 @@ pub fn fetchCatalogue(client: *Client, gpa: std.mem.Allocator, base_url: []const
     }
 }
 
+/// How much a job has downloaded, and how much it will in all (0 if that
+/// is not known, as for a catalogue).
+pub const Transfer = struct {
+    done: u64 = 0,
+    total: u64 = 0,
+};
+
+/// A job's count of what it has downloaded, in memory shared with its
+/// child (which adds to it as the bytes come). 32 bits, which the Pi's
+/// oldest cores can add to at once.
+const Shared = extern struct {
+    done: u32 = 0,
+    total: u32 = 0,
+};
+
+/// In a job's child: its count.
+var shared_out: ?*Shared = null;
+
+/// Counts `n` bytes downloaded (in a job's child).
+fn countDownloaded(n: usize) void {
+    if (shared_out) |s| _ = @atomicRmw(u32, &s.done, .Add, @truncate(n), .monotonic);
+}
+
 pub const Job = struct {
     pub const Kind = enum { catalogue, install, update_all, os_check, os_download };
 
@@ -927,6 +952,8 @@ pub const Job = struct {
     started: u64,
     /// The child's report: empty if it worked, else why not.
     result: linux.fd_t,
+    /// What it has downloaded (null if that cannot be known).
+    shared: ?*Shared = null,
     name_buf: [48]u8 = undefined,
     name_len: usize = 0,
 
@@ -942,17 +969,22 @@ pub const Job = struct {
     pub fn spawn(kind: Kind, job_name: []const u8, comptime work: anytype, args: anytype) !Job {
         var fds: [2]linux.fd_t = undefined;
         _ = try sys.check(linux.pipe2(&fds, .{ .CLOEXEC = true }));
+        const map = linux.mmap(null, std.heap.page_size_min, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED, .ANONYMOUS = true }, -1, 0);
+        const shared: ?*Shared = if (linux.errno(map) == .SUCCESS) @ptrFromInt(map) else null;
+        if (shared) |s| s.* = .{};
         const rc = linux.fork();
         switch (linux.errno(rc)) {
             .SUCCESS => {},
             else => |e| {
                 sys.close(fds[0]);
                 sys.close(fds[1]);
+                if (shared) |s| _ = linux.munmap(@ptrCast(s), std.heap.page_size_min);
                 return sys.errorFromErrno(e);
             },
         }
         if (rc == 0) {
             sys.close(fds[0]);
+            shared_out = shared;
             @call(.auto, work, args) catch |err| {
                 var why_buf: [160]u8 = undefined;
                 const why = if (last_status != 0)
@@ -968,7 +1000,7 @@ pub const Job = struct {
             linux.exit(0);
         }
         sys.close(fds[1]);
-        var j: Job = .{ .kind = kind, .pid = @intCast(rc), .started = sys.nowNs(), .result = fds[0] };
+        var j: Job = .{ .kind = kind, .pid = @intCast(rc), .started = sys.nowNs(), .result = fds[0], .shared = shared };
         j.name_len = @min(job_name.len, j.name_buf.len);
         @memcpy(j.name_buf[0..j.name_len], job_name[0..j.name_len]);
         return j;
@@ -1009,6 +1041,25 @@ pub const Job = struct {
         };
     }
 
+    /// What it has downloaded, and will in all (if known).
+    pub fn transfer(j: *const Job) Transfer {
+        const s = j.shared orelse return .{};
+        return .{ .done = @atomicLoad(u32, &s.done, .monotonic), .total = @atomicLoad(u32, &s.total, .monotonic) };
+    }
+
+    /// How much it will download in all (as the catalogue says).
+    pub fn setTotal(j: *Job, total: u64) void {
+        const s = j.shared orelse return;
+        @atomicStore(u32, &s.total, @intCast(@min(total, std.math.maxInt(u32))), .monotonic);
+    }
+
+    /// Lets go of what it was followed with (once it is over).
+    pub fn release(j: *Job) void {
+        sys.close(j.result);
+        if (j.shared) |s| _ = linux.munmap(@ptrCast(s), std.heap.page_size_min);
+        j.shared = null;
+    }
+
     /// If the job has finished: null if it worked, else why not (in `buf`).
     pub fn finished(j: *Job, buf: []u8) ??[]const u8 {
         var status: u32 = 0;
@@ -1017,14 +1068,14 @@ pub const Job = struct {
             if (sys.nowNs() -| j.started < timeLimit(j.kind)) return null;
             _ = linux.kill(j.pid, .KILL);
             _ = linux.wait4(j.pid, @ptrCast(&status), 0, null);
-            sys.close(j.result);
+            j.release();
             return @as(?[]const u8, "it took too long");
         }
         // (Its status may be gone: the shell's reaper may have had it. What
         // it said is what counts: done, why it failed, or nothing at all
         // if it crashed.)
         const n = sys.check(linux.read(j.result, buf.ptr, buf.len)) catch 0;
-        sys.close(j.result);
+        j.release();
         if (n == 0) return @as(?[]const u8, "it stopped");
         if (std.mem.eql(u8, buf[0..n], done_mark)) return @as(?[]const u8, null);
         return @as(?[]const u8, buf[0..n]);
@@ -1118,7 +1169,7 @@ pub const Store = struct {
             var status: u32 = 0;
             _ = linux.kill(j.pid, .KILL);
             _ = linux.wait4(j.pid, @ptrCast(&status), 0, null);
-            sys.close(j.result);
+            j.release();
             s.job = null;
         };
         s.base_url = base_url;
@@ -1184,6 +1235,7 @@ pub const Store = struct {
                 s.setMessage("Cannot install {s}: {s}", .{ a.title, @errorName(err) });
                 return;
             };
+            s.job.?.setTotal(a.size);
             s.message_len = 0;
             return;
         };
@@ -1192,16 +1244,16 @@ pub const Store = struct {
     /// Updates all installed apps that have a newer version in the catalogue.
     pub fn updateAll(s: *Store) void {
         if (s.job != null) return;
-        var any = false;
+        var total: u64 = 0;
         for (s.entries()) |a| if (installedEntry(apps_dir, a) and hasNewerVersion(apps_dir, a)) {
-            any = true;
-            break;
+            total += a.size;
         };
-        if (!any) return;
+        if (total == 0) return;
         s.job = Job.spawn(.update_all, "*", childUpdateAll, .{ s.gpa, s.base_url, s.entries() }) catch |err| {
             s.setMessage("Cannot update apps: {s}", .{@errorName(err)});
             return;
         };
+        s.job.?.setTotal(total);
         s.message_len = 0;
     }
 
@@ -1218,6 +1270,12 @@ pub const Store = struct {
     pub fn title(s: *const Store, name: []const u8) []const u8 {
         for (s.apps()) |a| if (std.mem.eql(u8, a.name, name)) return a.title;
         return name;
+    }
+
+    /// What the job under way has downloaded (and will).
+    pub fn transfer(s: *const Store) Transfer {
+        const j = s.job orelse return .{};
+        return j.transfer();
     }
 
     /// Whether the job under way has finished (and what is shown changed).
@@ -1417,6 +1475,33 @@ fn jobDone() !void {}
 fn jobFails() !void {
     noteUrl("https://example.com/apps.json");
     return error.HostUnreachable;
+}
+
+/// Downloads (as far as the job can tell) 3000 bytes, then waits to be
+/// let go of (its pipe: closed when it is; its own end of it first).
+fn jobDownloads(go: [2]linux.fd_t) !void {
+    sys.close(go[1]);
+    countDownloaded(1000);
+    countDownloaded(2000);
+    var b: [1]u8 = undefined;
+    _ = linux.read(go[0], &b, 1);
+}
+
+test "a job's downloads are counted as they come, and its total is what it was given" {
+    var go: [2]linux.fd_t = undefined;
+    _ = try sys.check(linux.pipe2(&go, .{}));
+    var j = try Job.spawn(.install, "dazzle-demo", jobDownloads, .{go});
+    j.setTotal(5000);
+    const until = sys.nowNs() + 5 * std.time.ns_per_s;
+    while (j.transfer().done < 3000 and sys.nowNs() < until) {}
+    try testing.expectEqual(Transfer{ .done = 3000, .total = 5000 }, j.transfer());
+    sys.close(go[1]);
+    sys.close(go[0]);
+    var buf: [160]u8 = undefined;
+    var got: ??[]const u8 = null;
+    while (got == null) got = j.finished(&buf);
+    try testing.expect(got.? == null);
+    try testing.expect(j.shared == null);
 }
 
 fn jobCrashes() !void {

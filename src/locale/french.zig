@@ -116,6 +116,7 @@ pub const france = [_][2][]const u8{
     .{ "None", "Aucun" },
     .{ "Default", "Par défaut" },
     .{ "Custom", "Personnalisé" },
+    .{ "{s} of {s}", "{s} sur {s}" },
     .{ "Software source", "Source des logiciels" },
     .{ "Source", "Source" },
     .{ "Official store", "Boutique officielle" },

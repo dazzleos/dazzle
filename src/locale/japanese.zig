@@ -116,6 +116,7 @@ pub const japan = [_][2][]const u8{
     .{ "None", "なし" },
     .{ "Default", "デフォルト" },
     .{ "Custom", "カスタム" },
+    .{ "{s} of {s}", "{s} / {s}" },
     .{ "Software source", "ソフトウェアの入手先" },
     .{ "Source", "入手先" },
     .{ "Official store", "公式ストア" },

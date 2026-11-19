@@ -116,6 +116,7 @@ pub const simplified = [_][2][]const u8{
     .{ "None", "无" },
     .{ "Default", "默认" },
     .{ "Custom", "自定义" },
+    .{ "{s} of {s}", "{s} / {s}" },
     .{ "Software source", "软件来源" },
     .{ "Source", "来源" },
     .{ "Official store", "官方商店" },

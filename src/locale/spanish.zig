@@ -133,6 +133,7 @@ pub const latin_america = [_][2][]const u8{
     .{ "None", "Ninguno" },
     .{ "Default", "Predeterminado" },
     .{ "Custom", "Personalizado" },
+    .{ "{s} of {s}", "{s} de {s}" },
     .{ "Software source", "Origen del software" },
     .{ "Source", "Origen" },
     .{ "Official store", "Tienda oficial" },

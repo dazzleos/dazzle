@@ -117,6 +117,7 @@ pub const arabic = [_][2][]const u8{
     .{ "None", "لا شيء" },
     .{ "Default", "الافتراضي" },
     .{ "Custom", "مخصص" },
+    .{ "{s} of {s}", "{s} من {s}" },
     .{ "Software source", "مصدر البرامج" },
     .{ "Source", "المصدر" },
     .{ "Official store", "المتجر الرسمي" },
