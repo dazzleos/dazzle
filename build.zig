@@ -535,6 +535,7 @@ fn appSources(b: *std.Build) []const []const u8 {
         "https://github.com/dazzleos/motu/releases/latest/download",
         "https://github.com/dazzleos/globe/releases/latest/download",
         "https://github.com/dazzleos/develop/releases/latest/download",
+        "https://github.com/dazzleos/geppetto/releases/latest/download",
     };
     return b.option([]const []const u8, "app-sources", "Other app catalogues Dazzle's lists (default: dazzleos' app repositories')") orelse default;
 }
@@ -1505,23 +1506,16 @@ pub fn build(b: *std.Build) void {
         .root_module = addBootScreen(b, addProgramModule(b, "src/init/main.zig", target, optimize, pi, shaders, true), target, optimize),
     });
     const install_init = b.addInstallArtifact(init_exe, .{});
-    const settings_module = addProgramModule(b, "src/apps/settings/main.zig", target, optimize, pi, shaders, true);
-    _ = addKete(b, settings_module, pi, target, optimize, "src/apps/settings");
+    const settings_module = addProgramModule(b, "src/settings/main.zig", target, optimize, pi, shaders, true);
+    _ = addKete(b, settings_module, pi, target, optimize, "src/settings");
     addBackgroundThumbnails(b, settings_module);
     const settings_exe = b.addExecutable(.{
         .name = "dazzle-settings",
         .root_module = settings_module,
     });
     const install_settings = b.addInstallArtifact(settings_exe, .{});
-    const logger_module = addProgramModule(b, "src/apps/logger/main.zig", target, optimize, pi, shaders, true);
-    _ = addKete(b, logger_module, pi, target, optimize, "src/apps/logger");
-    const logger_exe = b.addExecutable(.{
-        .name = "dazzle-data-logger",
-        .root_module = logger_module,
-    });
-    const install_logger = b.addInstallArtifact(logger_exe, .{});
-    const setup_module = addProgramModule(b, "src/apps/setup/main.zig", target, optimize, pi, shaders, true);
-    _ = addKete(b, setup_module, pi, target, optimize, "src/apps/setup");
+    const setup_module = addProgramModule(b, "src/setup/main.zig", target, optimize, pi, shaders, true);
+    _ = addKete(b, setup_module, pi, target, optimize, "src/setup");
     const setup_exe = b.addExecutable(.{
         .name = "dazzle-setup",
         .root_module = setup_module,
@@ -1594,15 +1588,13 @@ pub fn build(b: *std.Build) void {
     // are not part of the system or the image: each is an archive to
     // download and install, in setup or from Settings (zig-out/apps/, with
     // the catalogue).
-    const apps = [_]App{
-        .{ .exe = logger_exe, .icon = .show_chart, .title = "Data Logger", .description = "Record inputs from the GPIO pins", .about = "Record what the GPIO pins read over time, from buttons, switches and sensors, and see it drawn as a chart as it comes in." },
-    };
+    const apps = [_]App{};
     const apps_step = b.step("apps", "Build the apps' archives and their catalogue (zig-out/apps)");
     apps_step.dependOn(addAppArchives(b, &apps));
     b.getInstallStep().dependOn(apps_step);
     const install_initramfs = b.addInstallFile(initramfs, "initramfs.cpio");
     const programs_step = b.step("programs", "Build just the programs (zig-out/bin) and zig-out/initramfs.cpio");
-    for ([_]*std.Build.Step{ &install_init.step, &install_settings.step, &install_logger.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
+    for ([_]*std.Build.Step{ &install_init.step, &install_settings.step, &install_setup.step, &install_shell.step, &install_initramfs.step }) |st| {
         programs_step.dependOn(st);
         b.getInstallStep().dependOn(st);
     }
@@ -1644,20 +1636,17 @@ pub fn build(b: *std.Build) void {
     host_shell.addAnonymousImport("ja.dict", .{ .root_source_file = languageFile(b, "ja", "ja.dict") });
     host_shell.addAnonymousImport("ja.conn", .{ .root_source_file = languageFile(b, "ja", "ja.conn") });
     _ = addKete(b, host_shell, host, b.graph.host, test_optimize, "src/shell");
-    const host_settings = addProgramModule(b, "src/apps/settings/main.zig", b.graph.host, test_optimize, host, shaders, false);
+    const host_settings = addProgramModule(b, "src/settings/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_settings.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     // Arabic is laid out in its own font, as on the device.
     host_settings.addAnonymousImport("NotoSansArabic-Regular.ttf", .{ .root_source_file = b.path("fonts/NotoSansArabic-Regular.ttf") });
-    _ = addKete(b, host_settings, host, b.graph.host, test_optimize, "src/apps/settings");
+    _ = addKete(b, host_settings, host, b.graph.host, test_optimize, "src/settings");
     addBackgroundThumbnails(b, host_settings);
-    const host_logger = addProgramModule(b, "src/apps/logger/main.zig", b.graph.host, test_optimize, host, shaders, false);
-    host_logger.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
-    // Kete's frames, drawn with Dazzle's shaders in the QPU simulator.
-    const host_kete_vc4 = addKete(b, host_logger, host, b.graph.host, test_optimize, "src/apps/logger");
-    host_kete_vc4.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
-    const host_setup = addProgramModule(b, "src/apps/setup/main.zig", b.graph.host, test_optimize, host, shaders, false);
+    const host_setup = addProgramModule(b, "src/setup/main.zig", b.graph.host, test_optimize, host, shaders, false);
     host_setup.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
-    _ = addKete(b, host_setup, host, b.graph.host, test_optimize, "src/apps/setup");
+    // Kete's frames, drawn with Dazzle's shaders in the QPU simulator.
+    const host_kete_vc4 = addKete(b, host_setup, host, b.graph.host, test_optimize, "src/setup");
+    host_kete_vc4.addAnonymousImport("FiraSans-Regular.ttf", .{ .root_source_file = b.path("fonts/FiraSans-Regular.ttf") });
     for ([_]*std.Build.Module{
         host.sys,
         host.vc4,
@@ -1675,7 +1664,6 @@ pub fn build(b: *std.Build) void {
         addBootScreen(b, addProgramModule(b, "src/init/main.zig", b.graph.host, test_optimize, host, shaders, false), b.graph.host, test_optimize),
         host_kete_vc4,
         host_settings,
-        host_logger,
         host_setup,
         host_shell,
     }) |m| {

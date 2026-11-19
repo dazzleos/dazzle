@@ -27,7 +27,7 @@ library; programs make Linux system calls directly.
 - **Shell** (`src/shell/`). A Wayland compositor that owns the display and
   input devices, composites app windows, and renders the dock at the bottom
   of the screen. Apps connect to it over `/os/sockets/wayland-0`.
-- **System apps** (`src/apps/setup/`, `src/apps/settings/`). Built into the
+- **System apps** (`src/setup/`, `src/settings/`). Built into the
   OS image alongside the shell: Setup runs once on first boot, and Settings
   configures the system. Additional apps can be installed from the app
   catalogue into `/data/apps`.
