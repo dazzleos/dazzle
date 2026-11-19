@@ -510,15 +510,16 @@ fn addShaderImports(m: *std.Build.Module, shaders: []const ShaderBlob, owner: Sh
     };
 }
 
-/// Where Settings downloads the app catalogue and the apps from: where
-/// the image is published (CI's "latest" release).
+/// Where Settings downloads the system's updates, the app catalogue and
+/// the apps from: the store (dazzleos/store), which lists each from one
+/// of its builds (Dazzle's own too).
 fn appsUrl(b: *std.Build) []const u8 {
     const State = struct {
         var url: ?[]const u8 = null;
     };
     if (State.url) |u| return u;
-    State.url = b.option([]const u8, "apps-url", "Where Settings downloads apps and their catalogue (apps.json) from") orelse
-        "https://github.com/dazzleos/dazzle/releases/latest/download";
+    State.url = b.option([]const u8, "apps-url", "Where Settings downloads updates, apps and their catalogue (apps.json) from") orelse
+        "https://github.com/dazzleos/store/releases/latest/download";
     return State.url.?;
 }
 

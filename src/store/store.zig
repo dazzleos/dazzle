@@ -2,16 +2,17 @@
 //! page) and Settings' Software page.
 //!
 //! The catalogue of apps that can be installed (apps.json; see
-//! tools/mkcatalogue.zig) and their archives are published where the
-//! image is (`build_info.apps_url`), or on a custom `https://` software
-//! server stored in `/data/apps/.server`. An app's archive is its folder,
-//! as in /data/apps, as a tar file compressed with xz.
+//! tools/mkcatalogue.zig), and the system's update (os.json), are on the
+//! software server: the store (`build_info.apps_url`, dazzleos/store), or
+//! a custom `https://` one stored in `/data/apps/.server`. An app's
+//! archive is its folder, as in /data/apps, as a tar file compressed with
+//! xz. The store's catalogue and update say where each one's files are
+//! (`base`: the release of the build it is).
 //!
-//! That catalogue lists others (its "sources"): those of apps in
-//! repositories of their own, each published as its own release. Their
-//! apps are listed with Dazzle's (the catalogue kept has them all), each
-//! downloaded from where its catalogue is (`App.base`); a source that
-//! cannot be reached keeps the apps it had.
+//! A catalogue may list others (its "sources", as Dazzle's own does, and
+//! dazzle-serve's): their apps are listed with its own (the catalogue
+//! kept has them all), each downloaded from where its catalogue is; a
+//! source that cannot be reached keeps the apps it had.
 //!
 //! * Downloading (the catalogue, or an app) is done over HTTPS by a child
 //!   process (`Job`), so the window goes on meanwhile. It trusts the
@@ -46,7 +47,8 @@ pub const max_screenshot = 1 << 20;
 pub const os_icon_file = "/os/icon.png";
 pub const update_icon_file = sys.system.update_dir ++ "/icon.png";
 pub const icon_size = 64;
-pub const default_url = "https://github.com/dazzleos/dazzle/releases/latest/download";
+/// The store's (dazzleos/store): the system's updates, and the apps.
+pub const default_url = "https://github.com/dazzleos/store/releases/latest/download";
 pub const max_url_len = 255;
 pub const server_file = apps_dir ++ "/.server";
 pub const keys_file = apps_dir ++ "/.keys";
@@ -765,7 +767,7 @@ pub fn download(gpa: std.mem.Allocator, url: []const u8) ![]u8 {
 /// child process (`Job`): Settings', or the shell's (remote control).
 pub fn downloadAndInstallOs(gpa: std.mem.Allocator, base_url: []const u8, m: OsManifest) !void {
     const proto = sys.system;
-    const url = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ base_url, m.file });
+    const url = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ m.baseOr(base_url), m.file });
     // Straight to the card, not into memory.
     const tmp = proto.update_archive ++ ".new";
     var client: Client = .init(gpa);
@@ -806,7 +808,7 @@ pub fn fetchOs(client: *Client, gpa: std.mem.Allocator, base_url: []const u8, di
     _ = try sys.check(linux.rename(tmp, man_path));
 
     const icon_rel = if (validIconPath(m.icon)) m.icon else "icon.png";
-    const icon_url = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ base_url, icon_rel });
+    const icon_url = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ m.baseOr(base_url), icon_rel });
     defer gpa.free(icon_url);
     if (client.download(icon_url)) |png| {
         defer gpa.free(png);
@@ -1255,13 +1257,22 @@ pub const OsManifest = struct {
     size: u64,
     sha256: []const u8,
     signature: []const u8 = "",
+    /// Where its files (the archive, its icon) are, if not beside it (as
+    /// the store's says: the build's own release).
+    base: []const u8 = "",
 
     pub fn parse(gpa: std.mem.Allocator, json: []const u8) !std.json.Parsed(OsManifest) {
         const parsed = std.json.parseFromSlice(OsManifest, gpa, json, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return error.BadManifest;
         errdefer parsed.deinit();
         const m = parsed.value;
         if (sys.system.Version.init(m.time, m.version) == null or !(std.mem.endsWith(u8, m.file, ".tar.xz") and validName(m.file[0 .. m.file.len - ".tar.xz".len])) or m.sha256.len != 64) return error.BadManifest;
+        if (m.base.len > 0 and !std.mem.startsWith(u8, m.base, "https://")) return error.BadManifest;
         return parsed;
+    }
+
+    /// Where its files are: its base, or the software server's.
+    pub fn baseOr(m: *const OsManifest, server: []const u8) []const u8 {
+        return if (m.base.len > 0) m.base else server;
     }
 
     pub fn versionOf(m: *const OsManifest) sys.system.Version {
@@ -1570,7 +1581,7 @@ test "keep-alive fetches os.json, icon.png, apps.json and <app>.png on a single 
 
 test "parsing and saving custom https software server URLs" {
     try testing.expectEqualStrings(
-        "https://github.com/dazzleos/dazzle/releases/latest/download",
+        "https://github.com/dazzleos/store/releases/latest/download",
         parseHttpsUrl(default_url).?,
     );
     try testing.expectEqualStrings(
@@ -1718,6 +1729,19 @@ test "an update is offered when it is newer and in neither slot" {
     try testing.expectError(error.BadManifest, OsManifest.parse(testing.allocator, "{\"version\": \"x y\", \"time\": 1, \"file\": \"a.tar.xz\", \"size\": 1, \"sha256\": \"" ++ &@as([64]u8, @splat('0')) ++ "\"}"));
     try testing.expectError(error.BadManifest, OsManifest.parse(testing.allocator, "{\"version\": \"abc\", \"time\": 1, \"file\": \"../a\", \"size\": 1, \"sha256\": \"" ++ &@as([64]u8, @splat('0')) ++ "\"}"));
     try testing.expectError(error.BadManifest, OsManifest.parse(testing.allocator, "[]"));
+}
+
+test "an update's files are where its manifest says (the store's: its build's release), else beside it" {
+    const sha = "f3e817e51826f4ca7b7d334af8f857d9c42416073f44c7429e1bfda7f097a753";
+    const beside = try OsManifest.parse(testing.allocator, "{\"version\": \"0123abc\", \"time\": 1, \"file\": \"dazzle-os.tar.xz\", \"size\": 1, \"sha256\": \"" ++ sha ++ "\"}");
+    defer beside.deinit();
+    try testing.expectEqualStrings("https://server", beside.value.baseOr("https://server"));
+    const build = "https://github.com/dazzleos/dazzle/releases/download/build-0123abc";
+    const elsewhere = try OsManifest.parse(testing.allocator, "{\"version\": \"0123abc\", \"time\": 1, \"file\": \"dazzle-os.tar.xz\", \"size\": 1, \"sha256\": \"" ++ sha ++ "\", \"base\": \"" ++ build ++ "\"}");
+    defer elsewhere.deinit();
+    try testing.expectEqualStrings(build, elsewhere.value.baseOr("https://server"));
+    // Only from an https:// place.
+    try testing.expectError(error.BadManifest, OsManifest.parse(testing.allocator, "{\"version\": \"0123abc\", \"time\": 1, \"file\": \"dazzle-os.tar.xz\", \"size\": 1, \"sha256\": \"" ++ sha ++ "\", \"base\": \"http://x\"}"));
 }
 
 test "installed apps the catalogue does not have are listed, with titles from their names" {
