@@ -1147,7 +1147,10 @@ fn addImage(b: *std.Build, kernel: Kernel, initramfs: std.Build.LazyPath) *std.B
     // none: no vc4 (no display), and no camera.
     files.append(b.allocator, .{ "overlays/README", b.addWriteFiles().add("README", overlays_readme) }) catch @panic("OOM");
     for (files.items) |f| boot_files.append(b.allocator, .{ b.fmt("slot-a/{s}", .{f[0]}), f[1] }) catch @panic("OOM");
-    boot_files.append(b.allocator, .{ "slot-a/cmdline.txt", b.addWriteFiles().add("cmdline.txt", b.fmt("{s} dazzle.slot=a\n", .{cmdline})) }) catch @panic("OOM");
+    // A test image can have more there: the log server, or remote control
+    // (which updates keep: they copy the running slot's command line).
+    const extra = b.option([]const u8, "image-cmdline", "More for the image's kernel command line, for testing (\"dazzle.log_server=on dazzle.remote=123456\")");
+    boot_files.append(b.allocator, .{ "slot-a/cmdline.txt", b.addWriteFiles().add("cmdline.txt", b.fmt("{s}{s}{s} dazzle.slot=a\n", .{ cmdline, if (extra != null) " " else "", extra orelse "" })) }) catch @panic("OOM");
     // The same files as an update (zig-out/os: the archive and its
     // manifest, published beside the image; see tools/mkos.zig).
     const os_step = b.step("os", "Build the system as an update (zig-out/os)");
