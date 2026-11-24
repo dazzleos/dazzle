@@ -152,6 +152,10 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
     // Where the last touch on it was (a touch let go says no place: it
     // lets go there).
     var osk_touch_at: [2]f32 = .{ 0, 0 };
+    // Where it went down (a swipe down from there hides the keyboard), and
+    // whether it has (the rest of the touch does nothing).
+    var osk_touch_from: [2]f32 = .{ 0, 0 };
+    var osk_swiped = false;
     var last_touch = false;
     // The text input it was shown for (another one, and it shows again
     // after being hidden).
@@ -913,6 +917,8 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                     if (t.kind == .down) if (osk.local(x, y)) |at| {
                         osk_touches.set(t.id);
                         osk_touch_at = at;
+                        osk_touch_from = at;
+                        osk_swiped = false;
                         osk.panel.pointerMotion(at);
                         osk.panel.pointerButton(at, true);
                         continue;
@@ -920,13 +926,21 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                     if (osk_touches.has(t.id)) {
                         const at: [2]f32 = .{ @floatCast(x), @floatCast(y - @as(f64, @floatFromInt(osk.top()))) };
                         switch (t.kind) {
-                            .motion => {
+                            .motion => if (!osk_swiped) {
                                 osk_touch_at = at;
-                                osk.panel.pointerMotion(at);
+                                if (osk.swipedDown(osk_touch_from, at)) {
+                                    // Swiped down: it hides, and the key
+                                    // it went down on is let go of away
+                                    // from it (not typed).
+                                    osk_swiped = true;
+                                    osk.panel.pointerMotion(.{ -1000, -1000 });
+                                    osk.panel.pointerButton(.{ -1000, -1000 }, false);
+                                    osk.dismissed = true;
+                                } else osk.panel.pointerMotion(at);
                             },
                             .up => {
                                 _ = osk_touches.unset(t.id);
-                                osk.panel.pointerButton(osk_touch_at, false);
+                                if (!osk_swiped) osk.panel.pointerButton(osk_touch_at, false);
                             },
                             .down => {},
                         }

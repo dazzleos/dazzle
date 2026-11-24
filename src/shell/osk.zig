@@ -1,10 +1,10 @@
 //! The on-screen keyboard: for touchscreens, along the bottom of the screen
 //! while an app's text field has the keyboard (it enabled
 //! `zwp_text_input_v3`) and it was last touched (`Osk.wanted`); typing on a
-//! keyboard, or a mouse's button, hides it, as its own key does (until
-//! another text field). It slides up from the bottom, over the dock (which
-//! slides down out of its way), and back down when hidden. The windows'
-//! work area stops above it.
+//! keyboard, or a mouse's button, hides it, as its own key and a swipe
+//! down on it do (until another text field). It slides up from the
+//! bottom, over the dock (which slides down out of its way), and back down
+//! when hidden. The windows' work area stops above it.
 //!
 //! Its keys are kete buttons on its panel, given the shell's touches and
 //! pointer. What they type the shell sends the app (`take`): letters and
@@ -153,6 +153,14 @@ pub const Osk = struct {
     /// Whether it wants drawing again.
     pub fn needsDraw(o: *const Osk) bool {
         return o.changed or o.panel.needsFrame();
+    }
+
+    /// Whether a touch on it from `from` to `to` (in it) is a swipe down,
+    /// which hides it: down by a key's height, more than across.
+    pub fn swipedDown(o: *const Osk, from: [2]f32, to: [2]f32) bool {
+        const dy = to[1] - from[1];
+        const dx = @abs(to[0] - from[0]);
+        return dy >= key_height * o.scale and dy > 2 * dx;
     }
 
     /// Whether a key has done something the shell is yet to deal with:
@@ -371,4 +379,13 @@ test "slides up from the bottom of the screen, and back down" {
     _ = o.animate(5000 + Osk.slide_ns);
     try testing.expect(!o.visible());
     try testing.expectEqual(@as(i32, 1280), o.top());
+}
+
+test "a swipe down hides it; a key pressed and wobbled does not" {
+    var o: Osk = .{ .panel = undefined };
+    o.setScreen(720, 1280, 1);
+    try testing.expect(o.swipedDown(.{ 100, 20 }, .{ 110, 20 + Osk.key_height * o.scale }));
+    try testing.expect(!o.swipedDown(.{ 100, 20 }, .{ 104, 26 }));
+    try testing.expect(!o.swipedDown(.{ 100, 20 }, .{ 300, 90 }));
+    try testing.expect(!o.swipedDown(.{ 100, 120 }, .{ 100, 20 }));
 }
