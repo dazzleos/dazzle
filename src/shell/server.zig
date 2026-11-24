@@ -4135,6 +4135,21 @@ pub const Server = struct {
         s.touchedClient(sf.client);
     }
 
+    /// The touches down are the shell's from now on (a gesture): their
+    /// clients are told they are cancelled, and a move, resize or drag
+    /// they drive ends. They are still let go of (`touchUp`).
+    pub fn cancelTouches(s: *Server) void {
+        if (s.grab) |g| if (g.touch != null) s.dropGrab();
+        if (s.drag) |d| if (d.touch != null) s.endDrag();
+        for (&s.touches) |*slot| if (slot.*) |*t| if (t.surface) |sf| {
+            const c = sf.client;
+            broadcast(c, .touch, p.wl_touch.event.cancel, 1, .{});
+            for (&s.touches) |*o| if (o.*) |*ot| if (ot.surface) |os| if (os.client == c) {
+                ot.surface = null;
+            };
+        };
+    }
+
     /// Ends a group of touch events, for the clients they went to.
     pub fn touchFrame(s: *Server) void {
         for (&s.touch_frame_clients) |*slot| if (slot.*) |c| {

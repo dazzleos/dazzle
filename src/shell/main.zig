@@ -45,6 +45,7 @@ const quick_mod = @import("quick.zig");
 const notice_mod = @import("notice.zig");
 const lock_mod = @import("lock.zig");
 const osk_mod = @import("osk.zig");
+const gesture = @import("gesture.zig");
 const kete_panel = @import("kete_panel.zig");
 const ime_mod = @import("ime.zig");
 const keyboard = @import("keyboard.zig");
@@ -149,6 +150,8 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
     // touches on it; the last input was a touch (it shows only then).
     var osk: osk_mod.Osk = .init(try kit.gpuPanel(), renderer.width, renderer.height, dock.scale);
     var osk_touches: TouchSet = .{};
+    // The shell's touch gestures (four fingers swiped: the overview).
+    var gestures: gesture.Gestures = .{ .distance = @as(f64, @floatFromInt(@min(renderer.width, renderer.height))) * 0.08 };
     // Where the last touch on it was (a touch let go says no place: it
     // lets go there).
     var osk_touch_at: [2]f32 = .{ 0, 0 };
@@ -694,10 +697,13 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                         const steps = 12;
                         for (0..steps + 1) |i| {
                             const f = @as(f64, @floatFromInt(i)) / steps;
-                            const at = touchAt(&renderer, sw[0] + (sw[2] - sw[0]) * f, sw[1] + (sw[3] - sw[1]) * f);
-                            queue(q, qn, .{ .touch = .{ .kind = if (i == 0) .down else .motion, .id = 1001, .x = at[0], .y = at[1] } });
+                            for (0..sw.fingers) |k| {
+                                const off = 60 * @as(f64, @floatFromInt(k));
+                                const at = touchAt(&renderer, sw.from[0] + off + (sw.to[0] - sw.from[0]) * f, sw.from[1] + (sw.to[1] - sw.from[1]) * f);
+                                queue(q, qn, .{ .touch = .{ .kind = if (i == 0) .down else .motion, .id = @intCast(1001 + k), .x = at[0], .y = at[1] } });
+                            }
                         }
-                        queue(q, qn, .{ .touch = .{ .kind = .up, .id = 1001 } });
+                        for (0..sw.fingers) |k| queue(q, qn, .{ .touch = .{ .kind = .up, .id = @intCast(1001 + k) } });
                         req.respond("200 OK", "text/plain", "ok\n");
                     },
                     .tap => |at_screen| {
@@ -921,6 +927,41 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                     const ty = if (renderer.turned) t.x else t.y;
                     const x = tx * @as(f64, @floatFromInt(renderer.width - 1));
                     const y = ty * @as(f64, @floatFromInt(renderer.height - 1));
+                    // Four fingers down: the shell's (the apps' touches
+                    // cancelled); swiped, the overview, as Super.
+                    const g = switch (t.kind) {
+                        .down => gestures.down(t.id, x, y),
+                        .motion => gestures.motion(t.id, x, y),
+                        .up => gestures.up(t.id),
+                    };
+                    switch (g) {
+                        .none => {},
+                        .began => {
+                            server.cancelTouches();
+                            // A key held on the on-screen keyboard is not
+                            // typed; nothing on the dock or quick settings
+                            // goes on.
+                            if (osk_touches.any()) {
+                                osk.panel.pointerMotion(.{ -1000, -1000 });
+                                osk.panel.pointerButton(.{ -1000, -1000 }, false);
+                            }
+                            osk_touches = .{};
+                            dock_touches = .{};
+                            quick_touch = null;
+                            print("dazzle-shell: four fingers down\n", .{});
+                            continue;
+                        },
+                        .swipe => {
+                            server.setOverview(!server.overview);
+                            continue;
+                        },
+                        .taken => {
+                            // Let go of where it went (the server's touch,
+                            // its client told already).
+                            if (t.kind == .up) server.touchUp(time_ms, t.id);
+                            continue;
+                        },
+                    }
                     // On the on-screen keyboard: its keys, pressed and let go.
                     if (t.kind == .down) if (osk.local(x, y)) |at| {
                         osk_touches.set(t.id);
@@ -1627,6 +1668,11 @@ const TouchSet = struct {
         };
     }
 
+    fn any(t: *const TouchSet) bool {
+        for (t.ids) |slot| if (slot != null) return true;
+        return false;
+    }
+
     fn has(t: *const TouchSet, id: i32) bool {
         for (t.ids) |slot| if (slot == id) return true;
         return false;
@@ -2130,6 +2176,7 @@ test {
     _ = @import("notice.zig");
     _ = @import("lock.zig");
     _ = @import("osk.zig");
+    _ = @import("gesture.zig");
     _ = @import("kete_panel.zig");
     _ = @import("remote.zig");
     _ = @import("glass.zig");
