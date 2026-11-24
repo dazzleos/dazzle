@@ -594,8 +594,14 @@ pub const Frame = struct {
 
         const tiles = f.tileCounts();
         const num_tiles: u32 = @as(u32, tiles[0]) * @as(u32, tiles[1]);
-        const tile_alloc_size = std.mem.alignForward(u32, @max(num_tiles * 64, 4096), 4096);
-        const tile_state_size = std.mem.alignForward(u32, @max(num_tiles * 64, 4096), 4096);
+        // As Mesa sizes them. The tile lists: each tile's initial block (64
+        // bytes), then the PTB takes 4 KiB chunks; the first two it takes
+        // without signalling out of memory (when the kernel would give it
+        // more), so they must be there, and some more saves stalling on
+        // the kernel. The tile state: 256 bytes a tile on V3D 4.x and 7.x
+        // (64 was on the VC4's), which a 1080p frame's 510 tiles overran.
+        const tile_alloc_size = std.mem.alignForward(u32, num_tiles * 64, 4096) + 8192 + 512 * 1024;
+        const tile_state_size = std.mem.alignForward(u32, @max(num_tiles * 256, 4096), 4096);
 
         const slot = &v3d_scratch[v3d_scratch_next];
         v3d_scratch_next = (v3d_scratch_next + 1) % v3d_scratch_slots;
