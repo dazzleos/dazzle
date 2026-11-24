@@ -515,6 +515,9 @@ pub const Dock = struct {
     apps: []App,
     /// The app under the pointer.
     hover: ?usize = null,
+    /// Where the pointer is along the box (with icons turned, those near
+    /// it face the front: see `iconTurns`); null: not on it.
+    focus_x: ?f32 = null,
     /// Network status shown in the status box on the right of the dock.
     network: NetworkStatus = .{ .offline = .{} },
     /// Whether data is moving, shown as arrows beside the network status.
@@ -617,7 +620,7 @@ pub const Dock = struct {
     /// 1080p, scaled down for a smaller one; for fingers (`touch`: a
     /// touchscreen), no smaller than at 1080p (its icons are then about as
     /// big as a fingertip), as long as the status box and an icon fit
-    /// across the screen. More icons than fit overlap (see `iconStep`).
+    /// across the screen. More icons than fit turn to (see `iconTurns`).
     pub fn setScreen(d: *Dock, screen_width: u32, screen_height: u32, touch: bool) void {
         d.screen_width = screen_width;
         d.screen_height = screen_height;
@@ -709,7 +712,10 @@ pub const Dock = struct {
         return false;
     }
 
-    pub const Rect = struct { x: f32, y: f32, size: f32 };
+    /// An icon in the box: its square's left and top, and size; how wide
+    /// it looks (`size`, unless turned), and how far it is turned (see
+    /// `iconTurns`: radians, more than 0 its right edge away).
+    pub const Rect = struct { x: f32, y: f32, size: f32, width: f32 = 0, turn: f32 = 0 };
     /// The status box's width (at 1080p): the volume, in its padding.
     const status_box_width = 56;
     /// How much wider the status box is with the network (its icon and
@@ -771,12 +777,14 @@ pub const Dock = struct {
     }
 
     /// How wide the icons are, in a row: each as big as it is (on its way
-    /// in or out), overlapping if they do not all fit (`iconStep`).
+    /// in or out), and those turned (`iconTurns`) as narrow as they look.
     fn iconsWidth(d: *const Dock) f32 {
-        const n = d.iconCount();
         const step = (icon_size + icon_gap) * d.scale;
-        if (n <= 1) return n * step;
-        return (n - 1) * d.iconStep() + step;
+        var turns: [max_entries]f32 = undefined;
+        d.iconTurns(turns[0..d.entries_len]);
+        var w: f32 = 0;
+        for (d.entries[0..d.entries_len], turns[0..d.entries_len]) |e, t| w += e.k * step * @cos(t);
+        return w;
     }
 
     /// How many icons there are (those on their way in or out counted as
@@ -787,17 +795,70 @@ pub const Dock = struct {
         return n;
     }
 
-    /// How far along each icon is from the one before: an icon and its
-    /// gap, or, when they do not all fit across the screen beside the
-    /// status box (which always shows in full), less: they overlap, like
-    /// an accordion's folds, the last in full.
-    fn iconStep(d: *const Dock) f32 {
+    /// The room across the screen for the icons, beside the status box
+    /// (which always shows in full).
+    fn iconsRoom(d: *const Dock) f32 {
+        return @as(f32, @floatFromInt(d.screen_width)) - 2 * margin * d.scale - 2 * box_pad * d.scale - d.statusWidth();
+    }
+
+    /// The most an icon is turned (about 70°: it looks a third as wide).
+    const max_turn: f32 = 1.22;
+    /// Over how many icons the turn goes from none to the most.
+    const fold_ramp: f32 = 1.5;
+
+    /// When the icons do not all fit across the screen, those towards the
+    /// ends turn, edge on, to take less room (as on Unity's launcher):
+    /// those near the pointer (or, without it, the middle) face the front,
+    /// and the further from it the more they are turned, as much as it
+    /// takes for them to fit. Each one's turn (in `turns`), its right edge
+    /// away to the right of the pointer and its left to the left.
+    fn iconTurns(d: *const Dock, turns: []f32) void {
+        @memset(turns, 0);
         const step = (icon_size + icon_gap) * d.scale;
+        const room = d.iconsRoom();
+        if (d.iconCount() * step <= room) return;
+        const p = d.focusIndex();
+        // How far from the pointer an icon is before it turns: as far as
+        // lets them fit (the less, the narrower they are).
+        var lo: f32 = -fold_ramp;
+        var hi: f32 = d.iconCount();
+        if (d.foldedWidth(lo, p) < room) for (0..24) |_| {
+            const mid = (lo + hi) / 2;
+            if (d.foldedWidth(mid, p) > room) hi = mid else lo = mid;
+        };
+        var at: f32 = 0;
+        for (d.entries[0..d.entries_len], turns) |e, *t| {
+            const c = at + e.k / 2;
+            at += e.k;
+            const f = std.math.clamp((@abs(c - p) - lo) / fold_ramp, 0, 1);
+            t.* = if (c < p) -f * max_turn else f * max_turn;
+        }
+    }
+
+    /// Where along the row (in icons) the pointer is, or the middle.
+    fn focusIndex(d: *const Dock) f32 {
         const n = d.iconCount();
-        if (n <= 1) return step;
-        const room = @as(f32, @floatFromInt(d.screen_width)) - 2 * margin * d.scale - 2 * box_pad * d.scale - d.statusWidth();
-        if (n * step <= room) return step;
-        return std.math.clamp((room - step) / (n - 1), step * 0.1, step);
+        const fx = d.focus_x orelse return n / 2;
+        // Turned to fit, the icons fill the box's room for them, from its
+        // padding.
+        const room = d.iconsRoom();
+        if (!(room > 0)) return n / 2;
+        return std.math.clamp((fx - box_pad * d.scale) / room, 0, 1) * n;
+    }
+
+    /// How wide the row of icons is with those further than `from` icons
+    /// from `p` turned.
+    fn foldedWidth(d: *const Dock, from: f32, p: f32) f32 {
+        const step = (icon_size + icon_gap) * d.scale;
+        var w: f32 = 0;
+        var at: f32 = 0;
+        for (d.entries[0..d.entries_len]) |e| {
+            const c = at + e.k / 2;
+            at += e.k;
+            const f = std.math.clamp((@abs(c - p) - from) / fold_ramp, 0, 1);
+            w += e.k * step * @cos(f * max_turn);
+        }
+        return w;
     }
 
     /// The gap between the box and the bottom of the screen, in pixels.
@@ -871,7 +932,7 @@ pub const Dock = struct {
     pub fn iconRect(d: *const Dock, i: usize) Rect {
         for (d.entries[0..d.entries_len], 0..) |e, j| if (e.app == i) return d.entryRect(j);
         // Not in the row (yet): nowhere.
-        return .{ .x = -1000, .y = 0, .size = 0 };
+        return .{ .x = -1000, .y = 0, .size = 0, .width = 0 };
     }
 
     /// Where the `j`th icon in the row is, as big as it is (the room it
@@ -879,14 +940,17 @@ pub const Dock = struct {
     /// the space between the icons either side, and of the row's height.
     fn entryRect(d: *const Dock, j: usize) Rect {
         const full = icon_size * d.scale;
-        const step = d.iconStep();
+        const step = (icon_size + icon_gap) * d.scale;
+        var turns: [max_entries]f32 = undefined;
+        d.iconTurns(turns[0..d.entries_len]);
         var x = d.rowStart();
-        for (d.entries[0..j]) |e| x += e.k * step;
+        for (d.entries[0..j], turns[0..j]) |e, t| x += e.k * step * @cos(t);
         const k = d.entries[j].k;
         const size = full * k;
+        const w = @cos(turns[j]);
         // Back by half the gap before it that it has not grown into yet.
         const gap = icon_gap * d.scale;
-        return .{ .x = x - (1 - k) * gap / 2, .y = box_pad * d.scale + (full - size) / 2, .size = size };
+        return .{ .x = x - (1 - k) * gap * w / 2, .y = box_pad * d.scale + (full - size) / 2, .size = size, .width = size * w, .turn = turns[j] };
     }
 
     /// Where the row starts, in the box.
@@ -914,7 +978,7 @@ pub const Dock = struct {
         for (d.entries[0..d.entries_len], 0..) |e, j| {
             const i = e.app orelse continue;
             const r = d.entryRect(j);
-            if (x >= r.x and x < r.x + r.size and y >= r.y and y < r.y + r.size) found = i;
+            if (x >= r.x and x < r.x + r.width and y >= r.y and y < r.y + r.size) found = i;
         }
         return found;
     }
@@ -943,6 +1007,7 @@ pub const Dock = struct {
                 const r = d.entryRect(j);
                 const app: ?*const App = if (e.app) |i| &d.apps[i] else null;
                 const tile: Tile = .{
+                    .turn = r.turn,
                     .look = if (app) |ap| .of(ap) else e.gone,
                     .hover = e.app != null and d.hover == e.app.?,
                     .running = if (app) |ap| ap.pid != null else false,
@@ -991,6 +1056,8 @@ pub const Dock = struct {
     /// highlight behind it while the pointer is on it, and the dot under
     /// it while it runs; as big as it is (`k`, on its way in or out).
     const Tile = struct {
+        /// How far it is turned (see `Dock.iconTurns`).
+        turn: f32 = 0,
         look: Look,
         hover: bool,
         running: bool,
@@ -1004,11 +1071,46 @@ pub const Dock = struct {
         }
 
         fn origin(t: Tile, r: Rect) [2]f32 {
-            return .{ r.x - t.margin(), r.y - t.margin() };
+            return .{ r.x - t.margin() * @cos(t.turn), r.y - t.margin() };
+        }
+
+        /// Turned (to fit, see `Dock.iconTurns`): its square, and what is
+        /// on it, edge on in perspective, the highlight and dot as ever.
+        fn paintTurned(t: *const Tile, n: *kete.WidgetNode, p: *kete.Painter) void {
+            const c = t.theme.colors();
+            const argb = kete.gfx.Color.argb;
+            const cv = p.canvas();
+            const s = t.scale;
+            const k = t.k;
+            const pad = t.margin();
+            const size = icon_size * s * k;
+            const cx = n.size.w / 2;
+            const cy = pad + size / 2;
+            var pts: [4 * corner_points]kete.gfx.Point = undefined;
+            if (t.hover) cv.fillPolygon(turnedSquare(&pts, cx, cy, size + 2 * pad, 14 * s * k, t.turn), argb(c.hover_background));
+            cv.fillPolygon(turnedSquare(&pts, cx, cy, size, 12 * s * k, t.turn), argb(t.look.color));
+            // Its symbol or initial, as narrow as the square looks.
+            const saved = p.transform;
+            const o = cv.origin;
+            p.transform = kete.gfx.Affine.scaling(@cos(t.turn), 1).about(.{ o[0] + cx, o[1] + cy });
+            if (t.look.icon) |icon| {
+                const isz = @round(36 * s * k);
+                if (isz >= 1) p.icon(ui_icons.of(icon), cx - isz / 2, cy - isz / 2, isz, argb(0xffffffff));
+            } else if (p.ui.font) |f| if (t.look.initial_len > 0 and 30 * s * k >= 1) {
+                const style: kete.font.Style = .{ .font = f, .size = 30 * s * k };
+                const initial = t.look.initial[0..t.look.initial_len];
+                _ = p.text(style.size, cx - kete.font.measure(style, initial) / 2, cy + style.ascent() * 0.36, initial, argb(0xffffffff));
+            };
+            p.transform = saved;
+            _ = p.canvas();
+            if (t.running) {
+                const dot = 6 * s * k;
+                cv.fillRoundedRect(.{ .x = cx - dot / 2, .y = n.size.h - dot, .w = dot, .h = dot }, .all(dot / 2), argb(c.dot));
+            }
         }
 
         fn width(t: Tile, r: Rect) f32 {
-            return r.size + 2 * t.margin();
+            return r.width + 2 * t.margin() * @cos(t.turn);
         }
 
         /// Down to under the running dot.
@@ -1022,6 +1124,7 @@ pub const Dock = struct {
         }
 
         pub fn paint(t: *const Tile, n: *kete.WidgetNode, p: *kete.Painter) void {
+            if (t.turn != 0) return t.paintTurned(n, p);
             const c = t.theme.colors();
             const argb = kete.gfx.Color.argb;
             const cv = p.canvas();
@@ -1045,6 +1148,30 @@ pub const Dock = struct {
             }
         }
     };
+
+    /// A rounded square `size` across, its corners `radius`, round
+    /// (`cx`, `cy`), turned by `turn` about its upright middle line and
+    /// seen in perspective: its outline.
+    fn turnedSquare(out: *[4 * corner_points]kete.gfx.Point, cx: f32, cy: f32, size: f32, radius: f32, turn: f32) []const kete.gfx.Point {
+        const h = size / 2;
+        const r = @min(radius, h);
+        const centres = [4][2]f32{ .{ h - r, -(h - r) }, .{ h - r, h - r }, .{ -(h - r), h - r }, .{ -(h - r), -(h - r) } };
+        const starts = [4]f32{ -std.math.pi / 2.0, 0, std.math.pi / 2.0, std.math.pi };
+        // The eye a few squares away: the edge turned away smaller.
+        const eye = 3 * size;
+        var i: usize = 0;
+        for (centres, starts) |ctr, a0| for (0..corner_points) |k| {
+            const a = a0 + @as(f32, @floatFromInt(k)) / @as(f32, corner_points - 1) * std.math.pi / 2.0;
+            const u = ctr[0] + r * @cos(a);
+            const v = ctr[1] + r * @sin(a);
+            const z = u * @sin(turn);
+            const s = eye / (eye + z);
+            out[i] = .{ cx + u * @cos(turn) * s, cy + v * s };
+            i += 1;
+        };
+        return out[0..i];
+    }
+    const corner_points = 6;
 
     /// The status box: an outline, updates, the time, the volume and the
     /// network (the time and the network if shown).
@@ -1105,8 +1232,13 @@ pub const Dock = struct {
     /// it, the tooltip: gone, and due again a while later; at once if one
     /// was showing, moving along the icons).
     pub fn pointerAt(d: *Dock, x: ?f64, y: f64, now: u64) bool {
+        // Icons turned to fit face the front near it: they move with it.
+        const focus: ?f32 = if (x) |px| @floatCast(px) else null;
+        const folded = d.iconCount() * (icon_size + icon_gap) * d.scale > d.iconsRoom();
+        const refold = folded and !std.meta.eql(focus, d.focus_x);
+        d.focus_x = focus;
         const under = if (x) |px| d.hit(px, y) else null;
-        if (under == d.hover) return false;
+        if (under == d.hover) return refold;
         const was_shown = d.tooltip_shown != null;
         d.hover = under;
         d.tooltip_shown = null;
@@ -1154,7 +1286,7 @@ pub const Dock = struct {
         const r = d.iconRect(i);
         const at = d.place();
         const fw: f32 = @floatFromInt(w);
-        const x = std.math.clamp(@round(@as(f32, @floatFromInt(at.x)) + r.x + r.size / 2 - fw / 2), 0, @as(f32, @floatFromInt(d.screen_width)) - fw);
+        const x = std.math.clamp(@round(@as(f32, @floatFromInt(at.x)) + r.x + r.width / 2 - fw / 2), 0, @as(f32, @floatFromInt(d.screen_width)) - fw);
         return .{ .picture = tip, .x = @intFromFloat(x), .y = at.y - @as(i32, @intCast(h)) - @as(i32, @intFromFloat(@round(8 * d.scale))) };
     }
 
@@ -1296,7 +1428,7 @@ test "icons and the status box are in a row in a box, and clicks find the apps" 
     try testing.expectEqual(light.status_border, at(&d, rs.x + rs.width / 2, rs.y + 1));
 }
 
-test "more icons than fit across the screen overlap; the status box shows in full" {
+test "more icons than fit across the screen turn edge on at the ends, not overlapping; the status box shows in full" {
     var apps: [14]App = undefined;
     const names = "abcdefghijklmn";
     for (&apps, 0..) |*ap, i| ap.* = .{ .name = names[i .. i + 1], .label = names[i .. i + 1], .path = "/apps/x/x" };
@@ -1309,21 +1441,32 @@ test "more icons than fit across the screen overlap; the status box shows in ful
     try testing.expectEqual(@as(f32, 1), d.scale);
     try testing.expect(d.boxWidth() <= 720 - 2 * Dock.margin);
     const rs = d.statusRect();
-    try testing.expect(rs.x + rs.width <= @as(f32, @floatFromInt(d.boxWidth())));
-    // The icons are full size, but closer than their width.
-    const r0 = d.iconRect(0);
-    const r1 = d.iconRect(1);
+    try testing.expect(rs.x + rs.width <= @as(f32, @floatFromInt(d.boxWidth())) + 0.01);
+    // Side by side, none over another; the last clear of the status box.
+    for (0..13) |i| {
+        const a = d.iconRect(i);
+        const b = d.iconRect(i + 1);
+        try testing.expect(a.x + a.width <= b.x + 0.01);
+        // Each is pressed in its middle.
+        try testing.expectEqual(@as(?usize, i), d.hit(a.x + a.width / 2, a.y + a.size / 2));
+    }
     const last = d.iconRect(13);
-    try testing.expectEqual(@as(f32, Dock.icon_size), r0.size);
-    try testing.expect(r1.x - r0.x < r0.size);
-    try testing.expect(last.x + last.size <= rs.x);
-    // Where they overlap, the later is pressed; each can be.
-    try testing.expectEqual(@as(?usize, 1), d.hit(r1.x + 1, r1.y + 1));
-    try testing.expectEqual(@as(?usize, 0), d.hit(r0.x + 1, r0.y + 1));
-    try testing.expectEqual(@as(?usize, 13), d.hit(last.x + last.size - 1, last.y + 1));
-    // With room, they do not.
+    try testing.expect(last.x + last.width <= rs.x + 0.01);
+    // The middle ones face the front most; the ends are turned away, each
+    // way, all the way.
+    try testing.expect(@abs(d.iconRect(7).turn) < 0.5);
+    try testing.expectApproxEqAbs(-Dock.max_turn, d.iconRect(0).turn, 0.01);
+    try testing.expectApproxEqAbs(Dock.max_turn, d.iconRect(13).turn, 0.01);
+    try testing.expect(d.iconRect(0).width < d.iconRect(0).size);
+    // The pointer at the left: those there face the front.
+    _ = d.pointerAt(d.iconRect(0).x + 1, d.iconRect(0).y + 1, 0);
+    try testing.expect(@abs(d.iconRect(0).turn) < 0.5);
+    try testing.expect(d.iconRect(13).turn > 0);
+    d.draw();
+    // With room, none is turned.
+    _ = d.pointerAt(null, 0, 0);
     d.setScreen(1920, 1080, true);
-    try testing.expect(d.iconRect(1).x - d.iconRect(0).x > Dock.icon_size);
+    for (0..14) |i| try testing.expectEqual(@as(f32, 0), d.iconRect(i).turn);
 }
 
 test "the dock floats in a rounded box in the middle of the bottom, and slides down and back" {
