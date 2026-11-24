@@ -780,6 +780,10 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                         updates.checkNow();
                         req.respond("200 OK", "text/plain", "checking\n");
                     },
+                    .install => |name| {
+                        updates.installApp(name);
+                        req.respond("200 OK", "text/plain", "checking, then installing it\n");
+                    },
                     .update => {
                         updates.installAll();
                         req.respond("200 OK", "text/plain", "checking, then installing what is newer\n");

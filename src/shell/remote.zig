@@ -40,6 +40,8 @@
 //!                                   notifications, the default)
 //!     /updates                      how updates stand, as text
 //!     /check                        checks for updates now
+//!     /install?app=motu             checks, then installs that app (one
+//!                                   not installed yet)
 //!     /update                       checks, then installs everything
 //!                                   newer (the system starts when the
 //!                                   computer restarts)
@@ -73,6 +75,8 @@ pub const Command = union(enum) {
     /// The text (in the request's buffer).
     type: []const u8,
     launch: []const u8,
+    /// The app to install (in the request's buffer).
+    install: []const u8,
     /// The app (in the request's buffer); ended at once, or asked to close.
     quit: struct { app: []const u8, force: bool },
     /// What to do to the top window, of `app` (its app ID or title) or of
@@ -234,6 +238,7 @@ fn parse(text: []const u8, code: u32, text_buf: []u8) Parsed {
         .pressed = if (param(query, "pressed")) |p| !std.mem.eql(u8, p, "0") else null,
     } } };
     if (std.mem.eql(u8, path, "/type")) return .{ .command = .{ .type = decode(param(query, "text") orelse return .bad, text_buf) orelse return .bad } };
+    if (std.mem.eql(u8, path, "/install")) return .{ .command = .{ .install = decode(param(query, "app") orelse return .bad, text_buf) orelse return .bad } };
     if (std.mem.eql(u8, path, "/launch")) return .{ .command = .{ .launch = decode(param(query, "app") orelse return .bad, text_buf) orelse return .bad } };
     if (std.mem.eql(u8, path, "/quit")) return .{ .command = .{ .quit = .{
         .app = decode(param(query, "app") orelse return .bad, text_buf) orelse return .bad,

@@ -42,6 +42,9 @@ pub const Updates = struct {
     os_job: ?store.Job = null,
     /// Install what is newer once the check under way is done.
     install_after_check: bool = false,
+    /// An app to install once the check under way is done.
+    install_app_buf: [64]u8 = undefined,
+    install_app_len: usize = 0,
     /// What went wrong last (remote control says it).
     problem_buf: [160]u8 = undefined,
     problem_len: usize = 0,
@@ -96,6 +99,12 @@ pub const Updates = struct {
                 u.install_after_check = false;
                 u.installNow();
             }
+            if (u.install_app_len > 0 and u.apps.job == null) {
+                const name = u.install_app_buf[0..u.install_app_len];
+                u.install_app_len = 0;
+                u.apps.install(name);
+                if (u.apps.job == null) u.setProblem("cannot install {s}: not in the catalogue", .{name});
+            }
         }
         return changed;
     }
@@ -125,6 +134,15 @@ pub const Updates = struct {
     pub fn installAll(u: *Updates) void {
         u.checkNow();
         u.install_after_check = true;
+    }
+
+    /// Checks for updates now, then installs the app `name` (not
+    /// installed yet), if the catalogue has it.
+    pub fn installApp(u: *Updates, name: []const u8) void {
+        u.checkNow();
+        const n = @min(name.len, u.install_app_buf.len);
+        @memcpy(u.install_app_buf[0..n], name[0..n]);
+        u.install_app_len = n;
     }
 
     fn installNow(u: *Updates) void {
