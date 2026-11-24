@@ -25,7 +25,8 @@ comptime {
         .public, .layers, .my_location, .fullscreen, .fullscreen_exit, .code, .chat, .forum,
         .group, .logout, .send, .volume_up, .volume_down, .volume_mute, .volume_off, .speaker,
         .tv, .music_note, .audio_file, .palette, .dark_mode, .light_mode, .power_settings_new,
-        .wifi_off,
+        .wifi_off, .screen_rotation, .keyboard_capslock, .backspace, .space_bar,
+        .keyboard_return, .keyboard_hide,
     };
 }
 

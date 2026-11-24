@@ -44,6 +44,7 @@ const perf_mod = @import("perf.zig");
 const quick_mod = @import("quick.zig");
 const notice_mod = @import("notice.zig");
 const lock_mod = @import("lock.zig");
+const osk_mod = @import("osk.zig");
 const kete_panel = @import("kete_panel.zig");
 const ime_mod = @import("ime.zig");
 const keyboard = @import("keyboard.zig");
@@ -144,6 +145,14 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
     // keyboard: it gets each key first, and its candidates show by the
     // text's cursor.
     var ime: ime_mod.Ime = .{ .panel = try kit.panel() };
+    // The on-screen keyboard, for touchscreens (see osk.zig), and the
+    // touches on it; the last input was a touch (it shows only then).
+    var osk: osk_mod.Osk = .init(try kit.gpuPanel(), renderer.width, renderer.height, dock.scale);
+    var osk_touches: TouchSet = .{};
+    var last_touch = false;
+    // The text input it was shown for (another one, and it shows again
+    // after being hidden).
+    var osk_for: ?*server_mod.TextInput = null;
     var candidates_hidden = true;
     var parental: sys.system.Parental = .{};
     var locked = false;
@@ -210,6 +219,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
     // What the frames cost, for remote control's status.
     var frame_times: FrameTimes = .{};
     renderer.setPanelHidden(.perf, true);
+    renderer.setPanelHidden(.keyboard, true);
     renderer.setPanelHidden(.quick, true);
     renderer.setPanelHidden(.notice, true);
 
@@ -467,6 +477,43 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
             const c = apps_watch.take();
             apps_changes = apps_changes.with(c);
         }
+        // The on-screen keyboard: what its keys typed, to the app with the
+        // keyboard; shown while that has a text field enabled and the last
+        // input was a touch (not once hidden, until another text field),
+        // with the windows' work area above it.
+        {
+            for (osk.take()) |typed| switch (typed) {
+                .text => {
+                    server.textInputCommitString(typed.slice());
+                    server.textInputDone();
+                },
+                .key => |code| {
+                    const ms: u32 = @truncate(sys.nowNs() / std.time.ns_per_ms);
+                    server.keyboardKey(ms, code, true);
+                    server.keyboardKey(ms, code, false);
+                },
+            };
+            const input_now = server.activeTextInput();
+            if (input_now != osk_for) {
+                osk_for = input_now;
+                osk.dismissed = false;
+            }
+            const want = input_now != null and last_touch and !osk.dismissed and !locked and dock_shown and !server.fullscreenTop();
+            if (want != osk.shown) {
+                osk.shown = want;
+                renderer.setPanelHidden(.keyboard, !want);
+                var wa = with_dock;
+                if (want) wa.height = @intCast(@max(osk.top(band_y), 0));
+                server.setWorkArea(wa);
+                if (want) osk.changed = true;
+                panels_damaged = true;
+                server.damaged = true;
+            }
+            if (osk.shown and osk.needsDraw()) {
+                renderer.setPanelAt(.keyboard, osk.draw(sys.nowNs()), 0, osk.top(band_y));
+                panels_damaged = true;
+            }
+        }
         // The screen turned (the orientation chosen in Settings), or a
         // touchscreen came or went (the dock is sized for fingers then):
         // what is sized by them, again.
@@ -477,6 +524,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                 dock_touch = touch;
                 renderer.setTurned(turn) catch |err| print(sys.log_warning ++ "dazzle-shell: cannot turn the cursor: {s}\n", .{@errorName(err)});
                 dock.setScreen(renderer.width, renderer.height, touch);
+                osk.setScreen(renderer.width, renderer.height, dock.scale);
                 quick.setScale(dock.scale);
                 notice.resize(gpa, renderer.width, dock.scale) catch |err| print(sys.log_warning ++ "dazzle-shell: cannot size the notice: {s}\n", .{@errorName(err)});
                 perf.setScreen(renderer.width, renderer.height);
@@ -486,6 +534,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                 server.output.width = renderer.width;
                 server.output.height = renderer.height;
                 server.work_area = if (dock_shown) with_dock else server.screen();
+                if (osk.shown) server.work_area.height = @intCast(@max(osk.top(band_y), 0));
                 server.fitWindows();
                 server.setWorkArea(server.work_area);
                 pointer.max_x = @floatFromInt(renderer.width - 1);
@@ -575,6 +624,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                             .{ .candidates, ime.panel.? },
                             .{ .perf, perf.panel },
                             .{ .lock, lock.panel },
+                            .{ .keyboard, osk.panel },
                         }) catch {};
                         req.respond("200 OK", "text/plain; charset=utf-8", out.items);
                     },
@@ -621,6 +671,18 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                     .scroll => |dy| {
                         queue(q, qn, .{ .axis = .{ .axis = 0, .value = dy } });
                         queue(q, qn, .frame);
+                        req.respond("200 OK", "text/plain", "ok\n");
+                    },
+                    .tap => |at| {
+                        // As a touchscreen would say it: 0 to 1 across the
+                        // display (on its side, the screen's down is the
+                        // display's across).
+                        const sx = at[0] / @as(f64, @floatFromInt(@max(renderer.width, 2) - 1));
+                        const sy = at[1] / @as(f64, @floatFromInt(@max(renderer.height, 2) - 1));
+                        const tx = if (renderer.turned) sy else sx;
+                        const ty = if (renderer.turned) 1 - sx else sy;
+                        queue(q, qn, .{ .touch = .{ .kind = .down, .id = 1000, .x = tx, .y = ty } });
+                        queue(q, qn, .{ .touch = .{ .kind = .up, .id = 1000, .x = tx, .y = ty } });
                         req.respond("200 OK", "text/plain", "ok\n");
                     },
                     .key => |k| {
@@ -726,6 +788,20 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
             } else takeQueued(&remote_events, &remote_len, &events);
             if (batch.len == 0) continue;
             for (batch) |e| {
+                // The on-screen keyboard shows after a touch, not after a
+                // key typed or a button pressed (a keyboard, a mouse).
+                switch (e) {
+                    .touch => |t| if (t.kind == .down) {
+                        last_touch = true;
+                    },
+                    .key => |k| if (k.pressed) {
+                        last_touch = false;
+                    },
+                    .button => |b| if (b.pressed and !(osk.shown and osk.local(pointer.x, pointer.y, osk.top(band_y)) != null)) {
+                        last_touch = false;
+                    },
+                    else => {},
+                }
                 // Locked: the keys type the password, and the pointer moves
                 // over the lock screen and clicks in it; nothing goes to
                 // the windows.
@@ -821,6 +897,25 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                     const ty = if (renderer.turned) t.x else t.y;
                     const x = tx * @as(f64, @floatFromInt(renderer.width - 1));
                     const y = ty * @as(f64, @floatFromInt(renderer.height - 1));
+                    // On the on-screen keyboard: its keys, pressed and let go.
+                    if (t.kind == .down) if (osk.local(x, y, osk.top(band_y))) |at| {
+                        osk_touches.set(t.id);
+                        osk.panel.pointerMotion(at);
+                        osk.panel.pointerButton(at, true);
+                        continue;
+                    };
+                    if (osk_touches.has(t.id)) {
+                        const at: [2]f32 = .{ @floatCast(x), @floatCast(y - @as(f64, @floatFromInt(osk.top(band_y)))) };
+                        switch (t.kind) {
+                            .motion => osk.panel.pointerMotion(at),
+                            .up => {
+                                _ = osk_touches.unset(t.id);
+                                osk.panel.pointerButton(at, false);
+                            },
+                            .down => {},
+                        }
+                        continue;
+                    }
                     const on_dock = dock_visible and dock.local(x, y) != null;
                     switch (t.kind) {
                         .down => if (quick.local(x, y)) |at| {
@@ -859,6 +954,12 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                     if (dock_tap == null) continue;
                 }
                 if (e == .button) pointer.flushMotion(&server, time_ms);
+                // Clicked on the on-screen keyboard: its keys.
+                if (e == .button and e.button.code == evdev.btn_left) if (osk.local(pointer.x, pointer.y, osk.top(band_y))) |at| {
+                    osk.panel.pointerMotion(at);
+                    osk.panel.pointerButton(at, e.button.pressed);
+                    continue;
+                };
                 // While the quick settings are shown, the left button is
                 // theirs: pressed on them, it does what is there; pressed
                 // elsewhere (but the status box, which toggles them), it
@@ -1971,6 +2072,7 @@ test {
     _ = @import("quick.zig");
     _ = @import("notice.zig");
     _ = @import("lock.zig");
+    _ = @import("osk.zig");
     _ = @import("kete_panel.zig");
     _ = @import("remote.zig");
     _ = @import("glass.zig");

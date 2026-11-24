@@ -338,6 +338,8 @@ pub const PanelId = enum {
     candidates,
     /// Parental controls' lock screen, over everything.
     lock,
+    /// The on-screen keyboard, above the dock.
+    keyboard,
 };
 const n_panels = @typeInfo(PanelId).@"enum".field_names.len;
 
@@ -548,6 +550,7 @@ pub const Renderer = struct {
         .notice = 2,
         .candidates = null,
         .lock = null,
+        .keyboard = null,
     });
 
     fn panelLayers(r: *Renderer) ?vc4.kms.Overlays {

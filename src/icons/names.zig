@@ -131,4 +131,12 @@ pub const Icon = enum {
     // The dock's quick settings.
     power_settings_new,
     wifi_off,
+    // The Display page.
+    screen_rotation,
+    // The on-screen keyboard.
+    keyboard_capslock,
+    backspace,
+    space_bar,
+    keyboard_return,
+    keyboard_hide,
 };

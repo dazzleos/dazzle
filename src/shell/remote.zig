@@ -12,6 +12,8 @@
 //!                                   mouse does: an app that has taken
 //!                                   the pointer, as Motu does, turns)
 //!     /click?x=&y=[&button=right]   moves the pointer there and clicks
+//!     /tap?x=&y=                    touches the screen there (as a
+//!                                   touchscreen does), and lets go
 //!     /button?button=left&pressed=1 presses (or lets go of) a button
 //!     /scroll?dy=                   scrolls (positive: down)
 //!     /key?key=28[&pressed=1]       presses a key (a Linux key code) and
@@ -75,6 +77,8 @@ pub const Command = union(enum) {
     /// A notification to show: its title and body (in the request's
     /// buffer), and its icon's name, if one was given.
     notify: struct { title: []const u8, body: []const u8, icon: ?[]const u8 },
+    /// A touch at (x, y) on the screen, down and up.
+    tap: [2]f64,
     updates,
     check,
     update,
@@ -207,6 +211,7 @@ fn parse(text: []const u8, code: u32, text_buf: []u8) Parsed {
         .y = num(query, "y") orelse return .bad,
         .button = buttonCode(param(query, "button") orelse "left") orelse return .bad,
     } } };
+    if (std.mem.eql(u8, path, "/tap")) return .{ .command = .{ .tap = .{ num(query, "x") orelse return .bad, num(query, "y") orelse return .bad } } };
     if (std.mem.eql(u8, path, "/button")) return .{ .command = .{ .button = .{
         .button = buttonCode(param(query, "button") orelse "left") orelse return .bad,
         .pressed = !std.mem.eql(u8, param(query, "pressed") orelse "1", "0"),
@@ -334,6 +339,7 @@ test "apps, windows and updates are controlled directly" {
     try testing.expect(parse("GET /window?code=123456&do=maximize HTTP/1.1\r\n\r\n", 123456, &buf).command.window.app == null);
     try testing.expect(parse("GET /window?code=123456&do=explode HTTP/1.1\r\n\r\n", 123456, &buf) == .bad);
     try testing.expect(parse("GET /update?code=123456 HTTP/1.1\r\n\r\n", 123456, &buf).command == .update);
+    try testing.expectEqual([2]f64{ 10, 20 }, parse("GET /tap?code=123456&x=10&y=20 HTTP/1.1\r\n\r\n", 123456, &buf).command.tap);
     try testing.expect(parse("GET /restart?code=123456 HTTP/1.1\r\n\r\n", 123456, &buf).command == .restart);
     // Not without the code.
     try testing.expect(parse("GET /restart HTTP/1.1\r\n\r\n", 123456, &buf) == .forbidden);
