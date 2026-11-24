@@ -243,6 +243,8 @@ pub fn osPrefix(config: []const u8) ?u8 {
 const added_settings = [_][]const u8{
     // The firmware's wait before starting the kernel (a second by default).
     "boot_delay=0",
+    // A display on the DSI connector, found by the firmware (its overlay).
+    "display_auto_detect=1",
 };
 
 /// config.txt with its os_prefix lines for `slot` (or one added), and the
@@ -405,12 +407,12 @@ test "config.txt's os_prefix picks the slot" {
     var first: [256]u8 = undefined;
     const changed = setOsPrefix(config, 'b', &first);
     // A card made before: the settings it lacks are added.
-    try std.testing.expectEqualStrings("# Dazzle\narm_64bit=0\nos_prefix=slot-b/\ncamera_auto_detect=1\nboot_delay=0\n", changed);
+    try std.testing.expectEqualStrings("# Dazzle\narm_64bit=0\nos_prefix=slot-b/\ncamera_auto_detect=1\nboot_delay=0\ndisplay_auto_detect=1\n", changed);
     try std.testing.expectEqual(@as(?u8, 'b'), osPrefix(changed));
     try std.testing.expectEqual(@as(?u8, null), osPrefix("arm_64bit=0\n"));
-    try std.testing.expectEqualStrings("arm_64bit=0\nos_prefix=slot-a/\nboot_delay=0\n", setOsPrefix("arm_64bit=0", 'a', &out));
+    try std.testing.expectEqualStrings("arm_64bit=0\nos_prefix=slot-a/\nboot_delay=0\ndisplay_auto_detect=1\n", setOsPrefix("arm_64bit=0", 'a', &out));
     // Set already (to whatever): left as it is, and not added twice.
-    try std.testing.expectEqualStrings("boot_delay=2\nos_prefix=slot-b/\n", setOsPrefix("boot_delay=2\nos_prefix=slot-a/\n", 'b', &out));
+    try std.testing.expectEqualStrings("boot_delay=2\nos_prefix=slot-b/\ndisplay_auto_detect=1\n", setOsPrefix("boot_delay=2\nos_prefix=slot-a/\n", 'b', &out));
     var again: [256]u8 = undefined;
     try std.testing.expectEqualStrings(changed, setOsPrefix(changed, 'b', &again));
 }

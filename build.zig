@@ -783,18 +783,19 @@ const arm64_device_trees = [_][]const u8{
 
 /// The device tree overlays the firmware may apply: the display driver
 /// (config.txt's dtoverlay=vc4-kms-v3d, which overlay_map.dtb redirects to
-/// vc4-kms-v3d-pi4 on the Pi 4 and vc4-kms-v3d-pi5 on the Pi 5) and the
+/// vc4-kms-v3d-pi4 on the Pi 4 and vc4-kms-v3d-pi5 on the Pi 5), the Touch
+/// Display 2's (display_auto_detect applies one when it is there) and the
 /// cameras (camera_auto_detect picks one). overlay_map.dtb tells the firmware
 /// which overlays suit which board.
-const overlays = [_][]const u8{ "vc4-kms-v3d.dtbo", "vc4-kms-v3d-pi4.dtbo", "vc4-kms-v3d-pi5.dtbo", "imx219.dtbo", "ov5647.dtbo", "overlay_map.dtb" };
+const overlays = [_][]const u8{ "vc4-kms-v3d.dtbo", "vc4-kms-v3d-pi4.dtbo", "vc4-kms-v3d-pi5.dtbo", "vc4-kms-dsi-ili9881-7inch.dtbo", "vc4-kms-dsi-ili9881-5inch.dtbo", "imx219.dtbo", "ov5647.dtbo", "overlay_map.dtb" };
 
 /// Each slot's overlays/README. The firmware only reads overlays from
 /// `${os_prefix}overlays/` when this file is there (it says nothing
 /// otherwise, and looks in /overlays/ instead).
 const overlays_readme =
     \\Device tree overlays for this Dazzle OS slot (vc4-kms-v3d for the
-    \\display, imx219 and ov5647 for the cameras), from the Raspberry Pi
-    \\kernel.
+    \\display, vc4-kms-dsi-ili9881 for the Touch Display 2, imx219 and
+    \\ov5647 for the cameras), from the Raspberry Pi kernel.
     \\
     \\The Raspberry Pi firmware loads overlays from the folder os_prefix
     \\names (config.txt) only when this README is here: keep it.

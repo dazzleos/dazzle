@@ -25,6 +25,12 @@ initramfs initramfs.cpio followkernel
 dtoverlay=vc4-kms-v3d
 dtparam=audio=on
 
+# A display on the DSI connector (the Raspberry Pi Touch Display 2): the
+# firmware finds which is there and applies its overlay from the slot's
+# overlays/ (vc4-kms-dsi-ili9881-7inch or -5inch). Not applied without one:
+# vc4 would wait for the panel, and show nothing on HDMI either.
+display_auto_detect=1
+
 # The camera: the firmware finds which Camera Module is on the connector
 # and applies its overlay from the slot's overlays/ (imx219 or ov5647, the
 # Raspberry Pi kernel's). To choose one by hand instead, set

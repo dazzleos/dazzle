@@ -128,6 +128,8 @@ pub const ModeGetConnector = extern struct {
 };
 
 pub const connection_connected = 1;
+/// DRM_MODE_CONNECTOR_DSI.
+pub const connector_dsi = 16;
 
 pub const ModeGetEncoder = extern struct {
     encoder_id: u32 = 0,
@@ -309,13 +311,16 @@ pub fn findOutput(fd: linux.fd_t) !Output {
     };
     try ioctl(fd, IOCTL_MODE_GETRESOURCES, &res);
 
-    for (connectors[0..res.count_connectors]) |connector_id| {
+    // A display on the DSI connector first (one attached to the board, as
+    // the Touch Display 2 is), then any other (HDMI).
+    for ([_]bool{ true, false }) |want_dsi| for (connectors[0..res.count_connectors]) |connector_id| {
         var modes: [max_modes]ModeInfo = undefined;
         var conn_encoders: [max_objects]u32 = undefined;
 
         var conn: ModeGetConnector = .{ .connector_id = connector_id };
         try ioctl(fd, IOCTL_MODE_GETCONNECTOR, &conn);
         if (conn.connection != connection_connected or conn.count_modes == 0) continue;
+        if ((conn.connector_type == connector_dsi) != want_dsi) continue;
         conn = .{
             .connector_id = connector_id,
             .modes_ptr = @intFromPtr(&modes),
@@ -348,7 +353,7 @@ pub fn findOutput(fd: linux.fd_t) !Output {
                     return .{ .connector_id = connector_id, .crtc_id = crtc_id, .crtc_index = @intCast(index), .mode = mode };
             }
         }
-    }
+    };
     return error.NoConnectedOutput;
 }
 
