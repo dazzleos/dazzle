@@ -287,6 +287,9 @@ pub const Output = struct {
     /// masks refer to.
     crtc_index: u32,
     mode: ModeInfo,
+    /// On the DSI connector (a display attached to the board: the Touch
+    /// Display 2), not HDMI.
+    dsi: bool = false,
 };
 
 const max_objects = 16;
@@ -346,11 +349,11 @@ pub fn findOutput(fd: linux.fd_t) !Output {
             ioctl(fd, IOCTL_MODE_GETENCODER, &enc) catch continue;
             if (encoder_id == conn.encoder_id and enc.crtc_id != 0) {
                 if (std.mem.indexOfScalar(u32, crtcs[0..res.count_crtcs], enc.crtc_id)) |index|
-                    return .{ .connector_id = connector_id, .crtc_id = enc.crtc_id, .crtc_index = @intCast(index), .mode = mode };
+                    return .{ .connector_id = connector_id, .crtc_id = enc.crtc_id, .crtc_index = @intCast(index), .mode = mode, .dsi = want_dsi };
             }
             for (crtcs[0..res.count_crtcs], 0..) |crtc_id, index| {
                 if (enc.possible_crtcs & (@as(u32, 1) << @intCast(index)) != 0)
-                    return .{ .connector_id = connector_id, .crtc_id = crtc_id, .crtc_index = @intCast(index), .mode = mode };
+                    return .{ .connector_id = connector_id, .crtc_id = crtc_id, .crtc_index = @intCast(index), .mode = mode, .dsi = want_dsi };
             }
         }
     };

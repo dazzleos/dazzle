@@ -741,8 +741,13 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                 var dock_tap: ?[2]f64 = null;
                 if (e == .touch) {
                     const t = e.touch;
-                    const x = t.x * @as(f64, @floatFromInt(renderer.width - 1));
-                    const y = t.y * @as(f64, @floatFromInt(renderer.height - 1));
+                    // On a panel used on its side: its own across is the
+                    // screen's down, and its down the screen's across,
+                    // from the right.
+                    const tx = if (renderer.turned) 1 - t.y else t.x;
+                    const ty = if (renderer.turned) t.x else t.y;
+                    const x = tx * @as(f64, @floatFromInt(renderer.width - 1));
+                    const y = ty * @as(f64, @floatFromInt(renderer.height - 1));
                     const on_dock = dock_visible and dock.local(x, y) != null;
                     switch (t.kind) {
                         .down => if (quick.local(x, y)) |at| {

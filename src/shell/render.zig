@@ -10,6 +10,12 @@
 //! copies of shared-memory buffers, in 32-bit or RGB565 pixels. The quad
 //! shader is shaders/quad.zig.
 //!
+//! A panel upright (the Touch Display 2, 720 by 1280) is used on its side:
+//! the screen is as wide as the panel is tall (`Renderer.turned`). Every
+//! frame for it is composited (the display can turn a plane over, not a
+//! quarter), its quads turned into the panel's frame, and the cursor's
+//! picture turned too.
+//!
 //! A rounded window (one whose client asked, with dazzle_decoration_v1)
 //! is drawn in pieces: most of it as it is, and its corners blended, cut
 //! to its radius, with its shadow in strips around it (shaders/window.zig).
@@ -238,25 +244,47 @@ fn quad(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, index: us
 /// screenshot taken in bands (see `Renderer.capture`), each band's top.
 var band_top: i32 = 0;
 
+/// While a frame for a display turned a quarter is recorded
+/// (`Renderer.turned`): the screen's positions are turned into the frame's,
+/// the screen's left side at the frame's bottom, its top at the frame's
+/// left. (Not for a screenshot, drawn upright.)
+var turning: bool = false;
+
+/// Where the screen's point (`x`, `y`) is in a frame `h` tall, turned.
+fn turned(x: i32, y: i32, h: i32) [2]i32 {
+    return .{ y, h - x };
+}
+
 fn rect(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, index: usize, t: server.Texture, x: i32, y_screen: i32, qw: u32, qh: u32, uv: [4][2]f32, filter: texture.Filter, scissor_screen: ?render.Viewport) !void {
     std.debug.assert(index < max_quads);
     const y = y_screen - band_top;
+    const fh: i32 = @intCast(frame.target.height);
     const scissor: ?render.Viewport = if (scissor_screen) |sc| blk: {
+        if (turning) {
+            // Turned: across the screen is up the frame.
+            const at = turned(sc.x + @as(i32, @intCast(sc.width)), sc.y, fh);
+            break :blk .{ .x = at[0], .y = at[1], .width = sc.height, .height = sc.width };
+        }
         // In the band (or nothing of it, if it is not).
         const top = @max(sc.y - band_top, 0);
         const bottom = @max(sc.y - band_top + @as(i32, @intCast(sc.height)), top);
         break :blk .{ .x = sc.x, .y = top, .width = sc.width, .height = @intCast(bottom - top) };
     } else null;
-    // Two triangles, in clip space, with texture coordinates.
+    // Two triangles, in clip space, with texture coordinates: the corners
+    // top left, bottom left, top right and bottom right on the screen.
+    const right = x + @as(i32, @intCast(qw));
+    const bottom = y + @as(i32, @intCast(qh));
+    const screen = [4][2]i32{ .{ x, y }, .{ x, bottom }, .{ right, y }, .{ right, bottom } };
     const w: f32 = @floatFromInt(frame.target.width);
     const h: f32 = @floatFromInt(frame.target.height);
-    const x0 = @as(f32, @floatFromInt(x)) / w * 2 - 1;
-    const x1 = @as(f32, @floatFromInt(x + @as(i32, @intCast(qw)))) / w * 2 - 1;
-    const y0 = 1 - @as(f32, @floatFromInt(y)) / h * 2;
-    const y1 = 1 - @as(f32, @floatFromInt(y + @as(i32, @intCast(qh)))) / h * 2;
+    var clip: [4][2]f32 = undefined;
+    for (screen, &clip) |pt, *c| {
+        const at = if (turning) turned(pt[0], pt[1], fh) else pt;
+        c.* = .{ @as(f32, @floatFromInt(at[0])) / w * 2 - 1, 1 - @as(f32, @floatFromInt(at[1])) / h * 2 };
+    }
     const verts = [6][4]f32{
-        .{ x0, y0, uv[0][0], uv[0][1] }, .{ x0, y1, uv[1][0], uv[1][1] }, .{ x1, y0, uv[2][0], uv[2][1] },
-        .{ x1, y0, uv[2][0], uv[2][1] }, .{ x0, y1, uv[1][0], uv[1][1] }, .{ x1, y1, uv[3][0], uv[3][1] },
+        .{ clip[0][0], clip[0][1], uv[0][0], uv[0][1] }, .{ clip[1][0], clip[1][1], uv[1][0], uv[1][1] }, .{ clip[2][0], clip[2][1], uv[2][0], uv[2][1] },
+        .{ clip[2][0], clip[2][1], uv[2][0], uv[2][1] }, .{ clip[1][0], clip[1][1], uv[1][0], uv[1][1] }, .{ clip[3][0], clip[3][1], uv[3][0], uv[3][1] },
     };
     const offset: u32 = @intCast(index * @sizeOf(@TypeOf(verts)));
     @memcpy(vbo.map[offset..][0..@sizeOf(@TypeOf(verts))], std.mem.asBytes(&verts));
@@ -352,8 +380,11 @@ pub const Renderer = struct {
     gpa: std.mem.Allocator,
     dev: vc4.Device,
     display: vc4.display.Display,
+    /// The screen's size: the display's, or (turned) across it.
     width: u32,
     height: u32,
+    /// A panel upright, used on its side (see the top of this file).
+    turned: bool = false,
     /// Draws textures as quads; and blended, for the panels and the snap
     /// preview (with a little texture of its shade, made when first drawn).
     quads: shader.Pipeline,
@@ -390,6 +421,7 @@ pub const Renderer = struct {
         // The screen stays 32-bit: it is what everything is composited
         // into, and screenshots are taken from.
         const display = try vc4.display.Display.init(dev, output, .xrgb8888);
+        const turn = output.dsi and display.height > display.width;
         const layout: shader.pipeline.Options = .{
             .vertex_stride = 16,
             .attributes = &.{ .{ .location = 0, .offset = 0 }, .{ .location = 1, .offset = 8 } },
@@ -398,8 +430,9 @@ pub const Renderer = struct {
             .gpa = gpa,
             .dev = dev,
             .display = display,
-            .width = display.width,
-            .height = display.height,
+            .width = if (turn) display.height else display.width,
+            .height = if (turn) display.width else display.height,
+            .turned = turn,
             .quads = try shader.Pipeline.init(gpa, dev, shader.Program.decode(@embedFile("quad.shader")) catch unreachable, layout),
             .blended = try shader.Pipeline.init(gpa, dev, shader.Program.decode(@embedFile("quad_blend.shader")) catch unreachable, layout),
             .rounded = try shader.Pipeline.init(gpa, dev, shader.Program.decode(@embedFile("window.shader")) catch unreachable, layout),
@@ -534,7 +567,7 @@ pub const Renderer = struct {
     /// composited instead; otherwise whether it is already on the screen,
     /// as `show` does. Only while no flip is pending.
     pub fn showDirect(r: *Renderer, t: server.Texture, x: i32, y: i32, size: [2]u32) ?bool {
-        if (r.dev.is_v3d or r.display.kms == null) return null;
+        if (r.dev.is_v3d or r.display.kms == null or r.turned) return null;
         if (vc4.render.Target.textureTiling(t.format, t.width, t.height) != .t) return null;
         const panels = r.panelLayers() orelse return null;
         const fb = r.clientFramebuffer(t, x, y, size, panels) orelse return null;
@@ -719,6 +752,8 @@ pub const Renderer = struct {
         var quads = try r.panelQuads();
         quads[@intFromEnum(PanelId.notice)] = null;
         static_frame.begin(r.display.backTarget(), .{ .clear = r.background });
+        turning = r.turned;
+        defer turning = false;
         try recordFrame(&static_frame, r.pipelines(), try r.previewTexture(), r.background_image, r.vbo, &quads, windows);
         const seqno = try r.dev.submit(static_frame.finish());
         try r.dev.waitSeqno(seqno, std.time.ns_per_s);
@@ -736,7 +771,9 @@ pub const Renderer = struct {
         if (slot.* == null) {
             const bytes = cursor.size * cursor.size * 4;
             const bo = try r.dev.createBo(bytes);
-            cursor.draw(std.mem.bytesAsValue([cursor.size * cursor.size]u32, bo.map[0..bytes]), shape);
+            const pixels = std.mem.bytesAsValue([cursor.size * cursor.size]u32, bo.map[0..bytes]);
+            cursor.draw(pixels, shape);
+            if (r.turned) turnSquare(cursor.size, pixels);
             slot.* = bo;
         }
         try vc4.drm.setCursor(r.dev.fd, r.display.output.crtc_id, slot.*.?.kmsHandle(), cursor.size, cursor.size);
@@ -746,8 +783,13 @@ pub const Renderer = struct {
     /// Moves the pointer's hotspot to (`x`, `y`) on the screen.
     pub fn moveCursor(r: *Renderer, x: i32, y: i32) void {
         const shape = r.cursor_shape orelse return;
-        const hot = cursor.hotspot(shape);
-        vc4.drm.moveCursor(r.dev.fd, r.display.output.crtc_id, x - hot[0], y - hot[1]) catch |err| {
+        var hot = cursor.hotspot(shape);
+        var at: [2]i32 = .{ x, y };
+        if (r.turned) {
+            at = turned(x, y, @as(i32, @intCast(r.display.height)) - 1);
+            hot = turned(hot[0], hot[1], cursor.size - 1);
+        }
+        vc4.drm.moveCursor(r.dev.fd, r.display.output.crtc_id, at[0] - hot[0], at[1] - hot[1]) catch |err| {
             if (!r.cursor_move_failed) sys.print(sys.log_warning ++ "dazzle-shell: cannot move the cursor: {s}\n", .{@errorName(err)});
             r.cursor_move_failed = true;
         };
@@ -767,6 +809,8 @@ pub const Renderer = struct {
         const t0 = sys.nowNs();
         const quads = try r.panelQuads();
         static_frame.begin(r.display.backTarget(), .{ .clear = r.background });
+        turning = r.turned;
+        defer turning = false;
         try recordFrame(&static_frame, r.pipelines(), try r.previewTexture(), r.background_image, r.vbo, &quads, windows);
         const t1 = sys.nowNs();
         const seqno = try r.dev.submit(static_frame.finish());
@@ -955,6 +999,16 @@ pub const Renderer = struct {
     }
 };
 
+/// A square picture, `n` pixels across, turned as the screen is for a
+/// turned display (`turned`).
+fn turnSquare(comptime n: usize, pixels: *[n * n]u32) void {
+    const was = pixels.*;
+    for (0..n) |y| for (0..n) |x| {
+        const at = turned(@intCast(x), @intCast(y), n - 1);
+        pixels[@as(usize, @intCast(at[1])) * n + @as(usize, @intCast(at[0]))] = was[y * n + x];
+    };
+}
+
 fn channelDistance(a: u32, b: u32) u32 {
     var most: u32 = 0;
     inline for (.{ 0, 8, 16 }) |shift| {
@@ -1080,4 +1134,15 @@ test "a window fading out is drawn see-through, as much as its opacity (shaders/
         try testing.expect(red >= 0x7c and red <= 0x84);
         try testing.expectEqual(red, @as(u8, @truncate(px)));
     }
+}
+
+test "a screen on its side: its left at the frame's bottom, its top at the frame's left, and the cursor turned with it" {
+    // A 1280 by 720 screen on a 720 by 1280 panel.
+    try std.testing.expectEqual([2]i32{ 0, 1280 }, turned(0, 0, 1280));
+    try std.testing.expectEqual([2]i32{ 720, 1280 }, turned(0, 720, 1280));
+    try std.testing.expectEqual([2]i32{ 0, 0 }, turned(1280, 0, 1280));
+    // A picture's top left pixel goes to its bottom left.
+    var px: [4]u32 = .{ 1, 2, 3, 4 };
+    turnSquare(2, &px);
+    try std.testing.expectEqualSlices(u32, &.{ 2, 4, 1, 3 }, &px);
 }
