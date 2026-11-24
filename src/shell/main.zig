@@ -322,6 +322,8 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
     var screenshot_wanted = false;
     // Touches that went down on the dock (the shell's, not a window's).
     var dock_touches: TouchSet = .{};
+    // A touch down in the overview: let go, what it does there.
+    var overview_tap: ?struct { id: i32, x: f64, y: f64 } = null;
     // When a client last had a frame for the screen.
     var client_frame_ns: u64 = 0;
     // /data/apps has appeared, found too late for this time round.
@@ -948,6 +950,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                             osk_touches = .{};
                             dock_touches = .{};
                             quick_touch = null;
+                            overview_tap = null;
                             print("dazzle-shell: four fingers down\n", .{});
                             continue;
                         },
@@ -1014,10 +1017,11 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                             dock_touches.set(t.id);
                             dock_tap = .{ x, y };
                         } else if (server.overview) {
-                            // The shell's: it picks a window, or ends the
-                            // overview.
+                            // The shell's: let go, it picks a window, or
+                            // ends the overview (not if it turns out to be
+                            // part of a gesture).
                             dock_touches.set(t.id);
-                            if (server.overviewAt(x, y)) |win| server.overviewPick(win) else server.setOverview(false);
+                            overview_tap = .{ .id = t.id, .x = x, .y = y };
                         } else server.touchDown(time_ms, t.id, x, y),
                         .motion => if (quick_touch == t.id) {
                             if (quick.drag(x - @as(f64, @floatFromInt(quick.x)))) |v| setVolume(v, false, &quick, &dock, &renderer, &audio_devices, &quick_dirty);
@@ -1027,6 +1031,10 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                                 quick_touch = null;
                                 if (quick.release()) setVolume(quick.volume, true, &quick, &dock, &renderer, &audio_devices, &quick_dirty);
                             }
+                            if (overview_tap) |tap| if (tap.id == t.id) {
+                                overview_tap = null;
+                                if (server.overview) if (server.overviewAt(tap.x, tap.y)) |win| server.overviewPick(win) else server.setOverview(false);
+                            };
                             if (!dock_touches.unset(t.id)) server.touchUp(time_ms, t.id);
                         },
                     }
