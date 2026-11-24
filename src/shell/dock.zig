@@ -518,6 +518,9 @@ pub const Dock = struct {
     /// Where the pointer is along the box (with icons turned, those near
     /// it face the front: see `iconTurns`); null: not on it.
     focus_x: ?f32 = null,
+    /// Where along the row (in icons) faces the front without the pointer:
+    /// slid along by a finger (see `slideIcons`); null: the middle.
+    slid_to: ?f32 = null,
     /// Network status shown in the status box on the right of the dock.
     network: NetworkStatus = .{ .offline = .{} },
     /// Whether data is moving, shown as arrows beside the network status.
@@ -838,12 +841,26 @@ pub const Dock = struct {
     /// Where along the row (in icons) the pointer is, or the middle.
     fn focusIndex(d: *const Dock) f32 {
         const n = d.iconCount();
-        const fx = d.focus_x orelse return n / 2;
+        const fx = d.focus_x orelse return std.math.clamp(d.slid_to orelse n / 2, 0, n);
         // Turned to fit, the icons fill the box's room for them, from its
         // padding.
         const room = d.iconsRoom();
         if (!(room > 0)) return n / 2;
         return std.math.clamp((fx - box_pad * d.scale) / room, 0, 1) * n;
+    }
+
+    /// A finger dragged along the icons by `dx` pixels: they slide with
+    /// it, those turned coming round to the front as they near where it
+    /// faces (the other way, the row's end turning away). Returns whether
+    /// they moved (only when some are turned to fit).
+    pub fn slideIcons(d: *Dock, dx: f32) bool {
+        const n = d.iconCount();
+        if (n * (icon_size + icon_gap) * d.scale <= d.iconsRoom()) return false;
+        const was = d.focusIndex();
+        // An icon's width moved, the icons move on by one.
+        const to = std.math.clamp(was - dx / ((icon_size + icon_gap) * d.scale), 0, n);
+        d.slid_to = to;
+        return to != was;
     }
 
     /// How wide the row of icons is with those further than `from` icons
@@ -1463,8 +1480,17 @@ test "more icons than fit across the screen turn edge on at the ends, not overla
     try testing.expect(@abs(d.iconRect(0).turn) < 0.5);
     try testing.expect(d.iconRect(13).turn > 0);
     d.draw();
-    // With room, none is turned.
+    // Slid along by a finger (the pointer gone): to the right, the left
+    // end comes round to the front; it stays so.
     _ = d.pointerAt(null, 0, 0);
+    try testing.expect(d.slideIcons(1000));
+    try testing.expect(@abs(d.iconRect(0).turn) < 0.5);
+    try testing.expectApproxEqAbs(Dock.max_turn, d.iconRect(13).turn, 0.01);
+    try testing.expect(!d.slideIcons(400));
+    try testing.expect(d.slideIcons(-2000));
+    try testing.expect(@abs(d.iconRect(13).turn) < 0.5);
+    try testing.expectApproxEqAbs(-Dock.max_turn, d.iconRect(0).turn, 0.01);
+    // With room, none is turned.
     d.setScreen(1920, 1080, true);
     for (0..14) |i| try testing.expectEqual(@as(f32, 0), d.iconRect(i).turn);
 }

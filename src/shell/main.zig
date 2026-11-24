@@ -324,6 +324,9 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
     var dock_touches: TouchSet = .{};
     // A touch down in the overview: let go, what it does there.
     var overview_tap: ?struct { id: i32, x: f64, y: f64 } = null;
+    // A touch down on the dock's icons: where, where it is along now, and
+    // whether it has moved along (sliding the icons) or is a tap.
+    var dock_slide: ?struct { id: i32, from: [2]f64, last: f64, moved: bool = false } = null;
     // When a client last had a frame for the screen.
     var client_frame_ns: u64 = 0;
     // /data/apps has appeared, found too late for this time round.
@@ -951,6 +954,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                             dock_touches = .{};
                             quick_touch = null;
                             overview_tap = null;
+                            dock_slide = null;
                             print("dazzle-shell: four fingers down\n", .{});
                             continue;
                         },
@@ -1015,7 +1019,11 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                             panels_damaged = true;
                         } else if (on_dock) {
                             dock_touches.set(t.id);
-                            dock_tap = .{ x, y };
+                            // The status box: at once. An icon: let go
+                            // where it went down, a tap; moved along the
+                            // dock first, it slides the icons.
+                            const at = dock.local(x, y).?;
+                            if (dock.hitStatus(at[0], at[1])) dock_tap = .{ x, y } else dock_slide = .{ .id = t.id, .from = .{ x, y }, .last = x };
                         } else if (server.overview) {
                             // The shell's: let go, it picks a window, or
                             // ends the overview (not if it turns out to be
@@ -1025,12 +1033,29 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                         } else server.touchDown(time_ms, t.id, x, y),
                         .motion => if (quick_touch == t.id) {
                             if (quick.drag(x - @as(f64, @floatFromInt(quick.x)))) |v| setVolume(v, false, &quick, &dock, &renderer, &audio_devices, &quick_dirty);
+                        } else if (dock_slide != null and dock_slide.?.id == t.id) {
+                            const sl = &dock_slide.?;
+                            if (!sl.moved and @abs(x - sl.from[0]) > 10 * dock.scale) sl.moved = true;
+                            if (sl.moved) {
+                                if (dock.slideIcons(@floatCast(x - sl.last))) {
+                                    dock.draw();
+                                    showDock(&renderer, &dock);
+                                    panels_damaged = true;
+                                }
+                                sl.last = x;
+                            }
                         } else if (!dock_touches.has(t.id)) server.touchMotion(time_ms, t.id, x, y),
                         .up => {
                             if (quick_touch == t.id) {
                                 quick_touch = null;
                                 if (quick.release()) setVolume(quick.volume, true, &quick, &dock, &renderer, &audio_devices, &quick_dirty);
                             }
+                            if (dock_slide) |sl| if (sl.id == t.id) {
+                                dock_slide = null;
+                                // Not slid: a tap on the icon it went
+                                // down on.
+                                if (!sl.moved) dock_tap = sl.from;
+                            };
                             if (overview_tap) |tap| if (tap.id == t.id) {
                                 overview_tap = null;
                                 if (server.overview) if (server.overviewAt(tap.x, tap.y)) |win| server.overviewPick(win) else server.setOverview(false);
