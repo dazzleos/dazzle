@@ -4,7 +4,11 @@
 //! screenshots, for testing Dazzle from another computer. Each request
 //! must carry the code Settings shows (a new one each time it is turned
 //! on). Kept in `settings_file`: "code 123456\n" while on, "off\n" when
-//! not; Settings writes it and the shell watches it.
+//! not; Settings writes it and the shell watches it. `cmdline_key` on the
+//! kernel's command line ("dazzle.remote=123456", put in a slot's
+//! cmdline.txt with the card in another computer) has it on with that code
+//! whatever Settings says: before setup has finished too, for trying
+//! Dazzle on a board with no screen working yet.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -47,9 +51,34 @@ pub const Setting = struct {
     }
 };
 
+pub const cmdline_key = "dazzle.remote=";
+
 pub fn load() Setting {
+    if (forced()) |s| return s;
     var buf: [64]u8 = undefined;
     return .parse(sys.readFile(settings_file, &buf) orelse return .{});
+}
+
+/// The code on the kernel's command line (`cmdline_key`), if there is one.
+pub fn forced() ?Setting {
+    var buf: [1024]u8 = undefined;
+    return fromCmdline(sys.readFile("/proc/cmdline", &buf) orelse return null);
+}
+
+fn fromCmdline(cmdline: []const u8) ?Setting {
+    var words = std.mem.tokenizeAny(u8, cmdline, " \n");
+    while (words.next()) |w| if (std.mem.startsWith(u8, w, cmdline_key)) {
+        var line: [32]u8 = undefined;
+        const s = Setting.parse(std.fmt.bufPrint(&line, "code {s}", .{w[cmdline_key.len..]}) catch return null);
+        return if (s.code != null) s else null;
+    };
+    return null;
+}
+
+test "a code on the kernel's command line" {
+    try std.testing.expectEqual(@as(?u32, 408938), fromCmdline("cma=128M dazzle.remote=408938 dazzle.slot=a\n").?.code);
+    try std.testing.expect(fromCmdline("cma=128M dazzle.slot=a") == null);
+    try std.testing.expect(fromCmdline("dazzle.remote=12") == null);
 }
 
 pub fn save(s: Setting) void {
