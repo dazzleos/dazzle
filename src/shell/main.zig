@@ -149,6 +149,9 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
     // touches on it; the last input was a touch (it shows only then).
     var osk: osk_mod.Osk = .init(try kit.gpuPanel(), renderer.width, renderer.height, dock.scale);
     var osk_touches: TouchSet = .{};
+    // Where the last touch on it was (a touch let go says no place: it
+    // lets go there).
+    var osk_touch_at: [2]f32 = .{ 0, 0 };
     var last_touch = false;
     // The text input it was shown for (another one, and it shows again
     // after being hidden).
@@ -690,7 +693,8 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                         const tx = if (renderer.turned) sy else sx;
                         const ty = if (renderer.turned) 1 - sx else sy;
                         queue(q, qn, .{ .touch = .{ .kind = .down, .id = 1000, .x = tx, .y = ty } });
-                        queue(q, qn, .{ .touch = .{ .kind = .up, .id = 1000, .x = tx, .y = ty } });
+                        // Let go with no place, as a touchscreen says it.
+                        queue(q, qn, .{ .touch = .{ .kind = .up, .id = 1000 } });
                         req.respond("200 OK", "text/plain", "ok\n");
                     },
                     .key => |k| {
@@ -908,6 +912,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                     // On the on-screen keyboard: its keys, pressed and let go.
                     if (t.kind == .down) if (osk.local(x, y)) |at| {
                         osk_touches.set(t.id);
+                        osk_touch_at = at;
                         osk.panel.pointerMotion(at);
                         osk.panel.pointerButton(at, true);
                         continue;
@@ -915,10 +920,13 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                     if (osk_touches.has(t.id)) {
                         const at: [2]f32 = .{ @floatCast(x), @floatCast(y - @as(f64, @floatFromInt(osk.top()))) };
                         switch (t.kind) {
-                            .motion => osk.panel.pointerMotion(at),
+                            .motion => {
+                                osk_touch_at = at;
+                                osk.panel.pointerMotion(at);
+                            },
                             .up => {
                                 _ = osk_touches.unset(t.id);
-                                osk.panel.pointerButton(at, false);
+                                osk.panel.pointerButton(osk_touch_at, false);
                             },
                             .down => {},
                         }
