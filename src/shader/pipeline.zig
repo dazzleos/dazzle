@@ -89,7 +89,9 @@ pub const Pipeline = struct {
             .gpa = gpa,
             .program = p,
             .fs = .{ .handle = try dev.createShaderBo(fs_c.code()), .compiled = fs_c },
-            .fs_ms = if (p.has_fs_ms) .{ .handle = try dev.createShaderBo(fs_ms_c.code()), .compiled = fs_ms_c } else null,
+            // Not on V3D (the Pi 4 and 5), whose frames are not
+            // multisampled (see `render.Frame.submitV3dRegion`).
+            .fs_ms = if (p.has_fs_ms and !is_v3d) .{ .handle = try dev.createShaderBo(fs_ms_c.code()), .compiled = fs_ms_c } else null,
             .vs = .{ .handle = try dev.createShaderBo(vs_c.code()), .compiled = vs_c },
             .cs = .{ .handle = try dev.createShaderBo(cs_c.code()), .compiled = cs_c },
             .values = values,

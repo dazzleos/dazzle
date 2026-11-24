@@ -587,6 +587,13 @@ pub const Frame = struct {
     /// state buffers, submits them via `DRM_IOCTL_V3D_SUBMIT_CL`, and returns
     /// the command list BO handle to wait on.
     pub fn submitV3dRegion(f: *Frame, dev: device.Device, job: *const device.SubmitCl) !u32 {
+        // Not multisampled on V3D (the Pi 4 and 5): blending into a
+        // multisampled tile buffer left half of each pixel's samples black
+        // there, so a multisampled frame is drawn as an ordinary one (its
+        // shapes and text are smoothed by their shaders all the same).
+        const msaa = f.msaa;
+        f.msaa = false;
+        defer f.msaa = msaa;
         var bo_addrs: [max_bos]u32 = undefined;
         for (f.bo_handles[0..f.bo_count], 0..) |h, i| {
             bo_addrs[i] = try dev.getBoOffset(h);
