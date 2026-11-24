@@ -638,6 +638,47 @@ pub const ShaderRecord = struct {
     attributes: []const AttributeRecord,
 };
 
+/// The VPM segments the coordinate and vertex shaders use, as Mesa sets
+/// them up (`v3d_vs_set_prog_data`): each shader's inputs and outputs
+/// share one segment, as big (in sectors of 8 words a vertex) as the more
+/// of what it reads (its attributes' components) and what it writes (the
+/// coordinate shader the clip position and screen X and Y; the vertex
+/// shader the screen X and Y, Z, 1/W and the varyings). One sector was
+/// too few for a shader with more than 4 varying components or 8 input
+/// ones: on a Pi 4 nothing it drew showed (the 2D shape shader's corners
+/// and circles).
+pub const VpmSegments = struct {
+    cs: u4,
+    vs: u4,
+
+    pub fn of(rec: ShaderRecord) VpmSegments {
+        var any_cs = false;
+        for (rec.attributes) |a| any_cs = any_cs or a.read_by_cs;
+        var cs_in: u32 = 0;
+        var vs_in: u32 = 0;
+        for (rec.attributes, 0..) |a, i| {
+            if (a.read_by_cs or (!any_cs and i == rec.attributes.len - 1)) cs_in += a.components;
+            if (a.read_by_vs) vs_in += a.components;
+        }
+        return .{
+            .cs = sectors(@max(cs_in, 6)),
+            .vs = sectors(@max(vs_in, 4 + @as(u32, rec.fs_num_varyings))),
+        };
+    }
+
+    fn sectors(words: u32) u4 {
+        return @intCast(@min((words + 7) / 8, 15));
+    }
+
+    /// The VCM cache size for a segment of `size` sectors (VCM_CACHE_SIZE):
+    /// within half the VPM (at least 8 sectors), one output segment for
+    /// the shader and the rest for the cache, 2 to 4 batches.
+    pub fn vcmCacheSize(size: u4) u4 {
+        const batches = 8 / @as(u32, @max(size, 1));
+        return @intCast(std.math.clamp(batches -| 1, 2, 4));
+    }
+};
+
 /// Writes a 36-byte V3D 4.2 `GL Shader State Record` followed by `N` 16-byte
 /// `GL Shader State Attribute Record`s into `w` (`v3d_packet.xml` ver = 42).
 pub fn writeShaderStateRecord(w: *cl.Writer, rec: ShaderRecord) void {
@@ -647,9 +688,13 @@ pub fn writeShaderStateRecord(w: *cl.Writer, rec: ShaderRecord) void {
     w.u8_(@truncate(flags >> 16));
     w.u8_(rec.fs_num_varyings);
 
-    w.u8_(1 | (1 << 4));
+    // Each shader's output segment (shared with its inputs: an input
+    // segment size of 1, and at least one of them in play), and no more
+    // output segments in play than the VCM cache's (see `VpmSegments`).
+    const seg = VpmSegments.of(rec);
+    w.u8_(seg.cs);
     w.u8_(1);
-    w.u8_(1 | (1 << 4));
+    w.u8_(seg.vs);
     w.u8_(1);
 
     w.u32_(rec.default_attr_addr);
@@ -688,9 +733,11 @@ pub fn writeShaderStateRecord71(w: *cl.Writer, rec: ShaderRecord, has_draw_index
     w.u8_(@truncate(flags >> 16));
     w.u8_(rec.fs_num_varyings);
 
-    w.u8_(1 | (1 << 4));
+    // As on V3D 4.2 (`VpmSegments`); the input segment sizes are 0.
+    const seg = VpmSegments.of(rec);
+    w.u8_(seg.cs);
     w.u8_(0); // cs_input_vpm_segment_size = 0 on V3D 7.1
-    w.u8_(1 | (1 << 4));
+    w.u8_(seg.vs);
     w.u8_(0); // vs_input_vpm_segment_size = 0 on V3D 7.1
 
     // Note: V3D 7.1 omits the 4-byte `address_of_default_attribute_values` field
@@ -910,4 +957,19 @@ test "V3D 4.2 texture and sampler state packing" {
     try testing.expectEqual(@as(u32, 0x7), samp[0] & 0x7);
     try testing.expectEqual(@as(u32, 0x100f), tmuConfigP0(0x1000));
     try testing.expectEqual(@as(u32, 0x2001), tmuConfigP1(0x2000));
+}
+
+test "VPM segments: as big as the more of what a shader reads and writes" {
+    const pos: AttributeRecord = .{ .addr = 0, .components = 2, .stride = 48, .read_by_cs = true };
+    const vec4: AttributeRecord = .{ .addr = 8, .components = 4, .stride = 48, .read_by_cs = false };
+    const vec2: AttributeRecord = .{ .addr = 24, .components = 2, .stride = 48, .read_by_cs = false };
+    // The 2D solid shader: position and colour in, 4 varyings out.
+    const solid: ShaderRecord = .{ .fs_code_addr = 0, .fs_uniforms_addr = 0, .vs_code_addr = 0, .vs_uniforms_addr = 0, .cs_code_addr = 0, .cs_uniforms_addr = 0, .default_attr_addr = 0, .fs_num_varyings = 4, .attributes = &.{ pos, vec4 } };
+    try std.testing.expectEqual(VpmSegments{ .cs = 1, .vs = 1 }, VpmSegments.of(solid));
+    // The shape shader: 12 components in, 10 varyings out.
+    const shape: ShaderRecord = .{ .fs_code_addr = 0, .fs_uniforms_addr = 0, .vs_code_addr = 0, .vs_uniforms_addr = 0, .cs_code_addr = 0, .cs_uniforms_addr = 0, .default_attr_addr = 0, .fs_num_varyings = 10, .attributes = &.{ pos, vec4, vec2, vec4 } };
+    try std.testing.expectEqual(VpmSegments{ .cs = 1, .vs = 2 }, VpmSegments.of(shape));
+    try std.testing.expectEqual(@as(u4, 4), VpmSegments.vcmCacheSize(1));
+    try std.testing.expectEqual(@as(u4, 3), VpmSegments.vcmCacheSize(2));
+    try std.testing.expectEqual(@as(u4, 2), VpmSegments.vcmCacheSize(4));
 }

@@ -771,7 +771,8 @@ pub const Frame = struct {
                 }
                 ind_off += rec_bytes_len;
 
-                v3d_bcl.vcmCacheSize(4, 4);
+                const seg = v3d_cl.VpmSegments.of(srec);
+                v3d_bcl.vcmCacheSize(v3d_cl.VpmSegments.vcmCacheSize(seg.cs), v3d_cl.VpmSegments.vcmCacheSize(seg.vs));
                 v3d_bcl.glShaderState(shader_rec_addr, @intCast(d.attrs_len));
                 if (d.indices) |ib| {
                     const ib_addr = f.boAddr(&bo_addrs, ib.handle);
