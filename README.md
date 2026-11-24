@@ -10,7 +10,9 @@ Zero.
 
 You will need:
 
-- a Raspberry Pi (Raspberry Pi 1–5, or Raspberry Pi Zero / Zero W / Zero 2 W)
+- a Raspberry Pi: Raspberry Pi 1–4 (and the Pi 400), or Raspberry Pi Zero / Zero W / Zero 2 W.
+  The Raspberry Pi 5 is not supported yet: Dazzle has code for it, but it
+  has not been tried on one.
 - a microSD card (256 MB or larger; everything on it will be erased)
 - an HDMI display (with a mini-HDMI or micro-HDMI adapter if your board needs one)
 - a USB keyboard and mouse, or a USB touchscreen (with a micro-USB OTG adapter and hub for the Zero)

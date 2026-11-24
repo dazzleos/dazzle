@@ -15,7 +15,8 @@ library; programs make Linux system calls directly.
   `kernel/`:
   - `kernel.img` (ARMv6) for the Pi 1, Zero and Zero W
   - `kernel7.img` (ARMv7) for the Pi 2, 3, Zero 2 W and 4
-  - `kernel8.img` (ARM64) for the Pi 5
+  - `kernel8.img` (ARM64) for the Pi 5 (not supported yet: never tried on
+    one)
 - **Init** (`src/init/`), PID 1. It mounts the filesystems, grants the user
   access to the GPU, and starts the shell. It also runs small helper
   managers as child processes, each keeping only the privileges it needs:
