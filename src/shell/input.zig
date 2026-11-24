@@ -195,6 +195,14 @@ fn probeTouch(fd: linux.fd_t) ?Touch {
     return t;
 }
 
+/// Whether a device is a mouse: it reports relative motion across.
+fn probeMouse(fd: linux.fd_t) bool {
+    var rel_bits: [2]u8 = @splat(0);
+    const eviocgbit_rel = linux.IOCTL.IOR('E', 0x20 + evdev.ev_rel, [2]u8);
+    if (linux.errno(linux.ioctl(fd, eviocgbit_rel, @intFromPtr(&rel_bits))) != .SUCCESS) return false;
+    return rel_bits[evdev.rel_x / 8] & (@as(u8, 1) << @intCast(evdev.rel_x % 8)) != 0;
+}
+
 pub const max_devices = 32;
 
 /// N for a device node named "eventN" (N below `max_devices`).
@@ -211,6 +219,8 @@ pub const Devices = struct {
     active: [max_devices]bool = @splat(false),
     /// The touchscreens' touches.
     touch: [max_devices]?Touch = @splat(null),
+    /// Which are mice (they move the pointer by so much: relative motion).
+    mouse: [max_devices]bool = @splat(false),
     /// Watching /dev/input (inotify) for nodes made (a device plugged in)
     /// or handed to the user (init does that after): `scan` when it says
     /// so, rather than looking every so often.
@@ -271,7 +281,20 @@ pub const Devices = struct {
         var name: [64]u8 = @splat(0);
         _ = linux.ioctl(fd, linux.IOCTL.IOR('E', 0x06, [64]u8), @intFromPtr(&name));
         d.touch[n] = probeTouch(fd);
-        print("dazzle-shell: input: {s}: {s}{s}\n", .{ path, std.mem.sliceTo(&name, 0), if (d.touch[n] != null) " (touchscreen)" else "" });
+        d.mouse[n] = d.touch[n] == null and probeMouse(fd);
+        print("dazzle-shell: input: {s}: {s}{s}\n", .{ path, std.mem.sliceTo(&name, 0), if (d.touch[n] != null) " (touchscreen)" else if (d.mouse[n]) " (mouse)" else "" });
+    }
+
+    /// Whether a touchscreen is there (the dock is sized for fingers then).
+    pub fn hasTouch(d: *const Devices) bool {
+        for (d.fds, d.touch) |slot, t| if (slot != null and t != null) return true;
+        return false;
+    }
+
+    /// Whether a mouse is plugged in (the pointer is shown only then).
+    pub fn hasMouse(d: *const Devices) bool {
+        for (d.fds, d.mouse) |slot, m| if (slot != null and m) return true;
+        return false;
     }
 
     /// Adds the open devices to `fds`; returns how many.
@@ -297,6 +320,8 @@ pub const Devices = struct {
             else => |e| {
                 for (&d.fds, 0..) |*slot, i| if (slot.* == fd) {
                     slot.* = null;
+                    d.mouse[i] = false;
+                    d.touch[i] = null;
                     print("dazzle-shell: input: /dev/input/event{d} removed\n", .{i});
                 };
                 sys.close(fd);

@@ -376,6 +376,18 @@ pub const Overlay = struct {
         o.panel.destroy();
     }
 
+    /// Sized and placed again, for a screen `screen_width` by
+    /// `screen_height` (its panel kept).
+    pub fn setScreen(o: *Overlay, screen_width: u32, screen_height: u32) void {
+        const raw_scale = @min(@as(f32, @floatFromInt(screen_width)) / 1920, @as(f32, @floatFromInt(screen_height)) / 1080);
+        o.scale = @max(raw_scale, 0.5);
+        o.width = @min(screen_width, @as(u32, @intFromFloat(@round(280 * o.scale))));
+        o.height = @min(screen_height, @as(u32, @intFromFloat(@round(180 * o.scale))));
+        const margin: i32 = @intFromFloat(@round(dock.Dock.margin * o.scale));
+        o.x = @max(0, @as(i32, @intCast(screen_width)) - @as(i32, @intCast(o.width)) - margin);
+        o.y = @max(0, @as(i32, @intCast(screen_height)) - @as(i32, @intCast(o.height)) - margin);
+    }
+
     /// Its picture, `width` by `height`.
     pub fn picture(o: *const Overlay) kete_panel.Picture {
         return o.drawn;

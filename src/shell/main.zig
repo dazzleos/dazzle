@@ -191,8 +191,8 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
     took.step(.background);
     // The dock floats in a band along the bottom, which windows stay above;
     // on an overlay plane, the band is drawn whole, background and all.
-    const band_y: u32 = renderer.height - dock.bandHeight();
-    const with_dock: server_mod.Rect = .{ .x = 0, .y = 0, .width = renderer.width, .height = band_y };
+    var band_y: u32 = renderer.height - dock.bandHeight();
+    var with_dock: server_mod.Rect = .{ .x = 0, .y = 0, .width = renderer.width, .height = band_y };
     renderer.setPanelBand(.dock, @intCast(band_y));
     var perf = try perf_mod.Overlay.init(kit, renderer.width, renderer.height);
     var perf_monitor: perf_mod.Monitor = .{};
@@ -283,6 +283,11 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
     server.pointer_x = pointer.x;
     server.pointer_y = pointer.y;
     var cursor_shown = false;
+    // The orientation chosen (the system manager's report says, once
+    // asked; until then, as the boot screen had it), and whether the dock
+    // is sized for fingers (a touchscreen is there).
+    var orientation = sys.system.Orientation.now();
+    var dock_touch = false;
 
     const start = sys.nowNs();
     // A client buffer the display shows directly is held until a later
@@ -445,6 +450,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         var updates_changed = false;
         if (fds[sys_index].revents != 0) {
             if (sys_sub.poll()) |r| if (!r.denied) {
+                orientation = r.orientation;
                 if (applyLocale(r.locale, &server, &lock, &dock, &quick)) panels_damaged = true;
                 if (updates.setReport(r)) updates_changed = true;
                 if (applyParental(r.parental, &parental, &locked, &lock, &quick, &renderer)) {
@@ -460,6 +466,46 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         if (fds[watch_index].revents != 0) {
             const c = apps_watch.take();
             apps_changes = apps_changes.with(c);
+        }
+        // The screen turned (the orientation chosen in Settings), or a
+        // touchscreen came or went (the dock is sized for fingers then):
+        // what is sized by them, again.
+        {
+            const turn = orientation.turns(renderer.display.width, renderer.display.height);
+            const touch = devices.hasTouch();
+            if (turn != renderer.turned or touch != dock_touch) {
+                dock_touch = touch;
+                renderer.setTurned(turn) catch |err| print(sys.log_warning ++ "dazzle-shell: cannot turn the cursor: {s}\n", .{@errorName(err)});
+                dock.setScreen(renderer.width, renderer.height, touch);
+                quick.setScale(dock.scale);
+                notice.resize(gpa, renderer.width, dock.scale) catch |err| print(sys.log_warning ++ "dazzle-shell: cannot size the notice: {s}\n", .{@errorName(err)});
+                perf.setScreen(renderer.width, renderer.height);
+                band_y = renderer.height - dock.bandHeight();
+                with_dock = .{ .x = 0, .y = 0, .width = renderer.width, .height = band_y };
+                renderer.setPanelBand(.dock, @intCast(band_y));
+                server.output.width = renderer.width;
+                server.output.height = renderer.height;
+                server.setWorkArea(if (dock_shown) with_dock else server.screen());
+                pointer.max_x = @floatFromInt(renderer.width - 1);
+                pointer.max_y = @floatFromInt(renderer.height - 1);
+                pointer.x = std.math.clamp(pointer.x, 0, pointer.max_x);
+                pointer.y = std.math.clamp(pointer.y, 0, pointer.max_y);
+                server.pointer_x = pointer.x;
+                server.pointer_y = pointer.y;
+                renderer.moveCursor(@intFromFloat(pointer.x), @intFromFloat(pointer.y));
+                // The background, made again at the new size.
+                background_image.deinit();
+                background_image = .init(gpa, renderer.width, renderer.height, dock.bandHeight());
+                renderer.setBackgroundImage(null) catch {};
+                wantBackground(&background_image, &renderer, dock_mod.readAppearance());
+                if (dock_shown) {
+                    dock.draw();
+                    showDock(&renderer, &dock);
+                }
+                server.damaged = true;
+                panels_damaged = true;
+                print("dazzle-shell: the screen {d}x{d}{s}{s}\n", .{ renderer.width, renderer.height, if (turn) ", the display on its side" else "", if (touch) ", the dock for fingers" else "" });
+            }
         }
         // Settings fetched the catalogue, or installed or removed apps.
         if ((apps_changes.apps or apps_changes.catalogue) and updates.reload()) updates_changed = true;
@@ -1198,10 +1244,19 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                 // now), for the log.
                 took.step(.first_frame);
                 took.report(launched);
+            }
+        }
+        // The pointer, while a mouse is plugged in (a touchscreen has none).
+        if (cursor_shown) {
+            const mouse = devices.hasMouse();
+            if (mouse and renderer.cursor_shape == null) {
                 if (renderer.showCursor(.arrow)) {
                     renderer.moveCursor(@intFromFloat(pointer.x), @intFromFloat(pointer.y));
-                    print("dazzle-shell: cursor shown\n", .{});
+                    print("dazzle-shell: cursor shown (a mouse)\n", .{});
                 } else |err| print(sys.log_warning ++ "dazzle-shell: no cursor: {s}\n", .{@errorName(err)});
+            } else if (!mouse and renderer.cursor_shape != null) {
+                renderer.hideCursor();
+                print("dazzle-shell: cursor hidden (no mouse)\n", .{});
             }
         }
         // The pointer's picture: a hand over what can be clicked on the

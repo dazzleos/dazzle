@@ -10,8 +10,10 @@
 //! copies of shared-memory buffers, in 32-bit or RGB565 pixels. The quad
 //! shader is shaders/quad.zig.
 //!
-//! A panel upright (the Touch Display 2, 720 by 1280) is used on its side:
-//! the screen is as wide as the panel is tall (`Renderer.turned`). Every
+//! A display the other way from the orientation chosen (the Touch Display
+//! 2, 720 by 1280, for landscape; a monitor for portrait: see
+//! `sys.system.Orientation`) is used on its side: the screen is as wide as
+//! the display is tall (`Renderer.turned`). Every
 //! frame for it is composited (the display can turn a plane over, not a
 //! quarter), its quads turned into the panel's frame, and the cursor's
 //! picture turned too.
@@ -383,7 +385,7 @@ pub const Renderer = struct {
     /// The screen's size: the display's, or (turned) across it.
     width: u32,
     height: u32,
-    /// A panel upright, used on its side (see the top of this file).
+    /// The display used on its side (see the top of this file).
     turned: bool = false,
     /// Draws textures as quads; and blended, for the panels and the snap
     /// preview (with a little texture of its shade, made when first drawn).
@@ -421,7 +423,7 @@ pub const Renderer = struct {
         // The screen stays 32-bit: it is what everything is composited
         // into, and screenshots are taken from.
         const display = try vc4.display.Display.init(dev, output, .xrgb8888);
-        const turn = output.dsi and display.height > display.width;
+        const turn = sys.system.Orientation.now().turns(display.width, display.height);
         const layout: shader.pipeline.Options = .{
             .vertex_stride = 16,
             .attributes = &.{ .{ .location = 0, .offset = 0 }, .{ .location = 1, .offset = 8 } },
@@ -778,6 +780,30 @@ pub const Renderer = struct {
         }
         try vc4.drm.setCursor(r.dev.fd, r.display.output.crtc_id, slot.*.?.kmsHandle(), cursor.size, cursor.size);
         r.cursor_shape = shape;
+    }
+
+    /// Turns the screen (the display on its side, or not): its size swapped,
+    /// and the cursor's pictures, turned with it, made again.
+    pub fn setTurned(r: *Renderer, turn: bool) !void {
+        if (turn == r.turned) return;
+        r.turned = turn;
+        r.width = if (turn) r.display.height else r.display.width;
+        r.height = if (turn) r.display.width else r.display.height;
+        const shown = r.cursor_shape;
+        r.hideCursor();
+        for (&r.cursor_bos) |*slot| if (slot.*) |bo| {
+            r.dev.destroyBo(bo);
+            slot.* = null;
+        };
+        r.band_stamp +%= 1;
+        if (shown) |s| try r.showCursor(s);
+    }
+
+    /// Shows no pointer (until `showCursor` again).
+    pub fn hideCursor(r: *Renderer) void {
+        if (r.cursor_shape == null) return;
+        vc4.drm.setCursor(r.dev.fd, r.display.output.crtc_id, 0, 0, 0) catch {};
+        r.cursor_shape = null;
     }
 
     /// Moves the pointer's hotspot to (`x`, `y`) on the screen.

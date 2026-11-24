@@ -193,6 +193,13 @@ pub const Quick = struct {
         q.panel.destroy();
     }
 
+    /// Sized again, at `scale` (the dock's).
+    pub fn setScale(q: *Quick, scale: f32) void {
+        q.width = @intFromFloat(@round(box_width * scale));
+        q.height = @intFromFloat(@ceil(max_height * scale));
+        q.scale = scale;
+    }
+
     /// Where its parts are, in it.
     const Layout = struct {
         time_y: f32,

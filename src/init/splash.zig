@@ -241,9 +241,18 @@ const Screen = struct {
     fd: linux.fd_t,
     output: drm.Output,
     fb: u32,
+    /// What is drawn, `width` by `height` (`stride` pixels a row): the
+    /// display's buffer, or, on a display turned for the orientation chosen
+    /// (`sys.system.Orientation`, as the shell turns it), one of the screen's
+    /// own, copied into the display's turned (`present`).
     pixels: []u32,
     width: u32,
     height: u32,
+    stride: u32,
+    /// The display's buffer when it is turned (else `pixels` is it), and its
+    /// pitch in pixels.
+    display: ?[]u32 = null,
+    display_stride: u32 = 0,
     /// Where the text goes: its baseline, and the band it is drawn in.
     baseline: f32,
     band_top: u32,
@@ -261,17 +270,24 @@ const Screen = struct {
         const fd = try openDisplay();
         errdefer sys.close(fd);
         const output = try findOutput(fd);
-        const width: u32 = output.mode.hdisplay;
-        const height: u32 = output.mode.vdisplay;
-        const buffer = try drm.DumbBuffer.create(fd, width, height);
-        const fb = try drm.addFramebuffer(fd, buffer.handle, width, height, buffer.pitch, drm.format_xrgb8888);
-        const pixels = std.mem.bytesAsSlice(u32, buffer.map[0 .. buffer.pitch * height]);
+        const display_width: u32 = output.mode.hdisplay;
+        const display_height: u32 = output.mode.vdisplay;
+        const buffer = try drm.DumbBuffer.create(fd, display_width, display_height);
+        const fb = try drm.addFramebuffer(fd, buffer.handle, display_width, display_height, buffer.pitch, drm.format_xrgb8888);
+        const display = std.mem.bytesAsSlice(u32, buffer.map[0 .. buffer.pitch * display_height]);
+        // Turned for the orientation chosen, as the shell turns it: drawn
+        // upright into a buffer of the screen's own.
+        const turned = sys.system.Orientation.now().turns(display_width, display_height);
+        const width = if (turned) display_height else display_width;
+        const height = if (turned) display_width else display_height;
+        const pixels = if (turned) try gpa.alloc(u32, @as(usize, width) * height) else display;
+        const stride: u32 = if (turned) width else buffer.pitch / 4;
         @memset(pixels, background);
         // The logo: a quarter of the screen's height, in the middle (a
         // little above, to leave room for the text).
         const logo_size: u32 = @max(64, height / 4);
         const logo_top: u32 = (height - logo_size) / 2 - height / 24;
-        drawLogo(pixels, buffer.pitch / 4, (width - logo_size) / 2, logo_top, logo_size);
+        drawLogo(pixels, stride, (width - logo_size) / 2, logo_top, logo_size);
         const size: f32 = @floatFromInt(@max(16, height / 40));
         const font_data = sys.readFileAlloc(gpa, "/os/fonts/" ++ kete_font.default_font_file, 4 * 1024 * 1024) catch &.{};
         const font = if (font_data.len > 0) kete_font.Font.init(font_data) catch null else null;
@@ -282,6 +298,9 @@ const Screen = struct {
             .pixels = pixels,
             .width = width,
             .height = height,
+            .stride = stride,
+            .display = if (turned) display else null,
+            .display_stride = buffer.pitch / 4,
             .baseline = @as(f32, @floatFromInt(logo_top + logo_size)) + size * 2.5,
             .band_top = logo_top + logo_size + @as(u32, @intFromFloat(size)),
             .band_height = @intFromFloat(size * 2.5),
@@ -291,6 +310,7 @@ const Screen = struct {
             .style = undefined,
         };
         if (s.font) |*f| s.style = .{ .font = f, .size = size };
+        s.present();
         // Shown once drawn.
         if (show) try drm.setCrtc(fd, output, fb);
         return s;
@@ -307,10 +327,18 @@ const Screen = struct {
             const canvas: kete_font.Canvas = .{ .pixels = s.pixels, .width = s.width, .height = s.height, .stride = stride };
             _ = kete_font.draw(canvas, &s.cache, s.style, @round(x), s.baseline, text) catch {};
         }
+        s.present();
     }
 
     fn pitch(s: *const Screen) u32 {
-        return @intCast(s.pixels.len / s.height);
+        return s.stride;
+    }
+
+    /// The screen into the display's buffer, turned, if it is (else it is
+    /// drawn there already).
+    fn present(s: *const Screen) void {
+        const display = s.display orelse return;
+        turnInto(display, s.display_stride, s.pixels, s.width, s.height);
     }
 
     /// Lets the shell have the display, and waits (a while at most) for
@@ -328,6 +356,16 @@ const Screen = struct {
         }
     }
 };
+
+/// `pixels` (`width` by `height`, upright) into `display` (`height` wide,
+/// `display_stride` pixels a row) turned a quarter as the shell turns its
+/// frames: the screen's left at the display's bottom, its top at the
+/// display's left.
+fn turnInto(display: []u32, display_stride: u32, pixels: []const u32, width: u32, height: u32) void {
+    for (0..height) |y| for (0..width) |x| {
+        display[(width - 1 - x) * display_stride + y] = pixels[y * width + x];
+    };
+}
 
 /// Opens the display's DRM device (the vc4 driver's card), waiting a
 /// moment for it to come.
@@ -415,4 +453,12 @@ test "the logo is scaled down evenly and blended over what is under it" {
     var half: [1]u32 = .{0xff000000};
     scaleOver(&half, 1, 0, 0, 1, src[0..4], 2, 2);
     try std.testing.expectEqual(@as(u32, 0xff7f7f7f), half[0]);
+}
+
+test "the boot screen turned as the shell turns its frames: its left at the display's bottom" {
+    // A screen 3 wide and 2 tall on a display 2 wide and 3 tall.
+    const pixels = [_]u32{ 1, 2, 3, 4, 5, 6 };
+    var display: [6]u32 = undefined;
+    turnInto(&display, 2, &pixels, 3, 2);
+    try std.testing.expectEqualSlices(u32, &.{ 3, 6, 2, 5, 1, 4 }, &display);
 }

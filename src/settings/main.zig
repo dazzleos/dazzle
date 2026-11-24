@@ -163,6 +163,7 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
     defer screenshots.deinit();
     var icons_dirty = true;
     var video_memory_failed = false;
+    var orientation_failed = false;
     // Remote control, as Settings last saw (or set) it.
     var remote = sys.remote.load();
     // The password last given for parental controls was wrong.
@@ -417,6 +418,18 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
             print("dazzle-settings: video memory {d} MiB from the next start{s}\n", .{ mib, if (video_memory_failed) ": refused" else "" });
             dirty = true;
         }
+        // The orientation chosen: the system manager keeps it (the shell
+        // turns to it at once), and says what it now is.
+        if (actions.orientation) |o| {
+            actions.orientation = null;
+            const r = sys.system.ask(if (o == .portrait) "orientation portrait\n" else "orientation landscape\n", 3000);
+            if (r) |have| if (!have.denied) {
+                updater.report = have;
+            };
+            orientation_failed = if (r) |have| have.denied or have.orientation != o else true;
+            print("dazzle-settings: the screen {s}{s}\n", .{ @tagName(o), if (orientation_failed) ": refused" else "" });
+            dirty = true;
+        }
         // Serving the log over HTTP turned on or off: the system manager
         // keeps it, and the log server follows.
         if (actions.log_server) |on| {
@@ -589,6 +602,10 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
                     .default_source = build_info.apps_url,
                     .default_key = build_info.signing_key,
                     .subscribed_keys = subscribed_keys.slice(),
+                },
+                .display = .{
+                    .orientation = if (updater.report) |r| r.orientation else null,
+                    .failed = orientation_failed,
                 },
                 .video_memory = .{
                     .now = if (updater.report) |r| r.video_memory_now else null,

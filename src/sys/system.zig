@@ -27,6 +27,10 @@
 //!                              there is a /data)
 //!     video_memory <MiB>       how much memory the GPU may have, from the
 //!                              next start (settings): see `video_memory`
+//!     orientation <landscape|portrait>
+//!                              the screen's (settings): the shell turns
+//!                              to it at once, and the boot screen from
+//!                              the next start; see `Orientation`
 //!     parental_on <password> <limits>
 //!                              turn parental controls on (settings), the
 //!                              password (in hex) to unlock from now on;
@@ -47,6 +51,7 @@
 //!     update none
 //!     locale en-GB gb Europe/London
 //!     video_memory 128 256
+//!     orientation portrait
 //!     parental on 120 180 1200 420 block
 //!     parental_status none 1794830400 - 42 120 0 0
 //!     end
@@ -60,7 +65,8 @@
 //! next start runs it) or "failed" with why ("did_not_start" when it was
 //! installed but did not work, and the system before is running again).
 //! "video_memory" is the memory the GPU may have now and from the next
-//! start, in MiB ("-": not known). "parental" is whether parental
+//! start, in MiB ("-": not known). "orientation" is the screen's (as it is
+//! kept, for the next start too). "parental" is whether parental
 //! controls are on, and their limits; "parental_status" whether the
 //! computer is locked ("none", "time" or "downtime"), when it will lock
 //! and when it may be used again (seconds since 1970, by the manager's
@@ -139,6 +145,49 @@ pub const update_archive = update_dir ++ "/dazzle-os.tar.xz";
 /// The sizes offered, in MiB.
 pub const video_memory_sizes = [_]u16{ 64, 96, 128, 192, 256, 384 };
 
+/// Which way the screen is: wider than tall, or taller. A display the
+/// other way (the Touch Display 2 is upright; a monitor wide) is turned a
+/// quarter, by the boot screen and the shell. It is kept on the kernel's
+/// command line (`orientation_arg`), which both can read from the start;
+/// landscape if it is not there. Changed, the shell turns at once (it
+/// follows the system manager's report), the boot screen from the next
+/// start.
+pub const Orientation = enum {
+    landscape,
+    portrait,
+
+    /// The orientation a kernel command line gives.
+    pub fn of(cmdline: []const u8) Orientation {
+        var found: Orientation = .landscape;
+        var it = std.mem.tokenizeAny(u8, cmdline, " \n");
+        while (it.next()) |arg| {
+            if (!std.mem.startsWith(u8, arg, orientation_arg)) continue;
+            found = std.meta.stringToEnum(Orientation, arg[orientation_arg.len..]) orelse found;
+        }
+        return found;
+    }
+
+    /// This start's (from /proc/cmdline).
+    pub fn now() Orientation {
+        var buf: [1024]u8 = undefined;
+        const rc = linux.open("/proc/cmdline", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+        if (linux.errno(rc) != .SUCCESS) return .landscape;
+        const fd: linux.fd_t = @intCast(rc);
+        defer _ = linux.close(fd);
+        const n = linux.read(fd, &buf, buf.len);
+        if (linux.errno(n) != .SUCCESS) return .landscape;
+        return of(buf[0..n]);
+    }
+
+    /// Whether a display `width` by `height` is turned for it.
+    pub fn turns(o: Orientation, width: u32, height: u32) bool {
+        return (height > width) != (o == .portrait);
+    }
+};
+
+/// The kernel command line's argument for the orientation.
+pub const orientation_arg = "dazzle.orientation=";
+
 /// Whether `mib` may be chosen on a computer with `ram_mib` of memory (as
 /// Linux has it): one of the sizes, and no more than half of it, so the
 /// system and the apps keep enough.
@@ -190,6 +239,7 @@ pub const Request = union(enum) {
     locale: locale.Settings,
     /// In MiB, one of `video_memory_sizes`.
     video_memory: u16,
+    orientation: Orientation,
     /// Serve the log over HTTP, or not.
     log_server: bool,
     parental_on: struct { password: parental.Password, limits: parental.Limits },
@@ -216,6 +266,7 @@ pub const Request = union(enum) {
             if (std.mem.indexOfScalar(u16, &video_memory_sizes, mib) == null) return null;
             return .{ .video_memory = mib };
         }
+        if (std.mem.eql(u8, kind, "orientation")) return .{ .orientation = std.meta.stringToEnum(Orientation, f.next() orelse return null) orelse return null };
         if (std.mem.eql(u8, kind, "log_server")) return .{ .log_server = parseOnOff(f.next() orelse return null) orelse return null };
         if (std.mem.eql(u8, kind, "parental_on")) {
             const password = parental.Password.fromHex(f.next() orelse return null) orelse return null;
@@ -249,7 +300,7 @@ pub const Request = union(enum) {
             .prepare, .hostname, .finish => client == .setup,
             // The shell too: remote control installs updates and restarts.
             .update, .restart => client == .settings or client == .shell,
-            .video_memory, .log_server, .parental_on, .parental_bonus => client == .settings,
+            .video_memory, .orientation, .log_server, .parental_on, .parental_bonus => client == .settings,
             // The shell's lock screen unlocks.
             .parental_off => client == .settings or client == .shell,
             .locale => client == .setup or client == .settings,
@@ -389,6 +440,9 @@ pub const Report = struct {
     /// The memory the GPU may have now, and from the next start, in MiB.
     video_memory_now: ?u16 = null,
     video_memory_next: ?u16 = null,
+    /// The screen's orientation (as kept for the next start, which the
+    /// shell follows at once).
+    orientation: Orientation = .landscape,
     /// The log is served over HTTP (see `logServerOn`).
     log_server: bool = false,
     parental: Parental = .{},
@@ -428,6 +482,7 @@ pub const Report = struct {
         w.print("\nlocale {s} {s} {s}", .{ r.locale.language.code(), r.locale.keyboard.code(), r.locale.timezone.name() }) catch {};
         w.writeAll("\nvideo_memory") catch {};
         for ([_]?u16{ r.video_memory_now, r.video_memory_next }) |v| if (v) |mib| w.print(" {d}", .{mib}) catch {} else w.writeAll(" -") catch {};
+        w.print("\norientation {s}", .{@tagName(r.orientation)}) catch {};
         w.print("\nlog_server {s}", .{if (r.log_server) "on" else "off"}) catch {};
         const p = r.parental;
         w.print("\nparental {s} ", .{if (p.on) "on" else "off"}) catch {};
@@ -478,6 +533,8 @@ pub const Report = struct {
             } else if (std.mem.eql(u8, kind, "video_memory")) {
                 r.video_memory_now = std.fmt.parseInt(u16, f.next() orelse continue, 10) catch null;
                 r.video_memory_next = std.fmt.parseInt(u16, f.next() orelse continue, 10) catch null;
+            } else if (std.mem.eql(u8, kind, "orientation")) {
+                r.orientation = std.meta.stringToEnum(Orientation, f.next() orelse continue) orelse .landscape;
             } else if (std.mem.eql(u8, kind, "log_server")) {
                 r.log_server = parseOnOff(f.next() orelse continue) orelse false;
             } else if (std.mem.eql(u8, kind, "parental")) {
@@ -707,7 +764,7 @@ test "requests and reports go through the socket" {
     var r: Report = .{ .storage = .preparing, .progress = 42, .hostname = Hostname.parse("awesome-elephant").? };
     var buf: [512]u8 = undefined;
     const text = r.write(&buf);
-    try testing.expectEqualStrings("storage preparing 42\nhostname awesome-elephant\nversion a -\nversion b -\nupdate none\nlocale en-US us UTC\nvideo_memory - -\nlog_server off\nparental off - - - - allow\nparental_status none - - 0 - 0 0\nend\n", text);
+    try testing.expectEqualStrings("storage preparing 42\nhostname awesome-elephant\nversion a -\nversion b -\nupdate none\nlocale en-US us UTC\nvideo_memory - -\norientation landscape\nlog_server off\nparental off - - - - allow\nparental_status none - - 0 - 0 0\nend\n", text);
     const back = Report.parse(text).?;
     try testing.expectEqual(StorageState.preparing, back.storage);
     try testing.expectEqual(@as(u8, 42), back.progress);
@@ -717,6 +774,20 @@ test "requests and reports go through the socket" {
     try testing.expectEqual(Failure.too_small, failed.failure);
     try testing.expectEqual(@as(u8, 0), failed.hostname.len);
     try testing.expect(Report.parse("denied\n").?.denied);
+    // The orientation: asked for by Settings, and said now and next.
+    try testing.expectEqual(Orientation.portrait, Request.parse("orientation portrait\n").?.orientation);
+    try testing.expect(Request.parse("orientation sideways\n") == null);
+    try testing.expect(Request.allowedFor(.{ .orientation = .portrait }, .settings));
+    try testing.expect(!Request.allowedFor(.{ .orientation = .portrait }, .shell));
+    r = .{ .orientation = .portrait };
+    try testing.expectEqual(Orientation.portrait, Report.parse(r.write(&buf)).?.orientation);
+    try testing.expectEqual(Orientation.portrait, Orientation.of("cma=128M dazzle.orientation=portrait dazzle.slot=a"));
+    try testing.expectEqual(Orientation.landscape, Orientation.of("cma=128M"));
+    // The Touch Display 2 (upright) is turned for landscape, a monitor for
+    // portrait.
+    try testing.expect(Orientation.landscape.turns(720, 1280));
+    try testing.expect(!Orientation.landscape.turns(1920, 1080));
+    try testing.expect(Orientation.portrait.turns(1920, 1080));
     try testing.expect(Report.parse("storage ready\n") == null);
 
     // The slots, and an update.

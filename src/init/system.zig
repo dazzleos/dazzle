@@ -151,6 +151,7 @@ const Manager = struct {
         };
         for (&m.report.versions, "ab") |*v, s| v.* = slots.version(s);
         m.report.video_memory_next = slots.videoMemory(m.report.next orelse running);
+        m.report.orientation = slots.orientation(m.report.next orelse running);
     }
 
     fn run(m: *Manager) !void {
@@ -162,7 +163,9 @@ const Manager = struct {
         }
         m.readSlots();
         var cmdline: [1024]u8 = undefined;
-        if (sys.readFile("/proc/cmdline", &cmdline)) |text| m.report.video_memory_now = slots.cmaMiB(text);
+        if (sys.readFile("/proc/cmdline", &cmdline)) |text| {
+            m.report.video_memory_now = slots.cmaMiB(text);
+        }
         m.report.locale = locale.load();
         m.report.log_server = proto.logServerOn();
         // The last update did not work (and the system before is running).
@@ -280,6 +283,7 @@ const Manager = struct {
                 if (m.report.storage == .ready) m.keepLocale();
             },
             .video_memory => |mib| m.setVideoMemory(mib),
+            .orientation => |o| m.setOrientation(o),
             .log_server => |on| m.setLogServer(on),
             .parental_on => |r| if (m.parental_loaded) {
                 m.parental.enable(r.password.slice(), r.limits, parental.freshSalt());
@@ -434,6 +438,24 @@ const Manager = struct {
             return;
         };
         print("dazzle: system: video memory {d} MiB from the next start\n", .{mib});
+    }
+
+    /// Keeps the screen's orientation as `o` (in both slots' cmdline.txt, as
+    /// `setVideoMemory` does video memory): the shell follows the report at
+    /// once, the boot screen from the next start.
+    fn setOrientation(m: *Manager, o: proto.Orientation) void {
+        if (m.copier != null or m.installer != null) return;
+        slots.remount(false) catch |err| {
+            print(sys.log_warning ++ "dazzle: system: cannot write the boot partition: {s}\n", .{@errorName(err)});
+            return;
+        };
+        defer slots.remount(true) catch {};
+        defer m.readSlots();
+        slots.setOrientation(o) catch |err| {
+            print(sys.log_warning ++ "dazzle: system: cannot set the orientation: {s}\n", .{@errorName(err)});
+            return;
+        };
+        print("dazzle: system: the screen {s}\n", .{@tagName(o)});
     }
 
     /// Keeps the language and keyboard in /data/system (if it is there

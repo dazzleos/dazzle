@@ -355,6 +355,48 @@ pub fn setCma(cmdline: []const u8, mib: u16, out: []u8) []const u8 {
     return w.buffered();
 }
 
+/// A kernel command line with `key` (as "key=") set to `value` (changed,
+/// or added).
+pub fn setArg(cmdline: []const u8, key: []const u8, value: []const u8, out: []u8) []const u8 {
+    var w: std.Io.Writer = .fixed(out);
+    var found = false;
+    var it = std.mem.tokenizeAny(u8, cmdline, " \n");
+    var first = true;
+    while (it.next()) |arg| {
+        const is_key = std.mem.startsWith(u8, arg, key);
+        // Only one.
+        if (is_key and found) continue;
+        if (!first) w.writeByte(' ') catch {};
+        first = false;
+        if (is_key) {
+            w.print("{s}{s}", .{ key, value }) catch {};
+            found = true;
+        } else w.writeAll(arg) catch {};
+    }
+    if (!found) w.print("{s}{s}{s}", .{ if (first) "" else " ", key, value }) catch {};
+    w.writeByte('\n') catch {};
+    return w.buffered();
+}
+
+/// The screen's orientation `slot` starts with (its cmdline.txt's).
+pub fn orientation(slot: u8) sys.system.Orientation {
+    var dir_buf: [96]u8 = undefined;
+    var path_buf: [128]u8 = undefined;
+    const path = filePath(&path_buf, slotPath(&dir_buf, slot, ""), "cmdline.txt") orelse return .landscape;
+    var buf: [1024]u8 = undefined;
+    return .of(sys.readFile(path, &buf) orelse return .landscape);
+}
+
+/// Has both slots start with the screen `o` (as `setVideoMemory` does
+/// video memory).
+pub fn setOrientation(o: sys.system.Orientation) !void {
+    try rewriteCmdlines(struct {
+        fn f(cmdline: []const u8, out: []u8, which: sys.system.Orientation) []const u8 {
+            return setArg(cmdline, sys.system.orientation_arg, @tagName(which), out);
+        }
+    }.f, o);
+}
+
 /// The video memory `slot` starts with (its cmdline.txt's cma=).
 pub fn videoMemory(slot: u8) ?u16 {
     var dir_buf: [96]u8 = undefined;
@@ -370,6 +412,16 @@ pub fn videoMemory(slot: u8) ?u16 {
 /// one before if an update does not work). The boot partition must be
 /// writable.
 pub fn setVideoMemory(mib: u16) !void {
+    try rewriteCmdlines(struct {
+        fn f(cmdline: []const u8, out: []u8, m: u16) []const u8 {
+            return setCma(cmdline, m, out);
+        }
+    }.f, mib);
+}
+
+/// Both slots' cmdline.txt changed by `change(cmdline, out, arg)`, each
+/// written as cmdline.txt.new, then renamed over it.
+fn rewriteCmdlines(comptime change: anytype, arg: anytype) !void {
     var wrote = false;
     for ("ab") |slot| {
         var dir_buf: [96]u8 = undefined;
@@ -379,8 +431,8 @@ pub fn setVideoMemory(mib: u16) !void {
         const path = filePath(&path_buf, dir, "cmdline.txt") orelse return error.NameTooLong;
         var buf: [1024]u8 = undefined;
         const cmdline = sys.readFile(path, &buf) orelse continue;
-        var out: [1024 + 16]u8 = undefined;
-        const changed = setCma(cmdline, mib, &out);
+        var out: [1024 + 32]u8 = undefined;
+        const changed = change(cmdline, &out, arg);
         const tmp = filePath(&tmp_buf, dir, "cmdline.txt.new") orelse return error.NameTooLong;
         _ = linux.unlink(tmp);
         const fd = try sys.open(tmp, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true });
@@ -429,6 +481,12 @@ test "config.txt's os_prefix picks the slot" {
     try std.testing.expectEqualStrings(changed, setOsPrefix(changed, 'b', &again));
     // Taken out.
     try std.testing.expectEqualStrings("os_prefix=slot-b/\nboot_delay=0\ndisplay_auto_detect=1\n", setOsPrefix("os_prefix=slot-a/\ndisable_touchscreen=1\nboot_delay=0\ndisplay_auto_detect=1\n", 'b', &again));
+}
+
+test "a command line's orientation, set or changed" {
+    var out: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("cma=128M dazzle.orientation=portrait\n", setArg("cma=128M\n", sys.system.orientation_arg, "portrait", &out));
+    try std.testing.expectEqualStrings("cma=128M dazzle.orientation=landscape\n", setArg("cma=128M dazzle.orientation=portrait\n", sys.system.orientation_arg, "landscape", &out));
 }
 
 test "a slot's command line says which slot it is" {

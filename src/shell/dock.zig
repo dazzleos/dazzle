@@ -594,8 +594,6 @@ pub const Dock = struct {
     };
 
     pub fn init(kit: *kete_panel.Kit, apps: []App, screen_width: u32, screen_height: u32) !Dock {
-        const scale = @min(@as(f32, @floatFromInt(screen_width)) / 1920, @as(f32, @floatFromInt(screen_height)) / 1080);
-        const height: u32 = @intFromFloat(@round((icon_size + 2 * box_pad) * scale));
         const panel = try kit.gpuPanel();
         errdefer panel.destroy();
         var d: Dock = .{
@@ -604,14 +602,34 @@ pub const Dock = struct {
             .screen_height = screen_height,
             .screen_width = screen_width,
             .width = screen_width,
-            .height = height,
-            .scale = scale,
+            .height = 0,
+            .scale = 1,
             .apps = apps,
         };
         // The apps there to start with are there already.
         d.entries_len = @min(apps.len, max_entries);
         for (d.entries[0..d.entries_len], 0..) |*e, i| e.* = .{ .app = i };
+        d.setScreen(screen_width, screen_height, false);
         return d;
+    }
+
+    /// Sizes it for a screen `screen_width` by `screen_height`: as it is at
+    /// 1080p, scaled down for a smaller one; for fingers (`touch`: a
+    /// touchscreen), no smaller than at 1080p (its icons are then about as
+    /// big as a fingertip), as long as its row fits across the screen.
+    pub fn setScreen(d: *Dock, screen_width: u32, screen_height: u32, touch: bool) void {
+        d.screen_width = screen_width;
+        d.screen_height = screen_height;
+        d.width = screen_width;
+        var scale = @min(@as(f32, @floatFromInt(screen_width)) / 1920, @as(f32, @floatFromInt(screen_height)) / 1080);
+        if (touch) scale = @max(scale, 1);
+        d.scale = scale;
+        // Its row (as wide as it is at this scale) across the screen, less
+        // a margin each side.
+        const row = d.iconsWidth() + d.statusWidth() + 2 * box_pad * scale;
+        const room = @as(f32, @floatFromInt(screen_width)) - 2 * margin * scale;
+        if (row > room and row > 0) d.scale = scale * room / row;
+        d.height = @intFromFloat(@round((icon_size + 2 * box_pad) * d.scale));
     }
 
     pub fn deinit(d: *Dock) void {

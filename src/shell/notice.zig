@@ -60,6 +60,16 @@ pub const Notice = struct {
         gpa.free(n.pixels);
     }
 
+    /// Sized again, for a screen `screen_width` wide, at `scale`.
+    pub fn resize(n: *Notice, gpa: std.mem.Allocator, screen_width: u32, scale: f32) !void {
+        const again = try init(gpa, n.panel, screen_width, scale);
+        n.deinit(gpa);
+        n.pixels = again.pixels;
+        n.height = again.height;
+        n.scale = again.scale;
+        n.screen_width = again.screen_width;
+    }
+
     fn maxWidth(screen_width: u32, scale: f32) u32 {
         return @min(@as(u32, @intFromFloat(@round(max_width * scale))), screen_width);
     }

@@ -23,6 +23,7 @@ pub const appearance_view = @import("appearance_view.zig");
 pub const board_view = @import("board_view.zig");
 pub const software_view = @import("software_view.zig");
 pub const resources_view = @import("resources_view.zig");
+pub const display_view = @import("display_view.zig");
 pub const language_view = @import("language_view.zig");
 pub const log_view = @import("log_view.zig");
 pub const parental_view = @import("parental_view.zig");
@@ -64,6 +65,8 @@ pub const Actions = struct {
     gpio: ?GpioChange = null,
     /// The video memory to have from the next start, in MiB.
     video_memory: ?u16 = null,
+    /// The screen's orientation, from the next start.
+    orientation: ?@import("sys").system.Orientation = null,
     /// Sound settings (volume, mute, output device) and test chime trigger.
     sound: ?audio.Settings = null,
     test_sound: bool = false,
@@ -183,6 +186,7 @@ pub const Settings = struct {
     language_pack: LanguagePack = .none,
     update: software_view.Update = .{},
     video_memory: resources_view.VideoMemory = .{},
+    display: display_view.Display = .{},
     sound: audio.Settings = .{},
     audio_devices: *const audio.Devices = &empty_audio_devices,
     appearance: appearance_settings.Settings = .{},
@@ -194,6 +198,7 @@ pub const Settings = struct {
         wifi: wifi_view.State = .{},
         ethernet: ethernet_view.State = .{},
         sound: sound_view.State = .{},
+        display: display_view.State = .{},
         appearance: appearance_view.State = .{},
         board: board_view.State = .{},
         software: software_view.State = .{},
@@ -228,6 +233,7 @@ pub const Settings = struct {
             .wifi => wifi_view.build(self, b, &state.wifi),
             .ethernet => b.scroll(.ethernet, ethernet_view.build(self, b, &state.ethernet)),
             .sound => b.scroll(.sound, sound_view.build(self, b, &state.sound)),
+            .display => b.scroll(.display, display_view.build(self, b, &state.display)),
             .appearance => b.scroll(.appearance, appearance_view.build(self, b, &state.appearance)),
             .board => board_view.build(self, b, &state.board),
             .apps => software_view.build(self, b, &state.software),
@@ -258,6 +264,7 @@ pub const Page = enum {
     wifi,
     ethernet,
     sound,
+    display,
     appearance,
     board,
     apps,
@@ -271,6 +278,7 @@ pub const Page = enum {
             .wifi => locale.text(wifi_view.label),
             .ethernet => locale.text(ethernet_view.label),
             .sound => locale.text(sound_view.label),
+            .display => locale.text(display_view.label),
             .appearance => locale.text(appearance_view.label),
             .board => locale.text(board_view.label),
             .apps => locale.text(software_view.label),
@@ -286,6 +294,7 @@ pub const Page = enum {
             .wifi => wifi_view.icon,
             .ethernet => ethernet_view.icon,
             .sound => sound_view.icon,
+            .display => display_view.icon,
             .appearance => appearance_view.icon,
             .board => board_view.icon,
             .apps => software_view.icon,
