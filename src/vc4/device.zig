@@ -424,6 +424,21 @@ pub const Device = struct {
         drm.gemClose(dev.renderFd(), bo.handle);
     }
 
+    /// A buffer only the display reads (the cursor's), mapped: on a Pi 4 or
+    /// 5 not given to the GPU (`createBo` maps it into the GPU's address
+    /// space too), so no GPU job can write into it. Freed with `destroyBo`.
+    pub fn createScanoutBo(dev: Device, size: u32) !Bo {
+        if (!dev.is_v3d or dev.v3d_fd == null) return dev.createBo(size);
+        var dumb: drm.ModeCreateDumb = .{ .width = size, .height = 1, .bpp = 8 };
+        try drm.ioctl(dev.fd, drm.IOCTL_MODE_CREATE_DUMB, &dumb);
+        errdefer drm.gemClose(dev.fd, dumb.handle);
+        var map_arg: drm.ModeMapDumb = .{ .handle = dumb.handle };
+        try drm.ioctl(dev.fd, drm.IOCTL_MODE_MAP_DUMB, &map_arg);
+        const addr = try sys.check(linux.mmap(null, @intCast(dumb.size), .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, dev.fd, @intCast(map_arg.offset)));
+        const ptr: [*]align(std.heap.page_size_min) u8 = @ptrFromInt(addr);
+        return .{ .handle = 0, .kms_handle = dumb.handle, .map = ptr[0..size] };
+    }
+
     /// Allocates a GPU buffer and maps it. When `dev` bridges both `vc4` (KMS)
     /// and `v3d` (3D), allocates a physically contiguous buffer on `vc4` and
     /// imports it into `v3d` so it can be both rendered to and scanned out.
@@ -480,7 +495,8 @@ pub const Device = struct {
     pub fn destroyBo(dev: Device, bo: Bo) void {
         if (dev.is_v3d) invalidateBoOffsetCache(bo.handle);
         _ = linux.munmap(bo.map.ptr, bo.map.len);
-        drm.gemClose(dev.renderFd(), bo.handle);
+        // (A display-only buffer, `createScanoutBo`, has no GPU handle.)
+        if (bo.handle != 0) drm.gemClose(dev.renderFd(), bo.handle);
         if (bo.kms_handle != 0 and bo.kms_handle != bo.handle) {
             drm.gemClose(dev.fd, bo.kms_handle);
         }

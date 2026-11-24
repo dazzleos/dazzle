@@ -775,7 +775,9 @@ pub const Renderer = struct {
         const slot = &r.cursor_bos[@intFromEnum(shape)];
         if (slot.* == null) {
             const bytes = cursor.size * cursor.size * 4;
-            const bo = try r.dev.createBo(bytes);
+            // Only the display reads it: kept from the GPU (on a Pi 4,
+            // the hand came out as garbage, written over by a GPU job).
+            const bo = try r.dev.createScanoutBo(bytes);
             const pixels = std.mem.bytesAsValue([cursor.size * cursor.size]u32, bo.map[0..bytes]);
             cursor.draw(pixels, shape);
             if (r.turned) turnSquare(cursor.size, pixels);
