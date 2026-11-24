@@ -983,6 +983,10 @@ const wifi_firmware = [_]struct { name: []const u8, source: []const u8, sha256: 
     .{ .name = "brcmfmac43455-sdio.raspberrypi,4-model-b.txt", .source = "brcm/brcmfmac43455-sdio.txt", .sha256 = "ca709be81a78bdb6932936374f39943acbd7af07fae6151011127599a3ce9e3d" },
     .{ .name = "brcmfmac43455-sdio.raspberrypi,5-model-b.txt", .source = "brcm/brcmfmac43455-sdio.txt", .sha256 = "ca709be81a78bdb6932936374f39943acbd7af07fae6151011127599a3ce9e3d" },
     .{ .name = "brcmfmac43455-sdio.clm_blob", .source = "cypress/cyfmac43455-sdio.clm_blob", .sha256 = "9823842cae9fb9a5dd1e5fb31f595516ec7deee341354bef30bb3026eee29cc1" },
+    // CYW43456: the Pi 400 and Compute Module 4.
+    .{ .name = "brcmfmac43456-sdio.bin", .source = "brcm/brcmfmac43456-sdio.bin", .sha256 = "ddf83f2100885b166be52d21c8966db164fdd4e1d816aca2acc67ee9cc28d726" },
+    .{ .name = "brcmfmac43456-sdio.txt", .source = "brcm/brcmfmac43456-sdio.txt", .sha256 = "44e0bb322dc1f39a4b0a89f30ffdd28bc93f7d7aaf534d06d229fe56f6198194" },
+    .{ .name = "brcmfmac43456-sdio.clm_blob", .source = "brcm/brcmfmac43456-sdio.clm_blob", .sha256 = "2dbd7d22fc9af0eb560ceab45b19646d211bc7b34a1dd00c6bfac5dd6ba25e8a" },
     // CYW43436 (and the earlier 43436s): the Zero 2 W.
     .{ .name = "brcmfmac43436-sdio.bin", .source = "brcm/brcmfmac43436-sdio.bin", .sha256 = "510a7dd1e056199b309425548ee0bd846993a1837ac7fa1e4d3e641f05a1327a" },
     .{ .name = "brcmfmac43436-sdio.txt", .source = "brcm/brcmfmac43436-sdio.txt", .sha256 = "4cda90facd8844cff60d80b34b24ecbae76adb9a62508a109461b8bf42b478d1" },
