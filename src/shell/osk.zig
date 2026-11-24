@@ -155,6 +155,12 @@ pub const Osk = struct {
         return o.changed or o.panel.needsFrame();
     }
 
+    /// Whether a key has done something the shell is yet to deal with:
+    /// typed (see `take`), or hidden it.
+    pub fn pending(o: *const Osk) bool {
+        return o.typed_len > 0 or (o.shown and o.dismissed);
+    }
+
     /// What was typed since the last call.
     pub fn take(o: *Osk) []const Typed {
         const n = o.typed_len;

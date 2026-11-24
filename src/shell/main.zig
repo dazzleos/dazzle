@@ -387,6 +387,9 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         var wake = next_tick;
         if (notice.wakeAt(now)) |due| wake = @min(wake, due);
         if (dock.tooltipDue()) |due| wake = @min(wake, due);
+        // A key pressed on the on-screen keyboard (what it typed, or Hide):
+        // dealt with at once, not when something next wakes the shell.
+        if (osk.pending()) wake = now;
         if (!renderer.flipPending()) {
             if (server.damaged) wake = now;
             if (panels_damaged) wake = @min(wake, client_frame_ns + panel_grace_ns);
