@@ -688,14 +688,22 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                         queue(q, qn, .frame);
                         req.respond("200 OK", "text/plain", "ok\n");
                     },
-                    .tap => |at| {
-                        // As a touchscreen would say it: 0 to 1 across the
-                        // display (on its side, the screen's down is the
-                        // display's across).
-                        const sx = at[0] / @as(f64, @floatFromInt(@max(renderer.width, 2) - 1));
-                        const sy = at[1] / @as(f64, @floatFromInt(@max(renderer.height, 2) - 1));
-                        const tx = if (renderer.turned) sy else sx;
-                        const ty = if (renderer.turned) 1 - sx else sy;
+                    .swipe => |sw| {
+                        // Down, along in steps, and up (with no place, as a
+                        // touchscreen says it).
+                        const steps = 12;
+                        for (0..steps + 1) |i| {
+                            const f = @as(f64, @floatFromInt(i)) / steps;
+                            const at = touchAt(&renderer, sw[0] + (sw[2] - sw[0]) * f, sw[1] + (sw[3] - sw[1]) * f);
+                            queue(q, qn, .{ .touch = .{ .kind = if (i == 0) .down else .motion, .id = 1001, .x = at[0], .y = at[1] } });
+                        }
+                        queue(q, qn, .{ .touch = .{ .kind = .up, .id = 1001 } });
+                        req.respond("200 OK", "text/plain", "ok\n");
+                    },
+                    .tap => |at_screen| {
+                        const at = touchAt(&renderer, at_screen[0], at_screen[1]);
+                        const tx = at[0];
+                        const ty = at[1];
                         queue(q, qn, .{ .touch = .{ .kind = .down, .id = 1000, .x = tx, .y = ty } });
                         // Let go with no place, as a touchscreen says it.
                         queue(q, qn, .{ .touch = .{ .kind = .up, .id = 1000 } });
@@ -1759,6 +1767,14 @@ fn dockArea(dock: *const dock_mod.Dock) server_mod.Rect {
 }
 
 /// Gives the renderer the dock's latest picture, where it is.
+/// (`x`, `y`) on the screen, as a touchscreen would say it: 0 to 1 across
+/// the display (on its side, the screen's down is the display's across).
+fn touchAt(renderer: *const render.Renderer, x: f64, y: f64) [2]f64 {
+    const sx = x / @as(f64, @floatFromInt(@max(renderer.width, 2) - 1));
+    const sy = y / @as(f64, @floatFromInt(@max(renderer.height, 2) - 1));
+    return if (renderer.turned) .{ sy, 1 - sx } else .{ sx, sy };
+}
+
 fn showDock(renderer: *render.Renderer, dock: *const dock_mod.Dock) void {
     const at = dock.place();
     renderer.setPanelAt(.dock, dock.picture(), at.x, at.y);
