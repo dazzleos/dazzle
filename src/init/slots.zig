@@ -247,8 +247,16 @@ const added_settings = [_][]const u8{
     "display_auto_detect=1",
 };
 
-/// config.txt with its os_prefix lines for `slot` (or one added), and the
-/// settings it does not have yet (`added_settings`).
+/// Settings an update takes out of config.txt on cards made before it.
+const removed_settings = [_][]const u8{
+    // Passed on to the Touch Display 2's overlay by the firmware: without
+    // its touch controller.
+    "disable_touchscreen=1",
+};
+
+/// config.txt with its os_prefix lines for `slot` (or one added), the
+/// settings it does not have yet (`added_settings`), and without those
+/// taken out (`removed_settings`).
 pub fn setOsPrefix(config: []const u8, slot: u8, out: []u8) []const u8 {
     var w: std.Io.Writer = .fixed(out);
     var found = false;
@@ -256,9 +264,13 @@ pub fn setOsPrefix(config: []const u8, slot: u8, out: []u8) []const u8 {
     var lines = std.mem.splitScalar(u8, config, '\n');
     var first = true;
     while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        const removed = for (removed_settings) |r| {
+            if (std.mem.eql(u8, line, r)) break true;
+        } else false;
+        if (removed) continue;
         if (!first) w.writeByte('\n') catch {};
         first = false;
-        const line = std.mem.trim(u8, raw, " \t\r");
         for (added_settings, &has) |setting, *h| {
             const key = setting[0 .. std.mem.indexOfScalar(u8, setting, '=').? + 1];
             if (std.mem.startsWith(u8, line, key)) h.* = true;
@@ -415,6 +427,8 @@ test "config.txt's os_prefix picks the slot" {
     try std.testing.expectEqualStrings("boot_delay=2\nos_prefix=slot-b/\ndisplay_auto_detect=1\n", setOsPrefix("boot_delay=2\nos_prefix=slot-a/\n", 'b', &out));
     var again: [256]u8 = undefined;
     try std.testing.expectEqualStrings(changed, setOsPrefix(changed, 'b', &again));
+    // Taken out.
+    try std.testing.expectEqualStrings("os_prefix=slot-b/\nboot_delay=0\ndisplay_auto_detect=1\n", setOsPrefix("os_prefix=slot-a/\ndisable_touchscreen=1\nboot_delay=0\ndisplay_auto_detect=1\n", 'b', &again));
 }
 
 test "a slot's command line says which slot it is" {
