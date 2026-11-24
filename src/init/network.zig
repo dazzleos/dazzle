@@ -95,8 +95,18 @@ const Ethernet = struct {
     looked_ns: u64 = 0,
     said_waiting: bool = false,
 
+    /// Whether DHCP may start: once the computer has been named (setup
+    /// names it on the first start, so the router learns its name), or at
+    /// once if the kernel's command line has the log server or remote
+    /// control on (for trying a board whose screen does not work yet:
+    /// they need the network from the start). Named later, DHCP starts
+    /// again with the name.
+    fn dhcpAllowed(e: *const Ethernet) bool {
+        return e.hostname.len > 0 or sys.system.logServerForced() or sys.remote.forced() != null;
+    }
+
     /// Finds wired adapters, or notices any that have gone. DHCP starts
-    /// once the computer has been named (setup names it on the first start).
+    /// as `dhcpAllowed` says.
     fn look(e: *Ethernet, now: u64, cfg: *const proto.Config) void {
         if (ipv4.hostname()) |h| if (!std.mem.eql(u8, e.hostname.slice(), h.slice())) {
             e.hostname = h;
@@ -132,7 +142,7 @@ const Ethernet = struct {
                     i.name(), i.mac[0], i.mac[1], i.mac[2], i.mac[3], i.mac[4], i.mac[5],
                 });
                 slot.* = .{ .ifc = i, .addressing = cfg.ethernetAddressingFor(i.name()) };
-                slot.*.?.apply(e.hostname.len > 0);
+                slot.*.?.apply(e.dhcpAllowed());
                 break;
             };
         }
@@ -149,7 +159,7 @@ const Ethernet = struct {
                 // (DHCP may give another).
                 s.stopDhcp();
                 ipv4.removeAddress(s.ifc.name());
-                s.apply(e.hostname.len > 0);
+                s.apply(e.dhcpAllowed());
                 matched = true;
                 if (name.len == 0) break;
             }
