@@ -1244,6 +1244,23 @@ pub const Server = struct {
         s.damaged = true;
     }
 
+    /// The screen changed size (turned): each restored window placed to be
+    /// all in the work area at the size it is told (`configuredSize`), as
+    /// far as it fits. Before `setWorkArea`, which tells them.
+    pub fn fitWindows(s: *Server) void {
+        const wa = s.work_area;
+        for (s.toplevels.items) |t| {
+            if (t.maximized or t.fullscreen or t.tiled != null or !t.shown()) continue;
+            const size = s.configuredSize(t);
+            const right = wa.x + @as(i32, @intCast(wa.width)) - @as(i32, @intCast(size[0]));
+            const bottom = wa.y + @as(i32, @intCast(wa.height)) - @as(i32, @intCast(size[1]));
+            t.x = std.math.clamp(t.x, wa.x, @max(right, wa.x));
+            t.y = std.math.clamp(t.y, wa.y, @max(bottom, wa.y));
+            s.replacePopups(t);
+        }
+        s.damaged = true;
+    }
+
     /// Wakes all configured toplevels by sending a configure event (e.g. when
     /// a system-wide appearance setting changes).
     pub fn wakeAll(s: *Server) void {

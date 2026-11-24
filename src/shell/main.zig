@@ -485,7 +485,9 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                 renderer.setPanelBand(.dock, @intCast(band_y));
                 server.output.width = renderer.width;
                 server.output.height = renderer.height;
-                server.setWorkArea(if (dock_shown) with_dock else server.screen());
+                server.work_area = if (dock_shown) with_dock else server.screen();
+                server.fitWindows();
+                server.setWorkArea(server.work_area);
                 pointer.max_x = @floatFromInt(renderer.width - 1);
                 pointer.max_y = @floatFromInt(renderer.height - 1);
                 pointer.x = std.math.clamp(pointer.x, 0, pointer.max_x);
