@@ -12,12 +12,19 @@
 //!    system hangs.
 //! 3. Once the shell has run for `healthy_ns` the update has worked:
 //!    os_prefix is switched to it again and the trial ends (`commit`). If
-//!    the shell stops before then, init restarts the Pi.
+//!    the shell stops before then, init writes how it stopped in the trial
+//!    ("<x> started exited 1", "<x> started signal 11": `markStopped`) and
+//!    restarts the Pi.
 //! 4. The system before, started again with a trial "started" for the
 //!    other slot, knows the update did not work: the trial becomes
 //!    /boot/trial-failed, which the system manager reports to Settings
-//!    (and the next install removes). A trial still "pending" (the power
-//!    went while installing) is just removed.
+//!    (and the next trial removes), and the failed start's log is kept
+//!    (see bootlog.zig). A trial still "pending" (the power went while
+//!    installing) is just removed.
+//!
+//! Settings can also have the other slot start next (to go back to the
+//! system before an update, say): that is a trial too, so a slot that
+//! does not start leaves the running one to come back to.
 //!
 //! A kernel that does not get as far as init is not caught: os_prefix
 //! still names its slot. Updates' kernels are built and checked by CI, and
@@ -39,29 +46,57 @@ pub const healthy_ns = 60 * std.time.ns_per_s;
 
 pub const State = enum { pending, started };
 
+/// What init logs when a trial starts (bootlog.zig looks for it, to know
+/// a log is the trial's).
+pub const trying_text = "dazzle: trying OS slot ";
+
 pub const Trial = struct {
     slot: u8,
     state: State,
+    /// How the shell stopped, if it did (not known if the system hung, the
+    /// power went or it never got as far as the shell).
+    stop: sys.system.Stop = .unknown,
 
     pub fn parse(text: []const u8) ?Trial {
         var f = std.mem.tokenizeAny(u8, text, " \n");
         const s = f.next() orelse return null;
         if (s.len != 1 or (s[0] != 'a' and s[0] != 'b')) return null;
-        return .{ .slot = s[0], .state = std.meta.stringToEnum(State, f.next() orelse return null) orelse return null };
+        return .{
+            .slot = s[0],
+            .state = std.meta.stringToEnum(State, f.next() orelse return null) orelse return null,
+            .stop = sys.system.Stop.parse(&f),
+        };
+    }
+
+    pub fn format(t: Trial, buf: []u8) []const u8 {
+        var w: std.Io.Writer = .fixed(buf);
+        w.print("{c} {s}", .{ t.slot, @tagName(t.state) }) catch {};
+        if (t.stop != .unknown) {
+            w.writeByte(' ') catch {};
+            t.stop.write(&w) catch {};
+        }
+        w.writeByte('\n') catch {};
+        return w.buffered();
     }
 };
 
 /// The trial on the card, if there is one.
 pub fn read() ?Trial {
-    var buf: [32]u8 = undefined;
+    var buf: [64]u8 = undefined;
     return Trial.parse(sys.readFile(marker, &buf) orelse return null);
+}
+
+/// The trial that did not work, if the last one did not.
+pub fn readFailed() ?Trial {
+    var buf: [64]u8 = undefined;
+    return Trial.parse(sys.readFile(failed_marker, &buf) orelse return null);
 }
 
 /// Writes the trial (the boot partition must be writable): as trial.new,
 /// then renamed over it.
 pub fn write(t: Trial) !void {
-    var buf: [32]u8 = undefined;
-    const text = std.fmt.bufPrint(&buf, "{c} {s}\n", .{ t.slot, @tagName(t.state) }) catch unreachable;
+    var buf: [64]u8 = undefined;
+    const text = t.format(&buf);
     const tmp = marker ++ ".new";
     _ = linux.unlink(tmp);
     const fd = try sys.open(tmp, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true });
@@ -95,10 +130,11 @@ pub fn atBoot(running: ?u8) Outcome {
     defer slots.remount(true) catch {};
     if (t.slot == slot) {
         // The updated system: the next start is the one before, unless
-        // this one works.
+        // this one works. (A trial before that did not work is forgotten.)
         write(.{ .slot = slot, .state = .started }) catch |err| print(sys.log_warning ++ "dazzle: trial: cannot mark it started: {s}\n", .{@errorName(err)});
         slots.startNext(slots.other(slot)) catch |err| print(sys.log_warning ++ "dazzle: trial: cannot keep the system before: {s}\n", .{@errorName(err)});
-        print("dazzle: trying the update in OS slot {c}\n", .{std.ascii.toUpper(slot)});
+        _ = linux.unlink(failed_marker);
+        print(trying_text ++ "{c}: if its shell has not run a minute when the computer next starts, slot {c} starts instead\n", .{ std.ascii.toUpper(slot), std.ascii.toUpper(slots.other(slot)) });
         return .trying;
     }
     // The system before. (os_prefix already names it: the trial changed it.)
@@ -109,8 +145,20 @@ pub fn atBoot(running: ?u8) Outcome {
     _ = linux.unlink(failed_marker);
     _ = linux.rename(marker, failed_marker);
     slots.startNext(slot) catch {};
-    print(sys.log_error ++ "dazzle: the update in OS slot {c} did not work: back to slot {c}\n", .{ std.ascii.toUpper(t.slot), std.ascii.toUpper(slot) });
+    var how_buf: [96]u8 = undefined;
+    print(sys.log_error ++ "dazzle: OS slot {c} did not start properly ({s}): back to slot {c}\n", .{ std.ascii.toUpper(t.slot), t.stop.describe(&how_buf), std.ascii.toUpper(slot) });
     return .failed;
+}
+
+/// The shell stopped (`stop`) while the system in `running` was tried:
+/// kept in the trial, for the system before to say why it did not work.
+pub fn markStopped(running: u8, stop: sys.system.Stop) void {
+    slots.remount(false) catch |err| {
+        print(sys.log_warning ++ "dazzle: trial: cannot write the boot partition: {s}\n", .{@errorName(err)});
+        return;
+    };
+    defer slots.remount(true) catch {};
+    write(.{ .slot = running, .state = .started, .stop = stop }) catch |err| print(sys.log_warning ++ "dazzle: trial: cannot keep how the shell stopped: {s}\n", .{@errorName(err)});
 }
 
 /// The update has worked: it starts from now on.
@@ -201,4 +249,12 @@ test "the trial on the card" {
     try std.testing.expect(Trial.parse("c started") == null);
     try std.testing.expect(Trial.parse("b") == null);
     try std.testing.expect(Trial.parse("b done") == null);
+    // How the shell stopped, kept and read back.
+    const stopped: Trial = .{ .slot = 'b', .state = .started, .stop = .{ .signal = 11 } };
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("b started signal 11\n", stopped.format(&buf));
+    try std.testing.expectEqual(stopped, Trial.parse(stopped.format(&buf)).?);
+    try std.testing.expectEqual(sys.system.Stop{ .exited = 1 }, Trial.parse("a started exited 1").?.stop);
+    try std.testing.expectEqual(sys.system.Stop.unknown, Trial.parse("a started").?.stop);
+    try std.testing.expectEqualStrings("a pending\n", (Trial{ .slot = 'a', .state = .pending }).format(&buf));
 }

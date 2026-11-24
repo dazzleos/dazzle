@@ -112,8 +112,12 @@ pub const Updater = struct {
         const r = if (u.report) |*r| r else null;
         if (r) |rep| {
             if (rep.update == .installing) return .installing;
-            // The firmware starts the other slot next time.
-            if (rep.slot != null and rep.next != null and rep.slot.? != rep.next.?) return .ready;
+            // The firmware starts the other slot next time, and it is newer
+            // (an older one, chosen on Dazzle's page, is not an update).
+            if (rep.slot != null and rep.next != null and rep.slot.? != rep.next.?) {
+                const newer = if (rep.version(rep.next.?)) |v| v.time >= u.running.time else true;
+                if (newer) return .ready;
+            }
         }
         if (u.available() != null) return .available;
         return if (u.manifest != null and u.message_len == 0) .current else .unknown;

@@ -74,8 +74,9 @@ pub fn main() void {
     // From here on, a system that hangs (runs out of memory, say) restarts
     // by itself rather than sitting there with nothing on the screen.
     var watchdog = trial.Watchdog.start();
-    // This start's log, on the card (see bootlog.zig).
-    if (card.mounted) _ = bootlog.start();
+    // This start's log, on the card (see bootlog.zig); after a slot tried
+    // did not start properly, its log is kept too.
+    if (card.mounted) _ = bootlog.start(card.trial == .failed);
     const name = card.hostname.slice();
     if (name.len > 0) _ = linux.syscall2(.sethostname, @intFromPtr(name.ptr), name.len);
     const network_pid = network.start();
@@ -397,15 +398,22 @@ fn reapForever(first_shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, f
             continue;
         }
         if (pid != shell_pid) continue;
+        var stop: sys.system.Stop = .unknown;
         if (linux.W.IFEXITED(status)) {
-            print("dazzle: shell exited with status {d}\n", .{linux.W.EXITSTATUS(status)});
+            stop = .{ .exited = @truncate(linux.W.EXITSTATUS(status)) };
+            print(sys.log_error ++ "dazzle: shell exited with status {d}\n", .{linux.W.EXITSTATUS(status)});
         } else if (linux.W.IFSIGNALED(status)) {
-            print("dazzle: shell killed by signal {d}\n", .{linux.W.TERMSIG(status)});
+            const sig: u8 = @truncate(@intFromEnum(linux.W.TERMSIG(status)));
+            stop = .{ .signal = sig };
+            print(sys.log_error ++ "dazzle: shell killed by {s} (signal {d})\n", .{ sys.system.signalName(sig), sig });
         }
-        // The update does not work: back to the system before (which the
-        // next start already is).
+        // The system tried does not work: back to the system before (which
+        // the next start already is), saying how it stopped.
         if (t.timer != null) {
-            print(sys.log_error ++ "dazzle: the update did not work\n", .{});
+            trial.markStopped(card.slot orelse 'a', stop);
+            print(sys.log_error ++ "dazzle: OS slot {c} does not work: restarting into the system before\n", .{std.ascii.toUpper(card.slot orelse 'a')});
+            // A moment for the log to reach the card.
+            sys.sleepMs(1500);
             shutdown.now(.restart, null);
         }
         print("dazzle: restarting the shell in 1 s\n", .{});

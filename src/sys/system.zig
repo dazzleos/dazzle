@@ -18,6 +18,10 @@
 //!                              into the slot not in use, and start that
 //!                              slot next time (settings)
 //!     restart                  restart the computer (settings)
+//!     boot <a|b>               start that OS slot next time (settings):
+//!                              the other slot is tried, as an update is,
+//!                              so if it does not start the running one
+//!                              comes back; the running one undoes that
 //!     power_off                turn the computer off (the shell's quick
 //!                              settings, and settings)
 //!     locale <language> <keyboard> [<time zone>]
@@ -48,7 +52,8 @@
 //!     next a
 //!     version a 1791331200 de14aa2
 //!     version b -
-//!     update none
+//!     update failed did_not_start
+//!     failed_start b signal 11
 //!     locale en-GB gb Europe/London
 //!     video_memory 128 256
 //!     orientation portrait
@@ -64,6 +69,8 @@
 //! is how installing an update goes: "none", "installing", "ready" (the
 //! next start runs it) or "failed" with why ("did_not_start" when it was
 //! installed but did not work, and the system before is running again).
+//! "failed_start" is the slot that last did not start properly, and how
+//! its shell stopped (see `Stop`); its log is `failed_start_log`.
 //! "video_memory" is the memory the GPU may have now and from the next
 //! start, in MiB ("-": not known). "orientation" is the screen's (as it is
 //! kept, for the next start too). "parental" is whether parental
@@ -126,6 +133,9 @@ pub fn logServerChosen() bool {
     const text = sys.readFile(log_server_file, &buf) orelse return false;
     return std.mem.eql(u8, std.mem.trim(u8, text, " \n"), "on");
 }
+/// The log of the last start that did not work (an OS slot tried, whose
+/// shell did not run a minute): see init's bootlog.zig. Anyone's to read.
+pub const failed_start_log = "/data/system/start-failed.log";
 /// The user's files.
 pub const user_dir = "/data/user";
 /// The apps installed, each in its own folder: /data/apps/<name>/<name> is
@@ -235,6 +245,8 @@ pub const Request = union(enum) {
     finish: Hostname,
     update: Update,
     restart,
+    /// The OS slot to start next time.
+    boot: u8,
     power_off,
     locale: locale.Settings,
     /// In MiB, one of `video_memory_sizes`.
@@ -255,6 +267,7 @@ pub const Request = union(enum) {
         if (std.mem.eql(u8, kind, "hostname")) return .{ .hostname = Hostname.parse(f.next() orelse return null) orelse return null };
         if (std.mem.eql(u8, kind, "finish")) return .{ .finish = Hostname.parse(f.next() orelse return null) orelse return null };
         if (std.mem.eql(u8, kind, "restart")) return .restart;
+        if (std.mem.eql(u8, kind, "boot")) return .{ .boot = parseSlot(f.next() orelse return null) orelse return null };
         if (std.mem.eql(u8, kind, "power_off")) return .power_off;
         if (std.mem.eql(u8, kind, "locale")) return .{ .locale = .{
             .language = locale.Language.fromCode(f.next() orelse return null) orelse return null,
@@ -300,7 +313,7 @@ pub const Request = union(enum) {
             .prepare, .hostname, .finish => client == .setup,
             // The shell too: remote control installs updates and restarts.
             .update, .restart => client == .settings or client == .shell,
-            .video_memory, .orientation, .log_server, .parental_on, .parental_bonus => client == .settings,
+            .boot, .video_memory, .orientation, .log_server, .parental_on, .parental_bonus => client == .settings,
             // The shell's lock screen unlocks.
             .parental_off => client == .settings or client == .shell,
             .locale => client == .setup or client == .settings,
@@ -352,6 +365,68 @@ pub const Version = struct {
 };
 
 pub const UpdateState = enum { none, installing, ready, failed };
+
+/// How a tried system's shell stopped (see init's trial.zig): it exited,
+/// with a status; it was killed, by a signal; or not known (the system
+/// hung and the watchdog restarted it, the power went, or it stopped
+/// before the shell ran).
+pub const Stop = union(enum) {
+    unknown,
+    exited: u8,
+    signal: u8,
+
+    /// From the words after a trial's state ("exited 1", "signal 11").
+    pub fn parse(f: anytype) Stop {
+        const kind = f.next() orelse return .unknown;
+        const n = std.fmt.parseInt(u8, f.next() orelse return .unknown, 10) catch return .unknown;
+        if (std.mem.eql(u8, kind, "exited")) return .{ .exited = n };
+        if (std.mem.eql(u8, kind, "signal")) return .{ .signal = n };
+        return .unknown;
+    }
+
+    pub fn write(s: Stop, w: *std.Io.Writer) !void {
+        switch (s) {
+            .unknown => try w.writeAll("unknown"),
+            .exited => |n| try w.print("exited {d}", .{n}),
+            .signal => |n| try w.print("signal {d}", .{n}),
+        }
+    }
+
+    /// In English, for the log.
+    pub fn describe(s: Stop, buf: []u8) []const u8 {
+        return switch (s) {
+            .unknown => "it hung, lost power or stopped before its shell ran",
+            .exited => |n| std.fmt.bufPrint(buf, "its shell exited with status {d}", .{n}) catch "its shell exited",
+            .signal => |n| std.fmt.bufPrint(buf, "its shell was killed by {s}", .{signalName(n)}) catch "its shell was killed",
+        };
+    }
+};
+
+/// A signal's name ("SIGSEGV"); "a signal" if it is not a usual one.
+pub fn signalName(n: u8) []const u8 {
+    return switch (n) {
+        1 => "SIGHUP",
+        2 => "SIGINT",
+        3 => "SIGQUIT",
+        4 => "SIGILL",
+        5 => "SIGTRAP",
+        6 => "SIGABRT",
+        7 => "SIGBUS",
+        8 => "SIGFPE",
+        9 => "SIGKILL",
+        11 => "SIGSEGV",
+        13 => "SIGPIPE",
+        14 => "SIGALRM",
+        15 => "SIGTERM",
+        else => "a signal",
+    };
+}
+
+/// The OS slot that last did not start properly, and how.
+pub const FailedStart = struct {
+    slot: u8,
+    stop: Stop = .unknown,
+};
 
 pub const UpdateFailure = enum {
     none,
@@ -435,6 +510,9 @@ pub const Report = struct {
     versions: [2]?Version = .{ null, null },
     update: UpdateState = .none,
     update_failure: UpdateFailure = .none,
+    /// The slot that last did not start properly (its log is
+    /// `failed_start_log`).
+    failed_start: ?FailedStart = null,
     /// The language and keyboard chosen.
     locale: locale.Settings = .{},
     /// The memory the GPU may have now, and from the next start, in MiB.
@@ -479,6 +557,10 @@ pub const Report = struct {
         }
         w.print("update {s}", .{@tagName(r.update)}) catch {};
         if (r.update == .failed) w.print(" {s}", .{@tagName(r.update_failure)}) catch {};
+        if (r.failed_start) |fs| {
+            w.print("\nfailed_start {c} ", .{fs.slot}) catch {};
+            fs.stop.write(&w) catch {};
+        }
         w.print("\nlocale {s} {s} {s}", .{ r.locale.language.code(), r.locale.keyboard.code(), r.locale.timezone.name() }) catch {};
         w.writeAll("\nvideo_memory") catch {};
         for ([_]?u16{ r.video_memory_now, r.video_memory_next }) |v| if (v) |mib| w.print(" {d}", .{mib}) catch {} else w.writeAll(" -") catch {};
@@ -552,6 +634,9 @@ pub const Report = struct {
                 p.clock_offset = std.fmt.parseInt(i64, f.next() orelse continue, 10) catch 0;
             } else if (std.mem.eql(u8, kind, "password")) {
                 r.password = std.mem.eql(u8, f.next() orelse continue, "ok");
+            } else if (std.mem.eql(u8, kind, "failed_start")) {
+                const s = parseSlot(f.next() orelse continue) orelse continue;
+                r.failed_start = .{ .slot = s, .stop = Stop.parse(&f) };
             } else if (std.mem.eql(u8, kind, "update")) {
                 r.update = std.meta.stringToEnum(UpdateState, f.next() orelse continue) orelse .none;
                 if (r.update == .failed) r.update_failure = std.meta.stringToEnum(UpdateFailure, f.next() orelse "io") orelse .io;
@@ -803,6 +888,22 @@ test "requests and reports go through the socket" {
     r = .{ .update = .failed, .update_failure = .archive };
     const failed_update = Report.parse(r.write(&buf)).?;
     try testing.expectEqual(UpdateFailure.archive, failed_update.update_failure);
+    try testing.expect(failed_update.failed_start == null);
+    // A slot that did not start, and how.
+    r = .{ .update = .failed, .update_failure = .did_not_start, .failed_start = .{ .slot = 'b', .stop = .{ .signal = 11 } } };
+    const not_started = Report.parse(r.write(&buf)).?;
+    try testing.expectEqual(FailedStart{ .slot = 'b', .stop = .{ .signal = 11 } }, not_started.failed_start.?);
+    r = .{ .failed_start = .{ .slot = 'a' } };
+    try testing.expectEqual(Stop.unknown, Report.parse(r.write(&buf)).?.failed_start.?.stop);
+    var how: [96]u8 = undefined;
+    try testing.expectEqualStrings("its shell was killed by SIGSEGV", (Stop{ .signal = 11 }).describe(&how));
+    try testing.expectEqualStrings("its shell exited with status 1", (Stop{ .exited = 1 }).describe(&how));
+    // Choosing the slot to start.
+    try testing.expectEqual(@as(u8, 'b'), Request.parse("boot b\n").?.boot);
+    try testing.expect(Request.parse("boot c\n") == null);
+    try testing.expect(Request.parse("boot\n") == null);
+    try testing.expect(Request.allowedFor(.{ .boot = 'a' }, .settings));
+    try testing.expect(!Request.allowedFor(.{ .boot = 'a' }, .shell));
     try testing.expect(failed_update.version('a') == null);
     // Video memory: now, and from the next start.
     r = .{ .video_memory_now = 128, .video_memory_next = 256 };

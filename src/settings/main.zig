@@ -37,6 +37,7 @@ const gpio = @import("gpio.zig");
 const view = @import("view.zig");
 const store = @import("store");
 const update = @import("update.zig");
+const failed_start = @import("failed_start.zig");
 const audio = @import("audio");
 
 /// How often the GPIO pins' levels are read, while their page shows.
@@ -164,6 +165,11 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
     var icons_dirty = true;
     var video_memory_failed = false;
     var orientation_failed = false;
+    // The log of the slot that last did not start properly, and which
+    // failure it is of.
+    var failed_log: ?failed_start.Summary = null;
+    var failed_log_for: ?sys.system.FailedStart = null;
+    defer if (failed_log) |*l| l.deinit(gpa);
     // Remote control, as Settings last saw (or set) it.
     var remote = sys.remote.load();
     // The password last given for parental controls was wrong.
@@ -418,6 +424,29 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
             print("dazzle-settings: video memory {d} MiB from the next start{s}\n", .{ mib, if (video_memory_failed) ": refused" else "" });
             dirty = true;
         }
+        // An OS slot chosen to start next time: the system manager has the
+        // firmware start it (tried, if it is not the running one).
+        if (actions.boot) |slot| {
+            actions.boot = null;
+            var req_buf: [16]u8 = undefined;
+            const r = sys.system.ask(std.fmt.bufPrint(&req_buf, "boot {c}\n", .{slot}) catch "", 3000);
+            if (r) |have| if (!have.denied) {
+                updater.report = have;
+            };
+            const done = if (r) |have| !have.denied and have.next == slot else false;
+            print("dazzle-settings: OS slot {c} next time{s}\n", .{ std.ascii.toUpper(slot), if (done) "" else ": refused" });
+            dirty = true;
+        }
+        // The slot that last did not start properly: its log, read once.
+        {
+            const now_failed = if (updater.report) |r| r.failed_start else null;
+            if (!std.meta.eql(now_failed, failed_log_for)) {
+                failed_log_for = now_failed;
+                if (failed_log) |*l| l.deinit(gpa);
+                failed_log = if (now_failed != null) failed_start.load(gpa) else null;
+                dirty = true;
+            }
+        }
         // The orientation chosen: the system manager keeps it (the shell
         // turns to it at once), and says what it now is.
         if (actions.orientation) |o| {
@@ -603,6 +632,14 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
                     .default_key = build_info.signing_key,
                     .subscribed_keys = subscribed_keys.slice(),
                 },
+                .slots = if (updater.report) |r| .{
+                    .running = r.slot,
+                    .next = r.next,
+                    .versions = r.versions,
+                    .failed = r.failed_start,
+                    .log = if (failed_log) |*l| l else null,
+                    .busy = r.update == .installing or updater.job != null,
+                } else .{},
                 .display = .{
                     .orientation = if (updater.report) |r| r.orientation else null,
                     .failed = orientation_failed,
@@ -650,6 +687,8 @@ test {
     _ = @import("log_view.zig");
     _ = @import("parental_view.zig");
     _ = @import("update.zig");
+    _ = @import("failed_start.zig");
+    _ = @import("os_slots_view.zig");
     _ = @import("board.zig");
     _ = usb;
     _ = gpio;

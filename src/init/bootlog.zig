@@ -7,11 +7,16 @@
 //! every program's) from the start of this boot, then each new message as
 //! it comes, writing it to the card within a second. It needs /data, so
 //! a start that stops before init mounts it leaves nothing here.
+//!
+//! When a slot tried (see trial.zig) did not start properly, its log (the
+//! start before's) is also kept as `sys.system.failed_start_log`, which
+//! Settings shows, until the next trial: if it is that trial's.
 
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
 const logserver = @import("logserver.zig");
+const trial = @import("trial.zig");
 
 const print = sys.print;
 
@@ -24,8 +29,10 @@ const max_bytes = 4 * 1024 * 1024;
 /// How long a message may wait before it is on the card.
 const sync_ms = 1000;
 
-/// Starts keeping the log (with /data mounted). Returns the process's PID.
-pub fn start() ?linux.pid_t {
+/// Starts keeping the log (with /data mounted); `failed`: the start before
+/// was a trial that did not work (its log is kept). Returns the process's
+/// PID.
+pub fn start(failed: bool) ?linux.pid_t {
     const rc = linux.fork();
     switch (linux.errno(rc)) {
         .SUCCESS => if (rc != 0) return @intCast(rc),
@@ -34,12 +41,13 @@ pub fn start() ?linux.pid_t {
             return null;
         },
     }
-    keep() catch |err| print(sys.log_warning ++ "dazzle: boot log: {s}\n", .{@errorName(err)});
+    keep(failed) catch |err| print(sys.log_warning ++ "dazzle: boot log: {s}\n", .{@errorName(err)});
     linux.exit(1);
 }
 
-fn keep() !void {
+fn keep(failed: bool) !void {
     _ = linux.rename(file, previous_file);
+    if (failed) keepFailed() catch |err| print(sys.log_warning ++ "dazzle: boot log: cannot keep the failed start's: {s}\n", .{@errorName(err)});
     const fd = try sys.open(file, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .APPEND = true, .CLOEXEC = true });
     // Anyone's to read, on another computer too: the log server (when on)
     // serves the same to the network.
@@ -87,6 +95,22 @@ fn keep() !void {
         var fds = [_]linux.pollfd{.{ .fd = kmsg, .events = linux.POLL.IN, .revents = 0 }};
         _ = linux.poll(&fds, fds.len, timeout);
     }
+}
+
+/// The start before's log, as the failed start's: if it is the trial's
+/// (it got as far as saying so); otherwise there is none (it stopped
+/// before keeping one).
+fn keepFailed() !void {
+    _ = linux.unlink(sys.system.failed_start_log);
+    const gpa = std.heap.page_allocator;
+    const log = try sys.readFileAlloc(gpa, previous_file, max_bytes + 4096);
+    defer gpa.free(log);
+    if (std.mem.indexOf(u8, log, trial.trying_text) == null) return;
+    const out = try sys.open(sys.system.failed_start_log, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true });
+    defer sys.close(out);
+    _ = linux.fchmod(out, 0o644);
+    try writeAll(out, log);
+    _ = linux.fsync(out);
 }
 
 fn writeAll(fd: linux.fd_t, bytes: []const u8) !void {

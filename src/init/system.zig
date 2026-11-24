@@ -150,6 +150,7 @@ const Manager = struct {
             m.report.next = running;
         };
         for (&m.report.versions, "ab") |*v, s| v.* = slots.version(s);
+        m.report.failed_start = if (trial.readFailed()) |t| .{ .slot = t.slot, .stop = t.stop } else null;
         m.report.video_memory_next = slots.videoMemory(m.report.next orelse running);
         m.report.orientation = slots.orientation(m.report.next orelse running);
     }
@@ -277,6 +278,7 @@ const Manager = struct {
             .finish => |h| m.finish(h),
             .update => |u| m.startUpdate(u),
             .restart => m.restart = true,
+            .boot => |slot| m.setBoot(slot),
             .power_off => m.power_off = true,
             .locale => |l| {
                 m.report.locale = l;
@@ -456,6 +458,48 @@ const Manager = struct {
             return;
         };
         print("dazzle: system: the screen {s}\n", .{@tagName(o)});
+    }
+
+    /// Has `slot` start next time. Another slot than the running one is
+    /// tried (see trial.zig), as an update is: if it does not start
+    /// properly, the running one starts again. The running one undoes
+    /// that (and an update installed but not yet started). Not while a
+    /// slot is being written, or this one is still being tried.
+    fn setBoot(m: *Manager, slot: u8) void {
+        const running = m.report.slot orelse return;
+        if (m.copier != null or m.installer != null) return;
+        if (slots.version(slot) == null) return;
+        const tried = trial.read();
+        if (tried) |t| if (t.slot == running and t.state == .started) {
+            print(sys.log_warning ++ "dazzle: system: OS slot {c} is still being tried: cannot choose the slot to start yet\n", .{std.ascii.toUpper(running)});
+            return;
+        };
+        slots.remount(false) catch |err| {
+            print(sys.log_warning ++ "dazzle: system: cannot write the boot partition: {s}\n", .{@errorName(err)});
+            return;
+        };
+        defer slots.remount(true) catch {};
+        defer m.readSlots();
+        if (slot == running) {
+            if (tried != null) _ = linux.unlink(trial.marker);
+            slots.startNext(running) catch |err| {
+                print(sys.log_warning ++ "dazzle: system: cannot keep OS slot {c}: {s}\n", .{ std.ascii.toUpper(running), @errorName(err) });
+                return;
+            };
+            if (m.report.update == .ready) m.report.update = .none;
+            print("dazzle: system: OS slot {c} starts next time\n", .{std.ascii.toUpper(running)});
+            return;
+        }
+        trial.write(.{ .slot = slot, .state = .pending }) catch |err| {
+            print(sys.log_warning ++ "dazzle: system: cannot mark OS slot {c} to be tried: {s}\n", .{ std.ascii.toUpper(slot), @errorName(err) });
+            return;
+        };
+        slots.startNext(slot) catch |err| {
+            _ = linux.unlink(trial.marker);
+            print(sys.log_warning ++ "dazzle: system: cannot start OS slot {c}: {s}\n", .{ std.ascii.toUpper(slot), @errorName(err) });
+            return;
+        };
+        print("dazzle: system: OS slot {c} is tried next time\n", .{std.ascii.toUpper(slot)});
     }
 
     /// Keeps the language and keyboard in /data/system (if it is there

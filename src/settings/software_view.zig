@@ -2,7 +2,8 @@
 //! installed) and Available (the catalogue's other apps, with a field to
 //! search them). An app clicked shows its page: what it is, its
 //! screenshot, and Install, Update or Remove; Dazzle's, how its updates
-//! stand (with Update or Restart), and its build and kernel. The gear in
+//! stand (with Update or Restart), its build and kernel, and the OS slots
+//! (see os_slots_view.zig). The gear in
 //! the status bar shows where software comes from (the official store, or
 //! a custom server and its key). Back returns to the list.
 //! Under them, a fixed status bar with Update all and Refresh.
@@ -529,6 +530,7 @@ fn dazzlePage(self: *const Settings, b: Builder, state: *State, rows: *std.Array
             dazzleDetail(cx, "Linux", view.orUnknown(self.system.kernel.slice())),
         }) catch &.{},
     }) })) catch {};
+    view.os_slots_view.build(self, cx, rows);
 }
 
 fn dazzleDetail(cx: *kete.BuildContext, name: []const u8, text: []const u8) kete.Widget {

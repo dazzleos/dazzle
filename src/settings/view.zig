@@ -22,6 +22,7 @@ pub const sound_view = @import("sound_view.zig");
 pub const appearance_view = @import("appearance_view.zig");
 pub const board_view = @import("board_view.zig");
 pub const software_view = @import("software_view.zig");
+pub const os_slots_view = @import("os_slots_view.zig");
 pub const resources_view = @import("resources_view.zig");
 pub const display_view = @import("display_view.zig");
 pub const language_view = @import("language_view.zig");
@@ -52,6 +53,8 @@ pub const Actions = struct {
     download_update: bool = false,
     update_all: bool = false,
     restart: bool = false,
+    /// The OS slot to start next time.
+    boot: ?u8 = null,
     /// The software server URL (`https://...`), or empty (`""`) to revert to
     /// the default server.
     software_server: ?info.Str(store.max_url_len) = null,
@@ -185,6 +188,8 @@ pub const Settings = struct {
     /// The keyboard's language pack (its full input method), if it has one.
     language_pack: LanguagePack = .none,
     update: software_view.Update = .{},
+    /// The OS slots (on Dazzle's page).
+    slots: os_slots_view.Slots = .{},
     video_memory: resources_view.VideoMemory = .{},
     display: display_view.Display = .{},
     sound: audio.Settings = .{},
