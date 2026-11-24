@@ -11,6 +11,7 @@ const linux = std.os.linux;
 const drm = @import("drm.zig");
 const qpu = @import("qpu.zig");
 const render = @import("render.zig");
+const texture = @import("texture.zig");
 const sys = @import("sys");
 
 pub const SubmitRclSurface = extern struct {
@@ -328,6 +329,8 @@ pub fn open() !Device {
                     if (openV3dNode()) |v3d_fd| {
                         const info = queryV3dVersion(v3d_fd);
                         sys.print("dazzle: opened {s} ({s}) + v3d ({d}.{d} rev {d})\n", .{ path, name, info.ver / 10, info.ver % 10, info.rev });
+                        // Its textures are laid out as the V3D reads them.
+                        texture.use_uif = true;
                         return .{ .fd = fd, .v3d_fd = v3d_fd, .is_v3d = true, .v3d_ver = info.ver, .v3d_rev = info.rev };
                     }
                 }
@@ -350,6 +353,7 @@ pub fn openRender() !Device {
         const name = drm.driverName(fd, &name_buf) catch "";
         if (std.mem.eql(u8, name, "v3d")) {
             const info = queryV3dVersion(fd);
+            texture.use_uif = true;
             return .{ .fd = fd, .is_v3d = true, .v3d_ver = info.ver, .v3d_rev = info.rev };
         }
         if (std.mem.eql(u8, name, "vc4")) {

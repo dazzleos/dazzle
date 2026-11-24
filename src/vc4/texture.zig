@@ -124,7 +124,9 @@ pub fn decodeConfig(param0: u32, param1: u32) Config {
     };
 }
 
-/// Set when opening a V3D 4.2 (`v3d`) device so textures use UIF tiling.
+/// Set when opening a V3D (`v3d`: the Pi 4 and 5) device (see
+/// `device.open`), so textures are laid out as it reads them (UIF), not as
+/// the VC4 does. (Never set, a Pi 4's textures came out scrambled.)
 pub var use_uif: bool = false;
 
 /// Hardware tiling modes on V3D 4.2 (`enum v3d_tiling_mode` in Mesa).
