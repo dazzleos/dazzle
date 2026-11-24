@@ -1,8 +1,10 @@
 //! The on-screen keyboard: for touchscreens, along the bottom of the screen
-//! (above the dock) while an app's text field has the keyboard (it enabled
+//! while an app's text field has the keyboard (it enabled
 //! `zwp_text_input_v3`) and it was last touched (`Osk.wanted`); typing on a
 //! keyboard, or a mouse's button, hides it, as its own key does (until
-//! another text field). The windows' work area stops above it.
+//! another text field). It slides up from the bottom, over the dock (which
+//! slides down out of its way), and back down when hidden. The windows'
+//! work area stops above it.
 //!
 //! Its keys are kete buttons on its panel, given the shell's touches and
 //! pointer. What they type the shell sends the app (`take`): letters and
@@ -42,6 +44,11 @@ pub const key_enter = 28;
 
 const Page = enum { letters, symbols };
 
+/// Slow at the start and the end (as the dock's slide).
+fn easeInOut(t: f32) f32 {
+    return if (t < 0.5) 2 * t * t else 1 - (-2 * t + 2) * (-2 * t + 2) / 2;
+}
+
 pub const Osk = struct {
     panel: *kete_panel.Panel,
     /// Shown now (the shell shows its panel, and keeps windows above it).
@@ -60,6 +67,14 @@ pub const Osk = struct {
     typed_len: usize = 0,
     /// It changed (a page, Shift), and is to be drawn again.
     changed: bool = true,
+    /// How far up it is (0: off the screen, 1: all of it shown), and its
+    /// way there (`slideTo`).
+    slide: f32 = 0,
+    slide_from: f32 = 0,
+    slide_start: ?u64 = null,
+
+    /// How long it takes to slide up or down (as the dock does).
+    pub const slide_ns = 200 * std.time.ns_per_ms;
 
     pub fn init(panel: *kete_panel.Panel, screen_width: u32, screen_height: u32, scale: f32) Osk {
         var o: Osk = .{ .panel = panel };
@@ -85,16 +100,46 @@ pub const Osk = struct {
         o.changed = true;
     }
 
-    /// Its top, with its bottom at `bottom` (the dock's band's top).
-    pub fn top(o: *const Osk, bottom: u32) i32 {
-        return @as(i32, @intCast(bottom)) - @as(i32, @intCast(o.height));
+    /// Its top when all of it is shown (where the windows' work area
+    /// ends).
+    pub fn restTop(o: *const Osk) u32 {
+        return o.screen_height -| o.height;
     }
 
-    /// Where (`x`, `y`) on the screen is in it (null: not on it), its top
-    /// at `at_y`.
-    pub fn local(o: *const Osk, x: f64, y: f64, at_y: i32) ?[2]f32 {
+    /// Its top now, as far up as it has slid.
+    pub fn top(o: *const Osk) i32 {
+        const up = easeInOut(o.slide) * @as(f32, @floatFromInt(o.height));
+        return @as(i32, @intCast(o.screen_height)) - @as(i32, @intFromFloat(@round(up)));
+    }
+
+    /// Shows it (sliding up) or hides it (sliding down), from where it is,
+    /// at `now`.
+    pub fn slideTo(o: *Osk, show: bool, now: u64) void {
+        o.shown = show;
+        o.slide_from = o.slide;
+        o.slide_start = now;
+    }
+
+    /// Moves it along its way, at `now`; returns whether it moved.
+    pub fn animate(o: *Osk, now: u64) bool {
+        const start = o.slide_start orelse return false;
+        const k: f32 = @floatCast(@min(@as(f64, @floatFromInt(now -| start)) / slide_ns, 1));
+        const to: f32 = if (o.shown) 1 else 0;
+        o.slide = o.slide_from + (to - o.slide_from) * k;
+        if (k >= 1) o.slide_start = null;
+        return true;
+    }
+
+    /// Any of it on the screen.
+    pub fn visible(o: *const Osk) bool {
+        return o.shown or o.slide > 0;
+    }
+
+    /// Where (`x`, `y`) on the screen is in it (null: not on it), where
+    /// it is now.
+    pub fn local(o: *const Osk, x: f64, y: f64) ?[2]f32 {
         if (!o.shown) return null;
-        const ly = y - @as(f64, @floatFromInt(at_y));
+        const ly = y - @as(f64, @floatFromInt(o.top()));
         if (x < 0 or ly < 0 or x >= @as(f64, @floatFromInt(o.width)) or ly >= @as(f64, @floatFromInt(o.height))) return null;
         return .{ @floatCast(x), @floatCast(ly) };
     }
@@ -300,4 +345,24 @@ test "sized as tall as the dock's icons, but no more than a third of the screen"
     try testing.expectEqual(@as(u32, 4 * 56 + 3 * 6 + 2 * 8), o.height);
     o.setScreen(1280, 720, 1);
     try testing.expectEqual(@as(u32, 240), o.height);
+}
+
+test "slides up from the bottom of the screen, and back down" {
+    var o: Osk = .{ .panel = undefined };
+    o.setScreen(720, 1280, 1);
+    try testing.expectEqual(@as(i32, 1280), o.top());
+    try testing.expect(!o.visible());
+    o.slideTo(true, 1000);
+    try testing.expect(o.local(10, 1279) != null or o.top() == 1280);
+    try testing.expect(o.animate(1000 + Osk.slide_ns / 2));
+    try testing.expect(o.top() < 1280 and o.top() > @as(i32, @intCast(o.restTop())));
+    try testing.expect(o.animate(1000 + Osk.slide_ns));
+    try testing.expectEqual(@as(i32, @intCast(o.restTop())), o.top());
+    try testing.expect(!o.animate(1000 + 2 * Osk.slide_ns));
+    try testing.expect(o.local(10, @floatFromInt(o.restTop() + 1)) != null);
+    o.slideTo(false, 5000);
+    try testing.expect(o.visible());
+    _ = o.animate(5000 + Osk.slide_ns);
+    try testing.expect(!o.visible());
+    try testing.expectEqual(@as(i32, 1280), o.top());
 }

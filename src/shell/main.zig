@@ -356,7 +356,8 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         // each refresh until they are there.
         _ = server.animateOverview(now);
         _ = server.animateWindows(now);
-        slideDock(&dock, &server, &renderer, dock_shown, now);
+        slideDock(&dock, &server, &renderer, dock_shown, osk.shown, now);
+        slideOsk(&osk, &server, &renderer, now);
         animateNotice(&notice, &renderer, &server, now);
         // The tick: what has to be looked at rather than waited for, only
         // when there is something to look at, and when.
@@ -500,17 +501,21 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
             }
             const want = input_now != null and last_touch and !osk.dismissed and !locked and dock_shown and !server.fullscreenTop();
             if (want != osk.shown) {
-                osk.shown = want;
-                renderer.setPanelHidden(.keyboard, !want);
+                // Up from the bottom, over the dock (which slides down out
+                // of its way: see `slideDock`), or back down.
+                osk.slideTo(want, sys.nowNs());
+                if (want) {
+                    osk.changed = true;
+                    renderer.setPanelHidden(.keyboard, false);
+                }
                 var wa = with_dock;
-                if (want) wa.height = @intCast(@max(osk.top(band_y), 0));
+                if (want) wa.height = osk.restTop();
                 server.setWorkArea(wa);
-                if (want) osk.changed = true;
                 panels_damaged = true;
                 server.damaged = true;
             }
-            if (osk.shown and osk.needsDraw()) {
-                renderer.setPanelAt(.keyboard, osk.draw(sys.nowNs()), 0, osk.top(band_y));
+            if (osk.visible() and osk.needsDraw()) {
+                renderer.setPanelAt(.keyboard, osk.draw(sys.nowNs()), 0, osk.top());
                 panels_damaged = true;
             }
         }
@@ -534,7 +539,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                 server.output.width = renderer.width;
                 server.output.height = renderer.height;
                 server.work_area = if (dock_shown) with_dock else server.screen();
-                if (osk.shown) server.work_area.height = @intCast(@max(osk.top(band_y), 0));
+                if (osk.shown) server.work_area.height = osk.restTop();
                 server.fitWindows();
                 server.setWorkArea(server.work_area);
                 pointer.max_x = @floatFromInt(renderer.width - 1);
@@ -592,7 +597,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
 
         const time_ms: u32 = @truncate((sys.nowNs() - start) / std.time.ns_per_ms);
         // Under a fullscreen window the dock is hidden, and takes no input.
-        const dock_visible = dock_shown and !server.fullscreenTop();
+        const dock_visible = dock_shown and !server.fullscreenTop() and !osk.shown;
         // Remote control: each request carried out (its input queued, to
         // be handled with the devices').
         if (fds[remote_index].revents != 0) {
@@ -797,7 +802,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                     .key => |k| if (k.pressed) {
                         last_touch = false;
                     },
-                    .button => |b| if (b.pressed and !(osk.shown and osk.local(pointer.x, pointer.y, osk.top(band_y)) != null)) {
+                    .button => |b| if (b.pressed and !(osk.shown and osk.local(pointer.x, pointer.y) != null)) {
                         last_touch = false;
                     },
                     else => {},
@@ -898,14 +903,14 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                     const x = tx * @as(f64, @floatFromInt(renderer.width - 1));
                     const y = ty * @as(f64, @floatFromInt(renderer.height - 1));
                     // On the on-screen keyboard: its keys, pressed and let go.
-                    if (t.kind == .down) if (osk.local(x, y, osk.top(band_y))) |at| {
+                    if (t.kind == .down) if (osk.local(x, y)) |at| {
                         osk_touches.set(t.id);
                         osk.panel.pointerMotion(at);
                         osk.panel.pointerButton(at, true);
                         continue;
                     };
                     if (osk_touches.has(t.id)) {
-                        const at: [2]f32 = .{ @floatCast(x), @floatCast(y - @as(f64, @floatFromInt(osk.top(band_y)))) };
+                        const at: [2]f32 = .{ @floatCast(x), @floatCast(y - @as(f64, @floatFromInt(osk.top()))) };
                         switch (t.kind) {
                             .motion => osk.panel.pointerMotion(at),
                             .up => {
@@ -955,7 +960,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                 }
                 if (e == .button) pointer.flushMotion(&server, time_ms);
                 // Clicked on the on-screen keyboard: its keys.
-                if (e == .button and e.button.code == evdev.btn_left) if (osk.local(pointer.x, pointer.y, osk.top(band_y))) |at| {
+                if (e == .button and e.button.code == evdev.btn_left) if (osk.local(pointer.x, pointer.y)) |at| {
                     osk.panel.pointerMotion(at);
                     osk.panel.pointerButton(at, e.button.pressed);
                     continue;
@@ -1270,7 +1275,8 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         if (!renderer.flipPending()) {
             _ = server.animateOverview(sys.nowNs());
             _ = server.animateWindows(sys.nowNs());
-            slideDock(&dock, &server, &renderer, dock_shown, sys.nowNs());
+            slideDock(&dock, &server, &renderer, dock_shown, osk.shown, sys.nowNs());
+            slideOsk(&osk, &server, &renderer, sys.nowNs());
             animateNotice(&notice, &renderer, &server, sys.nowNs());
         }
         const dock_due = panels_damaged and sys.nowNs() >= client_frame_ns + panel_grace_ns;
@@ -1900,17 +1906,27 @@ fn animateNotice(notice: *notice_mod.Notice, renderer: *render.Renderer, server:
     } else if (was_shown and notice.shown_ns == null) server.damaged = true;
 }
 
-/// Sends the dock down while a fullscreen window is on top, and back up
-/// after, a frame each refresh while it is on its way; and grows and
-/// shrinks icons of apps installed or removed, and the box with them.
-fn slideDock(dock: *dock_mod.Dock, server: *server_mod.Server, renderer: *render.Renderer, dock_shown: bool, now: u64) void {
+/// Slides the on-screen keyboard up or down, a frame each refresh while it
+/// is on its way; down, its panel is hidden.
+fn slideOsk(osk: *osk_mod.Osk, server: *server_mod.Server, renderer: *render.Renderer, now: u64) void {
+    if (!osk.animate(now)) return;
+    renderer.movePanel(.keyboard, 0, osk.top());
+    if (!osk.visible()) renderer.setPanelHidden(.keyboard, true);
+    server.damaged = true;
+}
+
+/// Sends the dock down while a fullscreen window is on top or the
+/// on-screen keyboard is shown (`osk_shown`), and back up after, a frame
+/// each refresh while it is on its way; and grows and shrinks icons of
+/// apps installed or removed, and the box with them.
+fn slideDock(dock: *dock_mod.Dock, server: *server_mod.Server, renderer: *render.Renderer, dock_shown: bool, osk_shown: bool, now: u64) void {
     if (dock.resizing()) {
         _ = dock.animateApps(now);
         dock.draw();
         showDock(renderer, dock);
         server.damaged = true;
     }
-    if (dock_shown) dock.slideTo(server.fullscreenTop(), now);
+    if (dock_shown) dock.slideTo(server.fullscreenTop() or osk_shown, now);
     if (!dock.animateSlide(now)) return;
     const at = dock.place();
     renderer.movePanel(.dock, at.x, at.y);
