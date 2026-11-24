@@ -321,6 +321,15 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
                 icons_dirty = true;
             }
             if (actions.refresh_apps or actions.check_update) {
+                // Where software comes from, as it is now (remote control
+                // may have set it since).
+                const now_url = store.loadServerUrl(&server_url_buf, build_info.apps_url);
+                if (!std.mem.eql(u8, now_url, server_url)) {
+                    server_url = now_url;
+                    apps.setBaseUrl(server_url);
+                    updater.setBaseUrl(server_url);
+                }
+                subscribed_keys = store.loadKeys();
                 updater.message_len = 0;
                 apps.refresh(true);
             }

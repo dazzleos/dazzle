@@ -38,6 +38,13 @@
 //!                                   newer (the system starts when the
 //!                                   computer restarts)
 //!     /restart                      restarts the computer
+//!     /source                       where software comes from (the
+//!                                   official store, or a custom server),
+//!                                   its URL and key, as text
+//!     /source?url=official          the official store
+//!     /source?url=https://...[&key=<64 hex digits>]
+//!                                   a custom server, and its key (as
+//!                                   Settings' Software source page sets)
 //!
 //! A wrong code (or none) gets 403. The shell carries out each command
 //! (`Server.accept` gives it), and answers (`Request.respond`).
@@ -72,6 +79,10 @@ pub const Command = union(enum) {
     check,
     update,
     restart,
+    /// Where software comes from: to say (null), or to set (the URL, in
+    /// the request's buffer, "official" for the official store; and the
+    /// key, "" for none).
+    source: ?struct { url: []const u8, key: []const u8 },
 };
 
 /// What `/window` does (as `Server.WindowAction`).
@@ -227,6 +238,13 @@ fn parse(text: []const u8, code: u32, text_buf: []u8) Parsed {
     if (std.mem.eql(u8, path, "/check")) return .{ .command = .check };
     if (std.mem.eql(u8, path, "/update")) return .{ .command = .update };
     if (std.mem.eql(u8, path, "/restart")) return .{ .command = .restart };
+    if (std.mem.eql(u8, path, "/source")) {
+        const raw = param(query, "url") orelse return .{ .command = .{ .source = null } };
+        return .{ .command = .{ .source = .{
+            .url = decode(raw, text_buf) orelse return .bad,
+            .key = param(query, "key") orelse "",
+        } } };
+    }
     return .not_found;
 }
 
@@ -319,6 +337,14 @@ test "apps, windows and updates are controlled directly" {
     try testing.expect(parse("GET /restart?code=123456 HTTP/1.1\r\n\r\n", 123456, &buf).command == .restart);
     // Not without the code.
     try testing.expect(parse("GET /restart HTTP/1.1\r\n\r\n", 123456, &buf) == .forbidden);
+    // Where software comes from: said, or set.
+    try testing.expect(parse("GET /source?code=123456 HTTP/1.1\r\n\r\n", 123456, &buf).command.source == null);
+    const official = parse("GET /source?code=123456&url=official HTTP/1.1\r\n\r\n", 123456, &buf).command.source.?;
+    try testing.expectEqualStrings("official", official.url);
+    try testing.expectEqualStrings("", official.key);
+    const custom = parse("GET /source?code=123456&url=https%3A%2F%2F192.168.1.2%3A8443&key=ab12 HTTP/1.1\r\n\r\n", 123456, &buf).command.source.?;
+    try testing.expectEqualStrings("https://192.168.1.2:8443", custom.url);
+    try testing.expectEqualStrings("ab12", custom.key);
 }
 
 test "text is typed with US keys" {

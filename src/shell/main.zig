@@ -51,6 +51,7 @@ const screenshot = @import("screenshot.zig");
 const remote_mod = @import("remote.zig");
 const audio = @import("audio");
 const build_info = @import("build_info");
+const store = @import("store");
 
 const print = sys.print;
 
@@ -637,6 +638,30 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                     .update => {
                         updates.installAll();
                         req.respond("200 OK", "text/plain", "checking, then installing what is newer\n");
+                    },
+                    .source => |set| {
+                        if (set) |s| {
+                            const official = std.mem.eql(u8, s.url, "official");
+                            store.setSource(if (official) null else s.url, if (official) "" else s.key) catch |err| {
+                                req.respond("400 Bad Request", "text/plain", switch (err) {
+                                    error.NotAnHttpsUrl => "Give an https:// URL (or \"official\")\n",
+                                    error.NotAKey => "Give a 64-character hex Ed25519 public key\n",
+                                });
+                                continue;
+                            };
+                            updates.checkNow();
+                        }
+                        var url_buf: [store.max_url_len]u8 = undefined;
+                        const url = store.loadServerUrl(&url_buf, build_info.apps_url);
+                        const keys = store.loadKeys();
+                        var out_buf: [512]u8 = undefined;
+                        const custom = !std.mem.eql(u8, url, build_info.apps_url);
+                        const text = std.fmt.bufPrint(&out_buf, "source {s}\nurl {s}\nkey {s}\n", .{
+                            if (custom) "custom" else "official",
+                            url,
+                            if (custom) (if (keys.len > 0) &keys.slice()[0] else "none") else build_info.signing_key,
+                        }) catch "";
+                        req.respond("200 OK", "text/plain; charset=utf-8", text);
                     },
                     .restart => if (sys.system.ask("restart\n", 3000)) |r| {
                         req.respond(if (r.denied) "403 Forbidden" else "200 OK", "text/plain", if (r.denied) "Not allowed\n" else "restarting\n");

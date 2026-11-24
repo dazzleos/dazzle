@@ -427,6 +427,23 @@ pub fn loadKeysFrom(path: [:0]const u8) KeyList {
     return list;
 }
 
+/// Where software comes from: the official store (`url` null), or a
+/// custom server (an `https://` URL) and its key (`key`: 64 hex digits, or
+/// "" for none), trusted with the built-in one. Errors if they are not.
+pub fn setSource(url: ?[]const u8, key: []const u8) !void {
+    var list: KeyList = .{};
+    if (url) |u| {
+        const valid = parseHttpsUrl(u) orelse return error.NotAnHttpsUrl;
+        if (key.len > 0) {
+            var hex: [key_hex_len]u8 = undefined;
+            _ = parsePublicKey(key, &hex) orelse return error.NotAKey;
+            _ = list.add(&hex);
+        }
+        saveServerUrl(valid);
+    } else saveServerUrl(null);
+    saveKeys(&list);
+}
+
 pub fn saveKeys(list: *const KeyList) void {
     _ = linux.mkdir(apps_dir, 0o755);
     saveKeysTo(keys_file, list);
