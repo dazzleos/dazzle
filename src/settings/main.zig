@@ -523,7 +523,8 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
 
         if (dirty) {
             dirty = false;
-            const offered = apps.apps();
+            // The apps, then the language packs: listed as the apps are.
+            const offered = apps.entries();
             if (store.installedOnly(gpa, store.apps_dir, offered)) |now_not_offered| {
                 if (!sameNames(not_offered, now_not_offered)) icons_dirty = true;
                 store.freeInstalledOnly(gpa, not_offered);

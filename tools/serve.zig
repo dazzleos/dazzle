@@ -259,7 +259,12 @@ fn servePath(gpa: std.mem.Allocator, io: std.Io, tls_conn: *tls_server.Conn, roo
 
     const cwd = std.Io.Dir.cwd();
     const content_type = contentTypeFor(target);
-    if (cwd.readFileAlloc(io, fs_path, gpa, .limited(256 << 20))) |file| {
+    // Dazzle builds no catalogue (the store lists its language packs): one
+    // of the other repositories' apps, if any.
+    const empty_catalogue = "{\"version\":\"\",\"apps\":[]}";
+    const read = cwd.readFileAlloc(io, fs_path, gpa, .limited(256 << 20)) catch |err|
+        if (std.mem.eql(u8, withoutQuery(target), "/apps.json")) try gpa.dupe(u8, empty_catalogue) else err;
+    if (@as(anyerror![]u8, read)) |file| {
         // Dazzle's catalogue, with the other repositories' apps.
         const body = if (sources.len > 0 and std.mem.eql(u8, withoutQuery(target), "/apps.json")) blk: {
             defer gpa.free(file);

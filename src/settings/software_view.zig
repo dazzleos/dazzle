@@ -289,7 +289,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
             rows.append(a, cx.make(kete.Pressable{
                 .on_press = .of(open, OpenApp.open),
                 .child = cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = a.dupe(kete.Widget, &.{
-                    softwareIcon(cx, app_icon),
+                    entryIcon(cx, app_icon, app),
                     cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 2, .children = withBar(cx, &.{
                         cx.make(kete.Text{ .text = app.title, .style = .{ .size = 18, .color = t.on_surface }, .wrap = false, .ellipsis = true }),
                         cx.make(kete.Text{ .text = detail, .style = .{ .size = 15, .color = t.on_surface_variant } }),
@@ -421,7 +421,7 @@ fn detailsRows(self: *const Settings, b: Builder, state: *State, i: usize, busy:
         cx.fmt("{s}", .{info.formatBytes(&size_buf, app.size)});
     const app_icon: ?*const gfx.Image = if (i < apps.icons.len) apps.icons[i] else null;
     rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = a.dupe(kete.Widget, &.{
-        softwareIcon(cx, app_icon),
+        entryIcon(cx, app_icon, app),
         cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 2, .children = withBar(cx, &.{
             cx.make(kete.Text{ .text = app.title, .style = .{ .size = 24, .color = t.on_surface }, .wrap = false, .ellipsis = true }),
             cx.make(kete.Text{ .text = detail, .style = .{ .size = 15, .color = t.on_surface_variant } }),
@@ -667,11 +667,20 @@ fn withBar(cx: *kete.BuildContext, rows: []const kete.Widget, tr: ?store.Transfe
 /// Renders a 64x64 PNG icon, or the fallback `.apps` icon when no icon
 /// can be found.
 fn softwareIcon(cx: *kete.BuildContext, image: ?*const gfx.Image) kete.Widget {
+    return softwareIconOr(cx, image, .apps);
+}
+
+/// An entry's icon: its own, or a language pack's (which has none).
+fn entryIcon(cx: *kete.BuildContext, image: ?*const gfx.Image, app: store.App) kete.Widget {
+    return softwareIconOr(cx, image, if (app.language.len > 0) .language else .apps);
+}
+
+fn softwareIconOr(cx: *kete.BuildContext, image: ?*const gfx.Image, fallback: kete.IconName) kete.Widget {
     const t = &cx.ui.theme;
     if (image) |img| {
         return cx.make(kete.SizedBox{ .width = 64, .height = 64, .child = cx.make(kete.Image{ .source = .{ .image = img } }) });
     }
-    return cx.make(kete.SizedBox{ .width = 64, .height = 64, .child = cx.make(kete.Align{ .child = cx.make(kete.Icon{ .icon = .apps, .size = 48, .color = t.on_surface_variant }) }) });
+    return cx.make(kete.SizedBox{ .width = 64, .height = 64, .child = cx.make(kete.Align{ .child = cx.make(kete.Icon{ .icon = fallback, .size = 48, .color = t.on_surface_variant }) }) });
 }
 
 /// The screenshot of the app whose page is shown, decoded from
@@ -1027,6 +1036,29 @@ test "what downloads shows how far it has got: a bar when its size is known, the
     try testing.expect(view.findText(u.root.?, "Downloading the update… 3.0 MB of 12 MB") != null);
     try testing.expectApproxEqAbs(@as(f32, 0.25), view.findType(u.root.?, kete.ProgressBar).?.widget.as(kete.ProgressBar).?.value.?, 0.001);
     try testing.expect(!view.overflows(u.root.?));
+}
+
+test "a language pack is listed as an app is, with the language's icon" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
+    defer u.destroy();
+    const d = view.sample();
+    var actions: Actions = .{};
+    const list = [_]store.App{
+        .{ .name = "dazzle-language-ja", .title = "Japanese input", .description = "Converts kana to kanji a phrase at a time", .icon = "", .file = "dazzle-language-ja.tar.xz", .size = 3 << 20, .sha256 = "", .language = "ja" },
+    };
+    const settings: Settings = .{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .apps = .{ .list = &list, .installed = &.{false}, .updatable = &.{false} } };
+    u.frame(1920, 960, 0, settings);
+    u.root.?.state(Settings.State).page = .apps;
+    u.root.?.state(Settings.State).software.tab = .available;
+    u.frame(1920, 960, 1, settings);
+    const row = view.up(view.findText(u.root.?, "Japanese input").?, kete.Pressable).?;
+    try testing.expect(view.findIcon(row, .language) != null);
+    // Its page: Install, as an app's.
+    view.click(u, row);
+    u.frame(1920, 960, 2, settings);
+    view.click(u, view.up(view.findText(u.root.?, "Install").?, kete.FilledButton).?);
+    try testing.expectEqualStrings("dazzle-language-ja", actions.install.?.slice());
 }
 
 test "software icons: installed when up to date, server when uninstalled, missing on disk or newer available, else fallback" {

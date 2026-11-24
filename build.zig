@@ -75,17 +75,17 @@ const App = struct {
     screenshot: ?std.Build.LazyPath = null,
 };
 
-/// Each app as an archive to download (zig-out/apps/<name>.tar.xz: its
-/// folder, as in /apps), and the catalogue of them (zig-out/apps/apps.json;
-/// see tools/mkcatalogue.zig), published beside the image.
-fn addAppArchives(b: *std.Build, apps: []const App) *std.Build.Step {
-    return appArchives(b, b, apps, .{ .languages = true });
+/// Dazzle's language packs, each as an archive to download
+/// (zig-out/apps/<name>.tar.xz), published with each build: the store
+/// (dazzleos/store) lists them, and says what they are.
+fn addLanguagePacks(b: *std.Build) *std.Build.Step {
+    return appArchives(b, b, &.{}, .{ .languages = true });
 }
 
 /// The apps' archives and catalogue, installed in `b`'s zig-out/apps, made
 /// with Dazzle's tools (`d`: Dazzle's own build, or the dependency's, for
-/// apps in repositories of their own); with Dazzle's language packs, for
-/// Dazzle's.
+/// apps in repositories of their own); or Dazzle's language packs' archives
+/// alone (no catalogue: the store's says what they are).
 fn appArchives(b: *std.Build, d: *std.Build, apps: []const App, opts: struct { languages: bool = false }) *std.Build.Step {
     const step = b.step("app-archives", "The apps' archives (zig-out/apps)");
     const xz = requireTools(d, &.{"xz:xz-utils"});
@@ -148,10 +148,8 @@ fn appArchives(b: *std.Build, d: *std.Build, apps: []const App, opts: struct { l
         compress.addFileArg(tar);
         const archive = compress.captureStdOut(.{ .basename = b.fmt("{s}.tar.xz", .{name}) });
         step.dependOn(&b.addInstallFile(archive, b.fmt("apps/{s}.tar.xz", .{name})).step);
-        catalogue.addArgs(&.{ name, lp.title, lp.description, "", "", "" });
-        catalogue.addFileArg(archive);
     };
-    step.dependOn(&b.addInstallFile(json, "apps/apps.json").step);
+    if (apps.len > 0) step.dependOn(&b.addInstallFile(json, "apps/apps.json").step);
     return step;
 }
 
@@ -160,14 +158,12 @@ fn appArchives(b: *std.Build, d: *std.Build, apps: []const App, opts: struct { l
 /// are in languages/<code>/, compressed (<file>.xz), with NOTICE.
 const LanguagePack = struct {
     code: []const u8,
-    title: []const u8,
-    description: []const u8,
     files: []const []const u8,
 };
 
 const language_packs = [_]LanguagePack{
     // Made by tools/gen_japanese.zig.
-    .{ .code = "ja", .title = "Japanese input", .description = "Converts kana to kanji a phrase at a time", .files = &.{ "ja.dict", "ja.conn" } },
+    .{ .code = "ja", .files = &.{ "ja.dict", "ja.conn" } },
 };
 
 /// A language pack's file, uncompressed.
@@ -1568,11 +1564,10 @@ pub fn build(b: *std.Build) void {
     const initramfs = zstd.captureStdOut(.{ .basename = "initramfs.cpio" });
     // The apps, each in /data/apps/<name> and listed in the shell's dock,
     // are not part of the system or the image: each is an archive to
-    // download and install, in setup or from Settings (zig-out/apps/, with
-    // the catalogue).
-    const apps = [_]App{};
-    const apps_step = b.step("apps", "Build the apps' archives and their catalogue (zig-out/apps)");
-    apps_step.dependOn(addAppArchives(b, &apps));
+    // download and install, in setup or from Settings, from the store
+    // (which lists them, and the language packs built here: zig-out/apps/).
+    const apps_step = b.step("apps", "Build the language packs' archives (zig-out/apps)");
+    apps_step.dependOn(addLanguagePacks(b));
     b.getInstallStep().dependOn(apps_step);
     const install_initramfs = b.addInstallFile(initramfs, "initramfs.cpio");
     const programs_step = b.step("programs", "Build just the programs (zig-out/bin) and zig-out/initramfs.cpio");

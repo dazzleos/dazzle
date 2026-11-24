@@ -187,7 +187,7 @@ pub const Updates = struct {
 
     fn recompute(u: *Updates) bool {
         const was = .{ u.system, u.apps_newer };
-        u.apps_newer = appsNewer(store.apps_dir, u.apps.apps());
+        u.apps_newer = appsNewer(store.apps_dir, u.apps.entries());
         u.system = u.systemNewer();
         u.available = u.system or u.apps_newer;
         return u.system != was[0] or u.apps_newer != was[1];
