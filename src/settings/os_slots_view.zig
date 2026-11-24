@@ -157,7 +157,7 @@ fn logLine(cx: *kete.BuildContext, line: []const u8, wrong: bool) kete.Widget {
     const time = std.mem.trim(u8, line[0 .. line.len - text.len], "[] ");
     return cx.make(kete.Row{ .cross_axis_alignment = .start, .spacing = 12, .children = cx.arena.dupe(kete.Widget, &.{
         cx.make(kete.SizedBox{ .width = 96, .child = cx.make(kete.Text{ .text = time, .style = .{ .size = 14, .color = t.on_surface_variant }, .wrap = false, .text_align = .end }) }),
-        cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = text, .style = .{ .size = 14, .color = if (wrong) t.@"error" else t.on_surface } }) }),
+        cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = text, .style = .{ .size = 14, .color = if (wrong) t.@"error" else t.on_surface }, .break_words = true }) }),
     }) catch &.{} });
 }
 
@@ -176,7 +176,7 @@ test "the slots on Dazzle's page, and why one did not start" {
         \\[    3.150000] dazzle: shell exited with status 1
         \\
     );
-    var log = failed_start.summarize(log_text);
+    var log = failed_start.summarize(log_text, "");
     defer log.deinit(testing.allocator);
     var settings: Settings = .{ .commit = "de14aa2 (7 October 2026)", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .slots = .{
         .running = 'a',

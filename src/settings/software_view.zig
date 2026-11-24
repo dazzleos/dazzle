@@ -449,11 +449,13 @@ fn restartNow(a: *Actions) void {
 }
 
 /// How Dazzle's updates stand: what to say, the button (Update or
-/// Restart) if any, and whether it is under way.
+/// Restart) if any, whether it is under way, and what went wrong (shown
+/// as an icon in the list, and in full on its page).
 const DazzleStatus = struct {
     text: []const u8,
     button: ?struct { label: []const u8, icon: kete.IconName, restart: bool },
     busy: bool,
+    problem: []const u8 = "",
 
     fn of(self: *const Settings, cx: *kete.BuildContext) DazzleStatus {
         const u = &self.update;
@@ -462,19 +464,17 @@ const DazzleStatus = struct {
             kete_vc4.textf(cx, "The operating system · {s}", .{info.formatBytes(&size_buf, self.usage.storage.system)})
         else
             locale.text("The operating system");
-        const available_text = if (u.message.len > 0)
-            u.message
-        else if (u.size > 0)
+        const available_text = if (u.size > 0)
             kete_vc4.textf(cx, "Dazzle {s} is available · {s}", .{ u.available, info.formatBytes(&size_buf, u.size) })
         else
             kete_vc4.textf(cx, "Dazzle {s} is available", .{u.available});
         return switch (u.status) {
-            .unknown, .current => .{ .text = if (u.message.len > 0) u.message else detail, .button = null, .busy = false },
+            .unknown, .current => .{ .text = detail, .button = null, .busy = false, .problem = u.message },
             .checking => .{ .text = locale.text("Checking for updates…"), .button = null, .busy = true },
-            .available => .{ .text = available_text, .button = .{ .label = locale.text("Update"), .icon = .download, .restart = false }, .busy = false },
+            .available => .{ .text = available_text, .button = .{ .label = locale.text("Update"), .icon = .download, .restart = false }, .busy = false, .problem = u.message },
             .downloading => .{ .text = withTransfer(cx, locale.text("Downloading the update…"), u.transfer), .button = null, .busy = true },
             .installing => .{ .text = locale.text("Installing the update…"), .button = null, .busy = true },
-            .ready => .{ .text = if (u.message.len > 0) u.message else locale.text("The update is installed: restart to use it"), .button = .{ .label = locale.text("Restart"), .icon = .restart_alt, .restart = true }, .busy = false },
+            .ready => .{ .text = locale.text("The update is installed: restart to use it"), .button = .{ .label = locale.text("Restart"), .icon = .restart_alt, .restart = true }, .busy = false, .problem = u.message },
         };
     }
 };
@@ -493,6 +493,7 @@ fn dazzleRows(self: *const Settings, b: Builder, state: *State, rows: *std.Array
                 cx.make(kete.Text{ .text = locale.text("Dazzle"), .style = .{ .size = 18, .color = t.on_surface }, .wrap = false, .ellipsis = true }),
                 cx.make(kete.Text{ .text = s.text, .style = .{ .size = 15, .color = t.on_surface_variant } }),
             }, if (self.update.status == .downloading) self.update.transfer else null) }) }),
+            if (s.problem.len > 0) cx.make(kete.Icon{ .icon = .error_outline, .size = 24, .color = t.@"error" }) else cx.make(kete.SizedBox.empty),
             if (s.busy) cx.make(kete.Spinner{ .size = 28 }) else cx.make(kete.Icon{ .icon = .chevron_right, .size = 24, .color = t.on_surface_variant }),
         }) catch &.{} }),
     })) catch {};
@@ -520,6 +521,10 @@ fn dazzlePage(self: *const Settings, b: Builder, state: *State, rows: *std.Array
             cx.make(kete.Text{ .text = s.text, .style = .{ .size = 15, .color = t.on_surface_variant } }),
         }, if (self.update.status == .downloading) self.update.transfer else null) }) }),
         end,
+    }) catch &.{} })) catch {};
+    if (s.problem.len > 0) rows.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = a.dupe(kete.Widget, &.{
+        cx.make(kete.Icon{ .icon = .error_outline, .size = 24, .color = t.@"error" }),
+        cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = s.problem, .style = .{ .size = 15, .color = t.@"error" } }) }),
     }) catch &.{} })) catch {};
     rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 8 }, .child = cx.make(kete.Column{
         .cross_axis_alignment = .stretch,
@@ -999,7 +1004,15 @@ test "updates: offered, downloaded, installed, then a restart" {
 
     settings.update = .{ .status = .unknown, .message = "Cannot check for updates: the server could not be reached (is the network up?)" };
     u.frame(1920, 960, 7, settings);
+    // In the list, its description stays (with an icon for the problem);
+    // its page says what the problem is.
+    try testing.expect(view.findText(u.root.?, "Cannot check for updates: the server could not be reached (is the network up?)") == null);
+    try testing.expect(view.findText(u.root.?, "The operating system · 600 KB") != null);
+    view.click(u, view.up(view.findText(u.root.?, "Dazzle").?, kete.Pressable).?);
+    u.frame(1920, 960, 71, settings);
     try testing.expect(view.findText(u.root.?, "Cannot check for updates: the server could not be reached (is the network up?)") != null);
+    try testing.expect(view.findText(u.root.?, "The operating system · 600 KB") != null);
+    view.click(u, view.up(view.findText(u.root.?, "Back").?, kete.TextButton).?);
     settings.update = .{};
     u.frame(1920, 960, 8, settings);
     try testing.expect(view.findText(u.root.?, "The operating system · 600 KB") != null);

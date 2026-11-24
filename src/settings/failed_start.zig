@@ -1,6 +1,8 @@
 //! Why an OS slot did not start properly, from its log
 //! (`sys.system.failed_start_log`, kept by init's bootlog.zig): how long it
-//! ran, the lines that say something went wrong, and its last lines.
+//! ran, the lines that say something went wrong (but not those this start
+//! says too: what every start logs, such as firmware the Pi does without),
+//! and its last lines.
 
 const std = @import("std");
 const sys = @import("sys");
@@ -36,14 +38,19 @@ pub const Summary = struct {
 };
 
 /// Reads the failed start's log; null if there is none (it stopped
-/// before keeping one).
+/// before keeping one). This start's log (`sys.system.config_dir/log`)
+/// says what is usual.
 pub fn load(gpa: std.mem.Allocator) ?Summary {
     const text = sys.readFileAlloc(gpa, sys.system.failed_start_log, 8 * 1024 * 1024) catch return null;
-    return summarize(text);
+    const usual = sys.readFileAlloc(gpa, sys.system.config_dir ++ "/log", 8 * 1024 * 1024) catch null;
+    defer if (usual) |u| gpa.free(u);
+    return summarize(text, usual orelse "");
 }
 
-/// The summary of `text` (which it keeps).
-pub fn summarize(text: []u8) Summary {
+/// The summary of `text` (which it keeps); the lines that are in `usual`
+/// too (another start's log) are not among those that say what went
+/// wrong.
+pub fn summarize(text: []u8, usual: []const u8) Summary {
     var s: Summary = .{ .text = text };
     var lines = std.mem.splitScalar(u8, text, '\n');
     // The last lines, in a ring.
@@ -52,10 +59,10 @@ pub fn summarize(text: []u8) Summary {
     while (lines.next()) |raw| {
         const line = std.mem.trimEnd(u8, raw, "\r ");
         if (line.len == 0) continue;
-        if (stamp(line)) |us| s.ran_us = us;
+        if (stamp(line)) |us| s.ran_us = @max(s.ran_us orelse 0, us);
         ring[seen % max_tail] = line;
         seen += 1;
-        if (notable(message(line))) {
+        if (notable(message(line)) and !logs(usual, message(line))) {
             if (s.notable_len < max_notable) {
                 s.notable[s.notable_len] = line;
                 s.notable_len += 1;
@@ -66,6 +73,17 @@ pub fn summarize(text: []u8) Summary {
     for (0..n) |i| s.tail[i] = ring[(seen - n + i) % max_tail];
     s.tail_len = n;
     return s;
+}
+
+/// Whether `log` has a line saying `text` (at any time).
+fn logs(log: []const u8, text: []const u8) bool {
+    var at: usize = 0;
+    while (std.mem.indexOfPos(u8, log, at, text)) |i| {
+        at = i + 1;
+        const end = i + text.len;
+        if ((end == log.len or log[end] == '\n' or log[end] == '\r') and i >= 2 and log[i - 1] == ' ' and log[i - 2] == ']') return true;
+    }
+    return false;
 }
 
 /// A line's time: "[   12.345678] text" is 12345678 µs.
@@ -93,7 +111,7 @@ const signs = [_][]const u8{
     "error",  "fail",     "cannot",  "can't",   "unable",   "panic",  "oops",
     "bug:",   "segfault", "killed",  "signal",  "exited",   "denied", "timed out",
     "timeout", "not work", "did not", "corrupt", "warning",  "no such", "out of memory",
-    "unhandled", "abort",  "invalid", "refused", "watchdog",
+    "unhandled", "abort",  "invalid", "refused",
 };
 
 fn notable(text: []const u8) bool {
@@ -109,6 +127,7 @@ test "a failed start's log, summarized" {
     const log =
         \\[    0.000000] Booting Linux on physical CPU 0x0
         \\[    1.200000] mmc0: new high speed SDHC card
+        \\[    1.300000] unicam: error: already registered
         \\[    2.500000] dazzle: starting as init (build abc)
         \\[    2.600000] dazzle: trying OS slot B: if its shell has not run a minute when the computer next starts, slot A starts instead
         \\[    3.100000] dazzle-shell: cannot open /dev/dri/card0: NotFound
@@ -117,12 +136,13 @@ test "a failed start's log, summarized" {
         \\
     ;
     const text = try testing.allocator.dupe(u8, log);
-    var s = summarize(text);
+    // What every start says is not what went wrong.
+    var s = summarize(text, "[    1.000000] mmc0: new high speed SDHC card\n[    0.900000] unicam: error: already registered\n");
     defer s.deinit(testing.allocator);
     try testing.expectEqual(@as(?u64, 3_200_000), s.ran_us);
     try testing.expectEqual(@as(usize, 3), s.notable_len);
     try testing.expectEqualStrings("[    3.100000] dazzle-shell: cannot open /dev/dri/card0: NotFound", s.notableLines()[0]);
-    try testing.expectEqual(@as(usize, 7), s.tail_len);
+    try testing.expectEqual(@as(usize, 8), s.tail_len);
     try testing.expectEqualStrings("[    0.000000] Booting Linux on physical CPU 0x0", s.tailLines()[0]);
     try testing.expectEqualStrings("dazzle: shell exited with status 1", message(s.notableLines()[1]));
     try testing.expectEqual(@as(?u64, 12_340_000), stamp("[   12.34] x"));
@@ -133,7 +153,7 @@ test "only the last lines are kept" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
     for (0..40) |i| try buf.print(testing.allocator, "[{d:>5}.000000] line {d}\n", .{ i, i });
-    var s = summarize(try buf.toOwnedSlice(testing.allocator));
+    var s = summarize(try buf.toOwnedSlice(testing.allocator), "");
     defer s.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, max_tail), s.tail_len);
     try testing.expectEqualStrings("line 28", message(s.tailLines()[0]));
