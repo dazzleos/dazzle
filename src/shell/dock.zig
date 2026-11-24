@@ -616,7 +616,8 @@ pub const Dock = struct {
     /// Sizes it for a screen `screen_width` by `screen_height`: as it is at
     /// 1080p, scaled down for a smaller one; for fingers (`touch`: a
     /// touchscreen), no smaller than at 1080p (its icons are then about as
-    /// big as a fingertip), as long as its row fits across the screen.
+    /// big as a fingertip), as long as the status box and an icon fit
+    /// across the screen. More icons than fit overlap (see `iconStep`).
     pub fn setScreen(d: *Dock, screen_width: u32, screen_height: u32, touch: bool) void {
         d.screen_width = screen_width;
         d.screen_height = screen_height;
@@ -624,9 +625,9 @@ pub const Dock = struct {
         var scale = @min(@as(f32, @floatFromInt(screen_width)) / 1920, @as(f32, @floatFromInt(screen_height)) / 1080);
         if (touch) scale = @max(scale, 1);
         d.scale = scale;
-        // Its row (as wide as it is at this scale) across the screen, less
-        // a margin each side.
-        const row = d.iconsWidth() + d.statusWidth() + 2 * box_pad * scale;
+        // The status box and an icon (as wide as they are at this scale)
+        // across the screen, less a margin each side.
+        const row = (icon_size + icon_gap) * scale + d.statusWidth() + 2 * box_pad * scale;
         const room = @as(f32, @floatFromInt(screen_width)) - 2 * margin * scale;
         if (row > room and row > 0) d.scale = scale * room / row;
         d.height = @intFromFloat(@round((icon_size + 2 * box_pad) * d.scale));
@@ -770,11 +771,33 @@ pub const Dock = struct {
     }
 
     /// How wide the icons are, in a row: each as big as it is (on its way
-    /// in or out).
+    /// in or out), overlapping if they do not all fit (`iconStep`).
     fn iconsWidth(d: *const Dock) f32 {
-        var w: f32 = 0;
-        for (d.entries[0..d.entries_len]) |e| w += e.k;
-        return w * (icon_size + icon_gap) * d.scale;
+        const n = d.iconCount();
+        const step = (icon_size + icon_gap) * d.scale;
+        if (n <= 1) return n * step;
+        return (n - 1) * d.iconStep() + step;
+    }
+
+    /// How many icons there are (those on their way in or out counted as
+    /// far as they have grown).
+    fn iconCount(d: *const Dock) f32 {
+        var n: f32 = 0;
+        for (d.entries[0..d.entries_len]) |e| n += e.k;
+        return n;
+    }
+
+    /// How far along each icon is from the one before: an icon and its
+    /// gap, or, when they do not all fit across the screen beside the
+    /// status box (which always shows in full), less: they overlap, like
+    /// an accordion's folds, the last in full.
+    fn iconStep(d: *const Dock) f32 {
+        const step = (icon_size + icon_gap) * d.scale;
+        const n = d.iconCount();
+        if (n <= 1) return step;
+        const room = @as(f32, @floatFromInt(d.screen_width)) - 2 * margin * d.scale - 2 * box_pad * d.scale - d.statusWidth();
+        if (n * step <= room) return step;
+        return std.math.clamp((room - step) / (n - 1), step * 0.1, step);
     }
 
     /// The gap between the box and the bottom of the screen, in pixels.
@@ -856,7 +879,7 @@ pub const Dock = struct {
     /// the space between the icons either side, and of the row's height.
     fn entryRect(d: *const Dock, j: usize) Rect {
         const full = icon_size * d.scale;
-        const step = (icon_size + icon_gap) * d.scale;
+        const step = d.iconStep();
         var x = d.rowStart();
         for (d.entries[0..j]) |e| x += e.k * step;
         const k = d.entries[j].k;
@@ -884,13 +907,16 @@ pub const Dock = struct {
         return x >= rs.x and x < rs.x + rs.width and y >= rs.y and y < rs.y + rs.height;
     }
 
-    /// The app whose icon is at (`x`, `y`) in the dock.
+    /// The app whose icon is at (`x`, `y`) in the dock: where icons
+    /// overlap, the one on top (the later).
     pub fn hit(d: *const Dock, x: f64, y: f64) ?usize {
-        for (0..d.apps.len) |i| {
-            const r = d.iconRect(i);
-            if (x >= r.x and x < r.x + r.size and y >= r.y and y < r.y + r.size) return i;
+        var found: ?usize = null;
+        for (d.entries[0..d.entries_len], 0..) |e, j| {
+            const i = e.app orelse continue;
+            const r = d.entryRect(j);
+            if (x >= r.x and x < r.x + r.size and y >= r.y and y < r.y + r.size) found = i;
         }
-        return null;
+        return found;
     }
 
     /// Draws it as it is now (with kete: see `View`).
@@ -1268,6 +1294,36 @@ test "icons and the status box are in a row in a box, and clicks find the apps" 
     try testing.expectEqual(light.dot, at(&d, r0.x + r0.size / 2, r0.y + r0.size + 6));
     try testing.expectEqual(light.hover_background, at(&d, r1.x - 2, r1.y + r1.size / 2));
     try testing.expectEqual(light.status_border, at(&d, rs.x + rs.width / 2, rs.y + 1));
+}
+
+test "more icons than fit across the screen overlap; the status box shows in full" {
+    var apps: [14]App = undefined;
+    const names = "abcdefghijklmn";
+    for (&apps, 0..) |*ap, i| ap.* = .{ .name = names[i .. i + 1], .label = names[i .. i + 1], .path = "/apps/x/x" };
+    const kit = try testKit();
+    defer kit.destroy();
+    var d = try Dock.init(kit, &apps, 720, 1280);
+    defer d.deinit();
+    // For fingers: at full size.
+    d.setScreen(720, 1280, true);
+    try testing.expectEqual(@as(f32, 1), d.scale);
+    try testing.expect(d.boxWidth() <= 720 - 2 * Dock.margin);
+    const rs = d.statusRect();
+    try testing.expect(rs.x + rs.width <= @as(f32, @floatFromInt(d.boxWidth())));
+    // The icons are full size, but closer than their width.
+    const r0 = d.iconRect(0);
+    const r1 = d.iconRect(1);
+    const last = d.iconRect(13);
+    try testing.expectEqual(@as(f32, Dock.icon_size), r0.size);
+    try testing.expect(r1.x - r0.x < r0.size);
+    try testing.expect(last.x + last.size <= rs.x);
+    // Where they overlap, the later is pressed; each can be.
+    try testing.expectEqual(@as(?usize, 1), d.hit(r1.x + 1, r1.y + 1));
+    try testing.expectEqual(@as(?usize, 0), d.hit(r0.x + 1, r0.y + 1));
+    try testing.expectEqual(@as(?usize, 13), d.hit(last.x + last.size - 1, last.y + 1));
+    // With room, they do not.
+    d.setScreen(1920, 1080, true);
+    try testing.expect(d.iconRect(1).x - d.iconRect(0).x > Dock.icon_size);
 }
 
 test "the dock floats in a rounded box in the middle of the bottom, and slides down and back" {
