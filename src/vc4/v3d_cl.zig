@@ -654,8 +654,15 @@ pub fn writeShaderStateRecord(w: *cl.Writer, rec: ShaderRecord) void {
 
     w.u32_(rec.default_attr_addr);
 
+    // 4-way threadable, starts in the final thread section (it has no
+    // thread switch but its end: the vertex and coordinate shaders), and
+    // propagates NaNs. Not the fragment shader's final section: it
+    // always switches threads before it writes the tile buffer (`compileV3d`'s
+    // last thread switch), and so starts outside it (as Mesa's `single_seg`);
+    // marked as starting in it, it drew nothing, or hung the GPU.
     const shader_mode_bits: u32 = (1 << 0) | (1 << 1) | (1 << 2);
-    w.u32_((rec.fs_code_addr & ~@as(u32, 7)) | shader_mode_bits);
+    const fs_mode_bits: u32 = (1 << 0) | (1 << 2);
+    w.u32_((rec.fs_code_addr & ~@as(u32, 7)) | fs_mode_bits);
     w.u32_(rec.fs_uniforms_addr);
 
     w.u32_((rec.vs_code_addr & ~@as(u32, 7)) | shader_mode_bits);
@@ -688,8 +695,10 @@ pub fn writeShaderStateRecord71(w: *cl.Writer, rec: ShaderRecord, has_draw_index
 
     // Note: V3D 7.1 omits the 4-byte `address_of_default_attribute_values` field
     // and only uses bits 0..1 (`0x3`) for shader mode bits.
+    // Not the fragment shader's final section, as on V3D 4.2.
     const shader_mode_bits: u32 = (1 << 0) | (1 << 1);
-    w.u32_((rec.fs_code_addr & ~@as(u32, 7)) | shader_mode_bits);
+    const fs_mode_bits: u32 = 1 << 0;
+    w.u32_((rec.fs_code_addr & ~@as(u32, 7)) | fs_mode_bits);
     w.u32_(rec.fs_uniforms_addr);
 
     w.u32_((rec.vs_code_addr & ~@as(u32, 7)) | shader_mode_bits);
