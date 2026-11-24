@@ -179,11 +179,18 @@ const MapView = struct {
         const old = p.clipTo(.{ .x = 0, .y = 0, .w = size.w, .h = size.h });
         defer p.restoreClip(old);
         c = p.canvas();
-        // Opaque, so the triangles' shared edges do not show.
+        // In one go, their edges not smoothed: smoothed one by one, each
+        // triangle's edges let the sea through a little where it meets the
+        // next, and the land (thousands of triangles, many smaller than a
+        // pixel) came out speckled.
         const land = mix(t.surface_container, t.on_surface_variant, 0.35);
-        const pts = a.alloc(kete.Point, world.points.len) catch return;
-        for (world.points, pts) |w, *q| q.* = at(size, @as(f32, @floatFromInt(w[1])) / 100, @as(f32, @floatFromInt(w[0])) / 100);
-        for (world.triangles) |tri| c.fillPolygon(&.{ pts[tri[0]], pts[tri[1]], pts[tri[2]] }, land);
+        const corners = a.alloc([3]f32, world.triangles.len * 3) catch return;
+        for (world.triangles, 0..) |tri, i| for (tri, 0..) |k, j| {
+            const w = world.points[k];
+            const q = at(size, @as(f32, @floatFromInt(w[1])) / 100, @as(f32, @floatFromInt(w[0])) / 100);
+            corners[i * 3 + j] = .{ q[0], q[1], 1 };
+        };
+        c.fillShaded(corners, land);
         // The zones' places.
         const dot = t.on_surface.withAlpha(0.55);
         for (1..TimeZone.count) |i| {
