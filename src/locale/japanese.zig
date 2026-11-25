@@ -6,11 +6,12 @@
 
 /// Japan's.
 pub const japan = [_][2][]const u8{
-    .{ "Connect to a network", "ネットワークに接続" },
+    .{ "Time", "時刻" },
+    .{ "Device Name", "デバイス名" },
+    .{ "Getting the time…", "時刻を取得しています…" },
+    .{ "Could not get the time from the network", "ネットワークから時刻を取得できませんでした" },
+    .{ "Without a network, the time cannot be set", "ネットワークがないと時刻を設定できません" },
     .{ "Plug in an Ethernet cable or a Wi-Fi adapter to connect. You can also set up the network later in Settings.", "接続するには、イーサネットケーブルか Wi-Fi アダプターを差し込んでください。ネットワークは後で「設定」で設定することもできます。" },
-    .{ "Hello, I speak…", "こんにちは、私の言語は…" },
-    .{ "Is this your keyboard?", "これはあなたのキーボードですか？" },
-    .{ "Give me a name", "名前をつけてください" },
     .{ "Lowercase letters, numbers and hyphens. You can change it later in Settings.", "小文字、数字、ハイフンが使えます。あとで「設定」で変更できます。" },
     .{ "Let other computers control this one", "ほかのコンピューターからの操作を許可する" },
     .{ "Code {d}. With it, a computer on the network can move the pointer, type, open and close apps and windows, take screenshots, install updates and restart, at http://{s}:{d}/. Turn this off when you are done.", "コード {d}。このコードがあれば、ネットワーク上のコンピューターから http://{s}:{d}/ で、ポインターの移動、入力、アプリやウィンドウの開閉、スクリーンショット、アップデートのインストール、再起動ができます。使い終わったらオフにしてください。" },

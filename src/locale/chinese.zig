@@ -6,11 +6,12 @@
 //! they are.
 
 pub const simplified = [_][2][]const u8{
-    .{ "Connect to a network", "连接到网络" },
+    .{ "Time", "时间" },
+    .{ "Device Name", "设备名称" },
+    .{ "Getting the time…", "正在获取时间…" },
+    .{ "Could not get the time from the network", "无法从网络获取时间" },
+    .{ "Without a network, the time cannot be set", "没有网络，无法设置时间" },
     .{ "Plug in an Ethernet cable or a Wi-Fi adapter to connect. You can also set up the network later in Settings.", "插入以太网线或 Wi-Fi 适配器即可连接。你也可以稍后在“设置”中设置网络。" },
-    .{ "Hello, I speak…", "你好，我说…" },
-    .{ "Is this your keyboard?", "这是你的键盘吗？" },
-    .{ "Give me a name", "给我起个名字" },
     .{ "Lowercase letters, numbers and hyphens. You can change it later in Settings.", "小写字母、数字和连字符。你可以稍后在“设置”中更改。" },
     .{ "Let other computers control this one", "允许其他电脑控制这台电脑" },
     .{ "Code {d}. With it, a computer on the network can move the pointer, type, open and close apps and windows, take screenshots, install updates and restart, at http://{s}:{d}/. Turn this off when you are done.", "代码 {d}。凭此代码，网络上的电脑可以通过 http://{s}:{d}/ 移动指针、输入文字、打开和关闭应用与窗口、截屏、安装更新以及重启。用完后请关闭。" },

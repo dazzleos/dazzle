@@ -5,7 +5,7 @@
 //! picked (there is no language yet to say so in).
 //!
 //! Picked, the other words fade away, and the word moves up to where every
-//! page's title is, turning (fading) into this page's: "Hello, I speak…".
+//! page's title is, turning (fading) into this page's: "Language".
 //! The languages it is "hello" in are listed in the middle (all its
 //! places: English in the United States, the United Kingdom and so on, the
 //! most spoken first; and any other language with the same word), the
@@ -212,7 +212,7 @@ pub const Page = struct {
             layers.append(a, cx.make(kete.Place{ .at = at, .offset = offset, .child = body })) catch {};
             if (title > 0) layers.append(a, cx.make(kete.Place{ .at = at, .offset = offset, .child = cx.make(kete.Opacity{
                 .opacity = title,
-                .child = cx.make(kete.Text{ .text = locale.text("Hello, I speak…"), .wrap = false, .style = .{ .size = word_size } }),
+                .child = cx.make(kete.Text{ .text = locale.text("Language"), .wrap = false, .style = .{ .size = word_size } }),
             }) })) catch {};
         }
 

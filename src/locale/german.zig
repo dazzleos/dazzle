@@ -7,11 +7,12 @@
 
 /// Germany's.
 pub const germany = [_][2][]const u8{
-    .{ "Connect to a network", "Mit einem Netzwerk verbinden" },
+    .{ "Time", "Uhrzeit" },
+    .{ "Device Name", "Gerätename" },
+    .{ "Getting the time…", "Uhrzeit wird abgerufen…" },
+    .{ "Could not get the time from the network", "Die Uhrzeit konnte nicht aus dem Netzwerk abgerufen werden" },
+    .{ "Without a network, the time cannot be set", "Ohne Netzwerk kann die Uhrzeit nicht gestellt werden" },
     .{ "Plug in an Ethernet cable or a Wi-Fi adapter to connect. You can also set up the network later in Settings.", "Schließe ein Ethernet-Kabel oder einen WLAN-Adapter an, um dich zu verbinden. Du kannst das Netzwerk auch später in den Einstellungen einrichten." },
-    .{ "Hello, I speak…", "Hallo, ich spreche…" },
-    .{ "Is this your keyboard?", "Ist das deine Tastatur?" },
-    .{ "Give me a name", "Gib mir einen Namen" },
     .{ "Lowercase letters, numbers and hyphens. You can change it later in Settings.", "Kleinbuchstaben, Ziffern und Bindestriche. Du kannst ihn später in den Einstellungen ändern." },
     .{ "Let other computers control this one", "Anderen Computern die Steuerung erlauben" },
     .{ "Code {d}. With it, a computer on the network can move the pointer, type, open and close apps and windows, take screenshots, install updates and restart, at http://{s}:{d}/. Turn this off when you are done.", "Code {d}. Damit kann ein Computer im Netzwerk unter http://{s}:{d}/ den Zeiger bewegen, tippen, Apps und Fenster öffnen und schließen, Bildschirmfotos aufnehmen, Updates installieren und neu starten. Schalte dies aus, wenn du fertig bist." },

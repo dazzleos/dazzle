@@ -7,11 +7,12 @@
 
 /// Arabic, as Egypt has it.
 pub const arabic = [_][2][]const u8{
-    .{ "Connect to a network", "اتصل بشبكة" },
+    .{ "Time", "الوقت" },
+    .{ "Device Name", "اسم الجهاز" },
+    .{ "Getting the time…", "جارٍ الحصول على الوقت…" },
+    .{ "Could not get the time from the network", "تعذّر الحصول على الوقت من الشبكة" },
+    .{ "Without a network, the time cannot be set", "بدون شبكة، لا يمكن ضبط الوقت" },
     .{ "Plug in an Ethernet cable or a Wi-Fi adapter to connect. You can also set up the network later in Settings.", "صِل كابل إيثرنت أو محوّل Wi-Fi للاتصال. يمكنك أيضًا إعداد الشبكة لاحقًا في الإعدادات." },
-    .{ "Hello, I speak…", "مرحبا، أتحدث…" },
-    .{ "Is this your keyboard?", "هل هذه لوحة مفاتيحك؟" },
-    .{ "Give me a name", "أعطني اسمًا" },
     .{ "Lowercase letters, numbers and hyphens. You can change it later in Settings.", "أحرف صغيرة وأرقام وشرطات. يمكنك تغييره لاحقًا في الإعدادات." },
     .{ "Let other computers control this one", "السماح لأجهزة الكمبيوتر الأخرى بالتحكم في هذا الكمبيوتر" },
     .{ "Code {d}. With it, a computer on the network can move the pointer, type, open and close apps and windows, take screenshots, install updates and restart, at http://{s}:{d}/. Turn this off when you are done.", "الرمز {d}. باستخدامه، يمكن لكمبيوتر على الشبكة تحريك المؤشر والكتابة وفتح التطبيقات والنوافذ وإغلاقها والتقاط لقطات الشاشة وتثبيت التحديثات وإعادة التشغيل، على http://{s}:{d}/. أوقف هذا عند الانتهاء." },

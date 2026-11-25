@@ -97,6 +97,8 @@ pub const Setup = struct {
     network: ?*const net.Report = null,
     /// The time (seconds since 1970, UTC), if the clock has been set.
     wall_s: ?i64 = null,
+    /// On a network a while, the time has still not been got from it.
+    time_failed: bool = false,
     actions: ?*Actions = null,
 
     pub const State = struct {
@@ -286,10 +288,10 @@ pub const Setup = struct {
         const which = pages[state.page];
         const title = switch (which) {
             .hello => unreachable, // the whole window (see `build`)
-            .keyboard => locale.text("Is this your keyboard?"),
-            .hostname => locale.text("Give me a name"),
-            .network => locale.text("Connect to a network"),
-            .time => locale.text("Time zone"),
+            .keyboard => locale.text("Keyboard"),
+            .hostname => locale.text("Device Name"),
+            .network => locale.text("Network"),
+            .time => locale.text("Time"),
         };
         const body = switch (which) {
             .hello => unreachable,
@@ -474,7 +476,17 @@ pub const Setup = struct {
         var label_buf: [96]u8 = undefined;
         var off_buf: [16]u8 = undefined;
         const label = kete_vc4.textf(cx, "{s} · {s}", .{ state.timezone.label(&label_buf), kete_vc4.utcOffset(&off_buf, state.timezone.offsetAt(now)) });
+        // Until the clock is set: being got from the network, or why not.
+        const status: kete.Widget = if (self.wall_s != null)
+            cx.make(kete.SizedBox{ .height = 32 })
+        else if (!self.networkConnected())
+            timeStatus(cx, .wifi_off, locale.text("Without a network, the time cannot be set"), t.on_surface_variant)
+        else if (self.time_failed)
+            timeStatus(cx, .error_outline, locale.text("Could not get the time from the network"), t.@"error")
+        else
+            timeStatus(cx, null, locale.text("Getting the time…"), t.on_surface_variant);
         const body = cx.make(kete.Column{ .cross_axis_alignment = .center, .fill = false, .spacing = 12, .children = a.dupe(kete.Widget, &.{
+            status,
             cx.make(kete.Text{ .text = a.dupe(u8, clock) catch "", .wrap = false, .style = .{ .size = 120 } }),
             cx.make(kete.Text{ .text = a.dupe(u8, date) catch "", .wrap = false, .style = .{ .size = 24, .color = t.on_surface_variant } }),
             cx.make(kete.SizedBox{ .height = 16 }),
@@ -483,6 +495,20 @@ pub const Setup = struct {
             cx.make(parts.Choice{ .label = label, .icon = .public, .trailing_icon = .arrow_drop_down, .on_press = .of(state, State.showZones) }),
         }) catch &.{} });
         return body;
+    }
+
+    // The time's status icons (given by name below, which the icon
+    // scanner does not see).
+    comptime {
+        _ = &[_]kete.IconName{ .error_outline, .wifi_off };
+    }
+
+    /// A line over the clock: an icon (a spinner, if none) and what it says.
+    fn timeStatus(cx: *kete.BuildContext, icon: ?kete.IconName, text: []const u8, color: kete.Color) kete.Widget {
+        return cx.make(kete.SizedBox{ .height = 32, .child = cx.make(kete.Row{ .fill = false, .spacing = 12, .cross_axis_alignment = .center, .children = cx.arena.dupe(kete.Widget, &.{
+            if (icon) |ic| cx.make(kete.Icon{ .icon = ic, .size = 24, .color = color }) else cx.make(kete.Spinner{ .size = 22 }),
+            cx.make(kete.Text{ .text = text, .wrap = false, .style = .{ .size = 20, .color = color } }),
+        }) catch &.{} }) });
     }
 
     fn hostnamePage(_: *const Setup, cx: *kete.BuildContext, state: *State, nav: *Nav) kete.Widget {
@@ -947,7 +973,7 @@ test "Wi-Fi networks are shown when Ethernet is not connected and a Wi-Fi adapte
     u.frame(1280, 720, 0, setup);
     u.root.?.state(Setup.State).page = @intFromEnum(Page.hostname);
     u.frame(1280, 720, 0, setup);
-    try testing.expect(findText(u.root.?, "Give me a name") != null);
+    try testing.expect(findText(u.root.?, "Device Name") != null);
 
     // The name, then the network: the Wi-Fi networks (no Ethernet adapter,
     // so nothing of Ethernet), and Skip until one is joined.
@@ -957,7 +983,7 @@ test "Wi-Fi networks are shown when Ethernet is not connected and a Wi-Fi adapte
         try testing.expect(!overflows(u.root.?));
     }
     try testing.expectEqualStrings("my-pi", actions.hostname.?.slice());
-    try testing.expect(findText(u.root.?, "Connect to a network") != null);
+    try testing.expect(findText(u.root.?, "Network") != null);
     try testing.expect(findText(u.root.?, "Home") != null);
     try testing.expect(findText(u.root.?, "Cafe") != null);
     try testing.expect(findText(u.root.?, "Skip") != null);
@@ -984,7 +1010,7 @@ test "Wi-Fi networks are shown when Ethernet is not connected and a Wi-Fi adapte
     try testing.expect(findType(u.root.?, kete_vc4.ZoneMap) != null);
     click(u, findText(u.root.?, "Back").?);
     u.frame(1280, 720, 6, setup);
-    try testing.expect(findText(u.root.?, "Connect to a network") != null);
+    try testing.expect(findText(u.root.?, "Network") != null);
 
     // An Ethernet adapter too, connected: how it is, and Next (it is on a
     // network).
@@ -1097,7 +1123,7 @@ test "the first page: hello in every language; one picked, its languages, and ba
     u.frame(1920, 1080, 20 * s + 100 * std.time.ns_per_ms, setup);
     u.frame(1920, 1080, 22 * s, setup);
     try testing.expect(findText(u.root.?, "Hello") == null);
-    try testing.expect(findText(u.root.?, "Hello, I speak…") != null);
+    try testing.expect(findText(u.root.?, "Language") != null);
     try testing.expect(findText(u.root.?, "Español (México)") != null);
     try testing.expect(findText(u.root.?, "Español (Chile)") != null);
     try testing.expect(!overflows(u.root.?));

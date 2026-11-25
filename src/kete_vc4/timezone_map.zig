@@ -125,10 +125,11 @@ pub const TimeZoneMap = struct {
 };
 
 /// The map: the land, the zones' places, the chosen one marked. With
-/// `bands`, the world's hours too: a band for each hour ahead of or behind
-/// UTC (15° of longitude), every other one shaded, the chosen zone's lit;
-/// clicking where no place is near chooses the zone in that band nearest
-/// the click. A zone's band is its standard time's (summer time moves a
+/// `bands`, the world's time zones too (Natural Earth's: the regions an
+/// hour, or part of one, ahead of or behind UTC, by their borders), every
+/// other hour shaded, their outlines drawn, the chosen zone's region lit;
+/// clicking where no place is near chooses the zone in that region nearest
+/// the click. A zone's region is its standard time's (summer time moves a
 /// clock, not where it is).
 pub const MapView = struct {
     zone: TimeZone,
@@ -148,21 +149,38 @@ pub const MapView = struct {
         return .{ (lon + 180) / 360 * size.w, (north - lat) / (north - south) * size.h };
     }
 
-    /// The longitude at `x` across the map.
-    fn lonAt(size: kete.Size, x: f32) f32 {
-        return x / size.w * 360 - 180;
+    /// The time zone region at `p`: its quarter hours ahead of UTC.
+    pub fn regionAt(size: kete.Size, p: kete.Point) ?i8 {
+        for (world.zones) |z| for (world.zone_triangles[z.triangles[0]..][0..z.triangles[1]]) |tri| {
+            var q: [3]kete.Point = undefined;
+            for (tri, &q) |k, *o| o.* = onMap(size, world.zone_points[k]);
+            if (inTriangle(p, q)) return z.quarter_hours;
+        };
+        return null;
     }
 
-    /// The zone nearest `p` of those in its band (whose standard time's
-    /// hour ahead of UTC is the one there), if any is.
+    /// Where a point of the world map's (hundredths of a degree) is.
+    fn onMap(size: kete.Size, w: [2]i16) kete.Point {
+        return at(size, @as(f32, @floatFromInt(w[1])) / 100, @as(f32, @floatFromInt(w[0])) / 100);
+    }
+
+    fn inTriangle(p: kete.Point, t: [3]kete.Point) bool {
+        const d0 = (t[1][0] - t[0][0]) * (p[1] - t[0][1]) - (t[1][1] - t[0][1]) * (p[0] - t[0][0]);
+        const d1 = (t[2][0] - t[1][0]) * (p[1] - t[1][1]) - (t[2][1] - t[1][1]) * (p[0] - t[1][0]);
+        const d2 = (t[0][0] - t[2][0]) * (p[1] - t[2][1]) - (t[0][1] - t[2][1]) * (p[0] - t[2][0]);
+        return (d0 >= 0 and d1 >= 0 and d2 >= 0) or (d0 <= 0 and d1 <= 0 and d2 <= 0);
+    }
+
+    /// The zone nearest `p` of those in its region (whose standard time is
+    /// the region's), if any is.
     pub fn zoneInBand(size: kete.Size, p: kete.Point) ?TimeZone {
-        const hour = @round(lonAt(size, p[0]) / 15);
+        const quarters = regionAt(size, p) orelse return null;
         var best: ?TimeZone = null;
         var best_d: f32 = std.math.inf(f32);
         for (1..TimeZone.count) |i| {
             const z: TimeZone = @enumFromInt(i);
             const pl = z.place() orelse continue;
-            if (@round(@as(f32, @floatFromInt(z.standardOffset())) / 3600) != hour) continue;
+            if (@divFloor(z.standardOffset(), 900) != quarters) continue;
             const q = at(size, pl.lat, pl.lon);
             const d = (q[0] - p[0]) * (q[0] - p[0]) + (q[1] - p[1]) * (q[1] - p[1]);
             if (d < best_d) {
@@ -223,21 +241,42 @@ pub const MapView = struct {
         };
         c.fillShaded(corners, land);
         if (self.bands) {
-            // Every other hour shaded; the chosen zone's lit (half hours,
-            // as India's, between two).
-            var hour: i32 = -12;
-            while (hour <= 12) : (hour += 2) {
-                const mid: f32 = @floatFromInt(hour * 15);
-                const x0 = at(size, 0, mid - 7.5)[0];
-                const x1 = at(size, 0, mid + 7.5)[0];
-                c.fillRect(.{ .x = x0, .y = 0, .w = x1 - x0, .h = size.h }, t.on_surface.withAlpha(0.05));
+            // Every other hour's regions shaded (those part of an hour out
+            // between), the chosen zone's lit, and their outlines.
+            const chosen = @divFloor(self.zone.standardOffset(), 900);
+            for (world.zones) |z| {
+                const lit = z.quarter_hours == chosen;
+                const color = if (lit)
+                    t.primary.withAlpha(0.32)
+                else if (@mod(z.quarter_hours, 4) != 0)
+                    t.on_surface.withAlpha(0.03)
+                else if (@mod(@divFloor(z.quarter_hours, 4), 2) == 0)
+                    t.on_surface.withAlpha(0.06)
+                else
+                    continue;
+                const tris = world.zone_triangles[z.triangles[0]..][0..z.triangles[1]];
+                const zc = a.alloc([3]f32, tris.len * 3) catch continue;
+                for (tris, 0..) |tri, i| for (tri, 0..) |k, j_| {
+                    const q = onMap(size, world.zone_points[k]);
+                    zc[i * 3 + j_] = .{ q[0], q[1], 1 };
+                };
+                c.fillShaded(zc, color);
             }
-            // (Past the date line, as UTC+13 is, round to the other side.)
-            const mid = @as(f32, @floatFromInt(self.zone.standardOffset())) / 3600 * 15;
-            for ([_]f32{ -360, 0, 360 }) |turn| {
-                const x0 = at(size, 0, mid + turn - 7.5)[0];
-                const x1 = at(size, 0, mid + turn + 7.5)[0];
-                c.fillRect(.{ .x = x0, .y = 0, .w = x1 - x0, .h = size.h }, t.primary.withAlpha(0.28));
+            for (world.zones) |z| {
+                const lit = z.quarter_hours == chosen;
+                for (world.zone_rings[z.rings[0]..][0..z.rings[1]]) |r| {
+                    const ring = world.zone_outline[r[0]..][0..r[1]];
+                    // In pieces the canvas takes (each sharing its last
+                    // point with the next).
+                    var from: usize = 0;
+                    while (from + 1 < ring.len) {
+                        const count = @min(ring.len - from, 400);
+                        const pts = a.alloc(kete.Point, count) catch break;
+                        for (ring[from..][0..count], pts) |k, *o| o.* = onMap(size, world.zone_points[k]);
+                        c.strokePolyline(pts, false, if (lit) 1.5 else 1, if (lit) t.primary.withAlpha(0.8) else t.on_surface.withAlpha(0.14));
+                        from += count - 1;
+                    }
+                }
             }
         }
         // The zones' places.
@@ -368,8 +407,11 @@ test "the hours ahead of UTC, and the zones in a band and at the same time" {
     try testing.expectEqual(auckland, out[0]);
     for (out[0..n]) |z| try testing.expectEqual(auckland.offsetAt(now), z.offsetAt(now));
     // Clicking in the middle of the Pacific (no place near): the zone in
-    // that hour's band nearest it (UTC−10: Honolulu, say).
+    // that region nearest it (UTC−10: Honolulu, say).
     const size: kete.Size = .{ .w = 720, .h = 284 };
     const z = MapView.zoneInBand(size, MapView.at(size, 10, -150)).?;
     try testing.expectEqual(@as(i32, -10 * 3600), z.standardOffset());
+    // India's region is half an hour out; Nepal's, a quarter.
+    try testing.expectEqual(@as(?i8, 22), MapView.regionAt(size, MapView.at(size, 22, 79)));
+    try testing.expectEqual(@as(?i8, 23), MapView.regionAt(size, MapView.at(size, 28.2, 84)));
 }

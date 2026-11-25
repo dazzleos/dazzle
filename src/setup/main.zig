@@ -40,6 +40,7 @@ const Shown = struct {
     report: ?proto.Report = null,
     net_report: ?net.Report = null,
     wall_s: ?i64 = null,
+    time_failed: bool = false,
 
     pub fn build(s: *const Shown, cx: *kete.BuildContext) kete.Widget {
         return cx.make(view.Setup{
@@ -48,6 +49,7 @@ const Shown = struct {
             .report = if (s.report) |*r| r else null,
             .network = if (s.net_report) |*r| r else null,
             .wall_s = s.wall_s,
+            .time_failed = s.time_failed,
             .actions = s.actions,
         });
     }
@@ -110,11 +112,16 @@ fn run(init: std.process.Init) !void {
     var report: ?proto.Report = null;
     var net_report: ?net.Report = null;
     var finish_sent = false;
+    // Since when the computer has been on a network without the time.
+    var waiting_for_time_since: ?u64 = null;
 
     while (true) {
-        // Woken at the next minute at the latest, for the time page's clock.
+        // Woken at the next minute at the latest, for the time page's
+        // clock (and when the time is given up on, while it is awaited).
         const wall = sys.realtimeSec();
-        if (!try host.step(@intCast((60 - @mod(wall, 60)) * std.time.ns_per_s))) break;
+        var wait: u64 = @intCast((60 - @mod(wall, 60)) * std.time.ns_per_s);
+        if (waiting_for_time_since) |since| wait = @min(wait, @max((since + time_patience_ns) -| sys.nowNs(), std.time.ns_per_ms));
+        if (!try host.step(wait)) break;
         // The time, once the clock is set (it starts in 1970, until the
         // network sets it: a time before Dazzle was built cannot be right).
         const now_wall = sys.realtimeSec();
@@ -178,8 +185,25 @@ fn run(init: std.process.Init) !void {
 
         shown.report = report;
         shown.net_report = net_report;
+        // On a network this long without the time (the network manager
+        // sets the clock once it is up), it is not coming.
+        const on_network = if (net_report) |r| r.connection.state == .connected or r.ethernetConnected() else false;
+        if (on_network and wall_s == null) {
+            const mono = sys.nowNs();
+            const since = waiting_for_time_since orelse mono;
+            waiting_for_time_since = since;
+            const failed = mono - since >= time_patience_ns;
+            if (failed != shown.time_failed) host.redraw();
+            shown.time_failed = failed;
+        } else {
+            waiting_for_time_since = null;
+            shown.time_failed = false;
+        }
     }
 }
+
+/// How long the time may take to come once on a network.
+const time_patience_ns = 30 * std.time.ns_per_s;
 
 /// Talks to `system` and `network` on a background thread so the UI thread
 /// never waits on socket IPC or DHCP.

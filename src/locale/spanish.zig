@@ -12,11 +12,12 @@
 /// Latin America's (Mexico, Argentina, Colombia, Chile, Peru, the United
 /// States), and Spain's where it has none of its own.
 pub const latin_america = [_][2][]const u8{
-    .{ "Connect to a network", "Conéctate a una red" },
+    .{ "Time", "Hora" },
+    .{ "Device Name", "Nombre del dispositivo" },
+    .{ "Getting the time…", "Obteniendo la hora…" },
+    .{ "Could not get the time from the network", "No se pudo obtener la hora de la red" },
+    .{ "Without a network, the time cannot be set", "Sin una red, no se puede ajustar la hora" },
     .{ "Plug in an Ethernet cable or a Wi-Fi adapter to connect. You can also set up the network later in Settings.", "Conecta un cable Ethernet o un adaptador Wi-Fi para conectarte. También puedes configurar la red más tarde en Configuración." },
-    .{ "Hello, I speak…", "Hola, hablo…" },
-    .{ "Is this your keyboard?", "¿Es este tu teclado?" },
-    .{ "Give me a name", "Ponme un nombre" },
     .{ "Lowercase letters, numbers and hyphens. You can change it later in Settings.", "Letras minúsculas, números y guiones. Puedes cambiarlo más tarde en Configuración." },
     // --- Words that differ by country (Spain's are in `spain`) ---------------
     .{ "Let other computers control this one", "Permitir que otras computadoras controlen esta" },

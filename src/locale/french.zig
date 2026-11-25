@@ -6,11 +6,12 @@
 
 /// France's (and Canada's where it has none of its own).
 pub const france = [_][2][]const u8{
-    .{ "Connect to a network", "Connectez-vous à un réseau" },
+    .{ "Time", "Heure" },
+    .{ "Device Name", "Nom de l’appareil" },
+    .{ "Getting the time…", "Obtention de l’heure…" },
+    .{ "Could not get the time from the network", "Impossible d’obtenir l’heure depuis le réseau" },
+    .{ "Without a network, the time cannot be set", "Sans réseau, l’heure ne peut pas être réglée" },
     .{ "Plug in an Ethernet cable or a Wi-Fi adapter to connect. You can also set up the network later in Settings.", "Branchez un câble Ethernet ou un adaptateur Wi-Fi pour vous connecter. Vous pourrez aussi configurer le réseau plus tard dans les Paramètres." },
-    .{ "Hello, I speak…", "Bonjour, je parle…" },
-    .{ "Is this your keyboard?", "Est-ce votre clavier ?" },
-    .{ "Give me a name", "Donnez-moi un nom" },
     .{ "Lowercase letters, numbers and hyphens. You can change it later in Settings.", "Lettres minuscules, chiffres et traits d’union. Vous pourrez le changer plus tard dans les Paramètres." },
     .{ "Let other computers control this one", "Permettre à d’autres ordinateurs de contrôler celui-ci" },
     .{ "Code {d}. With it, a computer on the network can move the pointer, type, open and close apps and windows, take screenshots, install updates and restart, at http://{s}:{d}/. Turn this off when you are done.", "Code {d}. Avec lui, un ordinateur du réseau peut déplacer le pointeur, saisir du texte, ouvrir et fermer des applis et des fenêtres, faire des captures d’écran, installer des mises à jour et redémarrer, à l’adresse http://{s}:{d}/. Désactivez-le quand vous avez terminé." },

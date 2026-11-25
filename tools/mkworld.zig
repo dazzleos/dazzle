@@ -5,7 +5,14 @@
 //! as the Maps app's are), for filling simply; their points in hundredths
 //! of a degree (east, north).
 //!
-//!     mkworld <ne_110m_admin_0_countries.geojson> <world_map.zig>
+//! And the world's time zones, from Natural Earth's 10m Time Zones: the
+//! regions whose clocks are an hour (or half, or quarter) ahead of or
+//! behind UTC in standard time, by their borders and the sea's. Each
+//! region's outer rings, made simpler (points that move its outline less
+//! than `zone_tolerance` left out: the map is small), as triangles to fill
+//! and as outlines to draw, with how many quarter hours from UTC it is.
+//!
+//!     mkworld <ne_110m_admin_0_countries.geojson> <ne_10m_time_zones.geojson> <world_map.zig>
 
 const std = @import("std");
 const mkmap = @import("mkmap.zig");
@@ -13,14 +20,17 @@ const mkmap = @import("mkmap.zig");
 pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
-    if (args.len != 3) {
-        std.debug.print("usage: mkworld <ne_110m.geojson> <world_map.zig>\n", .{});
+    if (args.len != 4) {
+        std.debug.print("usage: mkworld <ne_110m.geojson> <ne_10m_time_zones.geojson> <world_map.zig>\n", .{});
         std.process.exit(2);
     }
     const cwd = std.Io.Dir.cwd();
     const geojson = try cwd.readFileAlloc(init.io, args[1], arena, .limited(32 << 20));
-    const out = try generate(arena, geojson);
-    const file = try cwd.createFile(init.io, args[2], .{});
+    const zones_geojson = try cwd.readFileAlloc(init.io, args[2], arena, .limited(32 << 20));
+    const land = try generate(arena, geojson);
+    const zones = try generateZones(arena, zones_geojson);
+    const out = try std.mem.concat(arena, u8, &.{ land, "\n", zones });
+    const file = try cwd.createFile(init.io, args[3], .{});
     defer file.close(init.io);
     try file.writeStreamingAll(init.io, out);
 }
@@ -74,6 +84,158 @@ pub fn generate(arena: std.mem.Allocator, geojson: []const u8) ![]const u8 {
     return out.items;
 }
 
+/// How far (degrees) a time zone's outline may move as it is made simpler.
+const zone_tolerance = 0.15;
+
+pub fn generateZones(arena: std.mem.Allocator, geojson: []const u8) ![]const u8 {
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, geojson, .{});
+    var points: std.ArrayList([2]i16) = .empty;
+    var index: std.AutoHashMapUnmanaged([2]i16, u16) = .empty;
+    var triangles: std.ArrayList([3]u16) = .empty;
+    var outline: std.ArrayList(u16) = .empty;
+    var rings: std.ArrayList([2]u32) = .empty;
+    var out: std.ArrayList(u8) = .empty;
+    var zones: std.ArrayList(u8) = .empty;
+    var n_zones: usize = 0;
+    const features = parsed.object.get("features") orelse return error.NoFeatures;
+    for (features.array.items) |f| {
+        const props = f.object.get("properties") orelse continue;
+        const zone = number(props.object.get("zone") orelse continue);
+        const geom = f.object.get("geometry") orelse continue;
+        if (geom != .object) continue;
+        const kind = (geom.object.get("type") orelse continue).string;
+        const coords = geom.object.get("coordinates") orelse continue;
+        var outers: std.ArrayList(std.json.Value) = .empty;
+        if (std.mem.eql(u8, kind, "Polygon")) {
+            try outers.append(arena, coords.array.items[0]);
+        } else if (std.mem.eql(u8, kind, "MultiPolygon")) {
+            for (coords.array.items) |poly| try outers.append(arena, poly.array.items[0]);
+        }
+        const first_tri = triangles.items.len;
+        const first_ring = rings.items.len;
+        for (outers.items) |ring| {
+            var pts: std.ArrayList([2]f64) = .empty;
+            for (ring.array.items) |pt| try pts.append(arena, .{ number(pt.array.items[0]), number(pt.array.items[1]) });
+            const simple = try simplify(arena, pts.items, zone_tolerance);
+            if (simple.len < 4) continue;
+            var tris: std.ArrayList([3][2]f64) = .empty;
+            try mkmap.earClip(arena, simple, &tris);
+            const ring_start = outline.items.len;
+            for (simple) |pt| try outline.append(arena, try pointIndex(arena, &points, &index, pt));
+            try rings.append(arena, .{ @intCast(ring_start), @intCast(outline.items.len - ring_start) });
+            for (tris.items) |t| {
+                var tri: [3]u16 = undefined;
+                for (t, &tri) |pt, *i| i.* = try pointIndex(arena, &points, &index, pt);
+                if (tri[0] != tri[1] and tri[1] != tri[2] and tri[0] != tri[2]) try triangles.append(arena, tri);
+            }
+        }
+        try zones.print(arena, "    .{{ .quarter_hours = {d}, .triangles = .{{ {d}, {d} }}, .rings = .{{ {d}, {d} }} }},\n", .{
+            @as(i32, @intFromFloat(@round(zone * 4))), first_tri, triangles.items.len - first_tri, first_ring, rings.items.len - first_ring,
+        });
+        n_zones += 1;
+    }
+    try out.appendSlice(arena,
+        \\/// The time zones (Natural Earth's 10m, simpler): regions an hour (or
+        \\/// part) ahead of or behind UTC in standard time. Each region's
+        \\/// triangles (`zone_triangles[first..][0..count]`) and outlines
+        \\/// (`zone_rings`: where in `zone_outline`, and how many points, closed).
+        \\pub const Zone = struct {
+        \\    quarter_hours: i8,
+        \\    triangles: [2]u32,
+        \\    rings: [2]u32,
+        \\};
+        \\
+        \\
+    );
+    try out.print(arena, "pub const zones = [{d}]Zone{{\n", .{n_zones});
+    try out.appendSlice(arena, zones.items);
+    try out.appendSlice(arena, "};\n\n");
+    try out.print(arena, "pub const zone_points = [{d}][2]i16{{\n", .{points.items.len});
+    for (points.items) |p| try out.print(arena, "    .{{ {d}, {d} }},\n", .{ p[0], p[1] });
+    try out.appendSlice(arena, "};\n\n");
+    try out.print(arena, "pub const zone_triangles = [{d}][3]u16{{\n", .{triangles.items.len});
+    for (triangles.items) |t| try out.print(arena, "    .{{ {d}, {d}, {d} }},\n", .{ t[0], t[1], t[2] });
+    try out.appendSlice(arena, "};\n\n");
+    try out.print(arena, "pub const zone_rings = [{d}][2]u32{{\n", .{rings.items.len});
+    for (rings.items) |r| try out.print(arena, "    .{{ {d}, {d} }},\n", .{ r[0], r[1] });
+    try out.appendSlice(arena, "};\n\n");
+    try out.print(arena, "pub const zone_outline = [{d}]u16{{", .{outline.items.len});
+    for (outline.items, 0..) |o, i| try out.print(arena, "{s}{d},", .{ if (i % 16 == 0) "\n    " else " ", o });
+    try out.appendSlice(arena, "\n};\n");
+    return out.items;
+}
+
+fn pointIndex(a: std.mem.Allocator, points: *std.ArrayList([2]i16), index: *std.AutoHashMapUnmanaged([2]i16, u16), pt: [2]f64) !u16 {
+    const q: [2]i16 = .{ @intFromFloat(@round(pt[0] * 100)), @intFromFloat(@round(pt[1] * 100)) };
+    const gop = try index.getOrPut(a, q);
+    if (!gop.found_existing) {
+        if (points.items.len > std.math.maxInt(u16)) return error.TooManyPoints;
+        gop.value_ptr.* = @intCast(points.items.len);
+        try points.append(a, q);
+    }
+    return gop.value_ptr.*;
+}
+
+/// `ring` (closed: its last point its first) with the points that move it
+/// less than `tolerance` left out (Douglas and Peucker's way), closed too.
+fn simplify(a: std.mem.Allocator, ring: []const [2]f64, tolerance: f64) ![]const [2]f64 {
+    if (ring.len < 4) return ring;
+    const keep = try a.alloc(bool, ring.len);
+    @memset(keep, false);
+    // Its first point, and the one furthest from it, split it in two.
+    var far: usize = 0;
+    var far_d: f64 = -1;
+    for (ring, 0..) |p, i| {
+        const d = (p[0] - ring[0][0]) * (p[0] - ring[0][0]) + (p[1] - ring[0][1]) * (p[1] - ring[0][1]);
+        if (d > far_d) {
+            far_d = d;
+            far = i;
+        }
+    }
+    keep[0] = true;
+    keep[far] = true;
+    keep[ring.len - 1] = true;
+    try keepFar(a, ring, keep, 0, far, tolerance);
+    try keepFar(a, ring, keep, far, ring.len - 1, tolerance);
+    var out: std.ArrayList([2]f64) = .empty;
+    for (ring, keep) |p, k| if (k) try out.append(a, p);
+    return out.items;
+}
+
+/// Keeps the point between `from` and `to` furthest from the line between
+/// them, if it is further than `tolerance`, and so on either side of it.
+fn keepFar(a: std.mem.Allocator, ring: []const [2]f64, keep: []bool, from: usize, to: usize, tolerance: f64) !void {
+    var stack: std.ArrayList([2]usize) = .empty;
+    try stack.append(a, .{ from, to });
+    while (stack.pop()) |span| {
+        const lo = span[0];
+        const hi = span[1];
+        if (hi <= lo + 1) continue;
+        const p0 = ring[lo];
+        const p1 = ring[hi];
+        const dx = p1[0] - p0[0];
+        const dy = p1[1] - p0[1];
+        const len = @sqrt(dx * dx + dy * dy);
+        var best: usize = lo;
+        var best_d: f64 = 0;
+        for (ring[lo + 1 .. hi], lo + 1..) |p, i| {
+            const d = if (len == 0)
+                @sqrt((p[0] - p0[0]) * (p[0] - p0[0]) + (p[1] - p0[1]) * (p[1] - p0[1]))
+            else
+                @abs(dy * (p[0] - p0[0]) - dx * (p[1] - p0[1])) / len;
+            if (d > best_d) {
+                best_d = d;
+                best = i;
+            }
+        }
+        if (best_d > tolerance) {
+            keep[best] = true;
+            try stack.append(a, .{ lo, best });
+            try stack.append(a, .{ best, hi });
+        }
+    }
+}
+
 fn addRing(a: std.mem.Allocator, ring: std.json.Value, tris: *std.ArrayList([3][2]f64)) !void {
     var pts: std.ArrayList([2]f64) = .empty;
     for (ring.array.items) |pt| try pts.append(a, .{ number(pt.array.items[0]), number(pt.array.items[1]) });
@@ -101,4 +263,18 @@ test "a polygon's outer ring, and a multipolygon's" {
     try std.testing.expect(std.mem.indexOf(u8, out, "pub const points = [6][2]i16") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, ".{ 1050, 2000 }") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "pub const triangles = [2][3]u16") != null);
+}
+
+test "time zones: each region's offset, triangles and outline, made simpler" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const out = try generateZones(arena.allocator(),
+        \\{"type": "FeatureCollection", "features": [
+        \\ {"type": "Feature", "properties": {"zone": 5.75}, "geometry": {"type": "Polygon", "coordinates": [[[0, 0], [5, 0.01], [10, 0], [10, 10], [0, 10], [0, 0]]]}}]}
+    );
+    // A quarter-hour zone (Nepal's), its square's corners (the point
+    // nearly on its edge left out), two triangles.
+    try std.testing.expect(std.mem.indexOf(u8, out, ".quarter_hours = 23, .triangles = .{ 0, 2 }, .rings = .{ 0, 1 }") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub const zone_points = [4][2]i16") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, ".{ 500, 1 }") == null);
 }

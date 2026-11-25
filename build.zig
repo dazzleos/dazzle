@@ -235,11 +235,13 @@ fn addBackgroundThumbnails(b: *std.Build, m: *std.Build.Module) void {
     }
 }
 
-/// The land as a flat map draws it, from Natural Earth's 110m countries
-/// (see tools/mkworld.zig).
+/// The land as a flat map draws it, from Natural Earth's 110m countries,
+/// and the world's time zones, from its 10m time zones (see
+/// tools/mkworld.zig).
 fn addWorldMap(b: *std.Build) std.Build.LazyPath {
     const run = b.addRunArtifact(hostTool(b, "mkworld"));
     run.addFileArg(b.path("data/ne_110m_admin_0_countries.geojson"));
+    run.addFileArg(b.path("data/ne_10m_time_zones.geojson"));
     return run.addOutputFileArg("world_map.zig");
 }
 

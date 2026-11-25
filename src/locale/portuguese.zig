@@ -6,11 +6,12 @@
 
 /// Brazil's (and Portugal's where it has none of its own).
 pub const brazil = [_][2][]const u8{
-    .{ "Connect to a network", "Conecte-se a uma rede" },
+    .{ "Time", "Hora" },
+    .{ "Device Name", "Nome do dispositivo" },
+    .{ "Getting the time…", "Obtendo a hora…" },
+    .{ "Could not get the time from the network", "Não foi possível obter a hora da rede" },
+    .{ "Without a network, the time cannot be set", "Sem uma rede, não é possível acertar a hora" },
     .{ "Plug in an Ethernet cable or a Wi-Fi adapter to connect. You can also set up the network later in Settings.", "Conecte um cabo Ethernet ou um adaptador Wi-Fi para se conectar. Você também pode configurar a rede depois em Configurações." },
-    .{ "Hello, I speak…", "Olá, eu falo…" },
-    .{ "Is this your keyboard?", "Este é o seu teclado?" },
-    .{ "Give me a name", "Me dê um nome" },
     .{ "Lowercase letters, numbers and hyphens. You can change it later in Settings.", "Letras minúsculas, números e hifens. Você pode mudá-lo depois em Configurações." },
     .{ "Let other computers control this one", "Permitir que outros computadores controlem este" },
     .{ "Code {d}. With it, a computer on the network can move the pointer, type, open and close apps and windows, take screenshots, install updates and restart, at http://{s}:{d}/. Turn this off when you are done.", "Código {d}. Com ele, um computador da rede pode mover o ponteiro, digitar, abrir e fechar apps e janelas, fazer capturas de tela, instalar atualizações e reiniciar, em http://{s}:{d}/. Desative quando terminar." },
@@ -387,10 +388,9 @@ pub const brazil = [_][2][]const u8{
 
 /// Portugal's, where it differs.
 pub const portugal = [_][2][]const u8{
-    .{ "Connect to a network", "Ligue-se a uma rede" },
+    .{ "Getting the time…", "A obter a hora…" },
+    .{ "Without a network, the time cannot be set", "Sem uma rede, não é possível acertar a hora" },
     .{ "Plug in an Ethernet cable or a Wi-Fi adapter to connect. You can also set up the network later in Settings.", "Ligue um cabo Ethernet ou um adaptador Wi-Fi para se ligar. Também pode configurar a rede mais tarde nas Definições." },
-    .{ "Hello, I speak…", "Olá, eu falo…" },
-    .{ "Give me a name", "Dê-me um nome" },
     .{ "Lowercase letters, numbers and hyphens. You can change it later in Settings.", "Letras minúsculas, números e hífenes. Pode alterá-lo mais tarde nas Definições." },
     .{ "Dazzle cannot keep files: {s}. Setup will run again when the computer next starts.", "O Dazzle não consegue guardar ficheiros: {s}. A configuração volta a ser executada no próximo arranque do computador." },
     .{ "Mouse", "Rato" },
