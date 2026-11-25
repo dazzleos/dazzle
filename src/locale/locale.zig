@@ -197,6 +197,26 @@ pub const Language = enum {
     }
 
     /// The keyboard most people there have.
+    /// The keyboards most likely for it, the likeliest (`keyboard`) first:
+    /// what setup offers before every keyboard.
+    pub fn keyboards(l: Language) []const Keyboard {
+        return switch (l) {
+            .en_us, .en_ca, .en_au, .en_nz => &.{ .us, .gb },
+            .en_gb => &.{ .gb, .us },
+            .es_es => &.{ .es, .latam },
+            .es_mx, .es_ar, .es_co, .es_cl, .es_pe => &.{ .latam, .es, .us },
+            .es_us => &.{ .us, .latam },
+            .zh_cn => &.{ .pinyin, .us },
+            .fr_fr => &.{ .fr, .us },
+            .fr_ca => &.{ .us, .fr },
+            .de_de => &.{ .de, .us },
+            .pt_br => &.{ .br, .pt, .us },
+            .pt_pt => &.{ .pt, .br },
+            .ja_jp => &.{ .romaji, .us },
+            .ar_eg => &.{ .ar, .us },
+        };
+    }
+
     pub fn keyboard(l: Language) Keyboard {
         return switch (l) {
             .en_gb => .gb,
@@ -1026,6 +1046,14 @@ const testing = std.testing;
 
 test {
     _ = timezone;
+}
+
+test "each language's likely keyboards: its own first, none twice" {
+    for (std.enums.values(Language)) |l| {
+        const ks = l.keyboards();
+        try std.testing.expectEqual(l.keyboard(), ks[0]);
+        for (ks, 0..) |k, i| try std.testing.expectEqual(@as(usize, 1), std.mem.count(Keyboard, ks[0 .. i + 1], &.{k}) + std.mem.count(Keyboard, ks[i + 1 ..], &.{k}));
+    }
 }
 
 test "every language is in by_speakers once, and says hello" {

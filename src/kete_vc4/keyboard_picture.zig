@@ -8,6 +8,9 @@
 //! its name or code), and those that match, one to choose.
 //!
 //!     cx.make(kete_vc4.KeyboardPicture{ .keyboard = .gb })
+//!
+//! Keys can be lit (`light`): to show those being pressed, so someone
+//! trying a layout sees which key types what.
 
 const std = @import("std");
 const kete = @import("kete");
@@ -18,6 +21,9 @@ pub const KeyboardPicture = struct {
     keyboard: Keyboard,
     /// A key's width (and height), in pixels.
     unit: f32 = 26,
+    /// How lit each key is (0 to 1), by its Linux key code (as long as it
+    /// has to be: keys past its end are not lit).
+    light: []const f32 = &.{},
 
     /// A key: its Linux key code (0: one that types nothing, drawn
     /// blank), and how wide it is, in keys.
@@ -75,10 +81,12 @@ pub const KeyboardPicture = struct {
                     text(cx, plain, u * 0.44, t.on_surface),
                 }) catch &.{} });
         }
+        const glow = if (slot.code != 0 and slot.code < self.light.len) std.math.clamp(self.light[slot.code], 0, 1) else 0;
+        const base = if (found != null or slot.code == 57) t.surface_container_highest else t.surface_container;
         return cx.make(kete.RoundedBox{
-            .color = if (found != null) t.surface_container_highest else t.surface_container,
+            .color = kete.Easing.linear.lerp(base, t.primary_container, glow),
             .border_width = 1,
-            .border_color = t.outline_variant,
+            .border_color = kete.Easing.linear.lerp(t.outline_variant, t.primary, glow),
             .radius = .all(u * 0.15),
             .child = cx.make(kete.SizedBox{ .width = width, .height = u, .child = label }),
         });

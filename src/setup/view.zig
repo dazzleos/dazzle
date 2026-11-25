@@ -4,8 +4,9 @@
 //!
 //! * "Hello" in every language, to pick the language by (hello.zig): it
 //!   fills the screen, with no buttons;
-//! * the language and the keyboard (which changes with the language, until
-//!   one is picked), with a field to try the keyboard in;
+//! * the keyboard: those most likely for the language, the likeliest
+//!   chosen, and the rest one button away; with its keys drawn, lit as
+//!   they are pressed, and a field to try it in;
 //! * the time zone (the language's, until one is picked);
 //! * the computer's name, filled in with a random one;
 //! * the Wi-Fi network to join (if Ethernet did not connect and there is a
@@ -33,8 +34,14 @@ const net = sys.network;
 /// The size the window opens at: one step at a time.
 pub const open_size = [2]u32{ 880, 620 };
 
-pub const Page = enum { hello, language, time, hostname, wifi, apps };
-pub const pages = [_]Page{ .hello, .language, .time, .hostname, .wifi, .apps };
+pub const Page = enum { hello, keyboard, time, hostname, wifi, apps };
+pub const pages = [_]Page{ .hello, .keyboard, .time, .hostname, .wifi, .apps };
+
+/// Keys lit on the keyboard's picture: those with Linux key codes below
+/// this (every one it draws).
+const key_codes = 128;
+/// How long a key let go takes to stop being lit.
+const key_fade_ns: f32 = 300 * std.time.ns_per_ms;
 
 /// The most apps that can be chosen (the catalogue's first).
 pub const max_apps = 64;
@@ -124,6 +131,16 @@ pub const Setup = struct {
         language: locale.Language = .en_us,
         keyboard: locale.Keyboard = .us,
         timezone: locale.TimeZone = .utc,
+        /// The keys held down (by Linux key code), those let go and to be
+        /// faded from when the page is next made, and when each was let go:
+        /// lit on the keyboard's picture.
+        keys_held: std.StaticBitSet(key_codes) = .empty,
+        keys_let_go: std.StaticBitSet(key_codes) = .empty,
+        key_let_go_ns: [key_codes]u64 = @splat(0),
+        /// Every keyboard shown, to choose from; and one chosen there that
+        /// is not one of the language's likely ones (offered beside them).
+        choosing_keyboard: bool = false,
+        other_keyboard: ?locale.Keyboard = null,
         /// The keyboard, and the zone, were picked (rather than going with
         /// the language).
         keyboard_picked: bool = false,
@@ -152,6 +169,42 @@ pub const Setup = struct {
             st.keyboard = k;
             st.keyboard_picked = true;
             st.chose();
+        }
+
+        /// A key pressed or let go anywhere on the page (while the field
+        /// types it): it lights on the keyboard's picture.
+        fn watchKey(st: *State, k: kete.Event.Key) bool {
+            const code = kete.window.evdev.codeOf(k.key) orelse return false;
+            if (code >= key_codes) return false;
+            if (k.pressed) {
+                st.keys_held.set(code);
+                st.keys_let_go.unset(code);
+            } else if (st.keys_held.isSet(code)) {
+                st.keys_held.unset(code);
+                st.keys_let_go.set(code);
+            }
+            return false;
+        }
+
+        /// One of the keyboards offered.
+        fn chooseKeyboard(st: *State, k: locale.Keyboard) void {
+            st.setKeyboard(k);
+        }
+
+        /// One from every keyboard: chosen, and offered beside the likely
+        /// ones (if it is not one).
+        fn chooseOtherKeyboard(st: *State, k: locale.Keyboard) void {
+            st.setKeyboard(k);
+            if (std.mem.indexOfScalar(locale.Keyboard, st.language.keyboards(), k) == null) st.other_keyboard = k;
+            st.choosing_keyboard = false;
+        }
+
+        fn showKeyboards(st: *State) void {
+            st.choosing_keyboard = true;
+        }
+
+        fn hideKeyboards(st: *State) void {
+            st.choosing_keyboard = false;
         }
 
         fn chose(st: *State) void {
@@ -233,7 +286,7 @@ pub const Setup = struct {
         const which = pages[state.page];
         const body = switch (which) {
             .hello => unreachable, // the whole window (see `build`)
-            .language => languagePage(cx, state),
+            .keyboard => keyboardPage(cx, state),
             .time => timePage(cx, state),
             .hostname => self.hostnamePage(cx, state, nav),
             .wifi => self.wifiPage(cx, state),
@@ -246,9 +299,9 @@ pub const Setup = struct {
             locale.text("Skip")
         else
             locale.text("Next");
-        // The time page's map takes the height there is (the others are
-        // as tall as they need).
-        const fill = which == .time;
+        // The time page's map, and the keyboard page's picture, take the
+        // height there is (the others are as tall as they need).
+        const fill = which == .time or which == .keyboard;
         return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = fill, .spacing = 24, .children = &.{
             cx.make(kete.Text{ .text = locale.text("Welcome to Dazzle"), .style = .{ .size = 40, .color = t.primary } }),
             if (fill) cx.make(kete.Expanded{ .child = body }) else body,
@@ -259,26 +312,77 @@ pub const Setup = struct {
         } });
     }
 
-    fn languagePage(cx: *kete.BuildContext, state: *State) kete.Widget {
+    /// The keyboard: the language's likely ones to choose from (the
+    /// likeliest chosen to begin with), and every one a button away; its
+    /// keys drawn, lit as they are pressed, and a field to try it in.
+    fn keyboardPage(cx: *kete.BuildContext, state: *State) kete.Widget {
         const t = cx.theme();
         const a = cx.arena;
-        var keyboards: std.ArrayList(kete.MenuItem) = .empty;
-        for (std.enums.values(locale.Keyboard)) |k| keyboards.append(a, .{ .label = k.name() }) catch {};
-        const heading: kete.TextStyle = .{ .size = 20, .color = t.on_surface_variant };
-        return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 12, .children = &.{
-            cx.make(kete.Text{ .text = locale.text("Language and keyboard"), .style = .{ .size = 28 } }),
-            cx.make(kete.Row{ .spacing = 24, .cross_axis_alignment = .start, .children = &.{
-                cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .start, .fill = false, .spacing = 4, .children = &.{
-                    cx.make(kete.Text{ .text = locale.text("Language"), .style = heading }),
-                    cx.make(kete_vc4.LanguagePicker{ .language = state.language, .on_changed = .of(state, State.setLanguage), .height = 160 }),
-                } }) }),
-                cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 4, .children = &.{
-                    cx.make(kete.Text{ .text = locale.text("Keyboard"), .style = heading }),
-                    cx.make(kete.DropdownMenu{ .options = keyboards.items, .selected = @intFromEnum(state.keyboard), .on_selected = .of(state, State.pickKeyboard), .width = 260 }),
-                    cx.make(kete.Padding{ .padding = .{ .top = 8 }, .child = cx.make(kete.TextField{ .placeholder = locale.text("Type here to try it"), .width = std.math.inf(f32) }) }),
-                } }) }),
-            } }),
-        } });
+        const now = cx.now();
+        // The keys' light: held, all of it; let go, fading.
+        const light = a.alloc(f32, key_codes) catch return cx.make(kete.SizedBox.empty);
+        var fading = false;
+        for (light, 0..) |*l, code| {
+            if (state.keys_let_go.isSet(code)) {
+                state.keys_let_go.unset(code);
+                state.key_let_go_ns[code] = now;
+            }
+            const since = now -| state.key_let_go_ns[code];
+            l.* = if (state.keys_held.isSet(code)) 1 else if (state.key_let_go_ns[code] != 0 and since < key_fade_ns) 1 - @as(f32, @floatFromInt(since)) / key_fade_ns else 0;
+            if (l.* > 0 and !state.keys_held.isSet(code)) fading = true;
+        }
+        if (fading) cx.requestFrame();
+
+        var choices: std.ArrayList(kete.Widget) = .empty;
+        var offered: [8]locale.Keyboard = undefined;
+        var n: usize = 0;
+        for (state.language.keyboards()) |k| {
+            offered[n] = k;
+            n += 1;
+        }
+        if (state.other_keyboard) |k| if (std.mem.indexOfScalar(locale.Keyboard, offered[0..n], k) == null) {
+            offered[n] = k;
+            n += 1;
+        };
+        for (offered[0..n]) |k| {
+            const pick = a.create(KeyboardChoice) catch continue;
+            pick.* = .{ .state = state, .keyboard = k };
+            choices.append(a, cx.make(kete.Chip{
+                .label = k.name(),
+                .icon = if (k == state.keyboard) .check else null,
+                .selected = k == state.keyboard,
+                .on_press = .of(pick, KeyboardChoice.choose),
+            })) catch {};
+        }
+        choices.append(a, cx.make(kete.TextButton{ .label = locale.text("Other keyboards"), .icon = .keyboard, .on_press = .of(state, State.showKeyboards) })) catch {};
+
+        const page_body = cx.make(kete.KeyHandler{ .watch = true, .on_key = .of(state, State.watchKey), .child = cx.make(kete.Column{
+            .cross_axis_alignment = .stretch,
+            .spacing = 16,
+            .children = a.dupe(kete.Widget, &.{
+                cx.make(kete.Column{ .cross_axis_alignment = .start, .fill = false, .spacing = 4, .children = a.dupe(kete.Widget, &.{
+                    cx.make(kete.Text{ .text = locale.text("Keyboard"), .style = .{ .size = 28 } }),
+                    cx.make(kete.Text{ .text = locale.text("Choose the one that matches the keys on yours"), .style = .{ .size = 18, .color = t.on_surface_variant } }),
+                }) catch &.{} }),
+                cx.make(kete.Wrap{ .spacing = 8, .run_spacing = 8, .cross_axis_alignment = .center, .children = choices.items }),
+                // As big as there is room for (no bigger than a key 40
+                // pixels across).
+                cx.make(kete.Expanded{ .child = cx.make(kete.Align{ .alignment = .center, .child = cx.make(kete.ScaleDown{
+                    .child = cx.make(kete_vc4.KeyboardPicture{ .keyboard = state.keyboard, .unit = 40, .light = light }),
+                }) }) }),
+                cx.make(kete.TextField{ .placeholder = locale.text("Type here to try it"), .width = std.math.inf(f32) }),
+            }) catch &.{},
+        }) });
+        return cx.make(kete.Dialog{
+            .open = state.choosing_keyboard,
+            .title = locale.text("All keyboards"),
+            .content = cx.make(kete_vc4.KeyboardPicker{ .keyboard = state.keyboard, .on_changed = .of(state, State.chooseOtherKeyboard) }),
+            .confirm_label = locale.text("Cancel"),
+            .on_confirm = .of(state, State.hideKeyboards),
+            .on_dismiss = .of(state, State.hideKeyboards),
+            .width = 480,
+            .child = page_body,
+        });
     }
 
     /// The time zone: on a map, or found by its city.
@@ -675,7 +779,7 @@ const Nav = struct {
                 st.page = @intFromEnum(Page.apps);
                 return;
             },
-            .hello, .language, .time, .apps => {},
+            .hello, .keyboard, .time, .apps => {},
         }
         if (st.page + 1 < pages.len) {
             st.page += 1;
@@ -690,8 +794,11 @@ const Nav = struct {
 
     /// A language picked on the first page: it, and on to the next.
     fn pickLanguage(n: *Nav, l: locale.Language) void {
+        // Its keyboard (and zone), and those likely for it, again.
+        n.state.keyboard_picked = false;
+        n.state.other_keyboard = null;
         n.state.setLanguage(l);
-        n.state.page = @intFromEnum(Page.language);
+        n.state.page = @intFromEnum(Page.keyboard);
     }
 
     fn back(n: *Nav) void {
@@ -705,6 +812,16 @@ const Nav = struct {
 
     fn continueWithout(n: *Nav) void {
         if (n.actions) |a| a.without_storage = true;
+    }
+};
+
+/// One of the keyboards offered, to choose.
+const KeyboardChoice = struct {
+    state: *Setup.State,
+    keyboard: locale.Keyboard,
+
+    fn choose(c: *KeyboardChoice) void {
+        c.state.chooseKeyboard(c.keyboard);
     }
 };
 
@@ -765,13 +882,13 @@ test "naming the computer, then waiting for the card" {
     }.draw;
     // Past the first page ("Hello", to pick the language by).
     Draw(u, &report, &actions, &now, .{ 1920, 1080 });
-    u.root.?.state(Setup.State).page = @intFromEnum(Page.language);
+    u.root.?.state(Setup.State).page = @intFromEnum(Page.keyboard);
     for ([_][2]u32{ .{ 1920, 1080 }, .{ 1280, 720 }, .{ 1024, 768 }, .{ 800, 600 }, .{ 640, 480 } }) |size| {
         Draw(u, &report, &actions, &now, size);
         try testing.expect(!overflows(u.root.?));
     }
     // The language; then the time zone and the name, which fit too.
-    try testing.expect(findText(u.root.?, "Language and keyboard") != null);
+    try testing.expect(findText(u.root.?, "Choose the one that matches the keys on yours") != null);
     click(u, findText(u.root.?, "Next").?);
     for ([_][2]u32{ .{ 1920, 1080 }, .{ 640, 480 } }) |size| {
         Draw(u, &report, &actions, &now, size);
@@ -841,7 +958,7 @@ test "Wi-Fi networks are shown when Ethernet is not connected and a Wi-Fi adapte
 
     var setup: Setup = .{ .suggestion = "my-pi", .report = &report, .wifi = &wifi, .actions = &actions };
     u.frame(1280, 720, 0, setup);
-    u.root.?.state(Setup.State).page = @intFromEnum(Page.language);
+    u.root.?.state(Setup.State).page = @intFromEnum(Page.keyboard);
     u.frame(1280, 720, 0, setup);
     click(u, findText(u.root.?, "Next").?);
     u.frame(1280, 720, 1, setup);
@@ -958,34 +1075,53 @@ test "every page fits, in Spanish too" {
     };
 }
 
-test "the language and keyboard: the keyboard goes with the language, until one is picked" {
+test "the keyboard: the language's likely ones, every one a button away, and the keys lit as they are pressed" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
     const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
     var actions: Actions = .{};
     const report: proto.Report = .{ .storage = .preparing };
-    const setup: Setup = .{ .suggestion = "my-pi", .report = &report, .actions = &actions, .locale = .{ .language = .en_us, .keyboard = .us } };
+    const setup: Setup = .{ .suggestion = "my-pi", .report = &report, .actions = &actions, .locale = .{ .language = .es_mx, .keyboard = .latam } };
+    const ms = std.time.ns_per_ms;
     u.frame(1280, 720, 0, setup);
     const st = u.root.?.state(Setup.State);
-    st.page = @intFromEnum(Page.language);
-    u.frame(1280, 720, 0, setup);
-    try testing.expect(findText(u.root.?, "English (New Zealand)") != null);
-    // British English: and a UK keyboard.
-    click(u, findText(u.root.?, "English (United Kingdom)").?);
-    u.frame(1280, 720, 1, setup);
-    try testing.expectEqual(locale.Language.en_gb, st.language);
-    try testing.expectEqual(locale.Keyboard.gb, st.keyboard);
-    try testing.expectEqual(locale.Keyboard.gb, actions.locale.?.keyboard);
-    // A US keyboard picked stays, whatever the language.
-    try testing.expect(findType(u.root.?, kete.DropdownMenu) != null);
-    st.pickKeyboard(@intFromEnum(locale.Keyboard.us));
-    u.frame(1280, 720, 2, setup);
-    click(u, findText(u.root.?, "English (Australia)").?);
-    u.frame(1280, 720, 3, setup);
-    // The time zone goes with the language too: Sydney's, for Australia.
-    try testing.expectEqual(locale.Settings{ .language = .en_au, .keyboard = .us, .timezone = locale.TimeZone.fromName("Australia/Sydney").? }, actions.locale.?);
-    // Somewhere to try it.
-    try testing.expect(findType(u.root.?, kete.TextField) != null);
+    st.page = @intFromEnum(Page.keyboard);
+    u.frame(1280, 720, 1 * ms, setup);
+    // Mexico's: Latin American Spanish, then Spain's, then US English.
+    for ([_][]const u8{ "Español (Latinoamérica)", "Español (España)", "English (US)" }) |name| try testing.expect(findText(u.root.?, name) != null);
+    try testing.expect(findText(u.root.?, "Deutsch (QWERTZ)") == null);
+    click(u, findText(u.root.?, "Español (España)").?);
+    u.frame(1280, 720, 2 * ms, setup);
+    try testing.expectEqual(locale.Keyboard.es, st.keyboard);
+    try testing.expectEqual(locale.Keyboard.es, actions.locale.?.keyboard);
+    // Every keyboard: German, picked there, is offered beside them.
+    click(u, findText(u.root.?, "Other keyboards").?);
+    u.frame(1280, 720, 3 * ms, setup);
+    try testing.expect(st.choosing_keyboard);
+    try testing.expect(findType(u.root.?, kete_vc4.KeyboardPicker) != null);
+    // (As the list does, chosen there.)
+    st.chooseOtherKeyboard(.de);
+    u.frame(1280, 720, 4 * ms, setup);
+    try testing.expectEqual(locale.Keyboard.de, st.keyboard);
+    try testing.expect(!st.choosing_keyboard);
+    try testing.expect(findText(u.root.?, "Deutsch (QWERTZ)") != null);
+    // Q pressed (in the field): lit while held, fading once let go.
+    const field = findType(u.root.?, kete.TextField).?;
+    u.focus(field);
+    const light = struct {
+        fn of(uu: *kete.ui.WindowUi) f32 {
+            return findType(uu.root.?, kete_vc4.KeyboardPicture).?.widget.as(kete_vc4.KeyboardPicture).?.light[16];
+        }
+    }.of;
+    u.key(.{ .key = .q, .pressed = true, .char = 'q' });
+    u.frame(1280, 720, 5 * ms, setup);
+    try testing.expectEqual(@as(f32, 1), light(u));
+    u.key(.{ .key = .q, .pressed = false });
+    u.frame(1280, 720, 6 * ms, setup);
+    u.frame(1280, 720, 106 * ms, setup);
+    try testing.expect(light(u) > 0 and light(u) < 1);
+    u.frame(1280, 720, 1000 * ms, setup);
+    try testing.expectEqual(@as(f32, 0), light(u));
     try testing.expect(!overflows(u.root.?));
 }
 
@@ -1025,7 +1161,7 @@ test "the first page: hello in every language; one picked, its languages, and ba
     u.frame(1920, 1080, 28 * s, setup);
     click(u, findText(u.root.?, "Español (México)").?);
     u.frame(1920, 1080, 29 * s, setup);
-    try testing.expectEqual(Page.language, pages[st.page]);
+    try testing.expectEqual(Page.keyboard, pages[st.page]);
     try testing.expectEqual(locale.Language.es_mx, st.language);
     try testing.expectEqual(locale.Language.es_mx, actions.locale.?.language);
 }
