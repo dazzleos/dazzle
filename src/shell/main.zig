@@ -586,9 +586,21 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         // with the windows' work area above it.
         {
             for (osk.take()) |typed| switch (typed) {
-                .text => {
+                .text => if (server.activeTextInput() != null) {
                     server.textInputCommitString(typed.slice());
                     server.textInputDone();
+                } else {
+                    // No text field takes text (an app used with a mouse,
+                    // from the touchscreen beside the monitor): typed as a
+                    // keyboard's keys would type it (those of a US
+                    // keyboard's that make it).
+                    const ms: u32 = @truncate(sys.nowNs() / std.time.ns_per_ms);
+                    for (typed.slice()) |c| if (remote_mod.keyFor(c)) |k| {
+                        if (k.shift) server.keyboardKey(ms, remote_mod.key_left_shift, true);
+                        server.keyboardKey(ms, k.code, true);
+                        server.keyboardKey(ms, k.code, false);
+                        if (k.shift) server.keyboardKey(ms, remote_mod.key_left_shift, false);
+                    };
                 },
                 .key => |code| {
                     const ms: u32 = @truncate(sys.nowNs() / std.time.ns_per_ms);
