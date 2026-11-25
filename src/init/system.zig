@@ -449,7 +449,9 @@ const Manager = struct {
 
     /// Until someone chooses the video memory, has the next start give the
     /// GPU as much as this computer's memory calls for
-    /// (`defaultVideoMemory`), if it would have less.
+    /// (`defaultVideoMemory`), if it would have less; or if it would have
+    /// more than any size Settings offers (512 MB, an earlier default, with
+    /// which a Pi 400 did not start).
     fn sizeVideoMemory(m: *Manager) void {
         if (storage.exists(proto.video_memory_chosen_file)) return;
         const next = m.report.video_memory_next orelse return;
@@ -457,7 +459,8 @@ const Manager = struct {
         if (linux.errno(linux.sysinfo(&info)) != .SUCCESS) return;
         const ram_mib = @as(u64, info.totalram) * @max(info.mem_unit, 1) >> 20;
         const want = proto.defaultVideoMemory(ram_mib);
-        if (want <= next) return;
+        const most = proto.video_memory_sizes[proto.video_memory_sizes.len - 1];
+        if (want <= next and next <= most) return;
         print("dazzle: system: {d} MiB of memory: video memory {d} MiB\n", .{ ram_mib, want });
         m.setVideoMemory(want);
     }

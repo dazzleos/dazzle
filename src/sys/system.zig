@@ -153,14 +153,14 @@ pub const update_archive = update_dir ++ "/dazzle-os.tar.xz";
 /// command line, the slots' cmdline.txt, so a change applies from the next
 /// start (and updates keep it: they copy the running slot's command line).
 /// The sizes offered, in MiB.
-pub const video_memory_sizes = [_]u16{ 64, 96, 128, 192, 256, 384, 512 };
+pub const video_memory_sizes = [_]u16{ 64, 96, 128, 192, 256, 384 };
 
 /// The video memory a computer with `ram_mib` of memory is given until
-/// someone chooses (`video_memory_chosen_file`): more on those with more
-/// (a Pi 4 or 400 with 4 GB has room for the GPU to have plenty, as the
-/// Raspberry Pi's own system gives it).
+/// someone chooses (`video_memory_chosen_file`): more on those with more.
+/// The pool has to be in the memory the kernel maps directly (768 MB, on
+/// the 32-bit kernel), with room left for the kernel: a Pi 400 did not
+/// start with 512 MB.
 pub fn defaultVideoMemory(ram_mib: u64) u16 {
-    if (ram_mib >= 3 * 1024) return 512;
     if (ram_mib >= 3 * 512) return 256;
     return 128;
 }
@@ -980,7 +980,7 @@ test "video memory grows with the computer's memory until chosen" {
     try std.testing.expectEqual(@as(u16, 128), defaultVideoMemory(434));
     try std.testing.expectEqual(@as(u16, 128), defaultVideoMemory(948));
     try std.testing.expectEqual(@as(u16, 256), defaultVideoMemory(1900));
-    try std.testing.expectEqual(@as(u16, 512), defaultVideoMemory(3800));
+    try std.testing.expectEqual(@as(u16, 256), defaultVideoMemory(3800));
     try std.testing.expect(videoMemoryAllowed(defaultVideoMemory(3800), 3800));
     try std.testing.expect(videoMemoryAllowed(defaultVideoMemory(434), 434));
 }
