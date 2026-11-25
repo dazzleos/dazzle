@@ -222,7 +222,10 @@ pub const Format = enum {
     /// What the VC4 does with it.
     pub fn vc4(f: Format) Vc4 {
         return switch (f) {
-            .xrgb8888, .argb8888 => .{ .texture = .rgba8888, .render = cl.render_config_format_rgba8888, .load_store = cl.loadstore_format_rgba8888 },
+            // XRGB8888 as RGBX8888, which reads it as opaque (as RGBA8888
+            // its unused byte came back as alpha, on a Pi 3).
+            .xrgb8888 => .{ .texture = .rgbx8888, .render = cl.render_config_format_rgba8888, .load_store = cl.loadstore_format_rgba8888 },
+            .argb8888 => .{ .texture = .rgba8888, .render = cl.render_config_format_rgba8888, .load_store = cl.loadstore_format_rgba8888 },
             // Stored without dithering, so a buffer loaded back and stored
             // again (when only part of a frame is redrawn) keeps its pixels.
             .bgr565 => .{ .texture = .rgb565, .render = cl.render_config_format_bgr565, .load_store = cl.loadstore_format_bgr565 },
