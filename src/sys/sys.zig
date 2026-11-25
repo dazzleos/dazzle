@@ -369,7 +369,9 @@ test "disk space" {
 }
 
 /// Memory, in bytes: the system's, and the contiguous pool (CMA) the GPU's
-/// buffers come from.
+/// buffers come from. Of the pool, free is what no buffer has: the kernel
+/// lends what is free to the file cache meanwhile (/proc/meminfo counts
+/// that as used), and takes it back for a buffer (see `meminfo`).
 pub const Meminfo = struct { total: u64 = 0, available: u64 = 0, cma_total: u64 = 0, cma_free: u64 = 0 };
 
 /// /proc/meminfo's figures, in bytes.
@@ -387,10 +389,74 @@ pub fn parseMeminfo(text: []const u8) Meminfo {
     return out;
 }
 
-/// /proc/meminfo's figures now, or null if it cannot be read.
+/// /proc/meminfo's figures now, or null if it cannot be read; the pool's
+/// free memory what its buffers leave of it, as the kernel's CMA counts
+/// them (`cma_dir`; /proc/meminfo's, if they cannot be read).
 pub fn meminfo() ?Meminfo {
     var buf: [4096]u8 = undefined;
-    return parseMeminfo(readFile("/proc/meminfo", &buf) orelse return null);
+    var mi = parseMeminfo(readFile("/proc/meminfo", &buf) orelse return null);
+    if (cmaAllocated(cma_dir)) |given| mi.cma_free = mi.cma_total -| given;
+    return mi;
+}
+
+/// Where the kernel counts each CMA area's pages given out and back (with
+/// CONFIG_CMA_SYSFS), a folder an area.
+pub const cma_dir = "/sys/kernel/mm/cma";
+
+/// The bytes given out of the CMA areas in `dir` (to buffers: not lent to
+/// the file cache), or null if they cannot be read.
+pub fn cmaAllocated(dir_path: [*:0]const u8) ?u64 {
+    const dir = open(dir_path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }) catch return null;
+    defer close(dir);
+    var pages: u64 = 0;
+    var areas: usize = 0;
+    var dents: [1024]u8 align(8) = undefined;
+    while (true) {
+        const n = check(linux.getdents64(dir, &dents, dents.len)) catch break;
+        if (n == 0) break;
+        var at: usize = 0;
+        while (at < n) {
+            const reclen = std.mem.readInt(u16, dents[at + 16 ..][0..2], .little);
+            const name = std.mem.sliceTo(dents[at + 19 .. at + reclen], 0);
+            at += reclen;
+            if (name.len == 0 or name[0] == '.') continue;
+            const given = counter(dir_path, name, "alloc_pages_success") orelse continue;
+            const back = counter(dir_path, name, "release_pages_success") orelse continue;
+            pages += given -| back;
+            areas += 1;
+        }
+    }
+    if (areas == 0) return null;
+    return pages * std.heap.pageSize();
+}
+
+/// A CMA area's counter (a number in a file of its folder).
+fn counter(dir_path: [*:0]const u8, area: []const u8, name: []const u8) ?u64 {
+    var path_buf: [256]u8 = undefined;
+    const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/{s}/{s}", .{ std.mem.span(dir_path), area, name }, 0) catch return null;
+    var buf: [32]u8 = undefined;
+    const text = readFile(path, &buf) orelse return null;
+    return std.fmt.parseInt(u64, std.mem.trim(u8, text, " \n"), 10) catch null;
+}
+
+test "the CMA areas' pages given out (and back), in bytes" {
+    var root_buf: [64]u8 = undefined;
+    const root = try std.fmt.bufPrintSentinel(&root_buf, "/tmp/dazzle-cma-test-{d}", .{linux.getpid()}, 0);
+    _ = linux.mkdir(root, 0o755);
+    defer files.removeTree(root);
+    // Two areas: 30 pages out and 10 back; 5 out.
+    for ([_][]const u8{ "reserved", "linux,cma" }, [_][2][]const u8{ .{ "30\n", "10\n" }, .{ "5\n", "0\n" } }) |area, counts| {
+        var dir_buf: [128]u8 = undefined;
+        const dir = try std.fmt.bufPrintSentinel(&dir_buf, "{s}/{s}", .{ root, area }, 0);
+        _ = linux.mkdir(dir, 0o755);
+        for ([_][]const u8{ "alloc_pages_success", "release_pages_success" }, counts) |name, text| {
+            var path_buf: [160]u8 = undefined;
+            try files.writeNew(try std.fmt.bufPrintSentinel(&path_buf, "{s}/{s}", .{ dir, name }, 0), text);
+        }
+    }
+    try std.testing.expectEqual(@as(?u64, 25 * std.heap.pageSize()), cmaAllocated(root));
+    // None there: not known.
+    try std.testing.expect(cmaAllocated("/nonexistent") == null);
 }
 
 /// Reads a small file (such as a sysfs attribute) into `buf`. Returns null
