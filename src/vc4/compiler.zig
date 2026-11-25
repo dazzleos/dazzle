@@ -2003,18 +2003,12 @@ pub fn compileV3d(shader: *const Shader) Error!Compiled {
                 }
                 tlb_load_sample += 1;
             },
-            .tlb_z => {
-                try ensureTlbLocked(&out, &last_rf_write, &tlb_locked);
-                try pushAlu(&out, &last_rf_write, .{
-                    .raddr_a = 2, // rf2 = payload Z
-                    .mul = .{
-                        .op = .mov,
-                        .dst = .magicAddr(v3d_qpu.W.tlbu),
-                        .a = .{ .mux = .a },
-                    },
-                });
-                try addUnif(&out, .{ .constant = 0xffffff8c });
-            },
+            // The fragment's own Z (all a shader writes, as the VC4 needs):
+            // left to the hardware, which depth-tests the Z it rasterized
+            // unless the shader record says the shader writes one (as Mesa
+            // does). Written without saying so, depth-tested draws did not
+            // show (Globe's ocean and land).
+            .tlb_z => {},
             .tlb_color, .tlb_color_ms => {
                 try ensureTlbLocked(&out, &last_rf_write, &tlb_locked);
                 const pack_idx = @intFromEnum(inst.srcs[0]);
