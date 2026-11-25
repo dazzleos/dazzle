@@ -61,3 +61,6 @@ one `config.txt`'s `os_prefix` names), on its one line.
 - `dazzle.log_server=on`: the system's log over HTTP, on port 80.
 - `dazzle.setup=again`: setup runs at every start, though it has finished
   (the card's files are kept). Remove it to start to the desktop again.
+
+With remote control on, `/setup` restarts the computer into setup once
+(the card's files are kept; finishing it starts the desktop again).

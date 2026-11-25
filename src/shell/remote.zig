@@ -56,6 +56,8 @@
 //!                                   newer (the system starts when the
 //!                                   computer restarts)
 //!     /restart                      restarts the computer
+//!     /setup                        restarts the computer into setup
+//!                                   (once: the card's files are kept)
 //!     /source                       where software comes from (the
 //!                                   official store, or a custom server),
 //!                                   its URL and key, as text
@@ -108,6 +110,8 @@ pub const Command = union(enum) {
     check,
     update,
     restart,
+    /// Restart into setup.
+    setup,
     /// Where software comes from: to say (null), or to set (the URL, in
     /// the request's buffer, "official" for the official store; and the
     /// key, "" for none).
@@ -293,6 +297,7 @@ fn parse(text: []const u8, code: u32, text_buf: []u8) Parsed {
     if (std.mem.eql(u8, path, "/check")) return .{ .command = .check };
     if (std.mem.eql(u8, path, "/update")) return .{ .command = .update };
     if (std.mem.eql(u8, path, "/restart")) return .{ .command = .restart };
+    if (std.mem.eql(u8, path, "/setup")) return .{ .command = .setup };
     if (std.mem.eql(u8, path, "/source")) {
         const raw = param(query, "url") orelse return .{ .command = .{ .source = null } };
         return .{ .command = .{ .source = .{
@@ -402,6 +407,7 @@ test "apps, windows and updates are controlled directly" {
     try testing.expectEqual([2]f64{ 30, 200 }, sw.to);
     try testing.expectEqual(@as(u8, 4), sw.fingers);
     try testing.expect(parse("GET /restart?code=123456 HTTP/1.1\r\n\r\n", 123456, &buf).command == .restart);
+    try testing.expect(parse("GET /setup?code=123456 HTTP/1.1\r\n\r\n", 123456, &buf).command == .setup);
     // Not without the code.
     try testing.expect(parse("GET /restart HTTP/1.1\r\n\r\n", 123456, &buf) == .forbidden);
     // Where software comes from: said, or set.

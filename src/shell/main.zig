@@ -958,6 +958,9 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                     .restart => if (sys.system.ask("restart\n", 3000)) |r| {
                         req.respond(if (r.denied) "403 Forbidden" else "200 OK", "text/plain", if (r.denied) "Not allowed\n" else "restarting\n");
                     } else req.respond("503 Service Unavailable", "text/plain", "The system did not answer\n"),
+                    .setup => if (sys.system.ask("setup_again\n", 3000)) |r| {
+                        req.respond(if (r.denied) "403 Forbidden" else "200 OK", "text/plain", if (r.denied) "Not allowed\n" else "restarting into setup\n");
+                    } else req.respond("503 Service Unavailable", "text/plain", "The system did not answer\n"),
                 }
             }
         }

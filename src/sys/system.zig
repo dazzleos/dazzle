@@ -18,6 +18,10 @@
 //!                              into the slot not in use, and start that
 //!                              slot next time (settings)
 //!     restart                  restart the computer (settings)
+//!     setup_again              have setup run at the next start (it
+//!                              is marked unfinished: the card's files
+//!                              are kept), and restart (the shell, for
+//!                              remote control: for trying setup)
 //!     boot <a|b>               start that OS slot next time (settings):
 //!                              the other slot is tried, as an update is,
 //!                              so if it does not start the running one
@@ -273,6 +277,8 @@ pub const Request = union(enum) {
     finish: Hostname,
     update: Update,
     restart,
+    /// Setup at the next start, and restart.
+    setup_again,
     /// The OS slot to start next time.
     boot: u8,
     power_off,
@@ -295,6 +301,7 @@ pub const Request = union(enum) {
         if (std.mem.eql(u8, kind, "hostname")) return .{ .hostname = Hostname.parse(f.next() orelse return null) orelse return null };
         if (std.mem.eql(u8, kind, "finish")) return .{ .finish = Hostname.parse(f.next() orelse return null) orelse return null };
         if (std.mem.eql(u8, kind, "restart")) return .restart;
+        if (std.mem.eql(u8, kind, "setup_again")) return .setup_again;
         if (std.mem.eql(u8, kind, "boot")) return .{ .boot = parseSlot(f.next() orelse return null) orelse return null };
         if (std.mem.eql(u8, kind, "power_off")) return .power_off;
         if (std.mem.eql(u8, kind, "locale")) return .{ .locale = .{
@@ -341,6 +348,8 @@ pub const Request = union(enum) {
             .prepare, .hostname, .finish => client == .setup,
             // The shell too: remote control installs updates and restarts.
             .update, .restart => client == .settings or client == .shell,
+            // Remote control's (for trying setup).
+            .setup_again => client == .shell,
             .boot, .video_memory, .orientation, .log_server, .parental_on, .parental_bonus => client == .settings,
             // The shell's lock screen unlocks.
             .parental_off => client == .settings or client == .shell,
@@ -840,6 +849,9 @@ test "requests and reports go through the socket" {
     try testing.expect(Request.parse("reboot\n") == null);
     try testing.expect(Request.parse("restart\n").? == .restart);
     try testing.expect(Request.parse("power_off\n").? == .power_off);
+    try testing.expect(Request.parse("setup_again\n").? == .setup_again);
+    try testing.expect(Request.allowedFor(.setup_again, .shell));
+    try testing.expect(!Request.allowedFor(.setup_again, .settings));
     try testing.expect(Request.allowedFor(.power_off, .shell));
     try testing.expect(Request.allowedFor(.power_off, .settings));
     try testing.expect(!Request.allowedFor(.power_off, .setup));

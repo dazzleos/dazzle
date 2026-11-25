@@ -279,6 +279,13 @@ const Manager = struct {
             .finish => |h| m.finish(h),
             .update => |u| m.startUpdate(u),
             .restart => m.restart = true,
+            .setup_again => {
+                // Unfinished: init starts setup next time (the card's
+                // files are kept; finishing it marks it done again).
+                _ = linux.unlink(proto.setup_done_file);
+                print("dazzle: system: setup runs at the next start\n", .{});
+                m.restart = true;
+            },
             .boot => |slot| m.setBoot(slot),
             .power_off => m.power_off = true,
             .locale => |l| {
