@@ -85,13 +85,18 @@ fn routeCompanion(cm: *companion_mod.Companion, osk: *osk_mod.Osk, osk_touches: 
             switch (t.kind) {
                 .down => {
                     osk_touches.set(t.id);
+                    cm.key_touch_at = key_at;
                     osk.panel.pointerMotion(key_at);
                     osk.panel.pointerButton(key_at, true);
                 },
-                .motion => osk.panel.pointerMotion(key_at),
+                .motion => {
+                    cm.key_touch_at = key_at;
+                    osk.panel.pointerMotion(key_at);
+                },
+                // Let go where it last was (it says no place).
                 .up => {
                     _ = osk_touches.unset(t.id);
-                    osk.panel.pointerButton(key_at, false);
+                    osk.panel.pointerButton(cm.key_touch_at, false);
                 },
             }
             cm.dirty = true;

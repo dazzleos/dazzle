@@ -132,6 +132,9 @@ pub const Companion = struct {
     pad_height: u32 = 0,
     /// Something changed: drawn and shown again.
     dirty: bool = true,
+    /// Where the touch on the keyboard last was (in it): a touch let go
+    /// says no place, and lets go there.
+    key_touch_at: [2]f32 = .{ 0, 0 },
     /// When the last frame was queued (for `serviceFlip`).
     queued_ns: u64 = 0,
     /// A flip's event did not come (said once).
