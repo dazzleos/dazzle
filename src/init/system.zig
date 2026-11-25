@@ -167,6 +167,7 @@ const Manager = struct {
         if (sys.readFile("/proc/cmdline", &cmdline)) |text| {
             m.report.video_memory_now = slots.cmaMiB(text);
         }
+        m.sizeVideoMemory();
         m.report.locale = locale.load();
         m.report.log_server = proto.logServerOn();
         // The last update did not work (and the system before is running).
@@ -284,7 +285,11 @@ const Manager = struct {
                 m.report.locale = l;
                 if (m.report.storage == .ready) m.keepLocale();
             },
-            .video_memory => |mib| m.setVideoMemory(mib),
+            .video_memory => |mib| {
+                m.setVideoMemory(mib);
+                // Kept as chosen from now on (see `sizeVideoMemory`).
+                if (storage.exists(proto.config_dir)) writeFile(proto.video_memory_chosen_file, "");
+            },
             .orientation => |o| m.setOrientation(o),
             .log_server => |on| m.setLogServer(on),
             .parental_on => |r| if (m.parental_loaded) {
@@ -440,6 +445,21 @@ const Manager = struct {
             return;
         };
         print("dazzle: system: video memory {d} MiB from the next start\n", .{mib});
+    }
+
+    /// Until someone chooses the video memory, has the next start give the
+    /// GPU as much as this computer's memory calls for
+    /// (`defaultVideoMemory`), if it would have less.
+    fn sizeVideoMemory(m: *Manager) void {
+        if (storage.exists(proto.video_memory_chosen_file)) return;
+        const next = m.report.video_memory_next orelse return;
+        var info: linux.Sysinfo = undefined;
+        if (linux.errno(linux.sysinfo(&info)) != .SUCCESS) return;
+        const ram_mib = @as(u64, info.totalram) * @max(info.mem_unit, 1) >> 20;
+        const want = proto.defaultVideoMemory(ram_mib);
+        if (want <= next) return;
+        print("dazzle: system: {d} MiB of memory: video memory {d} MiB\n", .{ ram_mib, want });
+        m.setVideoMemory(want);
     }
 
     /// Keeps the screen's orientation as `o` (in both slots' cmdline.txt, as

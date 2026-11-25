@@ -153,7 +153,21 @@ pub const update_archive = update_dir ++ "/dazzle-os.tar.xz";
 /// command line, the slots' cmdline.txt, so a change applies from the next
 /// start (and updates keep it: they copy the running slot's command line).
 /// The sizes offered, in MiB.
-pub const video_memory_sizes = [_]u16{ 64, 96, 128, 192, 256, 384 };
+pub const video_memory_sizes = [_]u16{ 64, 96, 128, 192, 256, 384, 512 };
+
+/// The video memory a computer with `ram_mib` of memory is given until
+/// someone chooses (`video_memory_chosen_file`): more on those with more
+/// (a Pi 4 or 400 with 4 GB has room for the GPU to have plenty, as the
+/// Raspberry Pi's own system gives it).
+pub fn defaultVideoMemory(ram_mib: u64) u16 {
+    if (ram_mib >= 3 * 1024) return 512;
+    if (ram_mib >= 3 * 512) return 256;
+    return 128;
+}
+
+/// There when someone has chosen the video memory (in Settings), which is
+/// then kept as it is.
+pub const video_memory_chosen_file = "/data/system/video-memory-chosen";
 
 /// Which way the screen is: wider than tall, or taller. A display the
 /// other way (the Touch Display 2 is upright; a monitor wide) is turned a
@@ -960,4 +974,13 @@ test "requests and reports go through the socket" {
     _ = linux.write(pair[1], vm_text.ptr, vm_text.len);
     const got = sub.poll().?;
     try testing.expectEqual(@as(?u16, 256), got.video_memory_next);
+}
+
+test "video memory grows with the computer's memory until chosen" {
+    try std.testing.expectEqual(@as(u16, 128), defaultVideoMemory(434));
+    try std.testing.expectEqual(@as(u16, 128), defaultVideoMemory(948));
+    try std.testing.expectEqual(@as(u16, 256), defaultVideoMemory(1900));
+    try std.testing.expectEqual(@as(u16, 512), defaultVideoMemory(3800));
+    try std.testing.expect(videoMemoryAllowed(defaultVideoMemory(3800), 3800));
+    try std.testing.expect(videoMemoryAllowed(defaultVideoMemory(434), 434));
 }
