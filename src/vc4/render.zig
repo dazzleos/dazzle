@@ -607,7 +607,7 @@ pub const Frame = struct {
         // more), so they must be there, and some more saves stalling on
         // the kernel. The tile state: 256 bytes a tile on V3D 4.x and 7.x
         // (64 was on the VC4's), which a 1080p frame's 510 tiles overran.
-        const tile_alloc_size = std.mem.alignForward(u32, num_tiles * 64, 4096) + 8192 + 512 * 1024;
+        const tile_alloc_size = std.mem.alignForward(u32, num_tiles * 64, 4096) + 8192 + 64 * 1024;
         const tile_state_size = std.mem.alignForward(u32, @max(num_tiles * 256, 4096), 4096);
 
         const slot = &v3d_scratch[v3d_scratch_next];
@@ -616,8 +616,31 @@ pub const Frame = struct {
             try dev.waitBo(slot.cl_bo.?.handle, std.time.ns_per_s);
             slot.in_use = false;
         }
+        // The control lists' buffer, as big as this frame needs (it grows):
+        // the default attributes and the generic tile list, then each
+        // draw's state (textures and samplers, uniforms, shader record),
+        // the binning list, and the rendering list. A fixed 256 KB was
+        // overrun by Globe's hundreds of draws, corrupting its frames.
+        var ind_need: u32 = 0;
+        for (f.v3d_draws[0..f.draws]) |*d| {
+            ind_need += 3 * (32 + 24 + 8 + 24); // textures' and samplers' states, aligned
+            ind_need += @intCast(3 * 4 + 4 * (d.fs_layout.len + d.vs_layout.len + d.cs_layout.len));
+            ind_need += 32 + 36 + 16 * @as(u32, d.attrs_len);
+        }
+        const ind_end = std.mem.alignForward(u32, 128 + ind_need, 64);
+        const bcl_size: u32 = 256 + 160 * @as(u32, f.draws);
+        const bcl_off_need = ind_end;
+        const rcl_off_need = std.mem.alignForward(u32, bcl_off_need + bcl_size, 64);
+        const rcl_size: u32 = 512 + 4 * @as(u32, num_tiles);
+        const cl_size = std.mem.alignForward(u32, rcl_off_need + rcl_size, 4096);
+        if (slot.cl_bo) |bo| {
+            if (bo.map.len < cl_size) {
+                dev.destroyV3dBo(bo);
+                slot.cl_bo = null;
+            }
+        }
         if (slot.cl_bo == null) {
-            slot.cl_bo = try dev.createV3dBo(256 * 1024);
+            slot.cl_bo = try dev.createV3dBo(@max(cl_size, 64 * 1024));
         }
         if (slot.tile_alloc_bo) |bo| {
             if (bo.map.len < tile_alloc_size) {
@@ -666,19 +689,22 @@ pub const Frame = struct {
             gen_rcl.branchToImplicitTileList();
         }
         gen_rcl.storeTileBufferGeneralColor(target_addr, f.target.format, f.target.tiling, f.target.width, f.target.height, f.msaa);
-        gen_rcl.clearTileBuffers(true, false, v3d_ver);
+        // The depth buffer too, for the next tile (as Mesa does without
+        // an early clear): left as it was, a depth-tested draw (Globe's)
+        // came out in blocks, tested against the tile before's.
+        gen_rcl.clearTileBuffers(true, true, v3d_ver);
         gen_rcl.endOfTileMarker();
         gen_rcl.returnFromSubList();
         const generic_start = cl_base + 64;
         const generic_end = generic_start + @as(u32, @intCast(gen_rcl.bytes().len));
 
-        // 128..196608: indirect state (shader records, attribute records,
+        // 128..: indirect state (shader records, attribute records,
         // texture/sampler states, uniforms).
         var ind_off: u32 = 128;
 
-        // 196608..245760: BCL.
-        const bcl_off: u32 = 196608;
-        var v3d_bcl = v3d_cl.Bcl.init(cl_bo.map[bcl_off..245760]);
+        // Then the BCL.
+        const bcl_off: u32 = bcl_off_need;
+        var v3d_bcl = v3d_cl.Bcl.init(cl_bo.map[bcl_off..][0..bcl_size]);
         var any_early_z = false;
         if (f.draws > 0) {
             v3d_bcl.startBinning(f.target.width, f.target.height, f.msaa, v3d_ver);
@@ -795,10 +821,11 @@ pub const Frame = struct {
         const bcl_start: u32 = if (f.draws > 0) cl_base + bcl_off else 0;
         const bcl_end: u32 = if (f.draws > 0) bcl_start + @as(u32, @intCast(v3d_bcl.bytes().len)) else 0;
 
-        // 245760..262144: RCL.
-        const rcl_off: u32 = 245760;
-        var rcl = v3d_cl.Rcl.init(cl_bo.map[rcl_off..262144]);
-        rcl.tileRenderingModeCfgCommon(f.target.width, f.target.height, f.msaa, any_early_z, true, v3d_ver);
+        // Then the RCL.
+        const rcl_off: u32 = rcl_off_need;
+        var rcl = v3d_cl.Rcl.init(cl_bo.map[rcl_off..][0..rcl_size]);
+        std.debug.assert(ind_off <= ind_end);
+        rcl.tileRenderingModeCfgCommon(f.target.width, f.target.height, f.msaa, any_early_z, false, v3d_ver);
         const clear_argb: u32 = switch (f.load) {
             .clear => |c| c,
             .keep => 0,
@@ -825,7 +852,7 @@ pub const Frame = struct {
             rcl.tileCoordinates(0, 0);
             rcl.endOfLoads();
             rcl.storeTileBufferGeneralNone();
-            if (i == 0) rcl.clearTileBuffers(true, false, v3d_ver);
+            if (i == 0) rcl.clearTileBuffers(true, true, v3d_ver);
             rcl.endOfTileMarker();
         }
         rcl.flushVcdCache();
