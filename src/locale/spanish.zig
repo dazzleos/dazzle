@@ -12,6 +12,8 @@
 /// Latin America's (Mexico, Argentina, Colombia, Chile, Peru, the United
 /// States), and Spain's where it has none of its own.
 pub const latin_america = [_][2][]const u8{
+    .{ "Connect to a network", "Conéctate a una red" },
+    .{ "Plug in an Ethernet cable or a Wi-Fi adapter to connect. You can also set up the network later in Settings.", "Conecta un cable Ethernet o un adaptador Wi-Fi para conectarte. También puedes configurar la red más tarde en Configuración." },
     .{ "Hello, I speak…", "Hola, hablo…" },
     .{ "Is this your keyboard?", "¿Es este tu teclado?" },
     .{ "Give me a name", "Ponme un nombre" },
@@ -30,7 +32,6 @@ pub const latin_america = [_][2][]const u8{
     .{ "Mouse", "Mouse" },
     .{ "A micro USB port: for a keyboard, mouse or USB drive (through an adapter or hub)", "Un puerto micro USB: para un teclado, un mouse o una memoria USB (con un adaptador o un hub)" },
     .{ "For keyboards, mice, USB drives and network adapters", "Para teclados, mouse, memorias USB y adaptadores de red" },
-    .{ "Choose a network to connect to, or skip to set up the network later in Settings.", "Elige una red para conectarte, u omite este paso para configurar la red más tarde en Configuración." },
     .{ "Settings", "Configuración" },
 
     // --- The shell ------------------------------------------------------------
@@ -87,7 +88,6 @@ pub const latin_america = [_][2][]const u8{
     .{ "Search", "Buscar" },
     .{ "No language matches", "Ningún idioma coincide" },
     .{ "Use 1 to 63 lowercase letters, numbers and hyphens, not starting or ending with a hyphen", "Usa de 1 a 63 letras minúsculas, números y guiones, sin empezar ni terminar con guion" },
-    .{ "Connect to Wi-Fi", "Conectarse a Wi-Fi" },
     .{ "Scanning for networks…", "Buscando redes…" },
     .{ "No networks found", "No se encontraron redes" },
     .{ "Getting the list of apps…", "Obteniendo la lista de apps…" },
@@ -425,6 +425,7 @@ pub const latin_america = [_][2][]const u8{
 
 /// Spain's, where it differs.
 pub const spain = [_][2][]const u8{
+    .{ "Plug in an Ethernet cable or a Wi-Fi adapter to connect. You can also set up the network later in Settings.", "Conecta un cable Ethernet o un adaptador Wi-Fi para conectarte. También puedes configurar la red más tarde en Ajustes." },
     .{ "Lowercase letters, numbers and hyphens. You can change it later in Settings.", "Letras minúsculas, números y guiones. Puedes cambiarlo más tarde en Ajustes." },
     .{ "Let other computers control this one", "Permitir que otros ordenadores controlen este" },
     .{ "Code {d}. With it, a computer on the network can move the pointer, type, open and close apps and windows, take screenshots, install updates and restart, at http://{s}:{d}/. Turn this off when you are done.", "Código {d}. Con él, un ordenador de la red puede mover el puntero, escribir, abrir y cerrar apps y ventanas, hacer capturas de pantalla, instalar actualizaciones y reiniciar, en http://{s}:{d}/. Desactívalo cuando termines." },
@@ -439,7 +440,6 @@ pub const spain = [_][2][]const u8{
     .{ "Mouse", "Ratón" },
     .{ "A micro USB port: for a keyboard, mouse or USB drive (through an adapter or hub)", "Un puerto micro USB: para un teclado, un ratón o una memoria USB (con un adaptador o un hub)" },
     .{ "For keyboards, mice, USB drives and network adapters", "Para teclados, ratones, memorias USB y adaptadores de red" },
-    .{ "Choose a network to connect to, or skip to set up the network later in Settings.", "Elige una red para conectarte, u omite este paso para configurar la red más tarde en Ajustes." },
     .{ "Settings", "Ajustes" },
     .{ "Add time", "Añadir tiempo" },
     .{ "Audio and video", "Audio y vídeo" },

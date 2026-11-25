@@ -7,6 +7,8 @@
 
 /// Germany's.
 pub const germany = [_][2][]const u8{
+    .{ "Connect to a network", "Mit einem Netzwerk verbinden" },
+    .{ "Plug in an Ethernet cable or a Wi-Fi adapter to connect. You can also set up the network later in Settings.", "Schließe ein Ethernet-Kabel oder einen WLAN-Adapter an, um dich zu verbinden. Du kannst das Netzwerk auch später in den Einstellungen einrichten." },
     .{ "Hello, I speak…", "Hallo, ich spreche…" },
     .{ "Is this your keyboard?", "Ist das deine Tastatur?" },
     .{ "Give me a name", "Gib mir einen Namen" },
@@ -24,7 +26,6 @@ pub const germany = [_][2][]const u8{
     .{ "Mouse", "Maus" },
     .{ "A micro USB port: for a keyboard, mouse or USB drive (through an adapter or hub)", "Ein Micro-USB-Anschluss: für Tastatur, Maus oder USB-Stick (über einen Adapter oder Hub)" },
     .{ "For keyboards, mice, USB drives and network adapters", "Für Tastaturen, Mäuse, USB-Sticks und Netzwerkadapter" },
-    .{ "Choose a network to connect to, or skip to set up the network later in Settings.", "Wähle ein Netzwerk aus oder überspringe diesen Schritt, um das Netzwerk später in den Einstellungen einzurichten." },
     .{ "Settings", "Einstellungen" },
     .{ "Volume", "Lautstärke" },
     .{ "Muted", "Stumm" },
@@ -76,7 +77,6 @@ pub const germany = [_][2][]const u8{
     .{ "Search", "Suchen" },
     .{ "No language matches", "Keine passende Sprache" },
     .{ "Use 1 to 63 lowercase letters, numbers and hyphens, not starting or ending with a hyphen", "Verwende 1 bis 63 Kleinbuchstaben, Ziffern und Bindestriche, nicht mit Bindestrich am Anfang oder Ende" },
-    .{ "Connect to Wi-Fi", "Mit WLAN verbinden" },
     .{ "Scanning for networks…", "Suche nach Netzwerken…" },
     .{ "No networks found", "Keine Netzwerke gefunden" },
     .{ "Getting the list of apps…", "App-Liste wird abgerufen…" },

@@ -6,6 +6,8 @@
 
 /// France's (and Canada's where it has none of its own).
 pub const france = [_][2][]const u8{
+    .{ "Connect to a network", "Connectez-vous à un réseau" },
+    .{ "Plug in an Ethernet cable or a Wi-Fi adapter to connect. You can also set up the network later in Settings.", "Branchez un câble Ethernet ou un adaptateur Wi-Fi pour vous connecter. Vous pourrez aussi configurer le réseau plus tard dans les Paramètres." },
     .{ "Hello, I speak…", "Bonjour, je parle…" },
     .{ "Is this your keyboard?", "Est-ce votre clavier ?" },
     .{ "Give me a name", "Donnez-moi un nom" },
@@ -23,7 +25,6 @@ pub const france = [_][2][]const u8{
     .{ "Mouse", "Souris" },
     .{ "A micro USB port: for a keyboard, mouse or USB drive (through an adapter or hub)", "Un port micro USB : pour un clavier, une souris ou une clé USB (avec un adaptateur ou un concentrateur)" },
     .{ "For keyboards, mice, USB drives and network adapters", "Pour les claviers, souris, clés USB et adaptateurs réseau" },
-    .{ "Choose a network to connect to, or skip to set up the network later in Settings.", "Choisissez un réseau auquel vous connecter, ou passez cette étape pour configurer le réseau plus tard dans les Paramètres." },
     .{ "Settings", "Paramètres" },
     .{ "Volume", "Volume" },
     .{ "Muted", "Muet" },
@@ -75,7 +76,6 @@ pub const france = [_][2][]const u8{
     .{ "Search", "Rechercher" },
     .{ "No language matches", "Aucune langue ne correspond" },
     .{ "Use 1 to 63 lowercase letters, numbers and hyphens, not starting or ending with a hyphen", "Utilisez de 1 à 63 lettres minuscules, chiffres et traits d’union, sans trait d’union au début ni à la fin" },
-    .{ "Connect to Wi-Fi", "Se connecter au Wi-Fi" },
     .{ "Scanning for networks…", "Recherche de réseaux…" },
     .{ "No networks found", "Aucun réseau trouvé" },
     .{ "Getting the list of apps…", "Récupération de la liste des applis…" },

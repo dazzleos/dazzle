@@ -6,6 +6,8 @@
 
 /// Japan's.
 pub const japan = [_][2][]const u8{
+    .{ "Connect to a network", "ネットワークに接続" },
+    .{ "Plug in an Ethernet cable or a Wi-Fi adapter to connect. You can also set up the network later in Settings.", "接続するには、イーサネットケーブルか Wi-Fi アダプターを差し込んでください。ネットワークは後で「設定」で設定することもできます。" },
     .{ "Hello, I speak…", "こんにちは、私の言語は…" },
     .{ "Is this your keyboard?", "これはあなたのキーボードですか？" },
     .{ "Give me a name", "名前をつけてください" },
@@ -23,7 +25,6 @@ pub const japan = [_][2][]const u8{
     .{ "Mouse", "マウス" },
     .{ "A micro USB port: for a keyboard, mouse or USB drive (through an adapter or hub)", "マイクロ USB ポート: キーボード、マウス、USB ドライブ用 (アダプターまたはハブ経由)" },
     .{ "For keyboards, mice, USB drives and network adapters", "キーボード、マウス、USB ドライブ、ネットワークアダプター用" },
-    .{ "Choose a network to connect to, or skip to set up the network later in Settings.", "接続するネットワークを選ぶか、スキップして後で「設定」で設定してください。" },
     .{ "Settings", "設定" },
     .{ "Volume", "音量" },
     .{ "Muted", "ミュート" },
@@ -75,7 +76,6 @@ pub const japan = [_][2][]const u8{
     .{ "Search", "検索" },
     .{ "No language matches", "一致する言語がありません" },
     .{ "Use 1 to 63 lowercase letters, numbers and hyphens, not starting or ending with a hyphen", "小文字、数字、ハイフンを 1～63 文字で使ってください (先頭と末尾にハイフンは使えません)" },
-    .{ "Connect to Wi-Fi", "Wi-Fi に接続" },
     .{ "Scanning for networks…", "ネットワークを検索しています…" },
     .{ "No networks found", "ネットワークが見つかりません" },
     .{ "Getting the list of apps…", "アプリの一覧を取得しています…" },

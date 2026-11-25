@@ -33,12 +33,12 @@ pub const TimeZoneMap = struct {
         query_buf: [64]u8 = undefined,
         query_len: u8 = 0,
 
-        fn setQuery(st: *State, q: []const u8) void {
+        pub fn setQuery(st: *State, q: []const u8) void {
             st.query_len = @intCast(@min(q.len, st.query_buf.len));
             @memcpy(st.query_buf[0..st.query_len], q[0..st.query_len]);
         }
 
-        fn query(st: *const State) []const u8 {
+        pub fn query(st: *const State) []const u8 {
             return st.query_buf[0..st.query_len];
         }
     };
@@ -46,7 +46,7 @@ pub const TimeZoneMap = struct {
     /// How many matches show as buttons.
     const max_matches = 4;
 
-    /// The map itself (for tests to find).
+    /// The map itself (for tests to find, and for a map alone).
     pub const Map = MapView;
 
     pub fn build(self: *const TimeZoneMap, cx: *kete.BuildContext, st: *State) kete.Widget {
@@ -86,12 +86,12 @@ pub const TimeZoneMap = struct {
     }
 
     /// A zone chosen (from the search): the search is done with.
-    const Choose = struct {
+    pub const Choose = struct {
         zone: TimeZone,
         on_changed: ?kete.ValueCallback(TimeZone),
         state: *State,
 
-        fn call(c: *Choose) void {
+        pub fn call(c: *Choose) void {
             if (c.on_changed) |f| f.call(c.zone);
         }
     };
@@ -124,11 +124,17 @@ pub const TimeZoneMap = struct {
     }
 };
 
-/// The map: the land, the zones' places, the chosen one marked.
-const MapView = struct {
+/// The map: the land, the zones' places, the chosen one marked. With
+/// `bands`, the world's hours too: a band for each hour ahead of or behind
+/// UTC (15° of longitude), every other one shaded, the chosen zone's lit;
+/// clicking where no place is near chooses the zone in that band nearest
+/// the click. A zone's band is its standard time's (summer time moves a
+/// clock, not where it is).
+pub const MapView = struct {
     zone: TimeZone,
-    on_changed: ?kete.ValueCallback(TimeZone),
-    width: f32,
+    on_changed: ?kete.ValueCallback(TimeZone) = null,
+    width: f32 = 560,
+    bands: bool = false,
 
     pub fn layout(self: *const MapView, _: *kete.WidgetNode, c: kete.Constraints) kete.Size {
         // As wide as asked, or as fits (across, and down).
@@ -140,6 +146,31 @@ const MapView = struct {
     /// Where a place is on the map.
     pub fn at(size: kete.Size, lat: f32, lon: f32) kete.Point {
         return .{ (lon + 180) / 360 * size.w, (north - lat) / (north - south) * size.h };
+    }
+
+    /// The longitude at `x` across the map.
+    fn lonAt(size: kete.Size, x: f32) f32 {
+        return x / size.w * 360 - 180;
+    }
+
+    /// The zone nearest `p` of those in its band (whose standard time's
+    /// hour ahead of UTC is the one there), if any is.
+    pub fn zoneInBand(size: kete.Size, p: kete.Point) ?TimeZone {
+        const hour = @round(lonAt(size, p[0]) / 15);
+        var best: ?TimeZone = null;
+        var best_d: f32 = std.math.inf(f32);
+        for (1..TimeZone.count) |i| {
+            const z: TimeZone = @enumFromInt(i);
+            const pl = z.place() orelse continue;
+            if (@round(@as(f32, @floatFromInt(z.standardOffset())) / 3600) != hour) continue;
+            const q = at(size, pl.lat, pl.lon);
+            const d = (q[0] - p[0]) * (q[0] - p[0]) + (q[1] - p[1]) * (q[1] - p[1]);
+            if (d < best_d) {
+                best_d = d;
+                best = z;
+            }
+        }
+        return best;
     }
 
     /// The zone whose place is nearest `p`, if any is near it.
@@ -163,7 +194,7 @@ const MapView = struct {
         if (self.on_changed == null) return false;
         switch (e) {
             .press => |p| return p.button == .left,
-            .release => |r| if (r.inside) if (zoneAt(n.size, r.pos)) |z| if (self.on_changed) |f| f.call(z),
+            .release => |r| if (r.inside) if (zoneAt(n.size, r.pos) orelse if (self.bands) zoneInBand(n.size, r.pos) else null) |z| if (self.on_changed) |f| f.call(z),
             else => {},
         }
         return false;
@@ -191,6 +222,24 @@ const MapView = struct {
             corners[i * 3 + j] = .{ q[0], q[1], 1 };
         };
         c.fillShaded(corners, land);
+        if (self.bands) {
+            // Every other hour shaded; the chosen zone's lit (half hours,
+            // as India's, between two).
+            var hour: i32 = -12;
+            while (hour <= 12) : (hour += 2) {
+                const mid: f32 = @floatFromInt(hour * 15);
+                const x0 = at(size, 0, mid - 7.5)[0];
+                const x1 = at(size, 0, mid + 7.5)[0];
+                c.fillRect(.{ .x = x0, .y = 0, .w = x1 - x0, .h = size.h }, t.on_surface.withAlpha(0.05));
+            }
+            // (Past the date line, as UTC+13 is, round to the other side.)
+            const mid = @as(f32, @floatFromInt(self.zone.standardOffset())) / 3600 * 15;
+            for ([_]f32{ -360, 0, 360 }) |turn| {
+                const x0 = at(size, 0, mid + turn - 7.5)[0];
+                const x1 = at(size, 0, mid + turn + 7.5)[0];
+                c.fillRect(.{ .x = x0, .y = 0, .w = x1 - x0, .h = size.h }, t.primary.withAlpha(0.28));
+            }
+        }
         // The zones' places.
         const dot = t.on_surface.withAlpha(0.55);
         for (1..TimeZone.count) |i| {
@@ -205,6 +254,77 @@ const MapView = struct {
         }
     }
 };
+
+/// Choosing a zone by name: a field to find it by its city, and the zones
+/// that match (before anything is typed, those whose clocks show what
+/// `zone`'s does), each with how far ahead of or behind UTC it is.
+pub const ZonePicker = struct {
+    zone: TimeZone,
+    now_s: i64 = 0,
+    on_changed: ?kete.ValueCallback(TimeZone) = null,
+
+    /// The most zones listed.
+    const shown = 8;
+
+    pub const State = TimeZoneMap.State;
+
+    pub fn build(self: *const ZonePicker, cx: *kete.BuildContext, st: *State) kete.Widget {
+        const a = cx.arena;
+        const t = cx.theme();
+        var found: [shown]TimeZone = undefined;
+        const n = if (st.query().len > 0) TimeZoneMap.search(st.query(), &found) else sameTime(self.zone, self.now_s, &found);
+        var rows: std.ArrayList(kete.Widget) = .empty;
+        const first = a.create(TimeZoneMap.Choose) catch return cx.make(kete.SizedBox.empty);
+        first.* = .{ .zone = if (n > 0) found[0] else self.zone, .on_changed = self.on_changed, .state = st };
+        rows.append(a, cx.make(kete.TextField{
+            .placeholder = locale.text("Search"),
+            .autofocus = true,
+            .on_changed = .of(st, State.setQuery),
+            .on_submit = if (n > 0 and self.on_changed != null) .of(first, TimeZoneMap.Choose.call) else null,
+            .width = std.math.inf(f32),
+        })) catch {};
+        if (n == 0) rows.append(a, cx.make(kete.Text{ .text = locale.text("No time zone matches"), .style = .{ .size = 15, .color = t.on_surface_variant } })) catch {};
+        for (found[0..n]) |z| {
+            const ch = a.create(TimeZoneMap.Choose) catch continue;
+            ch.* = .{ .zone = z, .on_changed = self.on_changed, .state = st };
+            var buf: [96]u8 = undefined;
+            var off_buf: [16]u8 = undefined;
+            rows.append(a, cx.make(kete.ListItem{
+                .headline = a.dupe(u8, z.label(&buf)) catch "",
+                .trailing = cx.make(kete.Text{ .text = a.dupe(u8, utcOffset(&off_buf, z.offsetAt(self.now_s))) catch "", .style = .{ .size = 14, .color = t.on_surface_variant } }),
+                .selected = z == self.zone,
+                .on_press = if (self.on_changed != null) .of(ch, TimeZoneMap.Choose.call) else null,
+            })) catch {};
+        }
+        return cx.make(kete.Column{ .fill = false, .cross_axis_alignment = .stretch, .spacing = 4, .children = rows.items });
+    }
+
+    /// The zones (the chosen one first) whose clocks show the same time as
+    /// `zone`'s at `now`; at most `out.len`.
+    pub fn sameTime(zone: TimeZone, now: i64, out: []TimeZone) usize {
+        if (out.len == 0) return 0;
+        out[0] = zone;
+        var n: usize = 1;
+        const offset = zone.offsetAt(now);
+        for (1..TimeZone.count) |i| {
+            if (n == out.len) break;
+            const z: TimeZone = @enumFromInt(i);
+            if (z == zone or z.place() == null or z.offsetAt(now) != offset) continue;
+            out[n] = z;
+            n += 1;
+        }
+        return n;
+    }
+};
+
+/// "UTC", "UTC+13", "UTC−3" or "UTC+5:30", for `seconds` ahead of UTC.
+pub fn utcOffset(buf: []u8, seconds: i32) []const u8 {
+    if (seconds == 0) return "UTC";
+    const m: u32 = @abs(seconds) / 60;
+    const sign = if (seconds < 0) "\u{2212}" else "+";
+    if (m % 60 == 0) return std.fmt.bufPrint(buf, "UTC{s}{d}", .{ sign, m / 60 }) catch "UTC";
+    return std.fmt.bufPrint(buf, "UTC{s}{d}:{d:0>2}", .{ sign, m / 60, m % 60 }) catch "UTC";
+}
 
 /// `b` over `a`, `f` of the way.
 fn mix(a: kete.gfx.Color, b: kete.gfx.Color, f: f32) kete.gfx.Color {
@@ -232,4 +352,24 @@ test "a place on the map, and the zone nearest a point" {
     try testing.expectEqual(auckland, MapView.zoneAt(size, .{ q[0] + 2, q[1] - 1 }).?);
     // Far from any (the middle of the Pacific).
     try testing.expect(MapView.zoneAt(size, MapView.at(size, -40, -130)) == null);
+}
+
+test "the hours ahead of UTC, and the zones in a band and at the same time" {
+    var buf: [16]u8 = undefined;
+    try testing.expectEqualStrings("UTC", utcOffset(&buf, 0));
+    try testing.expectEqualStrings("UTC+13", utcOffset(&buf, 13 * 3600));
+    try testing.expectEqualStrings("UTC\u{2212}3", utcOffset(&buf, -3 * 3600));
+    try testing.expectEqualStrings("UTC+5:30", utcOffset(&buf, 5 * 3600 + 1800));
+    // 16 November 2026: New Zealand in summer time (UTC+13).
+    const now: i64 = 1_794_787_200;
+    const auckland = TimeZone.fromName("Pacific/Auckland").?;
+    var out: [8]TimeZone = undefined;
+    const n = ZonePicker.sameTime(auckland, now, &out);
+    try testing.expectEqual(auckland, out[0]);
+    for (out[0..n]) |z| try testing.expectEqual(auckland.offsetAt(now), z.offsetAt(now));
+    // Clicking in the middle of the Pacific (no place near): the zone in
+    // that hour's band nearest it (UTC−10: Honolulu, say).
+    const size: kete.Size = .{ .w = 720, .h = 284 };
+    const z = MapView.zoneInBand(size, MapView.at(size, 10, -150)).?;
+    try testing.expectEqual(@as(i32, -10 * 3600), z.standardOffset());
 }

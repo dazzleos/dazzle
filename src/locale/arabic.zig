@@ -7,6 +7,8 @@
 
 /// Arabic, as Egypt has it.
 pub const arabic = [_][2][]const u8{
+    .{ "Connect to a network", "اتصل بشبكة" },
+    .{ "Plug in an Ethernet cable or a Wi-Fi adapter to connect. You can also set up the network later in Settings.", "صِل كابل إيثرنت أو محوّل Wi-Fi للاتصال. يمكنك أيضًا إعداد الشبكة لاحقًا في الإعدادات." },
     .{ "Hello, I speak…", "مرحبا، أتحدث…" },
     .{ "Is this your keyboard?", "هل هذه لوحة مفاتيحك؟" },
     .{ "Give me a name", "أعطني اسمًا" },
@@ -24,7 +26,6 @@ pub const arabic = [_][2][]const u8{
     .{ "Mouse", "الفأرة" },
     .{ "A micro USB port: for a keyboard, mouse or USB drive (through an adapter or hub)", "منفذ micro USB: للوحة مفاتيح أو فأرة أو محرك USB (عبر محوّل أو موزّع)" },
     .{ "For keyboards, mice, USB drives and network adapters", "للوحات المفاتيح والفئران ومحركات USB ومحوّلات الشبكة" },
-    .{ "Choose a network to connect to, or skip to set up the network later in Settings.", "اختر شبكة للاتصال بها، أو تخطَّ لإعداد الشبكة لاحقًا في الإعدادات." },
     .{ "Settings", "الإعدادات" },
     .{ "Volume", "مستوى الصوت" },
     .{ "Muted", "مكتوم" },
@@ -76,7 +77,6 @@ pub const arabic = [_][2][]const u8{
     .{ "Search", "بحث" },
     .{ "No language matches", "لا توجد لغة مطابقة" },
     .{ "Use 1 to 63 lowercase letters, numbers and hyphens, not starting or ending with a hyphen", "استخدم من 1 إلى 63 من الأحرف الصغيرة والأرقام والشرطات، دون أن يبدأ أو ينتهي بشرطة" },
-    .{ "Connect to Wi-Fi", "الاتصال بشبكة Wi-Fi" },
     .{ "Scanning for networks…", "جارٍ البحث عن الشبكات…" },
     .{ "No networks found", "لم يُعثر على شبكات" },
     .{ "Getting the list of apps…", "جارٍ الحصول على قائمة التطبيقات…" },

@@ -15,6 +15,7 @@ const sys = @import("sys");
 const locale = @import("locale");
 const kete = @import("kete");
 const kete_vc4 = @import("kete_vc4");
+const build_info = @import("build_info");
 const names = @import("names.zig");
 const view = @import("view.zig");
 
@@ -38,15 +39,15 @@ const Shown = struct {
     actions: *view.Actions,
     report: ?proto.Report = null,
     net_report: ?net.Report = null,
-    ethernet_connected: bool = false,
+    wall_s: ?i64 = null,
 
     pub fn build(s: *const Shown, cx: *kete.BuildContext) kete.Widget {
         return cx.make(view.Setup{
             .suggestion = s.suggestion,
             .locale = s.start_locale,
             .report = if (s.report) |*r| r else null,
-            .wifi = if (s.net_report) |*r| r else null,
-            .ethernet_connected = s.ethernet_connected,
+            .network = if (s.net_report) |*r| r else null,
+            .wall_s = s.wall_s,
             .actions = s.actions,
         });
     }
@@ -86,7 +87,6 @@ fn run(init: std.process.Init) !void {
         .keyboard = start_locale.keyboard,
         .timezone = start_locale.language.timeZone(),
     };
-    var named = false;
 
     var shown: Shown = .{ .suggestion = suggestion, .start_locale = start_locale, .actions = &actions };
     const window = try host.app.openWindow(.{
@@ -109,40 +109,24 @@ fn run(init: std.process.Init) !void {
 
     var report: ?proto.Report = null;
     var net_report: ?net.Report = null;
-    var wait_eth_until: u64 = 0;
     var finish_sent = false;
 
     while (true) {
-        const before_step = sys.nowNs();
-        const wait_eth = named and before_step < wait_eth_until;
-        const wake = if (wait_eth) wait_eth_until else std.math.maxInt(u64);
-        if (!try host.step(@max(wake -| before_step, std.time.ns_per_ms))) break;
-        const now = sys.nowNs();
+        // Woken at the next minute at the latest, for the time page's clock.
+        const wall = sys.realtimeSec();
+        if (!try host.step(@intCast((60 - @mod(wall, 60)) * std.time.ns_per_s))) break;
+        // The time, once the clock is set (it starts in 1970, until the
+        // network sets it: a time before Dazzle was built cannot be right).
+        const now_wall = sys.realtimeSec();
+        const wall_s: ?i64 = if (now_wall >= build_info.commit_time) now_wall else null;
+        // Drawn again when the minute changes (or the clock is set).
+        const minute_changed = if (wall_s) |w| (if (shown.wall_s) |was| @divFloor(w, 60) != @divFloor(was, 60) else true) else shown.wall_s != null;
+        shown.wall_s = wall_s;
+        if (minute_changed) host.redraw();
 
-        const prev_eth_connected = if (net_report) |r|
-            r.ethernetConnected() or (r.ethernetCarrier() and (!named or now < wait_eth_until))
-        else
-            false;
         if (worker.take(&report, &net_report)) |done| {
             if (done) return;
             host.redraw();
-        }
-        const eth_connected = if (net_report) |r|
-            r.ethernetConnected() or (r.ethernetCarrier() and (!named or now < wait_eth_until))
-        else
-            false;
-        if (eth_connected != prev_eth_connected) {
-            host.redraw();
-            // If a plugged-in Ethernet cable timed out waiting for DHCP and a
-            // Wi-Fi adapter is available, step back to the Wi-Fi page (from
-            // the page after it, which it was passed by for the cable).
-            if (!eth_connected and net_report != null and net_report.?.wifiAdapters().len > 0) {
-                if (pageState(window)) |st| {
-                    if (view.pages[st.page] == .time and !actions.skip_wifi and actions.finish == null) {
-                        st.page = @intFromEnum(view.Page.wifi);
-                    }
-                }
-            }
         }
 
         // A language or keyboard picked: used now, and kept.
@@ -158,10 +142,6 @@ fn run(init: std.process.Init) !void {
         // network connects with it.
         if (actions.hostname) |h| {
             actions.hostname = null;
-            if (!named) {
-                named = true;
-                wait_eth_until = now + 3 * std.time.ns_per_s;
-            }
             worker.setHostname(h);
             host.redraw();
         }
@@ -175,13 +155,9 @@ fn run(init: std.process.Init) !void {
             worker.disconnect();
             host.redraw();
         }
-        if (actions.skip_wifi) {
-            actions.skip_wifi = false;
-            host.redraw();
-        }
 
         const page_state = pageState(window);
-        const on_wifi_page = if (page_state) |st| view.pages[st.page] == .wifi else false;
+        const on_wifi_page = if (page_state) |st| view.pages[st.page] == .network else false;
         const wifi_selected = if (page_state) |st| st.has_selected else false;
         worker.setPageState(on_wifi_page, wifi_selected, actions.finish != null);
 
@@ -202,10 +178,6 @@ fn run(init: std.process.Init) !void {
 
         shown.report = report;
         shown.net_report = net_report;
-        shown.ethernet_connected = if (net_report) |r|
-            r.ethernetConnected() or (r.ethernetCarrier() and (!named or now < wait_eth_until))
-        else
-            false;
     }
 }
 

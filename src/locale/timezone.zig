@@ -113,6 +113,12 @@ pub const TimeZone = enum(u16) {
         return r.offsetAt(t);
     }
 
+    /// Seconds ahead of UTC in standard time (summer time left out).
+    pub fn standardOffset(z: TimeZone) i32 {
+        const r = Rule.parse(table.zones[@intFromEnum(z)].rule) orelse return 0;
+        return r.std_offset;
+    }
+
     /// The local time at `t` (seconds since 1970, UTC).
     pub fn local(z: TimeZone, t: i64) Local {
         return .of(t + z.offsetAt(t));

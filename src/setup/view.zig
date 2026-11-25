@@ -33,8 +33,8 @@ const net = sys.network;
 /// The size the window opens at: one step at a time.
 pub const open_size = [2]u32{ 880, 620 };
 
-pub const Page = enum { hello, keyboard, hostname, wifi, time };
-pub const pages = [_]Page{ .hello, .keyboard, .hostname, .wifi, .time };
+pub const Page = enum { hello, keyboard, hostname, network, time };
+pub const pages = [_]Page{ .hello, .keyboard, .hostname, .network, .time };
 
 /// Keys lit on the keyboard's picture: those with Linux key codes below
 /// this (every one it draws).
@@ -67,8 +67,6 @@ pub const Actions = struct {
     connect: ?Join = null,
     /// Leave the Wi-Fi network.
     disconnect: bool = false,
-    /// The Wi-Fi step was skipped.
-    skip_wifi: bool = false,
 
     pub const Join = struct {
         ssid_buf: [net.max_ssid]u8 = undefined,
@@ -96,9 +94,9 @@ pub const Setup = struct {
     /// What the system manager last said; null if it could not be asked.
     report: ?*const proto.Report = null,
     /// What the network manager last said; null if it could not be asked.
-    wifi: ?*const net.Report = null,
-    /// Whether Ethernet has connected.
-    ethernet_connected: bool = false,
+    network: ?*const net.Report = null,
+    /// The time (seconds since 1970, UTC), if the clock has been set.
+    wall_s: ?i64 = null,
     actions: ?*Actions = null,
 
     pub const State = struct {
@@ -134,6 +132,8 @@ pub const Setup = struct {
         /// Every keyboard shown, to choose from; and one chosen there that
         /// is not one of the language's likely ones (offered beside them).
         choosing_keyboard: bool = false,
+        /// Every time zone shown, to choose from by name.
+        choosing_zone: bool = false,
         other_keyboard: ?locale.Keyboard = null,
         /// The keyboard, and the zone, were picked (rather than going with
         /// the language).
@@ -152,6 +152,7 @@ pub const Setup = struct {
         fn setTimeZone(st: *State, z: locale.TimeZone) void {
             st.timezone = z;
             st.timezone_picked = true;
+            st.choosing_zone = false;
             st.chose();
         }
 
@@ -209,6 +210,14 @@ pub const Setup = struct {
             st.choosing_keyboard = false;
         }
 
+        fn showZones(st: *State) void {
+            st.choosing_zone = true;
+        }
+
+        fn hideZones(st: *State) void {
+            st.choosing_zone = false;
+        }
+
         fn showKeyboards(st: *State) void {
             st.choosing_keyboard = true;
         }
@@ -241,15 +250,10 @@ pub const Setup = struct {
         }
     };
 
-    pub fn showWifi(self: *const Setup) bool {
-        if (self.ethernet_connected) return false;
-        const w = self.wifi orelse return false;
-        return w.wifiAdapters().len > 0;
-    }
-
-    pub fn wifiConnected(self: *const Setup) bool {
-        const w = self.wifi orelse return false;
-        return w.connection.state == .connected;
+    /// Whether the computer is on a network (by Wi-Fi or Ethernet).
+    pub fn networkConnected(self: *const Setup) bool {
+        const r = self.network orelse return false;
+        return r.connection.state == .connected or r.ethernetConnected();
     }
 
     pub fn initState(self: *const Setup) State {
@@ -262,17 +266,8 @@ pub const Setup = struct {
     }
 
     pub fn build(self: *const Setup, cx: *kete.BuildContext, state: *State) kete.Widget {
-        const show_wifi = self.showWifi();
-        if (pages[state.page] == .wifi and !show_wifi) {
-            state.page = @intFromEnum(Page.time);
-        }
         const nav = cx.arena.create(Nav) catch return cx.make(kete.SizedBox.empty);
-        nav.* = .{
-            .state = state,
-            .actions = self.actions,
-            .show_wifi = show_wifi,
-            .wifi_connected = self.wifiConnected(),
-        };
+        nav.* = .{ .state = state, .actions = self.actions };
         state.actions = self.actions;
         // The first page is the whole window.
         if (!state.finishing and pages[state.page] == .hello) {
@@ -293,20 +288,20 @@ pub const Setup = struct {
             .hello => unreachable, // the whole window (see `build`)
             .keyboard => locale.text("Is this your keyboard?"),
             .hostname => locale.text("Give me a name"),
-            .wifi => locale.text("Connect to Wi-Fi"),
+            .network => locale.text("Connect to a network"),
             .time => locale.text("Time zone"),
         };
         const body = switch (which) {
             .hello => unreachable,
             .keyboard => keyboardPage(cx, state),
-            .time => timePage(cx, state),
+            .time => self.timePage(cx, state),
             .hostname => self.hostnamePage(cx, state, nav),
-            .wifi => self.wifiPage(cx, state),
+            .network => self.networkPage(cx, state),
         };
         const last = state.page + 1 == pages.len;
         const next_label = if (last)
             locale.text("Finish")
-        else if (which == .wifi and !self.wifiConnected())
+        else if (which == .network and !self.networkConnected())
             locale.text("Skip")
         else
             locale.text("Next");
@@ -318,7 +313,7 @@ pub const Setup = struct {
             cx.make(kete.Align{ .alignment = .top_center, .child = cx.make(kete.ConstrainedBox{ .constraints = .{ .max_w = 1600 }, .child = cx.make(kete.SizedBox{ .height = std.math.inf(f32), .child = body }) }) })
         else
             cx.make(kete.Align{ .child = cx.make(kete.ScaleDown{ .child = cx.make(kete.ConstrainedBox{ .constraints = .{ .max_w = 720 }, .child = body }) }) });
-        return cx.make(kete.Padding{ .padding = .{ .left = 24, .right = 24, .top = parts.title_top, .bottom = parts.margin }, .child = cx.make(kete.Column{
+        const whole = cx.make(kete.Padding{ .padding = .{ .left = 24, .right = 24, .top = parts.title_top, .bottom = parts.margin }, .child = cx.make(kete.Column{
             .cross_axis_alignment = .stretch,
             .fill = true,
             .children = cx.arena.dupe(kete.Widget, &.{
@@ -328,6 +323,30 @@ pub const Setup = struct {
                 parts.buttons(cx, .of(nav, Nav.back), next_label, .of(nav, Nav.next), last),
             }) catch &.{},
         }) });
+        // Every keyboard, or zone, to choose from: over the whole page.
+        return switch (which) {
+            .keyboard => cx.make(kete.Dialog{
+                .open = state.choosing_keyboard,
+                .title = locale.text("All keyboards"),
+                .content = cx.make(kete_vc4.KeyboardPicker{ .keyboard = state.keyboard, .on_changed = .of(state, State.chooseOtherKeyboard) }),
+                .confirm_label = locale.text("Cancel"),
+                .on_confirm = .of(state, State.hideKeyboards),
+                .on_dismiss = .of(state, State.hideKeyboards),
+                .width = 480,
+                .child = whole,
+            }),
+            .time => cx.make(kete.Dialog{
+                .open = state.choosing_zone,
+                .title = locale.text("Time zone"),
+                .content = cx.make(kete_vc4.ZonePicker{ .zone = state.timezone, .now_s = self.wall_s orelse 0, .on_changed = .of(state, State.setTimeZone) }),
+                .confirm_label = locale.text("Cancel"),
+                .on_confirm = .of(state, State.hideZones),
+                .on_dismiss = .of(state, State.hideZones),
+                .width = 520,
+                .child = whole,
+            }),
+            else => whole,
+        };
     }
 
     /// The keyboard: the language's likely ones to choose from (the
@@ -392,16 +411,7 @@ pub const Setup = struct {
                 cx.make(kete.Expanded{ .child = cx.make(kete.Align{ .alignment = .center, .child = typedLabel(cx, state) }) }),
             }) catch &.{},
         }) });
-        return cx.make(kete.Dialog{
-            .open = state.choosing_keyboard,
-            .title = locale.text("All keyboards"),
-            .content = cx.make(kete_vc4.KeyboardPicker{ .keyboard = state.keyboard, .on_changed = .of(state, State.chooseOtherKeyboard) }),
-            .confirm_label = locale.text("Cancel"),
-            .on_confirm = .of(state, State.hideKeyboards),
-            .on_dismiss = .of(state, State.hideKeyboards),
-            .width = 480,
-            .child = page_body,
-        });
+        return page_body;
     }
 
     /// What was typed on the keyboard page, in the middle, large: fading in
@@ -449,13 +459,30 @@ pub const Setup = struct {
     }
 
     /// The time zone: on a map, or found by its city.
-    fn timePage(cx: *kete.BuildContext, state: *State) kete.Widget {
+    /// The time zone: the time it is there (large), the world's hours on
+    /// a map to choose one by, and the zone's name, a button that shows
+    /// them all to choose from by name.
+    fn timePage(self: *const Setup, cx: *kete.BuildContext, state: *State) kete.Widget {
         const t = cx.theme();
-        // The map as wide as the page (the zone picked right under it).
-        return cx.make(kete.Column{ .cross_axis_alignment = .start, .fill = false, .spacing = 12, .children = cx.arena.dupe(kete.Widget, &.{
-            cx.make(kete.Text{ .text = locale.text("Where the computer is, for its clock"), .style = .{ .size = 18, .color = t.on_surface_variant } }),
-            cx.make(kete_vc4.TimeZoneMap{ .zone = state.timezone, .on_changed = .of(state, State.setTimeZone), .width = 720 }),
+        const a = cx.arena;
+        const now = self.wall_s orelse 0;
+        const local = state.timezone.local(now);
+        var clock_buf: [32]u8 = undefined;
+        var date_buf: [64]u8 = undefined;
+        const clock = if (self.wall_s != null) locale.formatClock(&clock_buf, local.hour, local.minute) else "--:--";
+        const date = if (self.wall_s != null) locale.formatFullDate(&date_buf, local.weekday, local.day, local.month, local.year) else "";
+        var label_buf: [96]u8 = undefined;
+        var off_buf: [16]u8 = undefined;
+        const label = kete_vc4.textf(cx, "{s} · {s}", .{ state.timezone.label(&label_buf), kete_vc4.utcOffset(&off_buf, state.timezone.offsetAt(now)) });
+        const body = cx.make(kete.Column{ .cross_axis_alignment = .center, .fill = false, .spacing = 12, .children = a.dupe(kete.Widget, &.{
+            cx.make(kete.Text{ .text = a.dupe(u8, clock) catch "", .wrap = false, .style = .{ .size = 120 } }),
+            cx.make(kete.Text{ .text = a.dupe(u8, date) catch "", .wrap = false, .style = .{ .size = 24, .color = t.on_surface_variant } }),
+            cx.make(kete.SizedBox{ .height = 16 }),
+            cx.make(kete.LeftToRight{ .child = cx.make(kete_vc4.ZoneMap{ .zone = state.timezone, .on_changed = .of(state, State.setTimeZone), .width = 640, .bands = true }) }),
+            cx.make(kete.SizedBox{ .height = 4 }),
+            cx.make(parts.Choice{ .label = label, .icon = .public, .trailing_icon = .arrow_drop_down, .on_press = .of(state, State.showZones) }),
         }) catch &.{} });
+        return body;
     }
 
     fn hostnamePage(_: *const Setup, cx: *kete.BuildContext, state: *State, nav: *Nav) kete.Widget {
@@ -486,120 +513,127 @@ pub const Setup = struct {
         } });
     }
 
-    fn wifiPage(self: *const Setup, cx: *kete.BuildContext, state: *State) kete.Widget {
+    /// The network: Ethernet, how it is (if there is an adapter); the
+    /// Wi-Fi networks (if there is one), large, to choose and join; or,
+    /// with neither, that there is no network to set up.
+    fn networkPage(self: *const Setup, cx: *kete.BuildContext, state: *State) kete.Widget {
         const t = cx.theme();
         const a = cx.arena;
         var rows: std.ArrayList(kete.Widget) = .empty;
-        const report = self.wifi orelse return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 12, .children = rows.items });
-        const conn = &report.connection;
-        const name = printable(cx, conn.ssid());
-        switch (conn.state) {
-            .idle => rows.append(a, cx.make(kete.Text{
-                .text = locale.text("Choose a network to connect to, or skip to set up the network later in Settings."),
-                .style = .{ .size = 18, .color = t.on_surface_variant },
-            })) catch {},
-            .connecting, .authenticating, .addressing => rows.append(a, cx.make(kete.Row{ .spacing = 12, .cross_axis_alignment = .center, .children = &.{
-                cx.make(kete.Spinner{ .size = 20 }),
-                cx.make(kete.Expanded{ .child = cx.make(kete.Text{
-                    .text = kete_vc4.textf(cx, "{s}: {s}…", .{ name, conn.state.label() }),
-                    .style = .{ .size = 18, .color = t.on_surface_variant },
-                }) }),
-            } })) catch {},
-            .connected => rows.append(a, cx.make(kete.Text{
-                .text = kete_vc4.textf(cx, "Connected to {s}", .{name}),
-                .style = .{ .size = 18, .color = t.on_surface_variant },
-            })) catch {},
-            .failed => rows.append(a, cx.make(kete.Text{
-                .text = kete_vc4.textf(cx, "Could not connect to {s}: {s}", .{ name, conn.failure.label() }),
-                .style = .{ .size = 18, .color = t.@"error" },
-            })) catch {},
+        const report = self.network orelse return noNetwork(cx);
+        const ethernets = report.ethernetAdapters();
+        const wifis = report.wifiAdapters();
+        if (ethernets.len == 0 and wifis.len == 0) return noNetwork(cx);
+        if (ethernets.len > 0) {
+            const connected = report.ethernetConnected();
+            const status = if (connected)
+                locale.text("Ethernet connected")
+            else if (report.ethernetCarrier())
+                locale.text("Ethernet connecting")
+            else
+                locale.text("Ethernet not connected");
+            rows.append(a, cx.make(kete.RoundedBox{
+                .color = if (connected) t.primary_container else null,
+                .radius = .all(20),
+                .child = cx.make(kete.Padding{ .padding = .symmetric(20, 16), .child = cx.make(kete.Row{ .spacing = 20, .cross_axis_alignment = .center, .children = a.dupe(kete.Widget, &.{
+                    cx.make(kete.Icon{ .icon = .settings_ethernet, .size = 32, .color = if (connected) t.on_primary_container else t.on_surface_variant }),
+                    cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = status, .wrap = false, .ellipsis = true, .style = .{ .size = 24, .color = if (connected) t.on_primary_container else t.on_surface } }) }),
+                    if (report.ethernetCarrier() and !connected) cx.make(kete.Spinner{ .size = 24 }) else if (connected) cx.make(kete.Icon{ .icon = .check_circle, .size = 28, .color = t.on_primary_container }) else cx.make(kete.SizedBox.empty),
+                }) catch &.{} }) }),
+            })) catch {};
         }
-
-        const nets = report.slice();
-        if (nets.len == 0) {
-            if (report.scanning) {
-                rows.append(a, cx.make(kete.Row{ .spacing = 12, .cross_axis_alignment = .center, .children = &.{
-                    cx.make(kete.Spinner{ .size = 24 }),
-                    cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = locale.text("Scanning for networks…"), .style = .{ .size = 18, .color = t.on_surface_variant } }) }),
-                } })) catch {};
-            } else {
-                rows.append(a, cx.make(kete.Text{ .text = locale.text("No networks found"), .style = .{ .size = 18, .color = t.on_surface_variant } })) catch {};
-            }
-            return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 12, .children = rows.items });
+        if (wifis.len > 0) {
+            const conn = &report.connection;
+            const nets = report.slice();
+            var list: std.ArrayList(kete.Widget) = .empty;
+            for (nets) |*n| list.append(a, self.networkRow(cx, state, conn, n)) catch {};
+            if (nets.len == 0) list.append(a, cx.make(kete.Padding{ .padding = .symmetric(20, 16), .child = cx.make(kete.Row{ .spacing = 20, .cross_axis_alignment = .center, .children = a.dupe(kete.Widget, &.{
+                if (report.scanning) cx.make(kete.Spinner{ .size = 28 }) else cx.make(kete.Icon{ .icon = .wifi_off, .size = 32, .color = t.on_surface_variant }),
+                cx.make(kete.Text{ .text = if (report.scanning) locale.text("Scanning for networks…") else locale.text("No networks found"), .style = .{ .size = 24, .color = t.on_surface_variant } }),
+            }) catch &.{} }) })) catch {};
+            // Up to six networks show; more, scrolled to.
+            rows.append(a, cx.make(kete.ConstrainedBox{ .constraints = .{ .max_h = 6 * 76 + 120 }, .child = cx.make(kete.ScrollView{
+                .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 4, .children = list.items }),
+            }) })) catch {};
         }
-
-        const chosen: ?*const net.Network = if (state.selected()) |sel| for (nets) |*n| {
-            if (std.mem.eql(u8, n.ssid(), sel)) break n;
-        } else null else null;
-        const form = chosen != null and !(conn.state.joined() and std.mem.eql(u8, conn.ssid(), chosen.?.ssid()));
-        const split = if (form) chosen.? - nets.ptr + 1 else nets.len;
-        var list_rows: std.ArrayList(kete.Widget) = .empty;
-        if (split > 0) list_rows.append(a, self.networkList(cx, state, report, nets[0..split], chosen)) catch {};
-        if (form) list_rows.append(a, self.joinForm(cx, state, chosen.?)) catch {};
-        if (split < nets.len) {
-            if (form) list_rows.append(a, cx.make(kete.HorizontalDivider{ .inset = 16 })) catch {};
-            list_rows.append(a, self.networkList(cx, state, report, nets[split..], chosen)) catch {};
-        }
-
-        rows.append(a, cx.make(kete.ConstrainedBox{
-            .constraints = .{ .max_h = 180 },
-            .child = cx.make(kete.ScrollView{
-                .child = cx.make(kete.Card{
-                    .variant = .outlined,
-                    .padding = .all(4),
-                    .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .children = list_rows.items }),
-                }),
-            }),
-        })) catch {};
         return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 12, .children = rows.items });
     }
 
-    fn networkList(
-        self: *const Setup,
-        cx: *kete.BuildContext,
-        state: *State,
-        report: *const net.Report,
-        nets: []const net.Network,
-        chosen: ?*const net.Network,
-    ) kete.Widget {
-        const list = cx.arena.create(Networks) catch return cx.make(kete.SizedBox.empty);
-        list.* = .{
-            .actions = self.actions,
-            .state = state,
-            .conn = &report.connection,
-            .nets = nets,
-            .chosen = chosen,
-        };
-        return cx.make(kete.Grid.list(nets.len, network_row_height, .of(list, Networks.row)));
+    /// No network to set up (no adapter): that, and what to do.
+    fn noNetwork(cx: *kete.BuildContext) kete.Widget {
+        const t = cx.theme();
+        return cx.make(kete.Column{ .cross_axis_alignment = .center, .fill = false, .spacing = 16, .children = cx.arena.dupe(kete.Widget, &.{
+            cx.make(kete.Icon{ .icon = .signal_wifi_off, .size = 72, .color = t.on_surface_variant }),
+            cx.make(kete.Text{ .text = locale.text("No network adapter"), .style = .{ .size = 28 } }),
+            cx.make(kete.Text{
+                .text = locale.text("Plug in an Ethernet cable or a Wi-Fi adapter to connect. You can also set up the network later in Settings."),
+                .text_align = .center,
+                .style = .{ .size = 18, .color = t.on_surface_variant },
+            }),
+        }) catch &.{} });
     }
 
+    /// A Wi-Fi network, large: pressed, chosen (its password asked for
+    /// under it); joined, how that is going, and the way to leave it.
+    fn networkRow(self: *const Setup, cx: *kete.BuildContext, state: *State, conn: *const net.Connection, n: *const net.Network) kete.Widget {
+        const t = cx.theme();
+        const a = cx.arena;
+        const joined = connectionBusy(conn) and std.mem.eql(u8, conn.ssid(), n.ssid());
+        const chosen = if (state.selected()) |sel| std.mem.eql(u8, sel, n.ssid()) else false;
+        const fg = if (joined) t.on_primary_container else t.on_surface;
+        var trailing: std.ArrayList(kete.Widget) = .empty;
+        if (joined) {
+            if (conn.state == .connected)
+                trailing.append(a, cx.make(kete.Icon{ .icon = .check_circle, .size = 28, .color = fg })) catch {}
+            else
+                trailing.append(a, cx.make(kete.Spinner{ .size = 24 })) catch {};
+            if (self.actions) |acts| trailing.append(a, cx.make(kete.TextButton{ .label = locale.text("Disconnect"), .on_press = .of(act(cx, acts, state, ""), Act.disconnect) })) catch {};
+        }
+        const head = cx.make(kete.Pressable{ .on_press = choose(cx, state, n.ssid()), .child = cx.make(kete.Padding{ .padding = .symmetric(20, 14), .child = cx.make(kete.Row{ .spacing = 20, .cross_axis_alignment = .center, .children = a.dupe(kete.Widget, &.{
+            cx.make(Signal{ .bars = n.bars(), .locked = n.security != .open, .size = 32 }),
+            cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = printable(cx, n.ssid()), .wrap = false, .ellipsis = true, .style = .{ .size = 24, .color = fg } }) }),
+            cx.make(kete.Row{ .fill = false, .spacing = 12, .cross_axis_alignment = .center, .children = trailing.items }),
+        }) catch &.{} }) }) });
+        var parts_: std.ArrayList(kete.Widget) = .empty;
+        parts_.append(a, head) catch {};
+        if (!joined and conn.state == .failed and std.mem.eql(u8, conn.ssid(), n.ssid())) parts_.append(a, cx.make(kete.Padding{ .padding = .{ .left = 72, .right = 20, .bottom = 12 }, .child = cx.make(kete.Text{
+            .text = kete_vc4.textf(cx, "Could not connect to {s}: {s}", .{ printable(cx, conn.ssid()), conn.failure.label() }),
+            .style = .{ .size = 18, .color = t.@"error" },
+        }) })) catch {};
+        if (chosen and !joined) parts_.append(a, self.joinForm(cx, state, n)) catch {};
+        return cx.make(kete.RoundedBox{
+            .color = if (joined) t.primary_container else if (chosen) t.surface_container else null,
+            .radius = .all(20),
+            .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .children = parts_.items }),
+        });
+    }
+
+    /// Under a network chosen: its password (if it has one), and Connect.
     fn joinForm(self: *const Setup, cx: *kete.BuildContext, state: *State, n: *const net.Network) kete.Widget {
         const t = cx.theme();
         const on_connect: ?kete.Callback = if (self.actions) |acts| .of(act(cx, acts, state, n.ssid()), Act.connect) else null;
         const field: kete.Widget = switch (n.security) {
-            .open => cx.make(kete.Text{ .text = locale.text("An open network: what is sent can be seen"), .style = .{ .size = 16, .color = t.on_surface_variant } }),
-            .wpa2, .wpa3 => cx.make(kete.TextField{
+            .open => cx.make(kete.Text{ .text = locale.text("An open network: what is sent can be seen"), .style = .{ .size = 18, .color = t.on_surface_variant } }),
+            .wpa2, .wpa3 => cx.make(kete.RoundedBox{ .color = t.surface_container_highest, .radius = .all(12), .child = cx.make(kete.Padding{ .padding = .symmetric(8, 4), .child = cx.make(kete.TextField{
                 .initial = state.password_buf[0..state.password_len],
                 .placeholder = locale.text("Password"),
                 .obscure = true,
+                .outlined = false,
                 .autofocus = true,
-                .size = 18,
+                .size = 22,
+                .width = std.math.inf(f32),
                 .on_changed = .of(state, State.setPassword),
                 .on_submit = on_connect,
-            }).withKey(std.hash.Fnv1a_64.hash(n.ssid())),
-            else => cx.make(kete.Text{ .text = kete_vc4.textf(cx, "{s} networks are not supported yet", .{n.security.label()}), .style = .{ .size = 16, .color = t.on_surface_variant } }),
+            }).withKey(std.hash.Fnv1a_64.hash(n.ssid())) }) }),
+            else => cx.make(kete.Text{ .text = kete_vc4.textf(cx, "{s} networks are not supported yet", .{n.security.label()}), .style = .{ .size = 18, .color = t.on_surface_variant } }),
         };
         const supported = n.security == .open or n.security == .wpa2 or n.security == .wpa3;
         return cx.make(kete.Padding{
-            .padding = .symmetric(16, 8),
-            .child = cx.make(kete.Row{
-                .cross_axis_alignment = .center,
-                .spacing = 12,
-                .children = &.{
-                    cx.make(kete.Expanded{ .child = field }),
-                    cx.make(kete.OutlinedButton{ .label = locale.text("Connect"), .on_press = if (supported) on_connect else null }),
-                },
-            }),
+            .padding = .{ .left = 72, .right = 20, .bottom = 16 },
+            .child = cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 16, .children = cx.arena.dupe(kete.Widget, &.{
+                cx.make(kete.Expanded{ .child = field }),
+                cx.make(parts.Choice{ .label = locale.text("Connect"), .filled = true, .on_press = if (supported) on_connect else null }),
+            }) catch &.{} }),
         });
     }
 
@@ -628,59 +662,6 @@ pub const Setup = struct {
         } });
     }
 };
-
-/// How tall a network's row is (including the 1px divider below it).
-const network_row_height = kete.ListItem.one_line_height + 1;
-
-/// Networks to make rows of (in the frame's arena).
-const Networks = struct {
-    actions: ?*Actions,
-    state: *Setup.State,
-    conn: *const net.Connection,
-    nets: []const net.Network,
-    chosen: ?*const net.Network,
-
-    fn row(l: *const Networks, cx: *kete.BuildContext, i: usize) kete.Widget {
-        const n = &l.nets[i];
-        const is_chosen = l.chosen != null and n == l.chosen.?;
-        const joined = connectionBusy(l.conn) and std.mem.eql(u8, l.conn.ssid(), n.ssid());
-        const on_disconnect: ?kete.Callback = if (joined)
-            (if (l.actions) |acts| .of(act(cx, acts, l.state, ""), Act.disconnect) else null)
-        else
-            null;
-        const item = networkRow(cx, n, is_chosen, joined, choose(cx, l.state, n.ssid()), on_disconnect);
-        if (i + 1 >= l.nets.len) return cx.make(kete.Column{
-            .fill = false,
-            .cross_axis_alignment = .stretch,
-            .children = &.{item},
-        });
-        return cx.make(kete.Column{
-            .fill = false,
-            .cross_axis_alignment = .stretch,
-            .children = &.{
-                item,
-                cx.make(kete.HorizontalDivider{ .inset = 16 }),
-            },
-        });
-    }
-};
-
-fn networkRow(
-    cx: *kete.BuildContext,
-    n: *const net.Network,
-    chosen: bool,
-    joined: bool,
-    on_press: kete.Callback,
-    on_disconnect: ?kete.Callback,
-) kete.Widget {
-    return cx.make(kete.ListItem{
-        .headline = printable(cx, n.ssid()),
-        .leading = cx.make(Signal{ .bars = n.bars(), .locked = n.security != .open, .size = 20 }),
-        .trailing = if (joined) cx.make(kete.OutlinedButton{ .label = locale.text("Disconnect"), .on_press = on_disconnect }) else null,
-        .selected = chosen or joined,
-        .on_press = on_press,
-    });
-}
 
 const Signal = struct {
     bars: u8,
@@ -779,8 +760,6 @@ fn act(cx: *kete.BuildContext, actions: *Actions, state: *Setup.State, ssid: []c
 const Nav = struct {
     state: *Setup.State,
     actions: ?*Actions,
-    show_wifi: bool = false,
-    wifi_connected: bool = false,
 
     fn next(n: *Nav) void {
         const st = n.state;
@@ -791,15 +770,8 @@ const Nav = struct {
                     return;
                 };
                 if (n.actions) |a| a.hostname = h;
-                if (!n.show_wifi) {
-                    st.page = @intFromEnum(Page.time);
-                    return;
-                }
             },
-            .wifi => if (!n.wifi_connected) if (n.actions) |a| {
-                a.skip_wifi = true;
-            },
-            .hello, .keyboard, .time => {},
+            .hello, .keyboard, .network, .time => {},
         }
         if (st.page + 1 < pages.len) {
             st.page += 1;
@@ -822,10 +794,6 @@ const Nav = struct {
 
     fn back(n: *Nav) void {
         const st = n.state;
-        if (pages[st.page] == .time and !n.show_wifi) {
-            st.page = @intFromEnum(Page.hostname);
-            return;
-        }
         st.page -|= 1;
     }
 
@@ -928,16 +896,20 @@ test "naming the computer, then waiting for the card" {
     try testing.expect(actions.hostname == null);
     try testing.expect(actions.finish == null);
 
-    // A good one: the name is confirmed at once, then (no Wi-Fi) the time
-    // zone, then finishing, with a spinner while the card is prepared.
+    // A good one: the name is confirmed at once, then the network (none
+    // here: no adapter, it says), the time zone, then finishing, with a
+    // spinner while the card is prepared.
     st.setName("my-pi");
     click(u, findText(u.root.?, "Next").?);
+    Draw(u, &report, &actions, &now, .{ 1920, 1080 });
+    try testing.expectEqualStrings("my-pi", actions.hostname.?.slice());
+    try testing.expect(findText(u.root.?, "No network adapter") != null);
+    click(u, findText(u.root.?, "Skip").?);
     for ([_][2]u32{ .{ 1920, 1080 }, .{ 640, 480 } }) |size| {
         Draw(u, &report, &actions, &now, size);
         try testing.expect(!overflows(u.root.?));
     }
-    try testing.expectEqualStrings("my-pi", actions.hostname.?.slice());
-    try testing.expect(findType(u.root.?, kete_vc4.TimeZoneMap) != null);
+    try testing.expect(findType(u.root.?, kete_vc4.ZoneMap) != null);
     try testing.expect(actions.finish == null);
     click(u, findText(u.root.?, "Finish").?);
     Draw(u, &report, &actions, &now, .{ 1920, 1080 });
@@ -971,33 +943,31 @@ test "Wi-Fi networks are shown when Ethernet is not connected and a Wi-Fi adapte
     cafe.setSsid("Cafe");
     wifi.add(cafe);
 
-    var setup: Setup = .{ .suggestion = "my-pi", .report = &report, .wifi = &wifi, .actions = &actions };
+    const setup: Setup = .{ .suggestion = "my-pi", .report = &report, .network = &wifi, .actions = &actions };
     u.frame(1280, 720, 0, setup);
-    u.root.?.state(Setup.State).page = @intFromEnum(Page.keyboard);
+    u.root.?.state(Setup.State).page = @intFromEnum(Page.hostname);
     u.frame(1280, 720, 0, setup);
-    click(u, findText(u.root.?, "Next").?);
-    u.frame(1280, 720, 1, setup);
-    // The name.
     try testing.expect(findText(u.root.?, "Give me a name") != null);
 
-    // Approving the hostname when Ethernet is not connected goes to the Wi-Fi page.
+    // The name, then the network: the Wi-Fi networks (no Ethernet adapter,
+    // so nothing of Ethernet), and Skip until one is joined.
     click(u, findText(u.root.?, "Next").?);
     for ([_][2]u32{ .{ 1920, 1080 }, .{ 1280, 720 }, .{ 1024, 768 }, .{ 800, 600 }, .{ 640, 480 } }) |size| {
         u.frame(size[0], size[1], 2, setup);
         try testing.expect(!overflows(u.root.?));
     }
     try testing.expectEqualStrings("my-pi", actions.hostname.?.slice());
-    try testing.expect(findText(u.root.?, "Connect to Wi-Fi") != null);
+    try testing.expect(findText(u.root.?, "Connect to a network") != null);
     try testing.expect(findText(u.root.?, "Home") != null);
     try testing.expect(findText(u.root.?, "Cafe") != null);
     try testing.expect(findText(u.root.?, "Skip") != null);
+    try testing.expect(findText(u.root.?, "Ethernet not connected") == null);
     // No options other than a network (e.g. no Static / Address / Mode / MAC address).
     try testing.expect(findText(u.root.?, "Address") == null);
     try testing.expect(findText(u.root.?, "Static") == null);
-    try testing.expect(findText(u.root.?, "Mode") == null);
     try testing.expect(findText(u.root.?, "MAC address") == null);
 
-    // Selecting a WPA2 network shows the password field and Connect button.
+    // Choosing a WPA2 network asks for its password, and Connect joins it.
     click(u, findText(u.root.?, "Home").?);
     u.frame(1280, 720, 3, setup);
     try testing.expect(!overflows(u.root.?));
@@ -1007,28 +977,24 @@ test "Wi-Fi networks are shown when Ethernet is not connected and a Wi-Fi adapte
     try testing.expectEqualStrings("Home", actions.connect.?.ssid());
     try testing.expectEqualStrings("secret123", actions.connect.?.passphrase());
 
-    // Skipping the network advances to the time zone.
+    // Skipping the network: on to the time zone, and Back to it again.
     u.frame(1280, 720, 4, setup);
     click(u, findText(u.root.?, "Skip").?);
     u.frame(1280, 720, 5, setup);
-    try testing.expect(actions.skip_wifi);
-    try testing.expect(findType(u.root.?, kete_vc4.TimeZoneMap) != null);
-    // Back goes to the network again.
+    try testing.expect(findType(u.root.?, kete_vc4.ZoneMap) != null);
     click(u, findText(u.root.?, "Back").?);
     u.frame(1280, 720, 6, setup);
-    try testing.expect(findText(u.root.?, "Connect to Wi-Fi") != null);
+    try testing.expect(findText(u.root.?, "Connect to a network") != null);
 
-    // If Ethernet is connected, approving the hostname skips the Wi-Fi page.
-    u.root.?.state(Setup.State).page = @intFromEnum(Page.hostname);
-    setup.ethernet_connected = true;
-    u.frame(1280, 720, 6, setup);
-    click(u, findText(u.root.?, "Next").?);
+    // An Ethernet adapter too, connected: how it is, and Next (it is on a
+    // network).
+    var eth: net.Ethernet = .{ .adapter = .{ .up = true }, .address = .{ 192, 168, 1, 20 } };
+    eth.adapter.?.setName("eth0");
+    wifi.addEthernet(eth);
     u.frame(1280, 720, 7, setup);
-    try testing.expect(findType(u.root.?, kete_vc4.TimeZoneMap) != null);
-    // And Back passes it by.
-    click(u, findText(u.root.?, "Back").?);
-    u.frame(1280, 720, 8, setup);
-    try testing.expect(findText(u.root.?, "Give me a name") != null);
+    try testing.expect(findText(u.root.?, "Ethernet connected") != null);
+    try testing.expect(findText(u.root.?, "Next") != null);
+    try testing.expect(!overflows(u.root.?));
 }
 
 test "every page fits, in Spanish too" {

@@ -6,6 +6,8 @@
 
 /// Brazil's (and Portugal's where it has none of its own).
 pub const brazil = [_][2][]const u8{
+    .{ "Connect to a network", "Conecte-se a uma rede" },
+    .{ "Plug in an Ethernet cable or a Wi-Fi adapter to connect. You can also set up the network later in Settings.", "Conecte um cabo Ethernet ou um adaptador Wi-Fi para se conectar. Você também pode configurar a rede depois em Configurações." },
     .{ "Hello, I speak…", "Olá, eu falo…" },
     .{ "Is this your keyboard?", "Este é o seu teclado?" },
     .{ "Give me a name", "Me dê um nome" },
@@ -23,7 +25,6 @@ pub const brazil = [_][2][]const u8{
     .{ "Mouse", "Mouse" },
     .{ "A micro USB port: for a keyboard, mouse or USB drive (through an adapter or hub)", "Uma porta micro USB: para teclado, mouse ou pen drive (com um adaptador ou hub)" },
     .{ "For keyboards, mice, USB drives and network adapters", "Para teclados, mouses, pen drives e adaptadores de rede" },
-    .{ "Choose a network to connect to, or skip to set up the network later in Settings.", "Escolha uma rede para se conectar ou pule para configurar a rede depois em Configurações." },
     .{ "Settings", "Configurações" },
     .{ "Volume", "Volume" },
     .{ "Muted", "Sem som" },
@@ -75,7 +76,6 @@ pub const brazil = [_][2][]const u8{
     .{ "Search", "Pesquisar" },
     .{ "No language matches", "Nenhum idioma corresponde" },
     .{ "Use 1 to 63 lowercase letters, numbers and hyphens, not starting or ending with a hyphen", "Use de 1 a 63 letras minúsculas, números e hifens, sem começar nem terminar com hífen" },
-    .{ "Connect to Wi-Fi", "Conectar ao Wi-Fi" },
     .{ "Scanning for networks…", "Procurando redes…" },
     .{ "No networks found", "Nenhuma rede encontrada" },
     .{ "Getting the list of apps…", "Obtendo a lista de apps…" },
@@ -387,6 +387,8 @@ pub const brazil = [_][2][]const u8{
 
 /// Portugal's, where it differs.
 pub const portugal = [_][2][]const u8{
+    .{ "Connect to a network", "Ligue-se a uma rede" },
+    .{ "Plug in an Ethernet cable or a Wi-Fi adapter to connect. You can also set up the network later in Settings.", "Ligue um cabo Ethernet ou um adaptador Wi-Fi para se ligar. Também pode configurar a rede mais tarde nas Definições." },
     .{ "Hello, I speak…", "Olá, eu falo…" },
     .{ "Give me a name", "Dê-me um nome" },
     .{ "Lowercase letters, numbers and hyphens. You can change it later in Settings.", "Letras minúsculas, números e hífenes. Pode alterá-lo mais tarde nas Definições." },
@@ -394,7 +396,6 @@ pub const portugal = [_][2][]const u8{
     .{ "Mouse", "Rato" },
     .{ "A micro USB port: for a keyboard, mouse or USB drive (through an adapter or hub)", "Uma porta micro USB: para teclado, rato ou pen USB (com um adaptador ou hub)" },
     .{ "For keyboards, mice, USB drives and network adapters", "Para teclados, ratos, pens USB e adaptadores de rede" },
-    .{ "Choose a network to connect to, or skip to set up the network later in Settings.", "Escolha uma rede para se ligar ou ignore para configurar a rede mais tarde nas Definições." },
     .{ "Settings", "Definições" },
     .{ "Power off", "Encerrar" },
     .{ "Click again to power off", "Clique de novo para encerrar" },
@@ -415,7 +416,6 @@ pub const portugal = [_][2][]const u8{
     .{ "Password", "Palavra-passe" },
     .{ "That is not the password", "Essa não é a palavra-passe" },
     .{ "Type here to try the keyboard", "Escreva aqui para experimentar o teclado" },
-    .{ "Connect to Wi-Fi", "Ligar ao Wi-Fi" },
     .{ "Scanning for networks…", "A procurar redes…" },
     .{ "Getting the list of apps…", "A obter a lista de apps…" },
     .{ "Getting the SD card ready", "A preparar o cartão SD" },

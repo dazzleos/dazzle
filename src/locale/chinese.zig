@@ -6,6 +6,8 @@
 //! they are.
 
 pub const simplified = [_][2][]const u8{
+    .{ "Connect to a network", "连接到网络" },
+    .{ "Plug in an Ethernet cable or a Wi-Fi adapter to connect. You can also set up the network later in Settings.", "插入以太网线或 Wi-Fi 适配器即可连接。你也可以稍后在“设置”中设置网络。" },
     .{ "Hello, I speak…", "你好，我说…" },
     .{ "Is this your keyboard?", "这是你的键盘吗？" },
     .{ "Give me a name", "给我起个名字" },
@@ -23,7 +25,6 @@ pub const simplified = [_][2][]const u8{
     .{ "Mouse", "鼠标" },
     .{ "A micro USB port: for a keyboard, mouse or USB drive (through an adapter or hub)", "Micro USB 接口：用于键盘、鼠标或 U 盘（通过转接头或集线器）" },
     .{ "For keyboards, mice, USB drives and network adapters", "用于键盘、鼠标、U 盘和网络适配器" },
-    .{ "Choose a network to connect to, or skip to set up the network later in Settings.", "选择要连接的网络，或跳过，稍后在“设置”中设置网络。" },
     .{ "Settings", "设置" },
     .{ "Volume", "音量" },
     .{ "Muted", "已静音" },
@@ -75,7 +76,6 @@ pub const simplified = [_][2][]const u8{
     .{ "Search", "搜索" },
     .{ "No language matches", "没有匹配的语言" },
     .{ "Use 1 to 63 lowercase letters, numbers and hyphens, not starting or ending with a hyphen", "使用 1 到 63 个小写字母、数字和连字符，不能以连字符开头或结尾" },
-    .{ "Connect to Wi-Fi", "连接到 Wi-Fi" },
     .{ "Scanning for networks…", "正在搜索网络…" },
     .{ "No networks found", "未找到网络" },
     .{ "Getting the list of apps…", "正在获取应用列表…" },

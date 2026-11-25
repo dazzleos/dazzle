@@ -41,6 +41,9 @@ pub fn textf(cx: *kete.BuildContext, comptime fmt: []const u8, args: anytype) []
 pub const LanguagePicker = @import("language_picker.zig").LanguagePicker;
 pub const KeyboardPicture = @import("keyboard_picture.zig").KeyboardPicture;
 pub const TimeZoneMap = @import("timezone_map.zig").TimeZoneMap;
+pub const ZonePicker = @import("timezone_map.zig").ZonePicker;
+pub const ZoneMap = @import("timezone_map.zig").MapView;
+pub const utcOffset = @import("timezone_map.zig").utcOffset;
 pub const KeyboardPicker = @import("keyboard_picture.zig").KeyboardPicker;
 pub const Renderer = renderer.Renderer;
 pub const Window = window.Window;
