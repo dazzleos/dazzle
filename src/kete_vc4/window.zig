@@ -395,6 +395,8 @@ pub const Display = struct {
     /// Who draws its windows' title bars: kete (`.toolkit`), or no one
     /// (`.none`: an app with the whole screen).
     decorations: kwin.WindowDecorations = .toolkit,
+    /// Its windows' buffers 32-bit (see `Host.Options.deep_color`).
+    deep_color: bool = false,
     /// The keyboard layout to type with, if the app chooses it rather than
     /// the system (setup, before the system has one).
     keyboard: ?locale.Keyboard = null,
@@ -498,6 +500,7 @@ pub const Display = struct {
         const win = try app.Window.open(d.gpa, d.gpu, d.environ, options);
         d.window = .{ .win = win, .gpa = d.gpa, .drawn_by = d.decorations, .keyboard = d.keyboard, .renderer = d.renderer };
         if (d.renderer) |r| if (r.pipelined) try win.setPipelined(true);
+        if (d.deep_color) win.setFormat(.xrgb8888);
         d.window.?.keepTitle(o.title);
         d.syncWake();
         return &d.window.?;

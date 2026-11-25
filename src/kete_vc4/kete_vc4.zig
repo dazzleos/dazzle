@@ -71,6 +71,10 @@ pub const Host = struct {
         /// than waiting for it: for an app that draws a frame after another
         /// (a game), at the cost of a frame's delay and a buffer's memory.
         pipelined: bool = false,
+        /// Its windows' buffers 32-bit, not the GPU's 16-bit (see the app
+        /// module's window.zig): for an app that draws smooth gradients
+        /// (setup's Finish button), at twice the memory.
+        deep_color: bool = false,
     };
 
     /// Opens the GPU, and makes a kete app whose windows are opened on the
@@ -84,7 +88,7 @@ pub const Host = struct {
         };
         errdefer h.dev.close();
         const gpu: app.Gpu = .device(&h.dev);
-        h.display = .{ .gpa = gpa, .io = io, .gpu = gpu, .environ = environ, .app_id = options.app_id, .decorations = options.decorations };
+        h.display = .{ .gpa = gpa, .io = io, .gpu = gpu, .environ = environ, .app_id = options.app_id, .decorations = options.decorations, .deep_color = options.deep_color };
         h.renderer = try Renderer.init(gpa, h.dev, gpu);
         errdefer h.renderer.deinit();
         if (options.pipelined) _ = h.renderer.setPipelined(true);

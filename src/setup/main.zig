@@ -80,7 +80,7 @@ fn run(init: std.process.Init) !void {
     locale.current = start_locale.language;
     var host: kete_vc4.Host = undefined;
     // The whole screen, with no title bar: it is the only window.
-    try host.init(gpa, init.io, init.minimal.environ, .{ .app_id = "dazzle-setup", .decorations = .none });
+    try host.init(gpa, init.io, init.minimal.environ, .{ .app_id = "dazzle-setup", .decorations = .none, .deep_color = true });
     defer host.deinit();
     // The keyboard chosen here, not yet the system's.
     host.display.setKeyboard(start_locale.keyboard);
