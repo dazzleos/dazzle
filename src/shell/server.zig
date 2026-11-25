@@ -2,7 +2,7 @@
 //!
 //! Supported globals: wl_compositor (surfaces; regions are accepted and
 //! ignored), wl_subcompositor (subsurfaces, drawn above their parent),
-//! wl_shm (ARGB8888, XRGB8888 and RGB565, copied to the GPU at commit),
+//! wl_shm (ARGB8888, XRGB8888 and BGR565, copied to the GPU at commit),
 //! zwp_linux_dmabuf_v1 (buffers in the VideoCore IV's T-tiled layout, in
 //! the same formats, used by the GPU directly), xdg_wm_base (toplevel windows, and popups above
 //! them: see `Popup`), wl_output (the screen), wl_seat (a pointer, a
@@ -84,13 +84,13 @@ pub const Texture = struct {
 
 /// The formats clients' buffers can be in, and wl_shm's codes for them
 /// (dma-bufs use their DRM codes).
-const buffer_formats = [_]vc4.Format{ .argb8888, .xrgb8888, .rgb565 };
+const buffer_formats = [_]vc4.Format{ .argb8888, .xrgb8888, .bgr565 };
 
 fn shmCode(f: vc4.Format) u32 {
     return switch (f) {
         .argb8888 => p.wl_shm.format.argb8888,
         .xrgb8888 => p.wl_shm.format.xrgb8888,
-        .rgb565 => p.wl_shm.format.rgb565,
+        .bgr565 => p.wl_shm.format.bgr565,
         .a8, .rgba4444 => unreachable, // textures only
     };
 }
@@ -721,10 +721,10 @@ fn peerPid(fd: linux.fd_t) ?linux.pid_t {
 pub const Server = struct {
     gpa: std.mem.Allocator,
     backend: Backend,
-    /// Apps may share tiled RGB565 buffers (16-bit windows). Not on V3D
-    /// (the Pi 4 and 5), which renders RGB565 with red and blue the other
-    /// way round to the VC4: their windows are 32-bit there.
-    tiled_rgb565: bool = true,
+    /// Apps may share tiled BGR565 buffers (16-bit windows). Not on V3D
+    /// (the Pi 4 and 5), which renders 16 bits with red at the top (RGB565)
+    /// instead: their windows are 32-bit there.
+    tiled_bgr565: bool = true,
     clients: std.ArrayList(*Client) = .empty,
     /// Toplevels in stacking order, bottom first.
     toplevels: std.ArrayList(*Toplevel) = .empty,
@@ -2958,7 +2958,7 @@ pub const Server = struct {
                 try c.addObject(id, .dmabuf);
                 const mod = p.modifier.broadcom_vc4_t_tiled;
                 for (buffer_formats) |f| {
-                    if (f == .rgb565 and !s.tiled_rgb565) continue;
+                    if (f == .bgr565 and !s.tiled_bgr565) continue;
                     if (c.send(id, p.zwp_linux_dmabuf_v1.event.format)) |m0| {
                         var e = m0;
                         e.uint(f.fourcc()).end();
@@ -5124,7 +5124,7 @@ pub const Server = struct {
                 } else null;
                 if (format == null or pr.modifier != p.modifier.broadcom_vc4_t_tiled) {
                     _ = linux.close(fd);
-                    return c.postError(m.object, E.invalid_format, "only T-tiled XRGB8888, ARGB8888 and RGB565 are supported", .{});
+                    return c.postError(m.object, E.invalid_format, "only T-tiled XRGB8888, ARGB8888 and BGR565 are supported", .{});
                 }
                 if (width <= 0 or height <= 0 or width > 2048 or height > 2048) {
                     _ = linux.close(fd);

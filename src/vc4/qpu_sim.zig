@@ -866,7 +866,7 @@ const PrecomputedTex = struct {
     /// the low byte, the next two the next, its low 4 bits the top: as a
     /// Pi 3's GPU returns it), each widened to 8 bits.
     inline fn from16(pt: *const PrecomputedTex, v: u16) u32 {
-        if (pt.cfg.type != .rgba4444) return pixel.fromRgb565(v);
+        if (pt.cfg.type != .rgba4444) return pixel.fromBgr565(v);
         const n = [4]u32{ v >> 12 & 0xf, v >> 8 & 0xf, v >> 4 & 0xf, v & 0xf };
         return n[0] * 17 | (n[1] * 17) << 8 | (n[2] * 17) << 16 | (n[3] * 17) << 24;
     }

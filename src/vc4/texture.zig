@@ -393,7 +393,7 @@ pub fn levelOffsetOf(format: Format, width: u32, height: u32, layout: Mipmapped,
 pub const Pack16 = *const fn (c: u32, x: u32, y: u32) u16;
 
 /// Uploads a 32-bit image (0xAARRGGBB, raster order) and its smaller
-/// levels (as `uploadMipmaps`) as a 16-bit `format` (RGB565 or RGBA4444),
+/// levels (as `uploadMipmaps`) as a 16-bit `format` (BGR565 or RGBA4444),
 /// each texel made by `pack`, into `dst` as `mipmapLayoutOf` says.
 pub fn uploadMipmapsOf(gpa: std.mem.Allocator, format: Format, dst: []u8, pixels: []const u32, width: u32, height: u32, levels: u4, kind: MipKind, pack: Pack16) !void {
     std.debug.assert(format.bytesPerPixel() == 2);
@@ -660,7 +660,7 @@ test "mipmaps of normals stay unit length" {
 test "layout matches the reference description" {
     const sim = @import("qpu_sim.zig");
     const sizes = [_][2]u32{ .{ 16, 16 }, .{ 8, 64 }, .{ 32, 64 }, .{ 64, 64 }, .{ 128, 96 }, .{ 96, 128 }, .{ 256, 256 } };
-    for ([_]Format{ .xrgb8888, .rgb565, .a8 }) |format| for (sizes) |sz| {
+    for ([_]Format{ .xrgb8888, .bgr565, .a8 }) |format| for (sizes) |sz| {
         var y: u32 = 0;
         while (y < sz[1]) : (y += 1) {
             var x: u32 = 0;
@@ -673,14 +673,14 @@ test "layout matches the reference description" {
 
 test "16-bit images: 8x4 micro-tiles, 64x32 tiles, sized as the kernel checks" {
     // LT up to 32 wide (4 micro-tiles of 8) or 16 high.
-    try testing.expect(isLtOf(.rgb565, 32, 100));
-    try testing.expect(!isLtOf(.rgb565, 40, 100));
+    try testing.expect(isLtOf(.bgr565, 32, 100));
+    try testing.expect(!isLtOf(.bgr565, 40, 100));
     // vc4_check_tex_size: T rounds to 64x32 pixels, LT to 8x4.
-    try testing.expectEqual(@as(u32, 128 * 64 * 2), imageSizeOf(.rgb565, 100, 50));
-    try testing.expectEqual(@as(u32, 16 * 100 * 2), imageSizeOf(.rgb565, 13, 100));
+    try testing.expectEqual(@as(u32, 128 * 64 * 2), imageSizeOf(.bgr565, 100, 50));
+    try testing.expectEqual(@as(u32, 16 * 100 * 2), imageSizeOf(.bgr565, 13, 100));
     // A micro-tile's rows are 16 bytes: 8 pixels.
-    try testing.expectEqual(@as(u32, 14), texelOffsetOf(.rgb565, 100, 50, 7, 0));
-    try testing.expectEqual(@as(u32, 16), texelOffsetOf(.rgb565, 100, 50, 0, 1));
+    try testing.expectEqual(@as(u32, 14), texelOffsetOf(.bgr565, 100, 50, 7, 0));
+    try testing.expectEqual(@as(u32, 16), texelOffsetOf(.bgr565, 100, 50, 0, 1));
 }
 
 test "every texel lands in a distinct slot inside the image" {
@@ -713,13 +713,13 @@ test "uploadRectOf writes 16-bit pixels where texelOffsetOf says" {
     const pixels = try gpa.alloc(u16, w * h);
     defer gpa.free(pixels);
     for (pixels, 0..) |*px, i| px.* = @truncate(i * 40503);
-    const a = try gpa.alloc(u8, imageSizeOf(.rgb565, w, h));
+    const a = try gpa.alloc(u8, imageSizeOf(.bgr565, w, h));
     defer gpa.free(a);
     @memset(a, 0);
     const r: Rect = .{ .x = 3, .y = 2, .width = w - 5, .height = h - 3 };
-    uploadRectOf(.rgb565, a, w, h, r, std.mem.sliceAsBytes(pixels), w * 2);
+    uploadRectOf(.bgr565, a, w, h, r, std.mem.sliceAsBytes(pixels), w * 2);
     for (0..h) |y| for (0..w) |x| {
-        const off = texelOffsetOf(.rgb565, w, h, @intCast(x), @intCast(y));
+        const off = texelOffsetOf(.bgr565, w, h, @intCast(x), @intCast(y));
         const inside = x >= r.x and x < r.x + r.width and y >= r.y and y < r.y + r.height;
         const want: u16 = if (inside) pixels[(y - r.y) * w + (x - r.x)] else 0;
         try testing.expectEqual(want, std.mem.readInt(u16, a[off..][0..2], .little));

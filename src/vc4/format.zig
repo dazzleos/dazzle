@@ -10,7 +10,7 @@
 //! A8 is for textures only (the tile buffer cannot store it): one byte of
 //! coverage per pixel, a quarter of a 32-bit texture, for the glyph atlas.
 //!
-//! RGB565 halves a buffer's memory (and the memory bandwidth to draw,
+//! BGR565 halves a buffer's memory (and the memory bandwidth to draw,
 //! composite and show it), at the cost of 5 or 6 bits per channel and no
 //! alpha: right for opaque windows of flat colours (Dazzle's toolkit), less
 //! so for smooth gradients, which band.
@@ -26,9 +26,9 @@ pub const Format = enum {
     /// The same with alpha in the top byte (DRM_FORMAT_ARGB8888).
     argb8888,
     /// 16 bits: red in the low 5, green in the middle 6, blue in the top 5
-    /// (DRM_FORMAT_BGR565; the GPU's tile buffer calls it BGR565, and its
-    /// texture unit calls it RGB565).
-    rgb565,
+    /// (DRM_FORMAT_BGR565, named as DRM names it: from the top bits; the
+    /// VC4's tile buffer calls it BGR565 too, and its texture unit RGB565).
+    bgr565,
     /// 8 bits of alpha (or coverage); textures only. The texture unit
     /// returns it as alpha, with black for the colour.
     a8,
@@ -42,7 +42,7 @@ pub const Format = enum {
     pub fn bytesPerPixel(f: Format) u32 {
         return switch (f) {
             .xrgb8888, .argb8888 => 4,
-            .rgb565, .rgba4444 => 2,
+            .bgr565, .rgba4444 => 2,
             .a8 => 1,
         };
     }
@@ -52,7 +52,7 @@ pub const Format = enum {
         return switch (f) {
             .xrgb8888 => code("XR24"),
             .argb8888 => code("AR24"),
-            .rgb565 => code("BG16"),
+            .bgr565 => code("BG16"),
             .a8 => code("R8  "),
             .rgba4444 => code("RA12"),
         };
@@ -70,20 +70,20 @@ pub const Format = enum {
     pub fn textureType(f: Format) texture.Type {
         return switch (f) {
             .xrgb8888, .argb8888 => .rgba8888,
-            .rgb565 => .rgb565,
+            .bgr565 => .rgb565,
             .a8 => .alpha,
             .rgba4444 => .rgba4444,
         };
     }
 
     /// How the tile buffer is stored to memory (and loaded back) in it:
-    /// for the render configuration and for load/store packets. RGB565 is
+    /// for the render configuration and for load/store packets. BGR565 is
     /// stored without dithering, so a buffer loaded back and stored again
     /// (when only part of a frame is redrawn) keeps the pixels it had.
     pub fn renderConfigFormat(f: Format) u2 {
         return switch (f) {
             .xrgb8888, .argb8888 => cl.render_config_format_rgba8888,
-            .rgb565 => cl.render_config_format_bgr565,
+            .bgr565 => cl.render_config_format_bgr565,
             .a8, .rgba4444 => unreachable, // not a render target
         };
     }
@@ -91,7 +91,7 @@ pub const Format = enum {
     pub fn loadStoreFormat(f: Format) u2 {
         return switch (f) {
             .xrgb8888, .argb8888 => cl.loadstore_format_rgba8888,
-            .rgb565 => cl.loadstore_format_bgr565,
+            .bgr565 => cl.loadstore_format_bgr565,
             .a8, .rgba4444 => unreachable, // not a render target
         };
     }
@@ -116,24 +116,24 @@ fn code(comptime s: *const [4]u8) u32 {
     return std.mem.readInt(u32, s, .little);
 }
 
-/// A 0xAARRGGBB colour as an RGB565 pixel (rounded to the nearest), with
-/// blue in the top 5 bits as the tile buffer stores it.
-pub inline fn toRgb565(argb: u32) u16 {
+/// A 0xAARRGGBB colour as a BGR565 pixel (rounded to the nearest): blue
+/// in the top 5 bits, red in the low 5.
+pub inline fn toBgr565(argb: u32) u16 {
     const r: u32 = (argb >> 16) & 0xff;
     const g: u32 = (argb >> 8) & 0xff;
     const b: u32 = argb & 0xff;
     return @intCast(((b * 31 + 127) / 255) << 11 | ((g * 63 + 127) / 255) << 5 | (r * 31 + 127) / 255);
 }
 
-/// An RGB565 pixel as 0xffRRGGBB, each channel's bits repeated to fill 8.
-pub inline fn fromRgb565(p: u16) u32 {
+/// A BGR565 pixel as 0xffRRGGBB, each channel's bits repeated to fill 8.
+pub inline fn fromBgr565(p: u16) u32 {
     const b: u32 = p >> 11;
     const g: u32 = (p >> 5) & 0x3f;
     const r: u32 = p & 0x1f;
     return 0xff000000 | (r << 3 | r >> 2) << 16 | (g << 2 | g >> 4) << 8 | (b << 3 | b >> 2);
 }
 
-pub inline fn toRgb565Vec8(argb: @Vector(8, u32)) @Vector(8, u16) {
+pub inline fn toBgr565Vec8(argb: @Vector(8, u32)) @Vector(8, u16) {
     const r = (argb >> @splat(16)) & @as(@Vector(8, u32), @splat(0xff));
     const g = (argb >> @splat(8)) & @as(@Vector(8, u32), @splat(0xff));
     const b = argb & @as(@Vector(8, u32), @splat(0xff));
@@ -146,7 +146,7 @@ pub inline fn toRgb565Vec8(argb: @Vector(8, u32)) @Vector(8, u16) {
     return @truncate((b5 << @splat(11)) | (g6 << @splat(5)) | r5);
 }
 
-pub inline fn fromRgb565Vec8(p16: @Vector(8, u16)) @Vector(8, u32) {
+pub inline fn fromBgr565Vec8(p16: @Vector(8, u16)) @Vector(8, u32) {
     const p: @Vector(8, u32) = p16;
     const b = p >> @splat(11);
     const g = (p >> @splat(5)) & @as(@Vector(8, u32), @splat(0x3f));
@@ -160,28 +160,28 @@ pub inline fn fromRgb565Vec8(p16: @Vector(8, u16)) @Vector(8, u32) {
 const testing = std.testing;
 
 test "formats' codes and sizes" {
-    try testing.expectEqual(@as(?Format, .rgb565), Format.fromFourcc(code("BG16")));
+    try testing.expectEqual(@as(?Format, .bgr565), Format.fromFourcc(code("BG16")));
     try testing.expectEqual(@as(?Format, .xrgb8888), Format.fromFourcc(code("XR24")));
     try testing.expectEqual(@as(?Format, null), Format.fromFourcc(code("NV12")));
-    try testing.expectEqual(@as(u32, 8), Format.rgb565.utileWidth());
+    try testing.expectEqual(@as(u32, 8), Format.bgr565.utileWidth());
     try testing.expectEqual(@as(u32, 4), Format.xrgb8888.utileWidth());
     try testing.expectEqual(@as(u32, 8), Format.a8.utileHeight());
 }
 
-test "RGB565 conversions" {
-    try testing.expectEqual(@as(u16, 0x001f), toRgb565(0xffff0000));
-    try testing.expectEqual(@as(u16, 0x07e0), toRgb565(0xff00ff00));
-    try testing.expectEqual(@as(u16, 0xf800), toRgb565(0xff0000ff));
-    try testing.expectEqual(@as(u32, 0xffffffff), fromRgb565(0xffff));
+test "BGR565 conversions" {
+    try testing.expectEqual(@as(u16, 0x001f), toBgr565(0xffff0000));
+    try testing.expectEqual(@as(u16, 0x07e0), toBgr565(0xff00ff00));
+    try testing.expectEqual(@as(u16, 0xf800), toBgr565(0xff0000ff));
+    try testing.expectEqual(@as(u32, 0xffffffff), fromBgr565(0xffff));
     // Every 565 value survives a round trip, and 8-wide SIMD matches scalar.
     var p: u32 = 0;
     while (p < 0x10000) : (p += 8) {
         var in16: [8]u16 = undefined;
         for (0..8) |i| in16[i] = @intCast(p + i);
-        const rgb32: [8]u32 = fromRgb565Vec8(in16);
-        const out16: [8]u16 = toRgb565Vec8(rgb32);
+        const rgb32: [8]u32 = fromBgr565Vec8(in16);
+        const out16: [8]u16 = toBgr565Vec8(rgb32);
         for (0..8) |i| {
-            try testing.expectEqual(fromRgb565(in16[i]), rgb32[i]);
+            try testing.expectEqual(fromBgr565(in16[i]), rgb32[i]);
             try testing.expectEqual(in16[i], out16[i]);
         }
     }

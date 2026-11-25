@@ -8,7 +8,7 @@
 //! 1920 by 1080 background takes about 1 MB of the GPU's memory that way,
 //! rather than 8 MB at 32 bits a pixel. Where ETC1 cannot be used (the
 //! renderer checks the GPU decodes it as expected, `Renderer.etc1Order`),
-//! it is RGB565 instead (4 MB), dithered so smooth skies do not band.
+//! it is BGR565 instead (4 MB), dithered so smooth skies do not band.
 //!
 //! The built-in backgrounds are ETC1 already (made at build time by
 //! tools/mkbackground.zig, at 1920 by 1080): on a screen that size, their
@@ -28,8 +28,8 @@ pub const Kind = union(enum) {
     /// ETC1 blocks, laid out as the texture unit reads them, in this byte
     /// order.
     etc1: etc1.ByteOrder,
-    /// RGB565 pixels, row by row (the renderer lays them out).
-    rgb565,
+    /// BGR565 pixels (red in the low bits), row by row (the renderer lays them out).
+    bgr565,
 };
 
 /// An image ready for the GPU: `data` as `kind` says, `width` by `height`.
@@ -130,7 +130,7 @@ pub fn fromPixels(gpa: std.mem.Allocator, pixels: []const u32, width: u32, heigh
             etc1.encode(pixels, width, height, blocks);
             return fromBlocks(gpa, blocks, width, height, order, bottom_rows);
         },
-        .rgb565 => {
+        .bgr565 => {
             const rows = @min(bottom_rows, height);
             const first = height - rows;
             const bottom = try gpa.alloc(u32, @as(usize, width) * rows);
@@ -147,7 +147,7 @@ pub fn fromPixels(gpa: std.mem.Allocator, pixels: []const u32, width: u32, heigh
     }
 }
 
-/// An RGB565 pixel (red in the low bits) as the GPU shows it.
+/// A BGR565 pixel (red in the low bits) as the GPU shows it.
 fn expand565(v: u16) u32 {
     const r: u32 = v & 31;
     const g: u32 = v >> 5 & 63;
@@ -196,7 +196,7 @@ fn spanEnd(v: f64, limit: u32) usize {
 /// A 4x4 ordered dither, in eighths of a 5-bit step.
 const bayer = [4][4]u8{ .{ 0, 8, 2, 10 }, .{ 12, 4, 14, 6 }, .{ 3, 11, 1, 9 }, .{ 15, 7, 13, 5 } };
 
-/// 0xAARRGGBB as RGB565 (the GPU's: red in the low 5 bits), dithered by
+/// 0xAARRGGBB as BGR565 (the GPU's: red in the low 5 bits), dithered by
 /// its place.
 fn dither565(px: u32, x: u32, y: u32) u16 {
     const t: u32 = bayer[y & 3][x & 3];
@@ -215,7 +215,7 @@ pub const Loader = struct {
     /// Its last rows kept as shown (`Prepared.bottom`).
     bottom_rows: u32,
     /// How the image wanted is made ready.
-    kind: Kind = .rgb565,
+    kind: Kind = .bgr565,
     /// The image wanted, and the one last given by `poll`.
     wanted: appearance.ImagePath = .{},
     given: appearance.ImagePath = .{},
@@ -315,9 +315,9 @@ test "an image is scaled to cover the screen, cropped in the middle" {
     try testing.expectEqual(@as(u32, 0xff007f7f), half[1]);
 }
 
-test "RGB565 is dithered: a level between two steps comes out as both" {
+test "BGR565 is dithered: a level between two steps comes out as both" {
     const pixels: [16]u32 = @splat(0xff848484);
-    var p = try fromPixels(testing.allocator, &pixels, 4, 4, .rgb565, 0);
+    var p = try fromPixels(testing.allocator, &pixels, 4, 4, .bgr565, 0);
     defer p.deinit(testing.allocator);
     var low: usize = 0;
     var high: usize = 0;
@@ -339,8 +339,8 @@ test "the bottom rows are kept as the GPU shows them, for the dock's overlay" {
     etc1.encode(&pixels, 8, 8, &blocks);
     try testing.expectEqual(etc1.decodeBlock(blocks[3])[1 * 4 + 2], e.bottom[0 * 8 + 6]);
     try testing.expectEqual(etc1.decodeBlock(blocks[2])[3 * 4 + 1], e.bottom[2 * 8 + 1]);
-    // RGB565: the dithered pixels, widened again.
-    var r = try fromPixels(testing.allocator, &pixels, 8, 8, .rgb565, 2);
+    // BGR565: the dithered pixels, widened again.
+    var r = try fromPixels(testing.allocator, &pixels, 8, 8, .bgr565, 2);
     defer r.deinit(testing.allocator);
     const v = std.mem.readInt(u16, r.data[(7 * 8 + 5) * 2 ..][0..2], .little);
     try testing.expectEqual(expand565(v), r.bottom[1 * 8 + 5]);
@@ -371,10 +371,10 @@ test "the loader makes the image wanted on a thread, and says when none is" {
     try testing.expectEqual(@as(usize, etc1.imageSize(16, 16)), image.data.len);
     // Nothing more, until another is wanted; then none.
     try testing.expect(l.poll() == null);
-    l.want(null, .rgb565);
+    l.want(null, .bgr565);
     try testing.expect(l.poll().? == .none);
     // One that is not there fails.
-    l.want("/tmp/dazzle-background-test-missing.png", .rgb565);
+    l.want("/tmp/dazzle-background-test-missing.png", .bgr565);
     const missing = while (true) {
         if (l.poll()) |o| break o;
         std.Thread.yield() catch {};
@@ -401,12 +401,12 @@ test "a built-in background's blocks are used as they are at its size, and decod
     try testing.expectEqualSlices(u8, &want, same.data);
     try testing.expectEqual(etc1.decodeBlock(blocks[2])[3 * 4 + 1], same.bottom[1 * 8 + 1]);
 
-    // Another size, or RGB565: decoded and scaled, as a PNG would be.
-    var small = try fromEtc1File(testing.allocator, &file, 4, 4, .rgb565, 0);
+    // Another size, or BGR565: decoded and scaled, as a PNG would be.
+    var small = try fromEtc1File(testing.allocator, &file, 4, 4, .bgr565, 0);
     defer small.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 4 * 4 * 2), small.data.len);
 
     // Not one: refused.
-    try testing.expectError(error.NotEtc1, fromEtc1File(testing.allocator, "PNG?", 8, 8, .rgb565, 0));
-    try testing.expectError(error.NotEtc1, fromEtc1File(testing.allocator, file[0..20], 8, 8, .rgb565, 0));
+    try testing.expectError(error.NotEtc1, fromEtc1File(testing.allocator, "PNG?", 8, 8, .bgr565, 0));
+    try testing.expectError(error.NotEtc1, fromEtc1File(testing.allocator, file[0..20], 8, 8, .bgr565, 0));
 }

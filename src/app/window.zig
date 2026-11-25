@@ -31,11 +31,11 @@
 //! small it may be with `setMinSize`, and draws at whatever size it is
 //! given at or above that.
 //!
-//! Buffers are RGB565 by default, half the memory of 32-bit ones (a
+//! Buffers are BGR565 by default, half the memory of 32-bit ones (a
 //! full-screen window's three buffers at 1920x1080 take 12 MB rather than
 //! 24): Dazzle's apps draw opaque windows of flat colours, which 16 bits
 //! show well. An app that needs more (smooth gradients, say) asks for
-//! 32-bit buffers with `setFormat`. If the shell does not take RGB565
+//! 32-bit buffers with `setFormat`. If the shell does not take BGR565
 //! buffers, they are 32-bit.
 //!
 //! While another window covers it, the shell says the window is
@@ -309,7 +309,7 @@ pub const Window = struct {
     /// The formats the shell takes T-tiled buffers in.
     tiled_formats: std.EnumSet(vc4.Format) = .{},
     /// The format the app would like its buffers in (`setFormat`).
-    wanted_format: vc4.Format = .rgb565,
+    wanted_format: vc4.Format = .bgr565,
     surface: client.Proxy = undefined,
     xdg_surface: client.Proxy = undefined,
     toplevel: client.Proxy = undefined,
@@ -1051,7 +1051,7 @@ pub const Window = struct {
 
     // --- Buffers ----------------------------------------------------------------
 
-    /// Asks for buffers in `format` from the next frame on (RGB565 unless
+    /// Asks for buffers in `format` from the next frame on (BGR565 unless
     /// asked otherwise).
     pub fn setFormat(w: *Window, wanted: vc4.Format) void {
         w.wanted_format = wanted;

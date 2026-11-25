@@ -288,13 +288,13 @@ test "the shell's textured quads copy texels exactly" {
     }
 }
 
-test "the shell's RGB565 quads give the tile buffer each texel's colour, blue first" {
+test "the shell's BGR565 quads give the tile buffer each texel's colour, blue first" {
     const w = 64;
     const h = 64;
     var pixels: [w * h]u16 = undefined;
     for (&pixels, 0..) |*px, i| px.* = @truncate(i *% 2654435761 >> 7);
-    var memory: [texture.imageSizeOf(.rgb565, w, h)]u8 = undefined;
-    texture.uploadRectOf(.rgb565, &memory, w, h, .{ .x = 0, .y = 0, .width = w, .height = h }, std.mem.sliceAsBytes(&pixels), w * 2);
+    var memory: [texture.imageSizeOf(.bgr565, w, h)]u8 = undefined;
+    texture.uploadRectOf(.bgr565, &memory, w, h, .{ .x = 0, .y = 0, .width = w, .height = h }, std.mem.sliceAsBytes(&pixels), w * 2);
     const cfg: texture.Config = .{ .type = .rgb565, .width = w, .height = h, .mag_filter = .nearest, .min_filter = .nearest };
     const p = try load("quad");
     var buf: [8]u32 = undefined;
@@ -303,10 +303,10 @@ test "the shell's RGB565 quads give the tile buffer each texel's colour, blue fi
     const r = try sim.run(p.fs.code(), .{ .uniforms = stream, .varyings = &varyings, .texture_memory = &memory });
     for (0..sim.lanes) |i| {
         // What a 32-bit target holds for it: 0xffRRGGBB, blue in the low
-        // byte, which the tile buffer stores back as the same RGB565 pixel.
+        // byte, which the tile buffer stores back as the same BGR565 pixel.
         const texel = pixels[(10 + 2 * i) * w + 3 * i];
-        try testing.expectEqual(pixel.fromRgb565(texel), r.tlb_color.?[i]);
-        try testing.expectEqual(texel, pixel.toRgb565(r.tlb_color.?[i]));
+        try testing.expectEqual(pixel.fromBgr565(texel), r.tlb_color.?[i]);
+        try testing.expectEqual(texel, pixel.toBgr565(r.tlb_color.?[i]));
     }
 }
 

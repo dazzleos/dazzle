@@ -298,7 +298,7 @@ test "a client maps a window, gets frame callbacks and buffer releases" {
     const shm = (try globals.bind(registry, p.wl_shm.name, 1, .{ .ptr = &state, .handler = State.shmEvent })).?;
     try d.roundtrip();
     try testing.expect(state.t_tiled);
-    // ARGB8888, XRGB8888 and RGB565.
+    // ARGB8888, XRGB8888 and BGR565.
     try testing.expectEqual(@as(u32, 3), state.shm_formats);
 
     // A toplevel: the first commit gets the configure.
@@ -681,8 +681,8 @@ test "app windows render, present through the compositor and resize" {
     // Frames render into T-tiled buffers the compositor can sample.
     try testing.expectEqual(@as(u32, 6), fake.frames);
     try testing.expectEqual(vc4.cl.Tiling.t, fake.last_target.?.tiling);
-    // RGB565, unless the app asks for 32 bits.
-    try testing.expectEqual(vc4.Format.rgb565, fake.last_target.?.format);
+    // BGR565, unless the app asks for 32 bits.
+    try testing.expectEqual(vc4.Format.bgr565, fake.last_target.?.format);
     while (win.frame_pending) try d.dispatch();
     try testing.expectEqual(@as(u32, 320), st.last_width.load(.monotonic));
     try testing.expect(st.titles_seen.load(.monotonic) > 0);

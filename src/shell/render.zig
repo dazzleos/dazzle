@@ -7,7 +7,7 @@
 //!
 //! Window contents are textures: clients' dma-bufs used in place (they
 //! render in the GPU's T-tiled layout, which the texture unit reads), or
-//! copies of shared-memory buffers, in 32-bit or RGB565 pixels. The quad
+//! copies of shared-memory buffers, in 32-bit or BGR565 pixels. The quad
 //! shader is shaders/quad.zig.
 //!
 //! A display the other way from the orientation chosen (the Touch Display
@@ -869,15 +869,15 @@ pub const Renderer = struct {
                 try r.owned.put(r.gpa, bo.handle, bo);
                 r.background_image = .{ .handle = bo.handle, .width = p.width, .height = p.height, .compressed = true };
             },
-            .rgb565 => r.background_image = try uploadPixels(r, null, p.data, p.width, p.height, p.width * 2, .rgb565),
+            .bgr565 => r.background_image = try uploadPixels(r, null, p.data, p.width, p.height, p.width * 2, .bgr565),
         }
     }
 
     /// How a background image is best made for this GPU: ETC1, if it
     /// decodes it as expected (checked once, by drawing a test image and
-    /// reading it back), and otherwise RGB565.
+    /// reading it back), and otherwise BGR565.
     pub fn backgroundKind(r: *Renderer) background_mod.Kind {
-        return if (r.etc1Order()) |order| .{ .etc1 = order } else .rgb565;
+        return if (r.etc1Order()) |order| .{ .etc1 = order } else .bgr565;
     }
 
     fn etc1Order(r: *Renderer) ?etc1.ByteOrder {
@@ -895,7 +895,7 @@ pub const Renderer = struct {
                 return order;
             }
         }
-        sys.print(sys.log_warning ++ "dazzle-shell: the GPU does not decode ETC1 as expected: background images are RGB565\n", .{});
+        sys.print(sys.log_warning ++ "dazzle-shell: the GPU does not decode ETC1 as expected: background images are BGR565\n", .{});
         return null;
     }
 
