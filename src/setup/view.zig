@@ -40,6 +40,17 @@ pub const pages = [_]Page{ .hello, .keyboard, .time, .hostname, .wifi, .apps };
 /// Keys lit on the keyboard's picture: those with Linux key codes below
 /// this (every one it draws).
 const key_codes = 128;
+/// The most characters typed shown at once (the oldest go first).
+const max_typed = 40;
+/// How long a character typed is shown; how long the label stays after
+/// the last; and how long it takes to fade in and out.
+const typed_life_ns = 3 * std.time.ns_per_s;
+const typed_idle_ns = 1500 * std.time.ns_per_ms;
+const typed_fade_ns = 300 * std.time.ns_per_ms;
+
+/// A character typed, and when.
+const Typed = struct { char: u21, at_ns: u64 };
+
 /// How long a key let go takes to stop being lit.
 const key_fade_ns: f32 = 300 * std.time.ns_per_ms;
 
@@ -137,6 +148,12 @@ pub const Setup = struct {
         keys_held: std.StaticBitSet(key_codes) = .empty,
         keys_let_go: std.StaticBitSet(key_codes) = .empty,
         key_let_go_ns: [key_codes]u64 = @splat(0),
+        /// What was typed on the keyboard page, the oldest first (each
+        /// gone a while after), and since when the label has been showing
+        /// (null: it is not).
+        typed: [max_typed]Typed = undefined,
+        typed_len: usize = 0,
+        typed_shown_ns: ?u64 = null,
         /// Every keyboard shown, to choose from; and one chosen there that
         /// is not one of the language's likely ones (offered beside them).
         choosing_keyboard: bool = false,
@@ -174,6 +191,11 @@ pub const Setup = struct {
         /// A key pressed or let go anywhere on the page (while the field
         /// types it): it lights on the keyboard's picture.
         fn watchKey(st: *State, k: kete.Event.Key) bool {
+            if (k.pressed) {
+                if (k.char) |c| {
+                    if (c >= ' ') st.typeChar(c);
+                } else if (k.key == .backspace and st.typed_len > 0) st.typed_len -= 1;
+            }
             const code = kete.window.evdev.codeOf(k.key) orelse return false;
             if (code >= key_codes) return false;
             if (k.pressed) {
@@ -184,6 +206,17 @@ pub const Setup = struct {
                 st.keys_let_go.set(code);
             }
             return false;
+        }
+
+        /// A character typed on the keyboard page: shown (its time set
+        /// when the page is next made), the oldest gone if there is no room.
+        fn typeChar(st: *State, c: u21) void {
+            if (st.typed_len == st.typed.len) {
+                std.mem.copyForwards(Typed, st.typed[0 .. st.typed.len - 1], st.typed[1..]);
+                st.typed_len -= 1;
+            }
+            st.typed[st.typed_len] = .{ .char = c, .at_ns = 0 };
+            st.typed_len += 1;
         }
 
         /// One of the keyboards offered.
@@ -280,9 +313,8 @@ pub const Setup = struct {
         }) }) });
     }
 
-    /// A page: its heading, what it asks, and the buttons.
+    /// A page: what it asks, and the buttons.
     fn page(self: *const Setup, cx: *kete.BuildContext, state: *State, nav: *Nav) kete.Widget {
-        const t = cx.theme();
         const which = pages[state.page];
         const body = switch (which) {
             .hello => unreachable, // the whole window (see `build`)
@@ -303,7 +335,6 @@ pub const Setup = struct {
         // height there is (the others are as tall as they need).
         const fill = which == .time or which == .keyboard;
         return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = fill, .spacing = 24, .children = &.{
-            cx.make(kete.Text{ .text = locale.text("Welcome to Dazzle"), .style = .{ .size = 40, .color = t.primary } }),
             if (fill) cx.make(kete.Expanded{ .child = body }) else body,
             cx.make(kete.Row{ .spacing = 12, .main_axis_alignment = .end, .children = &.{
                 if (state.page > 0) cx.make(kete.OutlinedButton{ .label = locale.text("Back"), .icon = .arrow_back, .on_press = .of(nav, Nav.back) }) else cx.make(kete.SizedBox.empty),
@@ -314,9 +345,8 @@ pub const Setup = struct {
 
     /// The keyboard: the language's likely ones to choose from (the
     /// likeliest chosen to begin with), and every one a button away; its
-    /// keys drawn, lit as they are pressed, and a field to try it in.
+    /// keys drawn, lit as they are pressed, and what is typed shown.
     fn keyboardPage(cx: *kete.BuildContext, state: *State) kete.Widget {
-        const t = cx.theme();
         const a = cx.arena;
         const now = cx.now();
         // The keys' light: held, all of it; let go, fading.
@@ -360,17 +390,16 @@ pub const Setup = struct {
             .cross_axis_alignment = .stretch,
             .spacing = 16,
             .children = a.dupe(kete.Widget, &.{
-                cx.make(kete.Column{ .cross_axis_alignment = .start, .fill = false, .spacing = 4, .children = a.dupe(kete.Widget, &.{
-                    cx.make(kete.Text{ .text = locale.text("Keyboard"), .style = .{ .size = 28 } }),
-                    cx.make(kete.Text{ .text = locale.text("Choose the one that matches the keys on yours"), .style = .{ .size = 18, .color = t.on_surface_variant } }),
-                }) catch &.{} }),
-                cx.make(kete.Wrap{ .spacing = 8, .run_spacing = 8, .cross_axis_alignment = .center, .children = choices.items }),
+                cx.make(kete.Wrap{ .spacing = 8, .run_spacing = 8, .alignment = .center, .cross_axis_alignment = .center, .children = choices.items }),
                 // As big as there is room for (no bigger than a key 40
                 // pixels across).
                 cx.make(kete.Expanded{ .child = cx.make(kete.Align{ .alignment = .center, .child = cx.make(kete.ScaleDown{
                     .child = cx.make(kete_vc4.KeyboardPicture{ .keyboard = state.keyboard, .unit = 40, .light = light }),
                 }) }) }),
-                cx.make(kete.TextField{ .placeholder = locale.text("Type here to try it"), .width = std.math.inf(f32) }),
+                // What is typed: shown while typing, each character gone a
+                // while after (there is no field to type in: the label
+                // only shows what the layout types).
+                typedLabel(cx, state),
             }) catch &.{},
         }) });
         return cx.make(kete.Dialog{
@@ -383,6 +412,50 @@ pub const Setup = struct {
             .width = 480,
             .child = page_body,
         });
+    }
+
+    /// What was typed on the keyboard page, in the middle, large: fading in
+    /// as it is typed, each character gone a while after, and fading out
+    /// once nothing is (it takes the same room, shown or not).
+    fn typedLabel(cx: *kete.BuildContext, state: *State) kete.Widget {
+        const now = cx.now();
+        const a = cx.arena;
+        // Characters typed since: from now.
+        for (state.typed[0..state.typed_len]) |*c| if (c.at_ns == 0) {
+            c.at_ns = @max(now, 1);
+        };
+        // Those shown long enough, gone.
+        var keep: usize = 0;
+        for (state.typed[0..state.typed_len]) |c| if (now -| c.at_ns < typed_life_ns) {
+            state.typed[keep] = c;
+            keep += 1;
+        };
+        state.typed_len = keep;
+        var last: u64 = 0;
+        for (state.typed[0..state.typed_len]) |c| last = @max(last, c.at_ns);
+        var alpha: f32 = 0;
+        if (state.typed_len > 0) {
+            if (state.typed_shown_ns == null) state.typed_shown_ns = now;
+            const in = @min(1, @as(f32, @floatFromInt(now -| state.typed_shown_ns.?)) / typed_fade_ns);
+            const idle = now -| last;
+            const out = if (idle < typed_idle_ns) 1 else 1 - @min(1, @as(f32, @floatFromInt(idle - typed_idle_ns)) / typed_fade_ns);
+            alpha = @min(in, out);
+            if (out <= 0) {
+                // Faded out: what was typed goes with it.
+                state.typed_len = 0;
+                state.typed_shown_ns = null;
+            } else cx.requestFrame();
+        } else state.typed_shown_ns = null;
+        var text: std.ArrayList(u8) = .empty;
+        for (state.typed[0..state.typed_len]) |c| {
+            var buf: [4]u8 = undefined;
+            const n = std.unicode.utf8Encode(c.char, &buf) catch continue;
+            text.appendSlice(a, buf[0..n]) catch {};
+        }
+        return cx.make(kete.SizedBox{ .height = 56, .child = cx.make(kete.Align{ .alignment = .center, .child = cx.make(kete.Opacity{
+            .opacity = alpha,
+            .child = cx.make(kete.Text{ .text = text.items, .wrap = false, .ellipsis = true, .style = .{ .size = 32 } }),
+        }) }) });
     }
 
     /// The time zone: on a map, or found by its city.
@@ -888,7 +961,7 @@ test "naming the computer, then waiting for the card" {
         try testing.expect(!overflows(u.root.?));
     }
     // The language; then the time zone and the name, which fit too.
-    try testing.expect(findText(u.root.?, "Choose the one that matches the keys on yours") != null);
+    try testing.expect(findType(u.root.?, kete_vc4.KeyboardPicture) != null);
     click(u, findText(u.root.?, "Next").?);
     for ([_][2]u32{ .{ 1920, 1080 }, .{ 640, 480 } }) |size| {
         Draw(u, &report, &actions, &now, size);
@@ -1105,9 +1178,8 @@ test "the keyboard: the language's likely ones, every one a button away, and the
     try testing.expectEqual(locale.Keyboard.de, st.keyboard);
     try testing.expect(!st.choosing_keyboard);
     try testing.expect(findText(u.root.?, "Deutsch (QWERTZ)") != null);
-    // Q pressed (in the field): lit while held, fading once let go.
-    const field = findType(u.root.?, kete.TextField).?;
-    u.focus(field);
+    // Q pressed: lit while held, fading once let go; and shown typed.
+    u.focus(null);
     const light = struct {
         fn of(uu: *kete.ui.WindowUi) f32 {
             return findType(uu.root.?, kete_vc4.KeyboardPicture).?.widget.as(kete_vc4.KeyboardPicture).?.light[16];
@@ -1120,9 +1192,15 @@ test "the keyboard: the language's likely ones, every one a button away, and the
     u.frame(1280, 720, 6 * ms, setup);
     u.frame(1280, 720, 106 * ms, setup);
     try testing.expect(light(u) > 0 and light(u) < 1);
+    try testing.expect(findText(u.root.?, "q") != null);
     u.frame(1280, 720, 1000 * ms, setup);
     try testing.expectEqual(@as(f32, 0), light(u));
     try testing.expect(!overflows(u.root.?));
+    // Some time later, gone (and nothing to type in).
+    u.frame(1280, 720, 6000 * ms, setup);
+    u.frame(1280, 720, 6001 * ms, setup);
+    try testing.expect(findText(u.root.?, "q") == null);
+    try testing.expect(findType(u.root.?, kete.TextField) == null);
 }
 
 test "the first page: hello in every language; one picked, its languages, and back" {

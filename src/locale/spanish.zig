@@ -77,15 +77,12 @@ pub const latin_america = [_][2][]const u8{
 
     // --- Setup ----------------------------------------------------------------
     .{ "Setup", "Configuración inicial" },
-    .{ "Welcome to Dazzle", "Te damos la bienvenida a Dazzle" },
     .{ "Language and keyboard", "Idioma y teclado" },
     .{ "Language", "Idioma" },
     .{ "Keyboard", "Teclado" },
     .{ "Time zone", "Zona horaria" },
-    .{ "Type here to try it", "Escribe aquí para probarlo" },
     .{ "Other keyboards", "Otros teclados" },
     .{ "All keyboards", "Todos los teclados" },
-    .{ "Choose the one that matches the keys on yours", "Elija el que coincide con las teclas del suyo" },
     .{ "Type here to try the keyboard", "Escribe aquí para probar el teclado" },
     .{ "Search", "Buscar" },
     .{ "No language matches", "Ningún idioma coincide" },
