@@ -12,7 +12,8 @@
 //!
 //! Everything moves by the time since it started (or since a word was
 //! picked, or the arrow pressed), so the page is made again each frame
-//! while anything moves.
+//! while anything moves: faded with `kete.Opacity`, placed (in proportion
+//! to the screen) with `kete.Place`.
 
 const std = @import("std");
 const kete = @import("kete");
@@ -168,23 +169,23 @@ pub const Page = struct {
             }
             if (alpha <= 0) continue;
             const outline = if (hint_word == i) hint_alpha else 0;
-            var body = cx.make(kete.RoundedBox{
+            var body = cx.make(kete.Opacity{ .opacity = alpha, .child = cx.make(kete.RoundedBox{
                 .border_color = t.primary.withAlpha(outline),
                 .border_width = 2,
                 .radius = .all(word_size),
                 .child = cx.make(kete.Padding{ .padding = .symmetric(28, 10), .child = cx.make(kete.Text{
                     .text = w.text,
                     .wrap = false,
-                    .style = .{ .size = word_size, .color = t.on_surface.withAlpha(alpha) },
+                    .style = .{ .size = word_size },
                 }) }),
-            });
+            }) });
             // Only the words showing can be picked.
             if (st.chosen == null) {
                 const press = a.create(Press) catch continue;
                 press.* = .{ .state = st, .word = i, .now = now };
                 body = cx.make(kete.Pressable{ .on_press = .of(press, Press.press), .child = body });
             }
-            layers.append(a, cx.make(At{ .x = at[0], .y = at[1], .child = body })) catch {};
+            layers.append(a, cx.make(kete.Place{ .at = at, .child = body })) catch {};
         }
 
         // The languages the word picked is "hello" in, and the way back.
@@ -199,54 +200,26 @@ pub const Page = struct {
                     .child = cx.make(kete.Padding{ .padding = .symmetric(0, 14), .child = cx.make(kete.Text{
                         .text = l.name(),
                         .text_align = .center,
-                        .style = .{ .size = 26, .color = t.on_surface.withAlpha(list_alpha) },
+                        .style = .{ .size = 26 },
                     }) }),
                 }) })) catch {};
             }
             const back = a.create(Back) catch return cx.make(kete.Overlay{ .children = layers.items });
             back.* = .{ .state = st, .now = now };
             rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 16 }, .child = cx.make(kete.Pressable{ .on_press = .of(back, Back.back), .child = cx.make(kete.RoundedBox{
-                .border_color = t.outline.withAlpha(list_alpha),
+                .border_color = t.outline,
                 .border_width = 1.5,
                 .radius = .all(28),
-                .child = cx.make(kete.SizedBox{ .width = 56, .height = 56, .child = cx.make(kete.Align{ .child = cx.make(kete.Icon{
-                    .icon = .arrow_back,
-                    .color = t.on_surface.withAlpha(list_alpha),
-                }) }) }),
+                .child = cx.make(kete.SizedBox{ .width = 56, .height = 56, .child = cx.make(kete.Align{ .child = cx.make(kete.Icon{ .icon = .arrow_back }) }) }),
             }) }) })) catch {};
             // Below the word (where it stops).
-            layers.append(a, cx.make(At{ .x = 0.5, .y = top[1], .top = word_size, .child = cx.make(kete.Column{
-                .fill = false,
-                .cross_axis_alignment = .center,
-                .children = rows.items,
+            layers.append(a, cx.make(kete.Place{ .at = top, .anchor = .top_center, .offset = .{ 0, word_size }, .child = cx.make(kete.Opacity{
+                .opacity = list_alpha,
+                .child = cx.make(kete.Column{ .fill = false, .cross_axis_alignment = .center, .children = rows.items }),
             }) })) catch {};
         }
         if (busy) cx.requestFrame();
         return cx.make(kete.RoundedBox{ .color = t.surface, .child = cx.make(kete.Overlay{ .children = layers.items }) });
-    }
-};
-
-/// `child` with its middle at (`x`, `y`) of the area (0 to 1 across and
-/// down), or (with `top`) its top that many pixels below `y`; kept on the
-/// screen.
-const At = struct {
-    x: f32,
-    y: f32,
-    top: ?f32 = null,
-    child: ?kete.Widget = null,
-
-    pub fn layout(self: *const At, n: *kete.WidgetNode, c: kete.Constraints) kete.Size {
-        const size = c.biggest();
-        if (n.childCount() == 0) return size;
-        const s = n.child(0).layout(c.loosen());
-        const x = size.w * self.x - s.w / 2;
-        const y = if (self.top) |below| size.h * self.y + below else size.h * self.y - s.h / 2;
-        n.child(0).place(std.math.clamp(x, 0, @max(size.w - s.w, 0)), std.math.clamp(y, 0, @max(size.h - s.h, 0)));
-        return size;
-    }
-
-    pub fn minSize(_: *const At, n: *kete.WidgetNode, c: kete.Constraints) kete.Size {
-        return if (n.childCount() > 0) n.child(0).minSize(c.loosen()) else .{};
     }
 };
 
