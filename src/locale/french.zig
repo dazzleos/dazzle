@@ -366,6 +366,7 @@ pub const france = [_][2][]const u8{
     .{ "Blinks green when the SD card is being read or written", "Clignote en vert pendant la lecture ou l’écriture de la carte SD" },
     .{ "Power LED", "Voyant d’alimentation" },
     .{ "Glows red when the board has 5 V power", "S’allume en rouge quand la carte est alimentée en 5 V" },
+    .{ "The computer is inside it, under the keys", "L’ordinateur est dedans, sous les touches" },
     .{ "Input device", "Périphérique d’entrée" },
     .{ "Hub", "Concentrateur" },
     .{ "Network adapter", "Adaptateur réseau" },

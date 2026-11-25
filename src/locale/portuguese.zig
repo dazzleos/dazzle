@@ -366,6 +366,7 @@ pub const brazil = [_][2][]const u8{
     .{ "Blinks green when the SD card is being read or written", "Pisca em verde quando o cartão SD está sendo lido ou gravado" },
     .{ "Power LED", "LED de energia" },
     .{ "Glows red when the board has 5 V power", "Acende em vermelho quando a placa recebe 5 V" },
+    .{ "The computer is inside it, under the keys", "O computador está dentro dele, sob as teclas" },
     .{ "Input device", "Dispositivo de entrada" },
     .{ "Hub", "Hub" },
     .{ "Network adapter", "Adaptador de rede" },

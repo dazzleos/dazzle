@@ -67,6 +67,8 @@ pub const Kind = enum {
     act_led,
     /// Red 5V power LED.
     pwr_led,
+    /// The keys of a computer built into a keyboard (the Pi 400).
+    keyboard,
 };
 
 pub const Part = struct {
@@ -399,6 +401,32 @@ const cm5: Board = .{ .width = 55, .height = 40, .corner = 1.5, .holes = &cm4_ho
     chip(.pmic, "DA9091", 21, 32, 7),
 } };
 
+// --- The Pi 400: a Pi 4 in a keyboard (286 × 122) ------------------------------
+
+/// Seen from above, the back (with the connectors) at the top: the
+/// keyboard's outline and its connectors, where the product brief's
+/// picture of its back shows them (mirrored, as that looks at it from
+/// behind: from left to right there, the GPIO header, the microSD slot,
+/// two micro HDMI, USB-C power, two USB 3.0, USB 2.0 and Ethernet), and
+/// its chips under the keys, where photos of its board show them.
+const pi400: Board = .{ .width = 286, .height = 122, .corner = 8, .holes = &.{}, .parts = &.{
+    header(.gpio, 217, 4.5, 20),
+    facing(at(.micro_sd, 184, 2.5, 12, 5), .top),
+    facing(at(.micro_hdmi, 171, 3, 7.8, 6), .top),
+    facing(at(.micro_hdmi, 160, 3, 7.8, 6), .top),
+    facing(at(.usb_c_power, 146, 3, 9, 6), .top),
+    facing(at(.usb, 132, 4, 14.5, 8), .top),
+    facing(at(.usb, 117, 4, 14.5, 8), .top),
+    facing(at(.usb, 101, 4, 14.5, 8), .top),
+    facing(at(.ethernet, 86, 6, 16, 12), .top),
+    at(.keyboard, 143, 69, 262, 88),
+    under(lidded(chip(.soc, "BCM2711", 168, 30, 15))),
+    under(chip(.ram, "LPDDR4", 150, 30, 12)),
+    under(chip(.usb_controller, "VL805", 118, 24, 9)),
+    under(chip(.ethernet_phy, "BCM54213PE", 96, 24, 6.5)),
+    under(at(.wireless_can, 240, 24, 12, 10.5)),
+} };
+
 /// The board's drawing, from its model (as the device tree gives it:
 /// "Raspberry Pi 3 Model B Plus Rev 1.3"); null for a board not known.
 pub fn forModel(model: []const u8) ?*const Board {
@@ -417,6 +445,7 @@ pub fn forModel(model: []const u8) ?*const Board {
     if (has(model, "Zero 2 W")) return &pi_zero_2_w;
     if (has(model, "Zero W")) return &pi_zero_w;
     if (has(model, "Zero")) return &pi_zero;
+    if (has(model, "Pi 400")) return &pi400;
     if (has(model, "5 Model B")) return &pi5_b;
     if (has(model, "4 Model B")) return &pi4_b;
     if (has(model, "3 Model B Plus") or has(model, "3 Model B+")) return &pi3_b_plus;
@@ -475,6 +504,7 @@ pub fn describe(p: *const Part) struct { title: []const u8, about: []const u8 } 
         .edge => .{ .title = locale.text("Edge connector"), .about = locale.text("Plugs into a carrier board, which has the connectors") },
         .act_led => .{ .title = locale.text("Activity LED"), .about = locale.text("Blinks green when the SD card is being read or written") },
         .pwr_led => .{ .title = locale.text("Power LED"), .about = locale.text("Glows red when the board has 5 V power") },
+        .keyboard => .{ .title = locale.text("Keyboard"), .about = locale.text("The computer is inside it, under the keys") },
     };
 }
 
@@ -483,6 +513,7 @@ const testing = std.testing;
 test "boards by their model" {
     try testing.expect(forModel("Raspberry Pi 5 Model B Rev 1.0").? == &pi5_b);
     try testing.expect(forModel("Raspberry Pi 4 Model B Rev 1.4").? == &pi4_b);
+    try testing.expect(forModel("Raspberry Pi 400 Rev 1.0").? == &pi400);
     try testing.expect(forModel("Raspberry Pi 3 Model B Plus Rev 1.3").? == &pi3_b_plus);
     try testing.expect(forModel("Raspberry Pi 3 Model B Rev 1.2").? == &pi3_b);
     try testing.expect(forModel("Raspberry Pi 3 Model A Plus Rev 1.0").? == &pi3_a_plus);
@@ -516,7 +547,7 @@ test "parts are found where they are, those on top first" {
 }
 
 test "every part is on or at the edge of its board" {
-    const all = [_]*const Board{ &pi1_a, &pi1_b, &pi1_a_plus, &pi1_b_plus, &pi2_b, &pi2_b_v12, &pi3_b, &pi3_b_plus, &pi3_a_plus, &pi4_b, &pi5_b, &pi_zero, &pi_zero_w, &pi_zero_2_w, &cm1, &cm3, &cm3_plus, &cm4, &cm5 };
+    const all = [_]*const Board{ &pi1_a, &pi1_b, &pi1_a_plus, &pi1_b_plus, &pi2_b, &pi2_b_v12, &pi3_b, &pi3_b_plus, &pi3_a_plus, &pi4_b, &pi400, &pi5_b, &pi_zero, &pi_zero_w, &pi_zero_2_w, &cm1, &cm3, &cm3_plus, &cm4, &cm5 };
     for (all) |b| for (b.parts) |p| {
         try testing.expect(p.rect.x + p.rect.w > 0 and p.rect.x < b.width);
         try testing.expect(p.rect.y + p.rect.h > 0 and p.rect.y < b.height);

@@ -605,6 +605,33 @@ fn drawPart(c: *gfx.Canvas, part: *const board.Part, r: gfx.Rect, s: f32, ink: C
             };
             c.strokeRoundedRect(lens, .all(0.15 * s), line, ink.withAlpha(ink.a * 0.75));
         },
+        .keyboard => {
+            c.strokeRoundedRect(r, .all(2 * s), line, ink);
+            // Rows of keys: the function keys, four of letters and numbers,
+            // and the space bar's.
+            const rows = 6;
+            const gap = 1.2 * s;
+            const key_h = (r.h - gap * (rows + 1)) / rows;
+            for (0..rows) |row| {
+                const y = r.y + gap + @as(f32, @floatFromInt(row)) * (key_h + gap);
+                if (row == rows - 1) {
+                    // The space bar, between smaller keys.
+                    const unit = (r.w - gap) / 15;
+                    var x = r.x + gap;
+                    for ([_]f32{ 1.5, 1, 1.5, 6, 1.5, 1, 1, 1, 1 }) |w| {
+                        c.strokeRoundedRect(.{ .x = x, .y = y, .w = w * unit - gap, .h = key_h }, .all(0.6 * s), line, ink);
+                        x += w * unit;
+                    }
+                    continue;
+                }
+                const keys: f32 = if (row == 0) 16 else 15;
+                const kw = (r.w - gap) / keys;
+                for (0..@intFromFloat(keys)) |k| {
+                    const x = r.x + gap + @as(f32, @floatFromInt(k)) * kw;
+                    c.strokeRoundedRect(.{ .x = x, .y = y, .w = kw - gap, .h = key_h }, .all(0.6 * s), line, ink);
+                }
+            }
+        },
         .edge => {
             // The contacts.
             const pitch = 1.2 * s;
