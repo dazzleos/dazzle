@@ -22,8 +22,6 @@ pub const france = [_][2][]const u8{
     .{ "A micro USB port: for a keyboard, mouse or USB drive (through an adapter or hub)", "Un port micro USB : pour un clavier, une souris ou une clé USB (avec un adaptateur ou un concentrateur)" },
     .{ "For keyboards, mice, USB drives and network adapters", "Pour les claviers, souris, clés USB et adaptateurs réseau" },
     .{ "Choose a network to connect to, or skip to set up the network later in Settings.", "Choisissez un réseau auquel vous connecter, ou passez cette étape pour configurer le réseau plus tard dans les Paramètres." },
-    .{ "The list of apps could not be got: {s}. You can install apps later in Settings.", "Impossible d’obtenir la liste des applis : {s}. Vous pourrez installer des applis plus tard dans les Paramètres." },
-    .{ "They are installed when you finish. You can add or remove apps later in Settings.", "Elles sont installées quand vous terminez. Vous pourrez ajouter ou supprimer des applis plus tard dans les Paramètres." },
     .{ "Settings", "Paramètres" },
     .{ "Volume", "Volume" },
     .{ "Muted", "Muet" },
@@ -78,12 +76,9 @@ pub const france = [_][2][]const u8{
     .{ "Connect to Wi-Fi", "Se connecter au Wi-Fi" },
     .{ "Scanning for networks…", "Recherche de réseaux…" },
     .{ "No networks found", "Aucun réseau trouvé" },
-    .{ "Choose your apps", "Choisissez vos applis" },
     .{ "Getting the list of apps…", "Récupération de la liste des applis…" },
     .{ "Getting the SD card ready", "Préparation de la carte SD" },
     .{ "The SD card could not be prepared", "Impossible de préparer la carte SD" },
-    .{ "Installing {s}", "Installation de {s}" },
-    .{ "{d} of {d}", "{d} sur {d}" },
     .{ "Back", "Retour" },
     .{ "Next", "Suivant" },
     .{ "Skip", "Passer" },
@@ -391,7 +386,6 @@ pub const france = [_][2][]const u8{
 /// Canada's, where it differs.
 pub const canada = [_][2][]const u8{
     .{ "Screenshot saved", "Capture d’écran enregistrée" },
-    .{ "Choose your apps", "Choisissez vos applications" },
     .{ "Apps", "Applications" },
     .{ "Weekends", "La fin de semaine" },
 };

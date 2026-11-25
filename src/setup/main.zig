@@ -1,12 +1,11 @@
 //! Dazzle's setup app: runs on the first start only, with the whole screen
-//! (the shell shows no dock while it runs). It asks for the computer's name
-//! and the apps to install (and, later, more), a page at a time (see
-//! view.zig), while init's system manager makes the SD card's free space a
-//! place for files (see sys.system). The list of apps is downloaded once
-//! that is ready (they are kept there; see the store module). Then it
-//! installs the apps chosen, tells the manager to finish, which names the
-//! computer and marks setup done, and ends. It lives in /os/shell with the
-//! shell: it cannot be removed.
+//! (the shell shows no dock while it runs). It asks for the language, the
+//! keyboard, the computer's name, the network and the time zone, a page at
+//! a time (see view.zig), while init's system manager makes the SD card's
+//! free space a place for files (see sys.system). Then it tells the manager
+//! to finish, which names the computer and marks setup done, and ends.
+//! Apps are installed from Settings. It lives in /os/shell with the shell:
+//! it cannot be removed.
 //!
 //!     dazzle-setup
 
@@ -16,8 +15,6 @@ const sys = @import("sys");
 const locale = @import("locale");
 const kete = @import("kete");
 const kete_vc4 = @import("kete_vc4");
-const store = @import("store");
-const build_info = @import("build_info");
 const names = @import("names.zig");
 const view = @import("view.zig");
 
@@ -42,7 +39,6 @@ const Shown = struct {
     report: ?proto.Report = null,
     net_report: ?net.Report = null,
     ethernet_connected: bool = false,
-    apps: view.Apps = .{},
 
     pub fn build(s: *const Shown, cx: *kete.BuildContext) kete.Widget {
         return cx.make(view.Setup{
@@ -51,7 +47,6 @@ const Shown = struct {
             .report = if (s.report) |*r| r else null,
             .wifi = if (s.net_report) |*r| r else null,
             .ethernet_connected = s.ethernet_connected,
-            .apps = s.apps,
             .actions = s.actions,
         });
     }
@@ -91,16 +86,7 @@ fn run(init: std.process.Init) !void {
         .keyboard = start_locale.keyboard,
         .timezone = start_locale.language.timeZone(),
     };
-    // The apps that can be installed (once the card is ready), and those
-    // chosen, left to install.
-    var server_url_buf: [store.max_url_len]u8 = undefined;
-    var apps: store.Store = .init(gpa, store.loadServerUrl(&server_url_buf, build_info.apps_url));
     var named = false;
-    var wait_network_until: u64 = 0;
-    var retry_at: u64 = 0;
-    var queue: ?u64 = null;
-    var installed: usize = 0;
-    var total: usize = 0;
 
     var shown: Shown = .{ .suggestion = suggestion, .start_locale = start_locale, .actions = &actions };
     const window = try host.app.openWindow(.{
@@ -128,12 +114,8 @@ fn run(init: std.process.Init) !void {
 
     while (true) {
         const before_step = sys.nowNs();
-        const wait_net = named and apps.apps().len == 0 and apps.job == null and queue == null and before_step < wait_network_until;
         const wait_eth = named and before_step < wait_eth_until;
-        const wake = @min(
-            if (wait_net or apps.job != null) before_step + 250 * std.time.ns_per_ms else std.math.maxInt(u64),
-            if (wait_eth) wait_eth_until else std.math.maxInt(u64),
-        );
+        const wake = if (wait_eth) wait_eth_until else std.math.maxInt(u64);
         if (!try host.step(@max(wake -| before_step, std.time.ns_per_ms))) break;
         const now = sys.nowNs();
 
@@ -152,10 +134,11 @@ fn run(init: std.process.Init) !void {
         if (eth_connected != prev_eth_connected) {
             host.redraw();
             // If a plugged-in Ethernet cable timed out waiting for DHCP and a
-            // Wi-Fi adapter is available, step back to the Wi-Fi page.
+            // Wi-Fi adapter is available, step back to the Wi-Fi page (from
+            // the page after it, which it was passed by for the cable).
             if (!eth_connected and net_report != null and net_report.?.wifiAdapters().len > 0) {
                 if (pageState(window)) |st| {
-                    if (view.pages[st.page] == .apps and !actions.skip_wifi and actions.finish == null) {
+                    if (view.pages[st.page] == .time and !actions.skip_wifi and actions.finish == null) {
                         st.page = @intFromEnum(view.Page.wifi);
                     }
                 }
@@ -172,14 +155,12 @@ fn run(init: std.process.Init) !void {
             host.redraw();
         }
         // The computer's name, confirmed on its page: set now so the
-        // network connects with it before the list of apps is fetched.
+        // network connects with it.
         if (actions.hostname) |h| {
             actions.hostname = null;
             if (!named) {
                 named = true;
                 wait_eth_until = now + 3 * std.time.ns_per_s;
-                wait_network_until = now + 10 * std.time.ns_per_s;
-                retry_at = 0;
             }
             worker.setHostname(h);
             host.redraw();
@@ -187,8 +168,6 @@ fn run(init: std.process.Init) !void {
         if (actions.connect) |j| {
             actions.connect = null;
             worker.connect(j);
-            wait_network_until = now + 10 * std.time.ns_per_s;
-            retry_at = 0;
             host.redraw();
         }
         if (actions.disconnect) {
@@ -198,8 +177,6 @@ fn run(init: std.process.Init) !void {
         }
         if (actions.skip_wifi) {
             actions.skip_wifi = false;
-            wait_network_until = 0;
-            retry_at = 0;
             host.redraw();
         }
 
@@ -208,22 +185,8 @@ fn run(init: std.process.Init) !void {
         const wifi_selected = if (page_state) |st| st.has_selected else false;
         worker.setPageState(on_wifi_page, wifi_selected, actions.finish != null);
 
-        const storage_now: proto.StorageState = if (report) |r| r.storage else .none;
-        const net_ready = if (net_report) |r| r.ready else false;
-        // The list of apps, kept on the card: once the computer is named
-        // and the card and network are ready, and again every while until
-        // it comes (the network is brought up once the name is confirmed).
-        if (apps.poll()) host.redraw();
-        if (named and storage_now == .ready and apps.job == null and apps.apps().len == 0 and queue == null and now >= retry_at) {
-            if (net_ready or (!on_wifi_page and now >= wait_network_until)) {
-                apps.refresh(true);
-                retry_at = now + 10 * std.time.ns_per_s;
-                host.redraw();
-            }
-        }
         // The pages are done: finish once the card is ready (or there is
-        // none, or it failed and that has been accepted), after installing
-        // the apps chosen.
+        // none, or it failed and that has been accepted).
         if (actions.finish) |h| {
             const storage: proto.StorageState = if (report) |r| r.storage else .none;
             const can = switch (storage) {
@@ -231,29 +194,7 @@ fn run(init: std.process.Init) !void {
                 .failed => actions.without_storage,
                 .preparing, .unprepared => false,
             };
-            // The apps first (with a card to put them on), one at a time.
-            var apps_done = true;
-            if (can and storage == .ready) {
-                if (apps.job != null) {
-                    apps_done = false;
-                } else {
-                    if (queue == null) {
-                        const n = @min(apps.apps().len, view.max_apps);
-                        queue = actions.apps & if (n == 64) ~@as(u64, 0) else (@as(u64, 1) << @intCast(n)) - 1;
-                        total = @popCount(queue.?);
-                    }
-                    if (queue.? != 0) {
-                        const item = apps.apps()[@ctz(queue.?)];
-                        queue.? &= queue.? - 1;
-                        installed = total - @popCount(queue.?) - 1;
-                        print("dazzle-setup: installing {s}\n", .{item.name});
-                        apps.install(item.name);
-                        apps_done = false;
-                        host.redraw();
-                    }
-                }
-            }
-            if (can and apps_done and !finish_sent) {
+            if (can and !finish_sent) {
                 finish_sent = true;
                 worker.finish(h);
             }
@@ -265,14 +206,6 @@ fn run(init: std.process.Init) !void {
             r.ethernetConnected() or (r.ethernetCarrier() and (!named or now < wait_eth_until))
         else
             false;
-        shown.apps = .{
-            .list = apps.apps(),
-            .loading = apps.job != null,
-            .message = apps.message(),
-            .installing = if (apps.busy()) |name| (if (name.len > 0) apps.title(name) else null) else null,
-            .done = installed,
-            .total = total,
-        };
     }
 }
 

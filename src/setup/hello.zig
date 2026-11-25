@@ -8,7 +8,8 @@
 //! languages it is "hello" in are listed under it (all its places: English
 //! in the United States, the United Kingdom and so on, the most spoken
 //! first; and any other language with the same word). Picking one of them
-//! is the language; the arrow under the list goes back to the words.
+//! is the language; the arrow along the bottom, in the middle (where
+//! the other pages' buttons are), goes back to the words.
 //!
 //! Everything moves by the time since it started (or since a word was
 //! picked, or the arrow pressed), so the page is made again each frame
@@ -20,6 +21,7 @@ const kete = @import("kete");
 const locale = @import("locale");
 
 const Language = locale.Language;
+const big = @import("big_button.zig");
 
 /// A word, and the languages it is "hello" in, the most spoken first.
 pub const Word = struct {
@@ -204,18 +206,16 @@ pub const Page = struct {
                     }) }),
                 }) })) catch {};
             }
-            const back = a.create(Back) catch return cx.make(kete.Overlay{ .children = layers.items });
-            back.* = .{ .state = st, .now = now };
-            rows.append(a, cx.make(kete.Padding{ .padding = .{ .top = 16 }, .child = cx.make(kete.Pressable{ .on_press = .of(back, Back.back), .child = cx.make(kete.RoundedBox{
-                .border_color = t.outline,
-                .border_width = 1.5,
-                .radius = .all(28),
-                .child = cx.make(kete.SizedBox{ .width = 56, .height = 56, .child = cx.make(kete.Align{ .child = cx.make(kete.Icon{ .icon = .arrow_back }) }) }),
-            }) }) })) catch {};
             // Below the word (where it stops).
             layers.append(a, cx.make(kete.Place{ .at = top, .anchor = .top_center, .offset = .{ 0, word_size }, .child = cx.make(kete.Opacity{
                 .opacity = list_alpha,
                 .child = cx.make(kete.Column{ .fill = false, .cross_axis_alignment = .center, .children = rows.items }),
+            }) })) catch {};
+            const back = a.create(Back) catch return cx.make(kete.Overlay{ .children = layers.items });
+            back.* = .{ .state = st, .now = now };
+            layers.append(a, cx.make(kete.Place{ .at = .{ 0.5, 1 }, .anchor = .bottom_center, .offset = .{ 0, -big.margin }, .child = cx.make(kete.Opacity{
+                .opacity = list_alpha,
+                .child = cx.make(big.BigButton{ .icon = .arrow_back, .on_press = .of(back, Back.back) }),
             }) })) catch {};
         }
         if (busy) cx.requestFrame();

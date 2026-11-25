@@ -1,31 +1,30 @@
-//! The setup app's window, as widgets: a page at a time, each with a Next
-//! button (Finish on the last, and Back after the first), filling the
-//! screen. The pages:
+//! The setup app's window, as widgets: a page at a time, filling the
+//! screen, each with large Back and Next buttons (Finish on the last) in
+//! the same place along the bottom, in the middle. The pages:
 //!
 //! * "Hello" in every language, to pick the language by (hello.zig): it
 //!   fills the screen, with no buttons;
 //! * the keyboard: those most likely for the language, the likeliest
 //!   chosen, and the rest one button away; with its keys drawn, lit as
-//!   they are pressed, and a field to try it in;
-//! * the time zone (the language's, until one is picked);
-//! * the computer's name, filled in with a random one;
+//!   they are pressed, and what is typed shown;
+//! * the computer's name, filled in with a random one (named, it joins the
+//!   network);
 //! * the Wi-Fi network to join (if Ethernet did not connect and there is a
 //!   Wi-Fi adapter), or Skip to set up the network later in Settings;
-//! * the apps to install (the image has none), from the catalogue, all
-//!   chosen to begin with;
+//! * the time zone (the language's, until one is picked);
 //!
 //! then finishing: if the SD card is still being prepared, a spinner says
 //! how far it has got (it started when setup did); if it could not be, why
-//! (and Continue); then the apps chosen are installed, one at a time. What
-//! the window asks for goes to the main loop through `Actions`.
+//! (and Continue). What the window asks for goes to the main loop through
+//! `Actions`.
 
 const std = @import("std");
 const kete = @import("kete");
 const kete_vc4 = @import("kete_vc4");
 const sys = @import("sys");
-const store = @import("store");
 const locale = @import("locale");
 const hello = @import("hello.zig");
+const big = @import("big_button.zig");
 
 const proto = sys.system;
 const net = sys.network;
@@ -34,8 +33,8 @@ const net = sys.network;
 /// The size the window opens at: one step at a time.
 pub const open_size = [2]u32{ 880, 620 };
 
-pub const Page = enum { hello, keyboard, time, hostname, wifi, apps };
-pub const pages = [_]Page{ .hello, .keyboard, .time, .hostname, .wifi, .apps };
+pub const Page = enum { hello, keyboard, hostname, wifi, time };
+pub const pages = [_]Page{ .hello, .keyboard, .hostname, .wifi, .time };
 
 /// Keys lit on the keyboard's picture: those with Linux key codes below
 /// this (every one it draws).
@@ -54,9 +53,6 @@ const Typed = struct { char: u21, at_ns: u64 };
 /// How long a key let go takes to stop being lit.
 const key_fade_ns: f32 = 300 * std.time.ns_per_ms;
 
-/// The most apps that can be chosen (the catalogue's first).
-pub const max_apps = 64;
-
 /// What the window asks for; the main loop does it.
 pub const Actions = struct {
     /// The computer's name, once confirmed on its page.
@@ -65,8 +61,6 @@ pub const Actions = struct {
     finish: ?proto.Hostname = null,
     /// Finish even though the card could not be prepared.
     without_storage: bool = false,
-    /// The apps to install: bit i for the catalogue's app i.
-    apps: u64 = 0,
     /// The language or keyboard picked (to use now, and keep).
     locale: ?locale.Settings = null,
     /// A Wi-Fi network to join.
@@ -92,20 +86,6 @@ pub const Actions = struct {
     };
 };
 
-/// What the apps page shows.
-pub const Apps = struct {
-    /// The catalogue's apps.
-    list: []const store.App = &.{},
-    /// Getting the catalogue.
-    loading: bool = false,
-    /// Why it could not be got.
-    message: []const u8 = "",
-    /// Installing: which app (its title), and how far through.
-    installing: ?[]const u8 = null,
-    done: usize = 0,
-    total: usize = 0,
-};
-
 /// Everything is the same size in pixels, whatever the window's: the card
 /// in the middle of it.
 pub const Setup = struct {
@@ -119,7 +99,6 @@ pub const Setup = struct {
     wifi: ?*const net.Report = null,
     /// Whether Ethernet has connected.
     ethernet_connected: bool = false,
-    apps: Apps = .{},
     actions: ?*Actions = null,
 
     pub const State = struct {
@@ -137,8 +116,6 @@ pub const Setup = struct {
         has_selected: bool = false,
         password_buf: [63]u8 = undefined,
         password_len: u8 = 0,
-        /// The apps not chosen: bit i for the catalogue's app i.
-        skipped: u64 = 0,
         language: locale.Language = .en_us,
         keyboard: locale.Keyboard = .us,
         timezone: locale.TimeZone = .utc,
@@ -244,10 +221,6 @@ pub const Setup = struct {
             if (st.actions) |a| a.locale = .{ .language = st.language, .keyboard = st.keyboard, .timezone = st.timezone };
         }
 
-        fn chosen(st: *const State, i: usize) bool {
-            return i < max_apps and st.skipped & (@as(u64, 1) << @intCast(i)) == 0;
-        }
-
         fn name(st: *const State) []const u8 {
             return st.name_buf[0..st.name_len];
         }
@@ -291,7 +264,7 @@ pub const Setup = struct {
     pub fn build(self: *const Setup, cx: *kete.BuildContext, state: *State) kete.Widget {
         const show_wifi = self.showWifi();
         if (pages[state.page] == .wifi and !show_wifi) {
-            state.page = @intFromEnum(Page.apps);
+            state.page = @intFromEnum(Page.time);
         }
         const nav = cx.arena.create(Nav) catch return cx.make(kete.SizedBox.empty);
         nav.* = .{
@@ -305,15 +278,15 @@ pub const Setup = struct {
         if (!state.finishing and pages[state.page] == .hello) {
             return cx.make(hello.Page{ .state = &state.hello, .on_pick = .of(nav, Nav.pickLanguage) });
         }
-        const content = if (state.finishing) self.finishing(cx, nav) else self.page(cx, state, nav);
-        // At most 720 pixels wide, narrower in a narrower window.
-        return cx.make(kete.RoundedBox{ .color = cx.theme().surface, .child = cx.make(kete.Align{ .child = cx.make(kete.ConstrainedBox{
+        if (state.finishing) return cx.make(kete.RoundedBox{ .color = cx.theme().surface, .child = cx.make(kete.Align{ .child = cx.make(kete.ConstrainedBox{
             .constraints = .{ .max_w = 720 },
-            .child = cx.make(kete.Padding{ .padding = .all(24), .child = content }),
+            .child = cx.make(kete.Padding{ .padding = .all(24), .child = self.finishing(cx, nav) }),
         }) }) });
+        return cx.make(kete.RoundedBox{ .color = cx.theme().surface, .child = self.page(cx, state, nav) });
     }
 
-    /// A page: what it asks, and the buttons.
+    /// A page: what it asks, in the middle (at most 720 pixels wide), and
+    /// the buttons along the bottom.
     fn page(self: *const Setup, cx: *kete.BuildContext, state: *State, nav: *Nav) kete.Widget {
         const which = pages[state.page];
         const body = switch (which) {
@@ -322,7 +295,6 @@ pub const Setup = struct {
             .time => timePage(cx, state),
             .hostname => self.hostnamePage(cx, state, nav),
             .wifi => self.wifiPage(cx, state),
-            .apps => self.appsPage(cx, state),
         };
         const last = state.page + 1 == pages.len;
         const next_label = if (last)
@@ -331,16 +303,26 @@ pub const Setup = struct {
             locale.text("Skip")
         else
             locale.text("Next");
-        // The time page's map, and the keyboard page's picture, take the
-        // height there is (the others are as tall as they need).
-        const fill = which == .time or which == .keyboard;
-        return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = fill, .spacing = 24, .children = &.{
-            if (fill) cx.make(kete.Expanded{ .child = body }) else body,
-            cx.make(kete.Row{ .spacing = 12, .main_axis_alignment = .end, .children = &.{
-                if (state.page > 0) cx.make(kete.OutlinedButton{ .label = locale.text("Back"), .icon = .arrow_back, .on_press = .of(nav, Nav.back) }) else cx.make(kete.SizedBox.empty),
-                cx.make(kete.OutlinedButton{ .label = next_label, .icon = if (last) .check else null, .trailing_icon = if (last) null else .arrow_forward, .on_press = .of(nav, Nav.next) }),
-            } }),
-        } });
+        // The keyboard page's picture takes the height there is (the others
+        // are as tall as they need, in the middle, and made smaller if there
+        // is not room on a small screen).
+        const fill = which == .keyboard;
+        const middle = cx.make(kete.ConstrainedBox{ .constraints = .{ .max_w = 720 }, .child = body });
+        return cx.make(kete.Padding{ .padding = .{ .left = 24, .right = 24, .top = 24, .bottom = big.margin }, .child = cx.make(kete.Column{
+            .cross_axis_alignment = .stretch,
+            .fill = true,
+            .spacing = 24,
+            .children = cx.arena.dupe(kete.Widget, &.{
+                cx.make(kete.Expanded{ .child = cx.make(kete.Align{
+                    .alignment = if (fill) .top_center else .center,
+                    .child = if (fill) cx.make(kete.SizedBox{ .height = std.math.inf(f32), .child = middle }) else cx.make(kete.ScaleDown{ .child = middle }),
+                }) }),
+                cx.make(kete.Row{ .spacing = 24, .main_axis_alignment = .center, .children = cx.arena.dupe(kete.Widget, &.{
+                    cx.make(big.BigButton{ .label = locale.text("Back"), .icon = .arrow_back, .on_press = .of(nav, Nav.back) }),
+                    cx.make(big.BigButton{ .label = next_label, .filled = true, .icon = if (last) .check else null, .trailing_icon = if (last) null else .arrow_forward, .on_press = .of(nav, Nav.next) }),
+                }) catch &.{} }),
+            }) catch &.{},
+        }) });
     }
 
     /// The keyboard: the language's likely ones to choose from (the
@@ -467,11 +449,11 @@ pub const Setup = struct {
     /// The time zone: on a map, or found by its city.
     fn timePage(cx: *kete.BuildContext, state: *State) kete.Widget {
         const t = cx.theme();
-        // The map as big as the page has room for.
-        return cx.make(kete.Column{ .cross_axis_alignment = .start, .spacing = 12, .children = cx.arena.dupe(kete.Widget, &.{
+        // The map as wide as the page (the zone picked right under it).
+        return cx.make(kete.Column{ .cross_axis_alignment = .start, .fill = false, .spacing = 12, .children = cx.arena.dupe(kete.Widget, &.{
             cx.make(kete.Text{ .text = locale.text("Time zone"), .style = .{ .size = 28 } }),
             cx.make(kete.Text{ .text = locale.text("Where the computer is, for its clock"), .style = .{ .size = 18, .color = t.on_surface_variant } }),
-            cx.make(kete.Expanded{ .child = cx.make(kete_vc4.TimeZoneMap{ .zone = state.timezone, .on_changed = .of(state, State.setTimeZone), .width = 720, .fill_height = true }) }),
+            cx.make(kete_vc4.TimeZoneMap{ .zone = state.timezone, .on_changed = .of(state, State.setTimeZone), .width = 720 }),
         }) catch &.{} });
     }
 
@@ -616,45 +598,8 @@ pub const Setup = struct {
         });
     }
 
-    fn appsPage(self: *const Setup, cx: *kete.BuildContext, state: *State) kete.Widget {
-        const t = cx.theme();
-        const a = cx.arena;
-        var rows: std.ArrayList(kete.Widget) = .empty;
-        rows.appendSlice(a, &.{
-            cx.make(kete.Text{ .text = locale.text("Choose your apps"), .style = .{ .size = 28 } }),
-            cx.make(kete.Text{
-                .text = locale.text("They are installed when you finish. You can add or remove apps later in Settings."),
-                .style = .{ .size = 18, .color = t.on_surface_variant },
-            }),
-        }) catch {};
-        const apps = &self.apps;
-        if (apps.list.len == 0) {
-            const why = if (apps.loading or apps.message.len == 0)
-                locale.text("Getting the list of apps…")
-            else
-                kete_vc4.textf(cx, "The list of apps could not be got: {s}. You can install apps later in Settings.", .{apps.message});
-            rows.append(a, cx.make(kete.Row{ .spacing = 12, .cross_axis_alignment = .center, .children = &.{
-                if (apps.loading or apps.message.len == 0) cx.make(kete.Spinner{ .size = 24 }) else cx.make(kete.SizedBox.empty),
-                cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = why, .style = .{ .size = 18, .color = t.on_surface_variant } }) }),
-            } })) catch {};
-        }
-        for (apps.list[0..@min(apps.list.len, max_apps)], 0..) |app, i| {
-            const toggle = a.create(Toggle) catch break;
-            toggle.* = .{ .state = state, .index = @intCast(i) };
-            rows.append(a, cx.make(kete.Row{ .spacing = 16, .cross_axis_alignment = .center, .children = &.{
-                cx.make(kete.Checkbox{ .value = state.chosen(i), .on_changed = .of(toggle, Toggle.set) }),
-                cx.make(kete.Icon{ .icon = kete.IconName.fromName(app.icon) orelse .apps, .size = 32, .color = t.on_surface_variant }),
-                cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 2, .children = &.{
-                    cx.make(kete.Text{ .text = app.title, .style = .{ .size = 20 }, .wrap = false, .ellipsis = true }),
-                    cx.make(kete.Text{ .text = app.description, .style = .{ .size = 16, .color = t.on_surface_variant } }),
-                } }) }),
-            } })) catch {};
-        }
-        return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 12, .children = rows.items });
-    }
-
     /// After the last page: waiting for the card, or why it could not be
-    /// prepared; then installing the apps.
+    /// prepared.
     fn finishing(self: *const Setup, cx: *kete.BuildContext, nav: *Nav) kete.Widget {
         const t = cx.theme();
         const r = self.report;
@@ -665,16 +610,9 @@ pub const Setup = struct {
                     .text = kete_vc4.textf(cx, "Dazzle cannot keep files: {s}. Setup will run again when the computer next starts.", .{r.?.failure.label()}),
                     .style = .{ .size = 18, .color = t.on_surface_variant },
                 }),
-                cx.make(kete.Row{ .main_axis_alignment = .end, .children = &.{
-                    cx.make(kete.OutlinedButton{ .label = locale.text("Continue"), .on_press = .of(nav, Nav.continueWithout) }),
+                cx.make(kete.Row{ .main_axis_alignment = .center, .children = &.{
+                    cx.make(big.BigButton{ .label = locale.text("Continue"), .filled = true, .on_press = .of(nav, Nav.continueWithout) }),
                 } }),
-            } });
-        }
-        if (self.apps.installing) |title| {
-            return cx.make(kete.Column{ .fill = false, .spacing = 20, .children = &.{
-                cx.make(kete.Spinner{ .size = 64 }),
-                cx.make(kete.Text{ .text = kete_vc4.textf(cx, "Installing {s}", .{title}), .style = .{ .size = 24 } }),
-                cx.make(kete.Text{ .text = kete_vc4.textf(cx, "{d} of {d}", .{ self.apps.done + 1, self.apps.total }), .style = .{ .size = 18, .color = t.on_surface_variant } }),
             } });
         }
         const progress = if (r) |rep| (if (rep.storage == .preparing) cx.fmt("{d}%", .{rep.progress}) else "") else "";
@@ -848,17 +786,15 @@ const Nav = struct {
                     return;
                 };
                 if (n.actions) |a| a.hostname = h;
-                st.page = if (n.show_wifi) @intFromEnum(Page.wifi) else @intFromEnum(Page.apps);
-                return;
+                if (!n.show_wifi) {
+                    st.page = @intFromEnum(Page.time);
+                    return;
+                }
             },
-            .wifi => {
-                if (!n.wifi_connected) if (n.actions) |a| {
-                    a.skip_wifi = true;
-                };
-                st.page = @intFromEnum(Page.apps);
-                return;
+            .wifi => if (!n.wifi_connected) if (n.actions) |a| {
+                a.skip_wifi = true;
             },
-            .hello, .keyboard, .time, .apps => {},
+            .hello, .keyboard, .time => {},
         }
         if (st.page + 1 < pages.len) {
             st.page += 1;
@@ -867,7 +803,6 @@ const Nav = struct {
         st.finishing = true;
         if (n.actions) |a| {
             a.finish = proto.Hostname.parse(st.name());
-            a.apps = ~st.skipped;
         }
     }
 
@@ -882,7 +817,7 @@ const Nav = struct {
 
     fn back(n: *Nav) void {
         const st = n.state;
-        if (pages[st.page] == .apps and !n.show_wifi) {
+        if (pages[st.page] == .time and !n.show_wifi) {
             st.page = @intFromEnum(Page.hostname);
             return;
         }
@@ -901,17 +836,6 @@ const KeyboardChoice = struct {
 
     fn choose(c: *KeyboardChoice) void {
         c.state.chooseKeyboard(c.keyboard);
-    }
-};
-
-/// A checkbox on the apps page.
-const Toggle = struct {
-    state: *Setup.State,
-    index: u6,
-
-    fn set(t: *Toggle, on: bool) void {
-        const bit = @as(u64, 1) << t.index;
-        if (on) t.state.skipped &= ~bit else t.state.skipped |= bit;
     }
 };
 
@@ -966,14 +890,8 @@ test "naming the computer, then waiting for the card" {
         Draw(u, &report, &actions, &now, size);
         try testing.expect(!overflows(u.root.?));
     }
-    // The language; then the time zone and the name, which fit too.
+    // The keyboard; then the name, which fits too.
     try testing.expect(findType(u.root.?, kete_vc4.KeyboardPicture) != null);
-    click(u, findText(u.root.?, "Next").?);
-    for ([_][2]u32{ .{ 1920, 1080 }, .{ 640, 480 } }) |size| {
-        Draw(u, &report, &actions, &now, size);
-        try testing.expect(!overflows(u.root.?));
-    }
-    try testing.expect(findType(u.root.?, kete_vc4.TimeZoneMap) != null);
     click(u, findText(u.root.?, "Next").?);
     for ([_][2]u32{ .{ 1920, 1080 }, .{ 640, 480 } }) |size| {
         Draw(u, &report, &actions, &now, size);
@@ -993,15 +911,16 @@ test "naming the computer, then waiting for the card" {
     try testing.expect(actions.hostname == null);
     try testing.expect(actions.finish == null);
 
-    // A good one: the name is confirmed at once, then the apps (the list
-    // still coming), then finishing, with a spinner while the card is
-    // prepared.
+    // A good one: the name is confirmed at once, then (no Wi-Fi) the time
+    // zone, then finishing, with a spinner while the card is prepared.
     st.setName("my-pi");
     click(u, findText(u.root.?, "Next").?);
-    Draw(u, &report, &actions, &now, .{ 1920, 1080 });
+    for ([_][2]u32{ .{ 1920, 1080 }, .{ 640, 480 } }) |size| {
+        Draw(u, &report, &actions, &now, size);
+        try testing.expect(!overflows(u.root.?));
+    }
     try testing.expectEqualStrings("my-pi", actions.hostname.?.slice());
-    try testing.expect(findText(u.root.?, "Choose your apps") != null);
-    try testing.expect(findText(u.root.?, "Getting the list of apps…") != null);
+    try testing.expect(findType(u.root.?, kete_vc4.TimeZoneMap) != null);
     try testing.expect(actions.finish == null);
     click(u, findText(u.root.?, "Finish").?);
     Draw(u, &report, &actions, &now, .{ 1920, 1080 });
@@ -1041,9 +960,7 @@ test "Wi-Fi networks are shown when Ethernet is not connected and a Wi-Fi adapte
     u.frame(1280, 720, 0, setup);
     click(u, findText(u.root.?, "Next").?);
     u.frame(1280, 720, 1, setup);
-    // The time zone, then the name.
-    click(u, findText(u.root.?, "Next").?);
-    u.frame(1280, 720, 1, setup);
+    // The name.
     try testing.expect(findText(u.root.?, "Name this computer") != null);
 
     // Approving the hostname when Ethernet is not connected goes to the Wi-Fi page.
@@ -1073,12 +990,16 @@ test "Wi-Fi networks are shown when Ethernet is not connected and a Wi-Fi adapte
     try testing.expectEqualStrings("Home", actions.connect.?.ssid());
     try testing.expectEqualStrings("secret123", actions.connect.?.passphrase());
 
-    // Skipping the network advances to the apps page.
+    // Skipping the network advances to the time zone.
     u.frame(1280, 720, 4, setup);
     click(u, findText(u.root.?, "Skip").?);
     u.frame(1280, 720, 5, setup);
     try testing.expect(actions.skip_wifi);
-    try testing.expect(findText(u.root.?, "Choose your apps") != null);
+    try testing.expect(findType(u.root.?, kete_vc4.TimeZoneMap) != null);
+    // Back goes to the network again.
+    click(u, findText(u.root.?, "Back").?);
+    u.frame(1280, 720, 6, setup);
+    try testing.expect(findText(u.root.?, "Connect to Wi-Fi") != null);
 
     // If Ethernet is connected, approving the hostname skips the Wi-Fi page.
     u.root.?.state(Setup.State).page = @intFromEnum(Page.hostname);
@@ -1086,51 +1007,11 @@ test "Wi-Fi networks are shown when Ethernet is not connected and a Wi-Fi adapte
     u.frame(1280, 720, 6, setup);
     click(u, findText(u.root.?, "Next").?);
     u.frame(1280, 720, 7, setup);
-    try testing.expect(findText(u.root.?, "Choose your apps") != null);
-}
-
-test "choosing apps, then installing them" {
-    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
-    defer u.destroy();
-    var actions: Actions = .{};
-    const report: proto.Report = .{ .storage = .ready };
-    const list = [_]store.App{
-        .{ .name = "dazzle-demo", .title = "Demo", .description = "A spinning 3D shape", .icon = "view_in_ar", .file = "dazzle-demo.tar.xz", .size = 1, .sha256 = "" },
-        .{ .name = "dazzle-files", .title = "Files", .description = "Browse your files", .icon = "folder", .file = "dazzle-files.tar.xz", .size = 1, .sha256 = "" },
-        .{ .name = "dazzle-camera", .title = "Camera", .description = "Take photos", .icon = "photo_camera", .file = "dazzle-camera.tar.xz", .size = 1, .sha256 = "" },
-    };
-    var setup: Setup = .{ .suggestion = "my-pi", .report = &report, .actions = &actions, .apps = .{ .list = &list } };
-    u.frame(1280, 720, 0, setup);
-    u.root.?.state(Setup.State).page = @intFromEnum(Page.apps);
-    u.frame(1280, 720, 1, setup);
-    try testing.expect(!overflows(u.root.?));
-    try testing.expect(findText(u.root.?, "Browse your files") != null);
-    // All chosen to begin with: Files is left out.
-    click(u, findType(up(findText(u.root.?, "Files").?, kete.Row).?, kete.Checkbox).?);
-    u.frame(1280, 720, 2, setup);
-    click(u, findText(u.root.?, "Finish").?);
-    try testing.expect(actions.apps & 0b111 == 0b101);
-
-    // Installing: which, and how far.
-    setup.apps.installing = "Camera";
-    setup.apps.done = 1;
-    setup.apps.total = 2;
-    u.frame(1280, 720, 3, setup);
-    try testing.expect(findText(u.root.?, "Installing Camera") != null);
-    try testing.expect(findText(u.root.?, "2 of 2") != null);
-
-    // No list: why, and that it can wait.
-    u.root.?.state(Setup.State).finishing = false;
-    setup.apps = .{ .message = "the server could not be reached (is the network up?)" };
-    u.frame(1280, 720, 4, setup);
-    try testing.expect(findText(u.root.?, "The list of apps could not be got: the server could not be reached (is the network up?). You can install apps later in Settings.") != null);
-}
-
-fn up(n: *kete.WidgetNode, comptime T: type) ?*kete.WidgetNode {
-    var at: ?*kete.WidgetNode = n;
-    while (at) |a| : (at = a.parent) if (a.widget.is(T)) return a;
-    return null;
+    try testing.expect(findType(u.root.?, kete_vc4.TimeZoneMap) != null);
+    // And Back passes it by.
+    click(u, findText(u.root.?, "Back").?);
+    u.frame(1280, 720, 8, setup);
+    try testing.expect(findText(u.root.?, "Name this computer") != null);
 }
 
 test "every page fits, in Spanish too" {
