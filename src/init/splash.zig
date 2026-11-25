@@ -276,8 +276,10 @@ const Screen = struct {
         const fb = try drm.addFramebuffer(fd, buffer.handle, display_width, display_height, buffer.pitch, drm.format_xrgb8888);
         const display = std.mem.bytesAsSlice(u32, buffer.map[0 .. buffer.pitch * display_height]);
         // Turned for the orientation chosen, as the shell turns it: drawn
-        // upright into a buffer of the screen's own.
-        const turned = sys.system.Orientation.now().turns(display_width, display_height);
+        // upright into a buffer of the screen's own. Not a monitor with a
+        // touchscreen beside it (the orientation is the touchscreen's then).
+        const companion = drm.findCompanion(fd, output) != null;
+        const turned = !companion and sys.system.Orientation.now().turns(display_width, display_height);
         const width = if (turned) display_height else display_width;
         const height = if (turned) display_width else display_height;
         const pixels = if (turned) try gpa.alloc(u32, @as(usize, width) * height) else display;
