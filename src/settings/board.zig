@@ -67,8 +67,6 @@ pub const Kind = enum {
     act_led,
     /// Red 5V power LED.
     pwr_led,
-    /// The keys of a computer built into a keyboard (the Pi 400).
-    keyboard,
 };
 
 pub const Part = struct {
@@ -85,19 +83,10 @@ pub const Part = struct {
     faces: ?Edge = null,
     /// A header's pins: columns and rows.
     pins: [2]u8 = .{ 0, 0 },
-
-    /// Whether it can be picked: not the case around a board (the Pi
-    /// 400's keyboard), which is drawn faint.
-    pub fn pickable(p: *const Part) bool {
-        return !isCase(p.kind);
-    }
 };
 
 pub const Edge = enum { top, bottom, left, right };
 
-pub fn isCase(k: Kind) bool {
-    return k == .keyboard;
-}
 
 pub const Notch = struct { x: f32, y: f32, r: f32 };
 
@@ -109,10 +98,6 @@ pub const Board = struct {
     hole_diameter: f32 = 2.75,
     /// Half-round notches cut into the edge (a Compute Module's).
     notches: []const Notch = &.{},
-    /// For a computer in a case (the Pi 400): the board inside it. The
-    /// case (`width` by `height`) and its keyboard are then drawn faint,
-    /// and cannot be picked; the board is drawn as a board is.
-    inner: ?Rect = null,
     parts: []const Part,
 
     /// The area drawn: the board, and what sticks out past its edges.
@@ -138,7 +123,7 @@ pub const Board = struct {
             while (i > 0) {
                 i -= 1;
                 const r = b.parts[i].rect;
-                if (b.parts[i].underside != underside or !b.parts[i].pickable()) continue;
+                if (b.parts[i].underside != underside) continue;
                 if (p[0] >= r.x and p[0] < r.x + r.w and p[1] >= r.y and p[1] < r.y + r.h) return i;
             }
         }
@@ -415,32 +400,31 @@ const cm5: Board = .{ .width = 55, .height = 40, .corner = 1.5, .holes = &cm4_ho
     chip(.pmic, "DA9091", 21, 32, 7),
 } };
 
-// --- The Pi 400: a Pi 4 in a keyboard (286 × 122) ------------------------------
+// --- The Pi 400: a Pi 4's board in a keyboard (180 × 54) ---------------------
 
-/// Seen from above, the back (with the connectors) at the top: the
-/// keyboard's outline, faint, and the board inside it along the back,
-/// with its connectors where the product brief's picture of its back
-/// shows them (mirrored, as that looks at it from behind: from left to
-/// right there, the GPIO header, the microSD slot, two micro HDMI, USB-C
-/// power, two USB 3.0, USB 2.0 and Ethernet), and its chips where photos
-/// of the board show them.
-const pi400: Board = .{ .width = 286, .height = 122, .corner = 8, .holes = &.{}, .inner = .{ .x = 70, .y = 1, .w = 180, .h = 54 }, .parts = &.{
-    at(.keyboard, 143, 69, 262, 88),
-    header(.gpio, 217, 4.5, 20),
-    facing(at(.micro_sd, 184, 2.5, 12, 5), .top),
-    facing(at(.micro_hdmi, 171, 3, 7.8, 6), .top),
-    facing(at(.micro_hdmi, 160, 3, 7.8, 6), .top),
-    facing(at(.usb_c_power, 146, 3, 9, 6), .top),
-    facing(at(.usb, 132, 4, 14.5, 8), .top),
-    facing(at(.usb, 117, 4, 14.5, 8), .top),
-    facing(at(.usb, 101, 4, 14.5, 8), .top),
-    facing(at(.ethernet, 86, 6, 16, 12), .top),
-    lidded(chip(.soc, "BCM2711", 168, 30, 15)),
-    chip(.ram, "LPDDR4", 150, 30, 12),
-    chip(.usb_controller, "VL805", 118, 26, 9),
-    chip(.ethernet_phy, "BCM54213PE", 96, 26, 6.5),
-    at(.wireless_can, 230, 26, 12, 10.5),
-    chip(.pmic, "MxL7704", 200, 40, 5),
+/// The board inside the keyboard, along its back, seen from above with the
+/// back (and its connectors) at the top; the keyboard itself is not drawn
+/// (it would take most of the room). The connectors are where the product
+/// brief's picture of its back shows them (mirrored, as that looks at it
+/// from behind: from left to right there, the GPIO header, the microSD
+/// slot, two micro HDMI, USB-C power, two USB 3.0, USB 2.0 and Ethernet),
+/// the chips where photos of the board show them.
+const pi400: Board = .{ .width = 180, .height = 54, .holes = &.{}, .parts = &.{
+    header(.gpio, 147, 3.5, 20),
+    facing(at(.micro_sd, 114, 1.5, 12, 5), .top),
+    facing(at(.micro_hdmi, 101, 2, 7.8, 6), .top),
+    facing(at(.micro_hdmi, 90, 2, 7.8, 6), .top),
+    facing(at(.usb_c_power, 76, 2, 9, 6), .top),
+    facing(at(.usb, 62, 3, 14.5, 8), .top),
+    facing(at(.usb, 47, 3, 14.5, 8), .top),
+    facing(at(.usb, 31, 3, 14.5, 8), .top),
+    facing(at(.ethernet, 16, 5, 16, 12), .top),
+    lidded(chip(.soc, "BCM2711", 98, 29, 15)),
+    chip(.ram, "LPDDR4", 80, 29, 12),
+    chip(.usb_controller, "VL805", 48, 25, 9),
+    chip(.ethernet_phy, "BCM54213PE", 26, 25, 6.5),
+    at(.wireless_can, 160, 25, 12, 10.5),
+    chip(.pmic, "MxL7704", 130, 39, 5),
 } };
 
 /// The board's drawing, from its model (as the device tree gives it:
@@ -520,7 +504,6 @@ pub fn describe(p: *const Part) struct { title: []const u8, about: []const u8 } 
         .edge => .{ .title = locale.text("Edge connector"), .about = locale.text("Plugs into a carrier board, which has the connectors") },
         .act_led => .{ .title = locale.text("Activity LED"), .about = locale.text("Blinks green when the SD card is being read or written") },
         .pwr_led => .{ .title = locale.text("Power LED"), .about = locale.text("Glows red when the board has 5 V power") },
-        .keyboard => .{ .title = locale.text("Keyboard"), .about = locale.text("The computer is inside it, under the keys") },
     };
 }
 
@@ -562,18 +545,11 @@ test "parts are found where they are, those on top first" {
     try testing.expect(r.w > 85 and r.x < 0);
 }
 
-test "the Pi 400: its keyboard is not picked, its board's parts are" {
+test "the Pi 400: its board's parts are where they are" {
     const b = forModel("Raspberry Pi 400 Rev 1.0").?;
-    // A key, away from the board.
-    try testing.expect(b.partAt(.{ 40, 100 }) == null);
-    // The processor, over the keys.
-    try testing.expectEqual(Kind.soc, b.parts[b.partAt(.{ 168, 30 }).?].kind);
-    try testing.expectEqual(Kind.gpio, b.parts[b.partAt(.{ 217, 4 }).?].kind);
-    // Its chips are on the board inside.
-    const in = b.inner.?;
-    for (b.parts) |p| if (!isCase(p.kind)) {
-        try testing.expect(p.rect.x >= in.x and p.rect.x + p.rect.w <= in.x + in.w);
-    };
+    try testing.expectEqual(Kind.soc, b.parts[b.partAt(.{ 98, 29 }).?].kind);
+    try testing.expectEqual(Kind.gpio, b.parts[b.partAt(.{ 147, 3 }).?].kind);
+    try testing.expect(b.partAt(.{ 5, 45 }) == null);
 }
 
 test "every part is on or at the edge of its board" {

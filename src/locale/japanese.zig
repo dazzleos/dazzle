@@ -366,7 +366,6 @@ pub const japan = [_][2][]const u8{
     .{ "Blinks green when the SD card is being read or written", "SD カードの読み書き中に緑に点滅します" },
     .{ "Power LED", "電源 LED" },
     .{ "Glows red when the board has 5 V power", "ボードに 5 V 電源が来ていると赤く点灯します" },
-    .{ "The computer is inside it, under the keys", "コンピューターはキーの下、この中にあります" },
     .{ "Input device", "入力デバイス" },
     .{ "Hub", "ハブ" },
     .{ "Network adapter", "ネットワークアダプター" },

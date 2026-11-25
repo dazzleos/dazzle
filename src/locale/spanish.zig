@@ -403,7 +403,6 @@ pub const latin_america = [_][2][]const u8{
     .{ "Blinks green when the SD card is being read or written", "Parpadea en verde cuando se lee o escribe la tarjeta SD" },
     .{ "Power LED", "LED de encendido" },
     .{ "Glows red when the board has 5 V power", "Se enciende en rojo cuando la placa tiene alimentación de 5 V" },
-    .{ "The computer is inside it, under the keys", "El ordenador está dentro, bajo las teclas" },
     // USB devices.
     .{ "Input device", "Dispositivo de entrada" },
     .{ "Hub", "Hub" },

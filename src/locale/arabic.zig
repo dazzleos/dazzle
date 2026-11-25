@@ -367,7 +367,6 @@ pub const arabic = [_][2][]const u8{
     .{ "Blinks green when the SD card is being read or written", "يومض بالأخضر عند القراءة من بطاقة SD أو الكتابة عليها" },
     .{ "Power LED", "مؤشر الطاقة" },
     .{ "Glows red when the board has 5 V power", "يضيء بالأحمر عندما تصل إلى اللوحة طاقة 5 V" },
-    .{ "The computer is inside it, under the keys", "الحاسوب بداخلها، تحت المفاتيح" },
     .{ "Input device", "جهاز إدخال" },
     .{ "Hub", "موزّع" },
     .{ "Network adapter", "محوّل الشبكة" },

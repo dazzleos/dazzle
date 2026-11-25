@@ -366,7 +366,6 @@ pub const simplified = [_][2][]const u8{
     .{ "Blinks green when the SD card is being read or written", "读写 SD 卡时绿灯闪烁" },
     .{ "Power LED", "电源指示灯" },
     .{ "Glows red when the board has 5 V power", "主板接通 5 V 电源时亮红灯" },
-    .{ "The computer is inside it, under the keys", "电脑就在里面，按键下方" },
     .{ "Input device", "输入设备" },
     .{ "Hub", "集线器" },
     .{ "Network adapter", "网络适配器" },

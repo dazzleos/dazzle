@@ -471,21 +471,11 @@ pub const BoardView = struct {
             }
         }.f;
 
-        // A computer in a case: the case and its keyboard faint, then the
-        // board inside drawn as any board is.
-        var c = p.canvas();
-        const faint = ink.withAlpha(0.3);
-        if (b.inner != null) {
-            c.strokeRoundedRect(map(t, .{ .x = 0, .y = 0, .w = b.width, .h = b.height }), .all(b.corner * s), line, faint);
-            for (b.parts) |part| if (board.isCase(part.kind)) drawPart(c, &part, map(t, part.rect), s, faint);
-        }
         // The board, with its notches cut into the edge.
-        const outline = map(t, b.inner orelse .{ .x = 0, .y = 0, .w = b.width, .h = b.height });
-        // (A board inside a case has a board's corners, not the case's.)
-        const corner: kete.CornerRadii = .all((if (b.inner != null) 3 else b.corner) * s);
-        if (b.inner != null) c.fillRoundedRect(outline, corner, theme.surface);
-        c.fillRoundedRect(outline, corner, theme.on_surface.withAlpha(0.04));
-        c.strokeRoundedRect(outline, corner, heavy, ink);
+        const outline = map(t, .{ .x = 0, .y = 0, .w = b.width, .h = b.height });
+        var c = p.canvas();
+        c.fillRoundedRect(outline, .all(b.corner * s), theme.on_surface.withAlpha(0.04));
+        c.strokeRoundedRect(outline, .all(b.corner * s), heavy, ink);
         if (b.notches.len > 0) {
             const old = p.clipTo(outline.outset(heavy));
             c = p.canvas();
@@ -501,7 +491,7 @@ pub const BoardView = struct {
 
         // What is under the board, faint; then what is on it.
         for (b.parts) |part| if (part.underside) drawPart(c, &part, map(t, part.rect), s, ink.withAlpha(0.35));
-        for (b.parts, 0..) |part, i| if (!part.underside and !board.isCase(part.kind)) {
+        for (b.parts, 0..) |part, i| if (!part.underside) {
             const pr = map(t, part.rect);
             if (partOverhangsBoard(b, &part)) {
                 fillOverhangingPart(c, &part, pr, s, theme.surface, theme.on_surface.withAlpha(0.04));
@@ -631,35 +621,6 @@ fn drawPart(c: *gfx.Canvas, part: *const board.Part, r: gfx.Rect, s: f32, ink: C
                 .h = r.h * 0.6,
             };
             c.strokeRoundedRect(lens, .all(0.15 * s), line, ink.withAlpha(ink.a * 0.75));
-        },
-        .keyboard => {
-            c.strokeRoundedRect(r, .all(2 * s), line, ink);
-            // Rows of keys: the function keys, four of letters and numbers,
-            // and the space bar's.
-            const rows = 6;
-            const gap = 1.2 * s;
-            const key_h = (r.h - gap * (rows + 1)) / rows;
-            for (0..rows) |row| {
-                const y = r.y + gap + @as(f32, @floatFromInt(row)) * (key_h + gap);
-                if (row == rows - 1) {
-                    // The space bar, between smaller keys: 15 keys' width
-                    // in all, as the rows above.
-                    const space_row = [_]f32{ 1.5, 1, 1.5, 6, 1, 1, 1, 1, 1 };
-                    const unit = (r.w - gap) / 15;
-                    var x = r.x + gap;
-                    for (space_row) |w| {
-                        c.strokeRoundedRect(.{ .x = x, .y = y, .w = w * unit - gap, .h = key_h }, .all(0.6 * s), line, ink);
-                        x += w * unit;
-                    }
-                    continue;
-                }
-                const keys: f32 = if (row == 0) 16 else 15;
-                const kw = (r.w - gap) / keys;
-                for (0..@intFromFloat(keys)) |k| {
-                    const x = r.x + gap + @as(f32, @floatFromInt(k)) * kw;
-                    c.strokeRoundedRect(.{ .x = x, .y = y, .w = kw - gap, .h = key_h }, .all(0.6 * s), line, ink);
-                }
-            }
         },
         .edge => {
             // The contacts.
