@@ -1,7 +1,9 @@
 //! The Language page: the language and keyboard layout chosen, each with a
 //! button to change it (in a dialog: the list to choose from, with a field
 //! to search it), and a picture of the keyboard's keys (and a field to try
-//! it in); and the time zone.
+//! it in); and the time zone. A keyboard with a language pack (its full
+//! input method) says whether it is installed, and if not, links to the
+//! pack's page in Software, to install it there.
 
 const std = @import("std");
 const kete = @import("kete");
@@ -16,14 +18,12 @@ const Builder = view.Builder;
 pub const label = "Language";
 pub const icon: kete.IconName = .language;
 
-pub fn build(self: *const Settings, b: Builder, st: *State) kete.Widget {
+pub fn build(self: *const Settings, b: Builder, st: *State, whole: *Settings.State) kete.Widget {
     const cx = b.cx;
     const t = cx.theme();
     const a = cx.arena;
     st.current = self.locale;
     st.actions = self.actions;
-    const picker = a.create(LocalePick) catch return cx.make(kete.SizedBox.empty);
-    picker.* = .{ .actions = self.actions, .current = self.locale };
     var rows: std.ArrayList(kete.Widget) = .empty;
     const heading: kete.TextStyle = .{ .size = 18, .color = t.on_surface_variant };
     const can = self.actions != null;
@@ -41,10 +41,15 @@ pub fn build(self: *const Settings, b: Builder, st: *State) kete.Widget {
             .style = .{ .size = 15, .color = t.on_surface_variant },
         })) catch {};
         switch (self.language_pack) {
-            .offered => line.append(a, cx.make(kete.OutlinedButton{
-                .label = locale.text("Install"),
-                .on_press = if (can) .of(picker, LocalePick.installPack) else null,
-            })) catch {},
+            .offered, .not_offered => if (self.locale.keyboard.languagePack()) |code| {
+                const go = a.create(GoToPack) catch return cx.make(kete.SizedBox.empty);
+                go.* = .{ .whole = whole, .actions = self.actions, .name = .init(packName(&go.name_buf, code)) };
+                line.append(a, cx.make(kete.TextButton{
+                    .label = locale.text("Install"),
+                    .trailing_icon = .arrow_forward,
+                    .on_press = .of(go, GoToPack.go),
+                })) catch {};
+            },
             .installing => line.append(a, cx.make(kete.Text{ .text = locale.text("Installing…"), .style = .{ .size = 15, .color = t.on_surface } })) catch {},
             else => {},
         }
@@ -160,13 +165,24 @@ pub fn withDialog(self: *const Settings, b: Builder, st: *State, child: kete.Wid
     });
 }
 
-/// Asking for the keyboard's language pack.
-const LocalePick = struct {
-    actions: ?*Actions,
-    current: locale.Settings,
+/// The name of the language pack for `code` ("ja").
+pub fn packName(buf: []u8, code: []const u8) []const u8 {
+    return std.fmt.bufPrint(buf, "dazzle-language-{s}", .{code}) catch "";
+}
 
-    fn installPack(p: *LocalePick) void {
-        if (p.actions) |a| a.install_language_pack = true;
+/// The keyboard's language pack's page in Software (its list got, if it
+/// is not yet, for the pack to be in it).
+const GoToPack = struct {
+    whole: *Settings.State,
+    actions: ?*Actions,
+    name_buf: [48]u8 = undefined,
+    name: Actions.AppName,
+
+    fn go(g: *GoToPack) void {
+        g.whole.page = .apps;
+        g.whole.software.tab = .available;
+        g.whole.software.details = g.name;
+        if (g.actions) |a| a.refresh_apps = true;
     }
 };
 
@@ -232,8 +248,12 @@ test "a keyboard's language pack: Install, then installed" {
     u.root.?.state(Settings.State).page = .language;
     u.frame(1600, 1600, 1, settings);
     try testing.expect(view.findText(u.root.?, "Basic input until its language pack is installed") != null);
-    view.click(u, view.up(view.findText(u.root.?, "Install").?, kete.OutlinedButton).?);
-    try testing.expect(actions.install_language_pack);
+    // Install: the pack's page in Software.
+    view.click(u, view.up(view.findText(u.root.?, "Install").?, kete.TextButton).?);
+    const st = u.root.?.state(Settings.State);
+    try testing.expectEqual(view.Page.apps, st.page);
+    try testing.expectEqualStrings("dazzle-language-ja", st.software.details.?.slice());
+    st.page = .language;
     settings.language_pack = .installed;
     u.frame(1600, 1600, 2, settings);
     try testing.expect(view.findText(u.root.?, "Its language pack is installed") != null);

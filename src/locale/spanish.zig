@@ -12,6 +12,7 @@
 /// Latin America's (Mexico, Argentina, Colombia, Chile, Peru, the United
 /// States), and Spain's where it has none of its own.
 pub const latin_america = [_][2][]const u8{
+    .{ "Installing language support", "Instalando el soporte de idioma" },
     .{ "Time", "Hora" },
     .{ "Device Name", "Nombre del dispositivo" },
     .{ "Getting the time…", "Obteniendo la hora…" },

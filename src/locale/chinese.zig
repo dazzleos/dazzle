@@ -6,6 +6,7 @@
 //! they are.
 
 pub const simplified = [_][2][]const u8{
+    .{ "Installing language support", "正在安装语言支持" },
     .{ "Time", "时间" },
     .{ "Device Name", "设备名称" },
     .{ "Getting the time…", "正在获取时间…" },

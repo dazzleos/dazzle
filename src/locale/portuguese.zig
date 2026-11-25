@@ -6,6 +6,7 @@
 
 /// Brazil's (and Portugal's where it has none of its own).
 pub const brazil = [_][2][]const u8{
+    .{ "Installing language support", "Instalando o suporte ao idioma" },
     .{ "Time", "Hora" },
     .{ "Device Name", "Nome do dispositivo" },
     .{ "Getting the time…", "Obtendo a hora…" },
@@ -388,6 +389,7 @@ pub const brazil = [_][2][]const u8{
 
 /// Portugal's, where it differs.
 pub const portugal = [_][2][]const u8{
+    .{ "Installing language support", "A instalar o suporte de idioma" },
     .{ "Getting the time…", "A obter a hora…" },
     .{ "Without a network, the time cannot be set", "Sem uma rede, não é possível acertar a hora" },
     .{ "Plug in an Ethernet cable or a Wi-Fi adapter to connect. You can also set up the network later in Settings.", "Ligue um cabo Ethernet ou um adaptador Wi-Fi para se ligar. Também pode configurar a rede mais tarde nas Definições." },

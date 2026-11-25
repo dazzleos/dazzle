@@ -6,6 +6,7 @@
 
 /// Japan's.
 pub const japan = [_][2][]const u8{
+    .{ "Installing language support", "言語サポートをインストールしています" },
     .{ "Time", "時刻" },
     .{ "Device Name", "デバイス名" },
     .{ "Getting the time…", "時刻を取得しています…" },

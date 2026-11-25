@@ -6,6 +6,7 @@
 
 /// France's (and Canada's where it has none of its own).
 pub const france = [_][2][]const u8{
+    .{ "Installing language support", "Installation de la prise en charge de la langue" },
     .{ "Time", "Heure" },
     .{ "Device Name", "Nom de l’appareil" },
     .{ "Getting the time…", "Obtention de l’heure…" },

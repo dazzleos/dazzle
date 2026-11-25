@@ -45,8 +45,6 @@ pub const Actions = struct {
     /// The app to install, or remove; whether to get the list of apps again.
     install: ?AppName = null,
     remove: ?AppName = null,
-    /// The keyboard's language pack, to be installed.
-    install_language_pack: bool = false,
     refresh_apps: bool = false,
     /// Updates: check for one, download the one offered, update all, restart into it.
     check_update: bool = false,
@@ -243,7 +241,7 @@ pub const Settings = struct {
             .board => board_view.build(self, b, &state.board),
             .apps => software_view.build(self, b, &state.software),
             .resources => resources_view.build(self, b, &state.resources),
-            .language => b.scroll(.language, language_view.build(self, b, &state.language)),
+            .language => b.scroll(.language, language_view.build(self, b, &state.language, state)),
             .parental => b.scroll(.parental, parental_view.build(self, b, &state.parental)),
             .log => b.scroll(.log, log_view.build(self, b, &state.log)),
         };

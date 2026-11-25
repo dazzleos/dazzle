@@ -385,10 +385,6 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
             } else print(sys.log_warning ++ "dazzle-settings: the system did not answer\n", .{});
             dirty = true;
         }
-        if (actions.install_language_pack) {
-            actions.install_language_pack = false;
-            want_pack = true;
-        }
         // The keyboard's language pack (its full input method), wanted:
         // installed, once the catalogue (downloaded if need be) has it.
         if (want_pack) if (chosen.keyboard.languagePack()) |code| {

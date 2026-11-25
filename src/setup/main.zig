@@ -2,9 +2,12 @@
 //! (the shell shows no dock while it runs). It asks for the language, the
 //! keyboard, the computer's name, the network and the time zone, a page at
 //! a time (see view.zig), while init's system manager makes the SD card's
-//! free space a place for files (see sys.system). Then it tells the manager
-//! to finish, which names the computer and marks setup done, and ends.
-//! Apps are installed from Settings. It lives in /os/shell with the shell:
+//! free space a place for files (see sys.system). Then, if the keyboard
+//! chosen has a language pack (Japanese's dictionary) and the computer is
+//! on a network, it installs that (and if it cannot, says nothing: Settings
+//! offers it too); then it tells the manager to finish, which names the
+//! computer and marks setup done, and ends. Apps are installed from
+//! Settings. It lives in /os/shell with the shell:
 //! it cannot be removed.
 //!
 //!     dazzle-setup
@@ -16,6 +19,7 @@ const locale = @import("locale");
 const kete = @import("kete");
 const kete_vc4 = @import("kete_vc4");
 const build_info = @import("build_info");
+const store = @import("store");
 const names = @import("names.zig");
 const view = @import("view.zig");
 
@@ -41,6 +45,7 @@ const Shown = struct {
     net_report: ?net.Report = null,
     wall_s: ?i64 = null,
     time_failed: bool = false,
+    installing_language: bool = false,
 
     pub fn build(s: *const Shown, cx: *kete.BuildContext) kete.Widget {
         return cx.make(view.Setup{
@@ -50,6 +55,7 @@ const Shown = struct {
             .network = if (s.net_report) |*r| r else null,
             .wall_s = s.wall_s,
             .time_failed = s.time_failed,
+            .installing_language = s.installing_language,
             .actions = s.actions,
         });
     }
@@ -112,6 +118,9 @@ fn run(init: std.process.Init) !void {
     var report: ?proto.Report = null;
     var net_report: ?net.Report = null;
     var finish_sent = false;
+    // The keyboard chosen (for its language pack), and the pack's install.
+    var keyboard = start_locale.keyboard;
+    var pack: Pack = .{};
     // Since when the computer has been on a network without the time.
     var waiting_for_time_since: ?u64 = null;
 
@@ -121,6 +130,8 @@ fn run(init: std.process.Init) !void {
         const wall = sys.realtimeSec();
         var wait: u64 = @intCast((60 - @mod(wall, 60)) * std.time.ns_per_s);
         if (waiting_for_time_since) |since| wait = @min(wait, @max((since + time_patience_ns) -| sys.nowNs(), std.time.ns_per_ms));
+        // (And often while the language pack is being got.)
+        if (pack.stage == .catalogue or pack.stage == .installing) wait = @min(wait, 250 * std.time.ns_per_ms);
         if (!try host.step(wait)) break;
         // The time, once the clock is set (it starts in 1970, until the
         // network sets it: a time before Dazzle was built cannot be right).
@@ -142,6 +153,7 @@ fn run(init: std.process.Init) !void {
             locale.current = l.language;
             window.setTitle(locale.text("Setup"));
             host.display.setKeyboard(l.keyboard);
+            keyboard = l.keyboard;
             worker.setLocale(l);
             host.redraw();
         }
@@ -177,7 +189,10 @@ fn run(init: std.process.Init) !void {
                 .failed => actions.without_storage,
                 .preparing, .unprepared => false,
             };
-            if (can and !finish_sent) {
+            // The keyboard's language pack first, if it can be got.
+            const on_net = if (net_report) |r| r.connection.state == .connected or r.ethernetConnected() else false;
+            if (can and pack.step(keyboard, storage == .ready and on_net, sys.nowNs())) host.redraw();
+            if (can and pack.stage == .done and !finish_sent) {
                 finish_sent = true;
                 worker.finish(h);
             }
@@ -185,6 +200,7 @@ fn run(init: std.process.Init) !void {
 
         shown.report = report;
         shown.net_report = net_report;
+        shown.installing_language = pack.stage == .catalogue or pack.stage == .installing;
         // On a network this long without the time (the network manager
         // sets the clock once it is up), it is not coming.
         const on_network = if (net_report) |r| r.connection.state == .connected or r.ethernetConnected() else false;
@@ -201,6 +217,62 @@ fn run(init: std.process.Init) !void {
         }
     }
 }
+
+/// Installing the keyboard's language pack, as setup finishes: the
+/// catalogue got, then the pack from it. Not done (nothing said) if there
+/// is no pack, no network or card, it is not in the catalogue, anything
+/// fails, or it takes too long.
+const Pack = struct {
+    stage: enum { start, catalogue, installing, done } = .start,
+    apps: store.Store = undefined,
+    url_buf: [store.max_url_len]u8 = undefined,
+    code: []const u8 = "",
+    give_up_at: u64 = 0,
+
+    /// How long it may take, in all.
+    const patience_ns = 3 * 60 * std.time.ns_per_s;
+
+    /// On with it; whether what is shown changed.
+    fn step(p: *Pack, keyboard: locale.Keyboard, can: bool, now: u64) bool {
+        switch (p.stage) {
+            .start => {
+                p.code = keyboard.languagePack() orelse "";
+                if (p.code.len == 0 or !can) {
+                    p.stage = .done;
+                    return true;
+                }
+                p.apps = .init(std.heap.page_allocator, store.loadServerUrl(&p.url_buf, build_info.apps_url));
+                p.apps.refresh(true);
+                p.give_up_at = now + patience_ns;
+                p.stage = .catalogue;
+                print("dazzle-setup: getting the {s} language pack\n", .{p.code});
+                return true;
+            },
+            .catalogue, .installing => {
+                _ = p.apps.poll();
+                if (now >= p.give_up_at) {
+                    print(sys.log_warning ++ "dazzle-setup: the language pack took too long: going on without it\n", .{});
+                    p.stage = .done;
+                    return true;
+                }
+                if (p.apps.busy() != null) return false;
+                if (p.stage == .installing) {
+                    p.stage = .done;
+                    return true;
+                }
+                const entry = p.apps.languagePack(p.code) orelse {
+                    print(sys.log_warning ++ "dazzle-setup: no {s} language pack to install ({s})\n", .{ p.code, p.apps.message() });
+                    p.stage = .done;
+                    return true;
+                };
+                p.apps.install(entry.name);
+                p.stage = .installing;
+                return true;
+            },
+            .done => return false,
+        }
+    }
+};
 
 /// How long the time may take to come once on a network.
 const time_patience_ns = 30 * std.time.ns_per_s;
@@ -524,6 +596,18 @@ fn drain(fd: linux.fd_t) void {
 /// moment to answer).
 fn ask(request: []const u8) ?proto.Report {
     return proto.ask(request, 5000);
+}
+
+test "no language pack got without one, or without the network or card" {
+    // A keyboard without one: done at once.
+    var p: Pack = .{};
+    try std.testing.expect(p.step(.gb, true, 0));
+    try std.testing.expect(p.stage == .done);
+    // Japanese's, but not on a network (or no card): done too, nothing got.
+    p = .{};
+    _ = p.step(.romaji, false, 0);
+    try std.testing.expect(p.stage == .done);
+    try std.testing.expect(!p.step(.romaji, true, 0));
 }
 
 test {

@@ -99,6 +99,8 @@ pub const Setup = struct {
     wall_s: ?i64 = null,
     /// On a network a while, the time has still not been got from it.
     time_failed: bool = false,
+    /// Finishing: the keyboard's language pack being installed.
+    installing_language: bool = false,
     actions: ?*Actions = null,
 
     pub const State = struct {
@@ -663,8 +665,8 @@ pub const Setup = struct {
         });
     }
 
-    /// After the last page: waiting for the card, or why it could not be
-    /// prepared.
+    /// After the last page: waiting for the card (or the keyboard's
+    /// language pack), or why the card could not be prepared.
     fn finishing(self: *const Setup, cx: *kete.BuildContext, nav: *Nav) kete.Widget {
         const t = cx.theme();
         const r = self.report;
@@ -683,7 +685,7 @@ pub const Setup = struct {
         const progress = if (r) |rep| (if (rep.storage == .preparing) cx.fmt("{d}%", .{rep.progress}) else "") else "";
         return cx.make(kete.Column{ .fill = false, .spacing = 20, .children = &.{
             cx.make(kete.Spinner{ .size = 64 }),
-            cx.make(kete.Text{ .text = locale.text("Getting the SD card ready"), .style = .{ .size = 24 } }),
+            cx.make(kete.Text{ .text = if (self.installing_language) locale.text("Installing language support") else locale.text("Getting the SD card ready"), .style = .{ .size = 24 } }),
             cx.make(kete.Text{ .text = progress, .style = .{ .size = 18, .color = t.on_surface_variant } }),
         } });
     }

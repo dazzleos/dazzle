@@ -7,6 +7,7 @@
 
 /// Germany's.
 pub const germany = [_][2][]const u8{
+    .{ "Installing language support", "Sprachunterstützung wird installiert" },
     .{ "Time", "Uhrzeit" },
     .{ "Device Name", "Gerätename" },
     .{ "Getting the time…", "Uhrzeit wird abgerufen…" },
