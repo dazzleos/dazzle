@@ -65,7 +65,7 @@ pub const BigButton = struct {
         outlined,
         /// Filled in the primary colour (the way on).
         filled,
-        /// In Dazzle's colours, glowing (the way in, at the end).
+        /// In Dazzle's colours (the way in, at the end).
         dazzle,
     };
 
@@ -117,7 +117,7 @@ pub const BigButton = struct {
                 .child = content,
             }),
             .dazzle => cx.make(kete.Overlay{ .children = cx.arena.dupe(kete.Widget, &.{
-                cx.make(Glow{ .light = layer }),
+                cx.make(Shaded{ .light = layer }),
                 content,
             }) catch &.{} }),
         };
@@ -181,23 +181,19 @@ pub const Choice = struct {
     }
 };
 
-/// A pill shaded from sky to violet across, in a soft sky-blue glow (a
-/// little below it, as if lit from above), lightened by `light` (hovered or
-/// pressed).
-const Glow = struct {
+/// A pill shaded from sky to violet across, lightened by `light` (hovered
+/// or pressed).
+const Shaded = struct {
     light: f32 = 0,
 
-    /// How far the glow spreads, and how far down it is.
-    const spread = 22;
-    const drop = 6;
     /// Points around each round end.
     const arc = 16;
 
-    pub fn layout(_: *const Glow, _: *kete.WidgetNode, c: kete.Constraints) kete.Size {
+    pub fn layout(_: *const Shaded, _: *kete.WidgetNode, c: kete.Constraints) kete.Size {
         return c.constrain(.{ .w = c.max_w, .h = c.max_h });
     }
 
-    pub fn paint(self: *const Glow, n: *kete.WidgetNode, p: *kete.Painter) void {
+    pub fn paint(self: *const Shaded, n: *kete.WidgetNode, p: *kete.Painter) void {
         const w = n.size.w;
         const h = n.size.h;
         if (w <= 0 or h <= 0) return;
@@ -215,18 +211,6 @@ const Glow = struct {
             ring[end * (arc + 1) + k] = .{ middle_x + d[0] * r, r + d[1] * r };
             out[end * (arc + 1) + k] = d;
         };
-        // The glow: from under the edge (strong) out to nothing.
-        const glow = a.alloc([3]f32, ring.len * 6) catch return;
-        for (0..ring.len) |k| {
-            const j = (k + 1) % ring.len;
-            // (From inside it all round, though the glow is dropped.)
-            const in0: [3]f32 = .{ ring[k][0] - out[k][0] * (drop + 2), ring[k][1] - out[k][1] * (drop + 2) + drop, 0.45 };
-            const in1: [3]f32 = .{ ring[j][0] - out[j][0] * (drop + 2), ring[j][1] - out[j][1] * (drop + 2) + drop, 0.45 };
-            const out0: [3]f32 = .{ ring[k][0] + out[k][0] * spread, ring[k][1] + out[k][1] * spread + drop, 0 };
-            const out1: [3]f32 = .{ ring[j][0] + out[j][0] * spread, ring[j][1] + out[j][1] * spread + drop, 0 };
-            glow[k * 6 ..][0..6].* = .{ in0, out0, out1, in0, out1, in1 };
-        }
-        c.fillShaded(glow, sky);
         // Violet, then sky over it, fading out across (from the middle, in
         // a fan: the fade is even across, so it is exact). The sky's edge
         // is not smoothed: it is kept just inside the violet's, which is.

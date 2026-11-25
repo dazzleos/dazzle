@@ -469,6 +469,7 @@ pub const Setup = struct {
                 .size = 44,
                 .width = 640,
                 .centered = true,
+                .outlined = false,
                 .autofocus = true,
                 .on_changed = .of(state, State.setName),
                 .on_submit = .of(nav, Nav.next),
