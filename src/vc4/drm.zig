@@ -250,10 +250,41 @@ pub fn readFlipEvents(fd: linux.fd_t) !?u64 {
         .INTR, .AGAIN => return null,
         else => |e| return sys.errorFromErrno(e),
     }
-    return parseFlipEvents(buf[0..rc]);
+    return parseFlipEvents(buf[0..rc], null);
 }
 
-fn parseFlipEvents(events: []const u8) ?u64 {
+/// Flips completed on other CRTCs than the one that read them (two
+/// displays share a DRM file, and so its events): kept for theirs
+/// (`readFlipEventsFor`).
+var other_flips: [4]?struct { crtc: u32, at: u64 } = @splat(null);
+
+/// Whether a flip on `crtc_id` was read by another display (and is kept
+/// for it): its file will not say so again.
+pub fn flipKept(crtc_id: u32) bool {
+    for (other_flips) |o| if (o) |f| if (f.crtc == crtc_id) return true;
+    return false;
+}
+
+/// As `readFlipEvents`, for the flip on `crtc_id`: another's is kept for it.
+/// Reads nothing if another display read this one's already.
+pub fn readFlipEventsFor(fd: linux.fd_t, crtc_id: u32) !?u64 {
+    for (&other_flips) |*o| if (o.*) |f| if (f.crtc == crtc_id) {
+        o.* = null;
+        return f.at;
+    };
+    var buf: [256]u8 align(8) = undefined;
+    const rc = linux.read(fd, &buf, buf.len);
+    switch (linux.errno(rc)) {
+        .SUCCESS => {},
+        .INTR, .AGAIN => return null,
+        else => |e| return sys.errorFromErrno(e),
+    }
+    return parseFlipEvents(buf[0..rc], crtc_id);
+}
+
+/// The time of the flip in `events` (on `crtc`, if given: those on others
+/// are kept in `other_flips`).
+fn parseFlipEvents(events: []const u8, crtc: ?u32) ?u64 {
     var flipped: ?u64 = null;
     var off: usize = 0;
     while (off + @sizeOf(Event) <= events.len) {
@@ -261,7 +292,15 @@ fn parseFlipEvents(events: []const u8) ?u64 {
         if (ev.length < @sizeOf(Event) or off + ev.length > events.len) break;
         if (ev.type == event_flip_complete and ev.length >= @sizeOf(EventVblank)) {
             const v = std.mem.bytesToValue(EventVblank, events[off..][0..@sizeOf(EventVblank)]);
-            flipped = @as(u64, v.tv_sec) * std.time.us_per_s + v.tv_usec;
+            const at = @as(u64, v.tv_sec) * std.time.us_per_s + v.tv_usec;
+            if (crtc == null or v.crtc_id == crtc.?) {
+                flipped = at;
+            } else {
+                const slot = for (&other_flips) |*o| {
+                    if (o.* == null or o.*.?.crtc == v.crtc_id) break o;
+                } else &other_flips[0];
+                slot.* = .{ .crtc = v.crtc_id, .at = at };
+            }
         }
         off += ev.length;
     }
@@ -275,8 +314,11 @@ test "flip events" {
     // Something else first (a vblank event), then the flip.
     std.mem.writeInt(u32, buf[0..4], 0x01, .little);
     std.mem.writeInt(u32, buf[4..8], 32, .little);
-    try std.testing.expectEqual(@as(?u64, 12_000_345), parseFlipEvents(&buf));
-    try std.testing.expectEqual(@as(?u64, null), parseFlipEvents(buf[0..32]));
+    try std.testing.expectEqual(@as(?u64, 12_000_345), parseFlipEvents(&buf, null));
+    try std.testing.expectEqual(@as(?u64, null), parseFlipEvents(buf[0..32], null));
+    // Another display's: kept for it.
+    try std.testing.expectEqual(@as(?u64, null), parseFlipEvents(&buf, 71));
+    try std.testing.expectEqual(@as(?u64, 12_000_345), try readFlipEventsFor(-1, 70));
 }
 
 /// A connected output and the mode and CRTC chosen to drive it.
@@ -295,9 +337,28 @@ pub const Output = struct {
 const max_objects = 16;
 const max_modes = 64;
 
-/// Finds the first connected connector, picks its preferred mode (or the
-/// first one listed) and a CRTC that can drive it.
+/// The display to use: a monitor on HDMI if one is connected, otherwise
+/// a display on the DSI connector (one attached to the board, as the
+/// Touch Display 2 is). With both, the DSI display is a companion to the
+/// HDMI one (`findCompanion`). Its preferred mode (or the first listed),
+/// and a CRTC that can drive it.
 pub fn findOutput(fd: linux.fd_t) !Output {
+    return findOutputOf(fd, false, null) catch |err| switch (err) {
+        error.NoConnectedOutput => findOutputOf(fd, true, null),
+        else => err,
+    };
+}
+
+/// A display on the DSI connector besides `main` (on HDMI), on a CRTC of
+/// its own; null if there is none.
+pub fn findCompanion(fd: linux.fd_t, main: Output) ?Output {
+    if (main.dsi) return null;
+    return findOutputOf(fd, true, main.crtc_id) catch null;
+}
+
+/// The first connected connector on DSI (`want_dsi`) or not, its mode and
+/// a CRTC for it (not `not_crtc`).
+fn findOutputOf(fd: linux.fd_t, want_dsi: bool, not_crtc: ?u32) !Output {
     var crtcs: [max_objects]u32 = undefined;
     var connectors: [max_objects]u32 = undefined;
     var encoders: [max_objects]u32 = undefined;
@@ -314,9 +375,7 @@ pub fn findOutput(fd: linux.fd_t) !Output {
     };
     try ioctl(fd, IOCTL_MODE_GETRESOURCES, &res);
 
-    // A display on the DSI connector first (one attached to the board, as
-    // the Touch Display 2 is), then any other (HDMI).
-    for ([_]bool{ true, false }) |want_dsi| for (connectors[0..res.count_connectors]) |connector_id| {
+    for (connectors[0..res.count_connectors]) |connector_id| {
         var modes: [max_modes]ModeInfo = undefined;
         var conn_encoders: [max_objects]u32 = undefined;
 
@@ -347,16 +406,17 @@ pub fn findOutput(fd: linux.fd_t) !Output {
         for (conn_encoders[0..@min(conn.count_encoders, max_objects)]) |encoder_id| {
             var enc: ModeGetEncoder = .{ .encoder_id = encoder_id };
             ioctl(fd, IOCTL_MODE_GETENCODER, &enc) catch continue;
-            if (encoder_id == conn.encoder_id and enc.crtc_id != 0) {
+            if (encoder_id == conn.encoder_id and enc.crtc_id != 0 and enc.crtc_id != not_crtc) {
                 if (std.mem.indexOfScalar(u32, crtcs[0..res.count_crtcs], enc.crtc_id)) |index|
                     return .{ .connector_id = connector_id, .crtc_id = enc.crtc_id, .crtc_index = @intCast(index), .mode = mode, .dsi = want_dsi };
             }
             for (crtcs[0..res.count_crtcs], 0..) |crtc_id, index| {
+                if (crtc_id == not_crtc) continue;
                 if (enc.possible_crtcs & (@as(u32, 1) << @intCast(index)) != 0)
                     return .{ .connector_id = connector_id, .crtc_id = crtc_id, .crtc_index = @intCast(index), .mode = mode, .dsi = want_dsi };
             }
         }
-    };
+    }
     return error.NoConnectedOutput;
 }
 

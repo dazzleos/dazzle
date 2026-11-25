@@ -45,6 +45,7 @@ const quick_mod = @import("quick.zig");
 const notice_mod = @import("notice.zig");
 const lock_mod = @import("lock.zig");
 const osk_mod = @import("osk.zig");
+const companion_mod = @import("companion.zig");
 const gesture = @import("gesture.zig");
 const kete_panel = @import("kete_panel.zig");
 const ime_mod = @import("ime.zig");
@@ -62,6 +63,52 @@ pub const std_options: std.Options = .{ .logFn = logFn };
 fn logFn(comptime level: std.log.Level, comptime scope: @TypeOf(.enum_literal), comptime fmt: []const u8, args: anytype) void {
     _ = level;
     print("dazzle-shell: " ++ (if (scope == .default) "" else @tagName(scope) ++ ": ") ++ fmt ++ "\n", args);
+}
+
+/// The events from a touchscreen beside the monitor (`cm`), its touches
+/// made what they do: on its keyboard, its keys pressed (nothing
+/// returned); on its touchpad, the pointer's motion, clicks and
+/// scrolling. Other events as they are.
+fn routeCompanion(cm: *companion_mod.Companion, osk: *osk_mod.Osk, osk_touches: *TouchSet, batch: []const input.Event, out: []input.Event) []const input.Event {
+    var n: usize = 0;
+    const now = sys.nowNs();
+    for (batch) |e| {
+        if (e != .touch) {
+            if (n < out.len) out[n] = e;
+            n += 1;
+            continue;
+        }
+        const t = e.touch;
+        const at = cm.place(t.x, t.y);
+        const key_at: [2]f32 = .{ @floatCast(at[0]), @floatCast(at[1] - @as(f64, @floatFromInt(cm.pad_height))) };
+        if (osk_touches.has(t.id) or (t.kind == .down and !cm.onPad(at))) {
+            switch (t.kind) {
+                .down => {
+                    osk_touches.set(t.id);
+                    osk.panel.pointerMotion(key_at);
+                    osk.panel.pointerButton(key_at, true);
+                },
+                .motion => osk.panel.pointerMotion(key_at),
+                .up => {
+                    _ = osk_touches.unset(t.id);
+                    osk.panel.pointerButton(key_at, false);
+                },
+            }
+            cm.dirty = true;
+            continue;
+        }
+        var made: companion_mod.Out = .{};
+        switch (t.kind) {
+            .down => cm.pad.down(t.id, at[0], at[1], now),
+            .motion => cm.pad.motion(t.id, at[0], at[1], &made),
+            .up => cm.pad.up(t.id, now, &made),
+        }
+        for (made.slice()) |m| {
+            if (n < out.len) out[n] = m;
+            n += 1;
+        }
+    }
+    return out[0..@min(n, out.len)];
 }
 
 pub fn main(init: std.process.Init) u8 {
@@ -86,7 +133,10 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
 
     const dev = try vc4.device.open();
     const output = try vc4.drm.waitForOutput(dev.fd);
-    var renderer = try render.Renderer.init(gpa, dev, output);
+    // A touchscreen beside the monitor: its keyboard and touchpad (see
+    // companion.zig). The orientation chosen in Settings is its then.
+    const companion_output = vc4.drm.findCompanion(dev.fd, output);
+    var renderer = try render.Renderer.init(gpa, dev, output, companion_output == null);
     took.step(.display);
     // What the boot screen shows, over the first frames, fading out.
     var boot_fade: BootFade = .start(&renderer);
@@ -150,6 +200,18 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
     // touches on it; the last input was a touch (it shows only then).
     var osk: osk_mod.Osk = .init(try kit.gpuPanel(), renderer.width, renderer.height, dock.scale);
     var osk_touches: TouchSet = .{};
+    // With a touchscreen beside the monitor, the keyboard is on it, always,
+    // below its touchpad.
+    var companion: ?companion_mod.Companion = if (companion_output) |co| blk: {
+        var cm: companion_mod.Companion = .{
+            .renderer = try render.Renderer.init(gpa, dev, co, true),
+            .panel = try kit.gpuPanel(),
+        };
+        osk.setScreen(cm.width(), cm.height(), 1);
+        cm.layout(osk.height);
+        print("dazzle-shell: the touchscreen ({d}x{d}) is the monitor's keyboard and touchpad\n", .{ cm.width(), cm.height() });
+        break :blk cm;
+    } else null;
     // The shell's touch gestures (four fingers swiped: the overview).
     var gestures: gesture.Gestures = .{ .distance = @as(f64, @floatFromInt(@min(renderer.width, renderer.height))) * 0.08 };
     // Where the last touch on it was (a touch let go says no place: it
@@ -410,6 +472,8 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
             if (server.damaged) wake = now;
             if (panels_damaged) wake = @min(wake, client_frame_ns + panel_grace_ns);
         }
+        // A flip of the monitor's read with the touchscreen's: at once.
+        if (vc4.drm.flipKept(renderer.display.output.crtc_id)) wake = now;
         const timeout: i32 = if (wake > now) @intCast((wake - now) / std.time.ns_per_ms + 1) else 0;
         const opener_index = 2 + n_clients + n_inputs;
         const net_index = opener_index + 1;
@@ -518,7 +582,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                 osk_for = input_now;
                 osk.dismissed = false;
             }
-            const want = input_now != null and last_touch and !osk.dismissed and !locked and dock_shown and !server.fullscreenTop();
+            const want = companion == null and input_now != null and last_touch and !osk.dismissed and !locked and dock_shown and !server.fullscreenTop();
             if (want != osk.shown) {
                 // Up from the bottom, over the dock (which slides down out
                 // of its way: see `slideDock`), or back down.
@@ -533,7 +597,14 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                 panels_damaged = true;
                 server.damaged = true;
             }
-            if (osk.visible() and osk.needsDraw()) {
+            if (companion) |*cm| {
+                // On the touchscreen beside the monitor: drawn when it
+                // changes (once the last frame there is shown).
+                if (cm.renderer.flipPending()) _ = cm.renderer.handleEvents() catch null;
+                if ((cm.dirty or osk.needsDraw()) and !cm.renderer.flipPending()) {
+                    cm.show(osk.draw(sys.nowNs()), sys.nowNs()) catch |err| print(sys.log_warning ++ "dazzle-shell: cannot draw the touchscreen: {s}\n", .{@errorName(err)});
+                }
+            } else if (osk.visible() and osk.needsDraw()) {
                 renderer.setPanelAt(.keyboard, osk.draw(sys.nowNs()), 0, osk.top());
                 panels_damaged = true;
             }
@@ -542,13 +613,14 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         // touchscreen came or went (the dock is sized for fingers then):
         // what is sized by them, again.
         {
-            const turn = orientation.turns(renderer.display.width, renderer.display.height);
-            const touch = devices.hasTouch();
+            const turn = renderer.follows_orientation and orientation.turns(renderer.display.width, renderer.display.height);
+            // (A touchscreen beside the monitor is not the monitor's.)
+            const touch = devices.hasTouch() and companion == null;
             if (turn != renderer.turned or touch != dock_touch) {
                 dock_touch = touch;
                 renderer.setTurned(turn) catch |err| print(sys.log_warning ++ "dazzle-shell: cannot turn the cursor: {s}\n", .{@errorName(err)});
                 dock.setScreen(renderer.width, renderer.height, touch);
-                osk.setScreen(renderer.width, renderer.height, dock.scale);
+                if (companion == null) osk.setScreen(renderer.width, renderer.height, dock.scale);
                 quick.setScale(dock.scale);
                 notice.resize(gpa, renderer.width, dock.scale) catch |err| print(sys.log_warning ++ "dazzle-shell: cannot size the notice: {s}\n", .{@errorName(err)});
                 perf.setScreen(renderer.width, renderer.height);
@@ -601,7 +673,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         }
         // The last frame reached the screen: its frame callbacks fire, and
         // the next one can be drawn.
-        if (fds[1].revents != 0) {
+        if (fds[1].revents != 0 or vc4.drm.flipKept(renderer.display.output.crtc_id)) {
             if (renderer.handleEvents() catch |err| blk: {
                 print("dazzle-shell: display events: {s}\n", .{@errorName(err)});
                 break :blk null;
@@ -842,7 +914,12 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                 break :blk if (f.revents != 0) devices.read(f.fd, &events) else &.{};
             } else takeQueued(&remote_events, &remote_len, &events);
             if (batch.len == 0) continue;
-            for (batch) |e| {
+            // A touchscreen beside the monitor: its touches are its
+            // keyboard's, or its touchpad's (the pointer's motion, clicks
+            // and scrolling, as a mouse's).
+            var routed: [256]input.Event = undefined;
+            const events_now = if (companion) |*cm| if (source < n_inputs) routeCompanion(cm, &osk, &osk_touches, batch, &routed) else batch else batch;
+            for (events_now) |e| {
                 // The on-screen keyboard shows after a touch, not after a
                 // key typed or a button pressed (a keyboard, a mouse).
                 switch (e) {
@@ -1490,7 +1567,8 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         }
         // The pointer, while a mouse is plugged in (a touchscreen has none).
         if (cursor_shown) {
-            const mouse = devices.hasMouse();
+            // (A touchscreen beside the monitor is its touchpad.)
+            const mouse = devices.hasMouse() or companion != null;
             if (mouse and renderer.cursor_shape == null) {
                 if (renderer.showCursor(.arrow)) {
                     renderer.moveCursor(@intFromFloat(pointer.x), @intFromFloat(pointer.y));
@@ -2227,6 +2305,7 @@ test {
     _ = @import("server.zig");
     _ = @import("server_test.zig");
     _ = @import("input.zig");
+    _ = @import("companion.zig");
     _ = @import("cursor.zig");
     _ = @import("dock.zig");
     _ = @import("updates.zig");

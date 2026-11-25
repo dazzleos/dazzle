@@ -263,6 +263,18 @@ pub const Kms = struct {
     /// Switches the DRM file to atomic mode setting and finds the CRTC's
     /// planes. Fails (and the caller should use the legacy API) if the
     /// driver does not support it.
+    /// Planes a display has taken (two displays may otherwise take the
+    /// same overlay planes, which can go on any CRTC, and each turn off
+    /// the other's).
+    var claimed: [32]u32 = undefined;
+    var n_claimed: usize = 0;
+
+    fn claim(id: u32) void {
+        if (n_claimed == claimed.len) return;
+        claimed[n_claimed] = id;
+        n_claimed += 1;
+    }
+
     pub fn init(fd: linux.fd_t, output: drm.Output) !Kms {
         var cap: SetClientCap = .{ .capability = cap_universal_planes, .value = 1 };
         try drm.ioctl(fd, IOCTL_SET_CLIENT_CAP, &cap);
@@ -286,6 +298,7 @@ pub const Kms = struct {
             var plane: GetPlane = .{ .plane_id = plane_id };
             drm.ioctl(fd, IOCTL_MODE_GETPLANE, &plane) catch continue;
             if (plane.possible_crtcs & (@as(u32, 1) << @intCast(output.crtc_index)) == 0) continue;
+            if (std.mem.indexOfScalar(u32, claimed[0..n_claimed], plane_id) != null) continue;
             const props, const plane_type = PlaneProps.read(fd, plane_id) catch continue;
             if (plane_type == plane_type_primary and primary == null) {
                 primary = .{ .id = plane_id, .props = props };
@@ -297,6 +310,9 @@ pub const Kms = struct {
             }
         }
 
+        if (primary) |p| claim(p.id);
+        for (overlays) |o| if (o) |p| claim(p.id);
+        if (cover_plane) |p| claim(p.id);
         var blob: CreateBlob = .{ .data = @intFromPtr(&output.mode), .length = @sizeOf(drm.ModeInfo) };
         try drm.ioctl(fd, IOCTL_MODE_CREATEPROPBLOB, &blob);
         return .{

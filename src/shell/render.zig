@@ -340,6 +340,8 @@ pub const PanelId = enum {
     lock,
     /// The on-screen keyboard, above the dock.
     keyboard,
+    /// A touchscreen beside a monitor: its touchpad (see companion.zig).
+    touchpad,
 };
 const n_panels = @typeInfo(PanelId).@"enum".field_names.len;
 
@@ -389,6 +391,9 @@ pub const Renderer = struct {
     height: u32,
     /// The display used on its side (see the top of this file).
     turned: bool = false,
+    /// Whether it is turned as the orientation chosen in Settings says:
+    /// not a monitor beside a touchscreen (which the setting is for then).
+    follows_orientation: bool = true,
     /// Draws textures as quads; and blended, for the panels and the snap
     /// preview (with a little texture of its shade, made when first drawn).
     quads: shader.Pipeline,
@@ -421,11 +426,11 @@ pub const Renderer = struct {
     etc1_checked: bool = false,
     etc1_order: ?etc1.ByteOrder = null,
 
-    pub fn init(gpa: std.mem.Allocator, dev: vc4.Device, output: vc4.drm.Output) !Renderer {
+    pub fn init(gpa: std.mem.Allocator, dev: vc4.Device, output: vc4.drm.Output, follows_orientation: bool) !Renderer {
         // The screen stays 32-bit: it is what everything is composited
         // into, and screenshots are taken from.
         const display = try vc4.display.Display.init(dev, output, .xrgb8888);
-        const turn = sys.system.Orientation.now().turns(display.width, display.height);
+        const turn = follows_orientation and sys.system.Orientation.now().turns(display.width, display.height);
         const layout: shader.pipeline.Options = .{
             .vertex_stride = 16,
             .attributes = &.{ .{ .location = 0, .offset = 0 }, .{ .location = 1, .offset = 8 } },
@@ -437,6 +442,7 @@ pub const Renderer = struct {
             .width = if (turn) display.height else display.width,
             .height = if (turn) display.width else display.height,
             .turned = turn,
+            .follows_orientation = follows_orientation,
             .quads = try shader.Pipeline.init(gpa, dev, shader.Program.decode(@embedFile("quad.shader")) catch unreachable, layout),
             .blended = try shader.Pipeline.init(gpa, dev, shader.Program.decode(@embedFile("quad_blend.shader")) catch unreachable, layout),
             .rounded = try shader.Pipeline.init(gpa, dev, shader.Program.decode(@embedFile("window.shader")) catch unreachable, layout),
@@ -551,6 +557,7 @@ pub const Renderer = struct {
         .candidates = null,
         .lock = null,
         .keyboard = null,
+        .touchpad = null,
     });
 
     fn panelLayers(r: *Renderer) ?vc4.kms.Overlays {

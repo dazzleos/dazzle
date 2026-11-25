@@ -131,7 +131,7 @@ pub const Display = struct {
     /// Returns the vertical blank's time (microseconds, CLOCK_MONOTONIC)
     /// if the queued frame has reached the screen.
     pub fn handleEvents(d: *Display) !?u64 {
-        const t = try drm.readFlipEvents(d.fd) orelse return null;
+        const t = try drm.readFlipEventsFor(d.fd, d.output.crtc_id) orelse return null;
         if (!d.flip_pending) return null;
         d.flip_pending = false;
         d.on_screen = d.pending_buffer;
