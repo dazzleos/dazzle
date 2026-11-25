@@ -280,10 +280,7 @@ pub const Bcl = struct {
         var bits: u32 = 0;
         if (c.enable_forward_facing) bits |= 1 << 0;
         if (c.enable_reverse_facing) bits |= 1 << 1;
-        // The other way to the VC4's: Mesa sets it from `front_ccw` (with
-        // the VC4's sense, the side to keep was culled: Globe's ocean and
-        // land did not show).
-        if (!c.clockwise_primitives) bits |= 1 << 2;
+        if (c.clockwise_primitives) bits |= 1 << 2;
         if (msaa) bits |= 1 << 6;
         bits |= @as(u32, @intFromEnum(c.depth_func)) << 12;
         if (c.z_updates) bits |= 1 << 15;
