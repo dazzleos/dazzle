@@ -107,6 +107,11 @@ fn routeCompanion(cm: *companion_mod.Companion, osk: *osk_mod.Osk, osk_touches: 
             if (n < out.len) out[n] = m;
             n += 1;
         }
+        // Ended, as a mouse's are (the pointer moves at a frame).
+        if (made.len > 0) {
+            if (n < out.len) out[n] = .frame;
+            n += 1;
+        }
     }
     return out[0..@min(n, out.len)];
 }

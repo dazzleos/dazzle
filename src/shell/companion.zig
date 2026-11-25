@@ -190,6 +190,8 @@ const View = struct {
             .color = t.surface_container,
             .radius = .all(24),
             .child = cx.make(kete.Align{ .alignment = .center, .child = cx.make(kete.Column{
+                .fill = false,
+                .cross_axis_alignment = .center,
                 .spacing = 8,
                 .children = cx.arena.dupe(kete.Widget, &.{
                     cx.make(kete.Text{ .text = "Touchpad", .style = .{ .size = 22, .color = t.on_surface } }),
