@@ -253,6 +253,8 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         .width = renderer.width,
         .height = renderer.height,
     });
+    // On a Pi 4 or 5, apps' windows are 32-bit (see `Server.tiled_rgb565`).
+    server.tiled_rgb565 = !renderer.dev.is_v3d;
     // The input method gets keys first.
     server.input_method = .{ .ctx = &ime, .key = struct {
         fn key(ctx: *anyopaque, s: *server_mod.Server, code: u32, pressed: bool) bool {

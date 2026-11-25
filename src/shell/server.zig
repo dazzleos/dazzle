@@ -721,6 +721,10 @@ fn peerPid(fd: linux.fd_t) ?linux.pid_t {
 pub const Server = struct {
     gpa: std.mem.Allocator,
     backend: Backend,
+    /// Apps may share tiled RGB565 buffers (16-bit windows). Not on V3D
+    /// (the Pi 4 and 5), which renders RGB565 with red and blue the other
+    /// way round to the VC4: their windows are 32-bit there.
+    tiled_rgb565: bool = true,
     clients: std.ArrayList(*Client) = .empty,
     /// Toplevels in stacking order, bottom first.
     toplevels: std.ArrayList(*Toplevel) = .empty,
@@ -2954,6 +2958,7 @@ pub const Server = struct {
                 try c.addObject(id, .dmabuf);
                 const mod = p.modifier.broadcom_vc4_t_tiled;
                 for (buffer_formats) |f| {
+                    if (f == .rgb565 and !s.tiled_rgb565) continue;
                     if (c.send(id, p.zwp_linux_dmabuf_v1.event.format)) |m0| {
                         var e = m0;
                         e.uint(f.fourcc()).end();
