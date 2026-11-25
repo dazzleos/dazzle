@@ -93,13 +93,7 @@ pub fn boot(splash: ?splash_mod.Splash) Boot {
     if (!b.mounted) return b;
     makeUserDirs();
     b.setup_done = exists(proto.setup_done_file);
-    // Asked to run it again (for trying it), it starts as if it had not
-    // finished (the name is kept, and offered).
-    if (b.setup_done and proto.setupAgain()) {
-        print("dazzle: setup runs again ({s})\n", .{proto.setup_again_cmdline});
-        b.setup_done = false;
-    }
-    if (exists(proto.setup_done_file)) {
+    if (b.setup_done) {
         b.hostname = proto.Hostname.parse("dazzle").?;
         var buf: [80]u8 = undefined;
         if (sys.readFile(proto.hostname_file, &buf)) |text| {
