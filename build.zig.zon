@@ -9,8 +9,8 @@
         // To build with a kete checkout beside Dazzle's instead:
         // `scripts/zig build --fork=../kete`.
         .kete = .{
-            .url = "git+https://github.com/robert-ancell/kete#69318c065057b0d3c3e5403e255ff451ea20c4d4",
-            .hash = "kete-0.1.0-tp3h6iXEVAB-KIAan2twVD8Ffz5-ktUrKWzOGf553DbC",
+            .url = "git+https://github.com/robert-ancell/kete#fc148b0dda7870353ec90a88e20c94bac664386b",
+            .hash = "kete-0.1.0-tp3h6qjLVADtShez1YHZfvwpcNutfXurvLpnpN1cHTT-",
         },
     },
     .paths = .{
