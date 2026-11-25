@@ -471,11 +471,21 @@ pub const BoardView = struct {
             }
         }.f;
 
-        // The board, with its notches cut into the edge.
-        const outline = map(t, .{ .x = 0, .y = 0, .w = b.width, .h = b.height });
+        // A computer in a case: the case and its keyboard faint, then the
+        // board inside drawn as any board is.
         var c = p.canvas();
-        c.fillRoundedRect(outline, .all(b.corner * s), theme.on_surface.withAlpha(0.04));
-        c.strokeRoundedRect(outline, .all(b.corner * s), heavy, ink);
+        const faint = ink.withAlpha(0.3);
+        if (b.inner != null) {
+            c.strokeRoundedRect(map(t, .{ .x = 0, .y = 0, .w = b.width, .h = b.height }), .all(b.corner * s), line, faint);
+            for (b.parts) |part| if (board.isCase(part.kind)) drawPart(c, &part, map(t, part.rect), s, faint);
+        }
+        // The board, with its notches cut into the edge.
+        const outline = map(t, b.inner orelse .{ .x = 0, .y = 0, .w = b.width, .h = b.height });
+        // (A board inside a case has a board's corners, not the case's.)
+        const corner: kete.CornerRadii = .all((if (b.inner != null) 3 else b.corner) * s);
+        if (b.inner != null) c.fillRoundedRect(outline, corner, theme.surface);
+        c.fillRoundedRect(outline, corner, theme.on_surface.withAlpha(0.04));
+        c.strokeRoundedRect(outline, corner, heavy, ink);
         if (b.notches.len > 0) {
             const old = p.clipTo(outline.outset(heavy));
             c = p.canvas();
@@ -491,7 +501,7 @@ pub const BoardView = struct {
 
         // What is under the board, faint; then what is on it.
         for (b.parts) |part| if (part.underside) drawPart(c, &part, map(t, part.rect), s, ink.withAlpha(0.35));
-        for (b.parts, 0..) |part, i| if (!part.underside) {
+        for (b.parts, 0..) |part, i| if (!part.underside and !board.isCase(part.kind)) {
             const pr = map(t, part.rect);
             if (partOverhangsBoard(b, &part)) {
                 fillOverhangingPart(c, &part, pr, s, theme.surface, theme.on_surface.withAlpha(0.04));
