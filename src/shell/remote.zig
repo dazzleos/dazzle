@@ -28,6 +28,8 @@
 //!     /quit?app=motu[&force=1]
 //!                                   asks the app's windows to close (or
 //!                                   ends it at once)
+//!     /window?do=place&x=&y=&w=&h=[&app=motu]
+//!                                   puts the window there, that big
 //!     /window?do=maximize[&app=motu]
 //!                                   maximizes, restores, makes fullscreen
 //!                                   (fullscreen), leaves fullscreen
@@ -82,6 +84,8 @@ pub const Command = union(enum) {
     /// What to do to the top window, of `app` (its app ID or title) or of
     /// all.
     window: struct { action: WindowAction, app: ?[]const u8 },
+    /// Where to put the top window (of `app`), and how big.
+    place: struct { app: ?[]const u8, x: i32, y: i32, width: u32, height: u32 },
     /// A notification to show: its title and body (in the request's
     /// buffer), and its icon's name, if one was given.
     notify: struct { title: []const u8, body: []const u8, icon: ?[]const u8 },
@@ -244,6 +248,20 @@ fn parse(text: []const u8, code: u32, text_buf: []u8) Parsed {
         .app = decode(param(query, "app") orelse return .bad, text_buf) orelse return .bad,
         .force = std.mem.eql(u8, param(query, "force") orelse "0", "1"),
     } } };
+    if (std.mem.eql(u8, path, "/window") and std.mem.eql(u8, param(query, "do") orelse "", "place")) {
+        const int = struct {
+            fn f(qs_: []const u8, name: []const u8, comptime T: type) ?T {
+                return std.fmt.parseInt(T, param(qs_, name) orelse return null, 10) catch null;
+            }
+        }.f;
+        return .{ .command = .{ .place = .{
+            .app = if (param(query, "app")) |a| decode(a, text_buf) orelse return .bad else null,
+            .x = int(query, "x", i32) orelse return .bad,
+            .y = int(query, "y", i32) orelse return .bad,
+            .width = int(query, "w", u32) orelse return .bad,
+            .height = int(query, "h", u32) orelse return .bad,
+        } } };
+    }
     if (std.mem.eql(u8, path, "/window")) return .{ .command = .{ .window = .{
         .action = std.meta.stringToEnum(WindowAction, param(query, "do") orelse return .bad) orelse return .bad,
         .app = if (param(query, "app")) |a| decode(a, text_buf) orelse return .bad else null,
@@ -355,6 +373,11 @@ test "apps, windows and updates are controlled directly" {
     try testing.expectEqualStrings("Motu", w.app.?);
     try testing.expect(parse("GET /window?code=123456&do=maximize HTTP/1.1\r\n\r\n", 123456, &buf).command.window.app == null);
     try testing.expect(parse("GET /window?code=123456&do=explode HTTP/1.1\r\n\r\n", 123456, &buf) == .bad);
+    const pl = parse("GET /window?code=123456&do=place&x=10&y=-5&w=800&h=600&app=Chat HTTP/1.1\r\n\r\n", 123456, &buf).command.place;
+    try testing.expectEqual(@as(i32, -5), pl.y);
+    try testing.expectEqual(@as(u32, 800), pl.width);
+    try testing.expectEqualStrings("Chat", pl.app.?);
+    try testing.expect(parse("GET /window?code=123456&do=place&x=10 HTTP/1.1\r\n\r\n", 123456, &buf) == .bad);
     try testing.expect(parse("GET /update?code=123456 HTTP/1.1\r\n\r\n", 123456, &buf).command == .update);
     try testing.expectEqual([2]f64{ 10, 20 }, parse("GET /tap?code=123456&x=10&y=20 HTTP/1.1\r\n\r\n", 123456, &buf).command.tap);
     const sw = parse("GET /swipe?code=123456&x=10&y=20&x2=30&y2=200&fingers=4 HTTP/1.1\r\n\r\n", 123456, &buf).command.swipe;

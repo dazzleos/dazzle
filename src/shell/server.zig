@@ -1562,6 +1562,26 @@ pub const Server = struct {
     /// and its app can).
     pub const WindowAction = enum { maximize, restore, fullscreen, windowed, close, raise };
 
+    /// Puts window `t` at (`x`, `y`) on the screen, `width` by `height`
+    /// (restored, as dragging and resizing it would: no smaller than its
+    /// minimum, nor bigger than the screen).
+    pub fn place(s: *Server, t: *Toplevel, x: i32, y: i32, width: u32, height: u32) void {
+        const c = (t.xdg.surface orelse return).client;
+        s.setFullscreen(c, t, false);
+        s.setMaximized(c, t, false);
+        t.tiled = null;
+        t.x = x;
+        t.y = y;
+        t.width = s.clampWidth(t, width, s.output.width);
+        t.height = s.clampHeight(t, height, s.output.height);
+        t.anchor_right = null;
+        t.anchor_bottom = null;
+        t.placed = true;
+        if (t.xdg.configured) s.configure(c, t);
+        s.damaged = true;
+        s.replacePopups(t);
+    }
+
     /// The top window whose app (its app ID, or the name of its program)
     /// or title is `app`; the top window if `app` is null.
     pub fn findWindow(s: *const Server, app: ?[]const u8) ?*Toplevel {

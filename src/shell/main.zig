@@ -771,6 +771,10 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                         server.act(t, std.meta.stringToEnum(server_mod.Server.WindowAction, @tagName(w.action)).?);
                         req.respond("200 OK", "text/plain", "ok\n");
                     } else req.respond("404 Not Found", "text/plain", "No such window\n"),
+                    .place => |pl| if (server.findWindow(pl.app)) |t| {
+                        server.place(t, pl.x, pl.y, pl.width, pl.height);
+                        req.respond("200 OK", "text/plain", "ok\n");
+                    } else req.respond("404 Not Found", "text/plain", "No such window\n"),
                     .updates => {
                         var out_buf: [512]u8 = undefined;
                         var w: std.Io.Writer = .fixed(&out_buf);
