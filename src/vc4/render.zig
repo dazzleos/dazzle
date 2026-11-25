@@ -382,10 +382,13 @@ pub const Frame = struct {
                 .tex_p0 => |u| try f.pushUniform(try f.index(d.unit(u).handle)),
                 else => {},
             };
+            // The VC4's texture words: on the V3D its own are written as
+            // it is submitted (`submitV3dRegion`), and many formats it
+            // samples the VC4 has none for.
             for (s.layout) |k| try f.pushUniform(switch (k) {
                 .user => |i| s.user[i],
-                .tex_p0 => |u| texture.p0(d.unit(u).config),
-                .tex_p1 => |u| texture.p1(d.unit(u).config),
+                .tex_p0 => |u| if (texture.use_uif) 0 else texture.p0(d.unit(u).config),
+                .tex_p1 => |u| if (texture.use_uif) 0 else texture.p1(d.unit(u).config),
                 .constant => |c| c,
             });
         }

@@ -21,7 +21,8 @@
 //!   BGR565, its R/B swap has no effect on 16-bit), RGBA4444, RGBA5551,
 //!   ABGR1555, R8 and GR88, and 10-bit and half-float colour; and samples
 //!   all of those and much more (16 bits a channel, floats, signed, ETC2,
-//!   EAC, BC1-3, ASTC), its texture unit putting the channels in order.
+//!   EAC, BC1-3, ASTC up to 8x6), its texture unit putting the channels
+//!   in order.
 //!
 //! The shaders' colour is red, green, blue and alpha whatever the format:
 //! the hardware converts as it samples and stores.
@@ -340,9 +341,13 @@ pub const Format = enum {
             .bc1_rgba => .{ .texture = tex(48, xyzw) },
             .bc2 => .{ .texture = tex(49, xyzw) },
             .bc3 => .{ .texture = tex(50, xyzw) },
-            .astc_4x4, .astc_5x4, .astc_5x5, .astc_6x5, .astc_6x6, .astc_8x5, .astc_8x6, .astc_8x8, .astc_10x5, .astc_10x6, .astc_10x8, .astc_10x10, .astc_12x10, .astc_12x12 => .{
+            .astc_4x4, .astc_5x4, .astc_5x5, .astc_6x5, .astc_6x6, .astc_8x5, .astc_8x6 => .{
                 .texture = tex(@intCast(64 + @intFromEnum(f) - @intFromEnum(Format.astc_4x4)), xyzw),
             },
+            // Blocks of more than 48 pixels come back black from a Pi 4's
+            // texture unit, at any size (v3d_packet.xml has them, 71 to
+            // 77; found on a Pi 400).
+            .astc_8x8, .astc_10x5, .astc_10x6, .astc_10x8, .astc_10x10, .astc_12x10, .astc_12x12 => .{},
         };
     }
 
