@@ -109,6 +109,8 @@ fn run(init: std.process.Init) !void {
         .size = view.open_size,
         .on_close_request = .close,
     });
+    // The whole screen (the first page is "Hello" all over it).
+    window.setFullscreen(true);
     // Show the first page at once before talking to the system and network
     // managers.
     _ = try host.step(0);

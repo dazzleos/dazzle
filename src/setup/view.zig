@@ -2,6 +2,8 @@
 //! button (Finish on the last, and Back after the first), filling the
 //! screen. The pages:
 //!
+//! * "Hello" in every language, to pick the language by (hello.zig): it
+//!   fills the screen, with no buttons;
 //! * the language and the keyboard (which changes with the language, until
 //!   one is picked), with a field to try the keyboard in;
 //! * the time zone (the language's, until one is picked);
@@ -22,6 +24,7 @@ const kete_vc4 = @import("kete_vc4");
 const sys = @import("sys");
 const store = @import("store");
 const locale = @import("locale");
+const hello = @import("hello.zig");
 
 const proto = sys.system;
 const net = sys.network;
@@ -30,8 +33,8 @@ const net = sys.network;
 /// The size the window opens at: one step at a time.
 pub const open_size = [2]u32{ 880, 620 };
 
-pub const Page = enum { language, time, hostname, wifi, apps };
-pub const pages = [_]Page{ .language, .time, .hostname, .wifi, .apps };
+pub const Page = enum { hello, language, time, hostname, wifi, apps };
+pub const pages = [_]Page{ .hello, .language, .time, .hostname, .wifi, .apps };
 
 /// The most apps that can be chosen (the catalogue's first).
 pub const max_apps = 64;
@@ -103,6 +106,8 @@ pub const Setup = struct {
 
     pub const State = struct {
         page: usize = 0,
+        /// The first page's words, and the one picked.
+        hello: hello.State = .{},
         /// Past the last page.
         finishing: bool = false,
         name_buf: [63]u8 = undefined,
@@ -210,6 +215,10 @@ pub const Setup = struct {
             .wifi_connected = self.wifiConnected(),
         };
         state.actions = self.actions;
+        // The first page is the whole window.
+        if (!state.finishing and pages[state.page] == .hello) {
+            return cx.make(hello.Page{ .state = &state.hello, .on_pick = .of(nav, Nav.pickLanguage) });
+        }
         const content = if (state.finishing) self.finishing(cx, nav) else self.page(cx, state, nav);
         // At most 720 pixels wide, narrower in a narrower window.
         return cx.make(kete.RoundedBox{ .color = cx.theme().surface, .child = cx.make(kete.Align{ .child = cx.make(kete.ConstrainedBox{
@@ -223,6 +232,7 @@ pub const Setup = struct {
         const t = cx.theme();
         const which = pages[state.page];
         const body = switch (which) {
+            .hello => unreachable, // the whole window (see `build`)
             .language => languagePage(cx, state),
             .time => timePage(cx, state),
             .hostname => self.hostnamePage(cx, state, nav),
@@ -665,7 +675,7 @@ const Nav = struct {
                 st.page = @intFromEnum(Page.apps);
                 return;
             },
-            .language, .time, .apps => {},
+            .hello, .language, .time, .apps => {},
         }
         if (st.page + 1 < pages.len) {
             st.page += 1;
@@ -676,6 +686,12 @@ const Nav = struct {
             a.finish = proto.Hostname.parse(st.name());
             a.apps = ~st.skipped;
         }
+    }
+
+    /// A language picked on the first page: it, and on to the next.
+    fn pickLanguage(n: *Nav, l: locale.Language) void {
+        n.state.setLanguage(l);
+        n.state.page = @intFromEnum(Page.language);
     }
 
     fn back(n: *Nav) void {
@@ -747,11 +763,14 @@ test "naming the computer, then waiting for the card" {
             uu.frame(size[0], size[1], n.*, Setup{ .suggestion = "awesome-elephant", .report = r, .actions = a });
         }
     }.draw;
+    // Past the first page ("Hello", to pick the language by).
+    Draw(u, &report, &actions, &now, .{ 1920, 1080 });
+    u.root.?.state(Setup.State).page = @intFromEnum(Page.language);
     for ([_][2]u32{ .{ 1920, 1080 }, .{ 1280, 720 }, .{ 1024, 768 }, .{ 800, 600 }, .{ 640, 480 } }) |size| {
         Draw(u, &report, &actions, &now, size);
         try testing.expect(!overflows(u.root.?));
     }
-    // The language first; then the time zone and the name, which fit too.
+    // The language; then the time zone and the name, which fit too.
     try testing.expect(findText(u.root.?, "Language and keyboard") != null);
     click(u, findText(u.root.?, "Next").?);
     for ([_][2]u32{ .{ 1920, 1080 }, .{ 640, 480 } }) |size| {
@@ -821,6 +840,8 @@ test "Wi-Fi networks are shown when Ethernet is not connected and a Wi-Fi adapte
     wifi.add(cafe);
 
     var setup: Setup = .{ .suggestion = "my-pi", .report = &report, .wifi = &wifi, .actions = &actions };
+    u.frame(1280, 720, 0, setup);
+    u.root.?.state(Setup.State).page = @intFromEnum(Page.language);
     u.frame(1280, 720, 0, setup);
     click(u, findText(u.root.?, "Next").?);
     u.frame(1280, 720, 1, setup);
@@ -946,6 +967,8 @@ test "the language and keyboard: the keyboard goes with the language, until one 
     const setup: Setup = .{ .suggestion = "my-pi", .report = &report, .actions = &actions, .locale = .{ .language = .en_us, .keyboard = .us } };
     u.frame(1280, 720, 0, setup);
     const st = u.root.?.state(Setup.State);
+    st.page = @intFromEnum(Page.language);
+    u.frame(1280, 720, 0, setup);
     try testing.expect(findText(u.root.?, "English (New Zealand)") != null);
     // British English: and a UK keyboard.
     click(u, findText(u.root.?, "English (United Kingdom)").?);
@@ -964,4 +987,45 @@ test "the language and keyboard: the keyboard goes with the language, until one 
     // Somewhere to try it.
     try testing.expect(findType(u.root.?, kete.TextField) != null);
     try testing.expect(!overflows(u.root.?));
+}
+
+test "the first page: hello in every language; one picked, its languages, and back" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
+    defer u.destroy();
+    var actions: Actions = .{};
+    const report: proto.Report = .{ .storage = .preparing };
+    const setup: Setup = .{ .suggestion = "my-pi", .report = &report, .actions = &actions };
+    const s = std.time.ns_per_s;
+    u.frame(1920, 1080, 1 * s, setup);
+    const st = u.root.?.state(Setup.State);
+    try testing.expectEqual(Page.hello, pages[st.page]);
+    // The most spoken first: English is in at once, Japanese later.
+    u.frame(1920, 1080, 1 * s + 500 * std.time.ns_per_ms, setup);
+    try testing.expect(findText(u.root.?, "Hello") != null);
+    try testing.expect(findText(u.root.?, "こんにちは") == null);
+    u.frame(1920, 1080, 20 * s, setup);
+    for (hello.words) |w| try testing.expect(findText(u.root.?, w.text) != null);
+    // Hola: the others go, and its languages show.
+    click(u, findText(u.root.?, "Hola").?);
+    u.frame(1920, 1080, 20 * s + 100 * std.time.ns_per_ms, setup);
+    u.frame(1920, 1080, 22 * s, setup);
+    try testing.expect(findText(u.root.?, "Hello") == null);
+    try testing.expect(findText(u.root.?, "Español (México)") != null);
+    try testing.expect(findText(u.root.?, "Español (Chile)") != null);
+    // Back: the words again.
+    click(u, findType(u.root.?, kete.Icon).?);
+    u.frame(1920, 1080, 23 * s, setup);
+    u.frame(1920, 1080, 25 * s, setup);
+    try testing.expect(findText(u.root.?, "Hello") != null);
+    try testing.expect(findText(u.root.?, "Español (México)") == null);
+    // Hola, then Mexico: the language, and on to the keyboard.
+    click(u, findText(u.root.?, "Hola").?);
+    u.frame(1920, 1080, 26 * s, setup);
+    u.frame(1920, 1080, 28 * s, setup);
+    click(u, findText(u.root.?, "Español (México)").?);
+    u.frame(1920, 1080, 29 * s, setup);
+    try testing.expectEqual(Page.language, pages[st.page]);
+    try testing.expectEqual(locale.Language.es_mx, st.language);
+    try testing.expectEqual(locale.Language.es_mx, actions.locale.?.language);
 }

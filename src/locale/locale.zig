@@ -119,6 +119,34 @@ pub const Language = enum {
         };
     }
 
+    /// "Hello" in it (setup's first page greets in every language).
+    pub fn hello(l: Language) []const u8 {
+        return switch (l.family()) {
+            .english => "Hello",
+            .spanish => "Hola",
+            .chinese => "你好",
+            .french => "Bonjour",
+            .german => "Hallo",
+            .portuguese => "Olá",
+            .japanese => "こんにちは",
+            .arabic => "مرحبا",
+        };
+    }
+
+    /// Every language, the most spoken first: languages by how many speak
+    /// them (English, Chinese, Spanish, Arabic, French, Portuguese, German,
+    /// Japanese), and each one's places by how many speak it there.
+    pub const by_speakers = [_]Language{
+        .en_us, .en_gb, .en_ca, .en_au, .en_nz,
+        .zh_cn,
+        .es_mx, .es_co, .es_es, .es_ar, .es_us, .es_pe, .es_cl,
+        .ar_eg,
+        .fr_fr, .fr_ca,
+        .pt_br, .pt_pt,
+        .de_de,
+        .ja_jp,
+    };
+
     /// Its name in English, for finding it by ("Spanish (Mexico)").
     pub fn englishName(l: Language) []const u8 {
         return switch (l) {
@@ -998,6 +1026,13 @@ const testing = std.testing;
 
 test {
     _ = timezone;
+}
+
+test "every language is in by_speakers once, and says hello" {
+    for (std.enums.values(Language)) |l| {
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(Language, &Language.by_speakers, &.{l}));
+        try std.testing.expect(l.hello().len > 0);
+    }
 }
 
 test "keyboards" {
