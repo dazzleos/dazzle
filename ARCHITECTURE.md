@@ -198,8 +198,9 @@ machine code by Dazzle's shader compiler (`src/shader/`). A QPU and
 texture-unit simulator executes these shaders during host unit tests.
 
 Each app renders its window into tiled GPU buffers shared with the shell as
-`dma-buf` file descriptors (16-bit `BGR565` by default, or 32-bit `BGRA8888`
-when requested). The shell composites visible windows into the screen
+`dma-buf` file descriptors: by default in the GPU's own 16-bit format
+(`BGR565` on the VC4, `RGB565` on the V3D), or 32-bit (`XRGB8888`) when
+requested. The shell composites visible windows into the screen
 buffer and presents frames via KMS page flips at vertical blank. Both apps
 and the shell track damage and redraw only regions that changed.
 
@@ -210,6 +211,16 @@ shadows under them. The shell draws both in its shaders as it composites
 around it blended), so app buffers need no alpha channel or margins, and
 there is no extra GPU memory per window. Other Wayland clients' windows
 are drawn as they are.
+
+Pixel formats are named as DRM names them, and each GPU is given only
+those it renders or samples as they are (`src/vc4/format.zig`): the VC4
+renders `XRGB8888`, `ARGB8888` and `BGR565` and samples those, `BGRA4444`,
+`BGRA5551`, 8-bit alpha and ETC1; the V3D renders 32-bit colour in either
+order, `RGB565`, `RGBA4444`, `RGBA5551`, `ABGR1555`, `R8`, `GR88`, 10-bit
+and half-float colour, and samples those and more (16 bits a channel,
+floats, signed, ETC2, EAC, BC1-3, ASTC up to 8x6), its texture unit
+putting the channels in order. The shell offers clients the formats the
+GPU samples (and, for tiled buffers, renders).
 
 When a single maximized or fullscreen window covers the screen, the shell
 bypasses GPU compositing and scans the app's buffer out directly on the
@@ -230,8 +241,7 @@ RAM) for the next boot.
 
 To keep GPU memory use low:
 
-- Window buffers default to 16-bit `BGR565` (4 MB instead of 8 MB at
-  1920×1080).
+- Window buffers default to 16 bits (4 MB instead of 8 MB at 1920×1080).
 - Font glyphs are cached in an 8-bit coverage atlas.
 - Covered windows release their spare buffers.
 - Triple buffering for pipelined rendering is only allocated when at least
