@@ -891,7 +891,7 @@ pub const Renderer = struct {
     fn etc1Order(r: *Renderer) ?etc1.ByteOrder {
         if (r.etc1_checked) return r.etc1_order;
         r.etc1_checked = true;
-        for ([_]etc1.ByteOrder{ .standard, .reversed }) |order| {
+        for ([_]etc1.ByteOrder{ .standard, .standard_blue_red, .reversed, .reversed_blue_red }) |order| {
             const ok = r.etc1Decodes(order) catch |err| {
                 sys.print(sys.log_warning ++ "dazzle-shell: cannot check ETC1 textures: {s}\n", .{@errorName(err)});
                 return null;

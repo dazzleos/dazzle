@@ -202,8 +202,32 @@ pub fn encode(pixels: []const u32, width: u32, height: u32, out: []u64) void {
 }
 
 /// How a block's 64 bits are stored, a byte at a time: the first byte of
-/// the standard layout first (as files hold it), or last.
-pub const ByteOrder = enum { standard, reversed };
+/// the standard layout first (as files hold it), or last; and whether its
+/// red and blue are exchanged (`swapRedBlue`). A Pi 3's GPU takes the
+/// standard order, but returns the colour it decodes with red where
+/// Dazzle's 32-bit textures have blue: given blocks with red and blue
+/// exchanged, it returns them as they should be (exchanging them costs
+/// nothing, where the shader would have to on every pixel).
+pub const ByteOrder = enum {
+    standard,
+    reversed,
+    standard_blue_red,
+    reversed_blue_red,
+
+    fn swapped(o: ByteOrder) bool {
+        return o == .standard_blue_red or o == .reversed_blue_red;
+    }
+};
+
+/// The block with its red and blue exchanged. In both of ETC1's modes a
+/// block's first byte holds red's base colour(s) and its third blue's,
+/// the same way, and the brightness changes apply to every channel alike:
+/// exchanging the two bytes exchanges the colours.
+pub fn swapRedBlue(b: u64) u64 {
+    const red = (b >> 56) & 0xff;
+    const blue = (b >> 40) & 0xff;
+    return (b & ~@as(u64, 0xff00_ff00_0000_0000)) | blue << 56 | red << 40;
+}
 
 /// The bytes a texture of `width` by `height` pixels takes, laid out by
 /// `upload`: as an image of 64-bit "pixels", a block each (the kernel
@@ -226,10 +250,10 @@ pub fn upload(dst: []u8, width: u32, height: u32, blocks: []const u64, order: By
     const n = blocksOf(width, height);
     for (0..n[1]) |by| for (0..n[0]) |bx| {
         const at = blockOffset(n[0], n[1], @intCast(bx), @intCast(by));
-        const b = blocks[by * n[0] + bx];
+        const b = if (order.swapped()) swapRedBlue(blocks[by * n[0] + bx]) else blocks[by * n[0] + bx];
         switch (order) {
-            .standard => std.mem.writeInt(u64, dst[at..][0..8], b, .big),
-            .reversed => std.mem.writeInt(u64, dst[at..][0..8], b, .little),
+            .standard, .standard_blue_red => std.mem.writeInt(u64, dst[at..][0..8], b, .big),
+            .reversed, .reversed_blue_red => std.mem.writeInt(u64, dst[at..][0..8], b, .little),
         }
     };
 }
@@ -328,4 +352,19 @@ test "a block's bytes are stored first byte first, or reversed" {
     try testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, dst[0..8]);
     upload(&dst, 4, 4, &.{0x0102030405060708}, .reversed);
     try testing.expectEqualSlices(u8, &.{ 8, 7, 6, 5, 4, 3, 2, 1 }, dst[0..8]);
+}
+
+test "exchanging a block's red and blue exchanges its colours" {
+    for ([_]u32{ 0xffff0000, 0xff2080c0, 0xff10f020 }) |color| {
+        var px: [16]u32 = @splat(color);
+        var blocks: [1]u64 = undefined;
+        encode(&px, 4, 4, &blocks);
+        const swapped = decodeBlock(swapRedBlue(blocks[0]));
+        const plain = decodeBlock(blocks[0]);
+        for (swapped, plain) |a, b| {
+            try testing.expectEqual(b >> 16 & 0xff, a & 0xff);
+            try testing.expectEqual(b & 0xff, a >> 16 & 0xff);
+            try testing.expectEqual(b >> 8 & 0xff, a >> 8 & 0xff);
+        }
+    }
 }
