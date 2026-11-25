@@ -7,8 +7,10 @@
 
 /// Germany's.
 pub const germany = [_][2][]const u8{
-    .{ "Name this computer", "Diesen Computer benennen" },
-    .{ "Other computers on the network know it by this name. It can have lowercase letters, numbers and hyphens.", "Andere Computer im Netzwerk kennen ihn unter diesem Namen. Er darf Kleinbuchstaben, Ziffern und Bindestriche enthalten." },
+    .{ "Hello, I speak…", "Hallo, ich spreche…" },
+    .{ "Is this your keyboard?", "Ist das deine Tastatur?" },
+    .{ "Give me a name", "Gib mir einen Namen" },
+    .{ "Lowercase letters, numbers and hyphens. You can change it later in Settings.", "Kleinbuchstaben, Ziffern und Bindestriche. Du kannst ihn später in den Einstellungen ändern." },
     .{ "Let other computers control this one", "Anderen Computern die Steuerung erlauben" },
     .{ "Code {d}. With it, a computer on the network can move the pointer, type, open and close apps and windows, take screenshots, install updates and restart, at http://{s}:{d}/. Turn this off when you are done.", "Code {d}. Damit kann ein Computer im Netzwerk unter http://{s}:{d}/ den Zeiger bewegen, tippen, Apps und Fenster öffnen und schließen, Bildschirmfotos aufnehmen, Updates installieren und neu starten. Schalte dies aus, wenn du fertig bist." },
     .{ "Dazzle cannot keep files: {s}. Setup will run again when the computer next starts.", "Dazzle kann keine Dateien speichern: {s}. Die Einrichtung läuft beim nächsten Start des Computers erneut." },

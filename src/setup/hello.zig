@@ -4,15 +4,17 @@
 //! an outline fades in and out around each in turn, to show they can be
 //! picked (there is no language yet to say so in).
 //!
-//! Picked, the other words fade away, the word moves to the top, and the
-//! languages it is "hello" in are listed under it (all its places: English
-//! in the United States, the United Kingdom and so on, the most spoken
-//! first; and any other language with the same word). Picking one of them
-//! is the language; the arrow along the bottom, in the middle (where
-//! the other pages' buttons are), goes back to the words.
+//! Picked, the other words fade away, and the word moves up to where every
+//! page's title is, turning (fading) into this page's: "Hello, I speak…".
+//! The languages it is "hello" in are listed in the middle (all its
+//! places: English in the United States, the United Kingdom and so on, the
+//! most spoken first; and any other language with the same word), the
+//! first chosen: the language, used at once (the title and buttons are in
+//! it). Choosing another changes it; Next goes on with it, and Back to
+//! the words. The buttons are where every page's are.
 //!
 //! Everything moves by the time since it started (or since a word was
-//! picked, or the arrow pressed), so the page is made again each frame
+//! picked, or Back pressed), so the page is made again each frame
 //! while anything moves: faded with `kete.Opacity`, placed (in proportion
 //! to the screen) with `kete.Place`.
 
@@ -21,7 +23,7 @@ const kete = @import("kete");
 const locale = @import("locale");
 
 const Language = locale.Language;
-const big = @import("big_button.zig");
+const parts = @import("parts.zig");
 
 /// A word, and the languages it is "hello" in, the most spoken first.
 pub const Word = struct {
@@ -64,18 +66,22 @@ const move_ns: u64 = 600 * std.time.ns_per_ms;
 const list_after: u64 = 450 * std.time.ns_per_ms;
 const list_fade_ns: u64 = 500 * std.time.ns_per_ms;
 
-/// Where the word picked goes: near the top, in the middle.
-const top: [2]f32 = .{ 0.5, 0.14 };
+/// Where the word picked goes: where the title is (across the middle, at
+/// the top, `parts.title_middle` down).
+const top: [2]f32 = .{ 0.5, 0 };
+const top_offset: kete.Point = .{ 0, parts.title_middle };
 
-const word_size = 56;
+/// As big as the title it turns into.
+const word_size = parts.title_size;
 
 pub const State = struct {
     /// Each word's place: across and down, 0 to 1.
     places: [max_words][2]f32 = undefined,
     /// When the words started fading in (null: not yet made).
     start_ns: ?u64 = null,
-    /// The word picked, if one is.
+    /// The word picked, if one is; and which of its languages is chosen.
     chosen: ?usize = null,
+    selected: usize = 0,
     /// The word last picked, going back to its place (after the arrow).
     returning: ?usize = null,
     /// When the last was picked, or the arrow pressed.
@@ -112,6 +118,7 @@ pub const State = struct {
 
     fn pick(st: *State, i: usize, now: u64) void {
         st.chosen = i;
+        st.selected = 0;
         st.returning = null;
         st.changed_ns = now;
     }
@@ -126,8 +133,11 @@ pub const State = struct {
 /// The page, filling the window.
 pub const Page = struct {
     state: *State,
-    /// A language picked from the list.
-    on_pick: ?kete.ValueCallback(Language) = null,
+    /// A language chosen (the first of a word's, as it is picked; then any
+    /// of them).
+    on_select: ?kete.ValueCallback(Language) = null,
+    /// Next: on with the language chosen.
+    on_next: ?kete.Callback = null,
 
     pub fn build(self: *const Page, cx: *kete.BuildContext) kete.Widget {
         const st = self.state;
@@ -164,14 +174,26 @@ pub const Page = struct {
             // Fading in, the most spoken first.
             var alpha = clamp01(ratio(since -| (fade_in_after + fade_in_step * @as(u64, i)), fade_in_ns));
             var at = st.places[i];
+            var offset: kete.Point = .{ 0, 0 };
+            // The word picked, going up (or back down): as it goes, it
+            // turns into the title (and back).
+            var title: f32 = 0;
             if (st.chosen) |c| {
-                if (c == i) at = lerp2(st.places[i], top, eased) else alpha *= 1 - moving;
+                if (c == i) {
+                    at = lerp2(st.places[i], top, eased);
+                    offset = .{ 0, top_offset[1] * eased };
+                    title = moving;
+                } else alpha *= 1 - moving;
             } else if (st.returning) |r| {
-                if (r == i) at = lerp2(top, st.places[i], eased) else alpha *= moving;
+                if (r == i) {
+                    at = lerp2(top, st.places[i], eased);
+                    offset = .{ 0, top_offset[1] * (1 - eased) };
+                    title = 1 - moving;
+                } else alpha *= moving;
             }
             if (alpha <= 0) continue;
             const outline = if (hint_word == i) hint_alpha else 0;
-            var body = cx.make(kete.Opacity{ .opacity = alpha, .child = cx.make(kete.RoundedBox{
+            var body = cx.make(kete.Opacity{ .opacity = alpha * (1 - title), .child = cx.make(kete.RoundedBox{
                 .border_color = t.primary.withAlpha(outline),
                 .border_width = 2,
                 .radius = .all(word_size),
@@ -184,38 +206,53 @@ pub const Page = struct {
             // Only the words showing can be picked.
             if (st.chosen == null) {
                 const press = a.create(Press) catch continue;
-                press.* = .{ .state = st, .word = i, .now = now };
+                press.* = .{ .page = self, .word = i, .now = now };
                 body = cx.make(kete.Pressable{ .on_press = .of(press, Press.press), .child = body });
             }
-            layers.append(a, cx.make(kete.Place{ .at = at, .child = body })) catch {};
+            layers.append(a, cx.make(kete.Place{ .at = at, .offset = offset, .child = body })) catch {};
+            if (title > 0) layers.append(a, cx.make(kete.Place{ .at = at, .offset = offset, .child = cx.make(kete.Opacity{
+                .opacity = title,
+                .child = cx.make(kete.Text{ .text = locale.text("Hello, I speak…"), .wrap = false, .style = .{ .size = word_size } }),
+            }) })) catch {};
         }
 
-        // The languages the word picked is "hello" in, and the way back.
+        // The languages the word picked is "hello" in, between the title
+        // and the buttons; and the buttons.
         if (st.chosen) |c| {
             const list_alpha = clamp01(ratio(since_change -| list_after, list_fade_ns));
             var rows: std.ArrayList(kete.Widget) = .empty;
-            for (words[c].languages) |l| {
-                const p = a.create(Pick) catch continue;
-                p.* = .{ .page = self, .language = l };
-                rows.append(a, cx.make(kete.Pressable{ .on_press = .of(p, Pick.pick), .child = cx.make(kete.SizedBox{
-                    .width = 560,
-                    .child = cx.make(kete.Padding{ .padding = .symmetric(0, 14), .child = cx.make(kete.Text{
-                        .text = l.name(),
-                        .text_align = .center,
-                        .style = .{ .size = 26 },
-                    }) }),
+            for (words[c].languages, 0..) |l, i| {
+                const sel = a.create(Select) catch continue;
+                sel.* = .{ .page = self, .index = i, .language = l };
+                const chosen = i == st.selected;
+                rows.append(a, cx.make(kete.Pressable{ .on_press = .of(sel, Select.select), .child = cx.make(kete.RoundedBox{
+                    .color = if (chosen) t.primary_container else null,
+                    .radius = .all(28),
+                    .child = cx.make(kete.SizedBox{
+                        .width = 560,
+                        .child = cx.make(kete.Padding{ .padding = .symmetric(0, 14), .child = cx.make(kete.Text{
+                            .text = l.name(),
+                            .text_align = .center,
+                            .style = .{ .size = 26, .color = if (chosen) t.on_primary_container else t.on_surface },
+                        }) }),
+                    }),
                 }) })) catch {};
             }
-            // Below the word (where it stops).
-            layers.append(a, cx.make(kete.Place{ .at = top, .anchor = .top_center, .offset = .{ 0, word_size }, .child = cx.make(kete.Opacity{
-                .opacity = list_alpha,
-                .child = cx.make(kete.Column{ .fill = false, .cross_axis_alignment = .center, .children = rows.items }),
-            }) })) catch {};
+            layers.append(a, cx.make(kete.Padding{
+                .padding = .{ .top = parts.title_top + parts.title_height, .bottom = parts.margin + parts.height + parts.above_buttons },
+                .child = cx.make(kete.Align{ .child = cx.make(kete.ScaleDown{ .child = cx.make(kete.Opacity{
+                    .opacity = list_alpha,
+                    .child = cx.make(kete.Column{ .fill = false, .spacing = 4, .cross_axis_alignment = .center, .children = rows.items }),
+                }) }) }),
+            })) catch {};
             const back = a.create(Back) catch return cx.make(kete.Overlay{ .children = layers.items });
             back.* = .{ .state = st, .now = now };
-            layers.append(a, cx.make(kete.Place{ .at = .{ 0.5, 1 }, .anchor = .bottom_center, .offset = .{ 0, -big.margin }, .child = cx.make(kete.Opacity{
-                .opacity = list_alpha,
-                .child = cx.make(big.BigButton{ .icon = .arrow_back, .on_press = .of(back, Back.back) }),
+            layers.append(a, cx.make(kete.Padding{ .padding = .{ .bottom = parts.margin }, .child = cx.make(kete.Align{
+                .alignment = .bottom_center,
+                .child = cx.make(kete.Opacity{
+                    .opacity = list_alpha,
+                    .child = parts.buttons(cx, .of(back, Back.back), locale.text("Next"), self.on_next, false),
+                }),
             }) })) catch {};
         }
         if (busy) cx.requestFrame();
@@ -223,13 +260,15 @@ pub const Page = struct {
     }
 };
 
+/// A word picked: its first language chosen.
 const Press = struct {
-    state: *State,
+    page: *const Page,
     word: usize,
     now: u64,
 
     fn press(p: *Press) void {
-        p.state.pick(p.word, p.now);
+        p.page.state.pick(p.word, p.now);
+        if (p.page.on_select) |f| f.call(words[p.word].languages[0]);
     }
 };
 
@@ -242,12 +281,15 @@ const Back = struct {
     }
 };
 
-const Pick = struct {
+/// One of the word's languages, chosen.
+const Select = struct {
     page: *const Page,
+    index: usize,
     language: Language,
 
-    fn pick(p: *Pick) void {
-        if (p.page.on_pick) |f| f.call(p.language);
+    fn select(x: *Select) void {
+        x.page.state.selected = x.index;
+        if (x.page.on_select) |f| f.call(x.language);
     }
 };
 

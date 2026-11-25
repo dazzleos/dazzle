@@ -7,8 +7,10 @@
 
 /// Arabic, as Egypt has it.
 pub const arabic = [_][2][]const u8{
-    .{ "Name this computer", "سمِّ هذا الكمبيوتر" },
-    .{ "Other computers on the network know it by this name. It can have lowercase letters, numbers and hyphens.", "تتعرّف أجهزة الكمبيوتر الأخرى على الشبكة على هذا الكمبيوتر بهذا الاسم. يمكن أن يحتوي على أحرف صغيرة وأرقام وشرطات." },
+    .{ "Hello, I speak…", "مرحبا، أتحدث…" },
+    .{ "Is this your keyboard?", "هل هذه لوحة مفاتيحك؟" },
+    .{ "Give me a name", "أعطني اسمًا" },
+    .{ "Lowercase letters, numbers and hyphens. You can change it later in Settings.", "أحرف صغيرة وأرقام وشرطات. يمكنك تغييره لاحقًا في الإعدادات." },
     .{ "Let other computers control this one", "السماح لأجهزة الكمبيوتر الأخرى بالتحكم في هذا الكمبيوتر" },
     .{ "Code {d}. With it, a computer on the network can move the pointer, type, open and close apps and windows, take screenshots, install updates and restart, at http://{s}:{d}/. Turn this off when you are done.", "الرمز {d}. باستخدامه، يمكن لكمبيوتر على الشبكة تحريك المؤشر والكتابة وفتح التطبيقات والنوافذ وإغلاقها والتقاط لقطات الشاشة وتثبيت التحديثات وإعادة التشغيل، على http://{s}:{d}/. أوقف هذا عند الانتهاء." },
     .{ "Dazzle cannot keep files: {s}. Setup will run again when the computer next starts.", "لا يستطيع Dazzle حفظ الملفات: {s}. سيعمل الإعداد مرة أخرى عند تشغيل الكمبيوتر في المرة القادمة." },

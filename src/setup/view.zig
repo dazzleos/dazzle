@@ -3,7 +3,7 @@
 //! the same place along the bottom, in the middle. The pages:
 //!
 //! * "Hello" in every language, to pick the language by (hello.zig): it
-//!   fills the screen, with no buttons;
+//!   fills the screen, the buttons only once a word is picked;
 //! * the keyboard: those most likely for the language, the likeliest
 //!   chosen, and the rest one button away; with its keys drawn, lit as
 //!   they are pressed, and what is typed shown;
@@ -24,7 +24,7 @@ const kete_vc4 = @import("kete_vc4");
 const sys = @import("sys");
 const locale = @import("locale");
 const hello = @import("hello.zig");
-const big = @import("big_button.zig");
+const parts = @import("parts.zig");
 
 const proto = sys.system;
 const net = sys.network;
@@ -276,7 +276,7 @@ pub const Setup = struct {
         state.actions = self.actions;
         // The first page is the whole window.
         if (!state.finishing and pages[state.page] == .hello) {
-            return cx.make(hello.Page{ .state = &state.hello, .on_pick = .of(nav, Nav.pickLanguage) });
+            return cx.make(hello.Page{ .state = &state.hello, .on_select = .of(nav, Nav.selectLanguage), .on_next = .of(nav, Nav.next) });
         }
         if (state.finishing) return cx.make(kete.RoundedBox{ .color = cx.theme().surface, .child = cx.make(kete.Align{ .child = cx.make(kete.ConstrainedBox{
             .constraints = .{ .max_w = 720 },
@@ -285,12 +285,19 @@ pub const Setup = struct {
         return cx.make(kete.RoundedBox{ .color = cx.theme().surface, .child = self.page(cx, state, nav) });
     }
 
-    /// A page: what it asks, in the middle (at most 720 pixels wide), and
-    /// the buttons along the bottom.
+    /// A page: its title, what it asks in the middle (at most 720 pixels
+    /// wide), and the buttons along the bottom.
     fn page(self: *const Setup, cx: *kete.BuildContext, state: *State, nav: *Nav) kete.Widget {
         const which = pages[state.page];
-        const body = switch (which) {
+        const title = switch (which) {
             .hello => unreachable, // the whole window (see `build`)
+            .keyboard => locale.text("Is this your keyboard?"),
+            .hostname => locale.text("Give me a name"),
+            .wifi => locale.text("Connect to Wi-Fi"),
+            .time => locale.text("Time zone"),
+        };
+        const body = switch (which) {
+            .hello => unreachable,
             .keyboard => keyboardPage(cx, state),
             .time => timePage(cx, state),
             .hostname => self.hostnamePage(cx, state, nav),
@@ -303,24 +310,22 @@ pub const Setup = struct {
             locale.text("Skip")
         else
             locale.text("Next");
-        // The keyboard page's picture takes the height there is (the others
-        // are as tall as they need, in the middle, and made smaller if there
-        // is not room on a small screen).
+        // The keyboard page's picture takes the room there is, as wide as
+        // the screen (the others are as tall as they need, in the middle,
+        // and made smaller if there is not room on a small screen).
         const fill = which == .keyboard;
-        const middle = cx.make(kete.ConstrainedBox{ .constraints = .{ .max_w = 720 }, .child = body });
-        return cx.make(kete.Padding{ .padding = .{ .left = 24, .right = 24, .top = 24, .bottom = big.margin }, .child = cx.make(kete.Column{
+        const area = if (fill)
+            cx.make(kete.Align{ .alignment = .top_center, .child = cx.make(kete.ConstrainedBox{ .constraints = .{ .max_w = 1600 }, .child = cx.make(kete.SizedBox{ .height = std.math.inf(f32), .child = body }) }) })
+        else
+            cx.make(kete.Align{ .child = cx.make(kete.ScaleDown{ .child = cx.make(kete.ConstrainedBox{ .constraints = .{ .max_w = 720 }, .child = body }) }) });
+        return cx.make(kete.Padding{ .padding = .{ .left = 24, .right = 24, .top = parts.title_top, .bottom = parts.margin }, .child = cx.make(kete.Column{
             .cross_axis_alignment = .stretch,
             .fill = true,
-            .spacing = 24,
             .children = cx.arena.dupe(kete.Widget, &.{
-                cx.make(kete.Expanded{ .child = cx.make(kete.Align{
-                    .alignment = if (fill) .top_center else .center,
-                    .child = if (fill) cx.make(kete.SizedBox{ .height = std.math.inf(f32), .child = middle }) else cx.make(kete.ScaleDown{ .child = middle }),
-                }) }),
-                cx.make(kete.Row{ .spacing = 24, .main_axis_alignment = .center, .children = cx.arena.dupe(kete.Widget, &.{
-                    cx.make(big.BigButton{ .label = locale.text("Back"), .icon = .arrow_back, .on_press = .of(nav, Nav.back) }),
-                    cx.make(big.BigButton{ .label = next_label, .filled = true, .icon = if (last) .check else null, .trailing_icon = if (last) null else .arrow_forward, .on_press = .of(nav, Nav.next) }),
-                }) catch &.{} }),
+                cx.make(parts.Title{ .text = title }),
+                cx.make(kete.Expanded{ .child = area }),
+                cx.make(kete.SizedBox{ .height = parts.above_buttons }),
+                parts.buttons(cx, .of(nav, Nav.back), next_label, .of(nav, Nav.next), last),
             }) catch &.{},
         }) });
     }
@@ -373,16 +378,14 @@ pub const Setup = struct {
             .fill = true,
             .children = a.dupe(kete.Widget, &.{
                 // The keyboards to choose from, just above the keyboard's
-                // picture, the two in the middle of the room above the
-                // buttons...
-                cx.make(kete.Expanded{ .child = cx.make(kete.SizedBox.empty) }),
-                cx.make(kete.Wrap{ .spacing = 8, .run_spacing = 8, .alignment = .center, .cross_axis_alignment = .center, .children = choices.items }),
-                cx.make(kete.SizedBox{ .height = 16 }),
-                // ... as wide as there is room for (no bigger than a key 40
-                // pixels across).
-                cx.make(kete.Align{ .alignment = .center, .child = cx.make(kete.ScaleDown{
-                    .child = cx.make(kete_vc4.KeyboardPicture{ .keyboard = state.keyboard, .unit = 40, .light = light }),
-                }) }),
+                // picture, the two as big as there is room for (no bigger
+                // than a key 80 pixels across)...
+                cx.make(kete.Expanded{ .flex = 4, .child = cx.make(kete.Align{ .alignment = .bottom_center, .child = cx.make(kete.ScaleDown{
+                    .child = cx.make(kete.Column{ .fill = false, .cross_axis_alignment = .center, .spacing = 20, .children = a.dupe(kete.Widget, &.{
+                        cx.make(kete.Row{ .fill = false, .spacing = 8, .cross_axis_alignment = .center, .children = choices.items }),
+                        cx.make(kete_vc4.KeyboardPicture{ .keyboard = state.keyboard, .unit = 80, .light = light }),
+                    }) catch &.{} }),
+                }) }) }),
                 // What is typed: shown while typing, each character gone a
                 // while after (there is no field to type in: the label
                 // only shows what the layout types), halfway between the
@@ -451,7 +454,6 @@ pub const Setup = struct {
         const t = cx.theme();
         // The map as wide as the page (the zone picked right under it).
         return cx.make(kete.Column{ .cross_axis_alignment = .start, .fill = false, .spacing = 12, .children = cx.arena.dupe(kete.Widget, &.{
-            cx.make(kete.Text{ .text = locale.text("Time zone"), .style = .{ .size = 28 } }),
             cx.make(kete.Text{ .text = locale.text("Where the computer is, for its clock"), .style = .{ .size = 18, .color = t.on_surface_variant } }),
             cx.make(kete_vc4.TimeZoneMap{ .zone = state.timezone, .on_changed = .of(state, State.setTimeZone), .width = 720 }),
         }) catch &.{} });
@@ -459,24 +461,28 @@ pub const Setup = struct {
 
     fn hostnamePage(_: *const Setup, cx: *kete.BuildContext, state: *State, nav: *Nav) kete.Widget {
         const t = cx.theme();
-        return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 12, .children = &.{
-            cx.make(kete.Text{ .text = locale.text("Name this computer"), .style = .{ .size = 28 } }),
-            cx.make(kete.Text{
-                .text = locale.text("Other computers on the network know it by this name. It can have lowercase letters, numbers and hyphens."),
-                .style = .{ .size = 18, .color = t.on_surface_variant },
-            }),
+        // The name, large, in the middle; what it can have under it (or
+        // what is wrong with it).
+        return cx.make(kete.Column{ .cross_axis_alignment = .center, .fill = false, .spacing = 16, .children = &.{
             cx.make(kete.TextField{
                 .initial = state.name(),
                 .max_len = state.name_buf.len,
-                .size = 20,
-                .width = 400,
+                .size = 44,
+                .width = 640,
+                .centered = true,
+                .autofocus = true,
                 .on_changed = .of(state, State.setName),
                 .on_submit = .of(nav, Nav.next),
             }),
             if (state.name_invalid) cx.make(kete.Text{
                 .text = locale.text("Use 1 to 63 lowercase letters, numbers and hyphens, not starting or ending with a hyphen"),
-                .style = .{ .size = 16, .color = t.@"error" },
-            }) else cx.make(kete.SizedBox.empty),
+                .text_align = .center,
+                .style = .{ .size = 18, .color = t.@"error" },
+            }) else cx.make(kete.Text{
+                .text = locale.text("Lowercase letters, numbers and hyphens. You can change it later in Settings."),
+                .text_align = .center,
+                .style = .{ .size = 18, .color = t.on_surface_variant },
+            }),
         } });
     }
 
@@ -484,7 +490,6 @@ pub const Setup = struct {
         const t = cx.theme();
         const a = cx.arena;
         var rows: std.ArrayList(kete.Widget) = .empty;
-        rows.append(a, cx.make(kete.Text{ .text = locale.text("Connect to Wi-Fi"), .style = .{ .size = 28 } })) catch {};
         const report = self.wifi orelse return cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 12, .children = rows.items });
         const conn = &report.connection;
         const name = printable(cx, conn.ssid());
@@ -611,7 +616,7 @@ pub const Setup = struct {
                     .style = .{ .size = 18, .color = t.on_surface_variant },
                 }),
                 cx.make(kete.Row{ .main_axis_alignment = .center, .children = &.{
-                    cx.make(big.BigButton{ .label = locale.text("Continue"), .filled = true, .on_press = .of(nav, Nav.continueWithout) }),
+                    cx.make(parts.BigButton{ .label = locale.text("Continue"), .look = .filled, .on_press = .of(nav, Nav.continueWithout) }),
                 } }),
             } });
         }
@@ -806,13 +811,13 @@ const Nav = struct {
         }
     }
 
-    /// A language picked on the first page: it, and on to the next.
-    fn pickLanguage(n: *Nav, l: locale.Language) void {
+    /// A language chosen on the first page: used at once (its Next goes
+    /// on with it).
+    fn selectLanguage(n: *Nav, l: locale.Language) void {
         // Its keyboard (and zone), and those likely for it, again.
         n.state.keyboard_picked = false;
         n.state.other_keyboard = null;
         n.state.setLanguage(l);
-        n.state.page = @intFromEnum(Page.keyboard);
     }
 
     fn back(n: *Nav) void {
@@ -862,9 +867,21 @@ fn findType(n: *kete.WidgetNode, comptime T: type) ?*kete.WidgetNode {
     return null;
 }
 
+/// Where `p` (in `n`'s own coordinates) is in the window: through the
+/// transforms of it and the nodes it is in (the keyboard page's, drawn
+/// smaller).
+fn onWindow(n: *const kete.WidgetNode, p: kete.Point) kete.Point {
+    var q = p;
+    var at: ?*const kete.WidgetNode = n;
+    while (at) |x| : (at = x.parent) {
+        if (x.widget.vtable.paint_transform) |f| q = f(x.widget.ptr, x).apply(q);
+        q = .{ q[0] + x.offset[0], q[1] + x.offset[1] };
+    }
+    return q;
+}
+
 fn click(u: *kete.ui.WindowUi, n: *kete.WidgetNode) void {
-    const at = n.position();
-    const p: kete.Point = .{ at[0] + n.size.w / 2, at[1] + n.size.h / 2 };
+    const p = onWindow(n, .{ n.size.w / 2, n.size.h / 2 });
     u.pointerMotion(p);
     u.pointerButton(p, .left, true);
     u.pointerButton(p, .left, false);
@@ -961,7 +978,7 @@ test "Wi-Fi networks are shown when Ethernet is not connected and a Wi-Fi adapte
     click(u, findText(u.root.?, "Next").?);
     u.frame(1280, 720, 1, setup);
     // The name.
-    try testing.expect(findText(u.root.?, "Name this computer") != null);
+    try testing.expect(findText(u.root.?, "Give me a name") != null);
 
     // Approving the hostname when Ethernet is not connected goes to the Wi-Fi page.
     click(u, findText(u.root.?, "Next").?);
@@ -1011,7 +1028,7 @@ test "Wi-Fi networks are shown when Ethernet is not connected and a Wi-Fi adapte
     // And Back passes it by.
     click(u, findText(u.root.?, "Back").?);
     u.frame(1280, 720, 8, setup);
-    try testing.expect(findText(u.root.?, "Name this computer") != null);
+    try testing.expect(findText(u.root.?, "Give me a name") != null);
 }
 
 test "every page fits, in Spanish too" {
@@ -1107,26 +1124,35 @@ test "the first page: hello in every language; one picked, its languages, and ba
     try testing.expect(findText(u.root.?, "こんにちは") == null);
     u.frame(1920, 1080, 20 * s, setup);
     for (hello.words) |w| try testing.expect(findText(u.root.?, w.text) != null);
-    // Hola: the others go, and its languages show.
+    // Hola: the others go, it turns into the title, and its languages
+    // show, the first chosen.
     click(u, findText(u.root.?, "Hola").?);
+    try testing.expectEqual(locale.Language.es_mx, actions.locale.?.language);
     u.frame(1920, 1080, 20 * s + 100 * std.time.ns_per_ms, setup);
     u.frame(1920, 1080, 22 * s, setup);
     try testing.expect(findText(u.root.?, "Hello") == null);
+    try testing.expect(findText(u.root.?, "Hello, I speak…") != null);
     try testing.expect(findText(u.root.?, "Español (México)") != null);
     try testing.expect(findText(u.root.?, "Español (Chile)") != null);
+    try testing.expect(!overflows(u.root.?));
     // Back: the words again.
-    click(u, findType(u.root.?, kete.Icon).?);
+    click(u, findText(u.root.?, "Back").?);
     u.frame(1920, 1080, 23 * s, setup);
     u.frame(1920, 1080, 25 * s, setup);
     try testing.expect(findText(u.root.?, "Hello") != null);
     try testing.expect(findText(u.root.?, "Español (México)") == null);
-    // Hola, then Mexico: the language, and on to the keyboard.
+    // Hola, then Chile: chosen (still on this page); then Next, on to the
+    // keyboard with it.
     click(u, findText(u.root.?, "Hola").?);
     u.frame(1920, 1080, 26 * s, setup);
     u.frame(1920, 1080, 28 * s, setup);
-    click(u, findText(u.root.?, "Español (México)").?);
+    click(u, findText(u.root.?, "Español (Chile)").?);
     u.frame(1920, 1080, 29 * s, setup);
+    try testing.expectEqual(Page.hello, pages[st.page]);
+    try testing.expectEqual(locale.Language.es_cl, st.language);
+    try testing.expectEqual(locale.Language.es_cl, actions.locale.?.language);
+    click(u, findText(u.root.?, "Next").?);
+    u.frame(1920, 1080, 30 * s, setup);
     try testing.expectEqual(Page.keyboard, pages[st.page]);
-    try testing.expectEqual(locale.Language.es_mx, st.language);
-    try testing.expectEqual(locale.Language.es_mx, actions.locale.?.language);
+    try testing.expectEqual(locale.Language.es_cl, st.language);
 }

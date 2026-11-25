@@ -6,8 +6,10 @@
 
 /// Brazil's (and Portugal's where it has none of its own).
 pub const brazil = [_][2][]const u8{
-    .{ "Name this computer", "Dê um nome a este computador" },
-    .{ "Other computers on the network know it by this name. It can have lowercase letters, numbers and hyphens.", "Os outros computadores da rede o conhecem por este nome. Ele pode ter letras minúsculas, números e hifens." },
+    .{ "Hello, I speak…", "Olá, eu falo…" },
+    .{ "Is this your keyboard?", "Este é o seu teclado?" },
+    .{ "Give me a name", "Me dê um nome" },
+    .{ "Lowercase letters, numbers and hyphens. You can change it later in Settings.", "Letras minúsculas, números e hifens. Você pode mudá-lo depois em Configurações." },
     .{ "Let other computers control this one", "Permitir que outros computadores controlem este" },
     .{ "Code {d}. With it, a computer on the network can move the pointer, type, open and close apps and windows, take screenshots, install updates and restart, at http://{s}:{d}/. Turn this off when you are done.", "Código {d}. Com ele, um computador da rede pode mover o ponteiro, digitar, abrir e fechar apps e janelas, fazer capturas de tela, instalar atualizações e reiniciar, em http://{s}:{d}/. Desative quando terminar." },
     .{ "Dazzle cannot keep files: {s}. Setup will run again when the computer next starts.", "O Dazzle não consegue guardar arquivos: {s}. A configuração será executada de novo na próxima vez que o computador ligar." },
@@ -385,7 +387,9 @@ pub const brazil = [_][2][]const u8{
 
 /// Portugal's, where it differs.
 pub const portugal = [_][2][]const u8{
-    .{ "Name this computer", "Dê um nome a este computador" },
+    .{ "Hello, I speak…", "Olá, eu falo…" },
+    .{ "Give me a name", "Dê-me um nome" },
+    .{ "Lowercase letters, numbers and hyphens. You can change it later in Settings.", "Letras minúsculas, números e hífenes. Pode alterá-lo mais tarde nas Definições." },
     .{ "Dazzle cannot keep files: {s}. Setup will run again when the computer next starts.", "O Dazzle não consegue guardar ficheiros: {s}. A configuração volta a ser executada no próximo arranque do computador." },
     .{ "Mouse", "Rato" },
     .{ "A micro USB port: for a keyboard, mouse or USB drive (through an adapter or hub)", "Uma porta micro USB: para teclado, rato ou pen USB (com um adaptador ou hub)" },

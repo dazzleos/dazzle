@@ -12,9 +12,11 @@
 /// Latin America's (Mexico, Argentina, Colombia, Chile, Peru, the United
 /// States), and Spain's where it has none of its own.
 pub const latin_america = [_][2][]const u8{
+    .{ "Hello, I speak…", "Hola, hablo…" },
+    .{ "Is this your keyboard?", "¿Es este tu teclado?" },
+    .{ "Give me a name", "Ponme un nombre" },
+    .{ "Lowercase letters, numbers and hyphens. You can change it later in Settings.", "Letras minúsculas, números y guiones. Puedes cambiarlo más tarde en Configuración." },
     // --- Words that differ by country (Spain's are in `spain`) ---------------
-    .{ "Name this computer", "Ponle nombre a esta computadora" },
-    .{ "Other computers on the network know it by this name. It can have lowercase letters, numbers and hyphens.", "Las demás computadoras de la red la conocen por este nombre. Puede tener letras minúsculas, números y guiones." },
     .{ "Let other computers control this one", "Permitir que otras computadoras controlen esta" },
     .{ "Code {d}. With it, a computer on the network can move the pointer, type, open and close apps and windows, take screenshots, install updates and restart, at http://{s}:{d}/. Turn this off when you are done.", "Código {d}. Con él, una computadora de la red puede mover el puntero, escribir, abrir y cerrar apps y ventanas, tomar capturas de pantalla, instalar actualizaciones y reiniciar, en http://{s}:{d}/. Desactívalo cuando termines." },
     .{ "Dazzle cannot keep files: {s}. Setup will run again when the computer next starts.", "Dazzle no puede guardar archivos: {s}. La configuración inicial se repetirá cuando la computadora vuelva a encenderse." },
@@ -423,8 +425,7 @@ pub const latin_america = [_][2][]const u8{
 
 /// Spain's, where it differs.
 pub const spain = [_][2][]const u8{
-    .{ "Name this computer", "Ponle nombre a este ordenador" },
-    .{ "Other computers on the network know it by this name. It can have lowercase letters, numbers and hyphens.", "Los demás ordenadores de la red lo conocen por este nombre. Puede tener letras minúsculas, números y guiones." },
+    .{ "Lowercase letters, numbers and hyphens. You can change it later in Settings.", "Letras minúsculas, números y guiones. Puedes cambiarlo más tarde en Ajustes." },
     .{ "Let other computers control this one", "Permitir que otros ordenadores controlen este" },
     .{ "Code {d}. With it, a computer on the network can move the pointer, type, open and close apps and windows, take screenshots, install updates and restart, at http://{s}:{d}/. Turn this off when you are done.", "Código {d}. Con él, un ordenador de la red puede mover el puntero, escribir, abrir y cerrar apps y ventanas, hacer capturas de pantalla, instalar actualizaciones y reiniciar, en http://{s}:{d}/. Desactívalo cuando termines." },
     .{ "Dazzle cannot keep files: {s}. Setup will run again when the computer next starts.", "Dazzle no puede guardar archivos: {s}. La configuración inicial se repetirá cuando el ordenador vuelva a encenderse." },
