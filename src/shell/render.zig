@@ -134,7 +134,7 @@ pub fn recordFrame(frame: *render.Frame, pipelines: Pipelines, preview: server.T
         }
         // A surface with alpha (a subsurface over a window, say) is blended;
         // others hide what is under them.
-        const p = if (w.texture.format == .argb8888 and !w.texture.compressed) pipelines.premultiplied else pipeline;
+        const p = if (w.texture.format.hasAlpha()) pipelines.premultiplied else pipeline;
         try quad(frame, p, vbo, quads, w.texture, w.x, w.y, qw, qh, w.transform, viewportOf(w.clip));
         quads += 1;
     }
@@ -296,7 +296,7 @@ fn rect(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, index: us
         .count = 6,
         .scissor = scissor,
         .texture = .{ .handle = t.handle, .config = .{
-            .type = if (t.compressed) .etc1 else t.format.textureType(),
+            .format = t.format,
             .width = t.width,
             .height = t.height,
             .mag_filter = filter,
@@ -593,7 +593,8 @@ pub const Renderer = struct {
         if (r.client_fbs.get(t.handle)) |fb| return fb;
         // T-tiled images are padded to whole columns of tiles.
         const pitch = texture.tiledPitch(t.format, t.width, t.height);
-        var fb: ?u32 = vc4.drm.addFramebufferWithModifier(r.dev.fd, t.handle, t.width, t.height, pitch, t.format.fourcc(), vc4.kms.modifier_t_tiled) catch |err| blk: {
+        const code = t.format.fourcc() orelse return null; // not a format the display has
+        var fb: ?u32 = vc4.drm.addFramebufferWithModifier(r.dev.fd, t.handle, t.width, t.height, pitch, code, vc4.kms.modifier_t_tiled) catch |err| blk: {
             sys.print(sys.log_warning ++ "dazzle-shell: no framebuffer for a {d}x{d} window: {s}\n", .{ t.width, t.height, @errorName(err) });
             break :blk null;
         };
@@ -867,24 +868,29 @@ pub const Renderer = struct {
                 errdefer r.dev.destroyBo(bo);
                 @memcpy(bo.map[0..p.data.len], p.data);
                 try r.owned.put(r.gpa, bo.handle, bo);
-                r.background_image = .{ .handle = bo.handle, .width = p.width, .height = p.height, .compressed = true };
+                r.background_image = .{ .handle = bo.handle, .width = p.width, .height = p.height, .format = .etc1 };
             },
             .bgr565 => r.background_image = try uploadPixels(r, null, p.data, p.width, p.height, p.width * 2, .bgr565),
+            .rgb565 => r.background_image = try uploadPixels(r, null, p.data, p.width, p.height, p.width * 2, .rgb565),
         }
     }
 
     /// How a background image is best made for this GPU: ETC1, if it
     /// decodes it as expected (checked once, by drawing a test image and
-    /// reading it back), and otherwise BGR565.
+    /// reading it back), and otherwise its 16-bit format.
     pub fn backgroundKind(r: *Renderer) background_mod.Kind {
-        return if (r.etc1Order()) |order| .{ .etc1 = order } else .bgr565;
+        if (r.etc1Order()) |order| return .{ .etc1 = order };
+        return r.background16();
+    }
+
+    /// The GPU's own 16-bit format, for a background image.
+    pub fn background16(r: *const Renderer) background_mod.Kind {
+        return if (r.dev.is_v3d) .rgb565 else .bgr565;
     }
 
     fn etc1Order(r: *Renderer) ?etc1.ByteOrder {
         if (r.etc1_checked) return r.etc1_order;
         r.etc1_checked = true;
-        // The V3D (a Pi 4's) tiles its textures otherwise.
-        if (r.dev.is_v3d) return null;
         for ([_]etc1.ByteOrder{ .standard, .reversed }) |order| {
             const ok = r.etc1Decodes(order) catch |err| {
                 sys.print(sys.log_warning ++ "dazzle-shell: cannot check ETC1 textures: {s}\n", .{@errorName(err)});
@@ -895,7 +901,7 @@ pub const Renderer = struct {
                 return order;
             }
         }
-        sys.print(sys.log_warning ++ "dazzle-shell: the GPU does not decode ETC1 as expected: background images are BGR565\n", .{});
+        sys.print(sys.log_warning ++ "dazzle-shell: the GPU does not decode ETC1 as expected: background images are 16-bit\n", .{});
         return null;
     }
 
@@ -922,7 +928,7 @@ pub const Renderer = struct {
         const target = try r.dev.createBo(pitch * n);
         defer r.dev.destroyBo(target);
         capture_frame.begin(.{ .handle = target.handle, .width = n, .height = n, .tiling = .linear }, .{ .clear = 0 });
-        try quad(&capture_frame, &r.quads, r.vbo, 0, .{ .handle = tex.handle, .width = n, .height = n, .compressed = true }, 0, 0, n, n, 0, null);
+        try quad(&capture_frame, &r.quads, r.vbo, 0, .{ .handle = tex.handle, .width = n, .height = n, .format = .etc1 }, 0, 0, n, n, 0, null);
         const seqno = try r.dev.submit(capture_frame.finish());
         try r.dev.waitSeqno(seqno, std.time.ns_per_s);
         for (0..nb[1]) |by| for (0..nb[0]) |bx| {
@@ -1074,7 +1080,7 @@ test "a rounded window's corners are cut, and its shadow fades out around it (sh
     var tex_memory: [texture.imageSizeOf(.xrgb8888, 4, 4)]u8 = undefined;
     const tex_pixels: [16]u32 = @splat(window_color);
     texture.uploadRectOf(.xrgb8888, &tex_memory, 4, 4, .{ .x = 0, .y = 0, .width = 4, .height = 4 }, std.mem.sliceAsBytes(&tex_pixels), 16);
-    const cfg: texture.Config = .{ .type = vc4.Format.xrgb8888.textureType(), .width = 4, .height = 4, .mag_filter = .nearest, .min_filter = .nearest, .wrap_s = .clamp, .wrap_t = .clamp };
+    const cfg: texture.Config = .{ .format = .xrgb8888, .width = 4, .height = 4, .mag_filter = .nearest, .min_filter = .nearest, .wrap_s = .clamp, .wrap_t = .clamp };
     const values: RoundedUniforms = .{ .shape = .{ ww / 2, wh / 2, 12, 1 }, .shadow = .{ shadow_alpha, shadow_blur, shadow_offset, 0 } };
     const words = std.mem.bytesAsSlice(u32, std.mem.asBytes(&values));
     var uniforms: [32]u32 = undefined;
@@ -1139,7 +1145,7 @@ test "a window fading out is drawn see-through, as much as its opacity (shaders/
     var tex_memory: [texture.imageSizeOf(.xrgb8888, 4, 4)]u8 = undefined;
     const tex_pixels: [16]u32 = @splat(0xff000000);
     texture.uploadRectOf(.xrgb8888, &tex_memory, 4, 4, .{ .x = 0, .y = 0, .width = 4, .height = 4 }, std.mem.sliceAsBytes(&tex_pixels), 16);
-    const cfg: texture.Config = .{ .type = vc4.Format.xrgb8888.textureType(), .width = 4, .height = 4, .mag_filter = .nearest, .min_filter = .nearest, .wrap_s = .clamp, .wrap_t = .clamp };
+    const cfg: texture.Config = .{ .format = .xrgb8888, .width = 4, .height = 4, .mag_filter = .nearest, .min_filter = .nearest, .wrap_s = .clamp, .wrap_t = .clamp };
     const values: RoundedUniforms = .{ .shape = .{ 50, 30, 0, 0.5 }, .shadow = .{ 0, 1, 0, 0 } };
     const words = std.mem.bytesAsSlice(u32, std.mem.asBytes(&values));
     var uniforms: [32]u32 = undefined;

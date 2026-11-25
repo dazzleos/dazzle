@@ -765,7 +765,7 @@ fn write(comptime RType: type, s: *State, r: *RType, env: *const Env, waddr: u6,
 pub const texture_base: u32 = 1 << 28;
 
 const PrecomputedTex = struct {
-    cfg: texture.Config,
+    cfg: texture.Decoded,
     base_off: u32,
     cpp: u32,
     fw: f32,
@@ -784,7 +784,7 @@ const PrecomputedTex = struct {
     tile_h_shift: u5,
     tiles_per_row: u32,
 
-    inline fn init(p: texture.Config) Error!PrecomputedTex {
+    inline fn init(p: texture.Decoded) Error!PrecomputedTex {
         const cpp: u32 = switch (p.type) {
             .rgba8888, .rgbx8888, .rgba32r => 4,
             .rgb565, .rgba4444 => 2,
@@ -1192,7 +1192,7 @@ test "a compiled shader blends with the tile buffer" {
 
 test "QPU TMU bilinear same-utile and cross-utile sampling" {
     var mem: [4096]u8 = @splat(0);
-    const cfg: texture.Config = .{
+    const cfg: texture.Decoded = .{
         .offset = 0,
         .width = 8,
         .height = 8,
@@ -1266,11 +1266,11 @@ test "QPU vectorized v8muld, v8min, v8max, v8adds, v8subs, and shifts" {
     try std.testing.expectEqual(@as(u32, 0x05f0_8010), addOpVec(.ror, va, splat(8))[0]);
 }
 
-test "RGBA4444 texels come back as a Pi 3's GPU returns them" {
+test "BGRA4444 texels come back as a Pi 3's GPU returns them" {
     // 0x1248: its top 4 bits the low byte, its low 4 bits the top (alpha).
-    var memory: [texture.imageSizeOf(.rgba4444, 16, 16)]u8 = undefined;
+    var memory: [texture.imageSizeOf(.bgra4444, 16, 16)]u8 = undefined;
     var i: usize = 0;
     while (i < memory.len) : (i += 2) std.mem.writeInt(u16, memory[i..][0..2], 0x1248, .little);
-    const cfg: texture.Config = .{ .type = .rgba4444, .width = 16, .height = 16, .mag_filter = .nearest, .min_filter = .nearest };
+    const cfg: texture.Config = .{ .format = .bgra4444, .width = 16, .height = 16, .mag_filter = .nearest, .min_filter = .nearest };
     try std.testing.expectEqual(@as(u32, 0x88442211), try sample(&memory, texture.p0(cfg), texture.p1(cfg), 0.5, 0.5));
 }

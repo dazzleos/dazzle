@@ -206,36 +206,17 @@ pub fn encode(pixels: []const u32, width: u32, height: u32, out: []u64) void {
 pub const ByteOrder = enum { standard, reversed };
 
 /// The bytes a texture of `width` by `height` pixels takes, laid out by
-/// `upload` (the kernel checks it the same way: 64-bit "pixels", a block
-/// each).
+/// `upload`: as an image of 64-bit "pixels", a block each (the kernel
+/// checks it the same way), in the GPU's layout (see texture.zig).
 pub fn imageSize(width: u32, height: u32) u32 {
     const n = blocksOf(width, height);
-    if (isLt(n[0], n[1])) return std.mem.alignForward(u32, n[0], utile_w) * std.mem.alignForward(u32, n[1], utile_h) * 8;
-    return std.mem.alignForward(u32, n[0], 8 * utile_w) * std.mem.alignForward(u32, n[1], 8 * utile_h) * 8;
-}
-
-/// A micro-tile (64 bytes) of 64-bit "pixels": 2 blocks across, 4 down.
-const utile_w = 2;
-const utile_h = 4;
-
-/// Small images are in linear micro-tiles (LT), not 4 KB tiles.
-fn isLt(bw: u32, bh: u32) bool {
-    return bw <= 4 * utile_w or bh <= 4 * utile_h;
+    return texture.imageSizeOf(.etc1, n[0], n[1]);
 }
 
 /// Byte offset of block (bx, by) in an image `bw` blocks wide (and `bh`
 /// high), as the texture unit reads it.
 pub fn blockOffset(bw: u32, bh: u32, bx: u32, by: u32) u32 {
-    const in_utile = ((by & (utile_h - 1)) * utile_w + (bx & (utile_w - 1))) * 8;
-    if (isLt(bw, bh)) {
-        const row_stride = std.mem.alignForward(u32, bw, utile_w) * 8;
-        return (by & ~@as(u32, utile_h - 1)) * row_stride + (bx / utile_w) * 64 + in_utile;
-    }
-    const utile_stride = std.mem.alignForward(u32, bw, 8 * utile_w) / utile_w;
-    const ux = bx / utile_w;
-    const uy = by / utile_h;
-    const in_subtile = (((uy & 3) << 2) | (ux & 3)) << 6;
-    return texture.tSubtileOffset(ux & ~@as(u32, 3), uy & ~@as(u32, 3), utile_stride) + in_subtile + in_utile;
+    return texture.texelOffsetOf(.etc1, bw, bh, bx, by);
 }
 
 /// Writes `blocks` (row by row, from `encode`) for an image `width` by

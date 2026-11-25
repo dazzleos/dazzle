@@ -295,7 +295,7 @@ test "the shell's BGR565 quads give the tile buffer each texel's colour, blue fi
     for (&pixels, 0..) |*px, i| px.* = @truncate(i *% 2654435761 >> 7);
     var memory: [texture.imageSizeOf(.bgr565, w, h)]u8 = undefined;
     texture.uploadRectOf(.bgr565, &memory, w, h, .{ .x = 0, .y = 0, .width = w, .height = h }, std.mem.sliceAsBytes(&pixels), w * 2);
-    const cfg: texture.Config = .{ .type = .rgb565, .width = w, .height = h, .mag_filter = .nearest, .min_filter = .nearest };
+    const cfg: texture.Config = .{ .format = .bgr565, .width = w, .height = h, .mag_filter = .nearest, .min_filter = .nearest };
     const p = try load("quad");
     var buf: [8]u32 = undefined;
     const stream = uniformStream(&buf, &p.fs, &.{}, .{ texture.p0(cfg), texture.p1(cfg) });

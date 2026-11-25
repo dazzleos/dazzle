@@ -220,7 +220,7 @@ pub const Window = struct {
         return .{
             .id = t.handle,
             .fd = -1,
-            .fourcc = t.format.fourcc(),
+            .fourcc = t.format.fourcc().?,
             .modifier = if (t.tiling == .linear) 0 else renderer_mod.tiled_modifier,
             .offset = 0,
             .stride = vc4.render.Target.pitch(t.format, t.width),

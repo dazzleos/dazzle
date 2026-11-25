@@ -31,12 +31,13 @@
 //! small it may be with `setMinSize`, and draws at whatever size it is
 //! given at or above that.
 //!
-//! Buffers are BGR565 by default, half the memory of 32-bit ones (a
+//! Buffers are 16-bit by default (the GPU's own: BGR565 on the VC4,
+//! RGB565 on the V3D), half the memory of 32-bit ones (a
 //! full-screen window's three buffers at 1920x1080 take 12 MB rather than
 //! 24): Dazzle's apps draw opaque windows of flat colours, which 16 bits
 //! show well. An app that needs more (smooth gradients, say) asks for
-//! 32-bit buffers with `setFormat`. If the shell does not take BGR565
-//! buffers, they are 32-bit.
+//! 32-bit buffers with `setFormat`. If the shell does not take them, or
+//! the GPU cannot render the format asked for, they are 32-bit.
 //!
 //! While another window covers it, the shell says the window is
 //! `suspended` and holds its frame callbacks: the app should not draw
@@ -73,6 +74,8 @@ pub var gpu_submit_ns: u64 = 0;
 pub const Gpu = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
+    /// Which GPU: what its formats are.
+    kind: vc4.Gpu = .vc4,
 
     pub const VTable = struct {
         createBo: *const fn (ptr: *anyopaque, size: u32) anyerror!vc4.Bo,
@@ -153,7 +156,7 @@ pub const Gpu = struct {
 
     /// The real GPU. `dev` must stay in place.
     pub fn device(dev: *vc4.Device) Gpu {
-        return .{ .ptr = dev, .vtable = &.{
+        return .{ .ptr = dev, .kind = if (dev.is_v3d) .v3d else .vc4, .vtable = &.{
             .createBo = devCreateBo,
             .destroyBo = devDestroyBo,
             .exportBo = devExportBo,
@@ -308,8 +311,9 @@ pub const Window = struct {
     dmabuf: client.Proxy = undefined,
     /// The formats the shell takes T-tiled buffers in.
     tiled_formats: std.EnumSet(vc4.Format) = .{},
-    /// The format the app would like its buffers in (`setFormat`).
-    wanted_format: vc4.Format = .bgr565,
+    /// The format the app would like its buffers in (`setFormat`); null
+    /// for the GPU's 16-bit one.
+    wanted_format: ?vc4.Format = null,
     surface: client.Proxy = undefined,
     xdg_surface: client.Proxy = undefined,
     toplevel: client.Proxy = undefined,
@@ -1051,8 +1055,8 @@ pub const Window = struct {
 
     // --- Buffers ----------------------------------------------------------------
 
-    /// Asks for buffers in `format` from the next frame on (BGR565 unless
-    /// asked otherwise).
+    /// Asks for buffers in `format` from the next frame on (the GPU's
+    /// 16-bit format unless asked otherwise).
     pub fn setFormat(w: *Window, wanted: vc4.Format) void {
         w.wanted_format = wanted;
     }
@@ -1071,7 +1075,8 @@ pub const Window = struct {
     }
 
     pub fn bufferFormat(w: *const Window) vc4.Format {
-        return if (w.tiled_formats.contains(w.wanted_format)) w.wanted_format else .xrgb8888;
+        const wanted = w.wanted_format orelse vc4.Format.opaque16(w.gpu.kind);
+        return if (wanted.renderable(w.gpu.kind) and w.tiled_formats.contains(wanted)) wanted else .xrgb8888;
     }
 
     fn pickBack(w: *Window) !usize {
@@ -1185,7 +1190,7 @@ pub const Window = struct {
         m.fd(fd).uint(0).uint(0).uint(vc4.texture.tiledPitch(format, dims[0], dims[1])).uint(@truncate(mod >> 32)).uint(@truncate(mod)).end();
         const proxy = try w.conn.newObject(.{ .ptr = &w.buffers[slot], .handler = bufferEvent });
         m = try params.request(p.zwp_linux_buffer_params_v1.request.create_immed);
-        m.uint(proxy.id).int(@intCast(dims[0])).int(@intCast(dims[1])).uint(format.fourcc()).uint(0).end();
+        m.uint(proxy.id).int(@intCast(dims[0])).int(@intCast(dims[1])).uint(format.fourcc().?).uint(0).end();
         m = try params.request(p.zwp_linux_buffer_params_v1.request.destroy);
         m.end();
         return .{ .bo = bo, .proxy = proxy, .width = dims[0], .height = dims[1], .format = format };

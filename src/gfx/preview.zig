@@ -161,7 +161,7 @@ const Texture = struct {
             t.memory = try std.heap.page_allocator.alloc(u8, vc4.texture.imageSizeOf(.a8, w, h));
             vc4.texture.uploadRectOf(.a8, t.memory, w, h, .{ .x = 0, .y = 0, .width = w, .height = h }, atlas.pixels, w);
         }
-        const cfg: vc4.texture.Config = .{ .type = vc4.Format.a8.textureType(), .width = atlas_mod.width, .height = atlas_mod.height, .mag_filter = .nearest, .min_filter = .nearest, .wrap_s = .clamp, .wrap_t = .clamp };
+        const cfg: vc4.texture.Config = .{ .format = .a8, .width = atlas_mod.width, .height = atlas_mod.height, .mag_filter = .nearest, .min_filter = .nearest, .wrap_s = .clamp, .wrap_t = .clamp };
         return textureUniforms(cfg, fs, buf);
     }
 };

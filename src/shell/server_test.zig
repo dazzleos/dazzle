@@ -299,7 +299,8 @@ test "a client maps a window, gets frame callbacks and buffer releases" {
     try d.roundtrip();
     try testing.expect(state.t_tiled);
     // ARGB8888, XRGB8888 and BGR565.
-    try testing.expectEqual(@as(u32, 3), state.shm_formats);
+    // What the VC4 samples: XRGB8888, ARGB8888, BGR565, BGRA4444, BGRA5551.
+    try testing.expectEqual(@as(u32, 5), state.shm_formats);
 
     // A toplevel: the first commit gets the configure.
     const surface = try d.newObject(null);

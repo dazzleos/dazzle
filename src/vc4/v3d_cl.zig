@@ -9,7 +9,8 @@
 
 const std = @import("std");
 const cl = @import("cl.zig");
-const Format = @import("format.zig").Format;
+const format_mod = @import("format.zig");
+const Format = format_mod.Format;
 const texture = @import("texture.zig");
 
 pub const Packet = enum(u8) {
@@ -78,12 +79,25 @@ pub const MemoryFormat = enum(u3) {
     uif_xor = 5,
 };
 
+/// Named from the low bits up (`v3d_packet.xml`).
 pub const OutputImageFormat = enum(u6) {
     srgb8_alpha8 = 0,
+    rgb10_a2 = 3,
+    abgr1555 = 4,
+    abgr4444 = 6,
     bgr565 = 7,
+    r11f_g11f_b10f = 8,
+    rgba32f = 9,
+    rg32f = 10,
+    r32f = 11,
     rgba16f = 18,
+    rg16f = 19,
+    r16f = 20,
     rgba8 = 27,
+    rg8 = 29,
+    r8 = 30,
     d24s8 = 43,
+    rgba5551 = 45,
 };
 
 pub const InternalType = enum(u4) {
@@ -103,6 +117,22 @@ pub const InternalBpp = enum(u2) {
     bpp_64 = 1,
     bpp_128 = 2,
 };
+
+/// A tile's size in pixels: smaller the more bits the tile buffer holds
+/// a pixel (`v3d_choose_tile_size`).
+pub fn tileDims(bpp: InternalBpp, msaa: bool) [2]u16 {
+    const sizes = [_][2]u16{ .{ 64, 64 }, .{ 64, 32 }, .{ 32, 32 }, .{ 32, 16 }, .{ 16, 16 }, .{ 16, 8 } };
+    return sizes[@as(usize, @intFromEnum(bpp)) + if (msaa) @as(usize, 2) else 0];
+}
+
+/// V3D 7.1's log2 tile width and height fields (each less 3), at bits
+/// `w_at` and `h_at`.
+fn log2TileFields(bpp: InternalBpp, msaa: bool, comptime w_at: u5, comptime h_at: u5) u32 {
+    const d = tileDims(bpp, msaa);
+    const lw: u32 = std.math.log2_int(u16, d[0]) - 3;
+    const lh: u32 = std.math.log2_int(u16, d[1]) - 3;
+    return (lw << w_at) | (lh << h_at);
+}
 
 pub const InternalDepthType = enum(u4) {
     depth_32f = 0,
@@ -124,20 +154,10 @@ pub const Buffer = enum(u4) {
     z_stencil = 11,
 };
 
-/// Returns the V3D 4.2 `OutputImageFormat` and whether R and B must be swapped
-/// when loading/storing the tile buffer.
-pub fn outputFormat(format: Format) struct { fmt: OutputImageFormat, rb_swap: bool } {
-    return switch (format) {
-        // 0xAARRGGBB in little-endian memory has B in bits 0..7 and R in bits
-        // 16..23; V3D_OUTPUT_IMAGE_FORMAT_RGBA8 has R in bits 0..7, so R/B swap
-        // converts between the two.
-        .xrgb8888, .argb8888 => .{ .fmt = .rgba8, .rb_swap = true },
-        // V3D_OUTPUT_IMAGE_FORMAT_BGR565 has B in bits 0..4, G in 5..10, and
-        // R in 11..15; R/B swap puts B in bits 11..15 and R in 0..4 (DRM_FORMAT_BGR565),
-        // matching VC4.
-        .bgr565 => .{ .fmt = .bgr565, .rb_swap = true },
-        .a8, .rgba4444 => unreachable, // not render targets
-    };
+/// How the tile buffer is stored to (and loaded from) a target in
+/// `format` (see `Format.v3d`).
+pub fn outputFormat(format: Format) format_mod.V3d.Render {
+    return format.v3d().render orelse unreachable; // not rendered to by the V3D
 }
 
 /// Converts a `cl.Tiling` for a target of `(width, height)` in `format` to the
@@ -214,19 +234,19 @@ pub const Bcl = struct {
     /// resets (`TRANSFORM_FEEDBACK_SPECS`, `BLEND_ENABLES`, `COLOR_WRITE_MASKS`,
     /// `ZERO_ALL_FLAT_SHADE_FLAGS`, `ZERO_ALL_NON_PERSPECTIVE_FLAGS`,
     /// `ZERO_ALL_CENTROID_FLAGS`, `SAMPLE_STATE`).
-    pub fn startBinning(b: *Bcl, width: u16, height: u16, msaa: bool, v3d_ver: u8) void {
+    pub fn startBinning(b: *Bcl, width: u16, height: u16, msaa: bool, bpp: InternalBpp, v3d_ver: u8) void {
         b.numberOfLayers(1);
 
         // Packet 120: Tile Binning Mode Cfg (8 bytes payload).
-        // On V3D 4.2: bit 14 = multisample_mode_4x.
-        // On V3D 7.1: bits 8..10 = log2_tile_width (3 -> 64), bits 11..13 = log2_tile_height (3 -> 64, 2 -> 32).
+        // On V3D 4.2: bit 14 = multisample_mode_4x, bits 12..13 = the
+        // render target's internal bpp (the hardware sizes tiles by them).
+        // On V3D 7.1: bits 8..10 = log2_tile_width - 3, bits 11..13 =
+        // log2_tile_height - 3.
         b.w.u8_(@intFromEnum(Packet.tile_binning_mode_cfg));
         const flags: u32 = if (v3d_ver >= 71)
-            (@as(u32, 3) << 8) | (@as(u32, if (msaa) 2 else 3) << 11)
-        else if (msaa)
-            (1 << 14)
+            log2TileFields(bpp, msaa, 8, 11)
         else
-            0;
+            (@as(u32, @intFromBool(msaa)) << 14) | (@as(u32, @intFromEnum(bpp)) << 12);
         b.w.u32_(flags);
         b.w.u16_(width - 1);
         b.w.u16_(height - 1);
@@ -385,6 +405,7 @@ pub const Rcl = struct {
         width: u16,
         height: u16,
         msaa: bool,
+        bpp: InternalBpp,
         early_z: bool,
         early_zs_clear: bool,
         v3d_ver: u8,
@@ -395,11 +416,12 @@ pub const Rcl = struct {
             (@as(u32, height & 0xff) << 24);
         var word1: u32 = @as(u32, height >> 8);
         if (msaa) word1 |= 1 << (42 - 32);
+        if (v3d_ver < 71) word1 |= @as(u32, @intFromEnum(bpp)) << (40 - 32);
         if (!early_z) word1 |= 1 << (46 - 32);
         word1 |= @as(u32, @intFromEnum(InternalDepthType.depth_24)) << (47 - 32);
         if (early_zs_clear) word1 |= 1 << (51 - 32);
         if (v3d_ver >= 71) {
-            word1 |= (@as(u32, 3) << (52 - 32)) | (@as(u32, if (msaa) 2 else 3) << (55 - 32));
+            word1 |= log2TileFields(bpp, msaa, 52 - 32, 55 - 32);
         }
 
         r.w.u8_(@intFromEnum(Packet.tile_rendering_mode_cfg));
@@ -407,22 +429,42 @@ pub const Rcl = struct {
         r.w.u32_(word1);
     }
 
-    /// Converts 0xAARRGGBB to the 32-bit internal RGBA8 clear word expected by
-    /// V3D 4.2/7.1 (`v3dx_rcl.c` / `u_pack_color`), where R is in bits 0..7, G in
-    /// 8..15, B in 16..23, and A in 24..31.
-    pub fn packClearColor(argb: u32) u32 {
+    /// Converts 0xAARRGGBB to the tile buffer's clear words for its
+    /// internal type (`v3dx_rcl.c`, `u_pack_color`): for 8 bits a channel,
+    /// R in bits 0..7, G in 8..15, B in 16..23 and A in 24..31; for half
+    /// floats, R and G in the first word, B and A in the second.
+    pub fn packClearColor(argb: u32, internal: InternalType) [2]u32 {
         const a = (argb >> 24) & 0xff;
         const r_ch = (argb >> 16) & 0xff;
         const g_ch = (argb >> 8) & 0xff;
         const b_ch = argb & 0xff;
-        return r_ch | (g_ch << 8) | (b_ch << 16) | (a << 24);
+        return switch (internal) {
+            .type_16f => .{ half(r_ch) | half(g_ch) << 16, half(b_ch) | half(a) << 16 },
+            else => .{ r_ch | (g_ch << 8) | (b_ch << 16) | (a << 24), 0 },
+        };
     }
 
-    pub fn tileRenderingModeCfgClearColorsPart1(r: *Rcl, clear_rgba: u32) void {
-        // Packet 121 sub-id 3: Clear Colors Part1 (8 bytes payload).
+    fn half(c: u32) u32 {
+        const f: f16 = @floatCast(@as(f32, @floatFromInt(c)) / 255.0);
+        return @as(u16, @bitCast(f));
+    }
+
+    pub fn tileRenderingModeCfgClearColorsPart1(r: *Rcl, clear: [2]u32) void {
+        // Packet 121 sub-id 3: Clear Colors Part1 (8 bytes payload): the
+        // low 32 bits, then the next 24.
         r.w.u8_(@intFromEnum(Packet.tile_rendering_mode_cfg));
         r.w.u8_(3);
-        r.w.u32_(clear_rgba);
+        r.w.u32_(clear[0]);
+        r.w.u16_(@truncate(clear[1]));
+        r.w.u8_(@truncate(clear[1] >> 16));
+    }
+
+    pub fn tileRenderingModeCfgClearColorsPart2(r: *Rcl, clear: [2]u32) void {
+        // Packet 121 sub-id 4: Clear Colors Part2, for 64 bits or more: the
+        // next 32 bits (the top 8 of the second word; nothing above).
+        r.w.u8_(@intFromEnum(Packet.tile_rendering_mode_cfg));
+        r.w.u8_(4);
+        r.w.u32_(clear[1] >> 24);
         r.w.u16_(0);
         r.w.u8_(0);
     }
@@ -434,9 +476,13 @@ pub const Rcl = struct {
         r.w.u32_(@as(u32, uif_padded_height_in_ub) << (40 - 32));
     }
 
-    pub fn tileRenderingModeCfgColor(r: *Rcl) void {
+    /// The tile buffer's render target 0: its internal type and bpp, and
+    /// clamped to 0..1 (`clamp_norm`) for formats that are (10-bit
+    /// colour held as half floats).
+    pub fn tileRenderingModeCfgColor(r: *Rcl, internal: InternalType, bpp: InternalBpp, clamp_norm: bool) void {
         // Packet 121 sub-id 1: Tile Rendering Mode Cfg (Color) (8 bytes payload).
-        const word0: u32 = 1 | (@as(u32, @intFromEnum(InternalType.type_8)) << 6);
+        const word0: u32 = 1 | (@as(u32, @intFromEnum(bpp)) << 4) | (@as(u32, @intFromEnum(internal)) << 6) |
+            (@as(u32, @intFromBool(clamp_norm)) << 10);
         r.w.u8_(@intFromEnum(Packet.tile_rendering_mode_cfg));
         r.w.u32_(word0);
         r.w.u32_(0);
@@ -444,18 +490,36 @@ pub const Rcl = struct {
 
     /// V3D 7.1 `Tile Rendering Mode Cfg (Render Target Part1)` (`sub-id = 2`),
     /// which replaces `Clear Colors Part1` and `Color` on V3D 7.1.
-    pub fn tileRenderingModeCfgRenderTargetPart1(r: *Rcl, clear_rgba: u32) void {
+    pub fn tileRenderingModeCfgRenderTargetPart1(r: *Rcl, clear: [2]u32, internal: InternalType, bpp: InternalBpp, clamp_norm: bool, msaa: bool) void {
         // bits 0..2: sub-id = 2
         // bits 3..5: render_target_number = 0
         // bits 7..17: base_address = 0
-        // bits 18..24: stride - 1 = (64 / 2) - 1 = 31
-        // bits 25..26: internal_bpp = 0 (32bpp)
-        // bits 27..31: internal_type_and_clamping = 4 (V3D_RENDER_TARGET_TYPE_CLAMP_8)
+        // bits 18..24: stride - 1, in 128 bits covering two rows (the
+        //   tile's width times its 32-bit words a pixel, halved)
+        // bits 25..26: internal_bpp
+        // bits 27..31: internal_type_and_clamping (`Render Target Type Clamp`)
         // bits 32..63: clear_color_low_bits
-        const word0: u32 = 2 | (@as(u32, 31) << 18) | (@as(u32, 4) << 27);
+        const words: u32 = @as(u32, 1) << @intFromEnum(bpp);
+        const stride: u32 = tileDims(bpp, msaa)[0] * words / 2;
+        const type_clamp: u32 = switch (internal) {
+            .type_8 => 8,
+            .type_16f => if (clamp_norm) 24 else 9,
+            .type_32f => 10,
+            else => unreachable,
+        };
+        const word0: u32 = 2 | ((stride - 1) << 18) | (@as(u32, @intFromEnum(bpp)) << 25) | (type_clamp << 27);
         r.w.u8_(@intFromEnum(Packet.tile_rendering_mode_cfg));
         r.w.u32_(word0);
-        r.w.u32_(clear_rgba);
+        r.w.u32_(clear[0]);
+        if (bpp != .bpp_32) {
+            // Render Target Part2 (sub-id 3): the next 40 bits, from bit
+            // 24 (the second word; nothing above it).
+            r.w.u8_(@intFromEnum(Packet.tile_rendering_mode_cfg));
+            r.w.u8_(3);
+            r.w.u16_(0);
+            r.w.u32_(clear[1]);
+            r.w.u8_(0);
+        }
     }
 
     pub fn tileRenderingModeCfgZsClearValues(r: *Rcl, clear_z: f32, clear_s: u8, v3d_ver: u8) void {
@@ -546,7 +610,7 @@ pub const Rcl = struct {
         var word0: u32 = @intFromEnum(Buffer.render_target_0) |
             (@as(u32, @intFromEnum(layout.mem_format)) << 4) |
             (@as(u32, @intFromEnum(decimate)) << 10) |
-            (@as(u32, @intFromEnum(out.fmt)) << 12) |
+            (@as(u32, @intFromEnum(out.format)) << 12) |
             ((stride_val & 0xf) << 28);
         if (out.rb_swap) word0 |= 1 << 20;
         const word1: u32 = (stride_val >> 4) | (@as(u32, height) << 16);
@@ -570,9 +634,9 @@ pub const Rcl = struct {
         var word0: u32 = @intFromEnum(Buffer.render_target_0) |
             (@as(u32, @intFromEnum(layout.mem_format)) << 4) |
             (@as(u32, @intFromEnum(DecimateMode.sample_0)) << 10) |
-            (@as(u32, @intFromEnum(out.fmt)) << 12) |
+            (@as(u32, @intFromEnum(out.format)) << 12) |
             ((stride_val & 0xf) << 28);
-        if (format == .xrgb8888 or format == .bgr565) word0 |= 1 << 18; // force_alpha_1
+        if (!format.hasAlpha()) word0 |= 1 << 18; // force_alpha_1
         if (out.rb_swap) word0 |= 1 << 20;
         const word1: u32 = (stride_val >> 4) | (@as(u32, height) << 16);
         r.w.u8_(@intFromEnum(Packet.load_tile_buffer_general));
@@ -782,47 +846,21 @@ fn writeAttributeRecords(w: *cl.Writer, attributes: []const AttributeRecord) voi
 pub fn packTextureShaderState(tex_base_addr: u32, cfg: texture.Config) [6]u32 {
     const addr = tex_base_addr + cfg.offset;
     std.debug.assert(addr & 0x3f == 0);
-    // Texture Data Formats (`v3d_packet.xml` lines 341-347):
-    // R8 = 0, RGBA8 = 4, RGB565 = 6.
-    const tex_type: u32 = switch (cfg.type) {
-        .rgba8888, .rgbx8888 => 4,
-        .rgb565 => 6,
-        .alpha, .luminance => 0,
-        else => unreachable,
-    };
-    const fmt: Format = switch (cfg.type) {
-        .rgba8888, .rgbx8888 => .argb8888,
-        .rgb565 => .bgr565,
-        .alpha, .luminance => .a8,
-        else => unreachable,
-    };
-    // Swizzle values (`v3d_packet.xml` lines 1611-1616):
-    // 0 = Zero, 1 = One, 2 = Red (ch0), 3 = Green (ch1), 4 = Blue (ch2), 5 = Alpha (ch3).
-    // Note: `compileV3d` assigns the 4 `ldtmu` words to `(ch[2], ch[1], ch[0], ch[3])`:
-    //   word 0 (R output) -> ch[2]
-    //   word 1 (G output) -> ch[1]
-    //   word 2 (B output) -> ch[0]
-    //   word 3 (A output) -> ch[3]
-    const swiz: struct { r: u32, g: u32, b: u32, a: u32 } = switch (cfg.type) {
-        // Memory is 0xAARRGGBB (little-endian [B, G, R, A]); RGBA8 reads byte 0 as Red(2),
-        // byte 1 as Green(3), byte 2 as Blue(4), byte 3 as Alpha(5).
-        // We want `ch[0]` (word 2 / B output) = byte 0 (Red=2),
-        //         `ch[1]` (word 1 / G output) = byte 1 (Green=3),
-        //         `ch[2]` (word 0 / R output) = byte 2 (Blue=4),
-        //         `ch[3]` (word 3 / A output) = byte 3 (Alpha=5).
-        .rgba8888, .rgbx8888 => .{ .r = 4, .g = 3, .b = 2, .a = 5 },
-        // Format.bgr565 (DRM_FORMAT_BGR565) has R in bits 0..4 (which V3D's
-        // RGB565 texture format reads as Blue(4)), G in bits 5..10 (Green(3)),
-        // and B in bits 11..15 (Red(2)): `ch[0]` (B output) = Red(2), `ch[1]` = Green(3),
-        // `ch[2]` (R output) = Blue(4), `ch[3]` = One(1).
-        .rgb565 => .{ .r = 4, .g = 3, .b = 2, .a = 1 },
-        // Alpha textures (`.alpha`, R8) are read by shaders via `unpack_unorm8(3)`
-        // (`ch[3]` = word 3 = A output).
-        .alpha, .luminance => .{ .r = 0, .g = 0, .b = 0, .a = 2 },
-        else => unreachable,
+    // The format's Texture Data Format (`v3d_packet.xml`), and which of
+    // its channels the texture unit returns as red, green, blue and alpha
+    // (`compileV3d` takes them in that order).
+    const fmt = cfg.format;
+    const t = fmt.v3d().texture orelse unreachable; // not sampled by the V3D
+    const tex_type: u32 = t.type;
+    const swiz: struct { r: u32, g: u32, b: u32, a: u32 } = .{
+        .r = @intFromEnum(t.swizzle[0]),
+        .g = @intFromEnum(t.swizzle[1]),
+        .b = @intFromEnum(t.swizzle[2]),
+        .a = @intFromEnum(t.swizzle[3]),
     };
 
-    const slice = texture.uifSlice(fmt, cfg.width, cfg.height);
+    const el = fmt.elements(cfg.width, cfg.height);
+    const slice = texture.uifSlice(fmt, el[0], el[1]);
     const ub_pad: u32 = slice.ub_pad;
     const xor_enable: u32 = @intFromBool(slice.tiling == .uif_xor);
     const strictly_uif: u32 = @intFromBool(slice.tiling == .uif_xor or slice.tiling == .uif_no_xor);
@@ -881,8 +919,11 @@ pub fn packSamplerState(cfg: texture.Config) [6]u32 {
         .mirror => 2,
         .border => 3,
     };
-    const mag_nearest: u32 = @intFromBool(cfg.mag_filter == .nearest);
-    const min_nearest: u32 = @intFromBool(cfg.min_filter == .nearest);
+    // Formats the texture unit cannot filter (32-bit floats) are sampled
+    // nearest.
+    const filterable = cfg.format.v3d().filterable;
+    const mag_nearest: u32 = @intFromBool(cfg.mag_filter == .nearest or !filterable);
+    const min_nearest: u32 = @intFromBool(cfg.min_filter == .nearest or !filterable);
     const mip_nearest: u32 = @intFromBool(cfg.mip_filter != .linear);
     const max_lod_fixed: u32 = if (cfg.mip_filter != .none) @as(u32, cfg.mip_levels) << 8 else 0;
 
@@ -922,7 +963,7 @@ const testing = std.testing;
 test "V3D 4.2 and V3D 7.1 BCL and RCL packet encoding" {
     var bcl_buf: [256]u8 = undefined;
     var bcl = Bcl.init(&bcl_buf);
-    bcl.startBinning(640, 480, false, 42);
+    bcl.startBinning(640, 480, false, .bpp_32, 42);
     bcl.finish();
     const b = bcl.bytes();
     try testing.expectEqual(@intFromEnum(Packet.number_of_layers), b[0]);
@@ -932,18 +973,21 @@ test "V3D 4.2 and V3D 7.1 BCL and RCL packet encoding" {
 
     var rcl_buf: [256]u8 = undefined;
     var rcl = Rcl.init(&rcl_buf);
-    rcl.tileRenderingModeCfgCommon(640, 480, false, false, true, 42);
-    rcl.tileRenderingModeCfgClearColorsPart1(Rcl.packClearColor(0xff112233));
-    rcl.tileRenderingModeCfgColor();
+    rcl.tileRenderingModeCfgCommon(640, 480, false, .bpp_32, false, true, 42);
+    rcl.tileRenderingModeCfgClearColorsPart1(Rcl.packClearColor(0xff112233, .type_8));
+    rcl.tileRenderingModeCfgColor(.type_8, .bpp_32, false);
     rcl.tileRenderingModeCfgZsClearValues(1.0, 0, 42);
     rcl.endOfRendering();
-    try testing.expectEqual(@as(u32, 0xff332211), Rcl.packClearColor(0xff112233));
+    try testing.expectEqual([2]u32{ 0xff332211, 0 }, Rcl.packClearColor(0xff112233, .type_8));
+    // Half floats: 1.0 is 0x3c00, 0 is 0.
+    try testing.expectEqual([2]u32{ 0x3c00, 0x3c000000 }, Rcl.packClearColor(0xffff0000, .type_16f));
+    try testing.expectEqual([2]u16{ 64, 32 }, tileDims(.bpp_64, false));
     try testing.expectEqual(@intFromEnum(Packet.end_of_rendering), rcl.bytes()[rcl.bytes().len - 1]);
 
     // V3D 7.1 RCL
     var rcl71 = Rcl.init(&rcl_buf);
-    rcl71.tileRenderingModeCfgCommon(640, 480, false, false, true, 71);
-    rcl71.tileRenderingModeCfgRenderTargetPart1(Rcl.packClearColor(0xff112233));
+    rcl71.tileRenderingModeCfgCommon(640, 480, false, .bpp_32, false, true, 71);
+    rcl71.tileRenderingModeCfgRenderTargetPart1(Rcl.packClearColor(0xff112233, .type_8), .type_8, .bpp_32, false, false);
     rcl71.tileRenderingModeCfgZsClearValues(1.0, 0, 71);
     rcl71.clearTileBuffers(true, true, 71);
     rcl71.endOfRendering();
@@ -951,7 +995,7 @@ test "V3D 4.2 and V3D 7.1 BCL and RCL packet encoding" {
 }
 
 test "V3D 4.2 texture and sampler state packing" {
-    const tex = packTextureShaderState(0x1000, .{ .width = 256, .height = 128, .type = .rgba8888 });
+    const tex = packTextureShaderState(0x1000, .{ .width = 256, .height = 128, .format = .argb8888 });
     try testing.expectEqual(@as(u32, 0x1000), tex[0]);
     const samp = packSamplerState(.{ .width = 256, .height = 128, .mag_filter = .nearest, .min_filter = .nearest });
     try testing.expectEqual(@as(u32, 0x7), samp[0] & 0x7);

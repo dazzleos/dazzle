@@ -310,7 +310,7 @@ pub const Renderer = struct {
                 .text => .{
                     .handle = (r.atlas_bo orelse return error.NotPrepared).handle,
                     .config = .{
-                        .type = vc4.Format.a8.textureType(),
+                        .format = .a8,
                         .width = atlas_mod.width,
                         .height = atlas_mod.height,
                         // Drawn smaller, smoothly.

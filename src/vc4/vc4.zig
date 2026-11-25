@@ -39,6 +39,7 @@ pub const reference_shaders = @import("reference_shaders.zig");
 
 pub const Device = device.Device;
 pub const Format = format.Format;
+pub const Gpu = format.Gpu;
 pub const Bo = device.Bo;
 pub const SubmitCl = device.SubmitCl;
 

@@ -78,26 +78,27 @@ pub const Texture = struct {
     width: u32,
     height: u32,
     format: vc4.Format = .xrgb8888,
-    /// ETC1 compressed (the desktop's background), not `format`.
-    compressed: bool = false,
 };
 
-/// The formats clients' buffers can be in, and wl_shm's codes for them
-/// (dma-bufs use their DRM codes).
-const buffer_formats = [_]vc4.Format{ .argb8888, .xrgb8888, .bgr565 };
+/// Every format that has a DRM code: what clients' buffers might be in.
+/// Those the GPU samples (`Server.gpu`) are offered.
+const drm_formats = blk: {
+    var list: []const vc4.Format = &.{};
+    for (@typeInfo(vc4.Format).@"enum".field_values) |value| {
+        const f: vc4.Format = @enumFromInt(value);
+        if (f.fourcc() != null) list = list ++ .{f};
+    }
+    break :blk list;
+};
 
+/// wl_shm's code for a format: its DRM code, except for the two every
+/// compositor has, which are 0 and 1.
 fn shmCode(f: vc4.Format) u32 {
     return switch (f) {
         .argb8888 => p.wl_shm.format.argb8888,
         .xrgb8888 => p.wl_shm.format.xrgb8888,
-        .bgr565 => p.wl_shm.format.bgr565,
-        .a8, .rgba4444 => unreachable, // textures only
+        else => f.fourcc().?,
     };
-}
-
-fn fromShmCode(code: u32) ?vc4.Format {
-    for (buffer_formats) |f| if (shmCode(f) == code) return f;
-    return null;
 }
 
 pub const Backend = struct {
@@ -721,10 +722,9 @@ fn peerPid(fd: linux.fd_t) ?linux.pid_t {
 pub const Server = struct {
     gpa: std.mem.Allocator,
     backend: Backend,
-    /// Apps may share tiled BGR565 buffers (16-bit windows). Not on V3D
-    /// (the Pi 4 and 5), which renders 16 bits with red at the top (RGB565)
-    /// instead: their windows are 32-bit there.
-    tiled_bgr565: bool = true,
+    /// The GPU clients' buffers are sampled by: the formats offered are
+    /// those it takes as they are.
+    gpu: vc4.Gpu = .vc4,
     clients: std.ArrayList(*Client) = .empty,
     /// Toplevels in stacking order, bottom first.
     toplevels: std.ArrayList(*Toplevel) = .empty,
@@ -874,6 +874,18 @@ pub const Server = struct {
 
     pub fn init(gpa: std.mem.Allocator, backend: Backend, work_area: Rect) Server {
         return .{ .gpa = gpa, .backend = backend, .work_area = work_area };
+    }
+
+    /// The format with wl_shm's `code`, if the GPU takes it.
+    fn shmFormat(s: *const Server, code: u32) ?vc4.Format {
+        for (drm_formats) |f| if (shmCode(f) == code and f.sampleable(s.gpu)) return f;
+        return null;
+    }
+
+    /// The format with DRM `code`, if the GPU takes it.
+    fn drmFormat(s: *const Server, code: u32) ?vc4.Format {
+        const f = vc4.Format.fromFourcc(code) orelse return null;
+        return if (f.sampleable(s.gpu)) f else null;
     }
 
     pub fn deinit(s: *Server) void {
@@ -2194,7 +2206,7 @@ pub const Server = struct {
                     const height = try r.int();
                     const stride = try r.int();
                     const code = try r.uint();
-                    const format = fromShmCode(code) orelse
+                    const format = s.shmFormat(code) orelse
                         return c.postError(m.object, p.wl_shm.err.invalid_format, "unsupported format {d}", .{code});
                     const bpp: i32 = @intCast(format.bytesPerPixel());
                     if (offset < 0 or width <= 0 or height <= 0 or width > 2048 or height > 2048 or stride < width * bpp or @mod(stride, bpp) != 0 or
@@ -2948,7 +2960,7 @@ pub const Server = struct {
             1 => try c.addObject(id, .compositor),
             2 => {
                 try c.addObject(id, .shm);
-                for (buffer_formats) |f| if (c.send(id, p.wl_shm.event.format)) |m0| {
+                for (drm_formats) |f| if (f.sampleable(s.gpu)) if (c.send(id, p.wl_shm.event.format)) |m0| {
                     var e = m0;
                     e.uint(shmCode(f)).end();
                 };
@@ -2957,15 +2969,15 @@ pub const Server = struct {
             4 => {
                 try c.addObject(id, .dmabuf);
                 const mod = p.modifier.broadcom_vc4_t_tiled;
-                for (buffer_formats) |f| {
-                    if (f == .bgr565 and !s.tiled_bgr565) continue;
+                for (drm_formats) |f| {
+                    if (!f.sampleable(s.gpu)) continue;
                     if (c.send(id, p.zwp_linux_dmabuf_v1.event.format)) |m0| {
                         var e = m0;
-                        e.uint(f.fourcc()).end();
+                        e.uint(f.fourcc().?).end();
                     }
                     if (c.send(id, p.zwp_linux_dmabuf_v1.event.modifier)) |m0| {
                         var e = m0;
-                        e.uint(f.fourcc()).uint(@truncate(mod >> 32)).uint(@truncate(mod)).end();
+                        e.uint(f.fourcc().?).uint(@truncate(mod >> 32)).uint(@truncate(mod)).end();
                     }
                 }
             },
@@ -5119,12 +5131,10 @@ pub const Server = struct {
                 pr.used = true;
                 const fd = pr.fd orelse return c.postError(m.object, E.incomplete, "no planes", .{});
                 pr.fd = null;
-                const format = for (buffer_formats) |f| {
-                    if (f.fourcc() == code) break f;
-                } else null;
+                const format = s.drmFormat(code);
                 if (format == null or pr.modifier != p.modifier.broadcom_vc4_t_tiled) {
                     _ = linux.close(fd);
-                    return c.postError(m.object, E.invalid_format, "only T-tiled XRGB8888, ARGB8888 and BGR565 are supported", .{});
+                    return c.postError(m.object, E.invalid_format, "only T-tiled buffers in formats the GPU samples are supported", .{});
                 }
                 if (width <= 0 or height <= 0 or width > 2048 or height > 2048) {
                     _ = linux.close(fd);

@@ -30,6 +30,8 @@ pub const Kind = union(enum) {
     etc1: etc1.ByteOrder,
     /// BGR565 pixels (red in the low bits), row by row (the renderer lays them out).
     bgr565,
+    /// RGB565 pixels (red in the top bits): the V3D's 16 bits.
+    rgb565,
 };
 
 /// An image ready for the GPU: `data` as `kind` says, `width` by `height`.
@@ -130,7 +132,7 @@ pub fn fromPixels(gpa: std.mem.Allocator, pixels: []const u32, width: u32, heigh
             etc1.encode(pixels, width, height, blocks);
             return fromBlocks(gpa, blocks, width, height, order, bottom_rows);
         },
-        .bgr565 => {
+        .bgr565, .rgb565 => {
             const rows = @min(bottom_rows, height);
             const first = height - rows;
             const bottom = try gpa.alloc(u32, @as(usize, width) * rows);
@@ -139,7 +141,9 @@ pub fn fromPixels(gpa: std.mem.Allocator, pixels: []const u32, width: u32, heigh
             for (0..height) |y| for (0..width) |x| {
                 const px = pixels[y * width + x];
                 const v = dither565(px, @intCast(x), @intCast(y));
-                std.mem.writeInt(u16, out[(y * width + x) * 2 ..][0..2], v, .little);
+                // Red and blue swapped for red at the top.
+                const stored = if (kind == .rgb565) (v & 0x07e0) | (v >> 11) | (v << 11) else v;
+                std.mem.writeInt(u16, out[(y * width + x) * 2 ..][0..2], stored, .little);
                 if (y >= first) bottom[(y - first) * width + x] = expand565(v);
             };
             return .{ .data = out, .width = width, .height = height, .kind = kind, .bottom = bottom };

@@ -57,7 +57,9 @@ pub const Wrap = enum(u2) { repeat = 0, clamp = 1, mirror = 2, border = 3 };
 pub const Config = struct {
     /// Byte offset of the image in its buffer; must be 4 KB aligned.
     offset: u32 = 0,
-    type: Type = .rgba8888,
+    /// One the GPU samples (`Format.sampleable`).
+    format: Format = .argb8888,
+    /// In pixels (for compressed formats too).
     width: u32,
     height: u32,
     mag_filter: Filter = .linear,
@@ -70,11 +72,30 @@ pub const Config = struct {
     mip_filter: MipFilter = .none,
 };
 
+/// A VC4 texture configuration as the hardware has it (`decodeConfig`):
+/// its texture type, not a `Format`.
+pub const Decoded = struct {
+    offset: u32 = 0,
+    type: Type = .rgba8888,
+    width: u32,
+    height: u32,
+    mag_filter: Filter = .linear,
+    min_filter: Filter = .linear,
+    wrap_s: Wrap = .repeat,
+    wrap_t: Wrap = .repeat,
+    mip_levels: u4 = 0,
+    mip_filter: MipFilter = .none,
+};
+
+fn vc4Type(c: Config) Type {
+    return c.format.vc4().texture orelse unreachable; // not sampled by the VC4
+}
+
 /// Texture config parameter 0: image offset, type and mip levels. The
 /// kernel adds the buffer's physical address when relocating it.
 pub fn p0(c: Config) u32 {
     std.debug.assert(c.offset & 0xfff == 0);
-    return c.offset | (@as(u32, @intFromEnum(c.type)) & 0xf) << 4 | c.mip_levels;
+    return c.offset | (@as(u32, @intFromEnum(vc4Type(c))) & 0xf) << 4 | c.mip_levels;
 }
 
 /// Texture config parameter 1: size, filtering and wrapping.
@@ -91,7 +112,7 @@ pub fn p1(c: Config) u32 {
         .linear => 0,
         .nearest => 1,
     };
-    return (@as(u32, @intFromEnum(c.type)) >> 4) << 31 |
+    return (@as(u32, @intFromEnum(vc4Type(c))) >> 4) << 31 |
         (c.height & 2047) << 20 |
         (c.width & 2047) << 8 |
         mag << 7 |
@@ -100,7 +121,7 @@ pub fn p1(c: Config) u32 {
         @as(u32, @intFromEnum(c.wrap_s));
 }
 
-pub fn decodeConfig(param0: u32, param1: u32) Config {
+pub fn decodeConfig(param0: u32, param1: u32) Decoded {
     const w = (param1 >> 8) & 2047;
     const h = (param1 >> 20) & 2047;
     return .{
@@ -165,13 +186,28 @@ fn uifUbPad(ub_h: u32, height: u32) u8 {
     return 0;
 }
 
+/// log2 of a format's utile width and height and of its element's bytes.
+const Shifts = struct { uw: u5, uh: u5, cpp: u5 };
+
+inline fn shiftsOf(format: Format) Shifts {
+    return .{
+        .uw = @intCast(std.math.log2_int(u32, format.utileWidth())),
+        .uh = @intCast(std.math.log2_int(u32, format.utileHeight())),
+        .cpp = @intCast(std.math.log2_int(u32, format.elementBytes())),
+    };
+}
+
 /// Computes the V3D 4.2 slice tiling and padded dimensions (`v3d_setup_slices`).
+///
+/// Here and in the other layout functions taking a format, sizes and
+/// positions are in elements: pixels, or the blocks of a compressed
+/// format (`Format.elements`).
 pub fn uifSlice(format: Format, width: u32, height: u32) UifSlice {
     const uw = format.utileWidth();
     const uh = format.utileHeight();
     const ub_w = uw * 2;
     const ub_h = uh * 2;
-    const cpp = format.bytesPerPixel();
+    const cpp = format.elementBytes();
     if (width <= uw or height <= uh) {
         const pw = std.mem.alignForward(u32, @max(width, 1), uw);
         const ph = std.mem.alignForward(u32, @max(height, 1), uh);
@@ -196,18 +232,14 @@ pub fn uifSlice(format: Format, width: u32, height: u32) UifSlice {
 }
 
 pub inline fn uifTexelOffsetOf(format: Format, width: u32, height: u32, x: u32, y: u32) u32 {
-    const cpp = format.bytesPerPixel();
-    const uw_shift: u5 = if (cpp == 4) 2 else 3;
-    const uh_shift: u5 = if (cpp == 1) 3 else 2;
+    const sh = shiftsOf(format);
+    const uw_shift = sh.uw;
+    const uh_shift = sh.uh;
     const uw: u32 = @as(u32, 1) << uw_shift;
     const uh: u32 = @as(u32, 1) << uh_shift;
     const ub_w_shift: u5 = uw_shift + 1;
     const ub_h_shift: u5 = uh_shift + 1;
-    const cpp_shift: u5 = switch (cpp) {
-        4 => 2,
-        2 => 1,
-        else => 0,
-    };
+    const cpp_shift = sh.cpp;
     const in_utile = (((y & (uh - 1)) << uw_shift) | (x & (uw - 1))) << cpp_shift;
     const slice = uifSlice(format, width, height);
     return switch (slice.tiling) {
@@ -441,7 +473,7 @@ pub fn imageSizeOf(format: Format, width: u32, height: u32) u32 {
     if (!@inComptime() and use_uif) return uifSlice(format, width, height).size;
     const uw = format.utileWidth();
     const uh = format.utileHeight();
-    const cpp = format.bytesPerPixel();
+    const cpp = format.elementBytes();
     if (isLtOf(format, width, height)) {
         return std.mem.alignForward(u32, width, uw) * std.mem.alignForward(u32, height, uh) * cpp;
     }
@@ -453,10 +485,10 @@ pub fn imageSizeOf(format: Format, width: u32, height: u32) u32 {
 /// (micro-tiles for LT), times the bytes per pixel. For T images that is
 /// 128 bytes per tile across, whatever the format.
 pub fn tiledPitch(format: Format, width: u32, height: u32) u32 {
-    if (!@inComptime() and use_uif) return uifSlice(format, width, height).padded_width * format.bytesPerPixel();
+    if (!@inComptime() and use_uif) return uifSlice(format, width, height).padded_width * format.elementBytes();
     const uw = format.utileWidth();
     const align_w = if (isLtOf(format, width, height)) uw else 8 * uw;
-    return std.mem.alignForward(u32, width, align_w) * format.bytesPerPixel();
+    return std.mem.alignForward(u32, width, align_w) * format.elementBytes();
 }
 
 /// Byte offset of the 1 KB sub-tile containing micro-tile (utile_x,
@@ -483,16 +515,12 @@ pub fn texelOffset(width: u32, height: u32, x: u32, y: u32) u32 {
 
 pub inline fn texelOffsetOf(format: Format, width: u32, height: u32, x: u32, y: u32) u32 {
     if (!@inComptime() and use_uif) return uifTexelOffsetOf(format, width, height, x, y);
-    const cpp = format.bytesPerPixel();
-    const uw_shift: u5 = if (cpp == 4) 2 else 3;
-    const uh_shift: u5 = if (cpp == 1) 3 else 2;
+    const sh = shiftsOf(format);
+    const uw_shift = sh.uw;
+    const uh_shift = sh.uh;
     const uw: u32 = @as(u32, 1) << uw_shift;
     const uh: u32 = @as(u32, 1) << uh_shift;
-    const cpp_shift: u5 = switch (cpp) {
-        4 => 2,
-        2 => 1,
-        else => 0,
-    };
+    const cpp_shift = sh.cpp;
     const in_utile = (((y & (uh - 1)) << uw_shift) | (x & (uw - 1))) << cpp_shift;
     if (width <= (uw << 2) or height <= (uh << 2)) {
         const row_stride = ((width + uw - 1) & ~(uw - 1)) << cpp_shift;
@@ -532,16 +560,12 @@ pub fn uploadRectOf(format: Format, dst: []u8, width: u32, height: u32, rect: Re
     std.debug.assert(dst.len >= imageSizeOf(format, width, height));
     std.debug.assert(rect.x + rect.width <= width and rect.y + rect.height <= height);
     if (rect.width == 0 or rect.height == 0) return;
-    const cpp = format.bytesPerPixel();
-    const uw_shift: u5 = if (cpp == 4) 2 else 3;
-    const uh_shift: u5 = if (cpp == 1) 3 else 2;
+    const sh = shiftsOf(format);
+    const uw_shift = sh.uw;
+    const uh_shift = sh.uh;
     const uw: u32 = @as(u32, 1) << uw_shift;
     const uh: u32 = @as(u32, 1) << uh_shift;
-    const cpp_shift: u5 = switch (cpp) {
-        4 => 2,
-        2 => 1,
-        else => 0,
-    };
+    const cpp_shift = sh.cpp;
     const x_end = rect.x + rect.width;
     const y_end = rect.y + rect.height;
     var uy = rect.y >> uh_shift;
@@ -570,7 +594,7 @@ test "config round trip" {
     const c: Config = .{ .offset = 0x3000, .width = 128, .height = 64, .mag_filter = .nearest, .min_filter = .nearest, .wrap_s = .clamp };
     const d = decodeConfig(p0(c), p1(c));
     try testing.expectEqual(c.offset, d.offset);
-    try testing.expectEqual(c.type, d.type);
+    try testing.expectEqual(Type.rgba8888, d.type);
     try testing.expectEqual(c.width, d.width);
     try testing.expectEqual(c.height, d.height);
     try testing.expectEqual(c.mag_filter, d.mag_filter);
@@ -790,11 +814,11 @@ test "16-bit mipmapped images: each level where the layout says, the texels as p
     const h = 32;
     var pixels: [w * h]u32 = undefined;
     for (&pixels, 0..) |*p, i| p.* = 0xff000000 | @as(u32, @intCast(i % 256));
-    const layout = mipmapLayoutOf(.rgba4444, w, h, 3);
+    const layout = mipmapLayoutOf(.bgra4444, w, h, 3);
     // Levels below level 0, which is 4 KB aligned at the end.
     try std.testing.expectEqual(@as(u32, 0), layout.base % 4096);
-    try std.testing.expectEqual(layout.base + imageSizeOf(.rgba4444, w, h), layout.size);
-    try std.testing.expect(levelOffsetOf(.rgba4444, w, h, layout, 1) < layout.base);
+    try std.testing.expectEqual(layout.base + imageSizeOf(.bgra4444, w, h), layout.size);
+    try std.testing.expect(levelOffsetOf(.bgra4444, w, h, layout, 1) < layout.base);
     const dst = try gpa.alloc(u8, layout.size);
     defer gpa.free(dst);
     @memset(dst, 0);
@@ -803,8 +827,8 @@ test "16-bit mipmapped images: each level where the layout says, the texels as p
             return @truncate(c);
         }
     }.f;
-    try uploadMipmapsOf(gpa, .rgba4444, dst, &pixels, w, h, 3, .colour, pack);
+    try uploadMipmapsOf(gpa, .bgra4444, dst, &pixels, w, h, 3, .colour, pack);
     // Level 0's texel (5, 3), where the tiled layout puts it.
-    const off = layout.base + texelOffsetOf(.rgba4444, w, h, 5, 3);
+    const off = layout.base + texelOffsetOf(.bgra4444, w, h, 5, 3);
     try std.testing.expectEqual(@as(u16, @truncate(pixels[3 * w + 5])), std.mem.readInt(u16, dst[off..][0..2], .little));
 }

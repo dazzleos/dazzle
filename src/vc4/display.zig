@@ -51,7 +51,7 @@ pub const Display = struct {
         for (&d.buffers) |*b| {
             const bo = try dev.createBo(pitch * height);
             errdefer dev.destroyBo(bo);
-            const fb_id = try drm.addFramebuffer(dev.fd, bo.kmsHandle(), width, height, pitch, format.fourcc());
+            const fb_id = try drm.addFramebuffer(dev.fd, bo.kmsHandle(), width, height, pitch, format.fourcc().?);
             b.* = .{ .bo = bo, .fb_id = fb_id };
         }
         return d;

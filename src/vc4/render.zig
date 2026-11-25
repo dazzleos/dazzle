@@ -130,7 +130,7 @@ pub const Target = struct {
     /// Byte stride the hardware uses for linear render targets: the width
     /// rounded up to a micro-tile.
     pub fn pitch(format: Format, width: u16) u32 {
-        return std.mem.alignForward(u32, width, format.utileWidth()) * format.bytesPerPixel();
+        return std.mem.alignForward(u32, width, format.utileWidth()) * format.elementBytes();
     }
 
     pub fn fullViewport(t: Target) Viewport {
@@ -275,15 +275,24 @@ pub const Frame = struct {
         f.limited_to_nothing = nothing;
     }
 
-    /// Tiles' size, in pixels.
-    pub fn tileSize(f: *const Frame) u16 {
-        return if (f.msaa) cl.multisample_tile_size else cl.tile_size;
+    /// Tiles' size in pixels, across and down. On the V3D, smaller the
+    /// more bits its tile buffer holds a pixel (formats of more than 8
+    /// bits a channel).
+    pub fn tileDims(f: *const Frame) [2]u16 {
+        if (texture.use_uif) return v3d_cl.tileDims(f.v3dRender().bpp, f.msaa);
+        const ts: u16 = if (f.msaa) cl.multisample_tile_size else cl.tile_size;
+        return .{ ts, ts };
+    }
+
+    fn v3dRender(f: *const Frame) @import("format.zig").V3d.Render {
+        return f.target.format.v3d().render orelse unreachable; // not rendered to by the V3D
     }
 
     fn tileCounts(f: *const Frame) [2]u16 {
+        const d = f.tileDims();
         return .{
-            std.math.divCeil(u16, f.target.width, f.tileSize()) catch unreachable,
-            std.math.divCeil(u16, f.target.height, f.tileSize()) catch unreachable,
+            std.math.divCeil(u16, f.target.width, d[0]) catch unreachable,
+            std.math.divCeil(u16, f.target.height, d[1]) catch unreachable,
         };
     }
 
@@ -437,8 +446,10 @@ pub const Frame = struct {
             const x1 = @min(r.x + @as(i32, @intCast(r.width)), f.target.width);
             const y1 = @min(r.y + @as(i32, @intCast(r.height)), f.target.height);
             if (x1 <= x0 or y1 <= y0) continue;
-            const ts: i32 = f.tileSize();
-            var t: [4]i32 = .{ @divFloor(x0, ts), @divFloor(y0, ts), @divFloor(x1 - 1, ts), @divFloor(y1 - 1, ts) };
+            const d = f.tileDims();
+            const tw: i32 = d[0];
+            const th: i32 = d[1];
+            var t: [4]i32 = .{ @divFloor(x0, tw), @divFloor(y0, th), @divFloor(x1 - 1, tw), @divFloor(y1 - 1, th) };
             t[2] = @min(t[2], tiles[0] - 1);
             t[3] = @min(t[3], tiles[1] - 1);
             // Merge with the ranges it overlaps (repeatedly, as merging
@@ -485,11 +496,13 @@ pub const Frame = struct {
     pub fn covers(f: *const Frame, r: Viewport) bool {
         if (f.limited_to_nothing) return false;
         if (f.region_count == 0) return true;
-        const ts: i32 = f.tileSize();
-        const x0 = @divFloor(r.x, ts);
-        const y0 = @divFloor(r.y, ts);
-        const x1 = @divFloor(r.x + @as(i32, @intCast(r.width)) - 1, ts);
-        const y1 = @divFloor(r.y + @as(i32, @intCast(r.height)) - 1, ts);
+        const d = f.tileDims();
+        const tw: i32 = d[0];
+        const th: i32 = d[1];
+        const x0 = @divFloor(r.x, tw);
+        const y0 = @divFloor(r.y, th);
+        const x1 = @divFloor(r.x + @as(i32, @intCast(r.width)) - 1, tw);
+        const y1 = @divFloor(r.y + @as(i32, @intCast(r.height)) - 1, th);
         for (f.regions[0..f.region_count]) |t| {
             if (x0 <= t[2] and t[0] <= x1 and y0 <= t[3] and t[1] <= y1) return true;
         }
@@ -531,7 +544,7 @@ pub const Frame = struct {
             .max_y_tile = @intCast(tiles[1] - 1),
             .color_write = .{
                 .hindex = 0,
-                .bits = cl.renderConfigBits(f.target.tiling, f.target.format.renderConfigFormat()) |
+                .bits = cl.renderConfigBits(f.target.tiling, f.target.format.vc4().render.?) |
                     (if (f.msaa) cl.render_config_multisample else 0),
             },
             // The clear values are always loaded so depth starts cleared;
@@ -554,7 +567,7 @@ pub const Frame = struct {
         if (f.load == .keep) {
             f.submit.color_read = .{
                 .hindex = 0,
-                .bits = cl.loadStoreBits(f.target.tiling, .color, f.target.format.loadStoreFormat()),
+                .bits = cl.loadStoreBits(f.target.tiling, .color, f.target.format.vc4().load_store.?),
             };
         }
         return f.submitRegion(0);
@@ -707,7 +720,7 @@ pub const Frame = struct {
         var v3d_bcl = v3d_cl.Bcl.init(cl_bo.map[bcl_off..][0..bcl_size]);
         var any_early_z = false;
         if (f.draws > 0) {
-            v3d_bcl.startBinning(f.target.width, f.target.height, f.msaa, v3d_ver);
+            v3d_bcl.startBinning(f.target.width, f.target.height, f.msaa, f.v3dRender().bpp, v3d_ver);
             for (f.v3d_draws[0..f.draws]) |*d| {
                 if (d.config.early_z) any_early_z = true;
                 v3d_bcl.clipWindow(d.x0, d.y0, d.width, d.height);
@@ -825,21 +838,25 @@ pub const Frame = struct {
         const rcl_off: u32 = rcl_off_need;
         var rcl = v3d_cl.Rcl.init(cl_bo.map[rcl_off..][0..rcl_size]);
         std.debug.assert(ind_off <= ind_end);
-        rcl.tileRenderingModeCfgCommon(f.target.width, f.target.height, f.msaa, any_early_z, false, v3d_ver);
+        const rt = f.v3dRender();
+        // 10-bit colour, held as half floats, is clamped to 0..1.
+        const clamp_norm = rt.format == .rgb10_a2;
+        rcl.tileRenderingModeCfgCommon(f.target.width, f.target.height, f.msaa, rt.bpp, any_early_z, false, v3d_ver);
         const clear_argb: u32 = switch (f.load) {
             .clear => |c| c,
             .keep => 0,
         };
-        const clear_rgba = v3d_cl.Rcl.packClearColor(clear_argb);
+        const clear = v3d_cl.Rcl.packClearColor(clear_argb, rt.internal);
         if (v3d_ver >= 71) {
-            rcl.tileRenderingModeCfgRenderTargetPart1(clear_rgba);
+            rcl.tileRenderingModeCfgRenderTargetPart1(clear, rt.internal, rt.bpp, clamp_norm, f.msaa);
         } else {
-            rcl.tileRenderingModeCfgClearColorsPart1(clear_rgba);
+            rcl.tileRenderingModeCfgClearColorsPart1(clear);
+            if (rt.bpp != .bpp_32) rcl.tileRenderingModeCfgClearColorsPart2(clear);
             const layout = v3d_cl.targetLayout(f.target.format, f.target.tiling, f.target.width, f.target.height);
             if (layout.uif_padded_height_in_ub -| layout.implicit_padded_height_in_ub >= 15) {
                 rcl.tileRenderingModeCfgClearColorsPart3(layout.uif_padded_height_in_ub);
             }
-            rcl.tileRenderingModeCfgColor();
+            rcl.tileRenderingModeCfgColor(rt.internal, rt.bpp, clamp_norm);
         }
         const clear_z_f: f32 = @as(f32, @floatFromInt(f.clear_z)) / @as(f32, @floatFromInt(0xffffff));
         rcl.tileRenderingModeCfgZsClearValues(clear_z_f, 0, v3d_ver);
