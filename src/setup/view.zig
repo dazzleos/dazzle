@@ -388,18 +388,24 @@ pub const Setup = struct {
 
         const page_body = cx.make(kete.KeyHandler{ .watch = true, .on_key = .of(state, State.watchKey), .child = cx.make(kete.Column{
             .cross_axis_alignment = .stretch,
-            .spacing = 16,
+            .fill = true,
             .children = a.dupe(kete.Widget, &.{
+                // The keyboards to choose from, just above the keyboard's
+                // picture, the two in the middle of the room above the
+                // buttons...
+                cx.make(kete.Expanded{ .child = cx.make(kete.SizedBox.empty) }),
                 cx.make(kete.Wrap{ .spacing = 8, .run_spacing = 8, .alignment = .center, .cross_axis_alignment = .center, .children = choices.items }),
-                // As big as there is room for (no bigger than a key 40
+                cx.make(kete.SizedBox{ .height = 16 }),
+                // ... as wide as there is room for (no bigger than a key 40
                 // pixels across).
-                cx.make(kete.Expanded{ .child = cx.make(kete.Align{ .alignment = .center, .child = cx.make(kete.ScaleDown{
+                cx.make(kete.Align{ .alignment = .center, .child = cx.make(kete.ScaleDown{
                     .child = cx.make(kete_vc4.KeyboardPicture{ .keyboard = state.keyboard, .unit = 40, .light = light }),
-                }) }) }),
+                }) }),
                 // What is typed: shown while typing, each character gone a
                 // while after (there is no field to type in: the label
-                // only shows what the layout types).
-                typedLabel(cx, state),
+                // only shows what the layout types), halfway between the
+                // keyboard and the buttons.
+                cx.make(kete.Expanded{ .child = cx.make(kete.Align{ .alignment = .center, .child = typedLabel(cx, state) }) }),
             }) catch &.{},
         }) });
         return cx.make(kete.Dialog{
