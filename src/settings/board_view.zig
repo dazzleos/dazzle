@@ -404,6 +404,15 @@ pub const BoardView = struct {
         hovered: ?usize = null,
     };
 
+    /// The least it needs: as a credit-card-sized board is drawn (so a
+    /// big one does not make the window wider than it has to be: it is
+    /// drawn as big as there is room for).
+    pub fn minSize(self: *const BoardView, _: *kete.WidgetNode, c: kete.Constraints) kete.Size {
+        const r = self.board.bounds();
+        const w = @min(260, self.max_width);
+        return c.constrain(.{ .w = w, .h = @min(w * r.h / r.w, self.max_height) });
+    }
+
     pub fn layout(self: *const BoardView, _: *kete.WidgetNode, c: kete.Constraints) kete.Size {
         const r = self.board.bounds();
         const w = @min(if (std.math.isFinite(c.max_w)) c.max_w else self.max_width, self.max_width);
@@ -827,4 +836,23 @@ test "selecting the GPIO header shows the horizontal pin diagram, colour key, an
     pins.read_failure = "Not allowed to use the GPIO";
     u.frame(1600, 900, 10, settings);
     try testing.expect(view.findText(u.root.?, "Not allowed to use the GPIO") != null);
+}
+
+test "a big board (the Pi 400) is drawn as wide as the page has room for, no wider" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
+    defer u.destroy();
+    var d = view.sample();
+    const wifi = view.sampleWifi();
+    d.sys.model = .of("Raspberry Pi 400 Rev 1.0");
+    for ([_][2]u32{ .{ 900, 430 }, .{ 900, 430 }, .{ 1600, 900 } }, 0..) |size, i| {
+        if (i == 1) u.root.?.state(Settings.State).page = .board;
+        u.frame(size[0], size[1], i + 1, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = view.sample_apps });
+        if (i == 0) continue;
+        const bv = view.findType(u.root.?, BoardView).?;
+        try testing.expect(bv.position()[0] + bv.size.w <= @as(f32, @floatFromInt(size[0])));
+        // It does not make the window's least width more than the
+        // smaller boards do.
+        try testing.expect(bv.minSize(.{}).w <= 260);
+    }
 }
