@@ -212,6 +212,9 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
             .renderer = try render.Renderer.init(gpa, dev, co, true),
             .panel = try kit.gpuPanel(),
         };
+        // The two share the DRM file: neither waits for its events.
+        renderer.display.shared = true;
+        cm.renderer.display.shared = true;
         osk.setScreen(cm.width(), cm.height(), 1);
         cm.layout(osk.height);
         print("dazzle-shell: the touchscreen ({d}x{d}) is the monitor's keyboard and touchpad\n", .{ cm.width(), cm.height() });
@@ -476,6 +479,11 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         // A key pressed on the on-screen keyboard (what it typed, or Hide):
         // dealt with at once, not when something next wakes the shell.
         if (osk.pending()) wake = now;
+        // The touchscreen beside the monitor, to be drawn again once its
+        // last frame is shown: soon.
+        if (companion) |*cm| if (cm.dirty or osk.needsDraw()) {
+            wake = @min(wake, now + 8 * std.time.ns_per_ms);
+        };
         // Remote control's input still queued (it goes in a batch at a
         // time): at once.
         if (remote_len > 0 or pad_len > 0) wake = now;
@@ -611,8 +619,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
             if (companion) |*cm| {
                 // On the touchscreen beside the monitor: drawn when it
                 // changes (once the last frame there is shown).
-                if (cm.renderer.flipPending()) _ = cm.renderer.handleEvents() catch null;
-                if ((cm.dirty or osk.needsDraw()) and !cm.renderer.flipPending()) {
+                if ((cm.dirty or osk.needsDraw()) and cm.serviceFlip(sys.nowNs())) {
                     cm.show(osk.draw(sys.nowNs()), sys.nowNs()) catch |err| print(sys.log_warning ++ "dazzle-shell: cannot draw the touchscreen: {s}\n", .{@errorName(err)});
                 }
             } else if (osk.visible() and osk.needsDraw()) {

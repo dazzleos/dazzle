@@ -132,6 +132,31 @@ pub const Companion = struct {
     pad_height: u32 = 0,
     /// Something changed: drawn and shown again.
     dirty: bool = true,
+    /// When the last frame was queued (for `serviceFlip`).
+    queued_ns: u64 = 0,
+    /// A flip's event did not come (said once).
+    flip_warned: bool = false,
+
+    /// How long a frame may take to reach the touchscreen before it is
+    /// taken as shown anyway (so a flip whose event never comes does not
+    /// stop it being drawn again).
+    pub const flip_timeout_ns = 200 * std.time.ns_per_ms;
+
+    /// Whether the last frame has reached the touchscreen (reading the
+    /// DRM file's events, if there are any, without waiting).
+    pub fn serviceFlip(c: *Companion, now: u64) bool {
+        const r = &c.renderer;
+        if (!r.flipPending()) return true;
+        _ = r.handleEvents() catch null;
+        if (!r.flipPending()) return true;
+        if (now -| c.queued_ns < flip_timeout_ns) return false;
+        if (!c.flip_warned) {
+            c.flip_warned = true;
+            sys.print(sys.log_warning ++ "dazzle-shell: the touchscreen's frame was not said to be shown: taken as shown\n", .{});
+        }
+        r.display.assumeFlipped();
+        return true;
+    }
 
     /// The touchscreen's size (turned, if it is used on its side).
     pub fn width(c: *const Companion) u32 {
@@ -170,10 +195,11 @@ pub const Companion = struct {
     }
 
     /// Draws the touchpad, and the keyboard below it (`keyboard`), and
-    /// shows them (waiting for the last frame shown, if it is not yet).
+    /// shows them (once the last frame is shown: `serviceFlip`).
     pub fn show(c: *Companion, keyboard: kete_panel.Picture, now: u64) !void {
         const r = &c.renderer;
-        while (r.flipPending()) _ = try r.handleEvents();
+        std.debug.assert(!r.flipPending());
+        c.queued_ns = now;
         r.setPanelAt(.touchpad, c.panel.draw(c.width(), c.pad_height, now, View{}), 0, 0);
         r.setPanelAt(.keyboard, keyboard, 0, @intCast(c.pad_height));
         _ = try r.composite(&.{});

@@ -33,6 +33,9 @@ pub const Display = struct {
     flip_pending: bool = false,
     /// What the queued frame shows: one of `buffers`, or null for layers.
     pending_buffer: ?u1 = null,
+    /// Another display shares the DRM file: its events are read only when
+    /// there are some (`drm.readFlipEventsFor`).
+    shared: bool = false,
 
     /// Two linear buffers of the display's size, in `format`.
     pub fn init(dev: vc4.Device, output: drm.Output, format: Format) !Display {
@@ -131,11 +134,18 @@ pub const Display = struct {
     /// Returns the vertical blank's time (microseconds, CLOCK_MONOTONIC)
     /// if the queued frame has reached the screen.
     pub fn handleEvents(d: *Display) !?u64 {
-        const t = try drm.readFlipEventsFor(d.fd, d.output.crtc_id) orelse return null;
+        const t = try drm.readFlipEventsFor(d.fd, d.output.crtc_id, !d.shared) orelse return null;
         if (!d.flip_pending) return null;
         d.flip_pending = false;
         d.on_screen = d.pending_buffer;
         return t;
+    }
+
+    /// Takes the queued frame as shown (its flip's event never came).
+    pub fn assumeFlipped(d: *Display) void {
+        if (!d.flip_pending) return;
+        d.flip_pending = false;
+        d.on_screen = d.pending_buffer;
     }
 
     /// The time between vertical blanks, in microseconds.

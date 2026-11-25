@@ -266,12 +266,18 @@ pub fn flipKept(crtc_id: u32) bool {
 }
 
 /// As `readFlipEvents`, for the flip on `crtc_id`: another's is kept for it.
-/// Reads nothing if another display read this one's already.
-pub fn readFlipEventsFor(fd: linux.fd_t, crtc_id: u32) !?u64 {
+/// Reads nothing if another display read this one's already. With two
+/// displays (`wait` false), it does not wait for events: the other's
+/// might be all that come, or none.
+pub fn readFlipEventsFor(fd: linux.fd_t, crtc_id: u32, wait: bool) !?u64 {
     for (&other_flips) |*o| if (o.*) |f| if (f.crtc == crtc_id) {
         o.* = null;
         return f.at;
     };
+    if (!wait) {
+        var pfd = [1]linux.pollfd{.{ .fd = fd, .events = linux.POLL.IN, .revents = 0 }};
+        if (linux.poll(&pfd, 1, 0) != 1) return null;
+    }
     var buf: [256]u8 align(8) = undefined;
     const rc = linux.read(fd, &buf, buf.len);
     switch (linux.errno(rc)) {
@@ -318,7 +324,7 @@ test "flip events" {
     try std.testing.expectEqual(@as(?u64, null), parseFlipEvents(buf[0..32], null));
     // Another display's: kept for it.
     try std.testing.expectEqual(@as(?u64, null), parseFlipEvents(&buf, 71));
-    try std.testing.expectEqual(@as(?u64, 12_000_345), try readFlipEventsFor(-1, 70));
+    try std.testing.expectEqual(@as(?u64, 12_000_345), try readFlipEventsFor(-1, 70, true));
 }
 
 /// A connected output and the mode and CRTC chosen to drive it.
