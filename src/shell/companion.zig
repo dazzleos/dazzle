@@ -156,6 +156,14 @@ pub const Companion = struct {
         return .{ tx * @as(f64, @floatFromInt(c.width() - 1)), ty * @as(f64, @floatFromInt(c.height() - 1)) };
     }
 
+    /// The other way: where (x, y) on the touchscreen as it is used is, as
+    /// the touchscreen panel reports it (0 to 1).
+    pub fn unplace(c: *const Companion, at: [2]f64) [2]f64 {
+        const tx = at[0] / @as(f64, @floatFromInt(c.width() - 1));
+        const ty = at[1] / @as(f64, @floatFromInt(c.height() - 1));
+        return if (c.renderer.turned) .{ ty, 1 - tx } else .{ tx, ty };
+    }
+
     /// Whether (x, y) (touchscreen pixels) is on the touchpad.
     pub fn onPad(c: *const Companion, at: [2]f64) bool {
         return at[1] < @as(f64, @floatFromInt(c.pad_height));

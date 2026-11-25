@@ -237,6 +237,9 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
     _ = remote.configure(sys.remote.load());
     var remote_events: [256]input.Event = undefined;
     var remote_len: usize = 0;
+    // Remote control's touches on the touchscreen beside the monitor.
+    var pad_events: [256]input.Event = undefined;
+    var pad_len: usize = 0;
     var shot_pipe: [2]linux.fd_t = .{ -1, -1 };
     if (linux.errno(linux.pipe2(&shot_pipe, .{ .NONBLOCK = true, .CLOEXEC = true })) != .SUCCESS) shot_pipe = .{ -1, -1 };
     var net_sub: sys.network.Subscription = .{};
@@ -468,6 +471,9 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         // A key pressed on the on-screen keyboard (what it typed, or Hide):
         // dealt with at once, not when something next wakes the shell.
         if (osk.pending()) wake = now;
+        // Remote control's input still queued (it goes in a batch at a
+        // time): at once.
+        if (remote_len > 0 or pad_len > 0) wake = now;
         if (!renderer.flipPending()) {
             if (server.damaged) wake = now;
             if (panels_damaged) wake = @min(wake, client_frame_ns + panel_grace_ns);
@@ -724,11 +730,17 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                         }) catch {};
                         req.respond("200 OK", "text/plain; charset=utf-8", out.items);
                     },
-                    .screenshot => |bands| {
+                    .screenshot => |shot| {
                         var windows: [render.max_windows]render.Window = undefined;
-                        if (renderer.capture(gpa, if (locked) &.{} else frameWindows(&server, &windows), bands)) |pixels| {
+                        // The touchscreen beside the monitor: its own.
+                        const r = if (shot.touchscreen) if (companion) |*cm| &cm.renderer else {
+                            req.respond("404 Not Found", "text/plain", "No touchscreen beside a monitor\n");
+                            continue;
+                        } else &renderer;
+                        const shown: []const render.Window = if (locked or shot.touchscreen) &.{} else frameWindows(&server, &windows);
+                        if (r.capture(gpa, shown, shot.bands)) |pixels| {
                             defer gpa.free(pixels);
-                            if (@import("gfx").png.encode(gpa, pixels, renderer.width, renderer.height)) |data| {
+                            if (@import("gfx").png.encode(gpa, pixels, r.width, r.height)) |data| {
                                 defer gpa.free(data);
                                 req.respond("200 OK", "image/png", data);
                             } else |err| req.respond("500 Internal Server Error", "text/plain", @errorName(err));
@@ -770,6 +782,14 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                         req.respond("200 OK", "text/plain", "ok\n");
                     },
                     .swipe => |sw| {
+                        // On the touchscreen beside the monitor: its
+                        // touches, as it would make them.
+                        const cm: ?*companion_mod.Companion = if (sw.touchscreen) if (companion) |*c| c else {
+                            req.respond("404 Not Found", "text/plain", "No touchscreen beside a monitor\n");
+                            continue;
+                        } else null;
+                        const sq = if (cm != null) &pad_events else q;
+                        const sn = if (cm != null) &pad_len else qn;
                         // Down, along in steps, and up (with no place, as a
                         // touchscreen says it).
                         const steps = 12;
@@ -777,20 +797,26 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                             const f = @as(f64, @floatFromInt(i)) / steps;
                             for (0..sw.fingers) |k| {
                                 const off = 60 * @as(f64, @floatFromInt(k));
-                                const at = touchAt(&renderer, sw.from[0] + off + (sw.to[0] - sw.from[0]) * f, sw.from[1] + (sw.to[1] - sw.from[1]) * f);
-                                queue(q, qn, .{ .touch = .{ .kind = if (i == 0) .down else .motion, .id = @intCast(1001 + k), .x = at[0], .y = at[1] } });
+                                const px = sw.from[0] + off + (sw.to[0] - sw.from[0]) * f;
+                                const py = sw.from[1] + (sw.to[1] - sw.from[1]) * f;
+                                const at = if (cm) |c| c.unplace(.{ px, py }) else touchAt(&renderer, px, py);
+                                queue(sq, sn, .{ .touch = .{ .kind = if (i == 0) .down else .motion, .id = @intCast(1001 + k), .x = at[0], .y = at[1] } });
                             }
                         }
-                        for (0..sw.fingers) |k| queue(q, qn, .{ .touch = .{ .kind = .up, .id = @intCast(1001 + k) } });
+                        for (0..sw.fingers) |k| queue(sq, sn, .{ .touch = .{ .kind = .up, .id = @intCast(1001 + k) } });
                         req.respond("200 OK", "text/plain", "ok\n");
                     },
-                    .tap => |at_screen| {
-                        const at = touchAt(&renderer, at_screen[0], at_screen[1]);
-                        const tx = at[0];
-                        const ty = at[1];
-                        queue(q, qn, .{ .touch = .{ .kind = .down, .id = 1000, .x = tx, .y = ty } });
+                    .tap => |tap| {
+                        const cm: ?*companion_mod.Companion = if (tap.touchscreen) if (companion) |*c| c else {
+                            req.respond("404 Not Found", "text/plain", "No touchscreen beside a monitor\n");
+                            continue;
+                        } else null;
+                        const at = if (cm) |c| c.unplace(tap.at) else touchAt(&renderer, tap.at[0], tap.at[1]);
+                        const sq = if (cm != null) &pad_events else q;
+                        const sn = if (cm != null) &pad_len else qn;
+                        queue(sq, sn, .{ .touch = .{ .kind = .down, .id = 1000, .x = at[0], .y = at[1] } });
                         // Let go with no place, as a touchscreen says it.
-                        queue(q, qn, .{ .touch = .{ .kind = .up, .id = 1000 } });
+                        queue(sq, sn, .{ .touch = .{ .kind = .up, .id = 1000 } });
                         req.respond("200 OK", "text/plain", "ok\n");
                     },
                     .key => |k| {
@@ -907,18 +933,18 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
             }
         }
         // The devices' events, then remote control's.
-        for (0..n_inputs + 1) |source| {
+        for (0..n_inputs + 2) |source| {
             var events: [64]input.Event = undefined;
             const batch: []const input.Event = if (source < n_inputs) blk: {
                 const f = fds[2 + n_clients + source];
                 break :blk if (f.revents != 0) devices.read(f.fd, &events) else &.{};
-            } else takeQueued(&remote_events, &remote_len, &events);
+            } else if (source == n_inputs) takeQueued(&remote_events, &remote_len, &events) else takeQueued(&pad_events, &pad_len, &events);
             if (batch.len == 0) continue;
             // A touchscreen beside the monitor: its touches are its
             // keyboard's, or its touchpad's (the pointer's motion, clicks
             // and scrolling, as a mouse's).
             var routed: [256]input.Event = undefined;
-            const events_now = if (companion) |*cm| if (source < n_inputs) routeCompanion(cm, &osk, &osk_touches, batch, &routed) else batch else batch;
+            const events_now = if (companion) |*cm| if (source != n_inputs) routeCompanion(cm, &osk, &osk_touches, batch, &routed) else batch else batch;
             for (events_now) |e| {
                 // The on-screen keyboard shows after a touch, not after a
                 // key typed or a button pressed (a keyboard, a mouse).

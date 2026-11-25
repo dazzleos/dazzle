@@ -5,6 +5,12 @@
 //!     /status                       the screen, the pointer, the windows
 //!                                   and the apps, as text
 //!     /screenshot                   the screen, as a PNG
+//!     /screenshot?display=touchscreen
+//!                                   the touchscreen beside the monitor (its
+//!                                   keyboard and touchpad), as a PNG
+//!     /tap?x=&y=&display=touchscreen, /swipe?...&display=touchscreen
+//!                                   touches the touchscreen beside the
+//!                                   monitor there (its pixels)
 //!     /screenshot?bands=1           the same, drawn a band at a time (as
 //!                                   when video memory is short), to try it
 //!     /pointer?x=&y=                moves the pointer there
@@ -69,7 +75,8 @@ const sys = @import("sys");
 pub const Command = union(enum) {
     status,
     /// Whether to draw it a band at a time, even with room for all of it.
-    screenshot: bool,
+    /// Drawn a band at a time; of the touchscreen beside the monitor.
+    screenshot: struct { bands: bool, touchscreen: bool },
     pointer: [2]f64,
     move: [2]f64,
     click: struct { x: f64, y: f64, button: u32 },
@@ -92,10 +99,11 @@ pub const Command = union(enum) {
     /// buffer), and its icon's name, if one was given.
     notify: struct { title: []const u8, body: []const u8, icon: ?[]const u8 },
     /// A touch at (x, y) on the screen, down and up.
-    tap: [2]f64,
+    /// On the touchscreen beside the monitor (`touchscreen`), or the screen.
+    tap: struct { at: [2]f64, touchscreen: bool = false },
     /// A touch from (x, y) to (x2, y2): down, moved along, and up; with
     /// `fingers` side by side.
-    swipe: struct { from: [2]f64, to: [2]f64, fingers: u8 = 1 },
+    swipe: struct { from: [2]f64, to: [2]f64, fingers: u8 = 1, touchscreen: bool = false },
     updates,
     check,
     update,
@@ -220,7 +228,11 @@ fn parse(text: []const u8, code: u32, text_buf: []u8) Parsed {
         }
     }.f;
     if (std.mem.eql(u8, path, "/status")) return .{ .command = .status };
-    if (std.mem.eql(u8, path, "/screenshot")) return .{ .command = .{ .screenshot = if (param(query, "bands")) |v| std.mem.eql(u8, v, "1") else false } };
+    const touchscreen = std.mem.eql(u8, param(query, "display") orelse "", "touchscreen");
+    if (std.mem.eql(u8, path, "/screenshot")) return .{ .command = .{ .screenshot = .{
+        .bands = if (param(query, "bands")) |v| std.mem.eql(u8, v, "1") else false,
+        .touchscreen = touchscreen,
+    } } };
     if (std.mem.eql(u8, path, "/pointer")) return .{ .command = .{ .pointer = .{ num(query, "x") orelse return .bad, num(query, "y") orelse return .bad } } };
     if (std.mem.eql(u8, path, "/move")) return .{ .command = .{ .move = .{ num(query, "dx") orelse return .bad, num(query, "dy") orelse return .bad } } };
     if (std.mem.eql(u8, path, "/click")) return .{ .command = .{ .click = .{
@@ -232,8 +244,9 @@ fn parse(text: []const u8, code: u32, text_buf: []u8) Parsed {
         .from = .{ num(query, "x") orelse return .bad, num(query, "y") orelse return .bad },
         .to = .{ num(query, "x2") orelse return .bad, num(query, "y2") orelse return .bad },
         .fingers = @intFromFloat(std.math.clamp(num(query, "fingers") orelse 1, 1, 5)),
+        .touchscreen = touchscreen,
     } } };
-    if (std.mem.eql(u8, path, "/tap")) return .{ .command = .{ .tap = .{ num(query, "x") orelse return .bad, num(query, "y") orelse return .bad } } };
+    if (std.mem.eql(u8, path, "/tap")) return .{ .command = .{ .tap = .{ .at = .{ num(query, "x") orelse return .bad, num(query, "y") orelse return .bad }, .touchscreen = touchscreen } } };
     if (std.mem.eql(u8, path, "/button")) return .{ .command = .{ .button = .{
         .button = buttonCode(param(query, "button") orelse "left") orelse return .bad,
         .pressed = !std.mem.eql(u8, param(query, "pressed") orelse "1", "0"),
@@ -360,8 +373,10 @@ test "requests are read with their code, and others turned away" {
     try testing.expectEqualStrings("Hello, there!", parse("GET /type?code=123456&text=Hello%2C+there%21 HTTP/1.1\r\n\r\n", 123456, &buf).command.type);
     try testing.expectEqual(@as(?bool, false), parse("GET /key?code=123456&key=28&pressed=0 HTTP/1.1\r\n\r\n", 123456, &buf).command.key.pressed);
     try testing.expectEqualStrings("motu", parse("GET /launch?code=123456&app=motu HTTP/1.1\r\n\r\n", 123456, &buf).command.launch);
-    try testing.expectEqual(false, parse("GET /screenshot?code=123456 HTTP/1.1\r\n\r\n", 123456, &buf).command.screenshot);
-    try testing.expectEqual(true, parse("GET /screenshot?code=123456&bands=1 HTTP/1.1\r\n\r\n", 123456, &buf).command.screenshot);
+    try testing.expectEqual(false, parse("GET /screenshot?code=123456 HTTP/1.1\r\n\r\n", 123456, &buf).command.screenshot.bands);
+    try testing.expectEqual(true, parse("GET /screenshot?code=123456&bands=1 HTTP/1.1\r\n\r\n", 123456, &buf).command.screenshot.bands);
+    try testing.expect(parse("GET /screenshot?code=123456&display=touchscreen HTTP/1.1\r\n\r\n", 123456, &buf).command.screenshot.touchscreen);
+    try testing.expect(parse("GET /tap?code=123456&x=1&y=2&display=touchscreen HTTP/1.1\r\n\r\n", 123456, &buf).command.tap.touchscreen);
 }
 
 test "apps, windows and updates are controlled directly" {
@@ -381,7 +396,7 @@ test "apps, windows and updates are controlled directly" {
     try testing.expectEqualStrings("Chat", pl.app.?);
     try testing.expect(parse("GET /window?code=123456&do=place&x=10 HTTP/1.1\r\n\r\n", 123456, &buf) == .bad);
     try testing.expect(parse("GET /update?code=123456 HTTP/1.1\r\n\r\n", 123456, &buf).command == .update);
-    try testing.expectEqual([2]f64{ 10, 20 }, parse("GET /tap?code=123456&x=10&y=20 HTTP/1.1\r\n\r\n", 123456, &buf).command.tap);
+    try testing.expectEqual([2]f64{ 10, 20 }, parse("GET /tap?code=123456&x=10&y=20 HTTP/1.1\r\n\r\n", 123456, &buf).command.tap.at);
     const sw = parse("GET /swipe?code=123456&x=10&y=20&x2=30&y2=200&fingers=4 HTTP/1.1\r\n\r\n", 123456, &buf).command.swipe;
     try testing.expectEqual([2]f64{ 10, 20 }, sw.from);
     try testing.expectEqual([2]f64{ 30, 200 }, sw.to);
