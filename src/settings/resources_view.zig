@@ -208,7 +208,6 @@ const PageState = State;
 pub const VideoMemoryMenu = struct {
     chosen: ?u16,
     ram_mib: u64,
-    high: bool = false,
     /// None if it cannot be changed (the system manager has not said).
     actions: ?*Actions,
     page_state: ?*PageState = null,
@@ -219,7 +218,6 @@ pub const VideoMemoryMenu = struct {
         page_state: ?*PageState = null,
         chosen: ?u16 = null,
         ram_mib: u64 = 0,
-        high: bool = false,
         interaction: kete.PointerInteraction = .{},
 
         fn open(st: *VideoMemoryMenu.State) void {
@@ -231,7 +229,7 @@ pub const VideoMemoryMenu = struct {
                 // (The menu keeps the labels: these last.)
                 item.* = .{
                     .label = if (chosen) std.fmt.comptimePrint("{d} MB (chosen)", .{mib}) else std.fmt.comptimePrint("{d} MB", .{mib}),
-                    .enabled = !chosen and proto.videoMemoryAllowed(mib, st.ram_mib, st.high),
+                    .enabled = !chosen and proto.videoMemoryAllowed(mib, st.ram_mib),
                     .on_press = .of(st, videoMemorySetter(mib)),
                 };
             }
@@ -246,7 +244,6 @@ pub const VideoMemoryMenu = struct {
         state.page_state = self.page_state;
         state.chosen = self.chosen;
         state.ram_mib = self.ram_mib;
-        state.high = self.high;
         return cx.make(kete.IconButton{
             .icon = .settings,
             .size = 24,

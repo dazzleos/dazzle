@@ -207,8 +207,6 @@ pub const Usage = struct {
     /// Bytes of memory: all of it, and what programs could still have.
     mem_total: u64 = 0,
     mem_available: u64 = 0,
-    /// Of it, the memory the kernel does not map directly.
-    mem_high: u64 = 0,
     /// The contiguous memory the GPU's buffers come from (the GPU has no
     /// MMU), and how much of it is free.
     gpu_total: u64 = 0,
@@ -289,7 +287,6 @@ pub const UsageMonitor = struct {
             const mi = parseMeminfo(text);
             u.mem_total = mi.total;
             u.mem_available = mi.available;
-            u.mem_high = mi.high_total;
             u.gpu_total = mi.cma_total;
             u.gpu_free = mi.cma_free;
         }

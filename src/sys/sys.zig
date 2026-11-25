@@ -370,15 +370,7 @@ test "disk space" {
 
 /// Memory, in bytes: the system's, and the contiguous pool (CMA) the GPU's
 /// buffers come from.
-pub const Meminfo = struct {
-    total: u64 = 0,
-    available: u64 = 0,
-    cma_total: u64 = 0,
-    cma_free: u64 = 0,
-    /// The memory the kernel does not map directly (with HIGHMEM: a Pi 4's
-    /// beyond 768 MB).
-    high_total: u64 = 0,
-};
+pub const Meminfo = struct { total: u64 = 0, available: u64 = 0, cma_total: u64 = 0, cma_free: u64 = 0 };
 
 /// /proc/meminfo's figures, in bytes.
 pub fn parseMeminfo(text: []const u8) Meminfo {
@@ -389,7 +381,7 @@ pub fn parseMeminfo(text: []const u8) Meminfo {
         var fields = std.mem.tokenizeScalar(u8, line[colon + 1 ..], ' ');
         const kb = std.fmt.parseInt(u64, fields.next() orelse continue, 10) catch continue;
         const key = line[0..colon];
-        const field: ?*u64 = if (std.mem.eql(u8, key, "MemTotal")) &out.total else if (std.mem.eql(u8, key, "MemAvailable")) &out.available else if (std.mem.eql(u8, key, "CmaTotal")) &out.cma_total else if (std.mem.eql(u8, key, "CmaFree")) &out.cma_free else if (std.mem.eql(u8, key, "HighTotal")) &out.high_total else null;
+        const field: ?*u64 = if (std.mem.eql(u8, key, "MemTotal")) &out.total else if (std.mem.eql(u8, key, "MemAvailable")) &out.available else if (std.mem.eql(u8, key, "CmaTotal")) &out.cma_total else if (std.mem.eql(u8, key, "CmaFree")) &out.cma_free else null;
         if (field) |f| f.* = kb * 1024;
     }
     return out;

@@ -153,12 +153,14 @@ pub const update_archive = update_dir ++ "/dazzle-os.tar.xz";
 /// command line, the slots' cmdline.txt, so a change applies from the next
 /// start (and updates keep it: they copy the running slot's command line).
 /// The sizes offered, in MiB.
-pub const video_memory_sizes = [_]u16{ 64, 96, 128, 192, 256, 384 };
+pub const video_memory_sizes = [_]u16{ 64, 96, 128, 192, 256, 384, 512 };
 
 /// The video memory a computer with `ram_mib` of memory is given until
-/// someone chooses (`video_memory_chosen_file`): more on those with more.
-/// (No more than `max_video_memory_with_high`: see `videoMemoryAllowed`.)
+/// someone chooses (`video_memory_chosen_file`): more on those with more
+/// (a Pi 4 or 400 with 4 GB has room for the GPU to have plenty, as the
+/// Raspberry Pi's own system gives it).
 pub fn defaultVideoMemory(ram_mib: u64) u16 {
+    if (ram_mib >= 3 * 1024) return 512;
     if (ram_mib >= 3 * 512) return 256;
     return 128;
 }
@@ -212,17 +214,11 @@ pub const orientation_arg = "dazzle.orientation=";
 
 /// Whether `mib` may be chosen on a computer with `ram_mib` of memory (as
 /// Linux has it): one of the sizes, and no more than half of it, so the
-/// system and the apps keep enough. With memory the kernel does not map
-/// directly (`high`: a Pi 4 with more than 1 GB), no more than 256 MB: a
-/// Pi 400 did not start with 384 or 512 (with the same kernel's 256 it
-/// did, and with 512 on a kernel without high memory).
-pub fn videoMemoryAllowed(mib: u16, ram_mib: u64, high: bool) bool {
+/// system and the apps keep enough.
+pub fn videoMemoryAllowed(mib: u16, ram_mib: u64) bool {
     if (std.mem.indexOfScalar(u16, &video_memory_sizes, mib) == null) return false;
-    if (high and mib > max_video_memory_with_high) return false;
     return @as(u64, mib) * 2 <= ram_mib;
 }
-
-pub const max_video_memory_with_high = 256;
 
 pub const StorageState = enum { none, unprepared, preparing, ready, failed };
 
@@ -933,10 +929,10 @@ test "requests and reports go through the socket" {
     try testing.expect(Request.parse("video_memory\n") == null);
     try testing.expect(Request.allowedFor(.{ .video_memory = 128 }, .settings));
     try testing.expect(!Request.allowedFor(.{ .video_memory = 128 }, .setup));
-    try testing.expect(videoMemoryAllowed(256, 940, false));
-    try testing.expect(!videoMemoryAllowed(256, 430, false));
-    try testing.expect(videoMemoryAllowed(192, 430, false));
-    try testing.expect(!videoMemoryAllowed(100, 940, false));
+    try testing.expect(videoMemoryAllowed(256, 940));
+    try testing.expect(!videoMemoryAllowed(256, 430));
+    try testing.expect(videoMemoryAllowed(192, 430));
+    try testing.expect(!videoMemoryAllowed(100, 940));
     // Serving the log: only Settings turns it on or off.
     const serving: Report = .{ .log_server = true };
     var serving_buf: [512]u8 = undefined;
@@ -984,9 +980,7 @@ test "video memory grows with the computer's memory until chosen" {
     try std.testing.expectEqual(@as(u16, 128), defaultVideoMemory(434));
     try std.testing.expectEqual(@as(u16, 128), defaultVideoMemory(948));
     try std.testing.expectEqual(@as(u16, 256), defaultVideoMemory(1900));
-    try std.testing.expectEqual(@as(u16, 256), defaultVideoMemory(3800));
-    try std.testing.expect(videoMemoryAllowed(defaultVideoMemory(3800), 3800, true));
-    try std.testing.expect(!videoMemoryAllowed(384, 3800, true));
-    try std.testing.expect(videoMemoryAllowed(384, 3800, false));
-    try std.testing.expect(videoMemoryAllowed(defaultVideoMemory(434), 434, false));
+    try std.testing.expectEqual(@as(u16, 512), defaultVideoMemory(3800));
+    try std.testing.expect(videoMemoryAllowed(defaultVideoMemory(3800), 3800));
+    try std.testing.expect(videoMemoryAllowed(defaultVideoMemory(434), 434));
 }
