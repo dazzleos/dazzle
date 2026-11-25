@@ -521,6 +521,9 @@ pub const Dock = struct {
     /// Where along the row (in icons) faces the front without the pointer:
     /// slid along by a finger (see `slideIcons`); null: the middle.
     slid_to: ?f32 = null,
+    /// On its way round to face the front (`faceFront`): where along the
+    /// row faced it, where it will, and since when.
+    turning: ?struct { from: f32, to: f32, start: u64 } = null,
     /// Network status shown in the status box on the right of the dock.
     network: NetworkStatus = .{ .offline = .{} },
     /// Whether data is moving, shown as arrows beside the network status.
@@ -706,11 +709,39 @@ pub const Dock = struct {
             n += 1;
         }
         d.entries_len = n;
+        if (d.turning) |t| {
+            const k: f32 = @floatCast(@min(@as(f64, @floatFromInt(now -| t.start)) / turn_ns, 1));
+            d.slid_to = t.from + (t.to - t.from) * easeInOut(k);
+            if (k >= 1) d.turning = null else moving = true;
+        }
         return moving;
     }
 
-    /// Whether icons are on their way in or out.
+    /// How long an icon tapped while turned takes to come round.
+    pub const turn_ns = 250 * std.time.ns_per_ms;
+
+    /// App `i`'s icon, tapped: if it is turned (the icons not all fitting),
+    /// the row slides until it faces the front, and true (it is not
+    /// started: it is now where it can be seen); false if it faces the
+    /// front already (it is started, as ever).
+    pub fn faceFront(d: *Dock, i: usize, now: u64) bool {
+        var at: f32 = 0;
+        for (d.entries[0..d.entries_len], 0..) |e, j| {
+            const c = at + e.k / 2;
+            at += e.k;
+            if (e.app != i) continue;
+            if (@abs(d.entryRect(j).turn) < 0.15) return false;
+            d.turning = .{ .from = d.focusIndex(), .to = c, .start = now };
+            // Facing where the finger left it, not the pointer.
+            d.focus_x = null;
+            return true;
+        }
+        return false;
+    }
+
+    /// Whether icons are on their way in or out, or round to the front.
     pub fn resizing(d: *const Dock) bool {
+        if (d.turning != null) return true;
         for (d.entries[0..d.entries_len]) |e| if (e.start != null) return true;
         return false;
     }
@@ -1490,6 +1521,16 @@ test "more icons than fit across the screen turn edge on at the ends, not overla
     try testing.expect(d.slideIcons(-2000));
     try testing.expect(@abs(d.iconRect(13).turn) < 0.5);
     try testing.expectApproxEqAbs(-Dock.max_turn, d.iconRect(0).turn, 0.01);
+    // Tapped while turned, an icon comes round to the front (and is not
+    // started); tapped again, it is.
+    try testing.expect(d.iconRect(0).turn < -0.5);
+    try testing.expect(d.faceFront(0, 0));
+    try testing.expect(d.resizing());
+    _ = d.animateApps(Dock.turn_ns / 2);
+    _ = d.animateApps(Dock.turn_ns);
+    try testing.expect(!d.resizing());
+    try testing.expect(@abs(d.iconRect(0).turn) < 0.15);
+    try testing.expect(!d.faceFront(0, Dock.turn_ns));
     // With room, none is turned.
     d.setScreen(1920, 1080, true);
     for (0..14) |i| try testing.expectEqual(@as(f32, 0), d.iconRect(i).turn);

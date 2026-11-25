@@ -1122,6 +1122,12 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                         continue;
                     }
                     const i = dock.hit(at[0], at[1]) orelse continue;
+                    // A turned icon (they do not all fit) comes round to
+                    // the front first.
+                    if (dock.faceFront(i, sys.nowNs())) {
+                        panels_damaged = true;
+                        continue;
+                    }
                     activateApp(&apps[i], &server, &dock, &renderer, runtime_dir, &panels_damaged);
                     continue;
                 }
