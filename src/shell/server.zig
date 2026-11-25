@@ -882,10 +882,18 @@ pub const Server = struct {
         return null;
     }
 
-    /// The format with DRM `code`, if the GPU takes it.
+    /// The format with DRM `code`, if the GPU takes it tiled.
     fn drmFormat(s: *const Server, code: u32) ?vc4.Format {
         const f = vc4.Format.fromFourcc(code) orelse return null;
-        return if (f.sampleable(s.gpu)) f else null;
+        return if (s.tiledFormat(f)) f else null;
+    }
+
+    /// Whether clients may share T-tiled buffers (dma-bufs) in `f`: those
+    /// the GPU renders (only it makes tiled buffers) and samples. Apps
+    /// make their windows in one of these (offered BGR565, a Pi 4's GPU,
+    /// which renders it with red and blue swapped, would be used).
+    fn tiledFormat(s: *const Server, f: vc4.Format) bool {
+        return f.renderable(s.gpu) and f.sampleable(s.gpu);
     }
 
     pub fn deinit(s: *Server) void {
@@ -2970,7 +2978,7 @@ pub const Server = struct {
                 try c.addObject(id, .dmabuf);
                 const mod = p.modifier.broadcom_vc4_t_tiled;
                 for (drm_formats) |f| {
-                    if (!f.sampleable(s.gpu)) continue;
+                    if (!s.tiledFormat(f)) continue;
                     if (c.send(id, p.zwp_linux_dmabuf_v1.event.format)) |m0| {
                         var e = m0;
                         e.uint(f.fourcc().?).end();
