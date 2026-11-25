@@ -129,6 +129,58 @@ pub const BigButton = struct {
     }
 };
 
+/// How tall a `Choice` is.
+pub const choice_height = 52;
+
+/// One of a few to choose from (a page's keyboards): a pill as large as
+/// its label, filled when chosen (with a tick), outlined when not; or, with
+/// no `selected`, a button that shows more of them.
+pub const Choice = struct {
+    label: []const u8,
+    icon: ?kete.IconName = null,
+    selected: bool = false,
+    on_press: ?kete.Callback = null,
+
+    pub const State = struct {
+        interaction: kete.PointerInteraction = .{},
+    };
+
+    pub fn build(self: *const Choice, cx: *kete.BuildContext, state: *State) kete.Widget {
+        const t = cx.theme();
+        const i = state.interaction;
+        const layer: f32 = if (self.on_press == null) 0 else if (i.pressed) 0.16 else if (i.hovered) 0.08 else 0;
+        const fg = if (self.selected) t.on_primary_container else t.on_surface;
+        const icon = if (self.selected) .check else self.icon;
+        var parts: [2]kete.Widget = undefined;
+        var n: usize = 0;
+        if (icon) |ic| {
+            parts[n] = cx.make(kete.Icon{ .icon = ic, .size = 24, .color = if (self.selected) fg else t.primary });
+            n += 1;
+        }
+        parts[n] = cx.make(kete.Text{ .text = self.label, .wrap = false, .style = .{ .size = 20, .color = fg } });
+        n += 1;
+        return cx.make(kete.Pressable{
+            .on_press = self.on_press,
+            .interaction = &state.interaction,
+            .child = cx.make(kete.RoundedBox{
+                .color = if (self.selected) blend(t.primary_container, t.on_primary_container, layer) else if (layer > 0) t.primary.withAlpha(layer) else null,
+                .border_color = if (self.selected) null else t.outline,
+                .border_width = 1.5,
+                .radius = .all(choice_height / 2),
+                .child = cx.make(kete.SizedBox{ .height = choice_height, .child = cx.make(kete.Padding{
+                    .padding = .symmetric(24, 0),
+                    .child = cx.make(kete.Align{ .width_factor = 1, .child = cx.make(kete.Row{
+                        .fill = false,
+                        .spacing = 10,
+                        .cross_axis_alignment = .center,
+                        .children = cx.arena.dupe(kete.Widget, parts[0..n]) catch &.{},
+                    }) }),
+                }) }),
+            }),
+        });
+    }
+};
+
 /// A pill shaded from sky to violet across, in a soft sky-blue glow (a
 /// little below it, as if lit from above), lightened by `light` (hovered or
 /// pressed).

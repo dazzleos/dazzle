@@ -364,14 +364,13 @@ pub const Setup = struct {
         for (offered[0..n]) |k| {
             const pick = a.create(KeyboardChoice) catch continue;
             pick.* = .{ .state = state, .keyboard = k };
-            choices.append(a, cx.make(kete.Chip{
+            choices.append(a, cx.make(parts.Choice{
                 .label = k.name(),
-                .icon = if (k == state.keyboard) .check else null,
                 .selected = k == state.keyboard,
                 .on_press = .of(pick, KeyboardChoice.choose),
             })) catch {};
         }
-        choices.append(a, cx.make(kete.TextButton{ .label = locale.text("Other keyboards"), .icon = .keyboard, .on_press = .of(state, State.showKeyboards) })) catch {};
+        choices.append(a, cx.make(parts.Choice{ .label = locale.text("Other keyboards"), .icon = .keyboard, .on_press = .of(state, State.showKeyboards) })) catch {};
 
         const page_body = cx.make(kete.KeyHandler{ .watch = true, .on_key = .of(state, State.watchKey), .child = cx.make(kete.Column{
             .cross_axis_alignment = .stretch,
@@ -379,11 +378,11 @@ pub const Setup = struct {
             .children = a.dupe(kete.Widget, &.{
                 // The keyboards to choose from, just above the keyboard's
                 // picture, the two as big as there is room for (no bigger
-                // than a key 80 pixels across)...
+                // than a key 64 pixels across)...
                 cx.make(kete.Expanded{ .flex = 4, .child = cx.make(kete.Align{ .alignment = .bottom_center, .child = cx.make(kete.ScaleDown{
-                    .child = cx.make(kete.Column{ .fill = false, .cross_axis_alignment = .center, .spacing = 20, .children = a.dupe(kete.Widget, &.{
-                        cx.make(kete.Row{ .fill = false, .spacing = 8, .cross_axis_alignment = .center, .children = choices.items }),
-                        cx.make(kete_vc4.KeyboardPicture{ .keyboard = state.keyboard, .unit = 80, .light = light }),
+                    .child = cx.make(kete.Column{ .fill = false, .cross_axis_alignment = .center, .spacing = 28, .children = a.dupe(kete.Widget, &.{
+                        cx.make(kete.Row{ .fill = false, .spacing = 12, .cross_axis_alignment = .center, .children = choices.items }),
+                        cx.make(kete_vc4.KeyboardPicture{ .keyboard = state.keyboard, .unit = 64, .light = light }),
                     }) catch &.{} }),
                 }) }) }),
                 // What is typed: shown while typing, each character gone a
