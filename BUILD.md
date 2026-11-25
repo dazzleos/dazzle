@@ -49,3 +49,15 @@ scripts/zig build qemu       # boot in QEMU, as a Pi Zero
 (`pi1a+`, `pi2b`, `pi3b` or `pi3a+`). QEMU cannot show the display: it is
 for checking the kernel, init and the network, with the log on the serial
 console and at `http://localhost:8080/`.
+
+## Testing on a Pi
+
+Options for testing go on the kernel's command line: a slot's
+`cmdline.txt` on the card's first partition (`slot-a/` or `slot-b/`, the
+one `config.txt`'s `os_prefix` names), on its one line.
+
+- `dazzle.remote=<six digits>`: remote control (`src/shell/remote.zig`) on
+  port 8080, with that code.
+- `dazzle.log_server=on`: the system's log over HTTP, on port 80.
+- `dazzle.setup=again`: setup runs at every start, though it has finished
+  (the card's files are kept). Remove it to start to the desktop again.

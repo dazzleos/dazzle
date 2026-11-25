@@ -112,6 +112,20 @@ pub const log_server_file = "/data/system/log-server";
 /// `log_server_file` says (as `zig build qemu` does, having no card).
 pub const log_server_cmdline = "dazzle.log_server=on";
 
+/// On the kernel's command line, setup runs at every start, though it has
+/// finished (for trying it): the card's files are kept, and finishing it
+/// again keeps what it set.
+pub const setup_again_cmdline = "dazzle.setup=again";
+
+/// Whether the kernel's command line has `setup_again_cmdline`.
+pub fn setupAgain() bool {
+    var buf: [1024]u8 = undefined;
+    const cmdline = sys.readFile("/proc/cmdline", &buf) orelse return false;
+    var words = std.mem.tokenizeAny(u8, cmdline, " \n");
+    while (words.next()) |w| if (std.mem.eql(u8, w, setup_again_cmdline)) return true;
+    return false;
+}
+
 /// Whether the log is to be served over HTTP: the kernel's command line
 /// has `log_server_cmdline`, or `log_server_file` says "on".
 pub fn logServerOn() bool {
