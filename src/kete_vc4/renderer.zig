@@ -333,15 +333,33 @@ pub const Renderer = struct {
                 },
                 else => null,
             };
-            try p.draw(frame, .{
-                .vertices = vbo.handle,
-                .vertex_offset = offset,
-                .count = b.vertexCount(),
-                .texture = texture,
-                .scissor = if (b.clip) |clip| scissor(clip, r.scale) else null,
-            });
+            // The GPU takes at most `max_draw_vertices` a draw (its vertex
+            // indices are 16 bits): more (a map's thousands of shapes, in
+            // one batch) are drawn a part at a time.
+            const stride: u32 = @intCast(kgfx.canvas.floatsPerVertex(b.kind) * 4);
+            var first: u32 = 0;
+            const total = b.vertexCount();
+            while (first < total) {
+                const count = @min(total - first, max_draw_vertices);
+                if (first > 0 and !frame.hasRoom(max_uniform_words)) {
+                    try r.gpu.vtable.run(r.gpu.ptr, frame);
+                    frame.again();
+                }
+                try p.draw(frame, .{
+                    .vertices = vbo.handle,
+                    .vertex_offset = offset + first * stride,
+                    .count = count,
+                    .texture = texture,
+                    .scissor = if (b.clip) |clip| scissor(clip, r.scale) else null,
+                });
+                first += count;
+            }
         }
     }
+
+    /// The most vertices a draw has: the GPU's vertex indices are 16 bits
+    /// (as Mesa's vc4 driver splits draws); whole triangles.
+    pub const max_draw_vertices = 65535 / 3 * 3;
 
     /// Draws a frame's segments straight into the window's buffer (see
     /// `window.zig`), only in the tiles `damage` touches, and waits for
