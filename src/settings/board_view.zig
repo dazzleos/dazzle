@@ -642,10 +642,12 @@ fn drawPart(c: *gfx.Canvas, part: *const board.Part, r: gfx.Rect, s: f32, ink: C
             for (0..rows) |row| {
                 const y = r.y + gap + @as(f32, @floatFromInt(row)) * (key_h + gap);
                 if (row == rows - 1) {
-                    // The space bar, between smaller keys.
+                    // The space bar, between smaller keys: 15 keys' width
+                    // in all, as the rows above.
+                    const space_row = [_]f32{ 1.5, 1, 1.5, 6, 1, 1, 1, 1, 1 };
                     const unit = (r.w - gap) / 15;
                     var x = r.x + gap;
-                    for ([_]f32{ 1.5, 1, 1.5, 6, 1.5, 1, 1, 1, 1 }) |w| {
+                    for (space_row) |w| {
                         c.strokeRoundedRect(.{ .x = x, .y = y, .w = w * unit - gap, .h = key_h }, .all(0.6 * s), line, ink);
                         x += w * unit;
                     }
