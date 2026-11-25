@@ -727,6 +727,17 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                         req.respond("200 OK", "text/plain", "ok\n");
                     },
                     .type => |text| {
+                        // All of it or none: with no room for it all (other
+                        // requests' input still queued), the caller tries
+                        // again (part of it, a Shift might stay down).
+                        var need: usize = 0;
+                        for (text) |c| if (remote_mod.keyFor(c)) |k| {
+                            need += if (k.shift) 4 else 2;
+                        };
+                        if (qn.* + need > q.len) {
+                            req.respond("503 Service Unavailable", "text/plain", "Busy: try again\n");
+                            continue;
+                        }
                         for (text) |c| if (remote_mod.keyFor(c)) |k| {
                             if (k.shift) queue(q, qn, .{ .key = .{ .code = remote_mod.key_left_shift, .pressed = true } });
                             queue(q, qn, .{ .key = .{ .code = k.code, .pressed = true } });

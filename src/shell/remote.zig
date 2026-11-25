@@ -23,7 +23,9 @@
 //!     /key?key=28[&pressed=1]       presses a key (a Linux key code) and
 //!                                   lets it go, or only one of those
 //!     /type?text=                   types the text (US keys: letters,
-//!                                   digits, space and common punctuation)
+//!                                   digits, space and common punctuation);
+//!                                   503 if input already queued leaves no
+//!                                   room for it all (try again)
 //!     /launch?app=motu     opens an app, or brings it to the top
 //!     /quit?app=motu[&force=1]
 //!                                   asks the app's windows to close (or
