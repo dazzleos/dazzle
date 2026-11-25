@@ -119,7 +119,7 @@ fn failure(cx: *kete.BuildContext, f: proto.FailedStart, log: ?*const failed_sta
         cx.make(kete.Expanded{ .child = cx.make(kete.Text{ .text = which, .style = .{ .size = 17, .color = t.@"error" } }) }),
     }) catch &.{} }) })) catch {};
     const why = switch (f.stop) {
-        .exited => |n| kete_vc4.textf(cx, "Its shell stopped with exit status {d} before it had run a minute.", .{n}),
+        .exited => |n| kete_vc4.textf(cx, "Its shell could not be run (exit status {d}).", .{n}),
         .signal => |n| switch (n) {
             11 => kete_vc4.textf(cx, "Its shell crashed ({s}, signal {d}: it read or wrote memory it should not have) before it had run a minute.", .{ proto.signalName(n), n }),
             6 => kete_vc4.textf(cx, "Its shell gave up ({s}, signal {d}: it found something wrong and stopped) before it had run a minute.", .{ proto.signalName(n), n }),
@@ -127,7 +127,7 @@ fn failure(cx: *kete.BuildContext, f: proto.FailedStart, log: ?*const failed_sta
             else => kete_vc4.textf(cx, "Its shell was stopped by {s} (signal {d}) before it had run a minute.", .{ proto.signalName(n), n }),
         },
         .unknown => if (log != null)
-            locale.text("Its shell did not stop, but the system did not run a minute: it hung (and the watchdog restarted it), or the power went.")
+            locale.text("The system did not get as far as running its shell: it hung (and the watchdog restarted it), or the power went.")
         else
             locale.text("Nothing was kept of that start: it stopped before the system could keep its log (the kernel did not start, or the card could not be read), or the power went at once."),
     };
@@ -171,7 +171,7 @@ test "the slots on Dazzle's page, and why one did not start" {
     const d = view.sample();
     var actions: Actions = .{};
     const log_text = try testing.allocator.dupe(u8,
-        \\[    2.600000] dazzle: trying OS slot B: if its shell has not run a minute when the computer next starts, slot A starts instead
+        \\[    2.600000] dazzle: trying OS slot B: if its shell does not run, slot A starts next
         \\[    3.100000] dazzle-shell: cannot open /dev/dri/card0: NotFound
         \\[    3.150000] dazzle: shell exited with status 1
         \\
@@ -193,7 +193,7 @@ test "the slots on Dazzle's page, and why one did not start" {
     try testing.expect(view.findText(u.root.?, "Running now · Starts next time") != null);
     try testing.expect(view.findText(u.root.?, "Did not start properly") != null);
     try testing.expect(view.findText(u.root.?, "Slot B (0123abc · 7 October 2026) did not start properly") != null);
-    try testing.expect(view.findText(u.root.?, "Its shell stopped with exit status 1 before it had run a minute.") != null);
+    try testing.expect(view.findText(u.root.?, "Its shell could not be run (exit status 1).") != null);
     try testing.expect(view.findText(u.root.?, "It ran for 3.1 seconds after the kernel started.") != null);
     try testing.expect(view.findText(u.root.?, "dazzle-shell: cannot open /dev/dri/card0: NotFound") != null);
     // Slot B chosen to start next (going back to it), then restarting.

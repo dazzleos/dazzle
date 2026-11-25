@@ -29,9 +29,9 @@
 //!    to the kernel log; its dock starts the apps;
 //! 8. reaps exited processes forever (PID 1 must never exit), restarting the
 //!    shell and the network, device, media and system managers if they ever
-//!    stop; and, when this start tries an update, keeps it once the shell has
-//!    run for a minute, or restarts into the system before if the shell stops
-//!    first (see trial.zig).
+//!    stop; and, when this start tries an update, keeps it once the shell
+//!    runs, or restarts into the system before if it cannot (see
+//!    trial.zig).
 //!
 //! The Dazzle user is just a user ID (see `sys.user`): there are no
 //! accounts, passwords or logins.
@@ -90,12 +90,21 @@ pub fn main() void {
     // to be made, and later installs updates.
     const system_pid = system.start(card.card, card.mounted, card.slot, card.setup_done, log_server_pid);
     if (screen) |s| s.handOver();
-    const shell_pid = startShell(!card.setup_done);
-    // Trying an update: it has worked when the shell has run for a while
-    // (the timer, a child process that ends then).
-    var t: Trying = .{};
-    if (card.trial == .trying) t.timer = startTimer(trial.healthy_ns);
-    reapForever(shell_pid, network_pid, devices_pid, media_pid, system_pid, log_server_pid, card, &t, &watchdog);
+    const shell = startShell(!card.setup_done);
+    // Trying an update: it has worked if the shell runs. If it cannot,
+    // back to the system before (which the next start already is).
+    if (card.trial == .trying) {
+        if (shell.ran) {
+            trial.commit(card.slot orelse 'a');
+        } else {
+            trial.markStopped(card.slot orelse 'a', .{ .exited = 127 });
+            print(sys.log_error ++ "dazzle: OS slot {c} does not work (its shell does not run): restarting into the system before\n", .{std.ascii.toUpper(card.slot orelse 'a')});
+            // A moment for the log to reach the card.
+            sys.sleepMs(1500);
+            shutdown.now(.restart, null);
+        }
+    }
+    reapForever(shell.pid, network_pid, devices_pid, media_pid, system_pid, log_server_pid, card, &watchdog);
 }
 
 fn mountPseudoFilesystems() void {
@@ -283,59 +292,70 @@ fn keepGpuAwake() void {
 
 /// Starts the shell as the Dazzle user. Returns its PID, or null if it
 /// could not be started.
-fn startShell(setup: bool) ?linux.pid_t {
+/// The shell started: its process, and whether its program runs (it was
+/// started, and nothing stopped it before).
+const Started = struct { pid: ?linux.pid_t = null, ran: bool = false };
+
+fn startShell(setup: bool) Started {
+    // Closed when the shell's program runs (close on exec); written to if
+    // it cannot be.
+    var told: [2]linux.fd_t = .{ -1, -1 };
+    const have_pipe = linux.errno(linux.pipe2(&told, .{ .CLOEXEC = true })) == .SUCCESS;
     const rc = linux.fork();
     switch (linux.errno(rc)) {
         .SUCCESS => {},
         else => |e| {
             print(sys.log_error ++ "dazzle: cannot start the shell: fork failed ({s})\n", .{@tagName(e)});
-            return null;
+            if (have_pipe) {
+                sys.close(told[0]);
+                sys.close(told[1]);
+            }
+            return .{};
         },
     }
     if (rc != 0) {
         const pid: linux.pid_t = @intCast(rc);
         print("dazzle: started {s} (pid {d}) as uid {d}\n", .{ shell_path, pid, sys.user.uid });
-        return pid;
+        // Nothing read (the end closed by running it): it runs.
+        var ran = true;
+        if (have_pipe) {
+            sys.close(told[1]);
+            var byte: [1]u8 = undefined;
+            while (true) {
+                const n = linux.read(told[0], &byte, 1);
+                if (linux.errno(n) == .INTR) continue;
+                ran = linux.errno(n) == .SUCCESS and n == 0;
+                break;
+            }
+            sys.close(told[0]);
+        }
+        return .{ .pid = pid, .ran = ran };
     }
 
     // The child. Its output goes to the kernel log: it inherits init's
     // /dev/kmsg descriptor, since only root may open that for writing.
+    if (have_pipe) sys.close(told[0]);
     if (sys.kmsgFd()) |kmsg| {
         _ = linux.dup2(kmsg, 1);
         _ = linux.dup2(kmsg, 2);
     }
     sys.dropPrivileges() catch |err| {
         print(sys.log_warning ++ "dazzle: cannot drop privileges ({s}); not starting the shell\n", .{@errorName(err)});
+        if (have_pipe) _ = linux.write(told[1], "x", 1);
         linux.exit(126);
     };
     const argv = [_:null]?[*:0]const u8{ shell_path, if (setup) "--setup" else null };
     const envp = [_:null]?[*:0]const u8{ "HOME=/", "USER=" ++ sys.user.name };
     const err = linux.errno(linux.execve(shell_path, &argv, &envp));
     print(sys.log_warning ++ "dazzle: cannot run {s} ({s})\n", .{ shell_path, @tagName(err) });
+    if (have_pipe) _ = linux.write(told[1], "x", 1);
     linux.exit(127);
-}
-
-/// An update being tried.
-const Trying = struct {
-    /// Ends when the update has run long enough.
-    timer: ?linux.pid_t = null,
-};
-
-/// A child process that does nothing for `ns`.
-fn startTimer(ns: u64) ?linux.pid_t {
-    const rc = linux.fork();
-    if (linux.errno(rc) != .SUCCESS) return null;
-    if (rc == 0) {
-        sys.sleepMs(@intCast(ns / std.time.ns_per_ms));
-        linux.exit(0);
-    }
-    return @intCast(rc);
 }
 
 /// Waits for child processes, logging how the shell ends and restarting it.
 /// Processes whose parent exits are re-parented to init, so this also
 /// collects those.
-fn reapForever(first_shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, first_devices_pid: ?linux.pid_t, first_media_pid: ?linux.pid_t, first_system_pid: ?linux.pid_t, log_server_pid: ?linux.pid_t, card: storage.Boot, t: *Trying, watchdog: *?trial.Watchdog) noreturn {
+fn reapForever(first_shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, first_devices_pid: ?linux.pid_t, first_media_pid: ?linux.pid_t, first_system_pid: ?linux.pid_t, log_server_pid: ?linux.pid_t, card: storage.Boot, watchdog: *?trial.Watchdog) noreturn {
     var shell_pid = first_shell_pid;
     var network_pid = first_network_pid;
     var devices_pid = first_devices_pid;
@@ -381,12 +401,6 @@ fn reapForever(first_shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, f
             system_pid = system.start(now.card, now.mounted, now.slot, now.setup_done, log_server_pid);
             continue;
         }
-        if (t.timer != null and pid == t.timer.?) {
-            // The shell has run all this while: the update works.
-            t.timer = null;
-            trial.commit(card.slot orelse 'a');
-            continue;
-        }
         if (watchdog.* != null and pid == watchdog.*.?.pid) {
             // Its feeder stopped: the watchdog still runs, so another must
             // take over within its timeout.
@@ -398,27 +412,15 @@ fn reapForever(first_shell_pid: ?linux.pid_t, first_network_pid: ?linux.pid_t, f
             continue;
         }
         if (pid != shell_pid) continue;
-        var stop: sys.system.Stop = .unknown;
         if (linux.W.IFEXITED(status)) {
-            stop = .{ .exited = @truncate(linux.W.EXITSTATUS(status)) };
             print(sys.log_error ++ "dazzle: shell exited with status {d}\n", .{linux.W.EXITSTATUS(status)});
         } else if (linux.W.IFSIGNALED(status)) {
             const sig: u8 = @truncate(@intFromEnum(linux.W.TERMSIG(status)));
-            stop = .{ .signal = sig };
             print(sys.log_error ++ "dazzle: shell killed by {s} (signal {d})\n", .{ sys.system.signalName(sig), sig });
-        }
-        // The system tried does not work: back to the system before (which
-        // the next start already is), saying how it stopped.
-        if (t.timer != null) {
-            trial.markStopped(card.slot orelse 'a', stop);
-            print(sys.log_error ++ "dazzle: OS slot {c} does not work: restarting into the system before\n", .{std.ascii.toUpper(card.slot orelse 'a')});
-            // A moment for the log to reach the card.
-            sys.sleepMs(1500);
-            shutdown.now(.restart, null);
         }
         print("dazzle: restarting the shell in 1 s\n", .{});
         sys.sleepMs(1000);
-        shell_pid = startShell(!storage.state(card).setup_done);
+        shell_pid = startShell(!storage.state(card).setup_done).pid;
     }
 }
 

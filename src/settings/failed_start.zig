@@ -129,7 +129,7 @@ test "a failed start's log, summarized" {
         \\[    1.200000] mmc0: new high speed SDHC card
         \\[    1.300000] unicam: error: already registered
         \\[    2.500000] dazzle: starting as init (build abc)
-        \\[    2.600000] dazzle: trying OS slot B: if its shell has not run a minute when the computer next starts, slot A starts instead
+        \\[    2.600000] dazzle: trying OS slot B: if its shell does not run, slot A starts next
         \\[    3.100000] dazzle-shell: cannot open /dev/dri/card0: NotFound
         \\[    3.150000] dazzle: shell exited with status 1
         \\[    3.200000] dazzle: OS slot B does not work: restarting into the system before

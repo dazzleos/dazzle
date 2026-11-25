@@ -138,7 +138,7 @@ pub fn logServerChosen() bool {
     return std.mem.eql(u8, std.mem.trim(u8, text, " \n"), "on");
 }
 /// The log of the last start that did not work (an OS slot tried, whose
-/// shell did not run a minute): see init's bootlog.zig. Anyone's to read.
+/// shell did not run): see init's bootlog.zig. Anyone's to read.
 pub const failed_start_log = "/data/system/start-failed.log";
 /// The user's files.
 pub const user_dir = "/data/user";

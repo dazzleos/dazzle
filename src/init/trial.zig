@@ -10,11 +10,10 @@
 //!    system that was there before. The SoC's watchdog (`Watchdog`, which
 //!    runs at every start, not only in a trial) restarts the Pi if the
 //!    system hangs.
-//! 3. Once the shell has run for `healthy_ns` the update has worked:
-//!    os_prefix is switched to it again and the trial ends (`commit`). If
-//!    the shell stops before then, init writes how it stopped in the trial
-//!    ("<x> started exited 1", "<x> started signal 11": `markStopped`) and
-//!    restarts the Pi.
+//! 3. Once the shell runs (its program has started) the update has
+//!    worked: os_prefix is switched to it again and the trial ends
+//!    (`commit`). If it cannot be run, init writes so in the trial
+//!    ("<x> started exited 127": `markStopped`) and restarts the Pi.
 //! 4. The system before, started again with a trial "started" for the
 //!    other slot, knows the update did not work: the trial becomes
 //!    /boot/trial-failed, which the system manager reports to Settings
@@ -40,9 +39,6 @@ const print = sys.print;
 
 pub const marker = storage.boot_dir ++ "/trial";
 pub const failed_marker = storage.boot_dir ++ "/trial-failed";
-
-/// How long the shell must run for an update to have worked.
-pub const healthy_ns = 60 * std.time.ns_per_s;
 
 pub const State = enum { pending, started };
 
@@ -134,7 +130,7 @@ pub fn atBoot(running: ?u8) Outcome {
         write(.{ .slot = slot, .state = .started }) catch |err| print(sys.log_warning ++ "dazzle: trial: cannot mark it started: {s}\n", .{@errorName(err)});
         slots.startNext(slots.other(slot)) catch |err| print(sys.log_warning ++ "dazzle: trial: cannot keep the system before: {s}\n", .{@errorName(err)});
         _ = linux.unlink(failed_marker);
-        print(trying_text ++ "{c}: if its shell has not run a minute when the computer next starts, slot {c} starts instead\n", .{ std.ascii.toUpper(slot), std.ascii.toUpper(slots.other(slot)) });
+        print(trying_text ++ "{c}: if its shell does not run, slot {c} starts next\n", .{ std.ascii.toUpper(slot), std.ascii.toUpper(slots.other(slot)) });
         return .trying;
     }
     // The system before. (os_prefix already names it: the trial changed it.)
