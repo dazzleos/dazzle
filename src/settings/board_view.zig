@@ -79,7 +79,15 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     const part = &drawing.parts[@min(picked, drawing.parts.len - 1)];
     const about = board.describe(part);
     rows.appendSlice(a, &.{
-        cx.make(kete.Padding{ .padding = .symmetric(0, 8), .child = cx.make(kete.Align{ .alignment = .center_left, .child = cx.make(BoardView{ .board = drawing, .selected = picked, .on_select = partPicker(state) }) }) }),
+        cx.make(kete.Padding{ .padding = .symmetric(0, 8), .child = cx.make(kete.Align{ .alignment = .center_left, .child = cx.make(BoardView{
+            .board = drawing,
+            .selected = picked,
+            .on_select = partPicker(state),
+            // As many pixels a millimetre as a credit-card-sized board
+            // has: a bigger one (the Pi 400, a keyboard) is drawn bigger.
+            .max_width = @max(260, drawing.width * 3),
+            .max_height = @max(170, drawing.height * 3),
+        }) }) }),
         cx.make(kete.Text{ .text = if (part.chip.len > 0) kete_vc4.textf(cx, "{s}: {s}", .{ about.title, part.chip }) else about.title, .style = .{ .size = 20, .color = t.on_surface } }),
         cx.make(kete.Text{ .text = cx.fmt("{s}{s}", .{ about.about, if (part.underside) " (underneath the board)" else "" }), .style = .{ .size = 16, .color = t.on_surface_variant } }),
     }) catch {};
