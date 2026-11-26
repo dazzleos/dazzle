@@ -967,7 +967,10 @@ pub const Renderer = struct {
                 const x = bx * 4 + i % 4;
                 const y = by * 4 + i / 4;
                 const got = std.mem.readInt(u32, target.map[y * pitch + x * 4 ..][0..4], .little);
-                if (channelDistance(got, want[i]) > 2) return false;
+                if (channelDistance(got, want[i]) > 2) {
+                    sys.print("dazzle-shell: ETC1 laid out {s}: at ({d}, {d}) the GPU drew {x:0>8}, not {x:0>8}\n", .{ @tagName(order), x, y, got, want[i] });
+                    return false;
+                }
             }
         };
         return true;
