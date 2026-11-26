@@ -218,7 +218,8 @@ fn hasTouchscreen() bool {
         var buf: [32]u8 = undefined;
         const props = sys.readFile(std.fmt.bufPrintSentinel(&path_buf, "/sys/class/input/{s}/properties", .{name}, 0) catch continue, &buf) orelse continue;
         const bits = std.fmt.parseInt(u32, std.mem.trim(u8, props, " \n"), 16) catch continue;
-        if (bits & 1 != 0) return true;
+        // INPUT_PROP_DIRECT is bit 1.
+        if (bits & 2 != 0) return true;
     }
     return false;
 }

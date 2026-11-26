@@ -103,7 +103,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
         .soc_with_ram => if (u.cpu_busy) |busy| kete_vc4.textf(cx, "{d:.0}% busy; {s} of {s} of memory in use", .{ busy, info.formatBytes(&b1, u.memUsed()), info.formatBytes(&b2, u.mem_total) }) else null,
         .ram => kete_vc4.textf(cx, "{s} of {s} in use", .{ info.formatBytes(&b1, u.memUsed()), info.formatBytes(&b2, u.mem_total) }),
         .micro_sd, .sd, .emmc => if (self.system.card.bytes > 0) cx.fmt("{s}", .{self.system.card.describe(&card_buf)}) else null,
-        .hdmi, .mini_hdmi, .micro_hdmi, .camera, .display, .camera_display, .ethernet, .wireless, .wireless_can => connectedLine(self, cx, drawing, at),
+        .hdmi, .mini_hdmi, .micro_hdmi, .camera, .display, .camera_display, .ethernet => connectedLine(self, cx, drawing, at),
         .usb, .usb_double, .usb_otg => if (self.usb.len == 0) locale.text("Nothing is plugged in") else null,
         else => null,
     };
@@ -169,14 +169,6 @@ fn ethernet(self: *const Settings) ?*const info.Interface {
     return null;
 }
 
-/// The Wi-Fi network connected to, from the manager's scan (its signal and
-/// frequency).
-fn wifiNetwork(r: *const info.manager.Report) ?*const info.manager.Network {
-    if (r.connection.state != .connected) return null;
-    for (r.slice()) |*n| if (std.mem.eql(u8, n.ssid(), r.connection.ssid())) return n;
-    return null;
-}
-
 /// Whether a connector has something connected, and what: "Connected to
 /// a Dell U2415", "Not connected".
 fn connectedLine(self: *const Settings, cx: *kete.BuildContext, drawing: *const board.Board, picked: usize) ?[]const u8 {
@@ -192,13 +184,6 @@ fn connectedLine(self: *const Settings, cx: *kete.BuildContext, drawing: *const 
         .display => if (h.panel.connected) cx.fmt("Connected to the {s}", .{if (h.panel.name.len > 0) h.panel.name.slice() else "display"}) else "Not connected",
         .camera_display => if (h.panel.connected) cx.fmt("Connected to the {s}", .{if (h.panel.name.len > 0) h.panel.name.slice() else "display"}) else if (h.camera.connected) (if (h.camera.module()) |m| cx.fmt("Connected to a {s}", .{m.name}) else "Connected to a camera") else "Not connected",
         .ethernet => if (ethernet(self)) |i| (if (!i.carrier) "Not connected" else if (i.speed) |s| (if (s >= 1000) cx.fmt("Connected at {d} Gb/s", .{s / 1000}) else cx.fmt("Connected at {d} Mb/s", .{s})) else "Connected") else "Not connected",
-        .wireless, .wireless_can => blk: {
-            const r = self.manager orelse break :blk null;
-            const up = if (r.adapter) |ad| ad.up else false;
-            if (!up) break :blk "Wi-Fi is off";
-            if (r.connection.state == .connected) break :blk cx.fmt("Wi-Fi is on, connected to {s}", .{r.connection.ssid()});
-            break :blk "Wi-Fi is on, not connected";
-        },
         else => null,
     };
 }
@@ -248,16 +233,10 @@ fn appendDetails(self: *const Settings, b: Builder, drawing: *const board.Board,
             if (i.mac.len > 0) items.append(a, b.item("MAC address", i.mac.slice())) catch {};
         },
         .wireless, .wireless_can => {
-            if (self.manager) |r| {
-                if (wifiNetwork(r)) |n| {
-                    const dbm = @divTrunc(n.signal_mbm, 100);
-                    const pct: i32 = std.math.clamp(2 * (dbm + 100), 0, 100);
-                    items.append(a, b.item("Signal", cx.fmt("{s} ({d}%)", .{ if (pct >= 70) "Strong" else if (pct >= 40) "Good" else "Weak", pct }))) catch {};
-                    items.append(a, b.item("Band", if (n.freq_mhz >= 5000) "5 GHz" else "2.4 GHz")) catch {};
-                }
-                if (r.adapter) |ad| items.append(a, b.item("MAC address", cx.fmt("{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}", .{ ad.mac[0], ad.mac[1], ad.mac[2], ad.mac[3], ad.mac[4], ad.mac[5] }))) catch {};
-            }
-            items.append(a, b.item("Bluetooth", if (h.bluetooth) |on| (if (on) "On" else "Off") else "Not available")) catch {};
+            const adapter = if (self.manager) |r| r.adapter else null;
+            items.append(a, b.item("Wi-Fi", if (adapter) |ad| (if (ad.up) "On" else "Off") else "Off")) catch {};
+            items.append(a, b.item("Bluetooth", if (h.bluetooth) |on| (if (on) "On" else "Off") else "Off")) catch {};
+            if (adapter) |ad| items.append(a, b.item("MAC address", cx.fmt("{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}", .{ ad.mac[0], ad.mac[1], ad.mac[2], ad.mac[3], ad.mac[4], ad.mac[5] }))) catch {};
         },
         else => {},
     }
