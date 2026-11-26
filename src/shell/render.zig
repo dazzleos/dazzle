@@ -961,19 +961,25 @@ pub const Renderer = struct {
         try quad(&capture_frame, &r.quads, r.vbo, 0, .{ .handle = tex.handle, .width = n, .height = n, .format = .etc1 }, 0, 0, n, n, 0, null);
         const seqno = try r.dev.submit(capture_frame.finish());
         try r.dev.waitSeqno(seqno, std.time.ns_per_s);
+        var wrong: usize = 0;
+        var most: u32 = 0;
+        var first: ?struct { x: usize, y: usize, got: u32, want: u32 } = null;
         for (0..nb[1]) |by| for (0..nb[0]) |bx| {
             const want = etc1.decodeBlock(blocks[by * nb[0] + bx]);
             for (0..16) |i| {
                 const x = bx * 4 + i % 4;
                 const y = by * 4 + i / 4;
                 const got = std.mem.readInt(u32, target.map[y * pitch + x * 4 ..][0..4], .little);
-                if (channelDistance(got, want[i]) > 2) {
-                    sys.print("dazzle-shell: ETC1 laid out {s}: at ({d}, {d}) the GPU drew {x:0>8}, not {x:0>8}\n", .{ @tagName(order), x, y, got, want[i] });
-                    return false;
-                }
+                const d = channelDistance(got, want[i]);
+                if (d <= 2) continue;
+                wrong += 1;
+                most = @max(most, d);
+                if (first == null) first = .{ .x = x, .y = y, .got = got, .want = want[i] };
             }
         };
-        return true;
+        const f = first orelse return true;
+        sys.print("dazzle-shell: ETC1 laid out {s}: {d} pixels of {d} drawn otherwise, by up to {d} (at ({d}, {d}): {x:0>8}, not {x:0>8})\n", .{ @tagName(order), wrong, n * n, most, f.x, f.y, f.got, f.want });
+        return false;
     }
 
     fn pipelines(r: *Renderer) Pipelines {
