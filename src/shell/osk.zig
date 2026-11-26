@@ -12,17 +12,20 @@
 //! keyboard's layout), Backspace, Enter and Tab as keys. Its pages are as
 //! Android's keyboards have them: the letters (with Shift, for one letter);
 //! the numbers and symbols, and more symbols (=\< where Shift is: every
-//! ASCII one between them); and emoji (each one character).
+//! ASCII one between them); and emoji, every one, in their groups, those
+//! used most first, in a skin tone (see emoji.zig).
 
 const std = @import("std");
 const kete = @import("kete");
 const kete_panel = @import("kete_panel.zig");
 const key_light = @import("kete_vc4").key_light;
+const emoji_mod = @import("emoji.zig");
 
 /// What a key typed, for the shell to send the app.
 pub const Typed = union(enum) {
-    /// Text (a character, up to 4 bytes of UTF-8).
-    text: struct { bytes: [4]u8, len: u3 },
+    /// Text (a character, or an emoji: up to `emoji_mod.max_text` bytes of
+    /// UTF-8).
+    text: struct { bytes: [emoji_mod.max_text]u8, len: u8 },
     /// A key (a Linux key code), pressed and let go.
     key: u32,
 
@@ -37,7 +40,7 @@ pub const Typed = union(enum) {
 // Its keys' icons, chosen as they are made (for kete's icon font, which
 // has only those its scan finds).
 comptime {
-    _ = &[_]kete.IconName{ .keyboard_capslock, .arrow_upward, .backspace, .space_bar, .keyboard_return, .keyboard_hide, .emoji_emotions };
+    _ = &[_]kete.IconName{ .keyboard_capslock, .arrow_upward, .backspace, .space_bar, .keyboard_return, .keyboard_hide, .emoji_emotions, .history, .chevron_left, .chevron_right };
 }
 
 /// Linux key codes it sends.
@@ -75,8 +78,13 @@ pub const Osk = struct {
     always: bool = false,
     /// Each key's light (as setup's keyboard picture lights its keys):
     /// held, and let go, fading. By which key it is (`Key.What.id`).
-    /// (Room for every key of every page: none shares one.)
-    lights: [160]Light = @splat(.{}),
+    /// (Room for every key of every page: none shares one. The emoji's
+    /// are by where they are on the page.)
+    lights: [200]Light = @splat(.{}),
+    /// The emoji page's (and where it keeps those used, and the tone:
+    /// none in tests).
+    emoji: emoji_mod.Emoji = .{},
+    emoji_file: ?[:0]const u8 = null,
 
     /// How far up it is (0: off the screen, 1: all of it shown), and its
     /// way there (`slideTo`).
@@ -103,7 +111,7 @@ pub const Osk = struct {
     }
 
     pub fn init(panel: *kete_panel.Panel, screen_width: u32, screen_height: u32, scale: f32) Osk {
-        var o: Osk = .{ .panel = panel };
+        var o: Osk = .{ .panel = panel, .emoji = .load(emoji_mod.file), .emoji_file = emoji_mod.file };
         o.setScreen(screen_width, screen_height, scale);
         return o;
     }
@@ -209,9 +217,20 @@ pub const Osk = struct {
         }
     }
 
+    /// The emoji's keys' lights: let go, for the page's new emoji.
+    fn unlightEmoji(o: *Osk) void {
+        for (&o.lights) |*l| if (l.id >= emoji_light and l.id < emoji_light + emoji_mod.per_page) {
+            l.key = .{};
+        };
+    }
+
+    fn saveEmoji(o: *const Osk) void {
+        if (o.emoji_file) |path| o.emoji.save(path);
+    }
+
     /// A key's character typed (Shift, once, makes a letter a capital).
     fn typeText(o: *Osk, text: []const u8) void {
-        var t: Typed = .{ .text = .{ .bytes = undefined, .len = @intCast(@min(text.len, 4)) } };
+        var t: Typed = .{ .text = .{ .bytes = undefined, .len = @intCast(@min(text.len, emoji_mod.max_text)) } };
         @memcpy(t.text.bytes[0..t.text.len], text[0..t.text.len]);
         if (o.shift and t.text.len == 1 and std.ascii.isLower(t.text.bytes[0])) t.text.bytes[0] = std.ascii.toUpper(t.text.bytes[0]);
         if (o.shift) {
@@ -234,6 +253,13 @@ const Key = struct {
         /// To that page.
         page: Page,
         hide,
+        /// An emoji, at `slot` on the emoji page.
+        emoji: struct { text: []const u8, slot: u8 },
+        /// The emoji page's tabs, its pages, and the skin tones.
+        tab: emoji_mod.Tab,
+        turn: bool,
+        tones,
+        tone: u3,
 
         /// Which key it is (never 0), whichever page it is on.
         fn id(w: What) u32 {
@@ -243,6 +269,11 @@ const Key = struct {
                 .shift => 1,
                 .hide => 3,
                 .page => |pg| 0x10 + @as(u32, @intFromEnum(pg)),
+                .emoji => |em| emoji_light + em.slot,
+                .tab => |tab| 0x20 + @as(u32, @intFromEnum(tab)),
+                .turn => |forward| @as(u32, if (forward) 0x31 else 0x30),
+                .tones => 0x32,
+                .tone => |v| 0x40 + @as(u32, v),
             };
         }
     };
@@ -261,6 +292,35 @@ const Key = struct {
                 o.page = pg;
                 o.shift = false;
                 o.changed = true;
+                if (pg == .emoji) {
+                    o.emoji.open();
+                    o.unlightEmoji();
+                }
+            },
+            .emoji => |em| {
+                o.typeText(em.text);
+                o.emoji.typed(em.text);
+                o.saveEmoji();
+            },
+            .tab => |tab| {
+                o.emoji.show(tab);
+                o.unlightEmoji();
+                o.changed = true;
+            },
+            .turn => |forward| {
+                o.emoji.turn(forward);
+                o.unlightEmoji();
+                o.changed = true;
+            },
+            .tones => {
+                o.emoji.choosing_tone = !o.emoji.choosing_tone;
+                o.changed = true;
+            },
+            .tone => |v| {
+                o.emoji.tone = v;
+                o.emoji.choosing_tone = false;
+                o.saveEmoji();
+                o.changed = true;
             },
             .hide => {
                 o.dismissed = true;
@@ -275,12 +335,15 @@ const letter_rows = [_][]const []const u8{
     &.{ "a", "s", "d", "f", "g", "h", "j", "k", "l" },
     &.{ "z", "x", "c", "v", "b", "n", "m" },
 };
-/// Emoji, each one character (a key types up to four bytes).
-const emoji_rows = [_][]const []const u8{
-    &.{ "😀", "😂", "😊", "😍", "😘", "😉", "😎", "🤔", "😢", "😭" },
-    &.{ "😅", "🙂", "🙃", "😴", "😡", "🥳", "🤗", "😮", "👍", "👎" },
-    &.{ "👏", "🙏", "💪", "👋", "🎉", "🔥", "💯" },
-};
+/// The emoji keys' lights' ids, by their place on the page.
+const emoji_light: u32 = 0x1000;
+
+/// The emoji page's tabs, as they show.
+const tab_faces = [_][]const u8{ "", "😀", "👋", "🐻", "🍔", "🚗", "⚽", "💡", "❤️", "🏁" };
+
+/// The skin tones, on a hand.
+const tone_faces = [_][]const u8{ "✋", "✋🏻", "✋🏼", "✋🏽", "✋🏾", "✋🏿" };
+
 const symbol_rows = [_][]const []const u8{
     &.{ "1", "2", "3", "4", "5", "6", "7", "8", "9", "0" },
     &.{ "@", "#", "$", "_", "&", "-", "+", "(", ")", "/" },
@@ -307,7 +370,7 @@ const View = struct {
             .letters => letter_rows,
             .symbols => symbol_rows,
             .more_symbols => more_symbol_rows,
-            .emoji => emoji_rows,
+            .emoji => return emojiView(cx, o),
         };
         var lines: std.ArrayList(kete.Widget) = .empty;
         for (rows, 0..) |row, i| {
@@ -349,6 +412,92 @@ const View = struct {
         });
     }
 };
+
+/// The emoji page: its tabs (those used most, then the groups) and the
+/// skin tones' key; three rows of the page's emoji (or the tones, to
+/// choose one); and ABC, the pages either way, Space, Backspace and Enter.
+fn emojiView(cx: *kete.BuildContext, o: *Osk) kete.Widget {
+    const t = cx.theme();
+    const a = cx.arena;
+    const s = o.scale;
+    const e = &o.emoji;
+    // Heights: the tabs a little less than a key; the three rows of emoji
+    // what is left of three keys' rows (all four rows' height in all).
+    const k: f32 = Osk.key_height * s;
+    const g: f32 = Osk.gap * s;
+    const tab_h = 0.8 * k;
+    const emoji_h = (2.2 * k) / 3;
+
+    var tabs: std.ArrayList(kete.Widget) = .empty;
+    for (std.enums.values(emoji_mod.Tab), 0..) |tab, i| {
+        const on = e.tab == tab and !e.choosing_tone;
+        tabs.append(a, if (tab == .frequent)
+            keyButton(cx, o, .{ .tab = tab }, null, .history, 1, on)
+        else
+            keyButton(cx, o, .{ .tab = tab }, tab_faces[i], null, 1, on)) catch {};
+    }
+    tabs.append(a, keyButton(cx, o, .tones, tone_faces[e.tone], null, 1, e.choosing_tone)) catch {};
+
+    var grid: std.ArrayList(kete.Widget) = .empty;
+    if (e.choosing_tone) {
+        for (0..3) |r| {
+            var keys: std.ArrayList(kete.Widget) = .empty;
+            if (r == 1) {
+                keys.append(a, spacer(cx, 2)) catch {};
+                for (tone_faces, 0..) |face, v| keys.append(a, keyButton(cx, o, .{ .tone = @intCast(v) }, face, null, 1, e.tone == v)) catch {};
+                keys.append(a, spacer(cx, 2)) catch {};
+            } else keys.append(a, spacer(cx, 1)) catch {};
+            grid.append(a, rowHeight(cx, keys.items, emoji_h, g)) catch {};
+        }
+    } else {
+        var shown: [emoji_mod.per_page][]const u8 = undefined;
+        const n = e.shown(&shown);
+        for (0..3) |r| {
+            var keys: std.ArrayList(kete.Widget) = .empty;
+            if (n == 0 and r == 1) {
+                keys.append(a, cx.make(kete.Expanded{ .child = cx.make(kete.Align{ .child = cx.make(kete.Text{ .text = "The emoji you use most show here", .style = .{ .size = 18 * s, .color = t.on_surface_variant }, .wrap = false }) }) })) catch {};
+            } else for (0..emoji_mod.columns) |c| {
+                const i = r * emoji_mod.columns + c;
+                keys.append(a, if (i < n) keyButton(cx, o, .{ .emoji = .{ .text = shown[i], .slot = @intCast(i) } }, shown[i], null, 1, false) else spacer(cx, 1)) catch {};
+            }
+            grid.append(a, rowHeight(cx, keys.items, emoji_h, g)) catch {};
+        }
+    }
+
+    const paged = e.pages() > 1;
+    var last: std.ArrayList(kete.Widget) = .empty;
+    last.appendSlice(a, &.{
+        keyButton(cx, o, .{ .page = .letters }, "ABC", null, 1.5, false),
+        if (paged and !e.choosing_tone) keyButton(cx, o, .{ .turn = false }, null, .chevron_left, 1, false) else spacer(cx, 1),
+        keyButton(cx, o, .{ .text = " " }, null, .space_bar, if (o.always) 3 else 2, false),
+        if (paged and !e.choosing_tone) keyButton(cx, o, .{ .turn = true }, null, .chevron_right, 1, false) else spacer(cx, 1),
+        keyButton(cx, o, .{ .key = key_backspace }, null, .backspace, 1.5, false),
+        keyButton(cx, o, .{ .key = key_enter }, null, .keyboard_return, 1.5, false),
+    }) catch {};
+    if (!o.always) last.append(a, keyButton(cx, o, .hide, null, .keyboard_hide, 1, false)) catch {};
+
+    return cx.make(kete.RoundedBox{
+        .color = t.surface_container,
+        .child = cx.make(kete.Padding{ .padding = .all(Osk.pad * s), .child = cx.make(kete.Column{
+            .cross_axis_alignment = .stretch,
+            .spacing = g,
+            .children = cx.makeAll(.{
+                rowHeight(cx, tabs.items, tab_h, g),
+                kete.Column{ .cross_axis_alignment = .stretch, .spacing = g / 2, .children = grid.items },
+                rowHeight(cx, last.items, k, g),
+            }),
+        }) }),
+    });
+}
+
+/// A row of keys `height` high, `gap` apart.
+fn rowHeight(cx: *kete.BuildContext, keys: []const kete.Widget, height: f32, gap: f32) kete.Widget {
+    return cx.make(kete.SizedBox{ .height = height, .child = cx.make(kete.Row{
+        .cross_axis_alignment = .stretch,
+        .spacing = gap,
+        .children = cx.arena.dupe(kete.Widget, keys) catch &.{},
+    }) });
+}
 
 fn row_of(cx: *kete.BuildContext, keys: []const kete.Widget, s: f32) kete.Widget {
     return cx.make(kete.SizedBox{ .height = Osk.key_height * s, .child = cx.make(kete.Row{
@@ -402,7 +551,7 @@ test "each key its own light, on every page" {
     var o: Osk = .{ .panel = undefined };
     var ids: std.ArrayList(u32) = .empty;
     defer ids.deinit(testing.allocator);
-    for ([_][]const []const []const u8{ &letter_rows, &symbol_rows, &more_symbol_rows, &emoji_rows }) |rows| for (rows) |row| for (row) |ch| {
+    for ([_][]const []const []const u8{ &letter_rows, &symbol_rows, &more_symbol_rows }) |rows| for (rows) |row| for (row) |ch| {
         const id = (Key.What{ .text = ch }).id();
         try testing.expect(std.mem.indexOfScalar(u32, ids.items, id) == null);
         try ids.append(testing.allocator, id);

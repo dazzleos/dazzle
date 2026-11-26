@@ -2582,6 +2582,7 @@ test {
     _ = @import("notice.zig");
     _ = @import("lock.zig");
     _ = @import("power.zig");
+    _ = @import("emoji.zig");
     _ = @import("osk.zig");
     _ = @import("gesture.zig");
     _ = @import("kete_panel.zig");
