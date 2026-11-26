@@ -9,8 +9,9 @@
 //! Its keys are kete buttons on its panel, given the shell's touches and
 //! pointer. What they type the shell sends the app (`take`): letters and
 //! the rest as the text input's text (the app puts it in, whatever its
-//! keyboard's layout), Backspace, Enter and Tab as keys. Two pages: the
-//! letters (with Shift, for one letter), and the numbers and symbols.
+//! keyboard's layout), Backspace, Enter and Tab as keys. Three pages: the
+//! letters (with Shift, for one letter), the numbers and symbols, and
+//! emoji (each one character).
 
 const std = @import("std");
 const kete = @import("kete");
@@ -35,7 +36,7 @@ pub const Typed = union(enum) {
 // Its keys' icons, chosen as they are made (for kete's icon font, which
 // has only those its scan finds).
 comptime {
-    _ = &[_]kete.IconName{ .keyboard_capslock, .arrow_upward, .backspace, .space_bar, .keyboard_return, .keyboard_hide };
+    _ = &[_]kete.IconName{ .keyboard_capslock, .arrow_upward, .backspace, .space_bar, .keyboard_return, .keyboard_hide, .emoji_emotions };
 }
 
 /// Linux key codes it sends.
@@ -43,7 +44,7 @@ pub const key_backspace = 14;
 pub const key_tab = 15;
 pub const key_enter = 28;
 
-const Page = enum { letters, symbols };
+const Page = enum { letters, symbols, emoji };
 
 /// Slow at the start and the end (as the dock's slide).
 fn easeInOut(t: f32) f32 {
@@ -231,6 +232,7 @@ const Key = struct {
         key: u32,
         shift,
         page,
+        emoji,
         hide,
 
         /// Which key it is (never 0), whichever page it is on.
@@ -241,6 +243,7 @@ const Key = struct {
                 .shift => 1,
                 .page => 2,
                 .hide => 3,
+                .emoji => 4,
             };
         }
     };
@@ -253,6 +256,11 @@ const Key = struct {
             .key => |code| o.push(.{ .key = code }),
             .shift => {
                 o.shift = !o.shift;
+                o.changed = true;
+            },
+            .emoji => {
+                o.page = .emoji;
+                o.shift = false;
                 o.changed = true;
             },
             .page => {
@@ -273,6 +281,12 @@ const letter_rows = [_][]const []const u8{
     &.{ "a", "s", "d", "f", "g", "h", "j", "k", "l" },
     &.{ "z", "x", "c", "v", "b", "n", "m" },
 };
+/// Emoji, each one character (a key types up to four bytes).
+const emoji_rows = [_][]const []const u8{
+    &.{ "😀", "😂", "😊", "😍", "😘", "😉", "😎", "🤔", "😢", "😭" },
+    &.{ "😅", "🙂", "🙃", "😴", "😡", "🥳", "🤗", "😮", "👍", "👎" },
+    &.{ "👏", "🙏", "💪", "👋", "🎉", "🔥", "💯" },
+};
 const symbol_rows = [_][]const []const u8{
     &.{ "1", "2", "3", "4", "5", "6", "7", "8", "9", "0" },
     &.{ "@", "#", "$", "%", "&", "-", "+", "(", ")", "/" },
@@ -290,7 +304,11 @@ const View = struct {
         const t = cx.theme();
         const a = cx.arena;
         const s = o.scale;
-        const rows = if (o.page == .letters) letter_rows else symbol_rows;
+        const rows = switch (o.page) {
+            .letters => letter_rows,
+            .symbols => symbol_rows,
+            .emoji => emoji_rows,
+        };
         var lines: std.ArrayList(kete.Widget) = .empty;
         for (rows, 0..) |row, i| {
             var keys: std.ArrayList(kete.Widget) = .empty;
@@ -310,8 +328,9 @@ const View = struct {
         var last: std.ArrayList(kete.Widget) = .empty;
         last.appendSlice(a, &.{
             keyButton(cx, o, .page, if (o.page == .letters) "?123" else "ABC", null, 1.5, false),
+            if (o.page == .emoji) spacer(cx, 1) else keyButton(cx, o, .emoji, null, .emoji_emotions, 1, false),
             keyButton(cx, o, .{ .text = "," }, ",", null, 1, false),
-            keyButton(cx, o, .{ .text = " " }, null, .space_bar, if (o.always) 5 else 4, false),
+            keyButton(cx, o, .{ .text = " " }, null, .space_bar, if (o.always) 4 else 3, false),
             keyButton(cx, o, .{ .text = "." }, ".", null, 1, false),
             keyButton(cx, o, .{ .key = key_enter }, null, .keyboard_return, 1.5, false),
         }) catch {};
