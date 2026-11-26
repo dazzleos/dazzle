@@ -1055,14 +1055,14 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                             pointer.x = std.math.clamp(pointer.x + @as(f64, @floatFromInt(d[0])), 0, pointer.max_x);
                             pointer.y = std.math.clamp(pointer.y + @as(f64, @floatFromInt(d[1])), 0, pointer.max_y);
                             pointer.moved = true;
-                            power.panel.pointerMotion(power_mod.Menu.local(pointer.x, pointer.y, renderer.width, renderer.height));
+                            power.panel.pointerMotion(power.local(pointer.x, pointer.y, renderer.width, renderer.height));
                         },
                         .button => |b| if (b.code == evdev.btn_left) {
-                            power.panel.pointerButton(power_mod.Menu.local(pointer.x, pointer.y, renderer.width, renderer.height), b.pressed);
+                            power.panel.pointerButton(power.local(pointer.x, pointer.y, renderer.width, renderer.height), b.pressed);
                         },
                         .touch => |t| if (t.kind != .motion) {
                             const on = renderer.turn.toScreen(t.x, t.y);
-                            const at = power_mod.Menu.local(on[0] * @as(f64, @floatFromInt(renderer.width - 1)), on[1] * @as(f64, @floatFromInt(renderer.height - 1)), renderer.width, renderer.height);
+                            const at = power.local(on[0] * @as(f64, @floatFromInt(renderer.width - 1)), on[1] * @as(f64, @floatFromInt(renderer.height - 1)), renderer.width, renderer.height);
                             power.panel.pointerMotion(at);
                             power.panel.pointerButton(at, t.kind == .down);
                         },
@@ -2318,7 +2318,7 @@ fn applyParental(p: sys.system.Parental, have: *sys.system.Parental, locked: *bo
 fn drawPower(power: *power_mod.Menu, renderer: *render.Renderer) void {
     const picture = power.draw(sys.nowNs());
     if (picture.isEmpty()) return;
-    const at = power_mod.Menu.place(renderer.width, renderer.height);
+    const at = power.place(renderer.width, renderer.height);
     renderer.setPanelAt(.power, picture, at[0], at[1]);
 }
 

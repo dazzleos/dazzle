@@ -9,10 +9,6 @@ const kete = @import("kete");
 const locale = @import("locale");
 const kete_panel = @import("kete_panel.zig");
 
-/// Its size (it is drawn as a panel, in the middle of the screen).
-pub const width = 460;
-pub const height = 230;
-
 pub const Choice = enum { power_off, restart, cancel };
 
 /// What was picked in it, for the shell to do.
@@ -68,6 +64,9 @@ pub const Menu = struct {
     panel: *kete_panel.Panel,
     shown: bool = false,
     picked: Picked = .{},
+    /// Its size, as its widgets want it (it is drawn as a panel, in the
+    /// middle of the screen).
+    size: [2]u32 = .{ 0, 0 },
 
     pub fn open(m: *Menu) void {
         m.shown = true;
@@ -86,19 +85,21 @@ pub const Menu = struct {
         return m.picked.choice;
     }
 
-    /// Its picture, `width` by `height`.
+    /// Its picture, as big as it wants.
     pub fn draw(m: *Menu, now_ns: u64) kete_panel.Picture {
-        return m.panel.draw(width, height, now_ns, View{ .picked = &m.picked });
+        const view: View = .{ .picked = &m.picked };
+        m.size = m.panel.naturalSize(view);
+        return m.panel.draw(m.size[0], m.size[1], now_ns, view);
     }
 
     /// In the middle of a screen `w` by `h`.
-    pub fn place(w: u32, h: u32) [2]i32 {
-        return .{ @divTrunc(@as(i32, @intCast(w)) - width, 2), @divTrunc(@as(i32, @intCast(h)) - height, 2) };
+    pub fn place(m: *const Menu, w: u32, h: u32) [2]i32 {
+        return .{ @divTrunc(@as(i32, @intCast(w)) - @as(i32, @intCast(m.size[0])), 2), @divTrunc(@as(i32, @intCast(h)) - @as(i32, @intCast(m.size[1])), 2) };
     }
 
     /// Where (`x`, `y`) on a screen `w` by `h` is in it.
-    pub fn local(x: f64, y: f64, w: u32, h: u32) [2]f32 {
-        const at = place(w, h);
+    pub fn local(m: *const Menu, x: f64, y: f64, w: u32, h: u32) [2]f32 {
+        const at = m.place(w, h);
         return .{ @floatCast(x - @as(f64, @floatFromInt(at[0]))), @floatCast(y - @as(f64, @floatFromInt(at[1]))) };
     }
 };
