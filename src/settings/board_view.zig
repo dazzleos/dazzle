@@ -278,9 +278,11 @@ fn appendDetails(self: *const Settings, b: Builder, drawing: *const board.Board,
         .wireless, .wireless_can => {
             const adapter = if (self.manager) |r| r.adapter else null;
             items.append(a, b.item("Wi-Fi", if (adapter) |ad| (if (ad.up) "On" else "Off") else "Off")) catch {};
+            if (adapter) |ad| items.append(a, b.item("MAC address", cx.fmt("{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}", .{ ad.mac[0], ad.mac[1], ad.mac[2], ad.mac[3], ad.mac[4], ad.mac[5] }))) catch {};
+            // Bluetooth apart.
+            items.append(a, cx.make(kete.SizedBox{ .height = 8 })) catch {};
             items.append(a, b.item("Bluetooth", if (h.bluetooth) |on| (if (on) "On" else "Off") else "Off")) catch {};
-            if (h.bluetooth_address) |ad| items.append(a, b.item("Bluetooth address", cx.fmt("{X:0>2}:{X:0>2}:{X:0>2}:{X:0>2}:{X:0>2}:{X:0>2}", .{ ad[0], ad[1], ad[2], ad[3], ad[4], ad[5] }))) catch {};
-            if (adapter) |ad| items.append(a, b.item("Wi-Fi MAC address", cx.fmt("{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}", .{ ad.mac[0], ad.mac[1], ad.mac[2], ad.mac[3], ad.mac[4], ad.mac[5] }))) catch {};
+            if (h.bluetooth_address) |ad| items.append(a, b.item("MAC address", cx.fmt("{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}", .{ ad[0], ad[1], ad[2], ad[3], ad[4], ad[5] }))) catch {};
         },
         else => {},
     }

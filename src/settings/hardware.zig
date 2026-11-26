@@ -95,7 +95,8 @@ pub const Hardware = struct {
     card: CardDetails = .{},
     /// Null: there is no Bluetooth.
     bluetooth: ?bool = null,
-    /// Bluetooth's address, as it is written (while it is running).
+    /// Bluetooth's address, as it is written (from the device tree, or
+    /// while it runs).
     bluetooth_address: ?[6]u8 = null,
     /// How fast the processor can go, in MHz (0: not known).
     cpu_max_mhz: u32 = 0,
@@ -165,7 +166,7 @@ pub fn read(output: []const u8) Hardware {
     var bt: Names = .{};
     bt.list("/sys/class/bluetooth");
     h.bluetooth = bt.len > 0;
-    if (h.bluetooth.?) h.bluetooth_address = bluetoothAddress();
+    h.bluetooth_address = (if (h.bluetooth.?) bluetoothAddress() else null) orelse firmwareBluetoothAddress();
     if (sys.readFile("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq", &buf)) |khz| h.cpu_max_mhz = (std.fmt.parseInt(u32, std.mem.trim(u8, khz, " \n"), 10) catch 0) / 1000;
     return h;
 }
@@ -202,6 +203,20 @@ const Names = struct {
         return n.out[0..n.len];
     }
 };
+
+/// Bluetooth's address as the firmware puts it in the device tree (the
+/// bluetooth alias's node's local-bd-address), running or not.
+fn firmwareBluetoothAddress() ?[6]u8 {
+    var alias_buf: [96]u8 = undefined;
+    const alias = std.mem.trimEnd(u8, sys.readFile("/proc/device-tree/aliases/bluetooth", &alias_buf) orelse return null, "\x00\n");
+    var path_buf: [160]u8 = undefined;
+    const path = std.fmt.bufPrintSentinel(&path_buf, "/proc/device-tree{s}/local-bd-address", .{alias}, 0) catch return null;
+    var raw_buf: [16]u8 = undefined;
+    const raw = sys.readFile(path, &raw_buf) orelse return null;
+    if (raw.len != 6 or std.mem.allEqual(u8, raw, 0)) return null;
+    // Least significant byte first.
+    return .{ raw[5], raw[4], raw[3], raw[2], raw[1], raw[0] };
+}
 
 /// The first Bluetooth adapter's address (HCIGETDEVINFO on an HCI socket),
 /// in the order it is written.
