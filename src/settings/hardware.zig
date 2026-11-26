@@ -95,6 +95,10 @@ pub const Hardware = struct {
     card: CardDetails = .{},
     /// Null: there is no Bluetooth.
     bluetooth: ?bool = null,
+    /// Bluetooth's address, as it is written (while it is running).
+    bluetooth_address: ?[6]u8 = null,
+    /// How fast the processor can go, in MHz (0: not known).
+    cpu_max_mhz: u32 = 0,
 };
 
 /// Reads it all: from sysfs (the displays, their EDIDs, the camera's
@@ -161,6 +165,8 @@ pub fn read(output: []const u8) Hardware {
     var bt: Names = .{};
     bt.list("/sys/class/bluetooth");
     h.bluetooth = bt.len > 0;
+    if (h.bluetooth.?) h.bluetooth_address = bluetoothAddress();
+    if (sys.readFile("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq", &buf)) |khz| h.cpu_max_mhz = (std.fmt.parseInt(u32, std.mem.trim(u8, khz, " \n"), 10) catch 0) / 1000;
     return h;
 }
 
@@ -196,6 +202,23 @@ const Names = struct {
         return n.out[0..n.len];
     }
 };
+
+/// The first Bluetooth adapter's address (HCIGETDEVINFO on an HCI socket),
+/// in the order it is written.
+fn bluetoothAddress() ?[6]u8 {
+    const af_bluetooth = 31;
+    const btproto_hci = 1;
+    const fd: linux.fd_t = @intCast(sys.check(linux.socket(af_bluetooth, linux.SOCK.RAW | linux.SOCK.CLOEXEC, btproto_hci)) catch return null);
+    defer sys.close(fd);
+    // struct hci_dev_info: dev_id, then its name (8 bytes), then its
+    // address (least significant byte first).
+    var dev_info: [128]u8 align(4) = @splat(0);
+    const hcigetdevinfo = linux.IOCTL.IOR('H', 211, c_int);
+    if (linux.errno(linux.ioctl(fd, hcigetdevinfo, @intFromPtr(&dev_info))) != .SUCCESS) return null;
+    const raw = dev_info[10..16];
+    if (std.mem.allEqual(u8, raw, 0)) return null;
+    return .{ raw[5], raw[4], raw[3], raw[2], raw[1], raw[0] };
+}
 
 /// Whether ALSA card `index` is playing (its first playback stream
 /// running).

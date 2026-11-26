@@ -93,15 +93,9 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
         cx.make(kete.Text{ .text = if (part.chip.len > 0) kete_vc4.textf(cx, "{s}: {s}", .{ about.title, part.chip }) else about.title, .style = .{ .size = 20, .color = t.on_surface } }),
     }) catch {};
     // A connector says what is connected to it instead.
-    if (!isConnector(part.kind)) rows.append(a, cx.make(kete.Text{ .text = cx.fmt("{s}{s}", .{ about.about, if (part.underside) " (underneath the board)" else "" }), .style = .{ .size = 16, .color = t.on_surface_variant } })) catch {};
-    // What it is doing now, where that is known.
-    const u = self.usage;
-    var b1: [32]u8 = undefined;
-    var b2: [32]u8 = undefined;
+    if (!saysMore(part.kind)) rows.append(a, cx.make(kete.Text{ .text = cx.fmt("{s}{s}", .{ about.about, if (part.underside) " (underneath the board)" else "" }), .style = .{ .size = 16, .color = t.on_surface_variant } })) catch {};
+    // Whether anything is connected, where that is known.
     const now: ?[]const u8 = switch (part.kind) {
-        .soc => if (u.cpu_busy) |busy| (if (u.temperature) |c| kete_vc4.textf(cx, "{d:.0}% busy, at {s}", .{ busy, locale.formatTemperature(&b1, c) }) else kete_vc4.textf(cx, "{d:.0}% busy", .{busy})) else null,
-        .soc_with_ram => if (u.cpu_busy) |busy| kete_vc4.textf(cx, "{d:.0}% busy; {s} of {s} of memory in use", .{ busy, info.formatBytes(&b1, u.memUsed()), info.formatBytes(&b2, u.mem_total) }) else null,
-        .ram => kete_vc4.textf(cx, "{s} of {s} in use", .{ info.formatBytes(&b1, u.memUsed()), info.formatBytes(&b2, u.mem_total) }),
         .hdmi, .mini_hdmi, .micro_hdmi, .camera, .display, .camera_display, .ethernet => notConnected(self, drawing, at),
         .usb, .usb_double, .usb_otg => if (self.usb.len == 0) locale.text("Nothing is plugged in") else null,
         else => null,
@@ -168,13 +162,29 @@ fn ethernet(self: *const Settings) ?*const info.Interface {
     return null;
 }
 
-/// The connectors (whose descriptions are left out: what is connected
-/// to them is said instead).
-fn isConnector(kind: board.Kind) bool {
+/// The parts that say what they are, or what is connected to them, in
+/// place of a description.
+fn saysMore(kind: board.Kind) bool {
     return switch (kind) {
         .hdmi, .mini_hdmi, .micro_hdmi, .camera, .display, .camera_display, .ethernet, .usb, .usb_double, .usb_otg, .micro_sd, .sd => true,
+        .soc, .soc_with_ram, .ram, .wireless, .wireless_can, .gpio, .gpio_holes => true,
         else => false,
     };
+}
+
+/// A system on a chip's processor cores and graphics.
+fn socOf(chip: []const u8) ?struct { core: []const u8, graphics: []const u8 } {
+    const known = [_]struct { []const u8, []const u8, []const u8 }{
+        .{ "BCM2835", "Arm1176", "VideoCore IV" },
+        .{ "BCM2836", "Arm Cortex-A7", "VideoCore IV" },
+        .{ "BCM2837", "Arm Cortex-A53", "VideoCore IV" },
+        .{ "BCM2837B0", "Arm Cortex-A53", "VideoCore IV" },
+        .{ "RP3A0", "Arm Cortex-A53", "VideoCore IV" },
+        .{ "BCM2711", "Arm Cortex-A72", "VideoCore VI" },
+        .{ "BCM2712", "Arm Cortex-A76", "VideoCore VII" },
+    };
+    for (known) |k| if (std.mem.eql(u8, chip, k[0])) return .{ .core = k[1], .graphics = k[2] };
+    return null;
 }
 
 /// "Not connected", if nothing is.
@@ -197,7 +207,26 @@ fn appendDetails(self: *const Settings, b: Builder, drawing: *const board.Board,
     const a = cx.arena;
     const h = self.hardware;
     var items: std.ArrayList(kete.Widget) = .empty;
-    switch (drawing.parts[picked].kind) {
+    const part = &drawing.parts[picked];
+    const u = self.usage;
+    var b1: [32]u8 = undefined;
+    var b2: [32]u8 = undefined;
+    switch (part.kind) {
+        .soc, .soc_with_ram => {
+            const cores = self.system.cores;
+            if (socOf(part.chip)) |soc| {
+                items.append(a, b.item("Processor", if (cores > 1) cx.fmt("{d} \u{d7} {s}", .{ cores, soc.core }) else soc.core)) catch {};
+                if (h.cpu_max_mhz > 0) items.append(a, b.item("Speed", if (h.cpu_max_mhz >= 1000) cx.fmt("Up to {d:.1} GHz", .{@as(f32, @floatFromInt(h.cpu_max_mhz)) / 1000}) else cx.fmt("Up to {d} MHz", .{h.cpu_max_mhz}))) catch {};
+                items.append(a, b.item("Graphics", soc.graphics)) catch {};
+            }
+            if (u.cpu_busy) |busy| items.append(a, b.item("Busy", cx.fmt("{d:.0}%", .{busy}))) catch {};
+            if (u.temperature) |c| items.append(a, b.item("Temperature", cx.fmt("{s}", .{locale.formatTemperature(&b1, c)}))) catch {};
+            if (part.kind == .soc_with_ram and u.mem_total > 0) items.append(a, b.item("Memory", cx.fmt("{s} of {s} in use", .{ info.formatBytes(&b1, u.memUsed()), info.formatBytes(&b2, u.mem_total) }))) catch {};
+        },
+        .ram => if (u.mem_total > 0) {
+            items.append(a, b.item("Size", cx.fmt("{s}", .{info.formatBytes(&b1, u.mem_total)}))) catch {};
+            items.append(a, b.item("In use", cx.fmt("{s}", .{info.formatBytes(&b2, u.memUsed())}))) catch {};
+        },
         .hdmi, .mini_hdmi, .micro_hdmi => {
             const port = hdmiPort(drawing, picked);
             const m = &h.hdmi[port];
@@ -208,12 +237,13 @@ fn appendDetails(self: *const Settings, b: Builder, drawing: *const board.Board,
             if (size > 0) items.append(a, b.item("Size", cx.fmt("{d} inches", .{size}))) catch {};
             if (m.year > 0) items.append(a, b.item("Made", cx.fmt("{d}", .{m.year}))) catch {};
             if (m.width > 0) items.append(a, b.item("Best resolution", cx.fmt("{d} \u{d7} {d} at {d} Hz", .{ m.width, m.height, m.refresh_hz }))) catch {};
-            items.append(a, b.item("Sound", switch (h.hdmi_sound[port]) {
-                .none => if (m.speakers) "Its speakers are not used" else "It has no speakers",
-                .available => "Its speakers can be chosen in Sound",
-                .chosen => "Sound goes to its speakers",
-                .playing => "Sound is playing through its speakers",
-            })) catch {};
+            // Only a monitor that takes sound: whether it goes there.
+            if (m.speakers) if (switch (h.hdmi_sound[port]) {
+                .none => null,
+                .available => "Not chosen in Sound",
+                .chosen => "Chosen in Sound",
+                .playing => "Playing",
+            }) |text| items.append(a, b.item("Sound", text)) catch {};
         },
         .camera, .display, .camera_display => {
             const kind = drawing.parts[picked].kind;
@@ -249,7 +279,8 @@ fn appendDetails(self: *const Settings, b: Builder, drawing: *const board.Board,
             const adapter = if (self.manager) |r| r.adapter else null;
             items.append(a, b.item("Wi-Fi", if (adapter) |ad| (if (ad.up) "On" else "Off") else "Off")) catch {};
             items.append(a, b.item("Bluetooth", if (h.bluetooth) |on| (if (on) "On" else "Off") else "Off")) catch {};
-            if (adapter) |ad| items.append(a, b.item("MAC address", cx.fmt("{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}", .{ ad.mac[0], ad.mac[1], ad.mac[2], ad.mac[3], ad.mac[4], ad.mac[5] }))) catch {};
+            if (h.bluetooth_address) |ad| items.append(a, b.item("Bluetooth address", cx.fmt("{X:0>2}:{X:0>2}:{X:0>2}:{X:0>2}:{X:0>2}:{X:0>2}", .{ ad[0], ad[1], ad[2], ad[3], ad[4], ad[5] }))) catch {};
+            if (adapter) |ad| items.append(a, b.item("Wi-Fi MAC address", cx.fmt("{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}", .{ ad.mac[0], ad.mac[1], ad.mac[2], ad.mac[3], ad.mac[4], ad.mac[5] }))) catch {};
         },
         else => {},
     }
@@ -753,6 +784,7 @@ test "the board, drawn: picking a part says what it is" {
     var d = view.sample();
     const wifi = view.sampleWifi();
     d.sys.model = .of("Raspberry Pi 3 Model B Plus Rev 1.3");
+    d.sys.cores = 4;
     var n: u64 = 0;
     const draw = struct {
         fn frame(uu: *kete.ui.WindowUi, dd: anytype, w: *const info.manager.Report, nn: *u64, size: [2]u32) void {
@@ -765,7 +797,10 @@ test "the board, drawn: picking a part says what it is" {
     draw(u, &d, &wifi, &n, .{ 1600, 900 });
     // The processor to begin with.
     try testing.expect(view.findText(u.root.?, "Processor and graphics: BCM2837B0") != null);
-    try testing.expect(view.findText(u.root.?, "23% busy, at 48.3 °C") != null);
+    try testing.expect(view.findText(u.root.?, "4 \u{d7} Arm Cortex-A53") != null);
+    try testing.expect(view.findText(u.root.?, "VideoCore IV") != null);
+    try testing.expect(view.findText(u.root.?, "23%") != null);
+    try testing.expect(view.findText(u.root.?, "48.3 °C") != null);
 
     // Clicking the Ethernet port.
     const bv = view.findType(u.root.?, BoardView).?;
