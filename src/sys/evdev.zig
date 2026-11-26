@@ -43,6 +43,9 @@ pub const key_left = 105;
 pub const key_right = 106;
 pub const key_down = 108;
 pub const key_delete = 111;
+/// The power button (the Pi 5's, the Pi 500's power key, the Pi 400's
+/// Fn+F10).
+pub const key_power = 116;
 pub const key_leftmeta = 125;
 pub const key_rightmeta = 126;
 

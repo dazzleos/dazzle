@@ -335,6 +335,8 @@ pub const PanelId = enum {
     candidates,
     /// Parental controls' lock screen, over everything.
     lock,
+    /// The power menu (see power.zig), over that too.
+    power,
     /// The on-screen keyboard, above the dock.
     keyboard,
     /// A touchscreen beside a monitor: its touchpad (see companion.zig).
@@ -554,6 +556,7 @@ pub const Renderer = struct {
         .notice = 2,
         .candidates = null,
         .lock = null,
+        .power = null,
         .keyboard = null,
         .touchpad = null,
     });

@@ -44,6 +44,7 @@ const perf_mod = @import("perf.zig");
 const quick_mod = @import("quick.zig");
 const notice_mod = @import("notice.zig");
 const lock_mod = @import("lock.zig");
+const power_mod = @import("power.zig");
 const osk_mod = @import("osk.zig");
 const companion_mod = @import("companion.zig");
 const gesture = @import("gesture.zig");
@@ -202,6 +203,8 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
     // computer is locked, the lock screen in place of the windows and the
     // dock; before then, warnings as time runs out.
     var lock: lock_mod.Screen = .{ .panel = try kit.panel() };
+    // The power menu: the power button, or the dock's, shows it.
+    var power: power_mod.Menu = .{ .panel = try kit.panel() };
     // The input method (emoji, pinyin, romaji), for the app with the
     // keyboard: it gets each key first, and its candidates show by the
     // text's cursor.
@@ -784,6 +787,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                             .{ .candidates, ime.panel.? },
                             .{ .perf, perf.panel },
                             .{ .lock, lock.panel },
+                            .{ .power, power.panel },
                             .{ .keyboard, osk.panel },
                         }) catch {};
                         req.respond("200 OK", "text/plain; charset=utf-8", out.items);
@@ -1021,6 +1025,57 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                     },
                     else => {},
                 }
+                // The power button: the power menu; pressed again while it
+                // shows, the computer powers off (as Raspberry Pi's desktop
+                // does). Never the windows'.
+                if (e == .key and e.key.code == evdev.key_power) {
+                    if (e.key.pressed) {
+                        if (power.shown) {
+                            powerChoice(.power_off, &power);
+                        } else {
+                            quick.close();
+                            power.open();
+                            print("dazzle-shell: the power button: the power menu\n", .{});
+                        }
+                        drawPower(&power, &renderer);
+                        server.damaged = true;
+                        panels_damaged = true;
+                    }
+                    continue;
+                }
+                // The power menu showing: the keys and the pointer (and
+                // touches) are its; Escape closes it.
+                if (power.shown) {
+                    power.panel.setKeyboard(server.keyboard_layout);
+                    switch (e) {
+                        .key => |k| if (k.code == evdev.key_esc) {
+                            if (k.pressed) power.close();
+                        } else power.panel.key(k.code, k.pressed),
+                        .motion => |d| {
+                            pointer.x = std.math.clamp(pointer.x + @as(f64, @floatFromInt(d[0])), 0, pointer.max_x);
+                            pointer.y = std.math.clamp(pointer.y + @as(f64, @floatFromInt(d[1])), 0, pointer.max_y);
+                            pointer.moved = true;
+                            power.panel.pointerMotion(power_mod.Menu.local(pointer.x, pointer.y, renderer.width, renderer.height));
+                        },
+                        .button => |b| if (b.code == evdev.btn_left) {
+                            power.panel.pointerButton(power_mod.Menu.local(pointer.x, pointer.y, renderer.width, renderer.height), b.pressed);
+                        },
+                        .touch => |t| if (t.kind != .motion) {
+                            const on = renderer.turn.toScreen(t.x, t.y);
+                            const at = power_mod.Menu.local(on[0] * @as(f64, @floatFromInt(renderer.width - 1)), on[1] * @as(f64, @floatFromInt(renderer.height - 1)), renderer.width, renderer.height);
+                            power.panel.pointerMotion(at);
+                            power.panel.pointerButton(at, t.kind == .down);
+                        },
+                        else => {},
+                    }
+                    // What a press picked takes effect at the next frame.
+                    _ = power.draw(sys.nowNs());
+                    if (power.take()) |c| powerChoice(c, &power);
+                    if (power.shown) drawPower(&power, &renderer);
+                    server.damaged = true;
+                    panels_damaged = true;
+                    continue;
+                }
                 // Locked: the keys type the password, and the pointer moves
                 // over the lock screen and clicks in it; nothing goes to
                 // the windows.
@@ -1192,7 +1247,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                             dock_touches.set(t.id);
                             const action = quick.press(at[0], at[1]);
                             if (quick.dragging) quick_touch = t.id;
-                            quickAction(action, &quick, &dock, &renderer, apps, &server, runtime_dir, &audio_devices, &quick_dirty);
+                            quickAction(action, &quick, &dock, &renderer, apps, &server, runtime_dir, &audio_devices, &quick_dirty, &power);
                         } else if (quick.shown and !(on_dock and dock.hitStatus((dock.local(x, y) orelse continue)[0], dock.local(x, y).?[1]))) {
                             // Elsewhere, it closes (the status box toggles
                             // it, below), and that is all the touch does.
@@ -1265,7 +1320,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                             continue;
                         }
                     } else if (quick.local(pointer.x, pointer.y)) |at| {
-                        quickAction(quick.press(at[0], at[1]), &quick, &dock, &renderer, apps, &server, runtime_dir, &audio_devices, &quick_dirty);
+                        quickAction(quick.press(at[0], at[1]), &quick, &dock, &renderer, apps, &server, runtime_dir, &audio_devices, &quick_dirty, &power);
                         continue;
                     } else {
                         const on_status = if (dock_visible) if (dock.local(pointer.x, pointer.y)) |at| dock.hitStatus(at[0], at[1]) else false else false;
@@ -1585,6 +1640,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
             // screen; its tooltip goes at once.
             renderer.setPanelHidden(.dock, !dock_shown or dock.offScreen() or locked);
             renderer.setPanelHidden(.lock, !locked);
+            renderer.setPanelHidden(.power, !power.shown);
             renderer.setPanelHidden(.tooltip, locked or !dock_shown or server.fullscreenTop() or dock.slide > 0 or dock.tooltip_shown == null);
             renderer.setPanelHidden(.perf, !perf_shown);
             renderer.setPanelHidden(.quick, !quick.shown);
@@ -1596,7 +1652,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
             // is composited.
             var on_screen: ?bool = null;
             // Not while the dock slides: it would leave its band.
-            if (!locked) if (top) |t| if (!dock.sliding()) if (server.scanoutBuffer(t)) |b| {
+            if (!locked and !power.shown) if (top) |t| if (!dock.sliding()) if (server.scanoutBuffer(t)) |b| {
                 const at = server.windowRect(t);
                 const direct_started = sys.nowNs();
                 const shown = renderer.showDirect(b.dmabuf.?, at.x, at.y, .{ at.width, at.height });
@@ -2105,6 +2161,7 @@ fn quickAction(
     runtime_dir: ?[:0]const u8,
     devices: *const audio.Devices,
     quick_dirty: *bool,
+    power: *power_mod.Menu,
 ) void {
     switch (action) {
         .none => {},
@@ -2121,11 +2178,11 @@ fn quickAction(
                 }
             };
         },
-        .power_off => {
-            print("dazzle-shell: powering off\n", .{});
-            if (sys.system.ask("power_off\n", 3000) == null) print(sys.log_warning ++ "dazzle-shell: cannot power off: the system did not answer\n", .{});
-            quick.power_armed = false;
+        .power_menu => {
+            quick.close();
             quick_dirty.* = true;
+            power.open();
+            drawPower(power, renderer);
         },
     }
 }
@@ -2255,6 +2312,28 @@ fn applyParental(p: sys.system.Parental, have: *sys.system.Parental, locked: *bo
     if (!changed and !locked.*) return false;
     if (locked.*) drawLock(lock, p, renderer);
     return true;
+}
+
+/// Draws the power menu, in the middle of the screen.
+fn drawPower(power: *power_mod.Menu, renderer: *render.Renderer) void {
+    const picture = power.draw(sys.nowNs());
+    if (picture.isEmpty()) return;
+    const at = power_mod.Menu.place(renderer.width, renderer.height);
+    renderer.setPanelAt(.power, picture, at[0], at[1]);
+}
+
+/// Does what was picked in the power menu: the system manager powers off
+/// or restarts (as Raspberry Pi OS does, the kernel's power-off handler
+/// ends it: see init's shutdown.zig); or it closes.
+fn powerChoice(choice: power_mod.Choice, power: *power_mod.Menu) void {
+    power.close();
+    const req: []const u8 = switch (choice) {
+        .cancel => return,
+        .power_off => "power_off\n",
+        .restart => "restart\n",
+    };
+    print("dazzle-shell: {s}\n", .{if (choice == .power_off) "powering off" else "restarting"});
+    if (sys.system.ask(req, 3000) == null) print(sys.log_warning ++ "dazzle-shell: cannot {s}: the system did not answer\n", .{if (choice == .power_off) "power off" else "restart"});
 }
 
 fn drawLock(lock: *lock_mod.Screen, p: sys.system.Parental, renderer: *render.Renderer) void {
@@ -2500,6 +2579,7 @@ test {
     _ = @import("quick.zig");
     _ = @import("notice.zig");
     _ = @import("lock.zig");
+    _ = @import("power.zig");
     _ = @import("osk.zig");
     _ = @import("gesture.zig");
     _ = @import("kete_panel.zig");

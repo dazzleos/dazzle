@@ -1,8 +1,8 @@
 //! The dock's quick settings: a popup above the status box (shown when it
 //! is clicked) with the volume (a slider, and its icon to mute), how the
 //! computer is connected, whether there are updates (clicked: Settings'
-//! Software page), and a button to power the computer off (pressed twice:
-//! the first press asks to be sure). In a see-through box like the dock's.
+//! Software page), and a button for the power menu (see power.zig). In a
+//! see-through box like the dock's.
 
 const std = @import("std");
 const sys = @import("sys");
@@ -147,8 +147,6 @@ const gap_above_dock = 8;
 
 /// The slider's colour.
 const accent = 0xff3f7ee8;
-/// The power button, pressed once.
-const armed_color = 0xffd04050;
 
 pub const Quick = struct {
     /// Where it is drawn (kete's).
@@ -174,9 +172,6 @@ pub const Quick = struct {
     hover: ?Part = null,
     /// The slider is being dragged.
     dragging: bool = false,
-    /// The power button was pressed once: pressed again, the computer
-    /// turns off.
-    power_armed: bool = false,
 
     pub fn init(kit: *kete_panel.Kit, scale: f32) !Quick {
         const width: u32 = @intFromFloat(@round(box_width * scale));
@@ -317,28 +312,20 @@ pub const Quick = struct {
         volume: dock.VolumeStatus,
         /// Settings' Software page opens, and the popup closes.
         updates,
-        /// The computer is to be powered off.
-        power_off,
+        /// The power menu opens, and the popup closes.
+        power_menu,
     };
 
     /// A press at (`x`, `y`) in it.
     pub fn press(q: *Quick, x: f64, y: f64) Action {
-        const part = q.hit(x, y);
-        // Anything else pressed, the power button is not pressed twice.
-        const disarmed = q.power_armed and part != .power;
-        if (disarmed) q.power_armed = false;
-        switch (part orelse return if (disarmed) .redraw else .none) {
+        switch (q.hit(x, y) orelse return .none) {
             .mute => return .{ .volume = .{ .volume = q.volume.volume, .muted = !q.volume.muted } },
             .slider => {
                 q.dragging = true;
                 return .{ .volume = .{ .volume = q.volumeAt(x), .muted = false } };
             },
             .updates => return .updates,
-            .power => {
-                if (q.power_armed) return .power_off;
-                q.power_armed = true;
-                return .redraw;
-            },
+            .power => return .power_menu,
         }
     }
 
@@ -371,7 +358,6 @@ pub const Quick = struct {
         q.shown = false;
         q.hover = null;
         q.dragging = false;
-        q.power_armed = false;
     }
 
     pub fn picture(q: *const Quick) kete_panel.Picture {
@@ -453,15 +439,15 @@ pub const Quick = struct {
                 .radius = .all(10 * s),
                 .child = cx.make(kete.Padding{ .padding = .{ .left = pad * s / 2, .right = pad * s / 2 }, .child = iconRow(cx, s, .system_update_alt, q.updates.text(), argb(c.dot), .chevron_right) }),
             }))) catch {};
-            // Turning the computer off: pressed once, it asks to be sure.
+            // The power menu.
             const pw = l.power;
-            const color: u32 = if (q.power_armed) 0xffffffff else c.dot;
+            const color: u32 = c.dot;
             layers.append(a, placed(cx, pw.x, pw.y, pw.w, pw.h, cx.make(kete.RoundedBox{
-                .color = argb(if (q.power_armed) armed_color else if (q.hover == .power) c.status_border else c.hover_background),
+                .color = argb(if (q.hover == .power) c.status_border else c.hover_background),
                 .radius = .all(12 * s),
                 .child = cx.make(kete.Align{ .child = cx.make(kete.Row{ .fill = false, .cross_axis_alignment = .center, .spacing = 8 * s, .children = a.dupe(kete.Widget, &.{
                     cx.make(kete.Icon{ .icon = .power_settings_new, .size = @round(small_icon * s), .color = argb(color) }),
-                    cx.make(kete.Text{ .text = if (q.power_armed) locale.text("Click again to power off") else locale.text("Power off"), .style = .{ .size = @round(text_size * s), .color = argb(color) }, .wrap = false }),
+                    cx.make(kete.Text{ .text = locale.text("Power off"), .style = .{ .size = @round(text_size * s), .color = argb(color) }, .wrap = false }),
                 }) catch &.{} }) }),
             }))) catch {};
             return cx.make(kete.Overlay{ .children = layers.items });
@@ -625,7 +611,7 @@ test "the popup sits above the status box, and its parts take clicks" {
     try testing.expectEqual(dock.Theme.dark.colors().hover_background, pic[py * q.width + px]);
 }
 
-test "pressing the popup's parts mutes, drags the slider, and asks twice before powering off" {
+test "pressing the popup's parts mutes, drags the slider, and opens the power menu" {
     const kit = try kete_panel.Kit.create(testing.allocator, testing.io, @embedFile("FiraSans-Regular.ttf"), null, &.{});
     defer kit.destroy();
     var q = try Quick.init(kit, 1);
@@ -646,16 +632,7 @@ test "pressing the popup's parts mutes, drags the slider, and asks twice before 
     try testing.expect(q.drag(slider.x) == null);
     // Updates: Settings.
     try testing.expect(q.press(l.updates.?.x + 5, l.updates.?.y + 5) == .updates);
-    // Power: once to ask, again to power off; anything between, and it
-    // asks again.
-    const px = l.power.x + 5;
-    const py = l.power.y + 5;
-    try testing.expect(q.press(px, py) == .redraw);
-    try testing.expect(q.power_armed);
-    try testing.expect(q.press(5, 2) == .redraw);
-    try testing.expect(!q.power_armed);
-    try testing.expect(q.press(px, py) == .redraw);
-    try testing.expect(q.press(px, py) == .power_off);
-    q.close();
-    try testing.expect(!q.power_armed and !q.shown);
+    // Power: the power menu.
+    try testing.expect(q.press(l.power.x + 5, l.power.y + 5) == .power_menu);
+    try testing.expect(q.press(5, 2) == .none);
 }
