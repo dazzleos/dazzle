@@ -124,6 +124,8 @@ pub const Board = struct {
                 i -= 1;
                 const r = b.parts[i].rect;
                 if (b.parts[i].underside != underside) continue;
+                // Nothing to say about the power chip.
+                if (b.parts[i].kind == .pmic) continue;
                 if (p[0] >= r.x and p[0] < r.x + r.w and p[1] >= r.y and p[1] < r.y + r.h) return i;
             }
         }

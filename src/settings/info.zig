@@ -112,15 +112,21 @@ pub const Card = struct {
         return c;
     }
 
+    /// "32 GB": its size as cards are sold (in thousands of millions of
+    /// bytes).
+    pub fn size(c: Card, buf: []u8) []const u8 {
+        const gb = @as(f64, @floatFromInt(c.bytes)) / 1e9;
+        return if (gb >= 1) std.fmt.bufPrint(buf, "{d:.0} GB", .{gb}) catch "" else std.fmt.bufPrint(buf, "{d:.0} MB", .{gb * 1000}) catch "";
+    }
+
     /// "32 GB SanDisk card": its size as cards are sold (in thousands of
     /// millions of bytes), and its maker if known.
     pub fn describe(c: Card, buf: []u8) []const u8 {
         if (c.bytes == 0) return "";
         var size_buf: [16]u8 = undefined;
-        const gb = @as(f64, @floatFromInt(c.bytes)) / 1e9;
-        const size = if (gb >= 1) std.fmt.bufPrint(&size_buf, "{d:.0} GB", .{gb}) catch "" else std.fmt.bufPrint(&size_buf, "{d:.0} MB", .{gb * 1000}) catch "";
-        if (c.maker.len == 0) return std.fmt.bufPrint(buf, "{s}", .{size}) catch "";
-        return locale.bufPrint(buf, "{s}, made by {s}", .{ size, c.maker });
+        const sized = c.size(&size_buf);
+        if (c.maker.len == 0) return std.fmt.bufPrint(buf, "{s}", .{sized}) catch "";
+        return locale.bufPrint(buf, "{s}, made by {s}", .{ sized, c.maker });
     }
 };
 

@@ -91,19 +91,18 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
             .max_height = @max(170, drawing.height * 3),
         }) }) }),
         cx.make(kete.Text{ .text = if (part.chip.len > 0) kete_vc4.textf(cx, "{s}: {s}", .{ about.title, part.chip }) else about.title, .style = .{ .size = 20, .color = t.on_surface } }),
-        cx.make(kete.Text{ .text = cx.fmt("{s}{s}", .{ about.about, if (part.underside) " (underneath the board)" else "" }), .style = .{ .size = 16, .color = t.on_surface_variant } }),
     }) catch {};
+    // A connector says what is connected to it instead.
+    if (!isConnector(part.kind)) rows.append(a, cx.make(kete.Text{ .text = cx.fmt("{s}{s}", .{ about.about, if (part.underside) " (underneath the board)" else "" }), .style = .{ .size = 16, .color = t.on_surface_variant } })) catch {};
     // What it is doing now, where that is known.
     const u = self.usage;
     var b1: [32]u8 = undefined;
     var b2: [32]u8 = undefined;
-    var card_buf: [64]u8 = undefined;
     const now: ?[]const u8 = switch (part.kind) {
         .soc => if (u.cpu_busy) |busy| (if (u.temperature) |c| kete_vc4.textf(cx, "{d:.0}% busy, at {s}", .{ busy, locale.formatTemperature(&b1, c) }) else kete_vc4.textf(cx, "{d:.0}% busy", .{busy})) else null,
         .soc_with_ram => if (u.cpu_busy) |busy| kete_vc4.textf(cx, "{d:.0}% busy; {s} of {s} of memory in use", .{ busy, info.formatBytes(&b1, u.memUsed()), info.formatBytes(&b2, u.mem_total) }) else null,
         .ram => kete_vc4.textf(cx, "{s} of {s} in use", .{ info.formatBytes(&b1, u.memUsed()), info.formatBytes(&b2, u.mem_total) }),
-        .micro_sd, .sd, .emmc => if (self.system.card.bytes > 0) cx.fmt("{s}", .{self.system.card.describe(&card_buf)}) else null,
-        .hdmi, .mini_hdmi, .micro_hdmi, .camera, .display, .camera_display, .ethernet => connectedLine(self, cx, drawing, at),
+        .hdmi, .mini_hdmi, .micro_hdmi, .camera, .display, .camera_display, .ethernet => notConnected(self, drawing, at),
         .usb, .usb_double, .usb_otg => if (self.usb.len == 0) locale.text("Nothing is plugged in") else null,
         else => null,
     };
@@ -169,23 +168,27 @@ fn ethernet(self: *const Settings) ?*const info.Interface {
     return null;
 }
 
-/// Whether a connector has something connected, and what: "Connected to
-/// a Dell U2415", "Not connected".
-fn connectedLine(self: *const Settings, cx: *kete.BuildContext, drawing: *const board.Board, picked: usize) ?[]const u8 {
-    const h = self.hardware;
-    return switch (drawing.parts[picked].kind) {
-        .hdmi, .mini_hdmi, .micro_hdmi => blk: {
-            const m = &h.hdmi[hdmiPort(drawing, picked)];
-            if (!m.connected) break :blk "Not connected";
-            if (m.model.len == 0) break :blk if (m.maker.len > 0) cx.fmt("Connected to a {s} monitor", .{m.maker.slice()}) else "Connected to a monitor";
-            break :blk cx.fmt("Connected to a {s} {s}", .{ m.maker.slice(), m.model.slice() });
-        },
-        .camera => if (h.camera.connected) (if (h.camera.module()) |m| cx.fmt("Connected to a {s}", .{m.name}) else "Connected to a camera") else "Not connected",
-        .display => if (h.panel.connected) cx.fmt("Connected to the {s}", .{if (h.panel.name.len > 0) h.panel.name.slice() else "display"}) else "Not connected",
-        .camera_display => if (h.panel.connected) cx.fmt("Connected to the {s}", .{if (h.panel.name.len > 0) h.panel.name.slice() else "display"}) else if (h.camera.connected) (if (h.camera.module()) |m| cx.fmt("Connected to a {s}", .{m.name}) else "Connected to a camera") else "Not connected",
-        .ethernet => if (ethernet(self)) |i| (if (!i.carrier) "Not connected" else if (i.speed) |s| (if (s >= 1000) cx.fmt("Connected at {d} Gb/s", .{s / 1000}) else cx.fmt("Connected at {d} Mb/s", .{s})) else "Connected") else "Not connected",
-        else => null,
+/// The connectors (whose descriptions are left out: what is connected
+/// to them is said instead).
+fn isConnector(kind: board.Kind) bool {
+    return switch (kind) {
+        .hdmi, .mini_hdmi, .micro_hdmi, .camera, .display, .camera_display, .ethernet, .usb, .usb_double, .usb_otg, .micro_sd, .sd => true,
+        else => false,
     };
+}
+
+/// "Not connected", if nothing is.
+fn notConnected(self: *const Settings, drawing: *const board.Board, picked: usize) ?[]const u8 {
+    const h = self.hardware;
+    const connected = switch (drawing.parts[picked].kind) {
+        .hdmi, .mini_hdmi, .micro_hdmi => h.hdmi[hdmiPort(drawing, picked)].connected,
+        .camera => h.camera.connected,
+        .display => h.panel.connected,
+        .camera_display => h.panel.connected or h.camera.connected,
+        .ethernet => if (ethernet(self)) |i| i.carrier else false,
+        else => true,
+    };
+    return if (connected) null else "Not connected";
 }
 
 /// The rest of what is known about what is connected, a line each.
@@ -199,8 +202,11 @@ fn appendDetails(self: *const Settings, b: Builder, drawing: *const board.Board,
             const port = hdmiPort(drawing, picked);
             const m = &h.hdmi[port];
             if (!m.connected) return;
+            if (m.maker.len > 0) items.append(a, b.item("Manufacturer", m.maker.slice())) catch {};
+            if (m.model.len > 0) items.append(a, b.item("Model", m.model.slice())) catch {};
             const size = m.inches();
-            if (size > 0 and m.year > 0) items.append(a, b.item("Screen", cx.fmt("{d} inches, made in {d}", .{ size, m.year }))) catch {} else if (size > 0) items.append(a, b.item("Screen", cx.fmt("{d} inches", .{size}))) catch {};
+            if (size > 0) items.append(a, b.item("Size", cx.fmt("{d} inches", .{size}))) catch {};
+            if (m.year > 0) items.append(a, b.item("Made", cx.fmt("{d}", .{m.year}))) catch {};
             if (m.width > 0) items.append(a, b.item("Best resolution", cx.fmt("{d} \u{d7} {d} at {d} Hz", .{ m.width, m.height, m.refresh_hz }))) catch {};
             items.append(a, b.item("Sound", switch (h.hdmi_sound[port]) {
                 .none => if (m.speakers) "Its speakers are not used" else "It has no speakers",
@@ -213,16 +219,22 @@ fn appendDetails(self: *const Settings, b: Builder, drawing: *const board.Board,
             const kind = drawing.parts[picked].kind;
             if (kind != .camera and h.panel.connected) {
                 const p = &h.panel;
+                if (p.name.len > 0) items.append(a, b.item("Model", p.name.slice())) catch {};
                 if (p.width > 0) items.append(a, b.item("Resolution", cx.fmt("{d} \u{d7} {d}", .{ p.width, p.height }))) catch {};
                 items.append(a, b.item("Touchscreen", if (p.touch) "Yes" else "No")) catch {};
             } else if (kind != .display and h.camera.connected) {
                 if (h.camera.module()) |m| {
+                    items.append(a, b.item("Model", m.name)) catch {};
                     items.append(a, b.item("Sensor", cx.fmt("{s}, {d} megapixels", .{ m.maker, m.megapixels }))) catch {};
                 } else items.append(a, b.item("Sensor", h.camera.sensor.slice())) catch {};
             }
         },
         .micro_sd, .sd => {
             const c = &h.card;
+            var size_buf: [16]u8 = undefined;
+            const card = self.system.card;
+            if (card.bytes > 0) items.append(a, b.item("Size", cx.fmt("{s}", .{card.size(&size_buf)}))) catch {};
+            if (card.maker.len > 0) items.append(a, b.item("Manufacturer", card.maker)) catch {};
             if (c.name.len > 0) items.append(a, b.item("Name", c.name.slice())) catch {};
             if (c.year > 0) items.append(a, b.item("Made", if (c.month > 0) cx.fmt("{s} {d}", .{ monthName(c.month), c.year }) else cx.fmt("{d}", .{c.year}))) catch {};
             const bytes = self.system.card.bytes;
@@ -230,6 +242,7 @@ fn appendDetails(self: *const Settings, b: Builder, drawing: *const board.Board,
         },
         .ethernet => {
             const i = ethernet(self) orelse return;
+            if (i.carrier) if (i.speed) |sp| items.append(a, b.item("Speed", if (sp >= 1000) cx.fmt("{d} Gb/s", .{sp / 1000}) else cx.fmt("{d} Mb/s", .{sp}))) catch {};
             if (i.mac.len > 0) items.append(a, b.item("MAC address", i.mac.slice())) catch {};
         },
         .wireless, .wireless_can => {
@@ -768,7 +781,9 @@ test "the board, drawn: picking a part says what it is" {
     u.pointerButton(p, .left, false);
     draw(u, &d, &wifi, &n, .{ 1600, 900 });
     try testing.expect(view.findText(u.root.?, "Ethernet") != null);
-    try testing.expect(view.findText(u.root.?, "The wired network") != null);
+    // What is connected, in place of a description.
+    try testing.expect(view.findText(u.root.?, "The wired network") == null);
+    try testing.expect(view.findText(u.root.?, "100 Mb/s") != null);
 
     // Clicking the microSD card (underneath): how big it is, and who made
     // it.
@@ -781,7 +796,8 @@ test "the board, drawn: picking a part says what it is" {
     u.pointerButton(sd_pt, .left, false);
     draw(u, &d, &wifi, &n, .{ 1600, 900 });
     try testing.expect(view.findText(u.root.?, "microSD card") != null);
-    try testing.expect(view.findText(u.root.?, "32 GB, made by SanDisk") != null);
+    try testing.expect(view.findText(u.root.?, "32 GB") != null);
+    try testing.expect(view.findText(u.root.?, "SanDisk") != null);
 
     // Clicking a USB connector shows plugged-in USB devices, or "Nothing is plugged in".
     const usb_pt: kete.Point = .{ x0 + 78 * scale, y0 + 9 * scale };
