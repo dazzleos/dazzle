@@ -223,6 +223,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         // The two share the DRM file: neither waits for its events.
         renderer.display.shared = true;
         cm.renderer.display.shared = true;
+        osk.always = true;
         osk.setScreen(cm.width(), cm.height(), 1);
         cm.layout(osk.height);
         print("dazzle-shell: the touchscreen ({d}x{d}) is the monitor's keyboard and touchpad\n", .{ cm.width(), cm.height() });
@@ -2034,6 +2035,7 @@ fn moveDisplays(gpa: std.mem.Allocator, dev: vc4.Device, kit: *kete_panel.Kit, r
         old.deinit(dev);
         parked.* = cm.*;
         companion.* = null;
+        osk.always = false;
         osk.setScreen(renderer.width, renderer.height, 1);
         print("dazzle-shell: the monitor unplugged: the desktop on the touchscreen ({d}x{d})\n", .{ renderer.width, renderer.height });
         return true;
@@ -2058,6 +2060,7 @@ fn moveDisplays(gpa: std.mem.Allocator, dev: vc4.Device, kit: *kete_panel.Kit, r
     parked.* = null;
     renderer.display.shared = true;
     cm.renderer.display.shared = true;
+    osk.always = true;
     osk.setScreen(cm.width(), cm.height(), 1);
     cm.layout(osk.height);
     renderer.setPanelHidden(.keyboard, true);

@@ -68,10 +68,13 @@ pub const Osk = struct {
     typed_len: usize = 0,
     /// It changed (a page, Shift), and is to be drawn again.
     changed: bool = true,
+    /// Always shown (on the touchscreen beside a monitor): it has no key
+    /// to hide it.
+    always: bool = false,
     /// Each key's light (as setup's keyboard picture lights its keys):
-    /// held, and let go, fading. By the key's place, as they are built.
-    lights: [40]key_light.Key = @splat(.{}),
-    lights_used: usize = 0,
+    /// held, and let go, fading. By which key it is (`Key.What.id`).
+    lights: [40]Light = @splat(.{}),
+
     /// How far up it is (0: off the screen, 1: all of it shown), and its
     /// way there (`slideTo`).
     slide: f32 = 0,
@@ -80,6 +83,23 @@ pub const Osk = struct {
 
     /// How long it takes to slide up or down (as the dock does).
     pub const slide_ns = 200 * std.time.ns_per_ms;
+
+    const Light = struct { id: u32 = 0, key: key_light.Key = .{} };
+
+    /// Key `id`'s light: its own, or one no key is lit by now.
+    fn lightFor(o: *Osk, id: u32) *key_light.Key {
+        for (&o.lights) |*l| if (l.id == id) return &l.key;
+        var oldest = &o.lights[0];
+        for (&o.lights) |*l| {
+            if (l.id == 0) {
+                oldest = l;
+                break;
+            }
+            if (!l.key.interaction.pressed and l.key.let_go_ns < oldest.key.let_go_ns) oldest = l;
+        }
+        oldest.* = .{ .id = id };
+        return &oldest.key;
+    }
 
     pub fn init(panel: *kete_panel.Panel, screen_width: u32, screen_height: u32, scale: f32) Osk {
         var o: Osk = .{ .panel = panel };
@@ -212,6 +232,17 @@ const Key = struct {
         shift,
         page,
         hide,
+
+        /// Which key it is (never 0), whichever page it is on.
+        fn id(w: What) u32 {
+            return switch (w) {
+                .text => |t| 0x1000_0000 | @as(u32, @truncate(std.hash.Wyhash.hash(0, t))) >> 4,
+                .key => |code| 0x100 + code,
+                .shift => 1,
+                .page => 2,
+                .hide => 3,
+            };
+        }
     };
 
     fn press(k: *Key) void {
@@ -260,7 +291,6 @@ const View = struct {
         const a = cx.arena;
         const s = o.scale;
         const rows = if (o.page == .letters) letter_rows else symbol_rows;
-        o.lights_used = 0;
         var lines: std.ArrayList(kete.Widget) = .empty;
         for (rows, 0..) |row, i| {
             var keys: std.ArrayList(kete.Widget) = .empty;
@@ -268,7 +298,7 @@ const View = struct {
             if (i == 2) keys.append(a, if (o.page == .letters)
                 keyButton(cx, o, .shift, null, if (o.shift) .keyboard_capslock else .arrow_upward, 1.5, o.shift)
             else
-                keyButton(cx, o, .page, "ABC", null, 1.5, false)) catch {};
+                spacer(cx, 1.5)) catch {};
             for (row) |ch| {
                 const shown = if (o.page == .letters and o.shift) upper(cx, ch) else ch;
                 keys.append(a, keyButton(cx, o, .{ .text = ch }, shown, null, 1, false)) catch {};
@@ -281,11 +311,11 @@ const View = struct {
         last.appendSlice(a, &.{
             keyButton(cx, o, .page, if (o.page == .letters) "?123" else "ABC", null, 1.5, false),
             keyButton(cx, o, .{ .text = "," }, ",", null, 1, false),
-            keyButton(cx, o, .{ .text = " " }, null, .space_bar, 4, false),
+            keyButton(cx, o, .{ .text = " " }, null, .space_bar, if (o.always) 5 else 4, false),
             keyButton(cx, o, .{ .text = "." }, ".", null, 1, false),
             keyButton(cx, o, .{ .key = key_enter }, null, .keyboard_return, 1.5, false),
-            keyButton(cx, o, .hide, null, .keyboard_hide, 1, false),
         }) catch {};
+        if (!o.always) last.append(a, keyButton(cx, o, .hide, null, .keyboard_hide, 1, false)) catch {};
         lines.append(a, row_of(cx, last.items, s)) catch {};
         return cx.make(kete.RoundedBox{
             .color = t.surface_container,
@@ -322,8 +352,7 @@ fn upper(cx: *kete.BuildContext, ch: []const u8) []const u8 {
 fn keyButton(cx: *kete.BuildContext, o: *Osk, what: Key.What, label: ?[]const u8, icon: ?kete.IconName, share: f32, on: bool) kete.Widget {
     const t = cx.theme();
     const k = cx.arena.create(Key) catch return spacer(cx, share);
-    const light: ?*key_light.Key = if (o.lights_used < o.lights.len) &o.lights[o.lights_used] else null;
-    o.lights_used += 1;
+    const light: ?*key_light.Key = o.lightFor(what.id());
     k.* = .{ .osk = o, .what = what, .light = light };
     const special = what != .text;
     const g = if (light) |l| l.glow(cx) else 0;
