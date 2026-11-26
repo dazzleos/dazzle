@@ -378,23 +378,48 @@ pub fn setArg(cmdline: []const u8, key: []const u8, value: []const u8, out: []u8
     return w.buffered();
 }
 
-/// The screen's orientation `slot` starts with (its cmdline.txt's).
-pub fn orientation(slot: u8) sys.system.Orientation {
+/// Each port's display's orientation `slot` starts with (its
+/// cmdline.txt's).
+pub fn orientations(slot: u8) sys.system.Orientations {
     var dir_buf: [96]u8 = undefined;
     var path_buf: [128]u8 = undefined;
-    const path = filePath(&path_buf, slotPath(&dir_buf, slot, ""), "cmdline.txt") orelse return .landscape;
+    const path = filePath(&path_buf, slotPath(&dir_buf, slot, ""), "cmdline.txt") orelse return .initFill(.landscape);
     var buf: [1024]u8 = undefined;
-    return .of(sys.readFile(path, &buf) orelse return .landscape);
+    return sys.system.Orientation.of(sys.readFile(path, &buf) orelse return .initFill(.landscape));
 }
 
-/// Has both slots start with the screen `o` (as `setVideoMemory` does
-/// video memory).
-pub fn setOrientation(o: sys.system.Orientation) !void {
+/// Has both slots start with `port`'s display `o` (as `setVideoMemory`
+/// does video memory).
+pub fn setOrientation(port: sys.system.Port, o: sys.system.Orientation) !void {
     try rewriteCmdlines(struct {
-        fn f(cmdline: []const u8, out: []u8, which: sys.system.Orientation) []const u8 {
-            return setArg(cmdline, sys.system.orientation_arg, @tagName(which), out);
+        fn f(cmdline: []const u8, out: []u8, which: struct { sys.system.Port, sys.system.Orientation }) []const u8 {
+            return setOrientationArgs(cmdline, which[0], which[1], out);
         }
-    }.f, o);
+    }.f, .{ port, o });
+}
+
+/// `cmdline` with `port`'s display's orientation `o`: each port's said
+/// on its own (the others as they were), in place of what said them (the
+/// one for all, as once kept, too).
+fn setOrientationArgs(cmdline: []const u8, port: sys.system.Port, o: sys.system.Orientation, out: []u8) []const u8 {
+    var each = sys.system.Orientation.of(cmdline);
+    each.set(port, o);
+    var w: std.Io.Writer = .fixed(out);
+    var first = true;
+    var it = std.mem.tokenizeAny(u8, cmdline, " \n");
+    while (it.next()) |arg| {
+        if (std.mem.startsWith(u8, arg, sys.system.orientation_arg ++ "=") or std.mem.startsWith(u8, arg, sys.system.orientation_arg ++ ".")) continue;
+        if (!first) w.writeByte(' ') catch {};
+        first = false;
+        w.writeAll(arg) catch {};
+    }
+    for (std.enums.values(sys.system.Port)) |p| {
+        if (!first) w.writeByte(' ') catch {};
+        first = false;
+        w.print("{s}.{s}={s}", .{ sys.system.orientation_arg, @tagName(p), @tagName(each.get(p)) }) catch {};
+    }
+    w.writeByte('\n') catch {};
+    return w.buffered();
 }
 
 /// The video memory `slot` starts with (its cmdline.txt's cma=).
@@ -431,7 +456,7 @@ fn rewriteCmdlines(comptime change: anytype, arg: anytype) !void {
         const path = filePath(&path_buf, dir, "cmdline.txt") orelse return error.NameTooLong;
         var buf: [1024]u8 = undefined;
         const cmdline = sys.readFile(path, &buf) orelse continue;
-        var out: [1024 + 32]u8 = undefined;
+        var out: [1024 + 128]u8 = undefined;
         const changed = change(cmdline, &out, arg);
         const tmp = filePath(&tmp_buf, dir, "cmdline.txt.new") orelse return error.NameTooLong;
         _ = linux.unlink(tmp);
@@ -483,10 +508,12 @@ test "config.txt's os_prefix picks the slot" {
     try std.testing.expectEqualStrings("os_prefix=slot-b/\nboot_delay=0\ndisplay_auto_detect=1\n", setOsPrefix("os_prefix=slot-a/\ndisable_touchscreen=1\nboot_delay=0\ndisplay_auto_detect=1\n", 'b', &again));
 }
 
-test "a command line's orientation, set or changed" {
+test "a command line's orientations, set or changed" {
     var out: [256]u8 = undefined;
-    try std.testing.expectEqualStrings("cma=128M dazzle.orientation=portrait\n", setArg("cma=128M\n", sys.system.orientation_arg, "portrait", &out));
-    try std.testing.expectEqualStrings("cma=128M dazzle.orientation=landscape\n", setArg("cma=128M dazzle.orientation=portrait\n", sys.system.orientation_arg, "landscape", &out));
+    try std.testing.expectEqualStrings("cma=128M dazzle.orientation.hdmi0=landscape dazzle.orientation.hdmi1=landscape dazzle.orientation.dsi=portrait\n", setOrientationArgs("cma=128M\n", .dsi, .portrait, &out));
+    // The one for all (as once kept) said for each port instead.
+    try std.testing.expectEqualStrings("cma=128M quiet dazzle.orientation.hdmi0=landscape_flipped dazzle.orientation.hdmi1=portrait dazzle.orientation.dsi=portrait\n", setOrientationArgs("cma=128M dazzle.orientation=portrait quiet\n", .hdmi0, .landscape_flipped, &out));
+    try std.testing.expectEqualStrings("a dazzle.orientation.hdmi0=landscape dazzle.orientation.hdmi1=landscape dazzle.orientation.dsi=landscape\n", setOrientationArgs("a dazzle.orientation.hdmi0=portrait dazzle.orientation.hdmi1=landscape dazzle.orientation.dsi=landscape\n", .hdmi0, .landscape, &out));
 }
 
 test "a slot's command line says which slot it is" {

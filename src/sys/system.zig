@@ -35,10 +35,11 @@
 //!                              there is a /data)
 //!     video_memory <MiB>       how much memory the GPU may have, from the
 //!                              next start (settings): see `video_memory`
-//!     orientation <landscape|portrait|landscape_flipped|portrait_flipped>
-//!                              the screen's (settings): the shell turns
-//!                              to it at once, and the boot screen from
-//!                              the next start; see `Orientation`
+//!     orientation <port> <landscape|portrait|landscape_flipped|portrait_flipped>
+//!                              the display's on that port (hdmi0, hdmi1,
+//!                              dsi; settings): the shell turns to it at
+//!                              once, and the boot screen from the next
+//!                              start; see `Orientation`
 //!     parental_on <password> <limits>
 //!                              turn parental controls on (settings), the
 //!                              password (in hex) to unlock from now on;
@@ -60,7 +61,9 @@
 //!     failed_start b signal 11
 //!     locale en-GB gb Europe/London
 //!     video_memory 128 256
-//!     orientation portrait
+//!     orientation hdmi0 landscape
+//!     orientation hdmi1 landscape
+//!     orientation dsi portrait
 //!     parental on 120 180 1200 420 block
 //!     parental_status none 1794830400 - 42 120 0 0
 //!     end
@@ -76,8 +79,8 @@
 //! "failed_start" is the slot that last did not start properly, and how
 //! its shell stopped (see `Stop`); its log is `failed_start_log`.
 //! "video_memory" is the memory the GPU may have now and from the next
-//! start, in MiB ("-": not known). "orientation" is the screen's (as it is
-//! kept, for the next start too). "parental" is whether parental
+//! start, in MiB ("-": not known). "orientation" is each port's display's
+//! (as it is kept, for the next start too). "parental" is whether parental
 //! controls are on, and their limits; "parental_status" whether the
 //! computer is locked ("none", "time" or "downtime"), when it will lock
 //! and when it may be used again (seconds since 1970, by the manager's
@@ -173,14 +176,36 @@ pub fn defaultVideoMemory(ram_mib: u64) u16 {
 /// then kept as it is.
 pub const video_memory_chosen_file = "/data/system/video-memory-chosen";
 
+/// Where a display is connected: a monitor on HDMI (the Pi 4 and 5 have
+/// two ports), or a display attached to the board (DSI: the Touch Display
+/// 2). Each keeps its own orientation, so a touchscreen is the way it was
+/// when a monitor is unplugged from beside it.
+pub const Port = enum {
+    hdmi0,
+    hdmi1,
+    dsi,
+
+    /// The port of a DRM connector: DSI, or HDMI's first or second
+    /// (`index`, from 1, as DRM numbers connectors of a type).
+    pub fn of(dsi_: bool, index: u32) Port {
+        if (dsi_) return .dsi;
+        return if (index >= 2) .hdmi1 else .hdmi0;
+    }
+};
+
+/// Each port's display's orientation.
+pub const Orientations = std.EnumArray(Port, Orientation);
+
 /// Which way the screen is: wider than tall, or taller; and either way
 /// up (flipped: turned half round, for a display mounted upside down). A
 /// display the other way (the Touch Display 2 is upright; a monitor wide)
-/// is turned a quarter, by the boot screen and the shell (see `turn`). It
-/// is kept on the kernel's command line (`orientation_arg`), which both can
-/// read from the start; landscape if it is not there. Changed, the shell
-/// turns at once (it follows the system manager's report), the boot screen
-/// from the next start.
+/// is turned a quarter, by the boot screen and the shell (see `turn`).
+/// Each port's is kept on the kernel's command line (`orientation_arg`
+/// and the port: dazzle.orientation.dsi=portrait), which both can read
+/// from the start; failing that the one for all (dazzle.orientation=, as
+/// it was once kept), or landscape. Changed, the shell turns at once (it
+/// follows the system manager's report), the boot screen from the next
+/// start.
 pub const Orientation = enum {
     landscape,
     portrait,
@@ -211,26 +236,37 @@ pub const Orientation = enum {
         return @enumFromInt(quarter +% half);
     }
 
-    /// The orientation a kernel command line gives.
-    pub fn of(cmdline: []const u8) Orientation {
-        var found: Orientation = .landscape;
+    /// The orientations a kernel command line gives.
+    pub fn of(cmdline: []const u8) Orientations {
+        var all: Orientation = .landscape;
+        var each: std.EnumArray(Port, ?Orientation) = .initFill(null);
         var it = std.mem.tokenizeAny(u8, cmdline, " \n");
         while (it.next()) |arg| {
             if (!std.mem.startsWith(u8, arg, orientation_arg)) continue;
-            found = std.meta.stringToEnum(Orientation, arg[orientation_arg.len..]) orelse found;
+            const rest = arg[orientation_arg.len..];
+            if (std.mem.startsWith(u8, rest, "=")) {
+                all = std.meta.stringToEnum(Orientation, rest[1..]) orelse all;
+                continue;
+            }
+            if (!std.mem.startsWith(u8, rest, ".")) continue;
+            const eq = std.mem.indexOfScalar(u8, rest, '=') orelse continue;
+            const port = std.meta.stringToEnum(Port, rest[1..eq]) orelse continue;
+            each.set(port, std.meta.stringToEnum(Orientation, rest[eq + 1 ..]) orelse continue);
         }
+        var found: Orientations = .initFill(all);
+        for (std.enums.values(Port)) |p| if (each.get(p)) |o| found.set(p, o);
         return found;
     }
 
     /// This start's (from /proc/cmdline).
-    pub fn now() Orientation {
+    pub fn now() Orientations {
         var buf: [1024]u8 = undefined;
         const rc = linux.open("/proc/cmdline", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
-        if (linux.errno(rc) != .SUCCESS) return .landscape;
+        if (linux.errno(rc) != .SUCCESS) return .initFill(.landscape);
         const fd: linux.fd_t = @intCast(rc);
         defer _ = linux.close(fd);
         const n = linux.read(fd, &buf, buf.len);
-        if (linux.errno(n) != .SUCCESS) return .landscape;
+        if (linux.errno(n) != .SUCCESS) return .initFill(.landscape);
         return of(buf[0..n]);
     }
 
@@ -290,8 +326,10 @@ pub const Turn = enum(u2) {
     }
 };
 
-/// The kernel command line's argument for the orientation.
-pub const orientation_arg = "dazzle.orientation=";
+/// The kernel command line's arguments for the orientations start so:
+/// "dazzle.orientation.<port>=" (and "dazzle.orientation=", once kept for
+/// every display).
+pub const orientation_arg = "dazzle.orientation";
 
 /// Whether `mib` may be chosen on a computer with `ram_mib` of memory (as
 /// Linux has it): one of the sizes, and no more than half of it, so the
@@ -348,7 +386,7 @@ pub const Request = union(enum) {
     locale: locale.Settings,
     /// In MiB, one of `video_memory_sizes`.
     video_memory: u16,
-    orientation: Orientation,
+    orientation: struct { port: Port, orientation: Orientation },
     /// Serve the log over HTTP, or not.
     log_server: bool,
     parental_on: struct { password: parental.Password, limits: parental.Limits },
@@ -377,7 +415,10 @@ pub const Request = union(enum) {
             if (std.mem.indexOfScalar(u16, &video_memory_sizes, mib) == null) return null;
             return .{ .video_memory = mib };
         }
-        if (std.mem.eql(u8, kind, "orientation")) return .{ .orientation = std.meta.stringToEnum(Orientation, f.next() orelse return null) orelse return null };
+        if (std.mem.eql(u8, kind, "orientation")) {
+            const port = std.meta.stringToEnum(Port, f.next() orelse return null) orelse return null;
+            return .{ .orientation = .{ .port = port, .orientation = std.meta.stringToEnum(Orientation, f.next() orelse return null) orelse return null } };
+        }
         if (std.mem.eql(u8, kind, "log_server")) return .{ .log_server = parseOnOff(f.next() orelse return null) orelse return null };
         if (std.mem.eql(u8, kind, "parental_on")) {
             const password = parental.Password.fromHex(f.next() orelse return null) orelse return null;
@@ -618,9 +659,9 @@ pub const Report = struct {
     /// The memory the GPU may have now, and from the next start, in MiB.
     video_memory_now: ?u16 = null,
     video_memory_next: ?u16 = null,
-    /// The screen's orientation (as kept for the next start, which the
-    /// shell follows at once).
-    orientation: Orientation = .landscape,
+    /// Each port's display's orientation (as kept for the next start,
+    /// which the shell follows at once).
+    orientations: Orientations = .initFill(.landscape),
     /// The log is served over HTTP (see `logServerOn`).
     log_server: bool = false,
     parental: Parental = .{},
@@ -664,7 +705,7 @@ pub const Report = struct {
         w.print("\nlocale {s} {s} {s}", .{ r.locale.language.code(), r.locale.keyboard.code(), r.locale.timezone.name() }) catch {};
         w.writeAll("\nvideo_memory") catch {};
         for ([_]?u16{ r.video_memory_now, r.video_memory_next }) |v| if (v) |mib| w.print(" {d}", .{mib}) catch {} else w.writeAll(" -") catch {};
-        w.print("\norientation {s}", .{@tagName(r.orientation)}) catch {};
+        for (std.enums.values(Port)) |p| w.print("\norientation {s} {s}", .{ @tagName(p), @tagName(r.orientations.get(p)) }) catch {};
         w.print("\nlog_server {s}", .{if (r.log_server) "on" else "off"}) catch {};
         const p = r.parental;
         w.print("\nparental {s} ", .{if (p.on) "on" else "off"}) catch {};
@@ -716,7 +757,8 @@ pub const Report = struct {
                 r.video_memory_now = std.fmt.parseInt(u16, f.next() orelse continue, 10) catch null;
                 r.video_memory_next = std.fmt.parseInt(u16, f.next() orelse continue, 10) catch null;
             } else if (std.mem.eql(u8, kind, "orientation")) {
-                r.orientation = std.meta.stringToEnum(Orientation, f.next() orelse continue) orelse .landscape;
+                const port = std.meta.stringToEnum(Port, f.next() orelse continue) orelse continue;
+                r.orientations.set(port, std.meta.stringToEnum(Orientation, f.next() orelse continue) orelse .landscape);
             } else if (std.mem.eql(u8, kind, "log_server")) {
                 r.log_server = parseOnOff(f.next() orelse continue) orelse false;
             } else if (std.mem.eql(u8, kind, "parental")) {
@@ -946,13 +988,13 @@ test "requests and reports go through the socket" {
     try testing.expect(Request.allowedFor(.{ .locale = .{} }, .setup));
     try testing.expect(Request.allowedFor(.{ .locale = .{} }, .settings));
     const chosen: Report = .{ .locale = .{ .language = .en_au, .keyboard = .gb, .timezone = locale.TimeZone.fromName("Australia/Perth").? } };
-    var chosen_buf: [256]u8 = undefined;
+    var chosen_buf: [512]u8 = undefined;
     try testing.expectEqual(chosen.locale, Report.parse(chosen.write(&chosen_buf)).?.locale);
 
     var r: Report = .{ .storage = .preparing, .progress = 42, .hostname = Hostname.parse("awesome-elephant").? };
-    var buf: [512]u8 = undefined;
+    var buf: [1024]u8 = undefined;
     const text = r.write(&buf);
-    try testing.expectEqualStrings("storage preparing 42\nhostname awesome-elephant\nversion a -\nversion b -\nupdate none\nlocale en-US us UTC\nvideo_memory - -\norientation landscape\nlog_server off\nparental off - - - - allow\nparental_status none - - 0 - 0 0\nend\n", text);
+    try testing.expectEqualStrings("storage preparing 42\nhostname awesome-elephant\nversion a -\nversion b -\nupdate none\nlocale en-US us UTC\nvideo_memory - -\norientation hdmi0 landscape\norientation hdmi1 landscape\norientation dsi landscape\nlog_server off\nparental off - - - - allow\nparental_status none - - 0 - 0 0\nend\n", text);
     const back = Report.parse(text).?;
     try testing.expectEqual(StorageState.preparing, back.storage);
     try testing.expectEqual(@as(u8, 42), back.progress);
@@ -963,14 +1005,32 @@ test "requests and reports go through the socket" {
     try testing.expectEqual(@as(u8, 0), failed.hostname.len);
     try testing.expect(Report.parse("denied\n").?.denied);
     // The orientation: asked for by Settings, and said now and next.
-    try testing.expectEqual(Orientation.portrait, Request.parse("orientation portrait\n").?.orientation);
-    try testing.expect(Request.parse("orientation sideways\n") == null);
-    try testing.expect(Request.allowedFor(.{ .orientation = .portrait }, .settings));
-    try testing.expect(!Request.allowedFor(.{ .orientation = .portrait }, .shell));
-    r = .{ .orientation = .portrait };
-    try testing.expectEqual(Orientation.portrait, Report.parse(r.write(&buf)).?.orientation);
-    try testing.expectEqual(Orientation.portrait, Orientation.of("cma=128M dazzle.orientation=portrait dazzle.slot=a"));
-    try testing.expectEqual(Orientation.landscape, Orientation.of("cma=128M"));
+    const req = Request.parse("orientation dsi portrait\n").?.orientation;
+    try testing.expectEqual(Port.dsi, req.port);
+    try testing.expectEqual(Orientation.portrait, req.orientation);
+    try testing.expect(Request.parse("orientation portrait\n") == null);
+    try testing.expect(Request.parse("orientation hdmi0 sideways\n") == null);
+    try testing.expect(Request.parse("orientation vga portrait\n") == null);
+    try testing.expect(Request.allowedFor(.{ .orientation = req }, .settings));
+    try testing.expect(!Request.allowedFor(.{ .orientation = req }, .shell));
+    r = .{};
+    r.orientations.set(.dsi, .portrait);
+    r.orientations.set(.hdmi1, .landscape_flipped);
+    const turned_back = Report.parse(r.write(&buf)).?.orientations;
+    try testing.expectEqual(Orientation.landscape, turned_back.get(.hdmi0));
+    try testing.expectEqual(Orientation.landscape_flipped, turned_back.get(.hdmi1));
+    try testing.expectEqual(Orientation.portrait, turned_back.get(.dsi));
+    // Each port's from the command line; the one for all (as once kept)
+    // where a port has none.
+    try testing.expectEqual(Orientation.portrait, Orientation.of("cma=128M dazzle.orientation=portrait dazzle.slot=a").get(.hdmi0));
+    try testing.expectEqual(Orientation.landscape, Orientation.of("cma=128M").get(.dsi));
+    const each = Orientation.of("dazzle.orientation=portrait dazzle.orientation.hdmi0=landscape_flipped dazzle.orientation.vga=portrait dazzle.orientation.dsi=sideways");
+    try testing.expectEqual(Orientation.landscape_flipped, each.get(.hdmi0));
+    try testing.expectEqual(Orientation.portrait, each.get(.hdmi1));
+    try testing.expectEqual(Orientation.portrait, each.get(.dsi));
+    try testing.expectEqual(Port.hdmi0, Port.of(false, 1));
+    try testing.expectEqual(Port.hdmi1, Port.of(false, 2));
+    try testing.expectEqual(Port.dsi, Port.of(true, 1));
     // The Touch Display 2 (upright) is turned for landscape, a monitor for
     // portrait.
     try testing.expect(Orientation.landscape.turns(720, 1280));
@@ -982,7 +1042,7 @@ test "requests and reports go through the socket" {
     try testing.expectEqual(Turn.three_quarters, Orientation.landscape_flipped.turn(720, 1280));
     try testing.expect(Orientation.portrait_flipped.turns(1920, 1080));
     try testing.expectEqual(Orientation.portrait_flipped, Orientation.of2(true, true));
-    try testing.expectEqual(Orientation.landscape_flipped, Orientation.of("quiet dazzle.orientation=landscape_flipped"));
+    try testing.expectEqual(Orientation.landscape_flipped, Orientation.of("quiet dazzle.orientation=landscape_flipped").get(.dsi));
     try testing.expect(Report.parse("storage ready\n") == null);
 
     // The slots, and an update.

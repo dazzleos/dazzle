@@ -152,7 +152,7 @@ const Manager = struct {
         for (&m.report.versions, "ab") |*v, s| v.* = slots.version(s);
         m.report.failed_start = if (trial.readFailed()) |t| .{ .slot = t.slot, .stop = t.stop } else null;
         m.report.video_memory_next = slots.videoMemory(m.report.next orelse running);
-        m.report.orientation = slots.orientation(m.report.next orelse running);
+        m.report.orientations = slots.orientations(m.report.next orelse running);
     }
 
     fn run(m: *Manager) !void {
@@ -199,7 +199,7 @@ const Manager = struct {
             };
 
             {
-                var out: [1024]u8 = undefined;
+                var out: [2048]u8 = undefined;
                 const text = m.report.write(&out);
                 const changed = !std.mem.eql(u8, text, last_sent[0..last_sent_len]);
                 if (changed) {
@@ -252,7 +252,7 @@ const Manager = struct {
                             continue;
                         }
                         m.handle(req);
-                        var out: [1024]u8 = undefined;
+                        var out: [2048]u8 = undefined;
                         const text = m.report.write(&out);
                         _ = linux.write(conn.fd, text.ptr, text.len);
                         // Said only to the one who gave it.
@@ -297,7 +297,7 @@ const Manager = struct {
                 // Kept as chosen from now on (see `sizeVideoMemory`).
                 if (storage.exists(proto.config_dir)) writeFile(proto.video_memory_chosen_file, "");
             },
-            .orientation => |o| m.setOrientation(o),
+            .orientation => |o| m.setOrientation(o.port, o.orientation),
             .log_server => |on| m.setLogServer(on),
             .parental_on => |r| if (m.parental_loaded) {
                 m.parental.enable(r.password.slice(), r.limits, parental.freshSalt());
@@ -469,10 +469,10 @@ const Manager = struct {
         m.setVideoMemory(want);
     }
 
-    /// Keeps the screen's orientation as `o` (in both slots' cmdline.txt, as
-    /// `setVideoMemory` does video memory): the shell follows the report at
-    /// once, the boot screen from the next start.
-    fn setOrientation(m: *Manager, o: proto.Orientation) void {
+    /// Keeps `port`'s display's orientation as `o` (in both slots'
+    /// cmdline.txt, as `setVideoMemory` does video memory): the shell
+    /// follows the report at once, the boot screen from the next start.
+    fn setOrientation(m: *Manager, port: proto.Port, o: proto.Orientation) void {
         if (m.copier != null or m.installer != null) return;
         slots.remount(false) catch |err| {
             print(sys.log_warning ++ "dazzle: system: cannot write the boot partition: {s}\n", .{@errorName(err)});
@@ -480,11 +480,11 @@ const Manager = struct {
         };
         defer slots.remount(true) catch {};
         defer m.readSlots();
-        slots.setOrientation(o) catch |err| {
+        slots.setOrientation(port, o) catch |err| {
             print(sys.log_warning ++ "dazzle: system: cannot set the orientation: {s}\n", .{@errorName(err)});
             return;
         };
-        print("dazzle: system: the screen {s}\n", .{@tagName(o)});
+        print("dazzle: system: the {s} display {s}\n", .{ @tagName(port), @tagName(o) });
     }
 
     /// Has `slot` start next time. Another slot than the running one is

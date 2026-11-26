@@ -276,11 +276,9 @@ const Screen = struct {
         const buffer = try drm.DumbBuffer.create(fd, display_width, display_height);
         const fb = try drm.addFramebuffer(fd, buffer.handle, display_width, display_height, buffer.pitch, drm.format_xrgb8888);
         const display = std.mem.bytesAsSlice(u32, buffer.map[0 .. buffer.pitch * display_height]);
-        // Turned for the orientation chosen, as the shell turns it: drawn
-        // upright into a buffer of the screen's own. Not a monitor with a
-        // touchscreen beside it (the orientation is the touchscreen's then).
-        const companion = drm.findCompanion(fd, output) != null;
-        const turn: sys.system.Turn = if (companion) .none else sys.system.Orientation.now().turn(display_width, display_height);
+        // Turned for its port's orientation, as the shell turns it: drawn
+        // upright into a buffer of the screen's own.
+        const turn = sys.system.Orientation.now().get(output.port).turn(display_width, display_height);
         const turned = turn != .none;
         const width = if (turn.sideways()) display_height else display_width;
         const height = if (turn.sideways()) display_width else display_height;

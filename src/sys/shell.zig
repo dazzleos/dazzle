@@ -14,7 +14,8 @@
 //!     screen
 //!
 //! asks the size of the screen the desktop is on (its background, as
-//! turned): the shell answers "<width> <height>".
+//! turned), and the port its display is on: the shell answers "<width>
+//! <height> <port>" ("1920 1080 hdmi0").
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -61,17 +62,25 @@ pub fn open(app: []const u8, what: ?[]const u8) bool {
     return std.mem.startsWith(u8, got, "opened");
 }
 
-/// The size of the screen the desktop is on (null: no shell to ask).
-pub fn screen() ?[2]u32 {
-    var answer: [32]u8 = undefined;
+/// The screen the desktop is on: its size, and its display's port.
+pub const Screen = struct {
+    width: u32,
+    height: u32,
+    port: sys.system.Port,
+};
+
+/// The screen the desktop is on (null: no shell to ask).
+pub fn screen() ?Screen {
+    var answer: [48]u8 = undefined;
     return parseScreen(send(socket_path, "screen\n", &answer) orelse return null);
 }
 
-fn parseScreen(answer: []const u8) ?[2]u32 {
+fn parseScreen(answer: []const u8) ?Screen {
     var f = std.mem.tokenizeAny(u8, answer, " \n");
     const w = std.fmt.parseInt(u32, f.next() orelse return null, 10) catch return null;
     const h = std.fmt.parseInt(u32, f.next() orelse return null, 10) catch return null;
-    return .{ w, h };
+    const port = std.meta.stringToEnum(sys.system.Port, f.next() orelse return null) orelse return null;
+    return .{ .width = w, .height = h, .port = port };
 }
 
 /// Sends `line` to the socket at `path`, and reads the answer (if `answer`
@@ -134,8 +143,8 @@ test "requests" {
     try testing.expect(Request.parse("open dazzle-files").?.open.what == null);
     try testing.expect(Request.parse("screen\n").? == .screen);
     try testing.expect(Request.parse("screen 1") == null);
-    try testing.expectEqual(@as(?[2]u32, .{ 1920, 1080 }), parseScreen("1920 1080\n"));
-    try testing.expect(parseScreen("1920") == null);
+    try testing.expectEqual(@as(?Screen, .{ .width = 1920, .height = 1080, .port = .hdmi1 }), parseScreen("1920 1080 hdmi1\n"));
+    try testing.expect(parseScreen("1920 1080") == null);
     try testing.expect(Request.parse("open ../x") == null);
     try testing.expect(Request.parse("open a b c") == null);
     try testing.expect(Request.parse("close a") == null);

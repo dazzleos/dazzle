@@ -165,10 +165,11 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
     var icons_dirty = true;
     var video_memory_failed = false;
     var orientation_failed = false;
-    // The desktop's screen, as the shell says; asked again for a few
-    // seconds after the orientation changes (the shell turns to it then).
+    // The desktop's screen, as the shell says (its size, and its
+    // display's port, whose orientation the Appearance page shows): asked
+    // again each second while that page is shown (the shell turns, or
+    // another display is used).
     var screen = sys.shell.screen();
-    var screen_until: u64 = 0;
     // The log of the slot that last did not start properly, and which
     // failure it is of.
     var failed_log: ?failed_start.Summary = null;
@@ -234,7 +235,11 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
         if (!window.suspended and now >= next_update) {
             next_update = now + std.time.ns_per_s;
             usage = monitor.read(now);
-            if (now < screen_until) screen = sys.shell.screen() orelse screen;
+            if (view.shownPage(window.ui) == .appearance) {
+                const got = sys.shell.screen() orelse screen;
+                if (!std.meta.eql(got, screen)) dirty = true;
+                screen = got;
+            }
             network = info.Network.read();
             if (view.shownPage(window.ui) == .board) {
                 devices = usb.Devices.read();
@@ -448,20 +453,20 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
                 dirty = true;
             }
         }
-        // The orientation chosen: the system manager keeps it (the shell
-        // turns to it at once), and says what it now is.
-        if (actions.orientation) |o| {
+        // The orientation chosen, for the desktop's screen's display: the
+        // system manager keeps it (the shell turns to it at once), and
+        // says what it now is.
+        if (actions.orientation) |o| if (screen) |s| {
             actions.orientation = null;
             var req_buf: [48]u8 = undefined;
-            const r = sys.system.ask(std.fmt.bufPrint(&req_buf, "orientation {s}\n", .{@tagName(o)}) catch "", 3000);
+            const r = sys.system.ask(std.fmt.bufPrint(&req_buf, "orientation {s} {s}\n", .{ @tagName(s.port), @tagName(o) }) catch "", 3000);
             if (r) |have| if (!have.denied) {
                 updater.report = have;
             };
-            orientation_failed = if (r) |have| have.denied or have.orientation != o else true;
-            screen_until = sys.nowNs() + 3 * std.time.ns_per_s;
-            print("dazzle-settings: the screen {s}{s}\n", .{ @tagName(o), if (orientation_failed) ": refused" else "" });
+            orientation_failed = if (r) |have| have.denied or have.orientations.get(s.port) != o else true;
+            print("dazzle-settings: the {s} display {s}{s}\n", .{ @tagName(s.port), @tagName(o), if (orientation_failed) ": refused" else "" });
             dirty = true;
-        }
+        };
         // Serving the log over HTTP turned on or off: the system manager
         // keeps it, and the log server follows.
         if (actions.log_server) |on| {
@@ -644,9 +649,9 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
                     .busy = r.update == .installing or updater.job != null,
                 } else .{},
                 .display = .{
-                    .orientation = if (updater.report) |r| r.orientation else null,
+                    .orientation = if (updater.report) |r| (if (screen) |s| r.orientations.get(s.port) else null) else null,
                     .failed = orientation_failed,
-                    .screen = screen,
+                    .screen = if (screen) |s| .{ s.width, s.height } else null,
                 },
                 .video_memory = .{
                     .now = if (updater.report) |r| r.video_memory_now else null,

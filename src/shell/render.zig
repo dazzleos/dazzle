@@ -10,9 +10,9 @@
 //! copies of shared-memory buffers, in 32-bit or BGR565 pixels. The quad
 //! shader is shaders/quad.zig.
 //!
-//! A display the other way from the orientation chosen (the Touch Display
-//! 2, 720 by 1280, for landscape; a monitor for portrait: see
-//! `sys.system.Orientation`) is used on its side: the screen is as wide as
+//! A display the other way from the orientation chosen for its port (the
+//! Touch Display 2, 720 by 1280, for landscape; a monitor for portrait:
+//! see `sys.system.Orientation`) is used on its side: the screen is as wide as
 //! the display is tall; and a flipped orientation turns it half round more
 //! (`Renderer.turn`). Every frame for a turned screen is composited, its
 //! quads turned into the display's frame, and the cursor's picture turned
@@ -388,9 +388,6 @@ pub const Renderer = struct {
     height: u32,
     /// How the screen is turned on the display (see the top of this file).
     turn: Turn = .none,
-    /// Whether it is turned as the orientation chosen in Settings says:
-    /// not a monitor beside a touchscreen (which the setting is for then).
-    follows_orientation: bool = true,
     /// Draws textures as quads; and blended, for the panels and the snap
     /// preview (with a little texture of its shade, made when first drawn).
     quads: shader.Pipeline,
@@ -423,11 +420,16 @@ pub const Renderer = struct {
     etc1_checked: bool = false,
     etc1_order: ?etc1.ByteOrder = null,
 
-    pub fn init(gpa: std.mem.Allocator, dev: vc4.Device, output: vc4.drm.Output, follows_orientation: bool) !Renderer {
+    /// The port the display is on (whose orientation it is turned for).
+    pub fn port(r: *const Renderer) sys.system.Port {
+        return r.display.output.port;
+    }
+
+    pub fn init(gpa: std.mem.Allocator, dev: vc4.Device, output: vc4.drm.Output) !Renderer {
         // The screen stays 32-bit: it is what everything is composited
         // into, and screenshots are taken from.
         const display = try vc4.display.Display.init(dev, output, .xrgb8888);
-        const turn: Turn = if (follows_orientation) sys.system.Orientation.now().turn(display.width, display.height) else .none;
+        const turn = sys.system.Orientation.now().get(output.port).turn(display.width, display.height);
         const layout: shader.pipeline.Options = .{
             .vertex_stride = 16,
             .attributes = &.{ .{ .location = 0, .offset = 0 }, .{ .location = 1, .offset = 8 } },
@@ -439,7 +441,6 @@ pub const Renderer = struct {
             .width = if (turn.sideways()) display.height else display.width,
             .height = if (turn.sideways()) display.width else display.height,
             .turn = turn,
-            .follows_orientation = follows_orientation,
             .quads = try shader.Pipeline.init(gpa, dev, shader.Program.decode(@embedFile("quad.shader")) catch unreachable, layout),
             .blended = try shader.Pipeline.init(gpa, dev, shader.Program.decode(@embedFile("quad_blend.shader")) catch unreachable, layout),
             .rounded = try shader.Pipeline.init(gpa, dev, shader.Program.decode(@embedFile("window.shader")) catch unreachable, layout),

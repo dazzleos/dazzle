@@ -26,10 +26,11 @@ const Orientation = sys.system.Orientation;
 pub const label = "Appearance";
 pub const icon: kete.IconName = .palette;
 
-/// The screen's orientation (null: not known), and whether changing it was
-/// refused; and the size of the screen the desktop is on (as the shell
-/// says: with a touchscreen beside a monitor, the orientation is the
-/// touchscreen's, the background the monitor's).
+/// The orientation of the display the desktop is on (null: not known),
+/// and whether changing it was refused; and the size of the screen there
+/// (as the shell says). Each display keeps its own (see
+/// `sys.system.Port`): with a touchscreen beside a monitor, this is the
+/// monitor's.
 pub const Display = struct {
     orientation: ?Orientation = null,
     failed: bool = false,
@@ -167,7 +168,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
         // (Which way is up can't be known, so this only turns it round.)
         cx.make(kete.OutlinedButton{
             .label = locale.text("Flip"),
-            .icon = .flip,
+            .icon = .rotate_right,
             .on_press = if (can_turn) .of(state, State.flip) else null,
         }),
     }) catch &.{} })) catch {};

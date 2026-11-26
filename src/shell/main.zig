@@ -144,9 +144,9 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
     const dev = try vc4.device.open();
     const output = try vc4.drm.waitForOutput(dev.fd);
     // A touchscreen beside the monitor: its keyboard and touchpad (see
-    // companion.zig). The orientation chosen in Settings is its then.
+    // companion.zig). Each is turned for its own port's orientation.
     const companion_output = vc4.drm.findCompanion(dev.fd, output);
-    var renderer = try render.Renderer.init(gpa, dev, output, companion_output == null);
+    var renderer = try render.Renderer.init(gpa, dev, output);
     took.step(.display);
     // What the boot screen shows, over the first frames, fading out.
     var boot_fade: BootFade = .start(&renderer);
@@ -214,7 +214,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
     // below its touchpad.
     var companion: ?companion_mod.Companion = if (companion_output) |co| blk: {
         var cm: companion_mod.Companion = .{
-            .renderer = try render.Renderer.init(gpa, dev, co, true),
+            .renderer = try render.Renderer.init(gpa, dev, co),
             .panel = try kit.gpuPanel(),
         };
         // The two share the DRM file: neither waits for its events.
@@ -382,10 +382,10 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
     server.pointer_x = pointer.x;
     server.pointer_y = pointer.y;
     var cursor_shown = false;
-    // The orientation chosen (the system manager's report says, once
-    // asked; until then, as the boot screen had it), and whether the dock
-    // is sized for fingers (a touchscreen is there).
-    var orientation = sys.system.Orientation.now();
+    // Each port's display's orientation (the system manager's report
+    // says, once asked; until then, as the boot screen had it), and
+    // whether the dock is sized for fingers (a touchscreen is there).
+    var orientations = sys.system.Orientation.now();
     var dock_touch = false;
 
     const start = sys.nowNs();
@@ -568,7 +568,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         var updates_changed = false;
         if (fds[sys_index].revents != 0) {
             if (sys_sub.poll()) |r| if (!r.denied) {
-                orientation = r.orientation;
+                orientations = r.orientations;
                 if (applyLocale(r.locale, &server, &lock, &dock, &quick)) panels_damaged = true;
                 if (updates.setReport(r)) updates_changed = true;
                 if (applyParental(r.parental, &parental, &locked, &lock, &quick, &renderer)) {
@@ -636,7 +636,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
             if (companion) |*cm| {
                 // The touchscreen beside the monitor turned (it follows
                 // the orientation): its keyboard and touchpad, again.
-                const turn = orientation.turn(cm.renderer.display.width, cm.renderer.display.height);
+                const turn = orientations.get(cm.renderer.port()).turn(cm.renderer.display.width, cm.renderer.display.height);
                 if (turn != cm.renderer.turn) {
                     cm.renderer.setTurn(turn) catch |err| print(sys.log_warning ++ "dazzle-shell: cannot turn the touchscreen: {s}\n", .{@errorName(err)});
                     osk.setScreen(cm.width(), cm.height(), 1);
@@ -657,7 +657,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         // touchscreen came or went (the dock is sized for fingers then):
         // what is sized by them, again.
         {
-            const turn: sys.system.Turn = if (renderer.follows_orientation) orientation.turn(renderer.display.width, renderer.display.height) else .none;
+            const turn = orientations.get(renderer.port()).turn(renderer.display.width, renderer.display.height);
             // (A touchscreen beside the monitor is not the monitor's.)
             const touch = devices.hasTouch() and companion == null;
             if (turn != renderer.turn or touch != dock_touch) {
@@ -1919,7 +1919,7 @@ fn openApp(listener: linux.fd_t, apps: []dock_mod.App, server: *server_mod.Serve
         .open => |o| o,
         .screen => {
             var size_buf: [32]u8 = undefined;
-            const line = std.fmt.bufPrint(&size_buf, "{d} {d}\n", .{ renderer.width, renderer.height }) catch return false;
+            const line = std.fmt.bufPrint(&size_buf, "{d} {d} {s}\n", .{ renderer.width, renderer.height, @tagName(renderer.port()) }) catch return false;
             _ = linux.write(got.fd, line.ptr, line.len);
             return false;
         },
