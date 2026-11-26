@@ -686,7 +686,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                 }
                 server.damaged = true;
                 panels_damaged = true;
-                print("dazzle-shell: the screen {d}x{d}{s}{s}\n", .{ renderer.width, renderer.height, if (turn) ", the display on its side" else "", if (touch) ", the dock for fingers" else "" });
+                print("dazzle-shell: the screen {d}x{d}{s}{s}\n", .{ renderer.width, renderer.height, if (turn.sideways()) ", the display on its side" else if (turn == .half) ", the display upside down" else "", if (touch) ", the dock for fingers" else "" });
             }
         }
         // Settings fetched the catalogue, or installed or removed apps.

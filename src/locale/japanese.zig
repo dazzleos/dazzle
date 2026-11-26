@@ -6,7 +6,7 @@
 
 /// Japan's.
 pub const japan = [_][2][]const u8{
-    .{ "Upside down", "上下逆さま" },
+    .{ "Flip", "反転" },
     .{ "Installing language support", "言語サポートをインストールしています" },
     .{ "Time", "時刻" },
     .{ "Device Name", "デバイス名" },

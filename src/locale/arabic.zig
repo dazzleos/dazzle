@@ -7,7 +7,7 @@
 
 /// Arabic, as Egypt has it.
 pub const arabic = [_][2][]const u8{
-    .{ "Upside down", "مقلوب" },
+    .{ "Flip", "قلب" },
     .{ "Installing language support", "جارٍ تثبيت دعم اللغة" },
     .{ "Time", "الوقت" },
     .{ "Device Name", "اسم الجهاز" },

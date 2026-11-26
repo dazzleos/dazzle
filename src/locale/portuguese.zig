@@ -6,7 +6,7 @@
 
 /// Brazil's (and Portugal's where it has none of its own).
 pub const brazil = [_][2][]const u8{
-    .{ "Upside down", "De cabeça para baixo" },
+    .{ "Flip", "Virar" },
     .{ "Installing language support", "Instalando o suporte ao idioma" },
     .{ "Time", "Hora" },
     .{ "Device Name", "Nome do dispositivo" },

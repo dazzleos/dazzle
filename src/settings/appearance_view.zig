@@ -46,9 +46,9 @@ pub const State = struct {
         if (st.actions) |a| a.orientation = .of2(o.isPortrait(), st.orientation.isFlipped());
     }
 
-    /// Upside down, or not: as it is otherwise.
-    pub fn setUpsideDown(st: *State, on: bool) void {
-        if (st.actions) |a| a.orientation = .of2(st.orientation.isPortrait(), on);
+    /// Turned half way round, the same way (landscape or portrait).
+    pub fn flip(st: *State) void {
+        if (st.actions) |a| a.orientation = .of2(st.orientation.isPortrait(), !st.orientation.isFlipped());
     }
 
     fn setDark(st: *State) void {
@@ -153,12 +153,13 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
             .value = if (d.orientation) |o| (if (o.isPortrait()) .portrait else .landscape) else null,
             .on_changed = if (can_turn) .of(state, State.choose) else null,
         }),
+        // (Which way is up can't be known, so this only turns it round.)
+        cx.make(kete.OutlinedButton{
+            .label = locale.text("Flip"),
+            .icon = .flip,
+            .on_press = if (can_turn) .of(state, State.flip) else null,
+        }),
     }) catch &.{} })) catch {};
-    screen.append(a, cx.make(kete.SwitchRow{
-        .value = if (d.orientation) |o| o.isFlipped() else false,
-        .on_changed = if (can_turn) .of(state, State.setUpsideDown) else null,
-        .label = locale.text("Upside down"),
-    })) catch {};
     if (d.failed) screen.append(a, cx.make(kete.Text{ .text = locale.text("It could not be changed"), .style = .{ .size = 15, .color = t.@"error" } })) catch {};
     rows.append(a, cx.make(kete.Column{ .cross_axis_alignment = .start, .spacing = 4, .children = screen.items })) catch {};
 
@@ -501,7 +502,7 @@ test "a picture chosen in Files is a fourth tile, ringed, with its thumbnail" {
     try testing.expect(findTile(u.root.?, name) == null);
 }
 
-test "the orientation chosen, and upside down; the tiles the screen's shape" {
+test "the orientation chosen, and flipped; the tiles the screen's shape" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
     const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
     defer u.destroy();
@@ -528,9 +529,9 @@ test "the orientation chosen, and upside down; the tiles the screen's shape" {
     while (!at.widget.is(kete.Image)) at = at.children.items[0];
     try testing.expect(at.size.h > at.size.w);
     try testing.expect(at.widget.as(kete.Image).?.source == .image);
-    // Upside down: portrait still, flipped; and back to landscape, still
-    // flipped.
-    view.click(u, view.up(view.findText(u.root.?, "Upside down").?, kete.SwitchRow).?);
+    // Flipped: portrait still, turned round; and back to landscape, still
+    // turned round.
+    view.click(u, view.up(view.findText(u.root.?, "Flip").?, kete.OutlinedButton).?);
     try testing.expectEqual(@as(?Orientation, .portrait_flipped), actions.orientation);
     settings.display = .{ .orientation = .portrait_flipped };
     u.frame(1920, 960, 3, settings);

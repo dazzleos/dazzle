@@ -12,7 +12,7 @@
 /// Latin America's (Mexico, Argentina, Colombia, Chile, Peru, the United
 /// States), and Spain's where it has none of its own.
 pub const latin_america = [_][2][]const u8{
-    .{ "Upside down", "Al revés" },
+    .{ "Flip", "Voltear" },
     .{ "Installing language support", "Instalando el soporte de idioma" },
     .{ "Time", "Hora" },
     .{ "Device Name", "Nombre del dispositivo" },

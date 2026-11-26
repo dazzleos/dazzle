@@ -6,7 +6,7 @@
 
 /// France's (and Canada's where it has none of its own).
 pub const france = [_][2][]const u8{
-    .{ "Upside down", "À l’envers" },
+    .{ "Flip", "Retourner" },
     .{ "Installing language support", "Installation de la prise en charge de la langue" },
     .{ "Time", "Heure" },
     .{ "Device Name", "Nom de l’appareil" },
