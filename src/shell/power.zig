@@ -119,10 +119,16 @@ pub const Menu = struct {
     shown: bool = false,
     picked: Picked = .{},
 
-    pub fn open(m: *Menu) void {
+    /// Shown over a screen `w` by `h`, Power off with the keyboard's
+    /// focus (Enter presses it; Tab moves to the others).
+    pub fn open(m: *Menu, w: u32, h: u32) void {
         m.shown = true;
         m.picked = .{};
         m.panel.followTheme();
+        // Laid out, for the focus to go to it: the last that takes it.
+        _ = m.draw(w, h, @import("sys").nowNs());
+        m.panel.ui.focus(null);
+        m.panel.moveFocus(false);
     }
 
     pub fn close(m: *Menu) void {

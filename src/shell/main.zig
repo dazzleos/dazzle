@@ -1034,7 +1034,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                             powerChoice(.power_off, &power);
                         } else {
                             quick.close();
-                            power.open();
+                            power.open(renderer.width, renderer.height);
                             print("dazzle-shell: the power button: the power menu\n", .{});
                         }
                         drawPower(&power, &renderer);
@@ -2181,7 +2181,7 @@ fn quickAction(
         .power_menu => {
             quick.close();
             quick_dirty.* = true;
-            power.open();
+            power.open(renderer.width, renderer.height);
             drawPower(power, renderer);
         },
     }

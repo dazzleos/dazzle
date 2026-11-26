@@ -145,6 +145,10 @@ pub const Panel = struct {
     width: u32 = 0,
     height: u32 = 0,
     keyboard_layout: ?locale.Keyboard = null,
+    /// The Shift and Control keys held (left, right), as the keys it was
+    /// given say: Shift and Tab moves the focus back.
+    shift_held: [2]bool = .{ false, false },
+    ctrl_held: [2]bool = .{ false, false },
     /// Its widgets laid out and painted (`frame`), and drawn into its
     /// picture (`render`), each time it is drawn.
     frame_times: Times = .{},
@@ -284,7 +288,26 @@ pub const Panel = struct {
 
     /// A key (a Linux key code) went down or up.
     pub fn key(p: *Panel, code: u32, pressed: bool) void {
-        p.ui.handleInput(.{ .key = .{ .key = kete.window.evdev.keyOf(@intCast(code)), .pressed = pressed } });
+        switch (code) {
+            42 => p.shift_held[0] = pressed,
+            54 => p.shift_held[1] = pressed,
+            29 => p.ctrl_held[0] = pressed,
+            97 => p.ctrl_held[1] = pressed,
+            else => {},
+        }
+        p.ui.handleInput(.{ .key = .{
+            .key = kete.window.evdev.keyOf(@intCast(code)),
+            .pressed = pressed,
+            .shift = p.shift_held[0] or p.shift_held[1],
+            .ctrl = p.ctrl_held[0] or p.ctrl_held[1],
+        } });
+    }
+
+    /// The focus moved as Tab (or Shift and Tab, back) moves it: to the
+    /// first (the last) widget that takes it, if nothing has it yet.
+    pub fn moveFocus(p: *Panel, forward: bool) void {
+        p.ui.handleInput(.{ .key = .{ .key = .tab, .pressed = true, .shift = !forward } });
+        p.ui.handleInput(.{ .key = .{ .key = .tab, .pressed = false, .shift = !forward } });
     }
 
     /// The pointer, at `pos` in the panel.
