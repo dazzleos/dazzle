@@ -105,7 +105,7 @@ fn routeCompanion(cm: *companion_mod.Companion, osk: *osk_mod.Osk, osk_touches: 
         }
         var made: companion_mod.Out = .{};
         switch (t.kind) {
-            .down => cm.pad.down(t.id, at[0], at[1], now),
+            .down => cm.pad.down(t.id, at[0], at[1], now, &made),
             .motion => cm.pad.motion(t.id, at[0], at[1], &made),
             .up => cm.pad.up(t.id, now, &made),
         }

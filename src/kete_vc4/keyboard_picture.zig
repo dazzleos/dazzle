@@ -16,6 +16,7 @@ const std = @import("std");
 const kete = @import("kete");
 const locale = @import("locale");
 const Keyboard = locale.Keyboard;
+const key_light = @import("key_light.zig");
 
 pub const KeyboardPicture = struct {
     keyboard: Keyboard,
@@ -84,9 +85,9 @@ pub const KeyboardPicture = struct {
         const glow = if (slot.code != 0 and slot.code < self.light.len) std.math.clamp(self.light[slot.code], 0, 1) else 0;
         const base = if (found != null or slot.code == 57) t.surface_container_highest else t.surface_container;
         return cx.make(kete.RoundedBox{
-            .color = kete.Easing.linear.lerp(base, t.primary_container, glow),
+            .color = key_light.face(t, base, glow),
             .border_width = 1,
-            .border_color = kete.Easing.linear.lerp(t.outline_variant, t.primary, glow),
+            .border_color = key_light.border(t, glow),
             .radius = .all(u * 0.15),
             .child = cx.make(kete.SizedBox{ .width = width, .height = u, .child = label }),
         });

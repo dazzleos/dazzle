@@ -15,6 +15,7 @@
 const std = @import("std");
 const kete = @import("kete");
 const kete_panel = @import("kete_panel.zig");
+const key_light = @import("kete_vc4").key_light;
 
 /// What a key typed, for the shell to send the app.
 pub const Typed = union(enum) {
@@ -67,6 +68,10 @@ pub const Osk = struct {
     typed_len: usize = 0,
     /// It changed (a page, Shift), and is to be drawn again.
     changed: bool = true,
+    /// Each key's light (as setup's keyboard picture lights its keys):
+    /// held, and let go, fading. By the key's place, as they are built.
+    lights: [40]key_light.Key = @splat(.{}),
+    lights_used: usize = 0,
     /// How far up it is (0: off the screen, 1: all of it shown), and its
     /// way there (`slideTo`).
     slide: f32 = 0,
@@ -200,6 +205,7 @@ pub const Osk = struct {
 const Key = struct {
     osk: *Osk,
     what: What,
+    light: ?*key_light.Key = null,
     const What = union(enum) {
         text: []const u8,
         key: u32,
@@ -209,6 +215,7 @@ const Key = struct {
     };
 
     fn press(k: *Key) void {
+        if (k.light) |l| l.pressed();
         const o = k.osk;
         switch (k.what) {
             .text => |t| o.typeText(t),
@@ -253,6 +260,7 @@ const View = struct {
         const a = cx.arena;
         const s = o.scale;
         const rows = if (o.page == .letters) letter_rows else symbol_rows;
+        o.lights_used = 0;
         var lines: std.ArrayList(kete.Widget) = .empty;
         for (rows, 0..) |row, i| {
             var keys: std.ArrayList(kete.Widget) = .empty;
@@ -314,16 +322,23 @@ fn upper(cx: *kete.BuildContext, ch: []const u8) []const u8 {
 fn keyButton(cx: *kete.BuildContext, o: *Osk, what: Key.What, label: ?[]const u8, icon: ?kete.IconName, share: f32, on: bool) kete.Widget {
     const t = cx.theme();
     const k = cx.arena.create(Key) catch return spacer(cx, share);
-    k.* = .{ .osk = o, .what = what };
+    const light: ?*key_light.Key = if (o.lights_used < o.lights.len) &o.lights[o.lights_used] else null;
+    o.lights_used += 1;
+    k.* = .{ .osk = o, .what = what, .light = light };
     const special = what != .text;
+    const g = if (light) |l| l.glow(cx) else 0;
+    const base = if (on) t.primary_container else if (special) t.surface_container_highest else t.surface;
     const face: kete.Widget = if (icon) |i|
         cx.make(kete.Icon{ .icon = i, .size = 26 * o.scale, .color = t.on_surface })
     else
         cx.make(kete.Text{ .text = label orelse "", .style = .{ .size = 24 * o.scale, .color = t.on_surface }, .wrap = false });
     return cx.make(kete.Expanded{ .flex = share, .child = cx.make(kete.Pressable{
         .on_press = .of(k, Key.press),
+        .interaction = if (light) |l| &l.interaction else null,
         .child = cx.make(kete.RoundedBox{
-            .color = if (on) t.primary_container else if (special) t.surface_container_highest else t.surface,
+            .color = key_light.face(t, base, g),
+            .border_width = 1,
+            .border_color = key_light.border(t, g),
             .radius = .all(8 * o.scale),
             .child = cx.make(kete.Align{ .child = face }),
         }),

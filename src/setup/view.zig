@@ -50,8 +50,6 @@ const typed_fade_ns = 300 * std.time.ns_per_ms;
 /// A character typed, and when.
 const Typed = struct { char: u21, at_ns: u64 };
 
-/// How long a key let go takes to stop being lit.
-const key_fade_ns: f32 = 300 * std.time.ns_per_ms;
 
 /// What the window asks for; the main loop does it.
 pub const Actions = struct {
@@ -367,8 +365,7 @@ pub const Setup = struct {
                 state.keys_let_go.unset(code);
                 state.key_let_go_ns[code] = now;
             }
-            const since = now -| state.key_let_go_ns[code];
-            l.* = if (state.keys_held.isSet(code)) 1 else if (state.key_let_go_ns[code] != 0 and since < key_fade_ns) 1 - @as(f32, @floatFromInt(since)) / key_fade_ns else 0;
+            l.* = kete_vc4.key_light.lit(state.keys_held.isSet(code), state.key_let_go_ns[code], now);
             if (l.* > 0 and !state.keys_held.isSet(code)) fading = true;
         }
         if (fading) cx.requestFrame();

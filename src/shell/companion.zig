@@ -24,6 +24,8 @@ const evdev = sys.evdev;
 /// * Two fingers moved: they scroll (down, the page goes up, as on a
 ///   touchscreen).
 /// * Two fingers tapped: a right click.
+/// * Tapped, then down again soon and moved: a drag (the left button held
+///   until the finger is let go), as a laptop's touchpad does.
 pub const Touchpad = struct {
     touches: [2]?Touch = .{ null, null },
     /// The most fingers down at once since the first went down.
@@ -35,6 +37,10 @@ pub const Touchpad = struct {
     left_over: [2]f64 = .{ 0, 0 },
     /// How far the pointer moves for a finger's pixel.
     gain: f64 = 2,
+    /// When the last one-finger tap was let go (0: none since), and
+    /// whether the finger down now is dragging (the left button held).
+    tapped_ns: u64 = 0,
+    dragging: bool = false,
 
     const Touch = struct { id: i32, at: [2]f64, from: [2]f64 };
 
@@ -44,12 +50,18 @@ pub const Touchpad = struct {
     pub const tap_slop = 12;
 
     /// The events touch `id` going down at (x, y) (touchpad pixels) makes,
-    /// in `out` (none).
-    pub fn down(p: *Touchpad, id: i32, x: f64, y: f64, now: u64) void {
+    /// in `out`: the left button pressed, if it is down again soon after a
+    /// tap (a drag).
+    pub fn down(p: *Touchpad, id: i32, x: f64, y: f64, now: u64, out: *Out) void {
         if (p.count() == 0) {
             p.most = 0;
             p.moved = false;
             p.first_down_ns = now;
+            if (p.tapped_ns != 0 and now -| p.tapped_ns <= tap_ns) {
+                p.dragging = true;
+                out.add(.{ .button = .{ .code = evdev.btn_left, .pressed = true } });
+            }
+            p.tapped_ns = 0;
         }
         for (&p.touches) |*slot| if (slot.* == null) {
             slot.* = .{ .id = id, .at = .{ x, y }, .from = .{ x, y } };
@@ -89,10 +101,17 @@ pub const Touchpad = struct {
             slot.* = null;
         };
         if (p.count() != 0) return;
+        // A drag ends: the button let go.
+        if (p.dragging) {
+            p.dragging = false;
+            out.add(.{ .button = .{ .code = evdev.btn_left, .pressed = false } });
+            return;
+        }
         if (p.moved or now -| p.first_down_ns > tap_ns) return;
         const button: u32 = if (p.most >= 2) evdev.btn_right else evdev.btn_left;
         out.add(.{ .button = .{ .code = button, .pressed = true } });
         out.add(.{ .button = .{ .code = button, .pressed = false } });
+        if (p.most == 1) p.tapped_ns = now;
     }
 
     fn count(p: *const Touchpad) u8 {
@@ -225,6 +244,7 @@ const View = struct {
                     cx.make(kete.Text{ .text = "Touchpad", .style = .{ .size = 22, .color = t.on_surface } }),
                     cx.make(kete.Text{ .text = "Tap to click, two fingers to scroll", .style = .{ .size = 16, .color = t.on_surface_variant } }),
                     cx.make(kete.Text{ .text = "Tap with two fingers to right-click", .style = .{ .size = 16, .color = t.on_surface_variant } }),
+                    cx.make(kete.Text{ .text = "Tap, then touch again and slide to drag", .style = .{ .size = 16, .color = t.on_surface_variant } }),
                 }) catch &.{},
             }) }),
         }) });
@@ -236,7 +256,7 @@ const testing = std.testing;
 test "a finger moved moves the pointer; tapped, it clicks" {
     var p: Touchpad = .{};
     var out: Out = .{};
-    p.down(1, 100, 100, 0);
+    p.down(1, 100, 100, 0, &out);
     p.motion(1, 103, 101.25, &out);
     try testing.expectEqual(@as(usize, 1), out.len);
     try testing.expectEqual([2]i32{ 6, 2 }, out.events[0].motion);
@@ -253,30 +273,57 @@ test "a finger moved moves the pointer; tapped, it clicks" {
     // Moved further than a tap: no click.
     p = .{};
     out = .{};
-    p.down(1, 100, 100, 0);
+    p.down(1, 100, 100, 0, &out);
     p.motion(1, 150, 100, &out);
     out = .{};
     p.up(1, 100 * std.time.ns_per_ms, &out);
     try testing.expectEqual(@as(usize, 0), out.len);
 
     // Held too long: no click.
-    p.down(1, 100, 100, 0);
+    p.down(1, 100, 100, 0, &out);
     out = .{};
     p.up(1, 2 * Touchpad.tap_ns, &out);
+    try testing.expectEqual(@as(usize, 0), out.len);
+}
+
+test "tapped, then down again and moved: a drag" {
+    var p: Touchpad = .{};
+    var out: Out = .{};
+    p.down(1, 100, 100, 0, &out);
+    p.up(1, 100 * std.time.ns_per_ms, &out);
+    try testing.expectEqual(@as(usize, 2), out.len);
+    // Down again soon: the button held while it moves, let go with it.
+    out = .{};
+    p.down(1, 100, 100, 200 * std.time.ns_per_ms, &out);
+    try testing.expectEqual(@as(usize, 1), out.len);
+    try testing.expect(out.events[0].button.pressed);
+    out = .{};
+    p.motion(1, 140, 100, &out);
+    try testing.expectEqual([2]i32{ 80, 0 }, out.events[0].motion);
+    out = .{};
+    p.up(1, 900 * std.time.ns_per_ms, &out);
+    try testing.expectEqual(@as(usize, 1), out.len);
+    try testing.expect(!out.events[0].button.pressed);
+    // Down again later than that: no drag.
+    out = .{};
+    p.down(1, 100, 100, 2 * std.time.ns_per_s, &out);
+    p.up(1, 2 * std.time.ns_per_s + 50 * std.time.ns_per_ms, &out);
+    out = .{};
+    p.down(1, 100, 100, 3 * std.time.ns_per_s, &out);
     try testing.expectEqual(@as(usize, 0), out.len);
 }
 
 test "two fingers scroll, and tapped, right-click" {
     var p: Touchpad = .{};
     var out: Out = .{};
-    p.down(1, 100, 100, 0);
-    p.down(2, 150, 100, 0);
+    p.down(1, 100, 100, 0, &out);
+    p.down(2, 150, 100, 0, &out);
     p.motion(1, 100, 80, &out);
     try testing.expectEqual(@as(f64, 10), out.events[0].axis.value);
     p = .{};
     out = .{};
-    p.down(1, 100, 100, 0);
-    p.down(2, 150, 100, 0);
+    p.down(1, 100, 100, 0, &out);
+    p.down(2, 150, 100, 0, &out);
     p.up(1, 50 * std.time.ns_per_ms, &out);
     try testing.expectEqual(@as(usize, 0), out.len);
     p.up(2, 60 * std.time.ns_per_ms, &out);
