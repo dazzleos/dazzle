@@ -60,6 +60,15 @@ pub const Display = struct {
         return d;
     }
 
+    /// Frees the buffers (the display stops showing them).
+    pub fn deinit(d: *Display, dev: vc4.Device) void {
+        for (d.buffers) |b| {
+            drm.removeFramebuffer(d.fd, b.fb_id);
+            dev.destroyBo(b.bo);
+        }
+        d.* = undefined;
+    }
+
     fn backIndex(d: *const Display) u1 {
         return if (d.on_screen) |i| i +% 1 else 0;
     }

@@ -225,6 +225,16 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         print("dazzle-shell: the touchscreen ({d}x{d}) is the monitor's keyboard and touchpad\n", .{ cm.width(), cm.height() });
         break :blk cm;
     } else null;
+    // The touchscreen's keyboard and touchpad, put aside while the monitor
+    // is unplugged (the desktop is on the touchscreen then).
+    var parked: ?companion_mod.Companion = null;
+    // The kernel's word that a display was plugged in or unplugged, and
+    // that the desktop moved (what is sized by the screen, again).
+    const hotplug: ?linux.fd_t = openHotplug() catch |err| blk: {
+        print(sys.log_warning ++ "dazzle-shell: displays plugged in are not noticed: {s}\n", .{@errorName(err)});
+        break :blk null;
+    };
+    var display_moved = false;
     // The shell's touch gestures (four fingers swiped: the overview).
     var gestures: gesture.Gestures = .{ .distance = @as(f64, @floatFromInt(@min(renderer.width, renderer.height))) * 0.08 };
     // Where the last touch on it was (a touch let go says no place: it
@@ -439,7 +449,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         // Wait for clients, input, the display (a page flip completing), or
         // the next clock tick; or not at all if a frame is due and can be
         // drawn.
-        var fds: [9 + 2 * max_clients + input.max_devices]linux.pollfd = undefined;
+        var fds: [10 + 2 * max_clients + input.max_devices]linux.pollfd = undefined;
         fds[0] = .{ .fd = listener, .events = linux.POLL.IN, .revents = 0 };
         fds[1] = .{ .fd = renderer.dev.fd, .events = linux.POLL.IN, .revents = 0 };
         const n_clients = @min(server.clients.items.len, max_clients);
@@ -506,6 +516,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         const shot_index = opener_index + 4;
         const remote_index = opener_index + 5;
         const input_watch_index = opener_index + 6;
+        const hotplug_index = opener_index + 7;
         fds[opener_index] = .{ .fd = opener orelse -1, .events = linux.POLL.IN, .revents = 0 };
         fds[net_index] = .{ .fd = net_sub.fd orelse -1, .events = linux.POLL.IN, .revents = 0 };
         fds[sys_index] = .{ .fd = sys_sub.fd orelse -1, .events = linux.POLL.IN, .revents = 0 };
@@ -513,15 +524,23 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         fds[shot_index] = .{ .fd = shot_pipe[0], .events = linux.POLL.IN, .revents = 0 };
         fds[remote_index] = .{ .fd = remote.listener orelse -1, .events = linux.POLL.IN, .revents = 0 };
         fds[input_watch_index] = .{ .fd = devices.watch orelse -1, .events = linux.POLL.IN, .revents = 0 };
+        fds[hotplug_index] = .{ .fd = hotplug orelse -1, .events = linux.POLL.IN, .revents = 0 };
         // The clients' processes, to notice one ending (crashing) while its
         // socket is still open elsewhere.
-        const exits = fds[input_watch_index + 1 ..][0..n_clients];
+        const exits = fds[hotplug_index + 1 ..][0..n_clients];
         for (server.clients.items[0..n_clients], exits) |c, *f| f.* = .{ .fd = c.pidfd orelse -1, .events = linux.POLL.IN, .revents = 0 };
-        _ = linux.poll(&fds, input_watch_index + 1 + n_clients, timeout);
+        _ = linux.poll(&fds, hotplug_index + 1 + n_clients, timeout);
         frame_times.wakes += 1;
         if (sys.nowNs() >= next_tick) frame_times.ticks += 1;
         // A keyboard or mouse plugged in (or handed to the user).
         if (fds[input_watch_index].revents != 0) devices.nodesChanged();
+        // A monitor plugged in or unplugged: the desktop moves to it, or
+        // to the touchscreen.
+        if (fds[hotplug_index].revents != 0 and drmChanged(hotplug.?)) {
+            if (moveDisplays(gpa, dev, kit, &renderer, &companion, &parked, orientations, &osk)) |moved| {
+                if (moved) display_moved = true;
+            } else |err| print(sys.log_warning ++ "dazzle-shell: cannot move to the display: {s}\n", .{@errorName(err)});
+        }
         // Asked to stop (the computer restarting or turning off): the last
         // frame is left for the shutdown screen to fade from.
         if (stop_asked.load(.monotonic)) {
@@ -660,8 +679,9 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
             const turn = orientations.get(renderer.port()).turn(renderer.display.width, renderer.display.height);
             // (A touchscreen beside the monitor is not the monitor's.)
             const touch = devices.hasTouch() and companion == null;
-            if (turn != renderer.turn or touch != dock_touch) {
+            if (turn != renderer.turn or touch != dock_touch or display_moved) {
                 dock_touch = touch;
+                display_moved = false;
                 renderer.setTurn(turn) catch |err| print(sys.log_warning ++ "dazzle-shell: cannot turn the cursor: {s}\n", .{@errorName(err)});
                 dock.setScreen(renderer.width, renderer.height, touch);
                 if (companion == null) osk.setScreen(renderer.width, renderer.height, dock.scale);
@@ -1903,6 +1923,94 @@ fn listen(path: [:0]const u8) !linux.fd_t {
     return fd;
 }
 
+/// A socket the kernel's uevents come on (a display plugged in, among
+/// them).
+fn openHotplug() !linux.fd_t {
+    const fd: linux.fd_t = @intCast(try sys.check(linux.socket(linux.AF.NETLINK, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK, linux.NETLINK.KOBJECT_UEVENT)));
+    errdefer sys.close(fd);
+    var addr: linux.sockaddr.nl = .{ .pid = 0, .groups = 1 };
+    _ = try sys.check(linux.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.nl)));
+    return fd;
+}
+
+/// Reads the uevents there; whether one is of a display (DRM) changing.
+fn drmChanged(fd: linux.fd_t) bool {
+    var changed = false;
+    var buf: [2048]u8 = undefined;
+    while (true) {
+        const n = linux.read(fd, &buf, buf.len);
+        if (linux.errno(n) != .SUCCESS or n == 0) break;
+        if (isDrmHotplug(buf[0..n])) changed = true;
+    }
+    return changed;
+}
+
+/// Whether a uevent (its fields, each ended by a NUL) says a display was
+/// plugged in or unplugged.
+fn isDrmHotplug(event: []const u8) bool {
+    var drm = false;
+    var hotplug_ = false;
+    var it = std.mem.splitScalar(u8, event, 0);
+    while (it.next()) |field| {
+        if (std.mem.eql(u8, field, "SUBSYSTEM=drm")) drm = true;
+        if (std.mem.eql(u8, field, "HOTPLUG=1")) hotplug_ = true;
+    }
+    return drm and hotplug_;
+}
+
+/// After a display was plugged in or unplugged: the desktop on the monitor
+/// if one is connected (the touchscreen, if there is one, its keyboard and
+/// touchpad), else on the touchscreen. Returns whether it moved.
+fn moveDisplays(gpa: std.mem.Allocator, dev: vc4.Device, kit: *kete_panel.Kit, renderer: *render.Renderer, companion: *?companion_mod.Companion, parked: *?companion_mod.Companion, orientations: sys.system.Orientations, osk: *osk_mod.Osk) !bool {
+    const want = vc4.drm.findOutput(dev.fd) catch return false;
+    const was = renderer.display.output;
+    if (want.connector_id == was.connector_id and std.meta.eql(want.mode, was.mode)) return false;
+    if (companion.*) |cm| if (cm.renderer.display.output.connector_id == want.connector_id) {
+        // The monitor unplugged: the desktop on the touchscreen, its
+        // keyboard and touchpad put aside (its renderer keeps nothing of
+        // the display, which is the desktop's now).
+        var old = renderer.swapDisplay(cm.renderer.display, turnFor(orientations, want));
+        renderer.display.shared = false;
+        old.deinit(dev);
+        parked.* = cm;
+        companion.* = null;
+        osk.setScreen(renderer.width, renderer.height, 1);
+        print("dazzle-shell: the monitor unplugged: the desktop on the touchscreen ({d}x{d})\n", .{ renderer.width, renderer.height });
+        return true;
+    };
+    var old = renderer.swapDisplay(try vc4.display.Display.init(dev, want, .xrgb8888), turnFor(orientations, want));
+    print("dazzle-shell: the desktop on the {s} display ({d}x{d})\n", .{ @tagName(want.port), renderer.width, renderer.height });
+    if (!old.output.dsi or want.dsi) {
+        old.deinit(dev);
+        return true;
+    }
+    // A monitor plugged in beside the touchscreen: the touchscreen its
+    // keyboard and touchpad again.
+    var cm: companion_mod.Companion = if (parked.*) |p| blk: {
+        var c = p;
+        _ = c.renderer.swapDisplay(old, turnFor(orientations, old.output));
+        break :blk c;
+    } else blk: {
+        const output = old.output;
+        old.deinit(dev);
+        break :blk .{ .renderer = try render.Renderer.init(gpa, dev, output), .panel = try kit.gpuPanel() };
+    };
+    parked.* = null;
+    renderer.display.shared = true;
+    cm.renderer.display.shared = true;
+    osk.setScreen(cm.width(), cm.height(), 1);
+    cm.layout(osk.height);
+    renderer.setPanelHidden(.keyboard, true);
+    companion.* = cm;
+    print("dazzle-shell: the touchscreen ({d}x{d}) is the monitor's keyboard and touchpad\n", .{ cm.width(), cm.height() });
+    return true;
+}
+
+/// How `output`'s display is turned for its port's orientation.
+fn turnFor(orientations: sys.system.Orientations, output: vc4.drm.Output) sys.system.Turn {
+    return orientations.get(output.port).turn(output.mode.hdisplay, output.mode.vdisplay);
+}
+
 /// An app asks for another to be opened (see `sys.shell`): one running is
 /// raised, and told what to show; another is started, with it as its
 /// argument. Returns whether an app was started. (Or it asks the screen's
@@ -2402,4 +2510,10 @@ test {
     _ = @import("render.zig");
     _ = @import("background.zig");
     _ = @import("clock.zig");
+}
+
+test "a display plugged in or unplugged, from its uevent" {
+    try std.testing.expect(isDrmHotplug("change@/devices/platform/gpu/drm/card1\x00ACTION=change\x00DEVPATH=/devices/platform/gpu/drm/card1\x00SUBSYSTEM=drm\x00HOTPLUG=1\x00DEVNAME=dri/card1\x00"));
+    try std.testing.expect(!isDrmHotplug("add@/devices/x\x00ACTION=add\x00SUBSYSTEM=input\x00"));
+    try std.testing.expect(!isDrmHotplug("change@/x\x00SUBSYSTEM=drm\x00"));
 }

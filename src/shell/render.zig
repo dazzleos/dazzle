@@ -795,6 +795,28 @@ pub const Renderer = struct {
 
     /// Turns the screen on the display: its size (swapped, on its side),
     /// and the cursor's pictures, turned with it, made again.
+    /// Shows the screen on `display` from now on (a monitor unplugged, or
+    /// plugged in), turned `turn`; returns the display it was on. Everything
+    /// is drawn again for it (overlays of another size are composited
+    /// until made again).
+    pub fn swapDisplay(r: *Renderer, display: vc4.display.Display, turn: Turn) vc4.display.Display {
+        const shown = r.cursor_shape;
+        r.hideCursor();
+        const old = r.display;
+        r.display = display;
+        r.turn = turn;
+        r.width = if (turn.sideways()) display.height else display.width;
+        r.height = if (turn.sideways()) display.width else display.height;
+        for (&r.cursor_bos) |*slot| if (slot.*) |bo| {
+            r.dev.destroyBo(bo);
+            slot.* = null;
+        };
+        r.band_stamp +%= 1;
+        for (&r.panels) |*p| p.dirty = true;
+        if (shown) |s| r.showCursor(s) catch {};
+        return old;
+    }
+
     pub fn setTurn(r: *Renderer, turn: Turn) !void {
         if (turn == r.turn) return;
         r.turn = turn;
