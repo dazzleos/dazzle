@@ -203,21 +203,89 @@ pub fn encode(pixels: []const u32, width: u32, height: u32, out: []u64) void {
 
 /// How a block's 64 bits are stored, a byte at a time: the first byte of
 /// the standard layout first (as files hold it), or last; and whether its
-/// red and blue are exchanged (`swapRedBlue`). A Pi 3's GPU takes the
-/// standard order, but returns the colour it decodes with red where
-/// Dazzle's 32-bit textures have blue: given blocks with red and blue
-/// exchanged, it returns them as they should be (exchanging them costs
-/// nothing, where the shader would have to on every pixel).
+/// red and blue are exchanged (`swapRedBlue`). Or as the VideoCore IV's
+/// texture unit (a Pi 1 to 3's) reads them (`vc4`): the standard order,
+/// but it returns the colour it decodes with red where Dazzle's 32-bit
+/// textures have blue, and draws each block's rows bottom first (as
+/// OpenGL's textures go, from the bottom up, where Dazzle's go from the
+/// top down); so its blocks have red and blue exchanged and are upside
+/// down (`upsideDown`), which costs nothing when drawn.
 pub const ByteOrder = enum {
     standard,
     reversed,
     standard_blue_red,
     reversed_blue_red,
+    vc4,
 
     fn swapped(o: ByteOrder) bool {
-        return o == .standard_blue_red or o == .reversed_blue_red;
+        return o == .standard_blue_red or o == .reversed_blue_red or o == .vc4;
     }
 };
+
+/// The block upside down: its rows in the other order. Each column's
+/// pixels' indices go the other way; and with its halves one above the
+/// other (flipped), they are exchanged: their tables, and their colours
+/// (in differential mode, the second as the first and the other's
+/// difference; one whose difference is -4, which cannot be +4, is given
+/// its colours individually, to 4 bits from 5).
+pub fn upsideDown(b: u64) u64 {
+    var out = b & 0xffff_ffff_0000_0000;
+    for (0..4) |x| for (0..4) |y| {
+        const from: u6 = @intCast(x * 4 + y);
+        const to: u6 = @intCast(x * 4 + 3 - y);
+        out |= (b >> from & 1) << to;
+        out |= (b >> (16 + from) & 1) << (16 + to);
+    };
+    if (b >> 32 & 1 == 0) return out;
+    // The halves exchanged: their tables.
+    const t1 = b >> 37 & 7;
+    const t2 = b >> 34 & 7;
+    out = (out & ~@as(u64, 0x3f << 34)) | t2 << 37 | t1 << 34;
+    if (b >> 33 & 1 == 0) {
+        // Individual: each channel's byte, its two colours' nibbles.
+        for (0..3) |c| {
+            const shift: u6 = @intCast(56 - 8 * c);
+            const byte = b >> shift & 0xff;
+            out = (out & ~(@as(u64, 0xff) << shift)) | ((byte & 0xf) << 4 | byte >> 4) << shift;
+        }
+        return out;
+    }
+    // Differential: each channel's 5-bit colour and 3-bit difference.
+    var fits = true;
+    for (0..3) |c| {
+        const shift: u6 = @intCast(59 - 8 * c);
+        const d: i32 = @as(i3, @bitCast(@as(u3, @intCast(b >> (shift - 3) & 7))));
+        if (d == -4) fits = false;
+    }
+    if (fits) {
+        for (0..3) |c| {
+            const shift: u6 = @intCast(59 - 8 * c);
+            const c5: i32 = @intCast(b >> shift & 31);
+            const d: i32 = @as(i3, @bitCast(@as(u3, @intCast(b >> (shift - 3) & 7))));
+            const byte: u64 = @intCast((c5 + d) << 3 | (-d & 7));
+            out = (out & ~(@as(u64, 0xff) << (shift - 3))) | byte << (shift - 3);
+        }
+        return out;
+    }
+    // Individually, the second colour first.
+    out &= ~@as(u64, 1 << 33);
+    for (0..3) |c| {
+        const shift: u6 = @intCast(59 - 8 * c);
+        const c5: i32 = @intCast(b >> shift & 31);
+        const d: i32 = @as(i3, @bitCast(@as(u3, @intCast(b >> (shift - 3) & 7))));
+        const first = to4(c5 + d);
+        const second = to4(c5);
+        out = (out & ~(@as(u64, 0xff) << (shift - 3))) | @as(u64, first << 4 | second) << (shift - 3);
+    }
+    return out;
+}
+
+/// A 5-bit colour (as differential mode expands it) to the nearest 4-bit
+/// one (as individual mode does).
+fn to4(c5: i32) u64 {
+    const v = (c5 << 3) | (c5 >> 2);
+    return @intCast(@divTrunc(v * 15 + 127, 255));
+}
 
 /// The block with its red and blue exchanged. In both of ETC1's modes a
 /// block's first byte holds red's base colour(s) and its third blue's,
@@ -253,6 +321,7 @@ pub fn upload(dst: []u8, width: u32, height: u32, blocks: []const u64, order: By
         const b = if (order.swapped()) swapRedBlue(blocks[by * n[0] + bx]) else blocks[by * n[0] + bx];
         switch (order) {
             .standard, .standard_blue_red => std.mem.writeInt(u64, dst[at..][0..8], b, .big),
+            .vc4 => std.mem.writeInt(u64, dst[at..][0..8], upsideDown(b), .big),
             .reversed, .reversed_blue_red => std.mem.writeInt(u64, dst[at..][0..8], b, .little),
         }
     };
@@ -261,6 +330,33 @@ pub fn upload(dst: []u8, width: u32, height: u32, blocks: []const u64, order: By
 // --- Tests ------------------------------------------------------------------
 
 const testing = std.testing;
+
+test "a block upside down decodes to its rows in the other order" {
+    // Every kind of block a gradient and some edges make, both ways up.
+    const w = 64;
+    var pixels: [w * w]u32 = undefined;
+    for (0..w) |y| for (0..w) |x| {
+        const r: u32 = @intCast(x * 4);
+        const g: u32 = @intCast(y * 4);
+        const b: u32 = if ((x / 7 + y / 5) % 2 == 0) 30 else 220;
+        pixels[y * w + x] = 0xff000000 | r << 16 | g << 8 | b;
+    };
+    var blocks: [(w / 4) * (w / 4)]u64 = undefined;
+    encode(&pixels, w, w, &blocks);
+    var flipped_halves: usize = 0;
+    for (blocks) |b| {
+        if (b >> 32 & 1 != 0) flipped_halves += 1;
+        const upright = decodeBlock(b);
+        const turned = decodeBlock(upsideDown(b));
+        // Exactly, but a differential block made individual (4 bits).
+        const tolerance: u32 = if (b >> 33 & 1 != 0 and upsideDown(b) >> 33 & 1 == 0) 17 else 0;
+        for (0..4) |y| for (0..4) |x| try testing.expect(channelError(turned[(3 - y) * 4 + x], upright[y * 4 + x]) <= tolerance);
+    }
+    try testing.expect(flipped_halves > 0);
+    // A differential block, one channel's difference -4: individual.
+    const d4: u64 = 0b11111_100 << 56 | 0x02 << 32 | 1 << 32;
+    try testing.expectEqual(@as(u64, 0), upsideDown(d4) >> 33 & 1);
+}
 
 fn channelError(a: u32, b: u32) u32 {
     var most: u32 = 0;
