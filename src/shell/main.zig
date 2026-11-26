@@ -634,6 +634,15 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                 server.damaged = true;
             }
             if (companion) |*cm| {
+                // The touchscreen beside the monitor turned (it follows
+                // the orientation): its keyboard and touchpad, again.
+                const turn = orientation.turn(cm.renderer.display.width, cm.renderer.display.height);
+                if (turn != cm.renderer.turn) {
+                    cm.renderer.setTurn(turn) catch |err| print(sys.log_warning ++ "dazzle-shell: cannot turn the touchscreen: {s}\n", .{@errorName(err)});
+                    osk.setScreen(cm.width(), cm.height(), 1);
+                    cm.layout(osk.height);
+                    print("dazzle-shell: the touchscreen {d}x{d}\n", .{ cm.width(), cm.height() });
+                }
                 // On the touchscreen beside the monitor: drawn when it
                 // changes (once the last frame there is shown).
                 if ((cm.dirty or osk.needsDraw()) and cm.serviceFlip(sys.nowNs())) {
