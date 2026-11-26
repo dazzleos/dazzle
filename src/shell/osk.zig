@@ -75,7 +75,8 @@ pub const Osk = struct {
     always: bool = false,
     /// Each key's light (as setup's keyboard picture lights its keys):
     /// held, and let go, fading. By which key it is (`Key.What.id`).
-    lights: [40]Light = @splat(.{}),
+    /// (Room for every key of every page: none shares one.)
+    lights: [160]Light = @splat(.{}),
 
     /// How far up it is (0: off the screen, 1: all of it shown), and its
     /// way there (`slideTo`).
@@ -88,19 +89,17 @@ pub const Osk = struct {
 
     const Light = struct { id: u32 = 0, key: key_light.Key = .{} };
 
-    /// Key `id`'s light: its own, or one no key is lit by now.
-    fn lightFor(o: *Osk, id: u32) *key_light.Key {
-        for (&o.lights) |*l| if (l.id == id) return &l.key;
-        var oldest = &o.lights[0];
+    /// Key `id`'s light: its own, kept for it from when it is first made
+    /// (null if there is no room: it is not lit).
+    fn lightFor(o: *Osk, id: u32) ?*key_light.Key {
         for (&o.lights) |*l| {
+            if (l.id == id) return &l.key;
             if (l.id == 0) {
-                oldest = l;
-                break;
+                l.* = .{ .id = id };
+                return &l.key;
             }
-            if (!l.key.interaction.pressed and l.key.let_go_ns < oldest.key.let_go_ns) oldest = l;
         }
-        oldest.* = .{ .id = id };
-        return &oldest.key;
+        return null;
     }
 
     pub fn init(panel: *kete_panel.Panel, screen_width: u32, screen_height: u32, scale: f32) Osk {
@@ -398,6 +397,21 @@ fn keyButton(cx: *kete.BuildContext, o: *Osk, what: Key.What, label: ?[]const u8
 }
 
 const testing = std.testing;
+
+test "each key its own light, on every page" {
+    var o: Osk = .{ .panel = undefined };
+    var ids: std.ArrayList(u32) = .empty;
+    defer ids.deinit(testing.allocator);
+    for ([_][]const []const []const u8{ &letter_rows, &symbol_rows, &more_symbol_rows, &emoji_rows }) |rows| for (rows) |row| for (row) |ch| {
+        const id = (Key.What{ .text = ch }).id();
+        try testing.expect(std.mem.indexOfScalar(u32, ids.items, id) == null);
+        try ids.append(testing.allocator, id);
+        try testing.expect(o.lightFor(id) != null);
+    };
+    // The same key, the same light; others, others.
+    try testing.expectEqual(o.lightFor((Key.What{ .text = "q" }).id()), o.lightFor((Key.What{ .text = "q" }).id()));
+    try testing.expect(o.lightFor((Key.What{ .text = "q" }).id()) != o.lightFor((Key.What{ .text = "*" }).id()));
+}
 
 test "keys type text (Shift for one capital), Backspace and Enter as keys, and Hide dismisses it" {
     var o: Osk = .{ .panel = undefined };
