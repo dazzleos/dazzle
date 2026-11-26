@@ -165,6 +165,10 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
     var icons_dirty = true;
     var video_memory_failed = false;
     var orientation_failed = false;
+    // The desktop's screen, as the shell says; asked again for a few
+    // seconds after the orientation changes (the shell turns to it then).
+    var screen = sys.shell.screen();
+    var screen_until: u64 = 0;
     // The log of the slot that last did not start properly, and which
     // failure it is of.
     var failed_log: ?failed_start.Summary = null;
@@ -230,6 +234,7 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
         if (!window.suspended and now >= next_update) {
             next_update = now + std.time.ns_per_s;
             usage = monitor.read(now);
+            if (now < screen_until) screen = sys.shell.screen() orelse screen;
             network = info.Network.read();
             if (view.shownPage(window.ui) == .board) {
                 devices = usb.Devices.read();
@@ -453,6 +458,7 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
                 updater.report = have;
             };
             orientation_failed = if (r) |have| have.denied or have.orientation != o else true;
+            screen_until = sys.nowNs() + 3 * std.time.ns_per_s;
             print("dazzle-settings: the screen {s}{s}\n", .{ @tagName(o), if (orientation_failed) ": refused" else "" });
             dirty = true;
         }
@@ -640,6 +646,7 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
                 .display = .{
                     .orientation = if (updater.report) |r| r.orientation else null,
                     .failed = orientation_failed,
+                    .screen = screen,
                 },
                 .video_memory = .{
                     .now = if (updater.report) |r| r.video_memory_now else null,

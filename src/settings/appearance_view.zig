@@ -27,10 +27,21 @@ pub const label = "Appearance";
 pub const icon: kete.IconName = .palette;
 
 /// The screen's orientation (null: not known), and whether changing it was
-/// refused.
+/// refused; and the size of the screen the desktop is on (as the shell
+/// says: with a touchscreen beside a monitor, the orientation is the
+/// touchscreen's, the background the monitor's).
 pub const Display = struct {
     orientation: ?Orientation = null,
     failed: bool = false,
+    screen: ?[2]u32 = null,
+
+    /// The background's shape: the screen's, or failing that the
+    /// orientation's.
+    fn shape(d: Display) Shape {
+        if (d.screen) |s| return if (s[1] > s[0]) .portrait else .landscape;
+        const o = d.orientation orelse return .landscape;
+        return if (o.isPortrait()) .portrait else .landscape;
+    }
 };
 
 pub const OrientationMenu = kete.Select(Orientation);
@@ -193,7 +204,7 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
 fn photoRow(cx: *kete.BuildContext, self: *const Settings, state: *State) kete.Widget {
     var tiles: [builtin.all.len + 1]kete.Widget = undefined;
     const chosen = self.appearance.image.slice() orelse "";
-    const shape: Shape = if (self.display.orientation) |o| (if (o.isPortrait()) .portrait else .landscape) else .landscape;
+    const shape = self.display.shape();
     inline for (builtin.all, tiles[0..builtin.all.len], 0..) |bg, *t, i| {
         t.* = tile(cx, bg.name, thumbnail(i, shape), shape, std.mem.eql(u8, chosen, builtin.path(bg)), if (self.actions != null) .of(state, State.setImage(bg)) else null);
     }
@@ -537,5 +548,12 @@ test "the orientation chosen, and flipped; the tiles the screen's shape" {
     u.frame(1920, 960, 3, settings);
     st.choose(.landscape);
     try testing.expectEqual(@as(?Orientation, .landscape_flipped), actions.orientation);
+    // A touchscreen beside a monitor, the touchscreen portrait: the
+    // background is on the monitor, so wide tiles.
+    settings.display = .{ .orientation = .portrait, .screen = .{ 1920, 1080 } };
+    u.frame(1920, 960, 4, settings);
+    at = findTile(u.root.?, "Forest").?;
+    while (!at.widget.is(kete.Image)) at = at.children.items[0];
+    try testing.expect(at.size.w > at.size.h);
     try testing.expect(!view.overflows(u.root.?));
 }

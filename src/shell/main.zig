@@ -543,7 +543,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         var apps_changes = apps_pending;
         apps_pending = .{};
         if (fds[opener_index].revents != 0) if (opener) |l| {
-            if (openApp(l, apps, &server, runtime_dir) and dock_shown) {
+            if (openApp(l, apps, &server, &renderer, runtime_dir) and dock_shown) {
                 dock.draw();
                 showDock(&renderer, &dock);
                 panels_damaged = true;
@@ -1896,14 +1896,24 @@ fn listen(path: [:0]const u8) !linux.fd_t {
 
 /// An app asks for another to be opened (see `sys.shell`): one running is
 /// raised, and told what to show; another is started, with it as its
-/// argument. Returns whether an app was started.
-fn openApp(listener: linux.fd_t, apps: []dock_mod.App, server: *server_mod.Server, runtime_dir: ?[:0]const u8) bool {
+/// argument. Returns whether an app was started. (Or it asks the screen's
+/// size.)
+fn openApp(listener: linux.fd_t, apps: []dock_mod.App, server: *server_mod.Server, renderer: *const render.Renderer, runtime_dir: ?[:0]const u8) bool {
     var buf: [160]u8 = undefined;
     const got = sys.shell.accept(listener, &buf) orelse return false;
     defer sys.close(got.fd);
-    const req = sys.shell.Request.parse(got.line) orelse {
+    const parsed = sys.shell.Request.parse(got.line) orelse {
         _ = linux.write(got.fd, "unknown\n", 8);
         return false;
+    };
+    const req = switch (parsed) {
+        .open => |o| o,
+        .screen => {
+            var size_buf: [32]u8 = undefined;
+            const line = std.fmt.bufPrint(&size_buf, "{d} {d}\n", .{ renderer.width, renderer.height }) catch return false;
+            _ = linux.write(got.fd, line.ptr, line.len);
+            return false;
+        },
     };
     const app = for (apps) |*a| {
         if (std.mem.eql(u8, a.name, req.app)) break a;

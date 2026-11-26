@@ -10,6 +10,11 @@
 //! with <what> as its argument; one running is brought to the front, and
 //! <what> is sent on to it, on its own socket (/os/sockets/app-<app>), if
 //! it has one: a line, "<what>".
+//!
+//!     screen
+//!
+//! asks the size of the screen the desktop is on (its background, as
+//! turned): the shell answers "<width> <height>".
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -17,19 +22,21 @@ const sys = @import("sys.zig");
 
 pub const socket_path = "/os/sockets/shell";
 
-pub const Request = struct {
-    app: []const u8,
-    what: ?[]const u8,
+pub const Request = union(enum) {
+    open: struct { app: []const u8, what: ?[]const u8 },
+    screen,
 
     pub fn parse(line: []const u8) ?Request {
         var f = std.mem.tokenizeAny(u8, line, " \n");
-        if (!std.mem.eql(u8, f.next() orelse return null, "open")) return null;
+        const verb = f.next() orelse return null;
+        if (std.mem.eql(u8, verb, "screen")) return if (f.next() == null) .screen else null;
+        if (!std.mem.eql(u8, verb, "open")) return null;
         const app = f.next() orelse return null;
         if (!validWord(app)) return null;
         const what = f.next();
         if (what) |w| if (!validWord(w)) return null;
         if (f.next() != null) return null;
-        return .{ .app = app, .what = what };
+        return .{ .open = .{ .app = app, .what = what } };
     }
 };
 
@@ -52,6 +59,19 @@ pub fn open(app: []const u8, what: ?[]const u8) bool {
     var answer: [32]u8 = undefined;
     const got = send(socket_path, line catch return false, &answer) orelse return false;
     return std.mem.startsWith(u8, got, "opened");
+}
+
+/// The size of the screen the desktop is on (null: no shell to ask).
+pub fn screen() ?[2]u32 {
+    var answer: [32]u8 = undefined;
+    return parseScreen(send(socket_path, "screen\n", &answer) orelse return null);
+}
+
+fn parseScreen(answer: []const u8) ?[2]u32 {
+    var f = std.mem.tokenizeAny(u8, answer, " \n");
+    const w = std.fmt.parseInt(u32, f.next() orelse return null, 10) catch return null;
+    const h = std.fmt.parseInt(u32, f.next() orelse return null, 10) catch return null;
+    return .{ w, h };
 }
 
 /// Sends `line` to the socket at `path`, and reads the answer (if `answer`
@@ -108,10 +128,14 @@ pub fn accept(listener: linux.fd_t, buf: []u8) ?struct { fd: linux.fd_t, line: [
 const testing = std.testing;
 
 test "requests" {
-    const r = Request.parse("open dazzle-settings gpio\n").?;
+    const r = Request.parse("open dazzle-settings gpio\n").?.open;
     try testing.expectEqualStrings("dazzle-settings", r.app);
     try testing.expectEqualStrings("gpio", r.what.?);
-    try testing.expect(Request.parse("open dazzle-files").?.what == null);
+    try testing.expect(Request.parse("open dazzle-files").?.open.what == null);
+    try testing.expect(Request.parse("screen\n").? == .screen);
+    try testing.expect(Request.parse("screen 1") == null);
+    try testing.expectEqual(@as(?[2]u32, .{ 1920, 1080 }), parseScreen("1920 1080\n"));
+    try testing.expect(parseScreen("1920") == null);
     try testing.expect(Request.parse("open ../x") == null);
     try testing.expect(Request.parse("open a b c") == null);
     try testing.expect(Request.parse("close a") == null);
