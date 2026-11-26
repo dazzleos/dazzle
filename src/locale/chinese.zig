@@ -33,7 +33,6 @@ pub const simplified = [_][2][]const u8{
     .{ "Muted", "已静音" },
     .{ "Power off", "关机" },
     .{ "Power off this computer?", "关闭这台电脑？" },
-    .{ "Press the power button again to power off", "再按一次电源键即可关机" },
     .{ "No network adapter", "没有网络适配器" },
     .{ "Ethernet not connected", "以太网未连接" },
     .{ "Ethernet connecting", "以太网正在连接" },

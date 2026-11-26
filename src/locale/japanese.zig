@@ -33,7 +33,6 @@ pub const japan = [_][2][]const u8{
     .{ "Muted", "ミュート" },
     .{ "Power off", "電源を切る" },
     .{ "Power off this computer?", "このコンピューターの電源を切りますか？" },
-    .{ "Press the power button again to power off", "もう一度電源ボタンを押すと電源が切れます" },
     .{ "No network adapter", "ネットワークアダプターがありません" },
     .{ "Ethernet not connected", "イーサネット未接続" },
     .{ "Ethernet connecting", "イーサネット接続中" },

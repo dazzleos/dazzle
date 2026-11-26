@@ -42,7 +42,6 @@ pub const latin_america = [_][2][]const u8{
     .{ "Muted", "Silenciado" },
     .{ "Power off", "Apagar" },
     .{ "Power off this computer?", "¿Apagar esta computadora?" },
-    .{ "Press the power button again to power off", "Presiona de nuevo el botón de encendido para apagar" },
     .{ "No network adapter", "Ningún adaptador de red" },
     .{ "Ethernet not connected", "Ethernet sin conexión" },
     .{ "Ethernet connecting", "Ethernet conectándose" },

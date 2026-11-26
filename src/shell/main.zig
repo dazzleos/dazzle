@@ -204,7 +204,7 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
     // dock; before then, warnings as time runs out.
     var lock: lock_mod.Screen = .{ .panel = try kit.panel() };
     // The power menu: the power button, or the dock's, shows it.
-    var power: power_mod.Menu = .{ .panel = try kit.panel() };
+    var power: power_mod.Menu = .{ .panel = try kit.gpuPanel() };
     // The input method (emoji, pinyin, romaji), for the app with the
     // keyboard: it gets each key first, and its candidates show by the
     // text's cursor.
@@ -1055,21 +1055,21 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                             pointer.x = std.math.clamp(pointer.x + @as(f64, @floatFromInt(d[0])), 0, pointer.max_x);
                             pointer.y = std.math.clamp(pointer.y + @as(f64, @floatFromInt(d[1])), 0, pointer.max_y);
                             pointer.moved = true;
-                            power.panel.pointerMotion(power.local(pointer.x, pointer.y, renderer.width, renderer.height));
+                            power.panel.pointerMotion(.{ @floatCast(pointer.x), @floatCast(pointer.y) });
                         },
                         .button => |b| if (b.code == evdev.btn_left) {
-                            power.panel.pointerButton(power.local(pointer.x, pointer.y, renderer.width, renderer.height), b.pressed);
+                            power.panel.pointerButton(.{ @floatCast(pointer.x), @floatCast(pointer.y) }, b.pressed);
                         },
                         .touch => |t| if (t.kind != .motion) {
                             const on = renderer.turn.toScreen(t.x, t.y);
-                            const at = power.local(on[0] * @as(f64, @floatFromInt(renderer.width - 1)), on[1] * @as(f64, @floatFromInt(renderer.height - 1)), renderer.width, renderer.height);
+                            const at: [2]f32 = .{ @floatCast(on[0] * @as(f64, @floatFromInt(renderer.width - 1))), @floatCast(on[1] * @as(f64, @floatFromInt(renderer.height - 1))) };
                             power.panel.pointerMotion(at);
                             power.panel.pointerButton(at, t.kind == .down);
                         },
                         else => {},
                     }
                     // What a press picked takes effect at the next frame.
-                    _ = power.draw(sys.nowNs());
+                    _ = power.draw(renderer.width, renderer.height, sys.nowNs());
                     if (power.take()) |c| powerChoice(c, &power);
                     if (power.shown) drawPower(&power, &renderer);
                     server.damaged = true;
@@ -2314,12 +2314,11 @@ fn applyParental(p: sys.system.Parental, have: *sys.system.Parental, locked: *bo
     return true;
 }
 
-/// Draws the power menu, in the middle of the screen.
+/// Draws the power menu, over the whole screen.
 fn drawPower(power: *power_mod.Menu, renderer: *render.Renderer) void {
-    const picture = power.draw(sys.nowNs());
+    const picture = power.draw(renderer.width, renderer.height, sys.nowNs());
     if (picture.isEmpty()) return;
-    const at = power.place(renderer.width, renderer.height);
-    renderer.setPanelAt(.power, picture, at[0], at[1]);
+    renderer.setPanelAt(.power, picture, 0, 0);
 }
 
 /// Does what was picked in the power menu: the system manager powers off

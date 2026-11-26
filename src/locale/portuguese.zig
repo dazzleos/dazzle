@@ -33,7 +33,6 @@ pub const brazil = [_][2][]const u8{
     .{ "Muted", "Sem som" },
     .{ "Power off", "Desligar" },
     .{ "Power off this computer?", "Desligar este computador?" },
-    .{ "Press the power button again to power off", "Pressione o botão liga/desliga de novo para desligar" },
     .{ "No network adapter", "Nenhum adaptador de rede" },
     .{ "Ethernet not connected", "Ethernet desconectada" },
     .{ "Ethernet connecting", "Ethernet conectando" },

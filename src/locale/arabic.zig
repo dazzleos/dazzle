@@ -34,7 +34,6 @@ pub const arabic = [_][2][]const u8{
     .{ "Muted", "مكتوم" },
     .{ "Power off", "إيقاف التشغيل" },
     .{ "Power off this computer?", "إيقاف تشغيل هذا الحاسوب؟" },
-    .{ "Press the power button again to power off", "اضغط زر الطاقة مرة أخرى لإيقاف التشغيل" },
     .{ "No network adapter", "لا يوجد محوّل شبكة" },
     .{ "Ethernet not connected", "إيثرنت غير متصل" },
     .{ "Ethernet connecting", "إيثرنت يتصل" },

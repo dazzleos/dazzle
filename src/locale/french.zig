@@ -33,7 +33,6 @@ pub const france = [_][2][]const u8{
     .{ "Muted", "Muet" },
     .{ "Power off", "Éteindre" },
     .{ "Power off this computer?", "Éteindre cet ordinateur ?" },
-    .{ "Press the power button again to power off", "Appuyez de nouveau sur le bouton d’alimentation pour éteindre" },
     .{ "No network adapter", "Aucun adaptateur réseau" },
     .{ "Ethernet not connected", "Ethernet non connecté" },
     .{ "Ethernet connecting", "Connexion Ethernet en cours" },

@@ -1,8 +1,9 @@
-//! The power menu, as Raspberry Pi's desktop has it: shown in the middle
-//! of the screen, over everything, by the power button (the Pi 5's, the Pi
-//! 500's power key, the Pi 400's Fn+F10: KEY_POWER) or the dock's quick
-//! settings. It powers the computer off or restarts it; pressing the power
-//! button again while it shows powers off; Escape, or Cancel, closes it.
+//! The power menu, as Raspberry Pi's desktop has it: a dialog in the
+//! middle of the screen, over everything, the rest dimmed, shown by the
+//! power button (the Pi 5's, the Pi 500's power key, the Pi 400's Fn+F10:
+//! KEY_POWER) or the dock's quick settings. It powers the computer off or
+//! restarts it; pressing the power button again while it shows powers off.
+//! Its X, Escape, or a press outside it, closes it.
 
 const std = @import("std");
 const kete = @import("kete");
@@ -28,45 +29,95 @@ const Picked = struct {
     }
 };
 
-/// The menu, as kete widgets: what it asks, and its buttons.
+/// The dialog's width.
+const card_width = 400;
+
+/// The menu, as kete widgets: the screen dimmed (pressed, it cancels), and
+/// the dialog: its X, what it asks, and its buttons.
 pub const View = struct {
     picked: *Picked,
 
     pub fn build(self: *const View, cx: *kete.BuildContext) kete.Widget {
         const t = cx.theme();
-        return cx.make(kete.RoundedBox{
+        const card = cx.make(Blocker{ .child = cx.make(kete.RoundedBox{
             .color = t.surface_container,
             .border_width = 1,
             .border_color = t.outline_variant,
             .radius = .all(24),
-            .child = cx.make(kete.Padding{ .padding = .all(28), .child = cx.make(kete.Column{
-                .fill = false,
-                .spacing = 10,
-                .cross_axis_alignment = .center,
-                .children = cx.makeAll(.{
-                    kete.Icon{ .icon = .power_settings_new, .size = 40, .color = t.primary },
-                    kete.Text{ .text = locale.text("Power off this computer?"), .style = .{ .size = 24, .color = t.on_surface }, .wrap = false },
-                    kete.Text{ .text = locale.text("Press the power button again to power off"), .style = .{ .size = 15, .color = t.on_surface_variant }, .wrap = false },
-                    kete.SizedBox{ .height = 8 },
-                    kete.Row{ .fill = false, .spacing = 12, .children = cx.makeAll(.{
-                        kete.TextButton{ .label = locale.text("Cancel"), .on_press = .of(self.picked, Picked.cancel) },
-                        kete.OutlinedButton{ .label = locale.text("Restart"), .icon = .restart_alt, .on_press = .of(self.picked, Picked.restart) },
-                        kete.FilledButton{ .label = locale.text("Power off"), .icon = .power_settings_new, .on_press = .of(self.picked, Picked.powerOff) },
-                    }) },
+            .child = cx.make(kete.SizedBox{ .width = card_width, .child = cx.make(kete.Padding{
+                .padding = .{ .left = 24, .right = 12, .top = 12, .bottom = 28 },
+                .child = cx.make(kete.Column{
+                    .fill = false,
+                    .cross_axis_alignment = .stretch,
+                    .children = cx.makeAll(.{
+                        kete.Row{ .main_axis_alignment = .end, .children = cx.makeAll(.{
+                            kete.IconButton{ .icon = .close, .on_press = .of(self.picked, Picked.cancel) },
+                        }) },
+                        kete.Padding{ .padding = .{ .right = 12 }, .child = cx.make(kete.Column{
+                            .fill = false,
+                            .spacing = 10,
+                            .cross_axis_alignment = .center,
+                            .children = cx.makeAll(.{
+                                kete.Icon{ .icon = .power_settings_new, .size = 40, .color = t.primary },
+                                kete.Text{ .text = locale.text("Power off this computer?"), .style = .{ .size = 24, .color = t.on_surface }, .wrap = false },
+                                kete.SizedBox{ .height = 10 },
+                                kete.Row{ .fill = false, .spacing = 12, .children = cx.makeAll(.{
+                                    kete.OutlinedButton{ .label = locale.text("Restart"), .icon = .restart_alt, .on_press = .of(self.picked, Picked.restart) },
+                                    kete.FilledButton{ .label = locale.text("Power off"), .icon = .power_settings_new, .on_press = .of(self.picked, Picked.powerOff) },
+                                }) },
+                            }),
+                        }) },
+                    }),
                 }),
             }) }),
-        });
+        }) });
+        return cx.make(kete.Overlay{ .children = cx.makeAll(.{
+            Scrim{ .on_press = .of(self.picked, Picked.cancel), .child = cx.make(kete.RoundedBox{ .color = .argb(0x88000000) }) },
+            kete.Align.center(card),
+        }) });
     }
 };
 
-/// The menu as the shell has it: its panel (kete's), and whether it shows.
+/// The dimmed screen around the dialog: it takes the pointer, and a press
+/// on it (let go there) cancels.
+const Scrim = struct {
+    on_press: ?kete.Callback = null,
+    child: ?kete.Widget = null,
+
+    pub fn event(self: *const Scrim, n: *kete.WidgetNode, e: kete.Event) bool {
+        switch (e) {
+            .press => |pr| return pr.button == .left,
+            .release => |rel| {
+                if (rel.button == .left and rel.inside) if (self.on_press) |cb| {
+                    cb.call();
+                    n.ui.needs_frame = true;
+                };
+                return true;
+            },
+            .scroll => return true,
+            else => return false,
+        }
+    }
+};
+
+/// The dialog: presses on it are not the scrim's.
+const Blocker = struct {
+    child: ?kete.Widget = null,
+
+    pub fn event(_: *const Blocker, _: *kete.WidgetNode, e: kete.Event) bool {
+        return switch (e) {
+            .press, .release, .scroll => true,
+            else => false,
+        };
+    }
+};
+
+/// The menu as the shell has it: its panel (kete's, as big as the
+/// screen), and whether it shows.
 pub const Menu = struct {
     panel: *kete_panel.Panel,
     shown: bool = false,
     picked: Picked = .{},
-    /// Its size, as its widgets want it (it is drawn as a panel, in the
-    /// middle of the screen).
-    size: [2]u32 = .{ 0, 0 },
 
     pub fn open(m: *Menu) void {
         m.shown = true;
@@ -85,21 +136,8 @@ pub const Menu = struct {
         return m.picked.choice;
     }
 
-    /// Its picture, as big as it wants.
-    pub fn draw(m: *Menu, now_ns: u64) kete_panel.Picture {
-        const view: View = .{ .picked = &m.picked };
-        m.size = m.panel.naturalSize(view);
-        return m.panel.draw(m.size[0], m.size[1], now_ns, view);
-    }
-
-    /// In the middle of a screen `w` by `h`.
-    pub fn place(m: *const Menu, w: u32, h: u32) [2]i32 {
-        return .{ @divTrunc(@as(i32, @intCast(w)) - @as(i32, @intCast(m.size[0])), 2), @divTrunc(@as(i32, @intCast(h)) - @as(i32, @intCast(m.size[1])), 2) };
-    }
-
-    /// Where (`x`, `y`) on a screen `w` by `h` is in it.
-    pub fn local(m: *const Menu, x: f64, y: f64, w: u32, h: u32) [2]f32 {
-        const at = m.place(w, h);
-        return .{ @floatCast(x - @as(f64, @floatFromInt(at[0]))), @floatCast(y - @as(f64, @floatFromInt(at[1]))) };
+    /// Its picture, over a screen `w` by `h`.
+    pub fn draw(m: *Menu, w: u32, h: u32, now_ns: u64) kete_panel.Picture {
+        return m.panel.draw(w, h, now_ns, View{ .picked = &m.picked });
     }
 };

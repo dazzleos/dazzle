@@ -34,7 +34,6 @@ pub const germany = [_][2][]const u8{
     .{ "Muted", "Stumm" },
     .{ "Power off", "Ausschalten" },
     .{ "Power off this computer?", "Diesen Computer ausschalten?" },
-    .{ "Press the power button again to power off", "Drücke die Ein-/Aus-Taste noch einmal, um auszuschalten" },
     .{ "No network adapter", "Kein Netzwerkadapter" },
     .{ "Ethernet not connected", "Ethernet nicht verbunden" },
     .{ "Ethernet connecting", "Ethernet wird verbunden" },
