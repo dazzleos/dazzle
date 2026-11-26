@@ -163,6 +163,8 @@ pub const Emoji = struct {
             const last = std.fmt.parseInt(u32, f.next() orelse continue, 10) catch continue;
             const t = f.rest();
             if (t.len == 0 or t.len > max_text or e.used_len == kept) continue;
+            // Only one there is (as the font draws), in any tone.
+            if (!known(t)) continue;
             const u = &e.used[e.used_len];
             u.* = .{ .len = @intCast(t.len), .count = count, .last = last };
             @memcpy(u.text[0..t.len], t);
@@ -170,6 +172,14 @@ pub const Emoji = struct {
             e.clock = @max(e.clock, last);
         }
         return e;
+    }
+
+    fn known(text: []const u8) bool {
+        for (&table.all) |*em| {
+            if (std.mem.eql(u8, em.text, text)) return true;
+            if (em.tones) |tones| for (tones) |t| if (std.mem.eql(u8, t, text)) return true;
+        }
+        return false;
     }
 
     pub const max_file = 16 + kept * (2 * 11 + max_text + 3);
@@ -233,14 +243,15 @@ test "those used most first, kept and read back" {
     const back = Emoji.parse(e.format(&buf));
     try testing.expectEqual(@as(u3, 2), back.tone);
     try testing.expectEqual(@as(usize, 3), back.used_len);
+    // One not in the table (one the font does not draw) is not read.
+    try testing.expectEqual(@as(usize, 1), Emoji.parse("tone 0\n1 1 🫷\n2 2 👋🏽\n").used_len);
     // Full, the least used is forgotten for a new one.
     var full: Emoji = .{};
-    for (0..kept) |i| {
-        var b: [8]u8 = undefined;
-        full.typed(std.fmt.bufPrint(&b, "e{d}", .{i}) catch unreachable);
-        if (i > 0) full.typed(std.fmt.bufPrint(&b, "e{d}", .{i}) catch unreachable);
+    for (table.all[0..kept], 0..) |em, i| {
+        full.typed(em.text);
+        if (i > 0) full.typed(em.text);
     }
-    full.typed("new");
+    full.typed("🎉");
     try testing.expectEqual(@as(usize, kept), full.used_len);
-    for (full.used[0..full.used_len]) |*u| try testing.expect(!std.mem.eql(u8, u.slice(), "e0"));
+    for (full.used[0..full.used_len]) |*u| try testing.expect(!std.mem.eql(u8, u.slice(), table.all[0].text));
 }
