@@ -9,9 +9,10 @@
 //! Its keys are kete buttons on its panel, given the shell's touches and
 //! pointer. What they type the shell sends the app (`take`): letters and
 //! the rest as the text input's text (the app puts it in, whatever its
-//! keyboard's layout), Backspace, Enter and Tab as keys. Three pages: the
-//! letters (with Shift, for one letter), the numbers and symbols, and
-//! emoji (each one character).
+//! keyboard's layout), Backspace, Enter and Tab as keys. Its pages are as
+//! Android's keyboards have them: the letters (with Shift, for one letter);
+//! the numbers and symbols, and more symbols (=\< where Shift is: every
+//! ASCII one between them); and emoji (each one character).
 
 const std = @import("std");
 const kete = @import("kete");
@@ -44,7 +45,7 @@ pub const key_backspace = 14;
 pub const key_tab = 15;
 pub const key_enter = 28;
 
-const Page = enum { letters, symbols, emoji };
+const Page = enum { letters, symbols, more_symbols, emoji };
 
 /// Slow at the start and the end (as the dock's slide).
 fn easeInOut(t: f32) f32 {
@@ -231,8 +232,8 @@ const Key = struct {
         text: []const u8,
         key: u32,
         shift,
-        page,
-        emoji,
+        /// To that page.
+        page: Page,
         hide,
 
         /// Which key it is (never 0), whichever page it is on.
@@ -241,9 +242,8 @@ const Key = struct {
                 .text => |t| 0x1000_0000 | @as(u32, @truncate(std.hash.Wyhash.hash(0, t))) >> 4,
                 .key => |code| 0x100 + code,
                 .shift => 1,
-                .page => 2,
                 .hide => 3,
-                .emoji => 4,
+                .page => |pg| 0x10 + @as(u32, @intFromEnum(pg)),
             };
         }
     };
@@ -258,13 +258,8 @@ const Key = struct {
                 o.shift = !o.shift;
                 o.changed = true;
             },
-            .emoji => {
-                o.page = .emoji;
-                o.shift = false;
-                o.changed = true;
-            },
-            .page => {
-                o.page = if (o.page == .letters) .symbols else .letters;
+            .page => |pg| {
+                o.page = pg;
                 o.shift = false;
                 o.changed = true;
             },
@@ -289,8 +284,13 @@ const emoji_rows = [_][]const []const u8{
 };
 const symbol_rows = [_][]const []const u8{
     &.{ "1", "2", "3", "4", "5", "6", "7", "8", "9", "0" },
-    &.{ "@", "#", "$", "%", "&", "-", "+", "(", ")", "/" },
+    &.{ "@", "#", "$", "_", "&", "-", "+", "(", ")", "/" },
     &.{ "*", "\"", "'", ":", ";", "!", "?" },
+};
+const more_symbol_rows = [_][]const []const u8{
+    &.{ "~", "`", "|", "\\", "^", "{", "}", "[", "]", "%" },
+    &.{ "<", ">", "=", "€", "£", "¥", "°", "•", "×", "÷" },
+    &.{ "©", "®", "™", "§", "¶", "¢", "…" },
 };
 
 /// The keyboard: three rows of characters (the last between Shift, or the
@@ -307,16 +307,20 @@ const View = struct {
         const rows = switch (o.page) {
             .letters => letter_rows,
             .symbols => symbol_rows,
+            .more_symbols => more_symbol_rows,
             .emoji => emoji_rows,
         };
         var lines: std.ArrayList(kete.Widget) = .empty;
         for (rows, 0..) |row, i| {
             var keys: std.ArrayList(kete.Widget) = .empty;
             if (i == 1 and o.page == .letters) keys.append(a, spacer(cx, 0.5)) catch {};
-            if (i == 2) keys.append(a, if (o.page == .letters)
-                keyButton(cx, o, .shift, null, if (o.shift) .keyboard_capslock else .arrow_upward, 1.5, o.shift)
-            else
-                spacer(cx, 1.5)) catch {};
+            // Where Shift is: the other page of symbols.
+            if (i == 2) keys.append(a, switch (o.page) {
+                .letters => keyButton(cx, o, .shift, null, if (o.shift) .keyboard_capslock else .arrow_upward, 1.5, o.shift),
+                .symbols => keyButton(cx, o, .{ .page = .more_symbols }, "=\\<", null, 1.5, false),
+                .more_symbols => keyButton(cx, o, .{ .page = .symbols }, "?123", null, 1.5, false),
+                .emoji => spacer(cx, 1.5),
+            }) catch {};
             for (row) |ch| {
                 const shown = if (o.page == .letters and o.shift) upper(cx, ch) else ch;
                 keys.append(a, keyButton(cx, o, .{ .text = ch }, shown, null, 1, false)) catch {};
@@ -327,8 +331,8 @@ const View = struct {
         }
         var last: std.ArrayList(kete.Widget) = .empty;
         last.appendSlice(a, &.{
-            keyButton(cx, o, .page, if (o.page == .letters) "?123" else "ABC", null, 1.5, false),
-            if (o.page == .emoji) spacer(cx, 1) else keyButton(cx, o, .emoji, null, .emoji_emotions, 1, false),
+            if (o.page == .letters) keyButton(cx, o, .{ .page = .symbols }, "?123", null, 1.5, false) else keyButton(cx, o, .{ .page = .letters }, "ABC", null, 1.5, false),
+            if (o.page == .emoji) spacer(cx, 1) else keyButton(cx, o, .{ .page = .emoji }, null, .emoji_emotions, 1, false),
             keyButton(cx, o, .{ .text = "," }, ",", null, 1, false),
             keyButton(cx, o, .{ .text = " " }, null, .space_bar, if (o.always) 4 else 3, false),
             keyButton(cx, o, .{ .text = "." }, ".", null, 1, false),
