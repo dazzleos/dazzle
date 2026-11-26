@@ -48,7 +48,6 @@ const RawEvent = extern struct {
 const wheel_step = 15;
 
 pub fn decode(ev_type: u16, code: u16, value: i32) ?Event {
-    if (ev_type == 1 or ev_type == 4) @import("sys").print("DEBUG input type {d} code {d} (0x{x}) value {d}\n", .{ ev_type, code, code, value });
     switch (ev_type) {
         evdev.ev_syn => if (code == evdev.syn_report) return .frame,
         evdev.ev_rel => switch (code) {
