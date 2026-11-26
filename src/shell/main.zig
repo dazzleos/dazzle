@@ -1965,14 +1965,18 @@ fn moveDisplays(gpa: std.mem.Allocator, dev: vc4.Device, kit: *kete_panel.Kit, r
     const want = vc4.drm.findOutput(dev.fd) catch return false;
     const was = renderer.display.output;
     if (want.connector_id == was.connector_id and std.meta.eql(want.mode, was.mode)) return false;
-    if (companion.*) |cm| if (cm.renderer.display.output.connector_id == want.connector_id) {
+    if (companion.*) |*cm| if (cm.renderer.display.output.connector_id == want.connector_id) {
         // The monitor unplugged: the desktop on the touchscreen, its
         // keyboard and touchpad put aside (its renderer keeps nothing of
-        // the display, which is the desktop's now).
+        // the display, which is the desktop's now). Its last frame shown
+        // first: the desktop's frames wait for none of its.
+        const waited = sys.nowNs();
+        while (!cm.serviceFlip(sys.nowNs())) sys.sleepMs(2);
+        print("dazzle-shell: the touchscreen's last frame shown after {d} ms\n", .{(sys.nowNs() - waited) / std.time.ns_per_ms});
         var old = renderer.swapDisplay(cm.renderer.display, turnFor(orientations, want));
         renderer.display.shared = false;
         old.deinit(dev);
-        parked.* = cm;
+        parked.* = cm.*;
         companion.* = null;
         osk.setScreen(renderer.width, renderer.height, 1);
         print("dazzle-shell: the monitor unplugged: the desktop on the touchscreen ({d}x{d})\n", .{ renderer.width, renderer.height });
