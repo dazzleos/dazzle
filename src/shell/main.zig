@@ -235,10 +235,6 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         break :blk null;
     };
     var display_moved = false;
-    // A display plugged in may not say what it is at once (its EDID read
-    // later): looked for again, a while after each uevent.
-    var display_checks: u8 = 0;
-    var display_check_at: u64 = 0;
     // The shell's touch gestures (four fingers swiped: the overview).
     var gestures: gesture.Gestures = .{ .distance = @as(f64, @floatFromInt(@min(renderer.width, renderer.height))) * 0.08 };
     // Where the last touch on it was (a touch let go says no place: it
@@ -494,7 +490,6 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         }
         var wake = next_tick;
         if (notice.wakeAt(now)) |due| wake = @min(wake, due);
-        if (display_checks > 0) wake = @min(wake, display_check_at);
         if (dock.tooltipDue()) |due| wake = @min(wake, due);
         // A key pressed on the on-screen keyboard (what it typed, or Hide):
         // dealt with at once, not when something next wakes the shell.
@@ -542,12 +537,6 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         // A monitor plugged in or unplugged: the desktop moves to it, or
         // to the touchscreen.
         if (fds[hotplug_index].revents != 0 and drmChanged(hotplug.?)) {
-            display_checks = 10;
-            display_check_at = 0;
-        }
-        if (display_checks > 0 and sys.nowNs() >= display_check_at) {
-            display_checks -= 1;
-            display_check_at = sys.nowNs() + 500 * std.time.ns_per_ms;
             if (moveDisplays(gpa, dev, kit, &renderer, &companion, &parked, orientations, &osk)) |moved| {
                 if (moved) display_moved = true;
             } else |err| print(sys.log_warning ++ "dazzle-shell: cannot move to the display: {s}\n", .{@errorName(err)});
