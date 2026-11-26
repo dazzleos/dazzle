@@ -1,6 +1,12 @@
-//! The Appearance page: system colour scheme (Dark or Light), and the
+//! The Appearance page: system colour scheme (Dark or Light); the
+//! screen's orientation, landscape or portrait, and either way up; and the
 //! desktop's background: one of the built-in photos, picked here (or a
-//! picture chosen in Files).
+//! picture chosen in Files), each shown as the screen's shape shows it.
+//!
+//! A display the other way from the orientation (the Touch Display 2 is
+//! upright, a monitor wide) is turned a quarter, and upside down half
+//! round: the shell turns at once, the boot screen from the next start
+//! (see `sys.system.Orientation`).
 
 const std = @import("std");
 const kete = @import("kete");
@@ -15,13 +21,35 @@ const sys = @import("sys");
 const Settings = view.Settings;
 const Actions = view.Actions;
 const Builder = view.Builder;
+const Orientation = sys.system.Orientation;
 
 pub const label = "Appearance";
 pub const icon: kete.IconName = .palette;
 
+/// The screen's orientation (null: not known), and whether changing it was
+/// refused.
+pub const Display = struct {
+    orientation: ?Orientation = null,
+    failed: bool = false,
+};
+
+pub const OrientationMenu = kete.Select(Orientation);
+
 pub const State = struct {
     appearance: appearance_settings.Settings = .{},
     actions: ?*Actions = null,
+    /// The orientation as the page was last made.
+    orientation: Orientation = .landscape,
+
+    /// Landscape or portrait chosen: that way, as far up as it was.
+    pub fn choose(st: *State, o: Orientation) void {
+        if (st.actions) |a| a.orientation = .of2(o.isPortrait(), st.orientation.isFlipped());
+    }
+
+    /// Upside down, or not: as it is otherwise.
+    pub fn setUpsideDown(st: *State, on: bool) void {
+        if (st.actions) |a| a.orientation = .of2(st.orientation.isPortrait(), on);
+    }
 
     fn setDark(st: *State) void {
         const acts = st.actions orelse return;
@@ -76,6 +104,9 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
 
     state.appearance = self.appearance;
     state.actions = self.actions;
+    const d = self.display;
+    if (d.orientation) |o| state.orientation = o;
+    const can_turn = self.actions != null and d.orientation != null;
 
     var rows: std.ArrayList(kete.Widget) = .empty;
 
@@ -107,8 +138,32 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
         },
     })) catch {};
 
-    // A tile of each photo under its label; the one chosen is ringed, as
-    // a radio button is.
+    // Which way the screen is, and which way up.
+    const t = cx.theme();
+    const options = a.dupe(OrientationMenu.Option, &.{
+        .labeled(.landscape, locale.text("Landscape")),
+        .labeled(.portrait, locale.text("Portrait")),
+    }) catch &.{};
+    var screen: std.ArrayList(kete.Widget) = .empty;
+    screen.append(a, cx.make(kete.Row{ .cross_axis_alignment = .center, .spacing = 12, .children = a.dupe(kete.Widget, &.{
+        b.label(locale.text("Orientation")),
+        cx.make(OrientationMenu{
+            // (The menu's choice is the way it is, either way up.)
+            .options = options,
+            .value = if (d.orientation) |o| (if (o.isPortrait()) .portrait else .landscape) else null,
+            .on_changed = if (can_turn) .of(state, State.choose) else null,
+        }),
+    }) catch &.{} })) catch {};
+    screen.append(a, cx.make(kete.SwitchRow{
+        .value = if (d.orientation) |o| o.isFlipped() else false,
+        .on_changed = if (can_turn) .of(state, State.setUpsideDown) else null,
+        .label = locale.text("Upside down"),
+    })) catch {};
+    if (d.failed) screen.append(a, cx.make(kete.Text{ .text = locale.text("It could not be changed"), .style = .{ .size = 15, .color = t.@"error" } })) catch {};
+    rows.append(a, cx.make(kete.Column{ .cross_axis_alignment = .start, .spacing = 4, .children = screen.items })) catch {};
+
+    // A tile of each photo under its label, the screen's shape; the one
+    // chosen is ringed, as a radio button is.
     rows.append(a, cx.make(kete.Column{
         .cross_axis_alignment = .start,
         .spacing = 8,
@@ -137,14 +192,15 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
 fn photoRow(cx: *kete.BuildContext, self: *const Settings, state: *State) kete.Widget {
     var tiles: [builtin.all.len + 1]kete.Widget = undefined;
     const chosen = self.appearance.image.slice() orelse "";
+    const shape: Shape = if (self.display.orientation) |o| (if (o.isPortrait()) .portrait else .landscape) else .landscape;
     inline for (builtin.all, tiles[0..builtin.all.len], 0..) |bg, *t, i| {
-        t.* = tile(cx, bg.name, thumbnail(i), std.mem.eql(u8, chosen, builtin.path(bg)), if (self.actions != null) .of(state, State.setImage(bg)) else null);
+        t.* = tile(cx, bg.name, thumbnail(i, shape), shape, std.mem.eql(u8, chosen, builtin.path(bg)), if (self.actions != null) .of(state, State.setImage(bg)) else null);
     }
     var count: usize = builtin.all.len;
     // The last picture chosen in Files, while its file is there.
     if (self.appearance.custom.slice()) |custom| if (exists(custom)) {
         const name = custom[if (std.mem.lastIndexOfScalar(u8, custom, '/')) |slash| slash + 1 else 0..];
-        tiles[count] = tile(cx, name, customThumbnail(custom), std.mem.eql(u8, chosen, custom), if (self.actions != null) .of(state, State.setCustom) else null);
+        tiles[count] = tile(cx, name, customThumbnail(custom, shape), shape, std.mem.eql(u8, chosen, custom), if (self.actions != null) .of(state, State.setCustom) else null);
         count += 1;
     };
     return cx.make(kete.Row{ .spacing = 8, .children = cx.arena.dupe(kete.Widget, tiles[0..count]) catch &.{} });
@@ -157,9 +213,20 @@ fn exists(path: []const u8) bool {
     return std.os.linux.errno(std.os.linux.access(pathz, std.os.linux.F_OK)) == .SUCCESS;
 }
 
+/// The screen's shape, as the tiles show it: wide, or tall.
+pub const Shape = enum {
+    landscape,
+    portrait,
+
+    /// A thumbnail's size: wide, or (tall) the other way round.
+    pub fn size(sh: Shape) [2]u32 {
+        return if (sh == .portrait) .{ builtin.thumbnail_height, builtin.thumbnail_width } else .{ builtin.thumbnail_width, builtin.thumbnail_height };
+    }
+};
+
 /// A picture's tile: its thumbnail, rounded, named by its tooltip, and
 /// ringed in the theme's primary colour when it is the one chosen.
-fn tile(cx: *kete.BuildContext, name: []const u8, image: ?*const gfx.Image, chosen: bool, on_press: ?kete.Callback) kete.Widget {
+fn tile(cx: *kete.BuildContext, name: []const u8, image: ?*const gfx.Image, shape: Shape, chosen: bool, on_press: ?kete.Callback) kete.Widget {
     const t = cx.theme();
     return cx.make(kete.Tooltip{
         .text = name,
@@ -172,8 +239,8 @@ fn tile(cx: *kete.BuildContext, name: []const u8, image: ?*const gfx.Image, chos
                 .child = cx.make(kete.Padding{
                     .padding = .all(ring + ring_gap),
                     .child = cx.make(kete.SizedBox{
-                        .width = builtin.thumbnail_width,
-                        .height = builtin.thumbnail_height,
+                        .width = @floatFromInt(shape.size()[0]),
+                        .height = @floatFromInt(shape.size()[1]),
                         .child = if (image) |img| cx.make(kete.Image{ .source = .{ .image = img } }) else cx.make(kete.SizedBox.empty),
                     }),
                 }),
@@ -182,25 +249,29 @@ fn tile(cx: *kete.BuildContext, name: []const u8, image: ?*const gfx.Image, chos
     });
 }
 
-/// The picture chosen in Files, as a thumbnail: made when it is first
-/// shown (and again when another is chosen).
+/// The picture chosen in Files, as a thumbnail (the screen's shape): made
+/// when it is first shown (and again when another is chosen, or the
+/// screen turns).
 var custom_path: appearance_settings.ImagePath = .{};
+var custom_shape: Shape = .landscape;
 var custom_pixels: [builtin.thumbnail_width * builtin.thumbnail_height]u32 = undefined;
 var custom_image: ?gfx.Image = null;
 
-fn customThumbnail(path: []const u8) ?*const gfx.Image {
-    if (!std.mem.eql(u8, custom_path.slice() orelse "", path)) {
+fn customThumbnail(path: []const u8, shape: Shape) ?*const gfx.Image {
+    if (!std.mem.eql(u8, custom_path.slice() orelse "", path) or custom_shape != shape) {
         custom_path = .of(path);
+        custom_shape = shape;
         custom_image = null;
-        if (makeThumbnail(path, &custom_pixels)) custom_image = .init(&custom_pixels, builtin.thumbnail_width, builtin.thumbnail_height);
+        const size = shape.size();
+        if (makeThumbnail(path, &custom_pixels, size[0], size[1])) custom_image = .init(&custom_pixels, size[0], size[1]);
     }
     return if (custom_image) |*img| img else null;
 }
 
-/// Reads the PNG at `path` into `out`, as a thumbnail: scaled to cover it
-/// (cropped in the middle), each pixel the average of those it covers, its
-/// corners rounded. Returns whether it could.
-fn makeThumbnail(path: []const u8, out: []u32) bool {
+/// Reads the PNG at `path` into `out`, as a thumbnail `tw` by `th`: scaled
+/// to cover it (cropped in the middle), each pixel the average of those it
+/// covers, its corners rounded. Returns whether it could.
+fn makeThumbnail(path: []const u8, out: []u32, tw: u32, th: u32) bool {
     const gpa = std.heap.smp_allocator;
     var path_buf: [appearance_settings.ImagePath.max_len + 1]u8 = undefined;
     const pathz = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch return false;
@@ -208,8 +279,6 @@ fn makeThumbnail(path: []const u8, out: []u32) bool {
     defer gpa.free(bytes);
     const img = gfx.png.decode(gpa, bytes) catch return false;
     defer gpa.free(img.pixels);
-    const tw: u32 = builtin.thumbnail_width;
-    const th: u32 = builtin.thumbnail_height;
     if (img.width == 0 or img.height == 0) return false;
     // The part of the picture shown: as wide, or as tall, as it can be.
     const scale = @max(@as(f64, tw) / @as(f64, @floatFromInt(img.width)), @as(f64, th) / @as(f64, @floatFromInt(img.height)));
@@ -236,23 +305,29 @@ fn makeThumbnail(path: []const u8, out: []u32) bool {
     return true;
 }
 
-/// The built-in photos' thumbnails (made at build time), decoded the first
+/// The built-in photos' thumbnails (made at build time), wide and tall
+/// (the middle of the photo, as a tall screen shows it), decoded the first
 /// time they show: kete's Image is given their pixels, as it cannot load
 /// bytes without the app's `std.Io`.
-var thumbnail_pixels: [builtin.all.len][builtin.thumbnail_width * builtin.thumbnail_height]u32 = undefined;
-var thumbnails: [builtin.all.len]?gfx.Image = @splat(null);
+var thumbnail_pixels: [2][builtin.all.len][builtin.thumbnail_width * builtin.thumbnail_height]u32 = undefined;
+var thumbnails: [2][builtin.all.len]?gfx.Image = @splat(@splat(null));
 
-fn thumbnail(comptime i: usize) ?*const gfx.Image {
-    if (thumbnails[i] == null) {
-        const bytes = @embedFile("background-" ++ builtin.all[i].file ++ ".png");
+fn thumbnail(comptime i: usize, shape: Shape) ?*const gfx.Image {
+    const k = @intFromEnum(shape);
+    if (thumbnails[k][i] == null) {
+        const bytes = switch (shape) {
+            .landscape => @embedFile("background-" ++ builtin.all[i].file ++ ".png"),
+            .portrait => @embedFile("background-" ++ builtin.all[i].file ++ "-portrait.png"),
+        };
         const decoded = gfx.png.decode(std.heap.smp_allocator, bytes) catch return null;
         defer std.heap.smp_allocator.free(decoded.pixels);
-        if (decoded.width != builtin.thumbnail_width or decoded.height != builtin.thumbnail_height) return null;
-        @memcpy(&thumbnail_pixels[i], decoded.pixels);
-        roundCorners(&thumbnail_pixels[i], decoded.width, decoded.height, tile_radius);
-        thumbnails[i] = .init(&thumbnail_pixels[i], decoded.width, decoded.height);
+        const size = shape.size();
+        if (decoded.width != size[0] or decoded.height != size[1]) return null;
+        @memcpy(&thumbnail_pixels[k][i], decoded.pixels);
+        roundCorners(&thumbnail_pixels[k][i], decoded.width, decoded.height, tile_radius);
+        thumbnails[k][i] = .init(&thumbnail_pixels[k][i], decoded.width, decoded.height);
     }
-    return &thumbnails[i].?;
+    return &thumbnails[k][i].?;
 }
 
 /// Makes the corners of `pixels` (`w` by `h`), outside a rounded rectangle
@@ -361,8 +436,8 @@ test "a built-in photo is picked as the background, shown by its rounded thumbna
     try testing.expect(ringed(u.root.?, "Forest"));
     try testing.expect(!ringed(u.root.?, "Seashore"));
     // Rounded: see-through at the corners.
-    try testing.expectEqual(@as(u32, 0), thumbnail(0).?.pixels[0] >> 24);
-    try testing.expectEqual(@as(u32, 0xff), thumbnail(0).?.pixels[builtin.thumbnail_width * 30 + 50] >> 24);
+    try testing.expectEqual(@as(u32, 0), thumbnail(0, .landscape).?.pixels[0] >> 24);
+    try testing.expectEqual(@as(u32, 0xff), thumbnail(0, .landscape).?.pixels[builtin.thumbnail_width * 30 + 50] >> 24);
 
     view.click(u, findTile(u.root.?, "Seashore").?.child(0));
     try testing.expectEqualStrings("/os/backgrounds/seashore.etc1", actions.appearance.?.image.slice().?);
@@ -403,7 +478,7 @@ test "a picture chosen in Files is a fourth tile, ringed, with its thumbnail" {
     inline for (builtin.all) |bg| try testing.expect(!ringed(u.root.?, bg.name));
     try testing.expectEqual(builtin.all.len + 1, view.up(findTile(u.root.?, name).?, kete.Row).?.children.items.len);
     // Its thumbnail: the middle of it, scaled; corners rounded.
-    const thumb = customThumbnail(path).?;
+    const thumb = customThumbnail(path, .landscape).?;
     try testing.expectEqual(@as(u32, 0xffff0000), thumb.pixels[30 * builtin.thumbnail_width + 10]);
     try testing.expectEqual(@as(u32, 0xff0000ff), thumb.pixels[30 * builtin.thumbnail_width + builtin.thumbnail_width - 10]);
     try testing.expectEqual(@as(u32, 0), thumb.pixels[0] >> 24);
@@ -424,4 +499,42 @@ test "a picture chosen in Files is a fourth tile, ringed, with its thumbnail" {
     _ = std.os.linux.unlink(path);
     u.frame(1280, 720, 4, settings);
     try testing.expect(findTile(u.root.?, name) == null);
+}
+
+test "the orientation chosen, and upside down; the tiles the screen's shape" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
+    defer u.destroy();
+    const d = view.sample();
+    var actions: Actions = .{};
+    var settings: Settings = .{ .commit = "x", .actions = &actions, .system = &d.sys, .usage = d.usage, .network = &d.net, .display = .{ .orientation = .landscape } };
+    u.frame(1920, 960, 0, settings);
+    _ = view.showPage(u, .appearance);
+    u.frame(1920, 960, 1, settings);
+    try testing.expect(view.findText(u.root.?, "Landscape") != null);
+    // Wide tiles.
+    var at = findTile(u.root.?, "Forest").?;
+    while (!at.widget.is(kete.Image)) at = at.children.items[0];
+    try testing.expect(at.size.w > at.size.h);
+    // Portrait: that way, as far up as it was.
+    const st = &u.root.?.state(Settings.State).appearance;
+    st.choose(.portrait);
+    try testing.expectEqual(@as(?Orientation, .portrait), actions.orientation);
+    settings.display = .{ .orientation = .portrait };
+    u.frame(1920, 960, 2, settings);
+    try testing.expect(view.findText(u.root.?, "Portrait") != null);
+    // Tall tiles (the photos' middles).
+    at = findTile(u.root.?, "Forest").?;
+    while (!at.widget.is(kete.Image)) at = at.children.items[0];
+    try testing.expect(at.size.h > at.size.w);
+    try testing.expect(at.widget.as(kete.Image).?.source == .image);
+    // Upside down: portrait still, flipped; and back to landscape, still
+    // flipped.
+    view.click(u, view.up(view.findText(u.root.?, "Upside down").?, kete.SwitchRow).?);
+    try testing.expectEqual(@as(?Orientation, .portrait_flipped), actions.orientation);
+    settings.display = .{ .orientation = .portrait_flipped };
+    u.frame(1920, 960, 3, settings);
+    st.choose(.landscape);
+    try testing.expectEqual(@as(?Orientation, .landscape_flipped), actions.orientation);
+    try testing.expect(!view.overflows(u.root.?));
 }

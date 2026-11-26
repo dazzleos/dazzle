@@ -7,6 +7,7 @@
 
 /// Germany's.
 pub const germany = [_][2][]const u8{
+    .{ "Upside down", "Auf dem Kopf" },
     .{ "Installing language support", "Sprachunterstützung wird installiert" },
     .{ "Time", "Uhrzeit" },
     .{ "Device Name", "Gerätename" },

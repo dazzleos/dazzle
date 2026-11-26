@@ -192,8 +192,9 @@ fn addIconFont(b: *std.Build) IconFont {
 }
 
 /// A built-in desktop background, made ready by `tools/mkbackground.zig`:
-/// the ETC1 file the shell shows, and Settings' thumbnail of it.
-const ReadyBackground = struct { etc1: std.Build.LazyPath, thumbnail: std.Build.LazyPath };
+/// the ETC1 file the shell shows, and Settings' thumbnails of it (wide,
+/// and tall).
+const ReadyBackground = struct { etc1: std.Build.LazyPath, thumbnail: std.Build.LazyPath, portrait: std.Build.LazyPath };
 
 /// Each of `builtin_backgrounds.all` (from backgrounds/<file>.png), made
 /// ready once.
@@ -221,6 +222,7 @@ fn addBackgrounds(b: *std.Build) []const ReadyBackground {
         run.addFileArg(b.path("backgrounds/" ++ bg.file ++ ".png"));
         r.etc1 = run.addOutputFileArg(bg.file ++ ".etc1");
         r.thumbnail = run.addOutputFileArg(bg.file ++ "-thumbnail.png");
+        r.portrait = run.addOutputFileArg(bg.file ++ "-portrait.png");
         run.addArgs(&.{ b.fmt("{d}", .{builtin_backgrounds.thumbnail_width}), b.fmt("{d}", .{builtin_backgrounds.thumbnail_height}) });
     }
     State.ready = ready;
@@ -228,10 +230,12 @@ fn addBackgrounds(b: *std.Build) []const ReadyBackground {
 }
 
 /// Settings shows the built-in backgrounds' thumbnails:
-/// `@embedFile("background-<file>.png")`.
+/// `@embedFile("background-<file>.png")`, and tall,
+/// `@embedFile("background-<file>-portrait.png")`.
 fn addBackgroundThumbnails(b: *std.Build, m: *std.Build.Module) void {
     for (builtin_backgrounds.all, addBackgrounds(b)) |bg, r| {
         m.addAnonymousImport(b.fmt("background-{s}.png", .{bg.file}), .{ .root_source_file = r.thumbnail });
+        m.addAnonymousImport(b.fmt("background-{s}-portrait.png", .{bg.file}), .{ .root_source_file = r.portrait });
     }
 }
 

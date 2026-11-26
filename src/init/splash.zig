@@ -249,10 +249,11 @@ const Screen = struct {
     width: u32,
     height: u32,
     stride: u32,
-    /// The display's buffer when it is turned (else `pixels` is it), and its
-    /// pitch in pixels.
+    /// The display's buffer when it is turned (else `pixels` is it), its
+    /// pitch in pixels, and how the screen is turned on it.
     display: ?[]u32 = null,
     display_stride: u32 = 0,
+    turn: sys.system.Turn = .none,
     /// Where the text goes: its baseline, and the band it is drawn in.
     baseline: f32,
     band_top: u32,
@@ -279,9 +280,10 @@ const Screen = struct {
         // upright into a buffer of the screen's own. Not a monitor with a
         // touchscreen beside it (the orientation is the touchscreen's then).
         const companion = drm.findCompanion(fd, output) != null;
-        const turned = !companion and sys.system.Orientation.now().turns(display_width, display_height);
-        const width = if (turned) display_height else display_width;
-        const height = if (turned) display_width else display_height;
+        const turn: sys.system.Turn = if (companion) .none else sys.system.Orientation.now().turn(display_width, display_height);
+        const turned = turn != .none;
+        const width = if (turn.sideways()) display_height else display_width;
+        const height = if (turn.sideways()) display_width else display_height;
         const pixels = if (turned) try gpa.alloc(u32, @as(usize, width) * height) else display;
         const stride: u32 = if (turned) width else buffer.pitch / 4;
         @memset(pixels, background);
@@ -303,6 +305,7 @@ const Screen = struct {
             .stride = stride,
             .display = if (turned) display else null,
             .display_stride = buffer.pitch / 4,
+            .turn = turn,
             .baseline = @as(f32, @floatFromInt(logo_top + logo_size)) + size * 2.5,
             .band_top = logo_top + logo_size + @as(u32, @intFromFloat(size)),
             .band_height = @intFromFloat(size * 2.5),
@@ -340,7 +343,7 @@ const Screen = struct {
     /// drawn there already).
     fn present(s: *const Screen) void {
         const display = s.display orelse return;
-        turnInto(display, s.display_stride, s.pixels, s.width, s.height);
+        turnInto(display, s.display_stride, s.pixels, s.width, s.height, s.turn);
     }
 
     /// Lets the shell have the display, and waits (a while at most) for
@@ -359,13 +362,16 @@ const Screen = struct {
     }
 };
 
-/// `pixels` (`width` by `height`, upright) into `display` (`height` wide,
-/// `display_stride` pixels a row) turned a quarter as the shell turns its
-/// frames: the screen's left at the display's bottom, its top at the
-/// display's left.
-fn turnInto(display: []u32, display_stride: u32, pixels: []const u32, width: u32, height: u32) void {
+/// `pixels` (`width` by `height`, upright) into `display` (`display_stride`
+/// pixels a row) turned as the shell turns its frames (`turn`: see
+/// `sys.system.Turn`).
+fn turnInto(display: []u32, display_stride: u32, pixels: []const u32, width: u32, height: u32, turn: sys.system.Turn) void {
+    // The display's size: the screen's, or (on its side) across it.
+    const dw: i32 = @intCast(if (turn.sideways()) height else width);
+    const dh: i32 = @intCast(if (turn.sideways()) width else height);
     for (0..height) |y| for (0..width) |x| {
-        display[(width - 1 - x) * display_stride + y] = pixels[y * width + x];
+        const at = turn.toDisplay(@intCast(x), @intCast(y), dw - 1, dh - 1);
+        display[@as(usize, @intCast(at[1])) * display_stride + @as(usize, @intCast(at[0]))] = pixels[y * width + x];
     };
 }
 
@@ -461,6 +467,9 @@ test "the boot screen turned as the shell turns its frames: its left at the disp
     // A screen 3 wide and 2 tall on a display 2 wide and 3 tall.
     const pixels = [_]u32{ 1, 2, 3, 4, 5, 6 };
     var display: [6]u32 = undefined;
-    turnInto(&display, 2, &pixels, 3, 2);
+    turnInto(&display, 2, &pixels, 3, 2, .quarter);
     try std.testing.expectEqualSlices(u32, &.{ 3, 6, 2, 5, 1, 4 }, &display);
+    // Flipped: upside down, on a display the same way.
+    turnInto(&display, 3, &pixels, 3, 2, .half);
+    try std.testing.expectEqualSlices(u32, &.{ 6, 5, 4, 3, 2, 1 }, &display);
 }

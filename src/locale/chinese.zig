@@ -6,6 +6,7 @@
 //! they are.
 
 pub const simplified = [_][2][]const u8{
+    .{ "Upside down", "上下颠倒" },
     .{ "Installing language support", "正在安装语言支持" },
     .{ "Time", "时间" },
     .{ "Device Name", "设备名称" },

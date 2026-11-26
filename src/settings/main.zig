@@ -447,7 +447,8 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
         // turns to it at once), and says what it now is.
         if (actions.orientation) |o| {
             actions.orientation = null;
-            const r = sys.system.ask(if (o == .portrait) "orientation portrait\n" else "orientation landscape\n", 3000);
+            var req_buf: [48]u8 = undefined;
+            const r = sys.system.ask(std.fmt.bufPrint(&req_buf, "orientation {s}\n", .{@tagName(o)}) catch "", 3000);
             if (r) |have| if (!have.denied) {
                 updater.report = have;
             };

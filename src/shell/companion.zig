@@ -179,9 +179,8 @@ pub const Companion = struct {
     /// Where a touch at (x, y) (0 to 1 across and down the touchscreen
     /// panel, as it reports them) is on the touchscreen as it is used.
     pub fn place(c: *const Companion, x: f64, y: f64) [2]f64 {
-        const tx = if (c.renderer.turned) 1 - y else x;
-        const ty = if (c.renderer.turned) x else y;
-        return .{ tx * @as(f64, @floatFromInt(c.width() - 1)), ty * @as(f64, @floatFromInt(c.height() - 1)) };
+        const at = c.renderer.turn.toScreen(x, y);
+        return .{ at[0] * @as(f64, @floatFromInt(c.width() - 1)), at[1] * @as(f64, @floatFromInt(c.height() - 1)) };
     }
 
     /// The other way: where (x, y) on the touchscreen as it is used is, as
@@ -189,7 +188,7 @@ pub const Companion = struct {
     pub fn unplace(c: *const Companion, at: [2]f64) [2]f64 {
         const tx = at[0] / @as(f64, @floatFromInt(c.width() - 1));
         const ty = at[1] / @as(f64, @floatFromInt(c.height() - 1));
-        return if (c.renderer.turned) .{ ty, 1 - tx } else .{ tx, ty };
+        return c.renderer.turn.fromScreen(tx, ty);
     }
 
     /// Whether (x, y) (touchscreen pixels) is on the touchpad.

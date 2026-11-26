@@ -648,12 +648,12 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
         // touchscreen came or went (the dock is sized for fingers then):
         // what is sized by them, again.
         {
-            const turn = renderer.follows_orientation and orientation.turns(renderer.display.width, renderer.display.height);
+            const turn: sys.system.Turn = if (renderer.follows_orientation) orientation.turn(renderer.display.width, renderer.display.height) else .none;
             // (A touchscreen beside the monitor is not the monitor's.)
             const touch = devices.hasTouch() and companion == null;
-            if (turn != renderer.turned or touch != dock_touch) {
+            if (turn != renderer.turn or touch != dock_touch) {
                 dock_touch = touch;
-                renderer.setTurned(turn) catch |err| print(sys.log_warning ++ "dazzle-shell: cannot turn the cursor: {s}\n", .{@errorName(err)});
+                renderer.setTurn(turn) catch |err| print(sys.log_warning ++ "dazzle-shell: cannot turn the cursor: {s}\n", .{@errorName(err)});
                 dock.setScreen(renderer.width, renderer.height, touch);
                 if (companion == null) osk.setScreen(renderer.width, renderer.height, dock.scale);
                 quick.setScale(dock.scale);
@@ -1080,13 +1080,11 @@ fn run(init: std.process.Init.Minimal, io: std.Io) !void {
                 var dock_tap: ?[2]f64 = null;
                 if (e == .touch) {
                     const t = e.touch;
-                    // On a panel used on its side: its own across is the
-                    // screen's down, and its down the screen's across,
-                    // from the right.
-                    const tx = if (renderer.turned) 1 - t.y else t.x;
-                    const ty = if (renderer.turned) t.x else t.y;
-                    const x = tx * @as(f64, @floatFromInt(renderer.width - 1));
-                    const y = ty * @as(f64, @floatFromInt(renderer.height - 1));
+                    // On a panel turned (on its side, or upside down):
+                    // where on the screen its touch is.
+                    const on_screen = renderer.turn.toScreen(t.x, t.y);
+                    const x = on_screen[0] * @as(f64, @floatFromInt(renderer.width - 1));
+                    const y = on_screen[1] * @as(f64, @floatFromInt(renderer.height - 1));
                     // Four fingers down: the shell's (the apps' touches
                     // cancelled); swiped, the overview, as Super.
                     const g = switch (t.kind) {
@@ -2009,11 +2007,11 @@ fn dockArea(dock: *const dock_mod.Dock) server_mod.Rect {
 
 /// Gives the renderer the dock's latest picture, where it is.
 /// (`x`, `y`) on the screen, as a touchscreen would say it: 0 to 1 across
-/// the display (on its side, the screen's down is the display's across).
+/// the display (turned as the screen is on it).
 fn touchAt(renderer: *const render.Renderer, x: f64, y: f64) [2]f64 {
     const sx = x / @as(f64, @floatFromInt(@max(renderer.width, 2) - 1));
     const sy = y / @as(f64, @floatFromInt(@max(renderer.height, 2) - 1));
-    return if (renderer.turned) .{ sy, 1 - sx } else .{ sx, sy };
+    return renderer.turn.fromScreen(sx, sy);
 }
 
 fn showDock(renderer: *render.Renderer, dock: *const dock_mod.Dock) void {

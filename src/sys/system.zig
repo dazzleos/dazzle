@@ -35,7 +35,7 @@
 //!                              there is a /data)
 //!     video_memory <MiB>       how much memory the GPU may have, from the
 //!                              next start (settings): see `video_memory`
-//!     orientation <landscape|portrait>
+//!     orientation <landscape|portrait|landscape_flipped|portrait_flipped>
 //!                              the screen's (settings): the shell turns
 //!                              to it at once, and the boot screen from
 //!                              the next start; see `Orientation`
@@ -173,16 +173,43 @@ pub fn defaultVideoMemory(ram_mib: u64) u16 {
 /// then kept as it is.
 pub const video_memory_chosen_file = "/data/system/video-memory-chosen";
 
-/// Which way the screen is: wider than tall, or taller. A display the
-/// other way (the Touch Display 2 is upright; a monitor wide) is turned a
-/// quarter, by the boot screen and the shell. It is kept on the kernel's
-/// command line (`orientation_arg`), which both can read from the start;
-/// landscape if it is not there. Changed, the shell turns at once (it
-/// follows the system manager's report), the boot screen from the next
-/// start.
+/// Which way the screen is: wider than tall, or taller; and either way
+/// up (flipped: turned half round, for a display mounted upside down). A
+/// display the other way (the Touch Display 2 is upright; a monitor wide)
+/// is turned a quarter, by the boot screen and the shell (see `turn`). It
+/// is kept on the kernel's command line (`orientation_arg`), which both can
+/// read from the start; landscape if it is not there. Changed, the shell
+/// turns at once (it follows the system manager's report), the boot screen
+/// from the next start.
 pub const Orientation = enum {
     landscape,
     portrait,
+    landscape_flipped,
+    portrait_flipped,
+
+    /// Whether it is taller than wide.
+    pub fn isPortrait(o: Orientation) bool {
+        return o == .portrait or o == .portrait_flipped;
+    }
+
+    /// Whether it is the other way up.
+    pub fn isFlipped(o: Orientation) bool {
+        return o == .landscape_flipped or o == .portrait_flipped;
+    }
+
+    /// Landscape or portrait (`portrait`), either way up (`flipped`).
+    pub fn of2(portrait_: bool, flipped: bool) Orientation {
+        return if (portrait_) (if (flipped) .portrait_flipped else .portrait) else (if (flipped) .landscape_flipped else .landscape);
+    }
+
+    /// How a display `width` by `height` is turned for it: a quarter if
+    /// it is the other way (taller, for landscape), and half round more
+    /// if flipped.
+    pub fn turn(o: Orientation, width: u32, height: u32) Turn {
+        const quarter: u2 = @intFromBool((height > width) != o.isPortrait());
+        const half: u2 = if (o.isFlipped()) 2 else 0;
+        return @enumFromInt(quarter +% half);
+    }
 
     /// The orientation a kernel command line gives.
     pub fn of(cmdline: []const u8) Orientation {
@@ -207,9 +234,59 @@ pub const Orientation = enum {
         return of(buf[0..n]);
     }
 
-    /// Whether a display `width` by `height` is turned for it.
+    /// Whether a display `width` by `height` is on its side for it (the
+    /// screen as wide as the display is tall).
     pub fn turns(o: Orientation, width: u32, height: u32) bool {
-        return (height > width) != (o == .portrait);
+        return o.turn(width, height).sideways();
+    }
+};
+
+/// How the screen is turned on the display: by quarters, clockwise as the
+/// display shows it (a quarter: the screen's left along the display's
+/// bottom, its top along the display's left).
+pub const Turn = enum(u2) {
+    none,
+    quarter,
+    half,
+    three_quarters,
+
+    /// Whether the screen is on its side (as wide as the display is tall).
+    pub fn sideways(t: Turn) bool {
+        return t == .quarter or t == .three_quarters;
+    }
+
+    /// Where the screen's point (`x`, `y`) is on the display, `w` by `h`
+    /// (as the display has them: its last pixel's, for pixels; its size,
+    /// for edges).
+    pub fn toDisplay(t: Turn, x: i32, y: i32, w: i32, h: i32) [2]i32 {
+        return switch (t) {
+            .none => .{ x, y },
+            .quarter => .{ y, h - x },
+            .half => .{ w - x, h - y },
+            .three_quarters => .{ w - y, x },
+        };
+    }
+
+    /// Where a point on the display (`x`, `y`, from 0 to 1 across and
+    /// down it, as a touchscreen reports them) is on the screen (0 to 1).
+    pub fn toScreen(t: Turn, x: f64, y: f64) [2]f64 {
+        return switch (t) {
+            .none => .{ x, y },
+            .quarter => .{ 1 - y, x },
+            .half => .{ 1 - x, 1 - y },
+            .three_quarters => .{ y, 1 - x },
+        };
+    }
+
+    /// The other way: where a point on the screen (0 to 1) is on the
+    /// display (0 to 1).
+    pub fn fromScreen(t: Turn, x: f64, y: f64) [2]f64 {
+        return switch (t) {
+            .none => .{ x, y },
+            .quarter => .{ y, 1 - x },
+            .half => .{ 1 - x, 1 - y },
+            .three_quarters => .{ 1 - y, x },
+        };
     }
 };
 
@@ -899,6 +976,13 @@ test "requests and reports go through the socket" {
     try testing.expect(Orientation.landscape.turns(720, 1280));
     try testing.expect(!Orientation.landscape.turns(1920, 1080));
     try testing.expect(Orientation.portrait.turns(1920, 1080));
+    // Flipped: half round more.
+    try testing.expectEqual(Turn.half, Orientation.landscape_flipped.turn(1920, 1080));
+    try testing.expectEqual(Turn.three_quarters, Orientation.portrait_flipped.turn(1920, 1080));
+    try testing.expectEqual(Turn.three_quarters, Orientation.landscape_flipped.turn(720, 1280));
+    try testing.expect(Orientation.portrait_flipped.turns(1920, 1080));
+    try testing.expectEqual(Orientation.portrait_flipped, Orientation.of2(true, true));
+    try testing.expectEqual(Orientation.landscape_flipped, Orientation.of("quiet dazzle.orientation=landscape_flipped"));
     try testing.expect(Report.parse("storage ready\n") == null);
 
     // The slots, and an update.
@@ -995,4 +1079,26 @@ test "video memory grows with the computer's memory until chosen" {
     try std.testing.expectEqual(@as(u16, 512), defaultVideoMemory(3800));
     try std.testing.expect(videoMemoryAllowed(defaultVideoMemory(3800), 3800));
     try std.testing.expect(videoMemoryAllowed(defaultVideoMemory(434), 434));
+}
+
+test "a screen turned on the display, and points on it back" {
+    // A quarter: the screen's top left at the display's bottom left.
+    try testing.expectEqual([2]i32{ 0, 1280 }, Turn.quarter.toDisplay(0, 0, 720, 1280));
+    // Half: its top left at the display's bottom right.
+    try testing.expectEqual([2]i32{ 1920, 1080 }, Turn.half.toDisplay(0, 0, 1920, 1080));
+    // Three quarters: its top left at the display's top right.
+    try testing.expectEqual([2]i32{ 720, 0 }, Turn.three_quarters.toDisplay(0, 0, 720, 1280));
+    // And back, each way: a touch where the screen's point is shown is at
+    // that point.
+    for ([_]Turn{ .none, .quarter, .half, .three_quarters }) |t| {
+        const on = t.fromScreen(0.25, 0.1);
+        const back = t.toScreen(on[0], on[1]);
+        try testing.expectApproxEqAbs(@as(f64, 0.25), back[0], 1e-9);
+        try testing.expectApproxEqAbs(@as(f64, 0.1), back[1], 1e-9);
+        // The same as the pixels go (the display 1 by 1).
+        const px = t.toDisplay(1, 0, 4, 4);
+        const scaled = t.fromScreen(0.25, 0);
+        try testing.expectApproxEqAbs(@as(f64, @floatFromInt(px[0])) / 4, scaled[0], 1e-9);
+        try testing.expectApproxEqAbs(@as(f64, @floatFromInt(px[1])) / 4, scaled[1], 1e-9);
+    }
 }

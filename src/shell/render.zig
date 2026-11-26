@@ -13,10 +13,10 @@
 //! A display the other way from the orientation chosen (the Touch Display
 //! 2, 720 by 1280, for landscape; a monitor for portrait: see
 //! `sys.system.Orientation`) is used on its side: the screen is as wide as
-//! the display is tall (`Renderer.turned`). Every
-//! frame for it is composited (the display can turn a plane over, not a
-//! quarter), its quads turned into the panel's frame, and the cursor's
-//! picture turned too.
+//! the display is tall; and a flipped orientation turns it half round more
+//! (`Renderer.turn`). Every frame for a turned screen is composited, its
+//! quads turned into the display's frame, and the cursor's picture turned
+//! too.
 //!
 //! A rounded window (one whose client asked, with dazzle_decoration_v1)
 //! is drawn in pieces: most of it as it is, and its corners blended, cut
@@ -37,6 +37,7 @@ const glass = @import("glass.zig");
 const kete_panel = @import("kete_panel.zig");
 
 const render = vc4.render;
+const Turn = sys.system.Turn;
 const texture = vc4.texture;
 const etc1 = vc4.etc1;
 
@@ -246,26 +247,22 @@ fn quad(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, index: us
 /// screenshot taken in bands (see `Renderer.capture`), each band's top.
 var band_top: i32 = 0;
 
-/// While a frame for a display turned a quarter is recorded
-/// (`Renderer.turned`): the screen's positions are turned into the frame's,
-/// the screen's left side at the frame's bottom, its top at the frame's
-/// left. (Not for a screenshot, drawn upright.)
-var turning: bool = false;
-
-/// Where the screen's point (`x`, `y`) is in a frame `h` tall, turned.
-fn turned(x: i32, y: i32, h: i32) [2]i32 {
-    return .{ y, h - x };
-}
+/// While a frame for a turned screen is recorded (`Renderer.turn`): the
+/// screen's positions are turned into the frame's (see
+/// `sys.system.Turn`). (Not for a screenshot, drawn upright.)
+var turning: Turn = .none;
 
 fn rect(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, index: usize, t: server.Texture, x: i32, y_screen: i32, qw: u32, qh: u32, uv: [4][2]f32, filter: texture.Filter, scissor_screen: ?render.Viewport) !void {
     std.debug.assert(index < max_quads);
     const y = y_screen - band_top;
     const fh: i32 = @intCast(frame.target.height);
     const scissor: ?render.Viewport = if (scissor_screen) |sc| blk: {
-        if (turning) {
-            // Turned: across the screen is up the frame.
-            const at = turned(sc.x + @as(i32, @intCast(sc.width)), sc.y, fh);
-            break :blk .{ .x = at[0], .y = at[1], .width = sc.height, .height = sc.width };
+        if (turning != .none) {
+            // Turned: its corners turned, and the rectangle between them.
+            const fw: i32 = @intCast(frame.target.width);
+            const a = turning.toDisplay(sc.x, sc.y, fw, fh);
+            const b = turning.toDisplay(sc.x + @as(i32, @intCast(sc.width)), sc.y + @as(i32, @intCast(sc.height)), fw, fh);
+            break :blk .{ .x = @min(a[0], b[0]), .y = @min(a[1], b[1]), .width = @abs(a[0] - b[0]), .height = @abs(a[1] - b[1]) };
         }
         // In the band (or nothing of it, if it is not).
         const top = @max(sc.y - band_top, 0);
@@ -281,7 +278,7 @@ fn rect(frame: *render.Frame, pipeline: *shader.Pipeline, vbo: vc4.Bo, index: us
     const h: f32 = @floatFromInt(frame.target.height);
     var clip: [4][2]f32 = undefined;
     for (screen, &clip) |pt, *c| {
-        const at = if (turning) turned(pt[0], pt[1], fh) else pt;
+        const at = turning.toDisplay(pt[0], pt[1], @intCast(frame.target.width), fh);
         c.* = .{ @as(f32, @floatFromInt(at[0])) / w * 2 - 1, 1 - @as(f32, @floatFromInt(at[1])) / h * 2 };
     }
     const verts = [6][4]f32{
@@ -386,11 +383,11 @@ pub const Renderer = struct {
     gpa: std.mem.Allocator,
     dev: vc4.Device,
     display: vc4.display.Display,
-    /// The screen's size: the display's, or (turned) across it.
+    /// The screen's size: the display's, or (on its side) across it.
     width: u32,
     height: u32,
-    /// The display used on its side (see the top of this file).
-    turned: bool = false,
+    /// How the screen is turned on the display (see the top of this file).
+    turn: Turn = .none,
     /// Whether it is turned as the orientation chosen in Settings says:
     /// not a monitor beside a touchscreen (which the setting is for then).
     follows_orientation: bool = true,
@@ -430,7 +427,7 @@ pub const Renderer = struct {
         // The screen stays 32-bit: it is what everything is composited
         // into, and screenshots are taken from.
         const display = try vc4.display.Display.init(dev, output, .xrgb8888);
-        const turn = follows_orientation and sys.system.Orientation.now().turns(display.width, display.height);
+        const turn: Turn = if (follows_orientation) sys.system.Orientation.now().turn(display.width, display.height) else .none;
         const layout: shader.pipeline.Options = .{
             .vertex_stride = 16,
             .attributes = &.{ .{ .location = 0, .offset = 0 }, .{ .location = 1, .offset = 8 } },
@@ -439,9 +436,9 @@ pub const Renderer = struct {
             .gpa = gpa,
             .dev = dev,
             .display = display,
-            .width = if (turn) display.height else display.width,
-            .height = if (turn) display.width else display.height,
-            .turned = turn,
+            .width = if (turn.sideways()) display.height else display.width,
+            .height = if (turn.sideways()) display.width else display.height,
+            .turn = turn,
             .follows_orientation = follows_orientation,
             .quads = try shader.Pipeline.init(gpa, dev, shader.Program.decode(@embedFile("quad.shader")) catch unreachable, layout),
             .blended = try shader.Pipeline.init(gpa, dev, shader.Program.decode(@embedFile("quad_blend.shader")) catch unreachable, layout),
@@ -579,7 +576,7 @@ pub const Renderer = struct {
     /// composited instead; otherwise whether it is already on the screen,
     /// as `show` does. Only while no flip is pending.
     pub fn showDirect(r: *Renderer, t: server.Texture, x: i32, y: i32, size: [2]u32) ?bool {
-        if (r.dev.is_v3d or r.display.kms == null or r.turned) return null;
+        if (r.dev.is_v3d or r.display.kms == null or r.turn != .none) return null;
         if (vc4.render.Target.textureTiling(t.format, t.width, t.height) != .t) return null;
         const panels = r.panelLayers() orelse return null;
         const fb = r.clientFramebuffer(t, x, y, size, panels) orelse return null;
@@ -765,8 +762,8 @@ pub const Renderer = struct {
         var quads = try r.panelQuads();
         quads[@intFromEnum(PanelId.notice)] = null;
         static_frame.begin(r.display.backTarget(), .{ .clear = r.background });
-        turning = r.turned;
-        defer turning = false;
+        turning = r.turn;
+        defer turning = .none;
         try recordFrame(&static_frame, r.pipelines(), try r.previewTexture(), r.background_image, r.vbo, &quads, windows);
         const seqno = try r.dev.submit(static_frame.finish());
         try r.dev.waitSeqno(seqno, std.time.ns_per_s);
@@ -788,20 +785,20 @@ pub const Renderer = struct {
             const bo = try r.dev.createScanoutBo(bytes);
             const pixels = std.mem.bytesAsValue([cursor.size * cursor.size]u32, bo.map[0..bytes]);
             cursor.draw(pixels, shape);
-            if (r.turned) turnSquare(cursor.size, pixels);
+            turnSquare(cursor.size, pixels, r.turn);
             slot.* = bo;
         }
         try vc4.drm.setCursor(r.dev.fd, r.display.output.crtc_id, slot.*.?.kmsHandle(), cursor.size, cursor.size);
         r.cursor_shape = shape;
     }
 
-    /// Turns the screen (the display on its side, or not): its size swapped,
+    /// Turns the screen on the display: its size (swapped, on its side),
     /// and the cursor's pictures, turned with it, made again.
-    pub fn setTurned(r: *Renderer, turn: bool) !void {
-        if (turn == r.turned) return;
-        r.turned = turn;
-        r.width = if (turn) r.display.height else r.display.width;
-        r.height = if (turn) r.display.width else r.display.height;
+    pub fn setTurn(r: *Renderer, turn: Turn) !void {
+        if (turn == r.turn) return;
+        r.turn = turn;
+        r.width = if (turn.sideways()) r.display.height else r.display.width;
+        r.height = if (turn.sideways()) r.display.width else r.display.height;
         const shown = r.cursor_shape;
         r.hideCursor();
         for (&r.cursor_bos) |*slot| if (slot.*) |bo| {
@@ -824,9 +821,9 @@ pub const Renderer = struct {
         const shape = r.cursor_shape orelse return;
         var hot = cursor.hotspot(shape);
         var at: [2]i32 = .{ x, y };
-        if (r.turned) {
-            at = turned(x, y, @as(i32, @intCast(r.display.height)) - 1);
-            hot = turned(hot[0], hot[1], cursor.size - 1);
+        if (r.turn != .none) {
+            at = r.turn.toDisplay(x, y, @as(i32, @intCast(r.display.width)) - 1, @as(i32, @intCast(r.display.height)) - 1);
+            hot = r.turn.toDisplay(hot[0], hot[1], cursor.size - 1, cursor.size - 1);
         }
         vc4.drm.moveCursor(r.dev.fd, r.display.output.crtc_id, at[0] - hot[0], at[1] - hot[1]) catch |err| {
             if (!r.cursor_move_failed) sys.print(sys.log_warning ++ "dazzle-shell: cannot move the cursor: {s}\n", .{@errorName(err)});
@@ -848,8 +845,8 @@ pub const Renderer = struct {
         const t0 = sys.nowNs();
         const quads = try r.panelQuads();
         static_frame.begin(r.display.backTarget(), .{ .clear = r.background });
-        turning = r.turned;
-        defer turning = false;
+        turning = r.turn;
+        defer turning = .none;
         try recordFrame(&static_frame, r.pipelines(), try r.previewTexture(), r.background_image, r.vbo, &quads, windows);
         const t1 = sys.nowNs();
         const seqno = try r.dev.submit(static_frame.finish());
@@ -1043,12 +1040,12 @@ pub const Renderer = struct {
     }
 };
 
-/// A square picture, `n` pixels across, turned as the screen is for a
-/// turned display (`turned`).
-fn turnSquare(comptime n: usize, pixels: *[n * n]u32) void {
+/// A square picture, `n` pixels across, turned as the screen is (`turn`).
+fn turnSquare(comptime n: usize, pixels: *[n * n]u32, turn: Turn) void {
+    if (turn == .none) return;
     const was = pixels.*;
     for (0..n) |y| for (0..n) |x| {
-        const at = turned(@intCast(x), @intCast(y), n - 1);
+        const at = turn.toDisplay(@intCast(x), @intCast(y), n - 1, n - 1);
         pixels[@as(usize, @intCast(at[1])) * n + @as(usize, @intCast(at[0]))] = was[y * n + x];
     };
 }
@@ -1180,13 +1177,17 @@ test "a window fading out is drawn see-through, as much as its opacity (shaders/
     }
 }
 
-test "a screen on its side: its left at the frame's bottom, its top at the frame's left, and the cursor turned with it" {
-    // A 1280 by 720 screen on a 720 by 1280 panel.
-    try std.testing.expectEqual([2]i32{ 0, 1280 }, turned(0, 0, 1280));
-    try std.testing.expectEqual([2]i32{ 720, 1280 }, turned(0, 720, 1280));
-    try std.testing.expectEqual([2]i32{ 0, 0 }, turned(1280, 0, 1280));
-    // A picture's top left pixel goes to its bottom left.
+test "the cursor's picture turned with the screen" {
+    // A quarter: its top left pixel goes to its bottom left.
     var px: [4]u32 = .{ 1, 2, 3, 4 };
-    turnSquare(2, &px);
+    turnSquare(2, &px, .quarter);
     try std.testing.expectEqualSlices(u32, &.{ 2, 4, 1, 3 }, &px);
+    // Half: upside down.
+    px = .{ 1, 2, 3, 4 };
+    turnSquare(2, &px, .half);
+    try std.testing.expectEqualSlices(u32, &.{ 4, 3, 2, 1 }, &px);
+    // Three quarters: its top left to its top right.
+    px = .{ 1, 2, 3, 4 };
+    turnSquare(2, &px, .three_quarters);
+    try std.testing.expectEqualSlices(u32, &.{ 3, 1, 4, 2 }, &px);
 }
