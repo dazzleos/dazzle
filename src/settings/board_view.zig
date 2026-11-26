@@ -111,7 +111,6 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
             if (d.manufacturer.len > 0) detail.print(a, "  \u{b7}  {s}", .{d.manufacturer.slice()}) catch {};
             const speed = usb.formatSpeed(&speed_buf, d.speed_mbps);
             if (speed.len > 0) detail.print(a, "  \u{b7}  {s}", .{speed}) catch {};
-            if (d.built_in) detail.appendSlice(a, "  \u{b7}  Part of the board") catch {};
             rows.append(a, cx.make(kete.Row{ .spacing = 16, .cross_axis_alignment = .center, .children = &.{
                 cx.make(kete.Icon{ .icon = usbIcon(d.kind), .size = 28, .color = t.on_surface_variant }),
                 cx.make(kete.Expanded{ .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 2, .children = &.{
@@ -850,14 +849,14 @@ test "the board, drawn: picking a part says what it is" {
     devices.items[0].product.set("USB Keyboard");
     devices.items[0].manufacturer.set("Logitech");
     devices.items[1] = .{ .kind = .storage, .speed_mbps = 480, .vendor_id = 0x0781, .product_id = 0x5567 };
-    devices.items[2] = .{ .kind = .network, .speed_mbps = 480, .built_in = true, .vendor_id = 0x0424, .product_id = 0xec00 };
+    devices.items[2] = .{ .kind = .network, .speed_mbps = 480, .vendor_id = 0x0424, .product_id = 0xec00 };
     devices.len = 3;
     n += 1;
     u.frame(1600, 900, n, Settings{ .commit = "574d538", .system = &d.sys, .usage = d.usage, .network = &d.net, .manager = &wifi, .apps = view.sample_apps, .usb = &devices });
     try testing.expect(view.findText(u.root.?, "USB Keyboard") != null);
     try testing.expect(view.findText(u.root.?, "Keyboard  \u{b7}  Logitech  \u{b7}  1.5 Mb/s") != null);
     try testing.expect(view.findText(u.root.?, "USB device 0781:5567") != null);
-    try testing.expect(view.findText(u.root.?, "Network adapter  \u{b7}  480 Mb/s  \u{b7}  Part of the board") != null);
+    try testing.expect(view.findText(u.root.?, "Network adapter  \u{b7}  480 Mb/s") != null);
 
     // Every board fits, at every size.
     for ([_][]const u8{ "Raspberry Pi Model B Rev 2", "Raspberry Pi Zero 2 W Rev 1.0", "Raspberry Pi Compute Module 3 Rev 1.0", "Raspberry Pi 4 Model B Rev 1.4", "Raspberry Pi Compute Module 4 Rev 1.0", "Raspberry Pi 5 Model B Rev 1.0", "Raspberry Pi Compute Module 5 Rev 1.0", "Something else" }) |model| {

@@ -70,8 +70,6 @@ pub const Device = struct {
     kind: Kind = .other,
     /// Megabits a second: 1.5, 12, 480 or 5000.
     speed_mbps: f32 = 0,
-    /// Part of the board, rather than plugged in.
-    built_in: bool = false,
 
     /// What to call it: its product's name, or its numbers.
     pub fn name(d: *const Device, buf: []u8) []const u8 {
@@ -125,7 +123,6 @@ pub const Devices = struct {
 };
 
 fn before(_: void, a: Device, b: Device) bool {
-    if (a.built_in != b.built_in) return !a.built_in;
     return std.mem.order(u8, a.port.slice(), b.port.slice()) == .lt;
 }
 
@@ -138,7 +135,6 @@ fn readDevice(dir: []const u8, port: []const u8) ?Device {
     if (attr(&buf, dir, port, "product")) |p| d.product.set(p);
     if (attr(&buf, dir, port, "manufacturer")) |m| d.manufacturer.set(m);
     if (attr(&buf, dir, port, "speed")) |s| d.speed_mbps = std.fmt.parseFloat(f32, s) catch 0;
-    if (attr(&buf, dir, port, "removable")) |r| d.built_in = std.mem.eql(u8, r, "fixed");
     const class = std.fmt.parseInt(u8, attr(&buf, dir, port, "bDeviceClass") orelse "00", 16) catch 0;
     d.kind = kindOf(class, 0, 0);
     // A device that says only that its interfaces say: the first that
@@ -233,16 +229,16 @@ const FakeSysfs = struct {
     }
 };
 
-test "devices, their kinds and speeds, the board's last" {
+test "devices, their kinds and speeds, in the order of their ports" {
     var f: FakeSysfs = .{};
     try f.init();
     defer f.deinit();
     // The root hub and an interface: left out.
     try f.add("usb1", &.{.{ "idVendor", "1d6b\n" }});
     // The board's hub.
-    try f.add("1-1", &.{ .{ "idVendor", "0424\n" }, .{ "idProduct", "9514\n" }, .{ "bDeviceClass", "09\n" }, .{ "speed", "480\n" }, .{ "removable", "fixed\n" } });
+    try f.add("1-1", &.{ .{ "idVendor", "0424\n" }, .{ "idProduct", "9514\n" }, .{ "bDeviceClass", "09\n" }, .{ "speed", "480\n" } });
     // A keyboard (its first interface says so; its second is media keys).
-    try f.add("1-1.2", &.{ .{ "idVendor", "046d\n" }, .{ "idProduct", "c31c\n" }, .{ "product", "USB Keyboard\n" }, .{ "manufacturer", "Logitech\n" }, .{ "bDeviceClass", "00\n" }, .{ "speed", "1.5\n" }, .{ "removable", "removable\n" } });
+    try f.add("1-1.2", &.{ .{ "idVendor", "046d\n" }, .{ "idProduct", "c31c\n" }, .{ "product", "USB Keyboard\n" }, .{ "manufacturer", "Logitech\n" }, .{ "bDeviceClass", "00\n" }, .{ "speed", "1.5\n" } });
     try f.add("1-1.2:1.0", &.{ .{ "bInterfaceClass", "03\n" }, .{ "bInterfaceSubClass", "01\n" }, .{ "bInterfaceProtocol", "01\n" } });
     try f.add("1-1.2:1.1", &.{ .{ "bInterfaceClass", "03\n" }, .{ "bInterfaceSubClass", "00\n" }, .{ "bInterfaceProtocol", "00\n" } });
     // A stick with no name.
@@ -251,17 +247,17 @@ test "devices, their kinds and speeds, the board's last" {
 
     const d = Devices.readFrom(f.path);
     try testing.expectEqual(@as(usize, 3), d.len);
+    // In the order of their ports.
     const all = d.slice();
     var buf: [64]u8 = undefined;
-    try testing.expectEqualStrings("USB Keyboard", all[0].name(&buf));
-    try testing.expectEqual(Kind.keyboard, all[0].kind);
-    try testing.expectEqualStrings("Logitech", all[0].manufacturer.slice());
-    try testing.expectEqualStrings("1.5 Mb/s", formatSpeed(&buf, all[0].speed_mbps));
-    try testing.expectEqualStrings("USB device 0781:5567", all[1].name(&buf));
-    try testing.expectEqual(Kind.storage, all[1].kind);
-    try testing.expectEqual(Kind.hub, all[2].kind);
-    try testing.expect(all[2].built_in);
-    try testing.expectEqualStrings("480 Mb/s", formatSpeed(&buf, all[2].speed_mbps));
+    try testing.expectEqual(Kind.hub, all[0].kind);
+    try testing.expectEqualStrings("480 Mb/s", formatSpeed(&buf, all[0].speed_mbps));
+    try testing.expectEqualStrings("USB Keyboard", all[1].name(&buf));
+    try testing.expectEqual(Kind.keyboard, all[1].kind);
+    try testing.expectEqualStrings("Logitech", all[1].manufacturer.slice());
+    try testing.expectEqualStrings("1.5 Mb/s", formatSpeed(&buf, all[1].speed_mbps));
+    try testing.expectEqualStrings("USB device 0781:5567", all[2].name(&buf));
+    try testing.expectEqual(Kind.storage, all[2].kind);
     try testing.expectEqualStrings("5 Gb/s", formatSpeed(&buf, 5000));
     // Nothing there: none.
     try testing.expectEqual(@as(usize, 0), Devices.readFrom("/nonexistent").len);
