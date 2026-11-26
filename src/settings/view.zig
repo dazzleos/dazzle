@@ -12,6 +12,7 @@ const info = @import("info.zig");
 const locale = @import("locale");
 const store = @import("store");
 const usb = @import("usb.zig");
+pub const hardware = @import("hardware.zig");
 const gpio = @import("gpio.zig");
 const log = @import("log.zig");
 const audio = @import("audio");
@@ -165,6 +166,9 @@ pub const Settings = struct {
     network: *const info.Network,
     /// The USB devices plugged in.
     usb: *const usb.Devices = &.{},
+    /// What is connected to the board's other connectors (while the Board
+    /// page shows).
+    hardware: *const hardware.Hardware = &empty_hardware,
     /// The GPIO pins (while their page shows).
     gpio: ?*const gpio.Pins = null,
     /// The system's log, as read so far (while its page shows).
@@ -258,6 +262,7 @@ pub const Settings = struct {
 };
 
 const empty_audio_devices: audio.Devices = .{};
+const empty_hardware: hardware.Hardware = .{};
 
 /// The pages, in the order of their tabs.
 pub const Page = enum {

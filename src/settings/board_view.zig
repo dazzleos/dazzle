@@ -18,6 +18,7 @@ const board = @import("board.zig");
 const usb = @import("usb.zig");
 const gpio = @import("gpio.zig");
 const view = @import("view.zig");
+const hardware = view.hardware;
 
 const Color = gfx.Color;
 const Pin = gpio.Pin;
@@ -76,7 +77,8 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
     } else 0 else for (drawing.parts, 0..) |part, i| {
         if (part.kind == .soc or part.kind == .soc_with_ram) break i;
     } else 0;
-    const part = &drawing.parts[@min(picked, drawing.parts.len - 1)];
+    const at = @min(picked, drawing.parts.len - 1);
+    const part = &drawing.parts[at];
     const about = board.describe(part);
     rows.appendSlice(a, &.{
         cx.make(kete.Padding{ .padding = .symmetric(0, 8), .child = cx.make(kete.Align{ .alignment = .center_left, .child = cx.make(BoardView{
@@ -101,10 +103,12 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
         .soc_with_ram => if (u.cpu_busy) |busy| kete_vc4.textf(cx, "{d:.0}% busy; {s} of {s} of memory in use", .{ busy, info.formatBytes(&b1, u.memUsed()), info.formatBytes(&b2, u.mem_total) }) else null,
         .ram => kete_vc4.textf(cx, "{s} of {s} in use", .{ info.formatBytes(&b1, u.memUsed()), info.formatBytes(&b2, u.mem_total) }),
         .micro_sd, .sd, .emmc => if (self.system.card.bytes > 0) cx.fmt("{s}", .{self.system.card.describe(&card_buf)}) else null,
+        .hdmi, .mini_hdmi, .micro_hdmi, .camera, .display, .camera_display, .ethernet, .wireless, .wireless_can => connectedLine(self, cx, drawing, at),
         .usb, .usb_double, .usb_otg => if (self.usb.len == 0) locale.text("Nothing is plugged in") else null,
         else => null,
     };
-    if (now) |text| rows.append(a, cx.make(kete.Text{ .text = text, .style = .{ .size = 16, .color = t.on_surface } })) catch {};
+    if (now) |text| rows.append(a, cx.make(kete.Text{ .text = text, .style = .{ .size = 18, .color = t.on_surface } })) catch {};
+    appendDetails(self, b, drawing, at, &rows);
     if (part.kind == .usb or part.kind == .usb_double or part.kind == .usb_otg) {
         for (self.usb.slice()) |*d| {
             var name_buf: [64]u8 = undefined;
@@ -148,6 +152,122 @@ pub fn build(self: *const Settings, b: Builder, state: *State) kete.Widget {
         .on_dismiss = .of(state, State.dismiss),
         .child = b.scroll(.board, b.page(rows.items)),
     });
+}
+
+/// Which HDMI port a part is (the first drawn is HDMI 0).
+fn hdmiPort(drawing: *const board.Board, picked: usize) usize {
+    var n: usize = 0;
+    for (drawing.parts[0..picked]) |p| {
+        if (p.kind == .hdmi or p.kind == .mini_hdmi or p.kind == .micro_hdmi) n += 1;
+    }
+    return @min(n, 1);
+}
+
+/// The wired network's interface (the first that is not Wi-Fi).
+fn ethernet(self: *const Settings) ?*const info.Interface {
+    for (self.network.slice()) |*i| if (std.mem.startsWith(u8, i.name.slice(), "eth") or std.mem.startsWith(u8, i.name.slice(), "end")) return i;
+    return null;
+}
+
+/// The Wi-Fi network connected to, from the manager's scan (its signal and
+/// frequency).
+fn wifiNetwork(r: *const info.manager.Report) ?*const info.manager.Network {
+    if (r.connection.state != .connected) return null;
+    for (r.slice()) |*n| if (std.mem.eql(u8, n.ssid(), r.connection.ssid())) return n;
+    return null;
+}
+
+/// Whether a connector has something connected, and what: "Connected to
+/// a Dell U2415", "Not connected".
+fn connectedLine(self: *const Settings, cx: *kete.BuildContext, drawing: *const board.Board, picked: usize) ?[]const u8 {
+    const h = self.hardware;
+    return switch (drawing.parts[picked].kind) {
+        .hdmi, .mini_hdmi, .micro_hdmi => blk: {
+            const m = &h.hdmi[hdmiPort(drawing, picked)];
+            if (!m.connected) break :blk "Not connected";
+            if (m.model.len == 0) break :blk if (m.maker.len > 0) cx.fmt("Connected to a {s} monitor", .{m.maker.slice()}) else "Connected to a monitor";
+            break :blk cx.fmt("Connected to a {s} {s}", .{ m.maker.slice(), m.model.slice() });
+        },
+        .camera => if (h.camera.connected) (if (h.camera.module()) |m| cx.fmt("Connected to a {s}", .{m.name}) else "Connected to a camera") else "Not connected",
+        .display => if (h.panel.connected) cx.fmt("Connected to the {s}", .{if (h.panel.name.len > 0) h.panel.name.slice() else "display"}) else "Not connected",
+        .camera_display => if (h.panel.connected) cx.fmt("Connected to the {s}", .{if (h.panel.name.len > 0) h.panel.name.slice() else "display"}) else if (h.camera.connected) (if (h.camera.module()) |m| cx.fmt("Connected to a {s}", .{m.name}) else "Connected to a camera") else "Not connected",
+        .ethernet => if (ethernet(self)) |i| (if (!i.carrier) "Not connected" else if (i.speed) |s| (if (s >= 1000) cx.fmt("Connected at {d} Gb/s", .{s / 1000}) else cx.fmt("Connected at {d} Mb/s", .{s})) else "Connected") else "Not connected",
+        .wireless, .wireless_can => blk: {
+            const r = self.manager orelse break :blk null;
+            const up = if (r.adapter) |ad| ad.up else false;
+            if (!up) break :blk "Wi-Fi is off";
+            if (r.connection.state == .connected) break :blk cx.fmt("Wi-Fi is on, connected to {s}", .{r.connection.ssid()});
+            break :blk "Wi-Fi is on, not connected";
+        },
+        else => null,
+    };
+}
+
+/// The rest of what is known about what is connected, a line each.
+fn appendDetails(self: *const Settings, b: Builder, drawing: *const board.Board, picked: usize, rows: *std.ArrayList(kete.Widget)) void {
+    const cx = b.cx;
+    const a = cx.arena;
+    const h = self.hardware;
+    var items: std.ArrayList(kete.Widget) = .empty;
+    switch (drawing.parts[picked].kind) {
+        .hdmi, .mini_hdmi, .micro_hdmi => {
+            const port = hdmiPort(drawing, picked);
+            const m = &h.hdmi[port];
+            if (!m.connected) return;
+            const size = m.inches();
+            if (size > 0 and m.year > 0) items.append(a, b.item("Screen", cx.fmt("{d} inches, made in {d}", .{ size, m.year }))) catch {} else if (size > 0) items.append(a, b.item("Screen", cx.fmt("{d} inches", .{size}))) catch {};
+            if (m.width > 0) items.append(a, b.item("Best resolution", cx.fmt("{d} \u{d7} {d} at {d} Hz", .{ m.width, m.height, m.refresh_hz }))) catch {};
+            items.append(a, b.item("Sound", switch (h.hdmi_sound[port]) {
+                .none => if (m.speakers) "Its speakers are not used" else "It has no speakers",
+                .available => "Its speakers can be chosen in Sound",
+                .chosen => "Sound goes to its speakers",
+                .playing => "Sound is playing through its speakers",
+            })) catch {};
+        },
+        .camera, .display, .camera_display => {
+            const kind = drawing.parts[picked].kind;
+            if (kind != .camera and h.panel.connected) {
+                const p = &h.panel;
+                if (p.width > 0) items.append(a, b.item("Resolution", cx.fmt("{d} \u{d7} {d}", .{ p.width, p.height }))) catch {};
+                items.append(a, b.item("Touchscreen", if (p.touch) "Yes" else "No")) catch {};
+            } else if (kind != .display and h.camera.connected) {
+                if (h.camera.module()) |m| {
+                    items.append(a, b.item("Sensor", cx.fmt("{s}, {d} megapixels", .{ m.maker, m.megapixels }))) catch {};
+                } else items.append(a, b.item("Sensor", h.camera.sensor.slice())) catch {};
+            }
+        },
+        .micro_sd, .sd => {
+            const c = &h.card;
+            if (c.name.len > 0) items.append(a, b.item("Name", c.name.slice())) catch {};
+            if (c.year > 0) items.append(a, b.item("Made", if (c.month > 0) cx.fmt("{s} {d}", .{ monthName(c.month), c.year }) else cx.fmt("{d}", .{c.year}))) catch {};
+            const bytes = self.system.card.bytes;
+            if (bytes > 0) items.append(a, b.item("Kind", if (bytes > 32 * 1000 * 1000 * 1000) "SDXC (more than 32 GB)" else if (bytes > 2 * 1000 * 1000 * 1000) "SDHC (up to 32 GB)" else "SD (up to 2 GB)")) catch {};
+        },
+        .ethernet => {
+            const i = ethernet(self) orelse return;
+            if (i.mac.len > 0) items.append(a, b.item("MAC address", i.mac.slice())) catch {};
+        },
+        .wireless, .wireless_can => {
+            if (self.manager) |r| {
+                if (wifiNetwork(r)) |n| {
+                    const dbm = @divTrunc(n.signal_mbm, 100);
+                    const pct: i32 = std.math.clamp(2 * (dbm + 100), 0, 100);
+                    items.append(a, b.item("Signal", cx.fmt("{s} ({d}%)", .{ if (pct >= 70) "Strong" else if (pct >= 40) "Good" else "Weak", pct }))) catch {};
+                    items.append(a, b.item("Band", if (n.freq_mhz >= 5000) "5 GHz" else "2.4 GHz")) catch {};
+                }
+                if (r.adapter) |ad| items.append(a, b.item("MAC address", cx.fmt("{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}", .{ ad.mac[0], ad.mac[1], ad.mac[2], ad.mac[3], ad.mac[4], ad.mac[5] }))) catch {};
+            }
+            items.append(a, b.item("Bluetooth", if (h.bluetooth) |on| (if (on) "On" else "Off") else "Not available")) catch {};
+        },
+        else => {},
+    }
+    if (items.items.len == 0) return;
+    rows.append(a, cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 6, .children = items.items })) catch {};
+}
+
+fn monthName(m: u8) []const u8 {
+    const names = [_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
+    return names[@min(m, 12) -| 1];
 }
 
 fn appendGpioSection(

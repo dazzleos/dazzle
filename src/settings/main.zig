@@ -116,6 +116,9 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
     defer if (test_player) |*p| p.close();
     // The USB devices, read while the board page shows.
     var devices = usb.Devices.read();
+    // What is connected to the board's other connectors (read with the
+    // USB devices, while the Board page shows).
+    var hardware = view.hardware.read(sound.output());
     // The GPIO pins, read while their page shows: their levels several
     // times a second (inputs change as they like).
     var pins: gpio.Pins = .{};
@@ -243,6 +246,7 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
             network = info.Network.read();
             if (view.shownPage(window.ui) == .board) {
                 devices = usb.Devices.read();
+                hardware = view.hardware.read(sound.output());
                 pins.readUsers();
             }
             if (view.shownPage(window.ui) == .sound) {
@@ -616,6 +620,7 @@ fn run(init: std.process.Init, first_page: ?view.Page, first_gpio: bool) !void {
                 .usage = usage,
                 .network = &network,
                 .usb = &devices,
+                .hardware = &hardware,
                 .gpio = if (pins_read) &pins else null,
                 .log = if (syslog.fd != null or syslog.failed) &syslog else null,
                 .log_server = if (updater.report) |r| r.log_server else null,
