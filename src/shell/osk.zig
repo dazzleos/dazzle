@@ -12,8 +12,9 @@
 //! keyboard's layout), Backspace, Enter and Tab as keys. Its pages are as
 //! Android's keyboards have them: the letters (with Shift, for one letter);
 //! the numbers and symbols, and more symbols (=\< where Shift is: every
-//! ASCII one between them); and emoji, every one, in their groups, those
-//! used most first, in a skin tone (see emoji.zig).
+//! ASCII one between them); and emoji, found by typing their names (the
+//! letters, without spaces, beside a few large emoji the name finds; with none typed,
+//! those used most), in a skin tone (see emoji.zig).
 
 const std = @import("std");
 const kete = @import("kete");
@@ -40,7 +41,7 @@ pub const Typed = union(enum) {
 // Its keys' icons, chosen as they are made (for kete's icon font, which
 // has only those its scan finds).
 comptime {
-    _ = &[_]kete.IconName{ .keyboard_capslock, .arrow_upward, .backspace, .space_bar, .keyboard_return, .keyboard_hide, .emoji_emotions, .history, .chevron_left, .chevron_right };
+    _ = &[_]kete.IconName{ .keyboard_capslock, .arrow_upward, .backspace, .space_bar, .keyboard_return, .keyboard_hide, .emoji_emotions };
 }
 
 /// Linux key codes it sends.
@@ -219,7 +220,7 @@ pub const Osk = struct {
 
     /// The emoji's keys' lights: let go, for the page's new emoji.
     fn unlightEmoji(o: *Osk) void {
-        for (&o.lights) |*l| if (l.id >= emoji_light and l.id < emoji_light + emoji_mod.per_page) {
+        for (&o.lights) |*l| if (l.id >= emoji_light and l.id < emoji_light + emoji_mod.shown_max) {
             l.key = .{};
         };
     }
@@ -255,9 +256,7 @@ const Key = struct {
         hide,
         /// An emoji, at `slot` on the emoji page.
         emoji: struct { text: []const u8, slot: u8 },
-        /// The emoji page's tabs, its pages, and the skin tones.
-        tab: emoji_mod.Tab,
-        turn: bool,
+        /// The skin tones, to choose one.
         tones,
         tone: u3,
 
@@ -270,8 +269,6 @@ const Key = struct {
                 .hide => 3,
                 .page => |pg| 0x10 + @as(u32, @intFromEnum(pg)),
                 .emoji => |em| emoji_light + em.slot,
-                .tab => |tab| 0x20 + @as(u32, @intFromEnum(tab)),
-                .turn => |forward| @as(u32, if (forward) 0x31 else 0x30),
                 .tones => 0x32,
                 .tone => |v| 0x40 + @as(u32, v),
             };
@@ -282,8 +279,17 @@ const Key = struct {
         if (k.light) |l| l.pressed();
         const o = k.osk;
         switch (k.what) {
-            .text => |t| o.typeText(t),
-            .key => |code| o.push(.{ .key = code }),
+            // On the emoji page, letters (and Space) type an emoji's name,
+            // and Backspace takes them away (then the app's text).
+            .text => |t| if (o.page == .emoji) {
+                o.emoji.add(t);
+                o.unlightEmoji();
+                o.changed = true;
+            } else o.typeText(t),
+            .key => |code| if (o.page == .emoji and code == key_backspace and o.emoji.erase()) {
+                o.unlightEmoji();
+                o.changed = true;
+            } else o.push(.{ .key = code }),
             .shift => {
                 o.shift = !o.shift;
                 o.changed = true;
@@ -292,24 +298,15 @@ const Key = struct {
                 o.page = pg;
                 o.shift = false;
                 o.changed = true;
-                if (pg == .emoji) {
-                    o.emoji.open();
-                    o.unlightEmoji();
-                }
+                o.emoji.clear();
+                o.unlightEmoji();
             },
+            // Typed: the name is done with.
             .emoji => |em| {
                 o.typeText(em.text);
                 o.emoji.typed(em.text);
                 o.saveEmoji();
-            },
-            .tab => |tab| {
-                o.emoji.show(tab);
-                o.unlightEmoji();
-                o.changed = true;
-            },
-            .turn => |forward| {
-                o.emoji.turn(forward);
-                o.unlightEmoji();
+                o.emoji.clear();
                 o.changed = true;
             },
             .tones => {
@@ -337,9 +334,6 @@ const letter_rows = [_][]const []const u8{
 };
 /// The emoji keys' lights' ids, by their place on the page.
 const emoji_light: u32 = 0x1000;
-
-/// The emoji page's tabs, as they show.
-const tab_faces = [_][]const u8{ "", "😀", "👋", "🐻", "🍔", "🚗", "⚽", "💡", "❤️", "🏁" };
 
 /// The skin tones, on a hand.
 const tone_faces = [_][]const u8{ "✋", "✋🏻", "✋🏼", "✋🏽", "✋🏾", "✋🏿" };
@@ -413,81 +407,90 @@ const View = struct {
     }
 };
 
-/// The emoji page: its tabs (those used most, then the groups) and the
-/// skin tones' key; three rows of the page's emoji (or the tones, to
-/// choose one); and ABC, the pages either way, Space, Backspace and Enter.
+/// The emoji page: on the left, the letters to type an emoji's name
+/// (with the skin tones' key where Shift is, and Backspace), and Space;
+/// on the right, the name typed, and the emoji it finds, large (with none
+/// typed, those used most), or the tones to choose one from.
 fn emojiView(cx: *kete.BuildContext, o: *Osk) kete.Widget {
     const t = cx.theme();
     const a = cx.arena;
     const s = o.scale;
     const e = &o.emoji;
-    // Heights: the tabs a little less than a key; the three rows of emoji
-    // what is left of three keys' rows (all four rows' height in all).
     const k: f32 = Osk.key_height * s;
     const g: f32 = Osk.gap * s;
-    const tab_h = 0.8 * k;
-    const emoji_h = (2.2 * k) / 3;
 
-    var tabs: std.ArrayList(kete.Widget) = .empty;
-    for (std.enums.values(emoji_mod.Tab), 0..) |tab, i| {
-        const on = e.tab == tab and !e.choosing_tone;
-        tabs.append(a, if (tab == .frequent)
-            keyButton(cx, o, .{ .tab = tab }, null, .history, 1, on)
-        else
-            keyButton(cx, o, .{ .tab = tab }, tab_faces[i], null, 1, on)) catch {};
+    var left: std.ArrayList(kete.Widget) = .empty;
+    for (letter_rows, 0..) |row, i| {
+        var keys: std.ArrayList(kete.Widget) = .empty;
+        if (i == 1) keys.append(a, spacer(cx, 0.5)) catch {};
+        if (i == 2) keys.append(a, keyButton(cx, o, .tones, tone_faces[e.tone], null, 1.5, e.choosing_tone)) catch {};
+        for (row) |ch| keys.append(a, keyButton(cx, o, .{ .text = ch }, ch, null, 1, false)) catch {};
+        if (i == 1) keys.append(a, spacer(cx, 0.5)) catch {};
+        if (i == 2) keys.append(a, keyButton(cx, o, .{ .key = key_backspace }, null, .backspace, 1.5, false)) catch {};
+        left.append(a, rowHeight(cx, keys.items, k, g)) catch {};
     }
-    tabs.append(a, keyButton(cx, o, .tones, tone_faces[e.tone], null, 1, e.choosing_tone)) catch {};
-
-    var grid: std.ArrayList(kete.Widget) = .empty;
-    if (e.choosing_tone) {
-        for (0..3) |r| {
-            var keys: std.ArrayList(kete.Widget) = .empty;
-            if (r == 1) {
-                keys.append(a, spacer(cx, 2)) catch {};
-                for (tone_faces, 0..) |face, v| keys.append(a, keyButton(cx, o, .{ .tone = @intCast(v) }, face, null, 1, e.tone == v)) catch {};
-                keys.append(a, spacer(cx, 2)) catch {};
-            } else keys.append(a, spacer(cx, 1)) catch {};
-            grid.append(a, rowHeight(cx, keys.items, emoji_h, g)) catch {};
-        }
-    } else {
-        var shown: [emoji_mod.per_page][]const u8 = undefined;
-        const n = e.shown(&shown);
-        for (0..3) |r| {
-            var keys: std.ArrayList(kete.Widget) = .empty;
-            if (n == 0 and r == 1) {
-                keys.append(a, cx.make(kete.Expanded{ .child = cx.make(kete.Align{ .child = cx.make(kete.Text{ .text = "The emoji you use most show here", .style = .{ .size = 18 * s, .color = t.on_surface_variant }, .wrap = false }) }) })) catch {};
-            } else for (0..emoji_mod.columns) |c| {
-                const i = r * emoji_mod.columns + c;
-                keys.append(a, if (i < n) keyButton(cx, o, .{ .emoji = .{ .text = shown[i], .slot = @intCast(i) } }, shown[i], null, 1, false) else spacer(cx, 1)) catch {};
-            }
-            grid.append(a, rowHeight(cx, keys.items, emoji_h, g)) catch {};
-        }
-    }
-
-    const paged = e.pages() > 1;
     var last: std.ArrayList(kete.Widget) = .empty;
-    last.appendSlice(a, &.{
-        keyButton(cx, o, .{ .page = .letters }, "ABC", null, 1.5, false),
-        if (paged and !e.choosing_tone) keyButton(cx, o, .{ .turn = false }, null, .chevron_left, 1, false) else spacer(cx, 1),
-        keyButton(cx, o, .{ .text = " " }, null, .space_bar, if (o.always) 3 else 2, false),
-        if (paged and !e.choosing_tone) keyButton(cx, o, .{ .turn = true }, null, .chevron_right, 1, false) else spacer(cx, 1),
-        keyButton(cx, o, .{ .key = key_backspace }, null, .backspace, 1.5, false),
-        keyButton(cx, o, .{ .key = key_enter }, null, .keyboard_return, 1.5, false),
-    }) catch {};
-    if (!o.always) last.append(a, keyButton(cx, o, .hide, null, .keyboard_hide, 1, false)) catch {};
+    // (No Space: names are matched without theirs.)
+    last.append(a, keyButton(cx, o, .{ .page = .letters }, "ABC", null, 1, false)) catch {};
+    if (!o.always) last.append(a, keyButton(cx, o, .hide, null, .keyboard_hide, 1.5, false)) catch {};
+    left.append(a, rowHeight(cx, last.items, k, g)) catch {};
+
+    // The name typed (or what to do), as a field shows it.
+    const q = e.query();
+    const name = cx.make(kete.SizedBox{ .height = k, .child = cx.make(kete.RoundedBox{
+        .color = t.surface,
+        .border_width = 1,
+        .border_color = t.outline_variant,
+        .radius = .all(8 * s),
+        .child = cx.make(kete.Padding{ .padding = .symmetric(12 * s, 0), .child = cx.make(kete.Align{ .alignment = .center_left, .child = cx.make(kete.Text{
+            .text = if (q.len > 0) q else if (e.choosing_tone) "Choose a skin tone" else "Type an emoji's name",
+            .style = .{ .size = 20 * s, .color = if (q.len > 0) t.on_surface else t.on_surface_variant },
+            .wrap = false,
+            .ellipsis = true,
+        }) }) }),
+    }) });
+    // Two rows of four, as tall as the keys' other three rows.
+    const big_h = (3 * k + g) / 2;
+    var grid: std.ArrayList(kete.Widget) = .empty;
+    var faces: [emoji_mod.shown_max][]const u8 = undefined;
+    var n: usize = 0;
+    if (e.choosing_tone) {
+        for (tone_faces, 0..) |face, v| faces[v] = face;
+        n = tone_faces.len;
+    } else n = e.shown(&faces);
+    for (0..2) |r| {
+        var keys: std.ArrayList(kete.Widget) = .empty;
+        for (0..4) |c| {
+            const i = r * 4 + c;
+            keys.append(a, if (i >= n)
+                spacer(cx, 1)
+            else if (e.choosing_tone)
+                bigKey(cx, o, .{ .tone = @intCast(i) }, faces[i], e.tone == i)
+            else
+                bigKey(cx, o, .{ .emoji = .{ .text = faces[i], .slot = @intCast(i) } }, faces[i], false)) catch {};
+        }
+        grid.append(a, rowHeight(cx, keys.items, big_h, g)) catch {};
+    }
+    var right: std.ArrayList(kete.Widget) = .empty;
+    right.append(a, name) catch {};
+    right.appendSlice(a, grid.items) catch {};
 
     return cx.make(kete.RoundedBox{
         .color = t.surface_container,
-        .child = cx.make(kete.Padding{ .padding = .all(Osk.pad * s), .child = cx.make(kete.Column{
+        .child = cx.make(kete.Padding{ .padding = .all(Osk.pad * s), .child = cx.make(kete.Row{
             .cross_axis_alignment = .stretch,
-            .spacing = g,
+            .spacing = 2 * g,
             .children = cx.makeAll(.{
-                rowHeight(cx, tabs.items, tab_h, g),
-                kete.Column{ .cross_axis_alignment = .stretch, .spacing = g / 2, .children = grid.items },
-                rowHeight(cx, last.items, k, g),
+                kete.Expanded{ .flex = 10, .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .spacing = g, .children = left.items }) },
+                kete.Expanded{ .flex = 5, .child = cx.make(kete.Column{ .cross_axis_alignment = .stretch, .spacing = g, .children = right.items }) },
             }),
         }) }),
     });
+}
+
+/// A key on the emoji page's right: an emoji (or a tone), large.
+fn bigKey(cx: *kete.BuildContext, o: *Osk, what: Key.What, face: []const u8, on: bool) kete.Widget {
+    return keySized(cx, o, what, face, null, 1, on, 44 * o.scale);
 }
 
 /// A row of keys `height` high, `gap` apart.
@@ -521,6 +524,11 @@ fn upper(cx: *kete.BuildContext, ch: []const u8) []const u8 {
 /// A key `share` of a row's width (a letter's is 1), showing `label` or
 /// `icon`; `on` for Shift while it holds.
 fn keyButton(cx: *kete.BuildContext, o: *Osk, what: Key.What, label: ?[]const u8, icon: ?kete.IconName, share: f32, on: bool) kete.Widget {
+    return keySized(cx, o, what, label, icon, share, on, 24 * o.scale);
+}
+
+/// A key, its label `size` high.
+fn keySized(cx: *kete.BuildContext, o: *Osk, what: Key.What, label: ?[]const u8, icon: ?kete.IconName, share: f32, on: bool, size: f32) kete.Widget {
     const t = cx.theme();
     const k = cx.arena.create(Key) catch return spacer(cx, share);
     const light: ?*key_light.Key = o.lightFor(what.id());
@@ -531,7 +539,7 @@ fn keyButton(cx: *kete.BuildContext, o: *Osk, what: Key.What, label: ?[]const u8
     const face: kete.Widget = if (icon) |i|
         cx.make(kete.Icon{ .icon = i, .size = 26 * o.scale, .color = t.on_surface })
     else
-        cx.make(kete.Text{ .text = label orelse "", .style = .{ .size = 24 * o.scale, .color = t.on_surface }, .wrap = false });
+        cx.make(kete.Text{ .text = label orelse "", .style = .{ .size = size, .color = t.on_surface }, .wrap = false });
     return cx.make(kete.Expanded{ .flex = share, .child = cx.make(kete.Pressable{
         .on_press = .of(k, Key.press),
         .interaction = if (light) |l| &l.interaction else null,

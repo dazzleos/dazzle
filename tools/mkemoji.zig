@@ -1,6 +1,6 @@
 //! Makes src/shell/emoji_table.zig from Unicode's emoji-test.txt, for the
 //! on-screen keyboard's emoji: each emoji (fully qualified) in Unicode's
-//! order, its group, and, for those that have them, its five skin tones
+//! order, its name, its group, and, for those that have them, its five skin tones
 //! (each the same tone throughout: "people holding hands: medium skin
 //! tone", not "...: light skin tone, dark skin tone"). The components
 //! (the tones and hair styles alone) are left out, and so are those newer
@@ -102,6 +102,8 @@ pub fn main(init: std.process.Init) !void {
         \\
         \\pub const Emoji = struct {
         \\    text: []const u8,
+        \\    /// Unicode's name ("grinning face", "flag: Japan").
+        \\    name: []const u8,
         \\    group: Group,
         \\    /// Light, medium-light, medium, medium-dark and dark.
         \\    tones: ?[5][]const u8 = null,
@@ -112,7 +114,12 @@ pub fn main(init: std.process.Init) !void {
     );
     var toned: usize = 0;
     for (entries.items) |e| {
-        try out.print(arena, "    .{{ .text = \"{s}\", .group = .{s}", .{ e.text, e.group });
+        try out.print(arena, "    .{{ .text = \"{s}\", .name = \"", .{e.text});
+        for (e.name) |c| {
+            if (c == '"' or c == '\\') try out.append(arena, '\\');
+            try out.append(arena, c);
+        }
+        try out.print(arena, "\", .group = .{s}", .{e.group});
         const complete = for (e.tones) |t| {
             if (t == null) break false;
         } else true;

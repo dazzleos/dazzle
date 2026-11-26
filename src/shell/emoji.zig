@@ -1,18 +1,14 @@
-//! The on-screen keyboard's emoji: every one (emoji_table.zig, from
-//! Unicode's), in its groups, a page at a time; a skin tone, for those
-//! that have them; and those used most, first (kept in `file`, with the
-//! tone, so they are a tap or two away).
+//! The on-screen keyboard's emoji: found by name, as it is typed (every
+//! emoji there is: emoji_table.zig, from Unicode's), a few at a time,
+//! large; with nothing typed, those used most. A skin tone, for those that
+//! have them. Those used, and the tone, are kept in `file`.
 
 const std = @import("std");
 const sys = @import("sys");
 const table = @import("emoji_table.zig");
 
-/// What the emoji page shows: those used most, or a group.
-pub const Tab = enum { frequent, smileys, people, animals, food, travel, activities, objects, symbols, flags };
-
-/// Emoji on a page: three rows of ten.
-pub const per_page = 30;
-pub const columns = 10;
+/// The most emoji shown at once.
+pub const shown_max = 8;
 
 /// Where those used most, and the tone, are kept.
 pub const file = sys.system.apps_dir ++ "/.emoji";
@@ -24,17 +20,8 @@ const kept = 60;
 /// bytes).
 pub const max_text = 40;
 
-/// Each group's emoji: where they start in the table, and how many.
-const ranges = blk: {
-    @setEvalBranchQuota(200_000);
-    var r: [std.enums.values(table.Group).len]struct { start: usize, len: usize } = @splat(.{ .start = 0, .len = 0 });
-    for (table.all, 0..) |e, i| {
-        const g = @intFromEnum(e.group);
-        if (r[g].len == 0) r[g].start = i;
-        r[g].len += 1;
-    }
-    break :blk r;
-};
+/// The longest name typed.
+pub const max_query = 32;
 
 const Used = struct {
     text: [max_text]u8 = undefined,
@@ -49,41 +36,42 @@ const Used = struct {
 };
 
 pub const Emoji = struct {
-    tab: Tab = .smileys,
-    page: usize = 0,
     /// The skin tone (0: none, the yellow; 1 to 5: light to dark).
     tone: u3 = 0,
     /// The tones being chosen from (in place of the emoji).
     choosing_tone: bool = false,
+    /// The name typed so far.
+    query_buf: [max_query]u8 = undefined,
+    query_len: u8 = 0,
     used: [kept]Used = undefined,
     used_len: usize = 0,
     clock: u32 = 0,
 
-    /// Those used most first, if any; else the smileys.
-    pub fn open(e: *Emoji) void {
-        e.tab = if (e.used_len > 0) .frequent else .smileys;
-        e.page = 0;
+    pub fn query(e: *const Emoji) []const u8 {
+        return e.query_buf[0..e.query_len];
+    }
+
+    /// `text` typed onto the name (in small letters).
+    pub fn add(e: *Emoji, text: []const u8) void {
+        for (text) |c| {
+            if (e.query_len == max_query) return;
+            // Not a space first.
+            if (c == ' ' and e.query_len == 0) continue;
+            e.query_buf[e.query_len] = std.ascii.toLower(c);
+            e.query_len += 1;
+        }
+    }
+
+    /// The name's last letter taken away; false if there was none.
+    pub fn erase(e: *Emoji) bool {
+        if (e.query_len == 0) return false;
+        e.query_len -= 1;
+        return true;
+    }
+
+    pub fn clear(e: *Emoji) void {
+        e.query_len = 0;
         e.choosing_tone = false;
-    }
-
-    pub fn show(e: *Emoji, tab: Tab) void {
-        e.tab = tab;
-        e.page = 0;
-        e.choosing_tone = false;
-    }
-
-    /// How many pages the tab has (one, at least).
-    pub fn pages(e: *const Emoji) usize {
-        const n = switch (e.tab) {
-            .frequent => @min(e.used_len, per_page),
-            else => ranges[@intFromEnum(e.tab) - 1].len,
-        };
-        return @max(1, (n + per_page - 1) / per_page);
-    }
-
-    pub fn turn(e: *Emoji, forward: bool) void {
-        const n = e.pages();
-        e.page = if (forward) (e.page + 1) % n else (e.page + n - 1) % n;
     }
 
     /// `em` in the tone chosen, if it has tones.
@@ -93,20 +81,20 @@ pub const Emoji = struct {
         return tones[e.tone - 1];
     }
 
-    /// The page's emoji (as they type), in `out`; returns how many.
-    pub fn shown(e: *const Emoji, out: *[per_page][]const u8) usize {
-        if (e.tab == .frequent) {
+    /// The emoji to show (as they type), in `out`; returns how many: those
+    /// the name finds, or with none typed, those used most.
+    pub fn shown(e: *const Emoji, out: *[shown_max][]const u8) usize {
+        if (e.query_len == 0) {
             var order: [kept]*const Used = undefined;
             for (e.used[0..e.used_len], 0..) |*u, i| order[i] = u;
             std.mem.sort(*const Used, order[0..e.used_len], {}, moreUsed);
-            const n = @min(e.used_len, per_page);
+            const n = @min(e.used_len, shown_max);
             for (order[0..n], 0..) |u, i| out[i] = u.slice();
             return n;
         }
-        const r = ranges[@intFromEnum(e.tab) - 1];
-        const start = e.page * per_page;
-        const n = @min(per_page, r.len -| start);
-        for (0..n) |i| out[i] = e.toned(&table.all[r.start + start + i]);
+        var found: [shown_max]*const table.Emoji = undefined;
+        const n = search(std.mem.trimEnd(u8, e.query(), " "), &found);
+        for (found[0..n], 0..) |em, i| out[i] = e.toned(em);
         return n;
     }
 
@@ -155,8 +143,8 @@ pub const Emoji = struct {
             var f = std.mem.tokenizeScalar(u8, line, ' ');
             const first = f.next() orelse continue;
             if (std.mem.eql(u8, first, "tone")) {
-                e.tone = std.math.cast(u3, std.fmt.parseInt(u8, f.next() orelse continue, 10) catch continue) orelse 0;
-                if (e.tone > 5) e.tone = 0;
+                const v = std.fmt.parseInt(u8, f.next() orelse continue, 10) catch continue;
+                e.tone = if (v <= 5) @intCast(v) else 0;
                 continue;
             }
             const count = std.fmt.parseInt(u32, first, 10) catch continue;
@@ -198,43 +186,93 @@ pub const Emoji = struct {
     }
 };
 
-const testing = std.testing;
-
-test "every emoji in a group, a page at a time; in a skin tone if it has them" {
-    var e: Emoji = .{};
-    e.show(.smileys);
-    var out: [per_page][]const u8 = undefined;
-    try testing.expectEqual(@as(usize, per_page), e.shown(&out));
-    try testing.expectEqualStrings("😀", out[0]);
-    // Every one, on some page of some group (but the components).
-    var total: usize = 0;
-    for (std.enums.values(Tab)[1..]) |tab| {
-        e.show(tab);
-        for (0..e.pages()) |_| {
-            total += e.shown(&out);
-            e.turn(true);
+/// Up to `out.len` emoji whose names `q` finds, best first: a name it is,
+/// then a name starting with it, a word of a name starting with it, and
+/// (for three letters or more) a name with it in; each in Unicode's order
+/// (the commonest first). Names are matched without their spaces and
+/// punctuation ("thumbsup" is "thumbs up"), in small letters. Returns how
+/// many.
+pub fn search(q: []const u8, out: []*const table.Emoji) usize {
+    if (q.len == 0) return 0;
+    var n: usize = 0;
+    for (0..4) |rank| {
+        if (rank == 3 and q.len < 3) break;
+        for (&table.all) |*em| {
+            if (n == out.len) return n;
+            if (rankOf(em.name, q) != rank) continue;
+            out[n] = em;
+            n += 1;
         }
-        try testing.expectEqual(@as(usize, 0), e.page);
     }
-    try testing.expectEqual(table.all.len, total);
-    // A waving hand in the tone chosen; a grinning face as it is.
-    e.tone = 3;
-    const wave = for (&table.all) |*x| {
-        if (std.mem.eql(u8, x.text, "👋")) break x;
-    } else unreachable;
-    try testing.expectEqualStrings("👋🏽", e.toned(wave));
-    try testing.expectEqualStrings("😀", e.toned(&table.all[0]));
+    return n;
 }
 
-test "those used most first, kept and read back" {
+/// `name` in small letters, without spaces and punctuation, in `buf`.
+fn compact(buf: []u8, name: []const u8) []const u8 {
+    var n: usize = 0;
+    for (name) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c < 0x80) continue;
+        if (n == buf.len) break;
+        buf[n] = std.ascii.toLower(c);
+        n += 1;
+    }
+    return buf[0..n];
+}
+
+/// How well `q` (small letters) finds `name` (0: best; 4: not at all).
+fn rankOf(name: []const u8, q: []const u8) u3 {
+    var buf: [96]u8 = undefined;
+    const whole = compact(&buf, name);
+    if (std.mem.eql(u8, whole, q)) return 0;
+    if (std.mem.startsWith(u8, whole, q)) return 1;
+    var i: usize = 1;
+    while (i < name.len) : (i += 1) {
+        const before = name[i - 1];
+        if (before != ' ' and before != '-' and before != ':') continue;
+        var rest_buf: [96]u8 = undefined;
+        if (std.mem.startsWith(u8, compact(&rest_buf, name[i..]), q)) return 2;
+    }
+    if (std.mem.indexOf(u8, whole, q) != null) return 3;
+    return 4;
+}
+
+const testing = std.testing;
+
+test "emoji found by name, best first, in the skin tone" {
+    var found: [shown_max]*const table.Emoji = undefined;
+    // A name it is, first; then those starting with it.
+    var n = search("thumbsup", &found);
+    try testing.expect(n >= 1);
+    try testing.expectEqualStrings("👍", found[0].text);
+    n = search("cat", &found);
+    try testing.expectEqualStrings("cat", found[0].name);
+    // A word of a name.
+    n = search("pizz", &found);
+    try testing.expectEqualStrings("🍕", found[0].text);
+    // A name's later words, run together.
+    n = search("facewithtears", &found);
+    try testing.expectEqualStrings("😂", found[0].text);
+    try testing.expectEqual(@as(usize, 0), search("zzqx", &found));
+    // As typed: the tone for those that have them.
+    var e: Emoji = .{ .tone = 3 };
+    e.add("WAVING");
+    e.add("hand");
+    try testing.expectEqualStrings("wavinghand", e.query());
+    var out: [shown_max][]const u8 = undefined;
+    try testing.expect(e.shown(&out) >= 1);
+    try testing.expectEqualStrings("👋🏽", out[0]);
+    try testing.expect(e.erase());
+    e.clear();
+    try testing.expect(!e.erase());
+}
+
+test "those used most, with nothing typed; kept and read back" {
     var e: Emoji = .{ .tone = 2 };
     e.typed("👍");
     e.typed("😂");
     e.typed("😂");
     e.typed("🎉");
-    e.open();
-    try testing.expectEqual(Tab.frequent, e.tab);
-    var out: [per_page][]const u8 = undefined;
+    var out: [shown_max][]const u8 = undefined;
     try testing.expectEqual(@as(usize, 3), e.shown(&out));
     try testing.expectEqualStrings("😂", out[0]);
     // The same uses: the latest first.
