@@ -488,9 +488,13 @@ fn emojiView(cx: *kete.BuildContext, o: *Osk) kete.Widget {
     });
 }
 
-/// A key on the emoji page's right: an emoji (or a tone), large.
+/// A key on the emoji page's right: an emoji (or a tone), large, on a
+/// face between the keys' and their text's colour (a black emoji, the ant,
+/// shows on it in the dark theme, and a white one, the ghost, in either).
 fn bigKey(cx: *kete.BuildContext, o: *Osk, what: Key.What, face: []const u8, on: bool) kete.Widget {
-    return keySized(cx, o, what, face, null, 1, on, 44 * o.scale);
+    const t = cx.theme();
+    const mid = kete.Easing.linear.lerp(t.surface_container_highest, t.on_surface, 0.25);
+    return keyOn(cx, o, what, face, null, 1, on, 44 * o.scale, mid);
 }
 
 /// A row of keys `height` high, `gap` apart.
@@ -529,13 +533,18 @@ fn keyButton(cx: *kete.BuildContext, o: *Osk, what: Key.What, label: ?[]const u8
 
 /// A key, its label `size` high.
 fn keySized(cx: *kete.BuildContext, o: *Osk, what: Key.What, label: ?[]const u8, icon: ?kete.IconName, share: f32, on: bool, size: f32) kete.Widget {
+    return keyOn(cx, o, what, label, icon, share, on, size, null);
+}
+
+/// A key, its face `face` (null: as keys of its kind are).
+fn keyOn(cx: *kete.BuildContext, o: *Osk, what: Key.What, label: ?[]const u8, icon: ?kete.IconName, share: f32, on: bool, size: f32, face_color: ?kete.gfx.Color) kete.Widget {
     const t = cx.theme();
     const k = cx.arena.create(Key) catch return spacer(cx, share);
     const light: ?*key_light.Key = o.lightFor(what.id());
     k.* = .{ .osk = o, .what = what, .light = light };
     const special = what != .text;
     const g = if (light) |l| l.glow(cx) else 0;
-    const base = if (on) t.primary_container else if (special) t.surface_container_highest else t.surface;
+    const base = if (on) t.primary_container else face_color orelse if (special) t.surface_container_highest else t.surface;
     const face: kete.Widget = if (icon) |i|
         cx.make(kete.Icon{ .icon = i, .size = 26 * o.scale, .color = t.on_surface })
     else
