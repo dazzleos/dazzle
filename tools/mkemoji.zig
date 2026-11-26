@@ -3,8 +3,9 @@
 //! order, its group, and, for those that have them, its five skin tones
 //! (each the same tone throughout: "people holding hands: medium skin
 //! tone", not "...: light skin tone, dark skin tone"). The components
-//! (the tones and hair styles alone) are left out. Run it again for a new
-//! version of Unicode's emoji:
+//! (the tones and hair styles alone) are left out, and so are those newer
+//! than `newest`, which the emoji font (kete's Twemoji Mozilla) does not
+//! draw. Run it again for a new version of Unicode's emoji, or of the font:
 //!
 //!     zig run tools/mkemoji.zig -- /usr/share/unicode/emoji/emoji-test.txt src/shell/emoji_table.zig
 
@@ -21,6 +22,9 @@ const groups = [_]struct { []const u8, []const u8 }{
     .{ "Symbols", "symbols" },
     .{ "Flags", "flags" },
 };
+
+/// The newest emoji (Unicode's emoji version) the font draws.
+const newest: f32 = 14.0;
 
 const tone_names = [_][]const u8{ "light skin tone", "medium-light skin tone", "medium skin tone", "medium-dark skin tone", "dark skin tone" };
 
@@ -62,6 +66,11 @@ pub fn main(init: std.process.Init) !void {
         rest = std.mem.trimStart(u8, rest[sp + 1 ..], " ");
         const sp2 = std.mem.indexOfScalar(u8, rest, ' ') orelse continue;
         const name = rest[sp2 + 1 ..];
+        // "E15.0": newer than the font, it is left out.
+        if (rest[0] == 'E') {
+            const v = std.fmt.parseFloat(f32, rest[1..sp2]) catch 0;
+            if (v > newest) continue;
+        }
         if (std.mem.indexOf(u8, name, "skin tone") == null) {
             try by_name.put(arena, name, entries.items.len);
             try entries.append(arena, .{ .name = name, .text = text, .group = in });
@@ -86,8 +95,8 @@ pub fn main(init: std.process.Init) !void {
     var out: std.ArrayList(u8) = .empty;
     try out.appendSlice(arena,
         \\//! Made by tools/mkemoji.zig from Unicode's emoji-test.txt: each emoji
-        \\//! (fully qualified) in Unicode's order, its group, and its five skin
-        \\//! tones if it has them.
+        \\//! (fully qualified, up to those the font draws) in Unicode's order,
+        \\//! its group, and its five skin tones if it has them.
         \\
         \\pub const Group = enum { smileys, people, animals, food, travel, activities, objects, symbols, flags };
         \\
